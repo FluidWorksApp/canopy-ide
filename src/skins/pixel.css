@@ -13,12 +13,21 @@
    fades its ring to about half alpha; a translucent edge is an anti-aliased
    edge, and an anti-aliased edge is the one thing this skin cannot have.
 
-   Both faces are bundled and imported in main.tsx (@fontsource/press-start-2p,
-   @fontsource/vt323) — this is a desktop app that has to look the same with
-   the network unplugged, so nothing here fetches. Press Start 2P is a label
-   face: at paragraph length it is unreadably wide, which is why it dresses the
-   chrome and VT323 — a terminal face, and comfortable in runs — carries
-   --font-mono, where code, counts and body text actually land. */
+   VT323 carries the whole skin, and the type scale moves with it. A face and
+   a scale are one decision: --fs-* is calibrated to the system sans, and at
+   13px VT323's cap height is 7.3 against the sans's 9.2, so at the shipped
+   sizes it reads as small type rather than a different machine. Every step is
+   lifted about a quarter, which puts cap height and advance width back where
+   the layout expects them — measured, not guessed.
+
+   Press Start 2P is deliberately NOT here, though it is what an 8-bit skin
+   wants to use for its labels. It is a display face: at 13px its average
+   advance is 210px against the sans's 101px, so it is 2.07x too wide for
+   chrome built around the sans. There is no size that rescues it — matching
+   the sans's width would mean 6.3px, below the 8px grid the face is drawn on.
+   Tabs clipped, buttons pushed out of their rows, "Integrations" broken
+   across two lines. A skin may retune the scale; it may not need a different
+   layout. */
 :root[data-theme="pixel"] {
   --bg-deep: #0a0f0b;
   --bg-alt: #101711;
@@ -46,8 +55,16 @@
   --r-md: 0px;
   --r-lg: 0px;
 
-  --font-ui: "Press Start 2P", ui-monospace, monospace;
+  --font-ui: "VT323", ui-monospace, Menlo, Monaco, monospace;
   --font-mono: "VT323", "SF Mono", Menlo, Monaco, monospace;
+
+  /* The scale, moved to VT323's metrics. Ratios held so the ramp still steps
+     the way every other skin's does. */
+  --fs-xs: 14px;
+  --fs-sm: 15px;
+  --fs-md: 16px;
+  --fs-lg: 19px;
+  --fs-xl: 22px;
 
   color-scheme: dark;
 }

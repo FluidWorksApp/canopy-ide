@@ -17,11 +17,11 @@ export type { TermTheme } from "./skins/types";
 export function terminalTheme(theme: Theme, customAccent?: string): TermTheme {
   if (theme === "auto") {
     theme = window.matchMedia("(prefers-color-scheme: dark)").matches
-      ? "default"
+      ? "gotham"
       : "daylight";
   }
-  // "custom" is Default's palette plus the user's accent, which the
-  // substitution below applies — so the lookup falling back to Default is
+  // "custom" is the base skin's palette plus the user's accent, which the
+  // substitution below applies — so the lookup falling back to Gotham is
   // exactly right for it.
   const palette = skinDef(theme).term;
   const accent = (customAccent ?? "").trim();

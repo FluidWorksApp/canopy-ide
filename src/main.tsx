@@ -8,10 +8,11 @@ import { invoke } from "@tauri-apps/api/core";
 // Referenced by --font-ui/--font-mono; see src/skins/vitrine.css.
 import "@fontsource-variable/archivo/wght.css";
 import "@fontsource-variable/jetbrains-mono/index.css";
-// The Pixel skin's two voices. Single weight, latin only, and both are tiny
-// (a few KB each) — an 8-bit skin whose type fell back to the system sans
-// would be the one thing in it that isn't 8-bit. See src/skins/pixel.css.
-import "@fontsource/press-start-2p/index.css";
+// The Pixel skin's voice. Single weight, latin only, and a few KB — an 8-bit
+// skin whose type fell back to the system sans would be the one thing in it
+// that isn't 8-bit. Press Start 2P was here too and is gone: it is a display
+// face 2x the sans's advance, which broke every row it touched. See
+// src/skins/pixel.css.
 import "@fontsource/vt323/index.css";
 import "./index.css";
 import { monacoReady } from "./monaco-setup";

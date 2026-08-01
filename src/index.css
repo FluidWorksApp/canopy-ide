@@ -11,33 +11,33 @@
    <html data-theme="…"> (see settings.ts applyTheme()); nothing re-renders. */
 :root {
   /* ---- surfaces, back to front (shell → panel → editor → raised → overlay) ---- */
-  --bg-deep: #0f101a; /* window shell: titlebar, activity rail, status bar */
-  --bg-alt: #13141f; /* side panels, terminal */
-  --bg: #171826; /* editor canvas */
-  --bg-raised: #1f2133; /* cards, inputs, hover */
-  --bg-overlay: #242840; /* palette, menus, toasts */
+  --bg-deep: #090b0e; /* window shell: titlebar, activity rail, status bar */
+  --bg-alt: #101317; /* side panels, terminal */
+  --bg: #0d0f12; /* editor canvas */
+  --bg-raised: #171b20; /* cards, inputs, hover */
+  --bg-overlay: #1e2228; /* palette, menus, toasts */
 
   /* ---- borders ---- */
-  --border: #262a3f;
-  --border-strong: #363c5c; /* lifted elements: active tabs, project pills */
+  --border: #2b2f36;
+  --border-strong: #3a3f4a; /* lifted elements: active tabs, project pills */
 
   /* ---- text ---- */
-  --text: #d7dcea;
-  --text-dim: #7d84a0;
-  --text-faint: #565d78;
+  --text: #e8e6df;
+  --text-dim: #8b8d93;
+  --text-faint: #575a60;
 
   /* ---- status — accent doubles as the primary action colour ---- */
-  --accent: #82aaff;
+  --accent: #d4af37;
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
-  --danger: #f7768e;
-  --ok: #9ece6a;
-  --warn: #e0af68;
-  --magenta: #bb9af7; /* agent identity, decorative chips */
-  --cyan: #7dcfff; /* links, secondary info */
+  --danger: #e0483e;
+  --ok: #4caf7d;
+  --warn: #e2943a;
+  --magenta: #c792ea; /* agent identity, decorative chips */
+  --cyan: #89ddff; /* links, secondary info */
 
   /* ---- ink on filled surfaces ---- */
-  --on-accent: #0d0f1a;
-  --on-danger: #14101a;
+  --on-accent: #14110a;
+  --on-danger: #14100a;
 
   /* ---- focus ring — one rule everywhere: box-shadow: var(--ring) ---- */
   --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
@@ -283,6 +283,30 @@
   -webkit-backdrop-filter: none;
 }
 
+/* Turning the blur off is only half of it, and the half that breaks things on
+   its own. These panes are translucent ON PURPOSE — between 55% and 88% — and
+   what makes them read as panes rather than windows is the blur destroying the
+   detail behind them. Take the blur and leave the alpha and you get the worst
+   of both: a side peek you can read the editor straight through. So every
+   surface that was frosted goes opaque here, which is also what the machine
+   this skin is imitating would have done — it had one plane and no compositor.
+   The scrims above are deliberately left alone: dimming what is behind a modal
+   is their whole job, and a scrim never had to hide anything. */
+:root[data-theme="pixel"] .side-peek-frost,
+:root[data-theme="pixel"] .palette {
+  --glass-tint: 100%;
+}
+:root[data-theme="pixel"] .workspace-handle,
+:root[data-theme="pixel"] .aw-touched-more {
+  background: var(--bg-raised);
+}
+:root[data-theme="pixel"] .workspace-overlay {
+  background: var(--bg);
+}
+:root[data-theme="pixel"] .hib-frost {
+  background: var(--bg-deep);
+}
+
 /* A skin has no business in the motion tokens: --ease-out is one curve so
    that everything in the window moves as one thing, and a palette that
    retimed the app would be a palette doing something you did not ask for.
@@ -338,22 +362,22 @@
    overridden inline by applyTheme() (settings.ts) from the user's picked
    color, computed there rather than here since it's a runtime value. */
 :root[data-theme="custom"] {
-  --bg-deep: #0f101a;
-  --bg-alt: #13141f;
-  --bg: #171826;
-  --bg-raised: #1f2133;
-  --bg-overlay: #242840;
-  --border: #262a3f;
-  --border-strong: #363c5c;
-  --text: #d7dcea;
-  --text-dim: #7d84a0;
-  --text-faint: #565d78;
-  --danger: #f7768e;
-  --ok: #9ece6a;
-  --warn: #e0af68;
-  --magenta: #bb9af7;
-  --cyan: #7dcfff;
-  --on-danger: #14101a;
+  --bg-deep: #090b0e;
+  --bg-alt: #101317;
+  --bg: #0d0f12;
+  --bg-raised: #171b20;
+  --bg-overlay: #1e2228;
+  --border: #2b2f36;
+  --border-strong: #3a3f4a;
+  --text: #e8e6df;
+  --text-dim: #8b8d93;
+  --text-faint: #575a60;
+  --danger: #e0483e;
+  --ok: #4caf7d;
+  --warn: #e2943a;
+  --magenta: #c792ea;
+  --cyan: #89ddff;
+  --on-danger: #14100a;
   color-scheme: dark;
 }
 

@@ -1,16 +1,16 @@
 /* Every skin's token block, one file each, in the order they appear in the
    picker. Imported once from the top of index.css.
 
-   Default has no file: its palette IS the `:root` contract in index.css, and
-   each block below is an override of it. Custom has no file either — it is
-   Default's palette with --accent/--on-accent written inline at runtime by
-   applyTheme(), so it stays in index.css next to that note.
+   Gotham has no file: it is the base skin, so its palette IS the `:root`
+   contract in index.css and each block below is an override of it. Custom has
+   no file either — it is that same palette with --accent/--on-accent written
+   inline at runtime by applyTheme(), so it stays in index.css next to that
+   note.
 
    A block here declares tokens and nothing else. Rules that need the material
    rather than the colour — Vitrine's frost, Pixel's hard edges — live beside
    the component they dress, in index.css. */
 
-@import "./gotham.css";
 @import "./daylight.css";
 @import "./vitrine.css";
 @import "./ember.css";

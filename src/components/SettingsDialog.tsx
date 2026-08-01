@@ -142,14 +142,17 @@ const NON_SKIN_PREVIEWS: Record<
   "auto" | "custom",
   { bg: string; raised: string; text: string; accent?: string; note: string }
 > = {
+  // The two halves are what Auto actually resolves to: Gotham in dark, Daylight
+  // in light. See resolveTheme().
   auto: {
-    bg: "linear-gradient(105deg, #1a1b26 50%, #f5f6f8 50%)",
-    raised: "#1f2335",
+    bg: "linear-gradient(105deg, #0d0f12 50%, #f5f6f8 50%)",
+    raised: "#171b20",
     text: "#f5f6f8",
-    accent: "#7aa2f7",
+    accent: "#d4af37",
     note: "follows the OS",
   },
-  custom: { bg: "#1a1b26", raised: "#1f2335", text: "#c9d1d9", note: "your accent" },
+  // Custom is the base skin's palette with the user's own accent on top.
+  custom: { bg: "#0d0f12", raised: "#171b20", text: "#e8e6df", note: "your accent" },
 };
 
 function skinPreview(id: Theme) {

@@ -12,7 +12,6 @@
 //   4. the import + array slot below
 // skins.test.ts fails on anything missing.
 import type { SkinDef } from "./types";
-import { defaultSkin } from "./default";
 import { gotham } from "./gotham";
 import { daylight } from "./daylight";
 import { vitrine } from "./vitrine";
@@ -29,7 +28,8 @@ import { plum } from "./plum";
 import { pixel } from "./pixel";
 
 export const SKINS = [
-  defaultSkin,
+  // Gotham is the base skin: its palette is the `:root` contract in index.css,
+  // so it has no token block of its own and everything below overrides it.
   gotham,
   daylight,
   vitrine,
@@ -58,9 +58,12 @@ export type SkinId = (typeof SKINS)[number]["id"];
 
 const BY_ID = new Map<string, SkinDef>(SKINS.map((s) => [s.id, s]));
 
-/** The roster entry for an id. Falls back to Default rather than throwing:
- *  a settings blob written by a newer build (or a skin removed between
- *  releases) should recolour the app, not break it. */
+/** The roster entry for an id. Falls back to the base skin rather than
+ *  throwing: a settings blob written by a newer build — or naming a skin that
+ *  has since been removed, which is every install still storing the retired
+ *  "default" — should recolour the app, not break it. That fallback is why
+ *  retiring a skin needs no migration: the stored value simply stops matching
+ *  and Gotham answers instead. */
 export function skinDef(id: string): SkinDef {
-  return BY_ID.get(id) ?? defaultSkin;
+  return BY_ID.get(id) ?? gotham;
 }
