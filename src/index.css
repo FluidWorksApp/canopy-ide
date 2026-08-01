@@ -21251,6 +21251,22 @@ a.btn-sm {
   color: var(--text);
 }
 
+.companion-grow {
+  flex: none;
+  padding: 0 3px;
+  background: none;
+  border: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.companion-grow:hover,
+.companion-grow[aria-pressed="true"] {
+  color: var(--text);
+}
+
 .companion-log {
   flex: 1;
   min-height: 0;
@@ -21327,11 +21343,83 @@ a.btn-sm {
   word-break: break-word;
 }
 
-.companion-tools {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+/* The tool trail: one line per reply, however many calls it took. Never wraps,
+   never grows — the machinery is allowed a line, not a paragraph. */
+.companion-trail {
   margin-bottom: 5px;
+}
+
+.companion-trail-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 1px 6px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font: inherit;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.companion-trail-row:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.companion-trail-mark {
+  flex: none;
+  font-size: 8px;
+}
+
+.companion-trail-mark-live {
+  color: var(--accent);
+  animation: companion-pulse 1.4s ease-in-out infinite;
+}
+
+.companion-trail-name {
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.companion-trail-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.7;
+}
+
+.companion-trail-count {
+  flex: none;
+  margin-left: auto;
+  padding-left: 6px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+.companion-trail-open .companion-trail-row {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.companion-trail-all {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  max-height: 132px;
+  margin-top: 4px;
+  overflow-y: auto;
 }
 
 .companion-tool {
@@ -21471,6 +21559,7 @@ a.btn-sm {
   }
 
   .companion-dot-working,
+  .companion-trail-mark-live,
   .companion-caret {
     animation: none;
   }
