@@ -20039,13 +20039,14 @@ a.btn-sm {
   font-style: italic;
 }
 
-/* Same box the rendered body occupies, so clicking into it doesn't reflow the
-   page under the cursor. */
+/* Editing takes the tab. `min-height: 180px` made the editor a small box
+   scrolling inside a large empty one — you clicked into a full-screen note and
+   got a letterbox. It fills the scroll region (100% of the region's height,
+   which is definite) and NoteView grows it past that as you type, so the
+   region scrolls, never the textarea. */
 .note-body-input {
-  /* Tall enough to be worth typing into, and it grows with the region rather
-     than scrolling inside a fixed box. */
   flex: 0 0 auto;
-  min-height: 180px;
+  min-height: 100%;
   padding: 14px 18px 8px;
   font: inherit;
   font-size: 13px;
