@@ -741,7 +741,9 @@ fn pty_chunk(id: u32, bytes: &[u8]) -> String {
 /// The same 30 minutes the Agents panel uses for shared context — past it a
 /// digest is history, and history belongs behind a deliberate tap, not in the
 /// list that reloads every four seconds.
-const RECENT_SECS: i64 = 30 * 60;
+fn recent_secs() -> i64 {
+    crate::agent_life::policy().peer_max_age_secs as i64
+}
 
 /// Prompts kept per offline session. The history view wants the thread, not the
 /// transcript, and this is the difference between a 230KB snapshot and a 20KB
@@ -885,12 +887,25 @@ fn scope_sessions(sessions: Vec<Value>, roots: &[String], now: i64) -> Vec<Value
         .into_iter()
         .filter(|d| within(d.get("cwd").and_then(|v| v.as_str()), roots))
         .filter(|d| {
-            // A session still running stays regardless of age — "ended" is the
-            // digest saying its own turn is over, and only then does the clock
-            // start mattering.
-            let ended = d.get("state").and_then(|v| v.as_str()) == Some("ended");
+            // Only a session we can positively say has finished starts a
+            // clock. Two changes from the `state == "ended"` test this
+            // replaces, in opposite directions:
+            //
+            //   * `ended` is unreachable for five of the seven CLIs and absent
+            //     from every row read out of a CLI's own store, so in practice
+            //     almost nothing aged out. A finished turn now ages out
+            //     whichever CLI reported it.
+            //   * `unknown` never ages out. Dropping a row we merely lost track
+            //     of would take away the list the user reaches that agent
+            //     through, on a guess — the same rule that keeps `unknown` out
+            //     of everything else destructive.
+            let life = crate::agent_life::agent_life(d, None, now.max(0) as u64);
+            let finished = matches!(
+                life.state,
+                crate::agent_life::LifeState::Ended | crate::agent_life::LifeState::Idle
+            );
             let updated = d.get("updated").and_then(|v| v.as_i64()).unwrap_or(0);
-            !ended || now - updated <= RECENT_SECS
+            !finished || now - updated <= recent_secs()
         })
         .map(trim_digest)
         .collect()
@@ -1096,13 +1111,15 @@ mod tests {
     fn scope_ages_out_ended_sessions_but_never_running_ones() {
         let roots = vec!["/w/canopy".into()];
         let now = 1_000_000;
-        let stale = now - RECENT_SECS - 1;
+        let stale = now - recent_secs() - 1;
         let out = scope_sessions(
             vec![
                 digest("/w/canopy", "ended", stale),
                 digest("/w/canopy", "ended", now - 60),
                 // A digest whose terminal died without a Stop stays "working"
-                // on disk forever; it is still attachable, so it stays.
+                // on disk forever. The ladder calls that `unknown` rather than
+                // believing it, and `unknown` is never aged out: the session may
+                // still be attachable, and this list is how you would reach it.
                 digest("/w/canopy", "working", stale),
             ],
             &roots,

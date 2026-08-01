@@ -28,6 +28,13 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 
+// The lifecycle ladder, shared with the app crate. Compiled in rather than
+// imported because this binary is standalone by design — but it must decide
+// state exactly as the app does, and `shared/agentLife/fixtures.json` is
+// replayed on both sides to prove it.
+#[path = "../agent_life.rs"]
+mod agent_life;
+
 const MAX_PROMPTS: usize = 6;
 const MAX_FILES: usize = 14;
 /// Per-edit content captured into the change journal — enough to render the
@@ -45,7 +52,9 @@ const MAX_CONTEXT_CHARS: usize = 4_000;
 /// dormant or died without a SessionEnd. Deliberately short: digests live for
 /// hours on disk to make crash restore work, but injecting them all crowds the
 /// truncation budget with dead sessions at the expense of live ones.
-const PEER_MAX_AGE_SECS: u64 = 30 * 60;
+fn peer_max_age_secs() -> u64 {
+    agent_life::policy().peer_max_age_secs
+}
 /// The most one quiet stretch may be credited as working time.
 ///
 /// This process only ever sees discrete events, so the span between two of them
@@ -61,7 +70,9 @@ const PEER_MAX_AGE_SECS: u64 = 30 * 60;
 /// that an abandoned turn adds fifteen minutes to a total rather than nine
 /// hours. The frontend applies the same bound when extrapolating past the last
 /// event (MAX_OPEN_GAP_SECS in shared/agentDuration.ts).
-const MAX_CREDITED_GAP_SECS: u64 = 900;
+fn max_credited_gap_secs() -> u64 {
+    agent_life::policy().credited_gap_secs
+}
 
 fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
@@ -403,11 +414,18 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     let mut agent_override: Option<String> = None;
     let mut synth_event: Option<String> = None;
     let mut synth_message: Option<String> = None;
+    let mut signal: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--agent" => agent_override = args.next(),
             "--event" => synth_event = args.next(),
             "--message" => synth_message = args.next(),
+            // What this moment *means*, classified at the source where the
+            // CLI's own event shape is still visible. Replaces shipping a
+            // sentence into the CLI's config and re-parsing it on the way back
+            // out: aider's whole lifecycle used to hinge on Canopy matching a
+            // string Canopy itself wrote, and matching it to the wrong answer.
+            "--signal" => signal = args.next(),
             _ => {}
         }
     }
@@ -417,6 +435,9 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     // with no payload (aider's notifications-command), so we build the event
     // ourselves from the flags and the environment.
     let mut raw = String::new();
+    // A signal with no --event still synthesizes: the flag says everything the
+    // event name would have.
+    let synth_event = synth_event.or_else(|| signal.as_ref().map(|_| "Notification".to_string()));
     let mut event: serde_json::Value = if let Some(name) = synth_event {
         let agent = agent_override.clone().unwrap_or_else(|| "agent".into());
         let cwd = std::env::current_dir()
@@ -440,6 +461,14 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
             Err(_) => return Ok(()),
         }
     };
+    // Stamp the signal onto the event so it travels with it: the digest writer
+    // reads it, and so does the bus, so the attention reducer on the other side
+    // sees the same classification the installer made.
+    if let Some(sig) = signal.as_deref() {
+        if let Some(map) = event.as_object_mut() {
+            map.insert("canopy_signal".into(), serde_json::json!(sig));
+        }
+    }
     if raw.is_empty() {
         raw = serde_json::to_string(&event).unwrap_or_default();
     }
@@ -621,38 +650,116 @@ fn publish_to_bus(raw: &str, event: &serde_json::Value) {
     }
 }
 
-/// The lifecycle state a hook event implies: `working` (a turn is in flight),
-/// `waiting` (blocked on the user — a question or permission prompt), `idle`
-/// (finished a turn, nothing outstanding), or `ended` (the session closed).
-/// Returns None for events that don't move the state (compaction, anything
-/// unrecognised), so the prior state stands rather than being reset.
-fn state_for(hook_event: &str, event: &serde_json::Value) -> Option<&'static str> {
+/// What a hook event proves about the session, decided against what the CLI
+/// that sent it can actually prove.
+///
+/// Returns `(state, rung, confidence)`. All three are written to the digest:
+/// the rung is what makes a wrong answer legible instead of merely wrong, and
+/// the confidence is what stands between a session and a SIGTERM — hibernation
+/// may only reclaim a *proven* finish.
+///
+/// `None` means the event says nothing about the state (compaction, anything
+/// unrecognised, or a claim this CLI has no way to make), so the prior state
+/// stands rather than being reset to a guess.
+///
+/// What this replaces took no `agent` argument. Every CLI was asked the same
+/// questions and every answer believed equally, with two consequences that both
+/// looked like features:
+///
+///   * `Notification` fell back to "blocked" whenever the message did not
+///     contain "waiting for". agy's hook payload carries no message at all and
+///     its helper is registered without `--message`, so *every* agy
+///     notification read as blocked and the session stayed pinned there until
+///     its next turn.
+///   * aider's single integration ships a message string Canopy itself wrote —
+///     "Aider is waiting for your input" — which the same line then re-parsed
+///     into "finished". aider fires it both after a turn and at a y/n confirm,
+///     so an agent stopped at a confirmation prompt was recorded as idle, and
+///     idle is what auto-hibernation kills.
+///
+/// Now the manifest is consulted first and the free-text arm is gone.
+fn declared_state(
+    agent: &str,
+    hook_event: &str,
+    event: &serde_json::Value,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    let f = agent_life::fidelity_for(agent);
     let tool = event["tool_name"].as_str().unwrap_or("");
-    let msg = event["message"].as_str().unwrap_or("").to_lowercase();
-    Some(match hook_event {
-        "SessionStart" | "Stop" => "idle",
-        "SessionEnd" => "ended",
-        "UserPromptSubmit" | "PostToolUse" => "working",
-        // Every tool but the questionnaire means the turn is progressing; the
-        // questionnaire itself is the agent blocking on an answer.
-        "PreToolUse" => {
-            if tool == "AskUserQuestion" {
-                "waiting"
-            } else {
-                "working"
+    let signal = event["canopy_signal"].as_str().unwrap_or("");
+
+    // An installer that fires an explicit signal has already classified the
+    // moment at the source, where the CLI's own event shape is still visible.
+    // Nothing is re-derived from prose here.
+    if !signal.is_empty() {
+        return match signal {
+            "turn-start" => Some(("working", "turn-start", "proven")),
+            "turn-progress" => Some(("working", "tool-activity", "proven")),
+            "turn-end" => Some(("idle", "turn-boundary", "proven")),
+            "session-end" => Some(("ended", "session-end", "proven")),
+            "needs-human" | "needs-human-permission" => {
+                Some(("waiting", "structured-block", "proven"))
             }
-        }
-        // A "waiting for input" line is a completion notice, not a request —
-        // the same text the frontend keys on to tell those two apart.
-        "Notification" | "PermissionRequest" => {
-            if msg.contains("waiting for") {
-                "idle"
-            } else {
-                "waiting"
+            // The CLI wants the keyboard and cannot say which kind. Recorded as
+            // blocked-but-only-reported: the two failure directions are not
+            // symmetric, and "finished" is the one that gets a session killed.
+            "needs-human-ambiguous" => Some(("waiting", "declared-block", "reported")),
+            _ => None,
+        };
+    }
+
+    let conf = if f.needs_trust { "reported" } else { "proven" };
+
+    if f.ends_session.iter().any(|e| e == hook_event) {
+        return Some(("ended", "session-end", "proven"));
+    }
+    // A tool-name equality, never a text match.
+    let structured = f
+        .structured_block
+        .iter()
+        .any(|e| e == hook_event || e == &format!("{hook_event}:{tool}"));
+    if structured {
+        return Some(("waiting", "structured-block", "proven"));
+    }
+    if f.ends_turn.iter().any(|e| e == hook_event) {
+        return Some(("idle", "turn-boundary", conf));
+    }
+    if f.starts_turn.iter().any(|e| e == hook_event) {
+        return Some(("working", "turn-start", conf));
+    }
+    if f.tool_activity.iter().any(|e| e == hook_event) {
+        return Some(("working", "tool-activity", conf));
+    }
+    // A notification-shaped event, read only as far as this CLI's manifest says
+    // it can be read. `unmapped` and `none` fall through to None — the prior
+    // state stands, which is the difference between not knowing and inventing.
+    if matches!(hook_event, "Notification" | "PermissionRequest") {
+        let msg = event["message"].as_str().unwrap_or("").to_lowercase();
+        return match f.notification.as_str() {
+            "block" => Some(("waiting", "declared-block", "proven")),
+            "mixed" => {
+                // The one place text is still read, and only against the CLI's
+                // own declared completion string.
+                let ready = f
+                    .prompt_ready_text
+                    .as_deref()
+                    .map(|t| msg.contains(&t.to_lowercase()))
+                    .unwrap_or(false);
+                if ready {
+                    Some(("idle", "turn-boundary", conf))
+                } else {
+                    Some(("waiting", "declared-block", "proven"))
+                }
             }
-        }
-        _ => return None,
-    })
+            "attention-only" => Some(("waiting", "declared-block", "reported")),
+            _ => None,
+        };
+    }
+    // SessionStart is a turn boundary for every CLI that has one: the session
+    // exists and is not mid-turn.
+    if hook_event == "SessionStart" && !f.ends_turn.is_empty() {
+        return Some(("idle", "turn-boundary", conf));
+    }
+    None
 }
 
 /// A session's working-time clock: how much of its life it actually spent
@@ -696,7 +803,7 @@ impl WorkClock {
         now: u64,
     ) -> WorkClock {
         let credit = if prev_state == "working" {
-            prev_updated.map_or(0, |t| now.saturating_sub(t).min(MAX_CREDITED_GAP_SECS))
+            prev_updated.map_or(0, |t| now.saturating_sub(t).min(max_credited_gap_secs()))
         } else {
             0
         };
@@ -846,19 +953,29 @@ fn update_digest(
         digest["branch"] = serde_json::json!(b);
     }
 
-    // Lifecycle state, derived from the event. The panel shows it as a dot and
-    // hibernation reads it to know which agents are safe to reclaim; both must
-    // read the exact same stream the cards do, so `state_for` mirrors the
-    // frontend's own reading of these events. An event that says nothing about
-    // state (compaction, an unrecognised name) leaves the prior state standing.
+    // Lifecycle state, derived from the event against what this CLI can prove.
+    //
+    // Three fields, not one. `state` is what happened; `state_via` is the rung
+    // it came from, so a reader can tell a tool-name equality from a text match
+    // it should trust less; `state_confidence` is what hibernation keys on, so
+    // an agent we merely believe has finished is never killed on that belief.
+    // An event that says nothing (compaction, an unrecognised name, or a claim
+    // this CLI has no way to make) leaves the prior state standing.
     let prev_state = digest["state"].as_str().unwrap_or("idle").to_string();
-    let state = match state_for(hook_event, event) {
-        Some(s) => s.to_string(),
-        None => prev_state.clone(),
-    };
+    let decided = declared_state(agent, hook_event, event);
+    let state = decided
+        .map(|(s, _, _)| s.to_string())
+        .unwrap_or_else(|| prev_state.clone());
     digest["state"] = serde_json::json!(state);
-    // `idle` is still what peer_context and older readers key on; derive it from
-    // the richer state so the two can never disagree.
+    if let Some((_, via, conf)) = decided {
+        digest["state_via"] = serde_json::json!(via);
+        digest["state_confidence"] = serde_json::json!(conf);
+    }
+    // `idle` is still what older readers key on. Kept byte-compatible for one
+    // release and deliberately not extended: it folds `waiting` into "not
+    // idle", which is how an agent stopped at an unanswered permission prompt
+    // came to be described to every other agent in the project as "active".
+    // Everything in this repo now reads `state`.
     digest["idle"] = serde_json::json!(state == "idle" || state == "ended");
 
     // How long this session has actually been working — the current stretch and
@@ -1110,7 +1227,7 @@ fn peer_context(session_id: &str, cwd: &str) -> Option<String> {
             continue; // different project — not our business
         }
         let updated = d["updated"].as_u64().unwrap_or(0);
-        if now.saturating_sub(updated) > PEER_MAX_AGE_SECS {
+        if now.saturating_sub(updated) > peer_max_age_secs() {
             continue;
         }
         if d["state"].as_str() == Some("ended") {
@@ -1123,14 +1240,11 @@ fn peer_context(session_id: &str, cwd: &str) -> Option<String> {
         if let Some(b) = d["branch"].as_str() {
             block.push_str(&format!(" (branch {b})"));
         }
-        block.push_str(&format!(
-            " — {}\n",
-            if d["idle"].as_bool().unwrap_or(false) {
-                "idle"
-            } else {
-                "active"
-            }
-        ));
+        // The same verdict the roster uses, for the same reason: "blocked on
+        // the user" is the fact a peer most needs from another peer, and the
+        // `idle` boolean could not express it.
+        let life = agent_life::agent_life(&d, None, now);
+        block.push_str(&format!(" — {}\n", agent_life::peer_label(&life)));
         block.push_str(&format!("- working dir: {peer_cwd}\n"));
         if let Some(prompts) = d["prompts"].as_array() {
             let recent: Vec<&str> = prompts
@@ -3620,11 +3734,11 @@ fn peer_scope<'a>(
 /// cutoff *and* no tab left to prove otherwise. Age alone used to be enough,
 /// which is why an agent on a long turn — or one simply waiting on the user —
 /// vanished out from under the tab the user was looking at.
-fn peer_state(age: u64, idle: bool, has_terminal: bool) -> Option<&'static str> {
-    if age <= PEER_MAX_AGE_SECS {
-        return Some(if idle { "idle" } else { "active" });
+fn peer_state(age: u64, life: &agent_life::Life, has_terminal: bool) -> Option<&'static str> {
+    if age <= peer_max_age_secs() {
+        return Some(agent_life::peer_label(life));
     }
-    has_terminal.then_some("stale")
+    has_terminal.then_some("unknown")
 }
 
 /// The other agent sessions in this project, merged from two sources that each
@@ -3797,12 +3911,18 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
         }
         let updated = d["updated"].as_u64().unwrap_or(0);
         let age = now.saturating_sub(updated);
-        let idle = d["idle"].as_bool().unwrap_or(false);
-        let Some(state) = peer_state(age, idle, here.is_some()) else {
+        // What this peer is actually doing. This used to read the `idle`
+        // boolean, which folds `waiting` into "not idle" — so an agent stopped
+        // at an unanswered permission prompt was described to every other agent
+        // in the project as "active", with the real state sitting unread in the
+        // same file. A peer that cannot proceed is the single most useful thing
+        // one agent can know about another.
+        let life = agent_life::agent_life(&d, None, now);
+        let Some(state) = peer_state(age, &life, here.is_some()) else {
             continue; // quiet too long, and no tab left to say otherwise
         };
         // Closed cleanly — that's restore's business, not a running agent.
-        if d["state"].as_str() == Some("ended") {
+        if matches!(life.state, agent_life::LifeState::Ended) {
             continue;
         }
         let live = local
@@ -4431,7 +4551,7 @@ mod tests {
         let build = WorkClock::default().advance("working", "working", Some(t0), t0 + 600);
         assert_eq!(build.total, 600, "a ten-minute build is real work");
         let overnight = WorkClock::default().advance("working", "working", Some(t0), t0 + 86_400);
-        assert_eq!(overnight.total, MAX_CREDITED_GAP_SECS);
+        assert_eq!(overnight.total, max_credited_gap_secs());
     }
 
     /// A digest written before the clock existed, and one whose stamp is in the
@@ -4528,15 +4648,37 @@ mod tests {
     /// the roster, so canopy_agents answered "no other agent sessions" about a
     /// tab the user was looking at while asking about it.
     #[test]
-    fn a_quiet_session_with_a_terminal_is_stale_not_gone() {
-        let old = PEER_MAX_AGE_SECS + 1;
-        assert_eq!(peer_state(old, true, true), Some("stale"));
-        assert_eq!(peer_state(old, false, true), Some("stale"));
+    fn a_quiet_session_with_a_terminal_is_unknown_not_gone() {
+        let now = 1_800_000_000u64;
+        let idle_life = agent_life::agent_life(
+            &serde_json::json!({"state":"idle","state_via":"turn-boundary","agent":"claude","updated":now}),
+            None,
+            now,
+        );
+        let busy_life = agent_life::agent_life(
+            &serde_json::json!({"state":"working","state_via":"tool-activity","agent":"claude","updated":now}),
+            None,
+            now,
+        );
+        let old = peer_max_age_secs() + 1;
+        assert_eq!(peer_state(old, &idle_life, true), Some("unknown"));
+        assert_eq!(peer_state(old, &busy_life, true), Some("unknown"));
         // No tab left to vouch for it: that one really is gone.
-        assert_eq!(peer_state(old, false, false), None);
+        assert_eq!(peer_state(old, &busy_life, false), None);
         // Inside the window the digest speaks for itself, terminal or not.
-        assert_eq!(peer_state(0, false, false), Some("active"));
-        assert_eq!(peer_state(PEER_MAX_AGE_SECS, true, false), Some("idle"));
+        assert_eq!(peer_state(0, &busy_life, false), Some("working"));
+        assert_eq!(
+            peer_state(peer_max_age_secs(), &idle_life, false),
+            Some("idle")
+        );
+        // The point of the change: a peer stopped at a permission prompt is no
+        // longer described to every other agent in the project as "active".
+        let blocked = agent_life::agent_life(
+            &serde_json::json!({"state":"waiting","state_via":"structured-block","agent":"claude","updated":now}),
+            None,
+            now,
+        );
+        assert_eq!(peer_state(0, &blocked, true), Some("blocked on the user"));
     }
 
     /// Canopy launches agents into worktrees, which sit outside every path the

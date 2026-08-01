@@ -56,9 +56,9 @@ export interface WorkingTime {
  * The two durations to display.
  *
  * `live` is the caller's answer to "is this agent still working right now?" —
- * on the desktop that is `effectiveState(...) === "working"`, which corroborates
- * the hook's claim against the process tree's CPU; on the portal it is the
- * digest's own state on an attached PTY. When it is true the open stretch since
+ * on the desktop that is `agentLife(...).state === "working"`, which ranks
+ * the hook's claim against the process tree and the terminal's own output; the
+ * portal asks the same function with the same evidence. When it is true the open stretch since
  * the last event is added to both numbers, so the row ticks. When it is false
  * both freeze at what was actually credited, which is the honest reading for a
  * session that stopped without saying so.

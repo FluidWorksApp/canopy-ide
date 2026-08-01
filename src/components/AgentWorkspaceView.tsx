@@ -16,7 +16,7 @@ import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
 import { ashFor } from "../ash";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
-import { effectiveState } from "../agentState";
+import { agentLife } from "../../shared/agentLife";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
 import {
@@ -661,8 +661,26 @@ export function AgentWorkspaceView({
     onNotice,
   ]);
 
-  const lifecycle = ws?.state ?? digest?.state;
-  const st = lifecycle ? STATE_META[lifecycle] : undefined;
+  // One verdict for the whole header. It used to compute two: the chip read
+  // the raw recorded state and the clock ran it through the decay function with
+  // `cpu: 0` hard-coded, so the same header could show a green "working" chip
+  // twelve pixels from a stopped stopwatch and both were doing what they were
+  // told.
+  const life = agentLife({
+    digest: {
+      state: ws?.state ?? digest?.state,
+      state_via: ws?.state_via ?? digest?.state_via,
+      updated: ws?.updated ?? digest?.updated,
+      agent: digest?.agent,
+    } as never,
+    // No process evidence reaches this view, so a working claim decays on
+    // silence alone. That is the conservative half of the rule the Agents panel
+    // applies with the process tree to hand: it under-reports a busy agent
+    // rather than pulsing green for one that died.
+    now: Date.now() / 1000,
+  });
+  const lifecycle = life.state;
+  const st = STATE_META[lifecycle];
   const task = lastHumanPrompt(digest?.prompts);
   // The working-time clock, preferring the freshly-joined workspace (re-read on
   // every poll) over the digest the panel handed us when the tab opened.
@@ -671,17 +689,7 @@ export function AgentWorkspaceView({
     run_secs: ws?.run_secs ?? digest?.run_secs,
     updated: ws?.updated ?? digest?.updated,
   };
-  // No CPU reading is available here, so `working` decays to stale on silence
-  // alone — the conservative half of the rule the Agents panel applies with the
-  // process tree to hand. A frozen timer is the right failure: it under-reports
-  // a genuinely busy agent rather than counting up for one that died.
-  const working =
-    effectiveState({
-      state: ws?.state ?? digest?.state,
-      updated: timing.updated ?? undefined,
-      cpu: 0,
-      now: Date.now() / 1000,
-    }) === "working";
+  const working = lifecycle === "working";
   const cost = usage ? sessionCost(usage) : null;
   const touched = ws?.touched?.length ? ws.touched : (digest?.files ?? []);
   const branchable = !!ws?.branch && !ws.detached && !ws.on_base;

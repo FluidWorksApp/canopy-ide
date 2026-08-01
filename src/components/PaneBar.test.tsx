@@ -162,9 +162,9 @@ describe("PaneBar tab rename", () => {
 // The strip's runs live here but their state lives in ProjectView; these are
 // about the wiring between the two, which is what the ProjectView/ split moved.
 const stack = (over: Partial<StripGroup>): StripGroup => ({
-  key: "idle",
+  key: "quiet",
   label: "Idle",
-  status: "idle",
+  status: "quiet",
   icon: null,
   tabs: [],
   shown: [],
@@ -216,7 +216,7 @@ describe("PaneBar stacks", () => {
     render(
       paneBar({
         tabGroups: [stack({ tabs, shown: [tabs[1]] })],
-        openStacks: { idle: false },
+        openStacks: { quiet: false },
         activeTabId: "t2",
       }),
     );

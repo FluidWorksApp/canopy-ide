@@ -23,10 +23,24 @@ import {
   STATUS_LABEL,
   docStackFor,
   shownInStack,
-  statusFor,
   useSettledGroups,
   type TabStatus,
 } from "../../tabGroups";
+import {
+  NO_ATTENTION,
+  POLICY,
+  bucketFor,
+  ringFor,
+  type Life,
+  type LifeState,
+} from "../../../shared/agentLife";
+import { lifeFor, useAttentionMemory, useFirstSeen } from "../../agentLifeStore";
+
+/** The one CPU floor. There used to be four numbers answering this question in
+ *  this file and its neighbours — 0, 2, 10 and 300 — for two genuinely
+ *  different questions ("is anything running" and "is this runaway") that had
+ *  drifted into sharing a threshold. */
+const QUIET_CPU = POLICY.quietCpuPercent;
 import { revealScroll } from "../../tabSticky";
 import { useFlipStrip } from "../../tabFlip";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
@@ -749,13 +763,33 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [stats, setStats] = useState<ipc.SessionStats[]>([]);
   const statsRef = useRef(stats);
   statsRef.current = stats;
-  // Hook-free waiting detection, for agents with no event integration (the
-  // Antigravity permission prompt sat invisible because only claude/codex
-  // emit hook events). An agent that burned real CPU and has now been
-  // near-idle for 3 straight ticks (~6s) is either blocked on a prompt or
-  // done — both mean "look at me", so the tab gets its attention ring.
-  // Heuristic by design: it rings the tab, it never fabricates an urgent
-  // pending card. Re-arms whenever the agent works again.
+  // What the human has not dealt with, per terminal — the other axis. Held here
+  // rather than on the tab because it must survive a tab re-render and must
+  // NOT survive the terminal: `forget` runs when a pty goes.
+  const { push: pushAttention, memory: attentionMemory } = useAttentionMemory();
+  const attentionRef = useRef(pushAttention);
+  attentionRef.current = pushAttention;
+  // One clock for every lifecycle verdict in this view. A verdict decays with
+  // time (a working claim past its trust window stops being believed), so
+  // something has to re-render for the decay to land; a single 5s tick is that
+  // something, rather than each surface keeping its own.
+  const [lifeClock, setLifeClock] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setLifeClock(Date.now()), 5000);
+    return () => window.clearInterval(t);
+  }, []);
+  // Hook-free waiting detection, for agents with no event integration — the
+  // Antigravity permission prompt sat invisible because only some CLIs emit
+  // hook events. An agent that burned real CPU and has now been near-idle for 3
+  // straight ticks (~6s) may be blocked on a prompt.
+  //
+  // Two things changed about it. It now feeds the attention axis rather than
+  // setting a flag that outranked live state, and it is gated on the CLI: a
+  // `quiet` input is dropped for any agent whose manifest says it can report
+  // being blocked (see reduceAttention). Before both, this fired against
+  // claude and codex sessions whose digests correctly read "working" — six
+  // seconds under 10% CPU is exactly what a model thinking looks like — and
+  // filed them under "Needs you" until the tab was clicked.
   const idleWatch = useRef(
     new Map<number, { busy: boolean; idle: number; flagged: boolean }>(),
   );
@@ -816,7 +850,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           idle: 0,
           flagged: false,
         };
-        if (s.total_cpu > 10) {
+        if (s.total_cpu > QUIET_CPU) {
           idleWatch.current.set(s.id, { busy: true, idle: 0, flagged: false });
         } else if (w.busy && !w.flagged && ++w.idle >= 3) {
           w.flagged = true;
@@ -829,10 +863,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
             tab &&
             !(tab.id === activeTabIdRef.current && visibleRef.current)
           ) {
-            patchTab(tab.id, {
-              notice: "Agent went quiet — it may be waiting on a prompt",
-              unread: true,
-            });
+            // An input, not a verdict. The reducer drops it outright for a CLI
+            // that has a way to say it is blocked, and the agent painting again
+            // retracts it without anyone having to click.
+            attentionRef.current(
+              s.id,
+              { t: "quiet", at: Date.now() },
+              identifyAgent(s.agent_hint)?.id ?? null,
+            );
           }
         } else {
           idleWatch.current.set(s.id, w);
@@ -3009,18 +3047,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // ring without each one having to remember to.
   useEffect(() => {
     if (!visible || !activeTabId) return;
+    // Chat tabs keep their own unread flag — a message you have not read is not
+    // an agent lifecycle, and nothing about it was ever wrong.
     setTabs((prev) =>
-      prev.some(
-        (t) =>
-          t.id === activeTabId &&
-          (t.type === "terminal" || t.type === "chat") &&
-          t.unread,
-      )
+      prev.some((t) => t.id === activeTabId && t.type === "chat" && t.unread)
         ? prev.map((t) =>
             t.id === activeTabId ? ({ ...t, unread: false } as SubTab) : t,
           )
         : prev,
     );
+    // A terminal's ring lives on the attention axis. Focus may clear `unseen`
+    // and may never clear `blocked`: glancing at a tab does not answer the
+    // question on it.
+    const t = tabsRef.current.find(
+      (x): x is TermSubTab => x.type === "terminal" && x.id === activeTabId,
+    );
+    if (t?.ptyId != null) {
+      attentionRef.current(
+        t.ptyId,
+        { t: "focus", at: Date.now(), visible: true },
+        agentIdForCommand(t.command) ?? null,
+      );
+    }
   }, [activeTabId, visible, tabs]);
 
   // Menu shortcuts — only the visible project reacts.
@@ -5192,44 +5240,46 @@ const ProjectViewBody = memo(function ProjectViewBody({
         (t.ptyId != null && agentPtyIds.has(t.ptyId))),
     [agentPtyIds],
   );
-  // A single dot carries an agent tab's whole state: orange sharp-pulse when it
-  // wants attention (unread — set by OSC or the went-quiet heuristic), gray
-  // soft-pulse while its work burns CPU, gray steady when idle.
-  // Same content-keying as agentPtyIds: identity changes only when the set of
-  // busy ptys crosses the CPU threshold, not on every sample.
-  const busyPtyList = projectStats
-    .filter((s) => s.total_cpu > 10)
-    .map((s) => s.id);
-  const busyPtyKey = busyPtyList
-    .slice()
-    .sort((a, b) => a - b)
-    .join(",");
+  // The one verdict for a terminal, from every channel at once: what the CLI's
+  // hooks proved, whether its process is still there, whether it is painting,
+  // and what its CPU is doing — ranked, in shared/agentLife.
+  //
+  // The map of stats by pty is content-keyed so its identity only changes when
+  // a number the ladder actually reads changes; stats land every 2s for every
+  // terminal in every open project, and a fresh object per tick re-renders
+  // every strip in the app.
+  const statsKey = projectStats
+    .map((s) => `${s.id}:${Math.round(s.total_cpu)}:${s.quiet_ms ?? -1}:${s.agent_hint ? 1 : 0}`)
+    .sort()
+    .join("|");
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const busyPtyIds = useMemo(() => new Set(busyPtyList), [busyPtyKey]);
-  // The tab dot's state. For an agent tab we use the authoritative session state
-  // — resolved through the live pty→session→digest binding the workspace uses —
-  // so the titlebar and the Agents panel never disagree, and `waiting` (blocked
-  // on you) and `ended` are shown as themselves rather than guessed. A plain
-  // shell, or an agent whose session we can't resolve yet, falls back to the CPU
-  // heuristic. `unread` (unseen activity) is layered on separately as a ring.
-  const tabState = useCallback(
-    (t: TermSubTab): "working" | "waiting" | "idle" | "ended" => {
-      if (isAgentTab(t) && t.ptyId != null) {
-        const sid = liveSessionByPty.get(t.ptyId);
-        const st = sid
-          ? wsDigests.find((d) => d.session_id === sid)?.state
-          : undefined;
-        if (
-          st === "working" ||
-          st === "waiting" ||
-          st === "idle" ||
-          st === "ended"
-        )
-          return st;
-      }
-      return t.ptyId != null && busyPtyIds.has(t.ptyId) ? "working" : "idle";
+  const statsByPty = useMemo(
+    () => new Map(projectStats.map((s) => [s.id, s])),
+    [statsKey],
+  );
+  const firstSeen = useFirstSeen(projectStats.map((s) => s.id));
+  // Re-read on every render: the memory is a ref, and `useAttentionMemory`
+  // bumps a counter when it changes, so this is always current.
+  const attention = attentionMemory.current;
+  const tabLife = useCallback(
+    (t: TermSubTab): Life => {
+      const stats = t.ptyId != null ? statsByPty.get(t.ptyId) : undefined;
+      const sid = t.ptyId != null ? liveSessionByPty.get(t.ptyId) : undefined;
+      const digest = sid
+        ? wsDigests.find((d) => d.session_id === sid)
+        : undefined;
+      return lifeFor({
+        digest: (digest ?? null) as never,
+        stats,
+        firstSeen: t.ptyId != null ? firstSeen.get(t.ptyId) : undefined,
+        now: lifeClock / 1000,
+      });
     },
-    [isAgentTab, liveSessionByPty, wsDigests, busyPtyIds],
+    [statsByPty, liveSessionByPty, wsDigests, firstSeen, lifeClock],
+  );
+  const tabState = useCallback(
+    (t: TermSubTab): LifeState => tabLife(t).state,
+    [tabLife],
   );
   // Everything the Tasks panel's Running list shows: the tasks running detached
   // (the usual case — no tab, this row is where they live) and the ones that
@@ -5326,16 +5376,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const statusTargets = useMemo(
     () =>
       new Map<string, TabStatus>(
-        agentTabs.map((t) => [t.id, statusFor(tabState(t), t.unread)]),
+        agentTabs.map((t) => [
+          t.id,
+          bucketFor(
+            tabLife(t),
+            (t.ptyId != null ? attention.get(t.ptyId) : undefined) ??
+              NO_ATTENTION,
+          ),
+        ]),
       ),
-    [agentTabs, tabState],
+    [agentTabs, tabLife, attention],
   );
   const settledStatus = useSettledGroups(statusTargets, tabPrefs.idleDelayMs);
   // Fall back to the raw status for a tab the settler hasn't seen yet (its
   // effect runs after this render), so a new tab is never briefly homeless.
   const groupOf = useCallback(
     (id: string): TabStatus =>
-      settledStatus.get(id) ?? statusTargets.get(id) ?? "idle",
+      settledStatus.get(id) ?? statusTargets.get(id) ?? "quiet",
     [settledStatus, statusTargets],
   );
 
@@ -5346,7 +5403,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
   const attentionTabs = useMemo(() => byStatus("attention"), [byStatus]);
   const workingTabs = useMemo(() => byStatus("active"), [byStatus]);
-  const quietTabs = useMemo(() => byStatus("idle"), [byStatus]);
+  const quietTabs = useMemo(() => byStatus("quiet"), [byStatus]);
 
   // Each status run is a stack: one chip standing in for the tabs folded behind
   // it, opened and closed by clicking it. Idle starts folded — six finished
@@ -5356,7 +5413,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // a stack that appears for the first time (a kind of document you just
   // opened) arrives open rather than guessing.
   const [openStacks, setOpenStacks] = useState<Record<string, boolean>>({
-    idle: false,
+    quiet: false,
   });
   const toggleStack = useCallback(
     (key: string) => setOpenStacks((p) => ({ ...p, [key]: p[key] === false })),
@@ -5396,7 +5453,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ? [
             run("attention", STATUS_LABEL.attention, "attention", null, attentionTabs),
             run("active", STATUS_LABEL.active, "active", null, workingTabs),
-            run("idle", STATUS_LABEL.idle, "idle", null, quietTabs),
+            run("quiet", STATUS_LABEL.quiet, "quiet", null, quietTabs),
           ]
         : [run("all", null, null, null, agentTabs)]),
       ...DOC_STACKS.map((d) =>
@@ -6844,6 +6901,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         collabPaths={collabPaths}
         isAgentTab={isAgentTab}
         tabState={tabState}
+        tabRing={(t) => (t.ptyId != null ? ringFor(attention.get(t.ptyId) ?? NO_ATTENTION) : false)}
         account={accountBanner}
         profileLabels={profileLabels}
         shellChips={shellChips}
@@ -7005,14 +7063,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 onTitle={(title) =>
                   patchTab(tab.id, { title: title || tab.command || "shell" })
                 }
-                onNotify={(notice) =>
-                  // Only unread if you aren't already looking at it — a ring on
-                  // the tab you're watching is noise.
-                  patchTab(tab.id, {
-                    notice,
-                    unread: !(tab.id === activeTabId && visible),
-                  })
-                }
+                onNotify={(notice) => {
+                  // Only a ring if you aren't already looking at it — a ring on
+                  // the tab you're watching is noise. The notice itself is
+                  // still the tab's, but where the tab *sits* is no longer this
+                  // decision's to make: a bell is unseen activity, and unseen
+                  // activity selects no bucket.
+                  patchTab(tab.id, { notice });
+                  if (
+                    tab.ptyId != null &&
+                    !(tab.id === activeTabId && visible)
+                  ) {
+                    pushAttention(
+                      tab.ptyId,
+                      { t: "osc", at: Date.now(), body: notice },
+                      agentIdForCommand(tab.command) ?? null,
+                    );
+                  }
+                }}
               />
             </div>
           ))}

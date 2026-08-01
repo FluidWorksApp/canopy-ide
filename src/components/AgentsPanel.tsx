@@ -7,7 +7,15 @@ import { getSettings } from "../settings";
 import { AGENT_CLIS } from "../projects";
 import { identifyAgent, observeForLearning } from "../agentIdentity";
 import { agentDisplayName, type TabName } from "../agentDisplayName";
-import { effectiveState, silenceLabel } from "../agentState";
+import {
+  NO_ATTENTION,
+  POLICY,
+  agentLife,
+  bucketFor,
+  reclaimable,
+  silenceLabel,
+  type LifeState,
+} from "../../shared/agentLife";
 import { ashFor } from "../ash";
 import { forgetSessions, markRestored, restorableFrom } from "../restorable";
 import { Mascot } from "./Mascot";
@@ -29,15 +37,17 @@ import { format, matchesModifierClick } from "../shortcuts";
 
 /** Colour + label for the lifecycle dot on a running-agent row. `working` is
  *  the only state that pulses — a moving dot in a column of still ones is
- *  where the eye lands first. `stale` is what `working` decays into when
- *  nothing corroborates it (see agentState.ts): pointedly not `idle`, because
- *  a session that stopped telling us anything has not told us it finished. */
-export const STATE_META: Record<string, { cls: string; label: string }> = {
+ *  where the eye lands first. `unknown` is what every other state decays into
+ *  when nothing corroborates it: pointedly not `idle`, because a session that
+ *  stopped telling us anything has not told us it finished, and `idle` is what
+ *  hibernation reclaims. */
+export const STATE_META: Record<LifeState, { cls: string; label: string }> = {
+  starting: { cls: "st-starting", label: "starting up" },
   working: { cls: "st-working", label: "working" },
   waiting: { cls: "st-waiting", label: "waiting on you" },
   idle: { cls: "st-idle", label: "idle — finished a turn" },
   ended: { cls: "st-ended", label: "session ended" },
-  stale: { cls: "st-stale", label: "no signal — may have stopped" },
+  unknown: { cls: "st-unknown", label: "no signal — may have stopped" },
 };
 
 /** CLIs whose approval prompt is a numbered/Escape menu we can drive by
@@ -451,7 +461,10 @@ export function AgentsPanel({
   // what makes restore work), and one whose terminal died without a Stop
   // event even stays "active" on disk — the age cutoff is what ages those out.
   // `digests` itself stays unfiltered — it is also the crash-restore record.
-  const PEER_MAX_AGE_SECS = 30 * 60;
+  // The shared constant, not a hand-copy. This number also lives in
+  // canopy_hook.rs and portal.rs, and used to live here as its own literal with
+  // a comment admitting it mirrored the other two.
+  const PEER_MAX_AGE_SECS = POLICY.peerMaxAgeSecs;
   const shared = useMemo(
     () =>
       digests.filter(
@@ -636,21 +649,51 @@ export function AgentsPanel({
   // under "Restorable" and its own --resume brings it back with history.
   const hibernate = (id: number) => void ipc.ptyKill(id);
 
-  // Auto-hibernation. Reclaim the stalest *finished* agents once a project is
-  // over its cap — never one mid-turn or blocked on the user, and never twice
-  // (a killed pty lingers in `stats` until the next poll, and pty ids are
-  // monotonic within a run, so a set of ids we've already reclaimed is enough
-  // to keep the toast from repeating and ptyKill from firing on the dead).
+  // Auto-hibernation. Reclaim the stalest *provably finished* agents once a
+  // project is over its cap — never one mid-turn, never one blocked on the
+  // user, never one we have merely lost track of, and never twice (a killed pty
+  // lingers in `stats` until the next poll, and pty ids are monotonic within a
+  // run, so a set of ids we've already reclaimed is enough to keep the toast
+  // from repeating and ptyKill from firing on the dead).
+  //
+  // This filtered on the raw recorded state, which is how it came to SIGTERM
+  // live sessions. Two ways in: aider's only integration classified both "turn
+  // finished" and "waiting at a y/n confirm" as idle, and a digest written by a
+  // session that has since gone keeps saying whatever it last said. Neither is
+  // fixed by ageing the state — the decay function this replaces could only
+  // rewrite an over-confident `working`, so routing this line through it
+  // produced a byte-identical victim set. `reclaimable` demands the *rung* be
+  // structural, which is the corroboration that was missing.
+  //
+  // Expect this to reclaim less than it used to. Five of seven CLIs cannot emit
+  // a session-end event at all, so for those the cap is only enforced once a
+  // turn provably ends; the toast says so rather than silently doing nothing.
   const hibernatedRef = useRef<Set<number>>(new Set());
   useEffect(() => {
     if (!settings.autoHibernate) return;
     const cap = Math.max(1, settings.maxLiveAgents);
     const live = agentSessions.filter((x) => !hibernatedRef.current.has(x.session.id));
     if (live.length <= cap) return;
-    const reclaimable = live
-      .filter((x) => x.digest?.state === "idle" || x.digest?.state === "ended")
+    const now = Date.now() / 1000;
+    const spare = live
+      .filter((x) =>
+        reclaimable(
+          agentLife({
+            digest: x.digest as never,
+            pty: {
+              kind: "live",
+              hint: x.session.agent_hint,
+              cpu: x.session.total_cpu,
+              quietForMs: x.session.quiet_ms ?? undefined,
+              sinceInputMs: x.session.since_input_ms ?? undefined,
+            },
+            now,
+          }),
+          NO_ATTENTION,
+        ),
+      )
       .sort((a, b) => (a.digest?.updated ?? 0) - (b.digest?.updated ?? 0));
-    const victims = reclaimable.slice(0, live.length - cap);
+    const victims = spare.slice(0, live.length - cap);
     for (const v of victims) {
       hibernatedRef.current.add(v.session.id);
       hibernate(v.session.id);
@@ -660,6 +703,12 @@ export function AgentsPanel({
         `Hibernated ${victims.length} idle agent${
           victims.length > 1 ? "s" : ""
         } to free memory — resume from Restorable.`,
+      );
+    } else {
+      // Saying nothing here is what makes "the cap is not working" look like a
+      // bug rather than a refusal.
+      onNotice?.(
+        `Over the agent cap, but none of these have provably finished — nothing was reclaimed.`,
       );
     }
   }, [agentSessions, settings.autoHibernate, settings.maxLiveAgents, onNotice]);
@@ -671,22 +720,30 @@ export function AgentsPanel({
     // Lifecycle dot: only for agent rows the hook stream has spoken for, and
     // only believed as far as the session's own activity backs it up — a CLI
     // that stops without a Stop event leaves "working" behind forever.
-    const shown = effectiveState({
-      state: digest?.state,
-      updated: digest?.updated,
-      cpu: s.total_cpu,
+    const life = agentLife({
+      digest: digest as never,
+      pty: {
+        kind: "live",
+        hint: s.agent_hint,
+        cpu: s.total_cpu,
+        quietForMs: s.quiet_ms ?? undefined,
+        sinceInputMs: s.since_input_ms ?? undefined,
+      },
       now: Date.now() / 1000,
     });
-    const st = agent && shown ? STATE_META[shown] : undefined;
+    const shown = life.state;
+    const st = agent ? STATE_META[shown] : undefined;
     const stTitle =
-      shown === "stale"
-        ? `No hook events for ${silenceLabel(digest?.updated, Date.now() / 1000)} and no CPU — this agent may have stopped without telling Canopy`
-        : st?.label;
-    // Only reclaim an agent that has finished — never one mid-turn or blocked.
-    // `stale` is not finished: it is an agent we have lost track of, and
-    // killing its terminal on a guess is not a trade worth making.
-    const canHibernate =
-      !!agent && (digest?.state === "idle" || digest?.state === "ended");
+      shown === "unknown"
+        ? `${life.note} (silent for ${silenceLabel(digest?.updated, Date.now() / 1000)})`
+        : life.note || st?.label;
+    // Only reclaim an agent that has *provably* finished — never one mid-turn,
+    // never one blocked, and never one we have merely lost track of. The
+    // confidence check is the part that matters: aider's whole lifecycle used
+    // to read `idle` (its one integration shipped a message Canopy wrote and
+    // then re-parsed into "finished"), so this button offered to kill a session
+    // sitting on a y/n confirm.
+    const canHibernate = !!agent && reclaimable(life, NO_ATTENTION);
     // What the human last asked for. The highest-signal line about a session:
     // "fix the login redirect" identifies it in a way that cpu, memory and a
     // directory never will.
@@ -796,7 +853,7 @@ export function AgentsPanel({
           {/* Blocked on you, stated on the row itself so it survives whether
               or not the transient card is up and whichever tab is focused —
               the durable "needs input" signal, not a fleeting event. */}
-          {digest?.state === "waiting" && (
+          {bucketFor(life, NO_ATTENTION) === "attention" && (
             <span className="agent-needs-you" title="This agent is waiting for your answer">
               needs you
             </span>

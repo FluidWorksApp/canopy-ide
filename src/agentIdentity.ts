@@ -17,6 +17,7 @@
 // is derived by watching the hook stream, so an in-house CLI Canopy has never
 // heard of names itself the first time it reports a single event.
 
+import { POLICY, agentLife } from "../shared/agentLife";
 import type { AgentHint, SessionDigest } from "./ipc";
 import { AGENT_CLIS, agentForBin, agentForPkg, binName } from "./projects";
 
@@ -93,9 +94,14 @@ export function resetLearned() {
 /** A hook digest is only evidence about what is running *now*. A terminal keeps
  *  its digest after the agent exits, so a stale one must not name whatever the
  *  user ran next. */
-const LEARN_WINDOW_MS = 10 * 60 * 1000;
+const LEARN_WINDOW_MS = POLICY.learnWindowSecs * 1000;
 function digestIsLive(digest: SessionDigest | undefined, now: number): boolean {
-  if (!digest?.agent || digest.state === "ended") return false;
+  if (!digest?.agent) return false;
+  // Through the ladder, so "this session is over" means the same thing here as
+  // it does everywhere else — including for the five CLIs that cannot write an
+  // `ended` state of their own.
+  if (agentLife({ digest: digest as never, now: now / 1000 }).state === "ended")
+    return false;
   return digest.updated == null || now - digest.updated < LEARN_WINDOW_MS;
 }
 

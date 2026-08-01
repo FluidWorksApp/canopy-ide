@@ -1,3 +1,4 @@
+import type { LifeState } from "../../shared/agentLife";
 // Tasks sidebar section: the home of micro-tasks. Four parts — the micro-task
 // tabs running right now (focus / stop), the ones that have finished (a count
 // and the last few, opening the full history tab), the tasks the user wrote
@@ -37,7 +38,7 @@ export interface RunningMicroTask {
   tabId?: string;
   ptyId?: number;
   title: string;
-  state: "working" | "waiting" | "idle" | "ended";
+  state: LifeState;
   icon?: string;
   /** One line under the title: the last tool it used, or that it needs you. */
   note?: string;

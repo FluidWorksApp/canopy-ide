@@ -55,6 +55,11 @@ struct SessionMeta {
     foreground: Option<u32>,
     /// The foreground app has the tty in raw mode.
     interactive: bool,
+    /// Milliseconds since this terminal last painted, and since the human last
+    /// typed into it. `None` before either has ever happened.
+    quiet_ms: Option<u64>,
+    since_input_ms: Option<u64>,
+    output_bytes: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -76,6 +81,21 @@ pub struct SessionStats {
     /// foreground process's executable. See agentid.rs — in particular, this
     /// is deliberately evidence and not a verdict.
     pub agent_hint: Option<AgentHint>,
+    /// How long this terminal has been silent, in milliseconds, and how much it
+    /// has ever printed.
+    ///
+    /// The channel that separates "the model is thinking" from "the agent is
+    /// sitting at its prompt". Both look identical in CPU and in hook events —
+    /// a turn in flight fires nothing between its last tool call and its end,
+    /// and burns no CPU while it waits on the API — so before this, the two
+    /// signals the lifecycle relied on went quiet together over exactly the
+    /// window that mattered. A CLI redrawing a spinner is writing bytes.
+    ///
+    /// `None` means the terminal has never painted (or never been typed into),
+    /// which is not the same as a very long silence. See shared/agentLife.
+    pub quiet_ms: Option<u64>,
+    pub since_input_ms: Option<u64>,
+    pub output_bytes: u64,
 }
 
 /// The one process worth identifying in a terminal.
@@ -140,6 +160,24 @@ fn candidate_pid(
 /// monitor loop already pays for the sysinfo walk once per tick.
 #[derive(Default)]
 pub struct StatsCache(pub std::sync::Mutex<Vec<SessionStats>>);
+
+/// The latest process reading for every live terminal, on demand.
+///
+/// The monitor emits `pty:stats` every 2s, which serves anything already
+/// mounted and subscribed. This is for a caller that needs one reading *now*
+/// and has no subscription — the companion, which answers "what are my agents
+/// doing" from session digests and, without this, could only report what a
+/// digest last claimed. A digest written by a session that died mid-turn keeps
+/// claiming "working" indefinitely, so Ash would say an agent was working on
+/// something it stopped days ago. Reads the cache the monitor already fills:
+/// no refresh, no syscall.
+#[tauri::command]
+pub fn pty_stats(app: tauri::AppHandle) -> Vec<SessionStats> {
+    use tauri::Manager;
+    app.try_state::<StatsCache>()
+        .map(|c| c.0.lock().unwrap().clone())
+        .unwrap_or_default()
+}
 
 static MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -224,6 +262,7 @@ pub fn start_monitor(app: AppHandle) {
                     let guard = map.lock().unwrap();
                     guard.values().cloned().collect()
                 };
+                let now_ms = crate::pty::now_ms();
                 let sessions: Vec<SessionMeta> = live
                     .iter()
                     .map(|s| SessionMeta {
@@ -233,6 +272,9 @@ pub fn start_monitor(app: AppHandle) {
                         cwd: s.cwd.clone(),
                         foreground: s.foreground_pid(),
                         interactive: s.raw_mode(),
+                        quiet_ms: s.quiet_ms(now_ms),
+                        since_input_ms: s.since_input_ms(now_ms),
+                        output_bytes: s.output_bytes(),
                     })
                     .collect();
                 // With no terminals there is nothing hot to watch — only the
@@ -318,6 +360,9 @@ pub fn start_monitor(app: AppHandle) {
                         cwd,
                         foreground,
                         interactive,
+                        quiet_ms,
+                        since_input_ms,
+                        output_bytes,
                     } = meta;
                     let Some(root) = root else { continue };
                     // What this terminal is running, identified once from the
@@ -369,6 +414,9 @@ pub fn start_monitor(app: AppHandle) {
                         procs,
                         ports: Vec::new(),
                         agent_hint,
+                        quiet_ms,
+                        since_input_ms,
+                        output_bytes,
                     });
                 }
 
@@ -670,8 +718,18 @@ fn setup_aider_hooks(cfg: &str, home: &str) -> Result<String, String> {
                 .into(),
         );
     }
+    // `--signal`, not `--message`. The old line shipped the sentence "Aider is
+    // waiting for your input" into aider's config, and the helper then matched
+    // "waiting for" in that same sentence and recorded the session as
+    // *finished*. aider fires this command both after a turn and at a y/n
+    // confirm — so an agent stopped at a confirmation prompt was classified as
+    // idle, and idle is what auto-hibernation SIGTERMs.
+    //
+    // The honest classification is that aider wants the keyboard and cannot say
+    // which kind. `needs-human-ambiguous` records exactly that: waiting, at
+    // `reported` confidence, never reclaimable.
     let block = format!(
-        "\n# canopy: surface \"waiting for input\" in the IDE\nnotifications: true\nnotifications-command: {} --agent aider --event Notification --message \"Aider is waiting for your input\"\n",
+        "\n# canopy: surface \"needs you\" in the IDE\nnotifications: true\nnotifications-command: {} --agent aider --signal needs-human-ambiguous\n",
         helper.to_string_lossy()
     );
     std::fs::write(&path, format!("{existing}{block}")).map_err(|e| e.to_string())?;
@@ -736,10 +794,15 @@ export const CanopyBridge = async ({ directory }) => {
             send({ ...base(event), hook_event_name: "Stop" })
             break
           case "permission.asked":
+            // The signal, not a sentence. This used to re-encode a structural
+            // event as prose that the helper then re-parsed — and the title is
+            // tool-supplied, so a tool whose title happened to contain
+            // "waiting for" silently turned a block into "finished".
             send({
               ...base(event),
               hook_event_name: "Notification",
-              message: `OpenCode needs permission: ${event?.properties?.title ?? event?.properties?.type ?? "tool"}`,
+              canopy_signal: "needs-human-permission",
+              tool_name: event?.properties?.title ?? event?.properties?.type ?? "tool",
             })
             break
           case "file.edited":
@@ -867,7 +930,8 @@ export default function canopyBridge(pi) {
     send({
       ...base(),
       hook_event_name: "Notification",
-      message: `oh-my-pi needs approval: ${ctx?.tool?.name ?? "a tool"}`,
+      canopy_signal: "needs-human-permission",
+      tool_name: ctx?.tool?.name ?? "a tool",
     }),
   )
 }
@@ -4449,6 +4513,20 @@ mod integration_tests {
 
 #[cfg(test)]
 mod tests {
+    /// The manifest must name every CLI we know how to set up. A supported CLI
+    /// missing from it declares nothing, which is safe — it falls through to
+    /// the process rungs — but silently: its hooks would stop being read and
+    /// nothing would say so.
+    #[test]
+    fn the_fidelity_manifest_covers_every_supported_agent() {
+        let declared = crate::agent_life::all_fidelity();
+        for (id, _) in crate::agents::SUPPORTED_AGENTS {
+            assert!(
+                declared.iter().any(|c| c.id == *id),
+                "{id} is in SUPPORTED_AGENTS but absent from shared/agentLife/fidelity.json"
+            );
+        }
+    }
     use super::claude_bucket;
     use super::first_version_token;
     use super::probe_target;

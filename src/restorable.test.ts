@@ -67,7 +67,11 @@ describe("restorableFrom", () => {
 
   it("keeps a session out while its terminal is still alive", () => {
     const stats = [
-      { id: 7, title: "claude", cwd: "/repo", total_cpu: 0, total_mem_bytes: 0, procs: [], ports: [], agent_hint: null },
+      {
+        id: 7, title: "claude", cwd: "/repo", total_cpu: 0, total_mem_bytes: 0,
+        procs: [], ports: [], agent_hint: null,
+        quiet_ms: null, since_input_ms: null, output_bytes: 0,
+      },
     ];
     expect(restorableFrom([digest()], stats, ["s-1"])).toHaveLength(0);
     // Same session, that pty gone: back on the list.
