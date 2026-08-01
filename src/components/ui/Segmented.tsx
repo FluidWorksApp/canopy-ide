@@ -1,6 +1,11 @@
+import type { ReactNode } from "react";
+
 export interface SegmentedOption<T extends string> {
   id: T;
-  label: string;
+  /** Usually a word. A node so a segment can carry a count beside it — see
+   *  `.ctl-seg-count`, which sets that count back a step so the word stays the
+   *  thing you read and the number stays the thing you check. */
+  label: ReactNode;
 }
 
 export interface SegmentedProps<T extends string> {
