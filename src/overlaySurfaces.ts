@@ -66,10 +66,14 @@ export const OVERLAY_SURFACES: OverlaySurface[] = [
   {
     // The companion, and the two surfaces that hang off it. Registered rather
     // than exempted, but note they are the one group that should never actually
-    // be found over a view: the companion unmounts itself while a native
-    // browser view is up (useBrowserShowing in Companion.tsx), because a child
-    // webview composites above the whole window and an overlay on top of one
-    // makes the host blank the page to keep the overlay readable.
+    // be found over a view: the companion unmounts itself while a browser tab
+    // is in front, because a child webview composites above the whole window
+    // and an overlay on top of one makes the host blank the page to keep the
+    // overlay readable. It hears that from the activeView channel
+    // (`useNativeSurface`), which reports whether a tab is CLAIMING the pane
+    // and never whether the view is currently shown — that second question is
+    // the host's answer to the companion being there, and reading it deadlocked
+    // the two into a permanently blank page.
     //
     // So these entries are the backstop for that unmounting failing, which is
     // exactly what a backstop is for.

@@ -112,6 +112,17 @@ export interface ViewSnapshot {
   tabId: string;
   /** The tab is in front of an open project and has a URL. */
   wanted: boolean;
+  /** That, plus a placeholder with room to draw in: a browser tab is in front
+   *  HERE, and a native view is claiming this rectangle.
+   *
+   *  The field to read when the question is "should I get out of the way" —
+   *  never `shown`. `shown` is what the occlusion walk concluded, so a surface
+   *  that hides itself on `shown` is reading its own effect: mounted, it covers
+   *  the view, the view goes down, `shown` is false, and it concludes it may
+   *  stay. Both sides are settled and the page never comes back. `claiming` is
+   *  upstream of the walk — set by the tab being active — so it says the same
+   *  thing whether or not the asker is currently covering the page. */
+  claiming: boolean;
   /** Last visibility the host pushed; null before the first push. */
   shown: boolean | null;
   /** Last bounds pushed to the backend, in window points. */

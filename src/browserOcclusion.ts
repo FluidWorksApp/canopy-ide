@@ -48,11 +48,12 @@ export const PAINTED_OVERLAY_SELECTOR = [
   ".dictation-pill",
   ".zoom-indicator",
   ".coach-layer",
-  // The companion unmounts itself while a view is up (see useBrowserShowing),
-  // so these should never be found over one. Listed anyway: the dev warning
-  // that fires on an unlisted box over a visible browser is how the next
-  // overlay gets found, and a mascot that slipped through would otherwise be
-  // reported as an unknown occluder rather than a known bug.
+  // The companion unmounts itself while a browser tab is in front (it
+  // subscribes to activeView.ts), so these should never be found over one.
+  // Listed anyway: the dev warning that fires on an unlisted box over a
+  // visible browser is how the next overlay gets found, and a mascot that
+  // slipped through would otherwise be reported as an unknown occluder rather
+  // than a known bug.
   ".companion",
   ".companion-panel",
   ".companion-notice",

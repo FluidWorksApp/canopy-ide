@@ -16,7 +16,7 @@
 // the room, the screen recording, and whoever walks past.
 import { useCallback, useEffect, useState } from "react";
 import * as ipc from "../ipc";
-import { browserViewSnapshots } from "../browserSignals";
+import { activeView } from "../activeView";
 import {
   generatePassword,
   monogram,
@@ -459,7 +459,7 @@ export function VaultSettings() {
   // add it is only worth making while that page is still what the user was
   // looking at a moment ago.
   useEffect(() => {
-    const tabId = browserViewSnapshots().find((v) => v.wanted)?.tabId;
+    const tabId = activeView().nativeTabId;
     if (!tabId) return;
     void ipc
       .browserHere(tabId)
