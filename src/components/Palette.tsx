@@ -4,7 +4,7 @@
 // read files.
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
-import { fuzzy } from "../fuzzy";
+import { fuzzyLower } from "../fuzzy";
 import { useEscapeLayer } from "../useEscape";
 
 export type PaletteMode = "files" | "search";
@@ -87,15 +87,24 @@ export function Palette({ mode, components, onOpen, onClose }: PaletteProps) {
     };
   }, [mode, query, roots.join("\n")]);
 
+  // Lowercased once when the corpus lands, not once per path per keystroke.
+  // `files` can hold 20,000 paths and each was tried twice, so this was tens of
+  // thousands of throwaway strings per character typed.
+  const lowered = useMemo(
+    () => files.map((p) => ({ p, lp: p.toLowerCase(), lb: base(p).toLowerCase() })),
+    [files],
+  );
+
   const rows: Row[] = useMemo(() => {
     if (mode === "search") return hits;
-    return files
-      .map((p) => ({ p, s: fuzzy(query, base(p)) ?? fuzzy(query, p) }))
+    const q = query.toLowerCase();
+    return lowered
+      .map((f) => ({ p: f.p, s: fuzzyLower(q, f.lb) ?? fuzzyLower(q, f.lp) }))
       .filter((r): r is { p: string; s: number } => r.s !== null)
       .sort((a, b) => a.s - b.s)
       .slice(0, 100)
       .map((r) => ({ path: r.p }));
-  }, [mode, files, hits, query]);
+  }, [mode, lowered, hits, query]);
 
   useEffect(() => setSel(0), [query, mode]);
   useEffect(() => {

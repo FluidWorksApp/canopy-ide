@@ -236,6 +236,34 @@ fn listening_ports(_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
     HashMap::new()
 }
 
+/// A cheap fingerprint of the per-terminal stats, at the precision the UI shows.
+///
+/// Raw equality would be useless here: `cpu` is a float that jitters in the
+/// noise on every sample, so the payload is never byte-identical even when the
+/// display would not change. Rounding to one decimal — what the readout shows —
+/// and to whole megabytes makes "the same picture" compare equal.
+fn stats_fingerprint(stats: &[SessionStats]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for s in stats {
+        s.id.hash(&mut h);
+        s.title.hash(&mut h);
+        ((s.total_cpu * 10.0).round() as i64).hash(&mut h);
+        (s.total_mem_bytes / (1024 * 1024)).hash(&mut h);
+        s.procs.len().hash(&mut h);
+        s.ports.hash(&mut h);
+        // The hint's identity, not merely its presence: a terminal whose agent
+        // changes must still reach the UI.
+        s.agent_hint.as_ref().map(|a| (&a.bin, &a.pkg)).hash(&mut h);
+        // Quiet/idle timers advance every tick by design; bucketing to whole
+        // seconds keeps them from defeating the comparison outright while still
+        // letting a real transition through.
+        s.quiet_ms.map(|v| v / 1000).hash(&mut h);
+        s.since_input_ms.map(|v| v / 1000).hash(&mut h);
+    }
+    h.finish()
+}
+
 pub fn start_monitor(app: AppHandle) {
     if MONITOR_STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -249,6 +277,11 @@ pub fn start_monitor(app: AppHandle) {
             // Lives across ticks: identification is filesystem work, and the
             // answer for a given binary only changes when it is reinstalled.
             let mut resolver = crate::agentid::Resolver::default();
+            // The last reading actually sent, so an unchanged one is not sent
+            // again. Emitting is not free at either end: it wakes the webview
+            // and re-renders every listener.
+            let mut last_app_shape: Option<(i64, i64, u32)> = None;
+            let mut last_stats_shape: Option<u64> = None;
             loop {
                 thread::sleep(POLL_INTERVAL);
                 tick = tick.wrapping_add(1);
@@ -335,14 +368,27 @@ pub fn start_monitor(app: AppHandle) {
                         queue.extend(kids);
                     }
                 }
-                let _ = app.emit(
-                    "app:stats",
-                    AppStats {
-                        cpu: app_cpu,
-                        mem_bytes: app_mem,
-                        procs: app_procs,
-                    },
+                // Only when the reading actually moved. CPU is a float that
+                // jitters in the noise, so it is compared at the precision the
+                // UI displays; memory at the megabyte. Without this the webview
+                // was woken twice a second forever to re-render the same
+                // numbers, in every open project.
+                let app_shape = (
+                    (app_cpu * 10.0).round() as i64,
+                    (app_mem / (1024 * 1024)) as i64,
+                    app_procs,
                 );
+                if last_app_shape != Some(app_shape) {
+                    last_app_shape = Some(app_shape);
+                    let _ = app.emit(
+                        "app:stats",
+                        AppStats {
+                            cpu: app_cpu,
+                            mem_bytes: app_mem,
+                            procs: app_procs,
+                        },
+                    );
+                }
 
                 // Session stats are only interesting when terminals exist, but
                 // app stats above must keep flowing regardless — a project with
@@ -458,7 +504,15 @@ pub fn start_monitor(app: AppHandle) {
                 if let Some(cache) = app.try_state::<StatsCache>() {
                     *cache.0.lock().unwrap() = stats.clone();
                 }
-                let _ = app.emit("pty:stats", &stats);
+                // Same rule for the per-terminal rows, which are far bigger:
+                // this payload carries the joined command line of every process
+                // in every terminal's tree, tens of KB with a handful of agents
+                // running, and it shipped unconditionally every two seconds.
+                let stats_shape = stats_fingerprint(&stats);
+                if last_stats_shape != Some(stats_shape) {
+                    last_stats_shape = Some(stats_shape);
+                    let _ = app.emit("pty:stats", &stats);
+                }
             }
         })
         .expect("spawn pty monitor thread");
@@ -1145,9 +1199,33 @@ pub fn install_hook_helper() -> Result<(), String> {
     }
     let dst = helper_path()?;
     std::fs::create_dir_all(dst.parent().ok_or("no bin dir")?).map_err(|e| e.to_string())?;
+    // Already the same binary: skip it. This runs synchronously in `setup`,
+    // before the first window paints, and copied several megabytes on every
+    // single launch — a write and the page-cache churn behind it, on the
+    // critical path, to reproduce a file that was already correct. Size plus
+    // mtime is the same test `stores.rs` uses to decide a file is unchanged.
+    //
+    // `>=` rather than `==` because `fs::copy` stamps the destination with the
+    // time of the copy, not the source's mtime: a helper we installed is always
+    // newer than the binary it came from, while one left over from an older
+    // build is older than the newly-shipped source and gets replaced.
+    let current = match (std::fs::metadata(&src), std::fs::metadata(&dst)) {
+        (Ok(a), Ok(b)) => {
+            a.len() == b.len()
+                && match (a.modified(), b.modified()) {
+                    (Ok(src_at), Ok(dst_at)) => dst_at >= src_at,
+                    _ => false,
+                }
+        }
+        _ => false,
+    };
+    if current {
+        return Ok(());
+    }
     // Replacing a running binary fails on some platforms; remove first.
     let _ = std::fs::remove_file(&dst);
     std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1234,20 +1312,68 @@ fn transcript_bucket(session_id: &str) -> Option<String> {
 /// Bucket name + path of a session's transcript, across profile roots. Exact
 /// filename match on a uuid, in registry order.
 fn claude_transcript_file(home: &str, session_id: &str) -> Option<(String, std::path::PathBuf)> {
-    let name = format!("{session_id}.jsonl");
+    transcript_index(home).get(session_id).cloned()
+}
+
+/// How long a built index is trusted. `session_digests` performs one lookup per
+/// stored session, so anything above zero collapses a whole call into a single
+/// walk; a couple of seconds also covers the panel's own 4s poll. The cost of
+/// being stale is that a transcript created in the last moment reads as
+/// not-yet-resumable, which the next poll corrects.
+const TRANSCRIPT_INDEX_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+type TranscriptIndex = std::collections::HashMap<String, (String, std::path::PathBuf)>;
+static TRANSCRIPT_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<(std::time::Instant, std::sync::Arc<TranscriptIndex>)>>,
+> = std::sync::OnceLock::new();
+
+/// Every session id that has a transcript on disk, to the bucket and path
+/// holding it.
+///
+/// Built in one pass rather than probed per session. The old shape asked
+/// "does <bucket>/<id>.jsonl exist?" for every bucket, for every session — and
+/// re-read the profile registry from disk each time. With a few hundred stored
+/// sessions and a hundred-odd project buckets that is tens of thousands of
+/// `stat` calls per call, on a four-second poll, growing quadratically because
+/// nothing prunes either directory.
+///
+/// Insertion order preserves the old resolution rule exactly: profiles in
+/// registry order, first match wins, so an id present under two profiles still
+/// resolves to the same one it used to.
+fn transcript_index(home: &str) -> std::sync::Arc<TranscriptIndex> {
+    let cell = TRANSCRIPT_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut held = cell.lock().unwrap();
+    if let Some((built, index)) = held.as_ref() {
+        if built.elapsed() < TRANSCRIPT_INDEX_TTL {
+            return index.clone();
+        }
+    }
+    let mut index: TranscriptIndex = Default::default();
     for (_, root) in crate::profiles::roots(home) {
         let projects = root.join(".claude/projects");
-        let Ok(entries) = std::fs::read_dir(&projects) else {
+        let Ok(buckets) = std::fs::read_dir(&projects) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let candidate = entry.path().join(&name);
-            if candidate.exists() {
-                return Some((entry.file_name().to_string_lossy().to_string(), candidate));
+        for bucket in buckets.flatten() {
+            let bucket_name = bucket.file_name().to_string_lossy().to_string();
+            let Ok(files) = std::fs::read_dir(bucket.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let name = file.file_name();
+                let name = name.to_string_lossy();
+                let Some(id) = name.strip_suffix(".jsonl") else {
+                    continue;
+                };
+                index
+                    .entry(id.to_string())
+                    .or_insert_with(|| (bucket_name.clone(), file.path()));
             }
         }
     }
-    None
+    let index = std::sync::Arc::new(index);
+    *held = Some((std::time::Instant::now(), index.clone()));
+    index
 }
 
 /// Where an agent's `--resume` has to run, and whether there is anything to

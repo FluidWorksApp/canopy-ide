@@ -99,7 +99,14 @@ fn halves(
     in_rx: std_mpsc::Receiver<Vec<u8>>,
     abort: tokio::task::AbortHandle,
 ) -> (BoxWrite, BoxRead, WsCloser) {
-    let writer: BoxWrite = Box::new(ChanWrite(out_tx));
+    // Buffered, because `ChanWrite::write` turns every call into its own
+    // WebSocket message. The relay's framing is a 4-byte length followed by the
+    // payload (`write_prefixed`), so unbuffered that was *two* messages per
+    // frame — one of them four bytes, with its own framing and masking
+    // overhead — on a path that carries a frame per keystroke. `write_prefixed`
+    // already ends with `flush`, so the two coalesce with no protocol change
+    // and nothing is left sitting in the buffer.
+    let writer: BoxWrite = Box::new(std::io::BufWriter::new(ChanWrite(out_tx)));
     let reader: BoxRead = Box::new(ChanRead {
         rx: in_rx,
         left: Vec::new(),

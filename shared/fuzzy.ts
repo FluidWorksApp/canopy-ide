@@ -4,8 +4,17 @@
  *  component importing the other. */
 export function fuzzy(needle: string, hay: string): number | null {
   if (!needle) return 0;
-  const n = needle.toLowerCase();
-  const h = hay.toLowerCase();
+  return fuzzyLower(needle.toLowerCase(), hay.toLowerCase());
+}
+
+/** `fuzzy` with the lowercasing already done.
+ *
+ *  Quick-open scores its whole corpus on every keystroke — up to 20,000 paths,
+ *  each tried twice (basename, then full path) — so `hay.toLowerCase()` was
+ *  tens of thousands of throwaway string allocations per character typed. A
+ *  caller that holds a stable corpus lowercases it once and calls this. */
+export function fuzzyLower(n: string, h: string): number | null {
+  if (!n) return 0;
   let score = 0;
   let hi = 0;
   let last = -1;

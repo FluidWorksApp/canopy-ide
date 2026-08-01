@@ -101,6 +101,82 @@ pub(crate) fn touches_git_state(path: &str) -> bool {
         )
 }
 
+/// How long file writes must stay quiet before the batch ships. Shorter than
+/// the git settle: this one drives the live re-read of files open in a tab, so
+/// it wants to feel immediate, and the flood it guards against arrives in
+/// milliseconds rather than over a second.
+const FS_SETTLE_MS: u64 = 120;
+
+/// Directories whose churn no panel is ever showing. Build output was the
+/// glaring omission: only `node_modules` and `.git` were filtered, so a
+/// `cargo build` into `target/` reached the UI in full.
+const IGNORED_DIRS: &[&str] = &[
+    "/node_modules/",
+    "/.git/",
+    "/target/",
+    "/dist/",
+    "/build/",
+    "/.next/",
+    "/.venv/",
+    "/__pycache__/",
+];
+
+type FsBatch = HashMap<(String, String), (u64, std::collections::HashSet<String>)>;
+static FS_PENDING: OnceLock<Mutex<FsBatch>> = OnceLock::new();
+
+fn fs_pending() -> &'static Mutex<FsBatch> {
+    FS_PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Collect this root's file changes and ship them as one event once the writes
+/// stop.
+///
+/// `pulse_git` beside it has always done this; `fs:change` did not, and emitted
+/// one IPC message per notify event. A `cargo build` or a `vite build` is
+/// thousands of file writes, so it was thousands of webview wakeups, each
+/// waking every open project's listener.
+///
+/// Batched per (root, kind) rather than per root: a consumer branches on
+/// `kind` -- ProjectView skips re-reading a file whose event was a remove --
+/// so folding creates, modifies and removes into one event would make that
+/// branch a coin toss.
+fn pulse_fs<R: tauri::Runtime>(app: &AppHandle<R>, root: &str, kind: &str, paths: Vec<String>) {
+    let key = (root.to_string(), kind.to_string());
+    let generation = {
+        let mut map = fs_pending().lock().unwrap();
+        let slot = map.entry(key.clone()).or_insert((0, Default::default()));
+        slot.0 = slot.0.wrapping_add(1);
+        slot.1.extend(paths);
+        slot.0
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(FS_SETTLE_MS)).await;
+        let batch = {
+            let mut map = fs_pending().lock().unwrap();
+            // Something newer is already waiting its turn — let that one speak,
+            // and leave the accumulated paths for it to carry.
+            match map.get(&key) {
+                Some((g, _)) if *g == generation => map.remove(&key).map(|(_, p)| p),
+                _ => None,
+            }
+        };
+        let Some(paths) = batch else { return };
+        if paths.is_empty() {
+            return;
+        }
+        let (root, kind) = key;
+        let _ = app.emit(
+            "fs:change",
+            FsChange {
+                root,
+                paths: paths.into_iter().collect(),
+                kind,
+            },
+        );
+    });
+}
+
 /// Note that this root's git state moved, and say so once the writes stop.
 fn pulse_git<R: tauri::Runtime>(app: &AppHandle<R>, root: &str) {
     let generation = {
@@ -198,8 +274,10 @@ pub async fn workspace_add(
                 .collect();
             let paths: Vec<String> = touched
                 .iter()
-                // node_modules / .git churn would flood the UI
-                .filter(|p| !p.contains("/node_modules/") && !p.contains("/.git/"))
+                // Build output and dependency trees churn in the thousands and
+                // are never what a panel is showing. `.git/` is excluded here
+                // and handled by `pulse_git` below, which wants it.
+                .filter(|p| !IGNORED_DIRS.iter().any(|d| p.contains(d)))
                 .cloned()
                 .collect();
             // The panels that used to poll git want both halves: a write to a
@@ -210,14 +288,7 @@ pub async fn workspace_add(
                 pulse_git(&app, &emit_root);
             }
             if !paths.is_empty() {
-                let _ = app.emit(
-                    "fs:change",
-                    FsChange {
-                        root: emit_root.clone(),
-                        paths,
-                        kind: kind.into(),
-                    },
-                );
+                pulse_fs(&app, &emit_root, kind, paths);
             }
         }
     })
@@ -894,6 +965,43 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Build output was reaching the UI in full: only `node_modules` and
+    /// `.git` were filtered, so a `cargo build` emitted one event per file
+    /// written into `target/`.
+    #[test]
+    fn build_output_is_not_a_file_change_anyone_is_showing() {
+        for p in [
+            "/repo/target/debug/build/x.rs",
+            "/repo/dist/index.js",
+            "/repo/.next/cache/y",
+            "/repo/node_modules/pkg/index.js",
+            "/repo/.git/index",
+            "/repo/.venv/lib/z.py",
+            "/repo/__pycache__/m.pyc",
+        ] {
+            assert!(
+                IGNORED_DIRS.iter().any(|d| p.contains(d)),
+                "{p} should be ignored"
+            );
+        }
+    }
+
+    /// ...but a path that merely *mentions* one of those names is still real
+    /// work the user did.
+    #[test]
+    fn a_source_file_named_after_a_build_dir_still_counts() {
+        for p in [
+            "/repo/src/target.rs",
+            "/repo/src/dist.ts",
+            "/repo/src/build_plan.rs",
+        ] {
+            assert!(
+                !IGNORED_DIRS.iter().any(|d| p.contains(d)),
+                "{p} should not be ignored"
+            );
+        }
+    }
     use super::*;
 
     fn write(path: &Path, text: &str) {

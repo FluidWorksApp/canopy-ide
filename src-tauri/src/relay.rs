@@ -223,9 +223,19 @@ enum Frame {
 /// threads writing the same channel unserialised would reuse a nonce.
 fn peer_send(sender: &Arc<Mutex<secure::Sender>>, frame: &Frame) -> bool {
     match serde_json::to_vec(frame) {
-        Ok(bytes) => sender.lock().unwrap().send(&bytes),
+        Ok(bytes) => peer_send_bytes(sender, &bytes),
         Err(_) => false,
     }
+}
+
+/// Send an already-serialised frame.
+///
+/// Encryption genuinely has to be per peer — the AEAD nonce is a send counter
+/// per channel — but serialisation does not, and doing it inside the fan-out
+/// loop meant one full `serde_json::to_vec` of the same frame per recipient,
+/// on a path that carries a frame per keystroke.
+fn peer_send_bytes(sender: &Arc<Mutex<secure::Sender>>, bytes: &[u8]) -> bool {
+    sender.lock().unwrap().send(bytes)
 }
 
 /// End-to-end encryption for the relay. The join code is a low-entropy secret,
@@ -954,8 +964,11 @@ fn broadcast_presence(host: &Host) {
     let frame = Frame::Presence {
         members: host_members(host),
     };
+    let Ok(bytes) = serde_json::to_vec(&frame) else {
+        return;
+    };
     for peer in host.peers.values() {
-        let _ = peer_send(&peer.sender, &frame);
+        let _ = peer_send_bytes(&peer.sender, &bytes);
     }
 }
 
@@ -1379,9 +1392,11 @@ fn serve_peer(
             return;
         }
         let presence = Frame::Presence { members };
-        for (pid, peer) in &host.peers {
-            if pid != &id {
-                let _ = peer_send(&peer.sender, &presence);
+        if let Ok(bytes) = serde_json::to_vec(&presence) {
+            for (pid, peer) in &host.peers {
+                if pid != &id {
+                    let _ = peer_send_bytes(&peer.sender, &bytes);
+                }
             }
         }
         emit_state(&app, &guard);
@@ -1508,8 +1523,11 @@ fn deliver_frame(
     event: &str,
     emit_local: bool,
 ) {
-    for sender in targets {
-        let _ = peer_send(sender, frame);
+    // Serialised once, encrypted per peer.
+    if let Ok(bytes) = serde_json::to_vec(frame) {
+        for sender in targets {
+            let _ = peer_send_bytes(sender, &bytes);
+        }
     }
     if emit_local {
         match frame {

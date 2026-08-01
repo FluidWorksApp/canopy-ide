@@ -3127,11 +3127,31 @@ fn list_worktrees(top: &Path) -> Result<Vec<WorktreeInfo>, String> {
     // Dirty counts are the expensive half — a `git status` per worktree, and a
     // repo can have 20+ of them. Anything that only needs to know *which*
     // worktree holds a branch calls scan_worktrees instead.
-    for w in list.iter_mut() {
-        if w.prunable.is_none() && !w.bare {
-            if let Ok(s) = run(git(std::path::Path::new(&w.path)).args(["status", "--porcelain"])) {
-                w.dirty = s.lines().filter(|l| !l.trim().is_empty()).count() as u32;
-            }
+    //
+    // They are independent, so they run together rather than one after another:
+    // twenty worktrees was twenty sequential process spawns, each a full index
+    // refresh and worktree walk, and the tab waited for the sum of them.
+    let counts: Vec<Option<u32>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = list
+            .iter()
+            .map(|w| {
+                let path = w.path.clone();
+                let wanted = w.prunable.is_none() && !w.bare;
+                scope.spawn(move || {
+                    if !wanted {
+                        return None;
+                    }
+                    run(git(std::path::Path::new(&path)).args(["status", "--porcelain"]))
+                        .ok()
+                        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count() as u32)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().ok().flatten()).collect()
+    });
+    for (w, dirty) in list.iter_mut().zip(counts) {
+        if let Some(n) = dirty {
+            w.dirty = n;
         }
     }
     Ok(list)
