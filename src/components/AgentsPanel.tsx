@@ -5,19 +5,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
 import { AGENT_CLIS } from "../projects";
-import { identifyAgent, observeForLearning } from "../agentIdentity";
 import { agentDisplayName, type TabName } from "../agentDisplayName";
 import {
   NO_ATTENTION,
-  POLICY,
   agentLife,
   bucketFor,
   reclaimable,
   silenceLabel,
-  type LifeState,
 } from "../../shared/agentLife";
 import { ashFor } from "../ash";
-import { forgetSessions, markRestored, restorableFrom } from "../restorable";
+import { markRestored } from "../restorable";
+import { STATE_META, lastHumanPrompt, useAgentSessions } from "../agentSessions";
+import { AGENT_LABELS, IntegrationsList, useIntegrations } from "./AgentIntegrations";
+import { PendingCard } from "./PendingCard";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
 import {
@@ -35,26 +35,6 @@ import type { PendingItem } from "../notifications";
 import { Button } from "./ui";
 import { format, matchesModifierClick } from "../shortcuts";
 
-/** Colour + label for the lifecycle dot on a running-agent row. `working` is
- *  the only state that pulses — a moving dot in a column of still ones is
- *  where the eye lands first. `unknown` is what every other state decays into
- *  when nothing corroborates it: pointedly not `idle`, because a session that
- *  stopped telling us anything has not told us it finished, and `idle` is what
- *  hibernation reclaims. */
-export const STATE_META: Record<LifeState, { cls: string; label: string }> = {
-  starting: { cls: "st-starting", label: "starting up" },
-  working: { cls: "st-working", label: "working" },
-  waiting: { cls: "st-waiting", label: "waiting on you" },
-  idle: { cls: "st-idle", label: "idle — finished a turn" },
-  ended: { cls: "st-ended", label: "session ended" },
-  unknown: { cls: "st-unknown", label: "no signal — may have stopped" },
-};
-
-/** CLIs whose approval prompt is a numbered/Escape menu we can drive by
- *  synthesising keystrokes. Anything else gets "answer in terminal" instead of
- *  buttons that might type into the wrong UI. */
-const KEYSTROKE_APPROVAL_AGENTS = new Set(["claude", "codex"]);
-
 /** What shared context actually does, in one hover rather than one paragraph.
  *  Both halves of the header carry it, so it's there whether you reach for the
  *  question mark or the switch.
@@ -66,43 +46,6 @@ const KEYSTROKE_APPROVAL_AGENTS = new Set(["claude", "codex"]);
 const SHARE_EXPLAIN =
   "Agents in this project can see what the others are up to. Before each prompt, an agent is told " +
   "the recent prompts you gave the other sessions here and the files they touched.";
-
-/** Every CLI with an auto-setup arm, in the order the integrations list shows
- *  them. Mirrors SUPPORTED_AGENTS in agents.rs. */
-const AGENT_LABELS = [
-  { id: "claude", label: "Claude Code" },
-  { id: "codex", label: "Codex" },
-  { id: "agy", label: "Antigravity" },
-  { id: "aider", label: "Aider" },
-  { id: "opencode", label: "OpenCode" },
-  { id: "omp", label: "oh-my-pi" },
-  { id: "amp", label: "Amp" },
-];
-
-const HEALTH_TONE: Record<string, string> = {
-  ours: "hs-ok",
-  missing: "hs-warn",
-  foreign: "hs-warn",
-  unreadable: "hs-warn",
-  unsupported: "hs-none",
-};
-
-/** Spelled out because "foreign" and "unsupported" look like problems and only
- *  one of them is. */
-const HEALTH_HELP: Record<string, Record<string, string>> = {
-  hooks: {
-    ours: "This CLI's config points its events at Canopy",
-    missing: "No Canopy hooks in this CLI's config — nothing will stream in",
-  },
-  mcp: {
-    ours: "The Canopy MCP server is registered for this CLI",
-    missing: "Not registered — this CLI's agents can't ask the IDE for context",
-    foreign:
-      "An MCP server named 'canopy' exists here that Canopy didn't write. It is left alone — rename or remove it, then set up again.",
-    unreadable: "This CLI's MCP config exists but can't be parsed",
-    unsupported: "This CLI has no MCP configuration Canopy can write",
-  },
-};
 
 interface AgentsPanelProps {
   /** False while another side tab is in front. The panel stays mounted (so
@@ -162,6 +105,9 @@ interface AgentsPanelProps {
   onNotice?: (msg: string) => void;
   /** Open the agent-instructions tab, optionally on one file. */
   onOpenInstructions?: (focus?: string) => void;
+  /** Open the agents page — the same material with room for it. The panel is
+   *  the glance; the page is where you go when the glance isn't enough. */
+  onOpenAgentsPage?: () => void;
   /** Which agent CLIs are on PATH, keyed by bin — decides which instruction
    *  formats are worth listing when the file doesn't exist yet. */
   installed?: Record<string, boolean>;
@@ -176,36 +122,6 @@ const ago = (secs?: number) => {
   if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
   return `${Math.floor(d / 86400)}d ago`;
 };
-
-/** Last thing the *human* typed. Hooks also record injected payloads
-    (`<task-notification>…`, shared-context blocks) as prompts; an XML-ish
-    blob identifies nothing, so skip anything that opens with a tag. */
-export const lastHumanPrompt = (prompts?: string[]) =>
-  [...(prompts ?? [])]
-    .reverse()
-    .find((p) => p.trim().length > 0 && !p.trimStart().startsWith("<"));
-
-/** Pair each terminal (by the PTY `surface` id the hook recorded from our spawn
- *  env) with the newest digest tagged for this app launch — an exact identity,
- *  not a cwd/title guess. Shared with ProjectView so the Agents panel and the
- *  workspace drawer resolve the same session for a given terminal. */
-export function digestBySurface(
-  digests: ipc.SessionDigest[],
-  thisInstance: string | null,
-): Map<string, ipc.SessionDigest> {
-  const bySurface = new Map<string, ipc.SessionDigest>();
-  for (const d of digests) {
-    if (!d.surface) continue;
-    // A PTY id is only unique within one app launch, but the sessions dir is
-    // shared across instances and restarts — so a digest tagged with another
-    // `instance` reused this id and must be skipped. Untagged digests are
-    // pre-upgrade and fall back to surface-only.
-    if (thisInstance && d.instance && d.instance !== thisInstance) continue;
-    const prev = bySurface.get(d.surface);
-    if (!prev || (d.updated ?? 0) > (prev.updated ?? 0)) bySurface.set(d.surface, d);
-  }
-  return bySurface;
-}
 
 const fmtMem = (bytes: number) =>
   bytes > 1024 * 1024 * 1024
@@ -338,6 +254,7 @@ export function AgentsPanel({
   onRespond,
   onNotice,
   onOpenInstructions,
+  onOpenAgentsPage,
   installed = {},
 }: AgentsPanelProps) {
   // Instruction files: scanned once when the panel comes into view, and again
@@ -387,7 +304,6 @@ export function AgentsPanel({
     return { rows: [...exists, ...missing], live: exists.length };
   }, [instructionFiles, installed]);
   const [showHookHelp, setShowHookHelp] = useState(false);
-  const [setupResult, setSetupResult] = useState<string | null>(null);
   // Which of the running CLIs have no hooks — not a single boolean over all of
   // them. `every` called a mixed roster (claude hooked, aider not) uninstalled
   // and told the user nothing was streaming when most of it was, then re-ran
@@ -395,10 +311,9 @@ export function AgentsPanel({
   // while we haven't checked, so the nudge never flashes the wrong message.
   const [unhooked, setUnhooked] = useState<string[] | null>(null);
   // Per-CLI integration state, so "why is this agent silent?" has an answer in
-  // the panel rather than in a config file the user has to go and read.
-  const [health, setHealth] = useState<ipc.IntegrationHealth[]>([]);
-  const refreshHealth = () =>
-    ipc.agentIntegrationHealth().then(setHealth).catch(() => {});
+  // the panel rather than in a config file the user has to go and read. Read
+  // only while the help is open — that is the only place the panel shows it.
+  const integrations = useIntegrations(showHookHelp);
   // Dismissing the "restart to stream" hint sticks across panels and launches:
   // once you know the agents just predate the hooks, you don't need telling in
   // every project. The genuine "not set up" nudge ignores this and always shows.
@@ -409,199 +324,15 @@ export function AgentsPanel({
     localStorage.setItem("canopy.hookHintDismissed", "1");
     setHintDismissed(true);
   };
-  // Per-card selections for multi-step questionnaires, keyed by item.key;
-  // picks[key][questionIndex] is the option index(es) chosen for that question.
-  // A lone single-select question answers on the click and never lands here.
-  const [picks, setPicks] = useState<Record<string, number[][]>>({});
-  const emptyPicks = (item: PendingItem) =>
-    (item.questions ?? []).map(() => [] as number[]);
-  const picksFor = (item: PendingItem) => picks[item.key] ?? emptyPicks(item);
-  const choose = (item: PendingItem, qi: number, oi: number, multi: boolean) => {
-    setPicks((prev) => {
-      const cur = (prev[item.key] ?? emptyPicks(item)).map((a) => [...a]);
-      cur[qi] = multi
-        ? cur[qi].includes(oi)
-          ? cur[qi].filter((x) => x !== oi)
-          : [...cur[qi], oi]
-        : [oi];
-      return { ...prev, [item.key]: cur };
-    });
-  };
-  const answerable = (item: PendingItem) =>
-    (item.questions ?? []).every((_, qi) => (picksFor(item)[qi]?.length ?? 0) > 0);
-  const submitAnswers = (item: PendingItem) => {
-    onAnswer?.(item, picksFor(item));
-    setPicks(({ [item.key]: _drop, ...rest }) => rest);
-  };
-  // A single single-select question answers on the option click itself; a
-  // multi-select (still one page) collects picks and submits together. A
-  // multi-question form is a different beast: answering it means navigating
-  // between pages, and driving that by synthesised keystrokes desyncs and the
-  // CLI records "declined". Until Canopy answers questions over the programmatic
-  // channel (headless `canUseTool`) rather than the TUI, a multi-page form is
-  // answered in the terminal — the panel points there instead of miscounting.
-  const instantAnswer = (item: PendingItem) =>
-    (item.questions?.length ?? 0) === 1 && !item.questions?.[0]?.multiSelect;
-  const multiPage = (item: PendingItem) => (item.questions?.length ?? 0) > 1;
-  const canAnswerInPanel = (item: PendingItem) => !!onAnswer && !multiPage(item);
-  const [digests, setDigests] = useState<ipc.SessionDigest[]>([]);
-  // This app launch's tag, so a digest from another instance/run (same reset-to-1
-  // PTY id, same shared sessions dir) can't be paired with our terminals.
-  const [thisInstance, setThisInstance] = useState<string | null>(null);
-  useEffect(() => {
-    void ipc.instanceId().then(setThisInstance).catch(() => {});
-  }, []);
   const [showShared, setShowShared] = useState(false);
   const settings = getSettings();
 
-  // What the hook would actually inject — mirrors peer_context in
-  // canopy_hook.rs: no "ended" sessions, and none quiet for longer than
-  // PEER_MAX_AGE_SECS. The panel must apply the same rules or it claims
-  // long-dead sessions are shared: a digest outlives its terminal (that's
-  // what makes restore work), and one whose terminal died without a Stop
-  // event even stays "active" on disk — the age cutoff is what ages those out.
-  // `digests` itself stays unfiltered — it is also the crash-restore record.
-  // The shared constant, not a hand-copy. This number also lives in
-  // canopy_hook.rs and portal.rs, and used to live here as its own literal with
-  // a comment admitting it mirrored the other two.
-  const PEER_MAX_AGE_SECS = POLICY.peerMaxAgeSecs;
-  const shared = useMemo(
-    () =>
-      digests.filter(
-        (d) =>
-          d.state !== "ended" &&
-          Date.now() / 1000 - (d.updated ?? 0) <= PEER_MAX_AGE_SECS,
-      ),
-    [digests],
-  );
-
-  // Loaded regardless of the sharing toggle: these digests are also the crash
-  // record that "Restore sessions" reads. Sharing is about what agents see of
-  // each other; restore is about what the *user* lost when the IDE died.
-  useEffect(() => {
-    if (!visible) return;
-    const load = () =>
-      void ipc
-        .sessionDigests(roots)
-        .then((d) =>
-          setDigests(
-            d.filter((x) =>
-              roots.some((r) => x.cwd === r || (x.cwd ?? "").startsWith(r + "/")),
-            ),
-          ),
-        )
-        .catch(() => setDigests([]));
-    load();
-    const t = setInterval(load, 4000);
-    return () => clearInterval(t);
-  }, [roots.join("\n"), visible]);
-
-  // Claims other agents hold in this checkout, refreshed when one changes.
-  const [claims, setClaims] = useState<ipc.AgentClaim[]>([]);
-  useEffect(() => {
-    if (!visible) return;
-    const load = () => void ipc.contextClaims().then(setClaims).catch(() => {});
-    load();
-    let un: (() => void) | undefined;
-    void ipc.onAgentClaims(load).then((u) => {
-      un = u;
-    });
-    return () => un?.();
-  }, [visible]);
-
-  // Read the integrations when the help panel opens (that's the only place
-  // they're shown) and whenever the startup pass reports in, so a repair that
-  // happened while the panel was open is reflected without a manual refresh.
-  useEffect(() => {
-    if (!showHookHelp) return;
-    void refreshHealth();
-    let un: (() => void) | undefined;
-    void ipc.onIntegrationHealth((r) => setHealth(r.agents)).then((u) => {
-      un = u;
-    });
-    return () => un?.();
-  }, [showHookHelp]);
-
-  // allSettled, not all: one CLI whose config can't be written must not erase
-  // the report for the others. `Promise.all` rejected on the first failure and
-  // showed that error alone, so a single unparseable registry made a setup that
-  // wired up three CLIs look like it had done nothing at all.
-  const autoSetup = async (agents: string | string[]) => {
-    const ids = Array.isArray(agents) ? agents : [agents];
-    const results = await Promise.allSettled(ids.map((agent) => ipc.setupAgentHooks(agent)));
-    setSetupResult(
-      results
-        .map((r, i) =>
-          r.status === "fulfilled" ? r.value.summary : `${ids[i]}: ${String(r.reason)}`,
-        )
-        .join("\n"),
-    );
-    void refreshHealth();
-  };
-
-  // One row per terminal session, named after the agent running inside it.
-  // "Running agents" and "Terminal sessions" used to be separate lists built
-  // from the same `stats`, so a terminal running claude appeared twice with
-  // near-identical numbers — the only difference being that the session total
-  // also counts the shell wrapping the agent. The session is the real unit:
-  // it's what you kill, and what has a directory. The display *partitions*
-  // these rows — agent-hosting terminals under one head, plain shells under
-  // another — so each session still appears exactly once.
-  // Sessions that exist on disk but have no live terminal — what you lost when
-  // the IDE or the machine died. Newest first: that's the one you were most
-  // likely mid-thought in.
-  //
-  // Requires at least one prompt. A session where the agent started but was
-  // never typed into has no conversation for the CLI to reopen — verified:
-  // `claude --resume` on such an id answers "No conversation found with session
-  // ID", because the transcript is only created once there is something to
-  // record. Listing those would offer a button that can only fail, on sessions
-  // with nothing worth restoring anyway.
-  // Shared with the project's empty state — one definition of "restorable",
-  // so the two surfaces can never disagree about what is offered.
-  const restorable = useMemo(
-    () => restorableFrom(digests, stats, liveSessionIds),
-    [digests, stats, liveSessionIds.join(",")],
-  );
-
-  // Bumped when the hook stream teaches us a binary (see observeForLearning),
-  // which is the one thing that can change an identity without stats moving.
-  const [learnedTick, setLearnedTick] = useState(0);
-
-  const sessions = useMemo(() => {
-    // Terminal -> the agent conversation running in it, by the surface id the
-    // hook recorded from our spawn env. An exact identity, not a guess: two
-    // claudes in the same directory are indistinguishable by cwd, and matching
-    // on titles or newest-file-by-mtime attaches to the wrong one silently.
-    // Newest wins if a terminal has hosted more than one session in its life.
-    const bySurface = digestBySurface(digests, thisInstance);
-    return stats.map((s) => {
-      const digest = bySurface.get(String(s.id));
-      return {
-        session: s,
-        // What this terminal is running, from the process the pty has in the
-        // foreground — see agentIdentity.ts. `learnedTick` is in the dep list
-        // because learning a binary changes this answer.
-        agent: identifyAgent(s.agent_hint, digest),
-        digest,
-        // Where it's running — the thing that tells two `claude` rows apart.
-        dir: (s.cwd || "").split("/").filter(Boolean).pop() ?? "",
-      };
-    });
-  }, [stats, digests, thisInstance, learnedTick]);
-
-  // The hook stream names binaries nothing else can identify, so a CLI Canopy
-  // has never heard of is recognised from its second launch onward. Derived,
-  // never asked.
-  useEffect(() => {
-    if (observeForLearning(sessions.map((s) => ({ hint: s.session.agent_hint, digest: s.digest }))))
-      setLearnedTick((n) => n + 1);
-  }, [sessions]);
-
-  // An agent session and a plain shell answer different questions — "what is
-  // it working on?" vs "what's running in it?" — so they get separate heads.
-  const agentSessions = sessions.filter((x) => x.agent);
-  const termSessions = sessions.filter((x) => !x.agent);
+  // What is running, what can come back, and who has claimed what — the same
+  // read the agents page makes. An agent session and a plain shell answer
+  // different questions ("what is it working on?" vs "what's running in it?"),
+  // so they get separate heads; every session appears under exactly one.
+  const { sessions, agentSessions, termSessions, restorable, shared, claims, forget } =
+    useAgentSessions({ visible, roots, stats, liveSessionIds });
 
   // Agents are running but not one of them has a digest — nothing is streaming
   // from their hooks, which is exactly why a question or task never appears in
@@ -642,7 +373,7 @@ export function AgentsPanel({
       // transient IPC failure must not keep a banner on screen that describes
       // a state we can no longer confirm.
       .catch(() => setUnhooked(null));
-  }, [noHookSignal, setupKey, setupResult]);
+  }, [noHookSignal, setupKey, integrations.result]);
 
   // Hibernate an agent: kill its terminal to reclaim the memory, keeping the
   // session digest (which is already the restore record) so the row reappears
@@ -948,18 +679,6 @@ export function AgentsPanel({
   const urgent = pending.filter((i) => i.kind !== "idle");
   const idle = pending.filter((i) => i.kind === "idle");
 
-  const dismissBtn = (key: string) =>
-    onDismissPending && (
-      <Button icon className="pending-dismiss"
-        title="Dismiss"
-        onClick={(e) => {
-          e.stopPropagation();
-          onDismissPending(key);
-        }}>
-        ✕
-      </Button>
-    );
-
   return (
     <div className="side-panel">
       {urgent.length > 0 && (
@@ -969,141 +688,14 @@ export function AgentsPanel({
             <span className="badge">{urgent.length}</span>
           </div>
           {urgent.map((item) => (
-            <div
+            <PendingCard
               key={item.key}
-              className="pending-card"
-              onClick={() => onJumpToTerminal?.(item)}
-              title="Open the terminal running this agent"
-            >
-              {item.kind === "question" ? (
-                <>
-                  {(item.questions ?? []).map((q, i) => {
-                    const sel = picksFor(item)[i] ?? [];
-                    return (
-                      <div key={i} className="pending-question">
-                        {q.header && <span className="pending-chip">{q.header}</span>}
-                        <div className="pending-q-text">{q.question}</div>
-                        <div className="pending-options">
-                          {q.options.map((o, oi) => {
-                            // Every option is now selectable in the panel. A
-                            // lone single-select answers on the click; anything
-                            // multi-step (multi-select, or several questions)
-                            // records the pick here and submits via the button
-                            // below. The synthesised keystrokes fill the
-                            // terminal form; it stays reachable as the fallback.
-                            const chosen = sel.includes(oi);
-                            const inPanel = canAnswerInPanel(item);
-                            const mark = q.multiSelect
-                              ? chosen
-                                ? "☑"
-                                : "☐"
-                              : chosen
-                                ? "◉"
-                                : "○";
-                            return (
-                              <div
-                                key={o.label}
-                                className={`pending-option ${inPanel ? "pending-option-clickable" : ""} ${
-                                  chosen ? "pending-option-chosen" : ""
-                                }`}
-                                title={inPanel ? "Select this option" : "Answer in the terminal"}
-                                onClick={
-                                  inPanel
-                                    ? (e) => {
-                                        e.stopPropagation();
-                                        if (instantAnswer(item)) onAnswer!(item, [[oi]]);
-                                        else choose(item, i, oi, !!q.multiSelect);
-                                      }
-                                    : undefined
-                                }
-                              >
-                                <span className="pending-option-label">
-                                  {mark} {o.label}
-                                </span>
-                                {o.description && (
-                                  <span className="pending-option-desc">{o.description}</span>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {/* A single-page multi-select submits its picks as one
-                      keystroke sequence (no page navigation to desync). A lone
-                      single-select answered on click above, so it shows no
-                      button. */}
-                  {canAnswerInPanel(item) && !instantAnswer(item) && (
-                    <Button variant="accent" className="pending-submit"
-                      disabled={!answerable(item)}
-                      title={
-                        answerable(item)
-                          ? "Send this answer to the terminal"
-                          : "Choose an option first"
-                      }
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        submitAnswers(item);
-                      }}>
-                      Submit answer
-                    </Button>
-                  )}
-                  {/* A multi-question form can't be answered reliably by
-                      synthesised keystrokes (the pages desync into a decline),
-                      so the panel sends you to the terminal to answer it there. */}
-                  {onAnswer && multiPage(item) && (
-                    <Button className="pending-submit"
-                      title="Multi-question forms are answered in the terminal"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onJumpToTerminal?.(item);
-                      }}>
-                      Answer in the terminal ↗
-                    </Button>
-                  )}
-                </>
-              ) : (
-                <>
-                  <div className="pending-q-text">
-                    <Mascot state="needs" size={16} className="pending-ash" />
-                    {item.message}
-                  </div>
-                  {/* Respond without leaving the panel: Allow types the accept
-                      key, Deny sends Escape. Only for CLIs whose prompt we can
-                      drive by keystroke — the rest fall back to the terminal. */}
-                  {onRespond && KEYSTROKE_APPROVAL_AGENTS.has(item.agent) && (
-                    <div className="pending-respond">
-                      <button
-                        className="pending-approve"
-                        title="Allow — types the accept key into the terminal"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onRespond(item, "approve");
-                        }}
-                      >
-                        ✓ Allow
-                      </button>
-                      <button
-                        className="pending-deny"
-                        title="Deny — sends Escape to the terminal"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onRespond(item, "deny");
-                        }}
-                      >
-                        ✕ Deny
-                      </button>
-                    </div>
-                  )}
-                </>
-              )}
-              <div className="pending-footer">
-                <span className="event-time">{new Date(item.ts).toLocaleTimeString()}</span>
-                <span className="pending-jump">answer in terminal ➜</span>
-                {dismissBtn(item.key)}
-              </div>
-            </div>
+              item={item}
+              onAnswer={onAnswer}
+              onRespond={onRespond}
+              onJumpToTerminal={onJumpToTerminal}
+              onDismiss={onDismissPending}
+            />
           ))}
         </>
       )}
@@ -1114,22 +706,12 @@ export function AgentsPanel({
             <span className="badge">{idle.length}</span>
           </div>
           {idle.map((item) => (
-            <div
+            <PendingCard
               key={item.key}
-              className="pending-card pending-card-idle"
-              onClick={() => onJumpToTerminal?.(item)}
-              title="Open the terminal running this agent"
-            >
-              <div className="pending-q-text">
-                <Mascot state="done" size={16} className="pending-ash" />
-                {item.message}
-              </div>
-              <div className="pending-footer">
-                <span className="event-time">{new Date(item.ts).toLocaleTimeString()}</span>
-                <span className="pending-jump">open terminal ➜</span>
-                {dismissBtn(item.key)}
-              </div>
-            </div>
+              item={item}
+              onJumpToTerminal={onJumpToTerminal}
+              onDismiss={onDismissPending}
+            />
           ))}
         </>
       )}
@@ -1229,11 +811,23 @@ export function AgentsPanel({
         title="Running agents"
         count={agentSessions.length}
         action={
-          <Button icon
-            title="How to hook up agent CLIs"
-            onClick={() => setShowHookHelp((v) => !v)}>
-            ?
-          </Button>
+          <>
+            {/* The same material with room for it: cards instead of one-line
+                rows, the archive searchable, and the integrations out in the
+                open. The panel stays the glance. */}
+            {onOpenAgentsPage && (
+              <Button icon
+                title="Open the agents page — every session, with room to read it"
+                onClick={onOpenAgentsPage}>
+                ⤢
+              </Button>
+            )}
+            <Button icon
+              title="How to hook up agent CLIs"
+              onClick={() => setShowHookHelp((v) => !v)}>
+              ?
+            </Button>
+          </>
         }
       >
 
@@ -1245,10 +839,10 @@ export function AgentsPanel({
             {unhooked.map((id) => AGENT_LABELS.find((a) => a.id === id)?.label ?? id).join(", ")} —
             questions, tasks and tokens won't show until hooks are set up.
           </span>
-          <Button variant="accent" onClick={() => void autoSetup(unhooked)}>
+          <Button variant="accent" onClick={() => void integrations.setUp(unhooked)}>
             Set up agent integrations
           </Button>
-          {setupResult && <p className="hook-result">{setupResult}</p>}
+          {integrations.result && <p className="hook-result">{integrations.result}</p>}
         </div>
       )}
 
@@ -1270,47 +864,11 @@ export function AgentsPanel({
       {showHookHelp && hookPath && (
         <div className="hook-help">
           <p>Stream tool-use events from agent CLIs into this panel:</p>
-          {/* One row per CLI with an auto-setup arm — every CLI whose
-              integration surface supports it (see docs/agent-parity.md).
-              SUPPORTED_AGENTS in agents.rs is the registry for these.
-              Each row states what is actually on disk: a registration that
-              silently failed used to be invisible here, which is how one
-              survived unnoticed until a user asked why an agent was quiet. */}
-          <div className="hook-setup-list">
-            {AGENT_LABELS.map((a) => {
-              const h = health.find((x) => x.agent === a.id);
-              return (
-                <div key={a.id} className="hook-setup-row">
-                  <span className="hook-setup-name">{a.label}</span>
-                  {h && !h.cli_installed && (
-                    <span className="hook-setup-state" title="This CLI isn't on your PATH">
-                      not installed
-                    </span>
-                  )}
-                  {h?.cli_installed && (
-                    <>
-                      <span
-                        className={`hook-setup-state ${HEALTH_TONE[h.hooks] ?? ""}`}
-                        title={HEALTH_HELP.hooks[h.hooks] ?? h.hooks}
-                      >
-                        hooks {h.hooks}
-                      </span>
-                      <span
-                        className={`hook-setup-state ${HEALTH_TONE[h.mcp] ?? ""}`}
-                        title={HEALTH_HELP.mcp[h.mcp] ?? h.mcp}
-                      >
-                        MCP {h.mcp}
-                      </span>
-                    </>
-                  )}
-                  <Button variant="accent" onClick={() => void autoSetup(a.id)}>
-                    Set up
-                  </Button>
-                </div>
-              );
-            })}
-          </div>
-          {setupResult && <p className="hook-result">{setupResult}</p>}
+          <IntegrationsList
+            health={integrations.health}
+            onSetUp={(a) => void integrations.setUp(a)}
+          />
+          {integrations.result && <p className="hook-result">{integrations.result}</p>}
           <p>
             Other CLIs: point any hook at appending single-line JSON to:
           </p>
@@ -1427,25 +985,10 @@ export function AgentsPanel({
                         ? `Forget this directory's ${superseded.length + 1} sessions — removes them from this list`
                         : "Forget this session — removes it from this list"
                     }
-                    onClick={() => {
-                      // The row stands for its whole directory (see
-                      // newestPerDirectory), so forgetting only the session on
-                      // show would just promote the next one behind it.
-                      const gone = [d, ...superseded];
-                      // Tombstone first: sessions read from a CLI's own on-disk
-                      // store (omp) aren't in ~/.canopy/sessions, so deleting
-                      // that file can't stop them — the next poll re-reads them
-                      // from omp's dir and they come straight back. The
-                      // persistent forget is what restorableFrom actually
-                      // filters on, so it's the only thing that makes an omp
-                      // session stay gone.
-                      forgetSessions(gone);
-                      for (const g of gone) {
-                        void ipc.sessionForget(g.session_id).catch(() => {});
-                      }
-                      const ids = new Set(gone.map((g) => g.session_id));
-                      setDigests((prev) => prev.filter((x) => !ids.has(x.session_id)));
-                    }}
+                    // The row stands for its whole directory (see
+                    // newestPerDirectory), so forgetting only the session on
+                    // show would just promote the next one behind it.
+                    onClick={() => forget([d, ...superseded])}
                   >
                     <TrashIcon size={13} />
                     <span className="row-act-label">Forget</span>

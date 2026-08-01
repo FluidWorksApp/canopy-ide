@@ -214,7 +214,9 @@ import {
   type ModelChoice,
 } from "../../agentModels";
 import { refreshChoices } from "../../modelCatalog";
-import { AgentsPanel, digestBySurface } from "../AgentsPanel";
+import { AgentsPanel } from "../AgentsPanel";
+import { AgentsView } from "../AgentsView";
+import { digestBySurface } from "../../agentSessions";
 import { StatusBar } from "../StatusBar";
 import { Palette, type PaletteMode } from "../Palette";
 import { LaunchPalette } from "../LaunchPalette";
@@ -2050,6 +2052,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [patchTabRaw],
   );
+
+  /** Open the agents page, or focus it if it's already up. One per project:
+   *  it is a view of this project's sessions, so a second would be a copy. */
+  const openAgentsPage = useCallback(() => {
+    const existing = tabsRef.current.find((t) => t.type === "agents");
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    const id = tabId();
+    setTabs((prev) => [...prev, { id, type: "agents" }]);
+    setActiveTabId(id);
+  }, []);
 
   /** Open one MCP server as its own tab, reusing the one already open for it.
    *  Identity is the server key — the same server reached through two CLIs is
@@ -4385,6 +4400,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             sessionId: t.sessionId,
             digest: t.digest,
           });
+        case "agents":
+          return push({ id: tabId(), type: "agents" });
         case "task-history":
           return push({ id: tabId(), type: "task-history" });
         case "instructions":
@@ -6996,6 +7013,37 @@ const ProjectViewBody = memo(function ProjectViewBody({
             projects={components.map((c) => ({ label: c.label, path: c.path }))}
           />
         );
+      case "agents":
+        return (
+          <AgentsView
+            active={tab.id === activeTabId && visible}
+            projectName={project.name}
+            roots={roots}
+            stats={projectStats}
+            hookPath={hookPath}
+            pending={pending}
+            onDismissPending={onDismissPending}
+            onAnswer={answerQuestions}
+            onRespond={respondPermission}
+            onJumpToTerminal={jumpToTerminal}
+            onJumpToPty={jumpToPty}
+            onPreviewUrl={openPreview}
+            onOpenAgent={(p) => void openAgent(p)}
+            tabNames={tabNames}
+            shareContext={Boolean(project.shareContext)}
+            onShareContext={onShareContext}
+            liveSessionIds={liveSessionIds}
+            onRestore={(cwd, cmd, title, agentId) =>
+              addTerminal(
+                cwd,
+                cmd,
+                title,
+                AGENT_CLIS.find((c) => c.id === agentId)?.icon,
+              )
+            }
+            onOpenInstructions={openInstructions}
+          />
+        );
       case "task-history":
         return (
           <TaskHistoryView
@@ -8280,6 +8328,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
           onNotice={onNotice}
           onOpenInstructions={openInstructions}
+          onOpenAgentsPage={openAgentsPage}
           installed={installed}
         />
       ))}

@@ -12,7 +12,7 @@ import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { useBranchSwitch } from "../useBranchSwitch";
 import { splitPatch } from "./PrView";
-import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
+import { STATE_META, lastHumanPrompt } from "../agentSessions";
 import { ashFor } from "../ash";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";

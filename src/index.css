@@ -21615,3 +21615,527 @@ a.btn-sm {
 .companion-retry:hover {
   background: color-mix(in srgb, currentColor 14%, transparent);
 }
+
+/* ── The agents page ──────────────────────────────────────────────────────────
+   The side panel's material with room for it. Everything here trades density
+   for legibility: a card per running session instead of a truncated line, the
+   last prompt on two lines rather than one, and the archive as a list you can
+   search. The page is capped and centred — a 2400px-wide row of one-line
+   sessions is not more readable than a 1100px one, it is just further to look. */
+
+.agv {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.agv-head {
+  flex: 0 0 auto;
+  padding: 22px 32px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+.agv-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+.agv-title h1 {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 620;
+  letter-spacing: -0.01em;
+}
+
+.agv-project {
+  color: var(--text-faint);
+  font-size: 12px;
+  align-self: flex-end;
+  padding-bottom: 3px;
+}
+
+.agv-spacer {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The one setting that belongs on this page rather than in Settings: it changes
+   what every agent here is told, so it is stated, not hidden behind a mark. */
+.agv-share {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px 3px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.agv-share-label {
+  color: var(--text);
+}
+
+.agv-share-count {
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+.agv-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px;
+  max-width: 1180px;
+  margin: 18px auto 2px;
+}
+
+.agv-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 62px;
+}
+
+.agv-stat-value {
+  font-size: 23px;
+  font-weight: 600;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.agv-stat-label {
+  color: var(--text-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+
+.agv-stat-active .agv-stat-value {
+  color: var(--ok);
+}
+
+.agv-stat-attention .agv-stat-value {
+  color: var(--warn);
+}
+
+.agv-stat-quiet .agv-stat-value {
+  color: var(--text-dim);
+}
+
+.agv-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 32px 48px;
+}
+
+.agv-section {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 22px 0 4px;
+}
+
+.agv-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.agv-section-head h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--text-dim);
+}
+
+.agv-section-note {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+/* One running session. Auto-fill rather than a fixed column count: on a narrow
+   window this is one column of cards, on a wide one it is three, and neither
+   needs the page to know which. */
+.agv-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  align-items: stretch;
+  gap: 14px;
+}
+
+.agv-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 14px 16px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  background: var(--bg-raised);
+}
+
+/* Blocked on you: the one state worth colouring the whole card for. */
+.agv-card-attention {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
+  background: color-mix(in srgb, var(--warn) 6%, var(--bg-raised));
+}
+
+.agv-card-runaway {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+.agv-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.agv-card-id {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.agv-card-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+  font-weight: 560;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agv-card-mark {
+  flex: none;
+  color: var(--text-dim);
+}
+
+.agv-card-state {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+.agv-card-state.st-working {
+  color: var(--ok);
+}
+
+.agv-card-state.st-waiting,
+.agv-card-state.st-unknown {
+  color: var(--warn);
+}
+
+.agv-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.agv-chip {
+  max-width: 100%;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  background: var(--bg-deep);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 17px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agv-chip-branch {
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.agv-chip-attention {
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--border));
+  color: var(--warn);
+}
+
+.agv-chip-warn {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  color: var(--danger);
+}
+
+.agv-chip-port {
+  cursor: pointer;
+  font-family: var(--font-mono);
+}
+
+.agv-chip-port:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* What the human last asked for — the highest-signal line on the card, so it
+   gets two lines and body-text colour. */
+.agv-task {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.agv-task-none {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* Pinned to the bottom of the card, so a row of cards of different content
+   heights still lines its buttons up. */
+.agv-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+}
+
+.agv-card-metrics {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.agv-card-acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  margin-left: auto;
+}
+
+.agv-metric {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.agv-metric-cost {
+  color: var(--text-dim);
+}
+
+.agv-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 40px 20px 48px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.agv-empty p {
+  margin: 0;
+  max-width: 44ch;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* Questions and permissions, two across where there is room. The card itself is
+   the panel's, unchanged — this only decides how many fit on a line. */
+.agv-pending {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 10px;
+}
+
+.agv-pending .pending-card {
+  margin: 0;
+}
+
+.agv-terms,
+.agv-claims,
+.agv-past {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agv-term,
+.agv-claim {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 12px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  font-size: 12px;
+}
+
+.agv-term {
+  cursor: pointer;
+}
+
+.agv-term:hover,
+.agv-claim:hover {
+  background: var(--bg-raised);
+}
+
+.agv-term-name,
+.agv-claim-owner {
+  font-weight: 520;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agv-claim-paths {
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The archive. A row per past session, two lines: what it was, and what you
+   last asked it — the only thing that makes a uuid recognisable. */
+.agv-past-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+}
+
+.agv-past-row:hover {
+  background: var(--bg-raised);
+}
+
+.agv-past-row .agv-card-mark {
+  margin-top: 2px;
+}
+
+.agv-past-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.agv-past-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.agv-past-agent {
+  font-size: 12.5px;
+  font-weight: 540;
+}
+
+.agv-past-when {
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+.agv-past-prompt {
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Actions stay put rather than appearing on hover: this list is where you go to
+   restore something, and a button you have to find by hovering is not one. */
+.agv-past-acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.agv-none {
+  margin: 0;
+  padding: 6px 2px 2px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+/* Integrations, at page density: one row per CLI with its brand mark. */
+.hook-setup-roomy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hook-setup-roomy .hook-setup-row {
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+}
+
+.hook-setup-roomy .hook-setup-row:hover {
+  background: var(--bg-raised);
+}
+
+.hook-setup-roomy .hook-setup-name {
+  min-width: 140px;
+  font-size: 12px;
+}
+
+.hook-setup-mark {
+  flex: none;
+  color: var(--text-dim);
+}
+
+.agv-setup-result {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  background: var(--bg-deep);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.agv-hook-path {
+  margin: 10px 0 0;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.agv-hook-path code {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
