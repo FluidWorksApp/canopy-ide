@@ -829,7 +829,7 @@ terms govern use of the model:
 
 - **foldhash 0.2.0** — Copyright (c) 2024 Orson Peters
 
-## npm packages (234)
+## npm packages (236)
 
 ### MIT — 173
 
@@ -1074,10 +1074,12 @@ terms govern use of the model:
 - **mammoth 1.12.0** — Copyright (c) 2013, Michael Williamson
 - **option 0.2.4** — Copyright (c) 2013, Michael Williamson
 
-### OFL-1.1 — 2
+### OFL-1.1 — 4
 
 - **@fontsource-variable/archivo 5.3.0** — Copyright 2020 The Archivo Project Authors (https://github.com/Omnibus-Type/Archivo) Archivo-Italic[wdth,wght].ttf: Copyright 2020 The Archivo Project Authors (https://github.com/Omnibus-Type/Archivo)
 - **@fontsource-variable/jetbrains-mono 5.3.0** — Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) JetBrainsMono-Italic[wght].ttf: Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
+- **@fontsource/press-start-2p 5.3.0** — Copyright 2012 The Press Start 2P Project Authors (cody@zone38.net), with Reserved Font Name "Press Start 2P"
+- **@fontsource/vt323 5.3.0** — Copyright 2011, The VT323 Project Authors (peter.hull@oikoi.com)
 
 ### BSD-3-Clause AND Apache-2.0 — 1
 

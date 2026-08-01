@@ -10,8 +10,11 @@
    because the eye fills in an edge it already expects. On pure black there is
    no gradient to lean on, so structure has to be drawn rather than implied, and
    both border tokens are lifted until the line itself carries the separation.
+   --border is set to clear 3:1 on the shell and the editor canvas, which is
+   WCAG 1.4.11's bar for a non-text boundary; on the raised surfaces it lands at
+   2.4 and --border-strong (6.1:1 on black) is what those already use. */
 
-   Same reason the ring is 3px at 75% rather than the 2px/55% every other skin
+/* Same reason the ring is 3px at 75% rather than the 2px/55% every other skin
    uses: a focus ring is the one piece of state with no other channel — no
    colour change, no label, no position — so on the skin chosen for visibility
    it is the last thing that may be a suggestion. */
@@ -21,7 +24,7 @@
   --bg: #000000;
   --bg-raised: #1c1c1c;
   --bg-overlay: #1c1c1c;
-  --border: #4d4d4d;
+  --border: #595959;
   --border-strong: #8a8a8a;
   --text: #ffffff;
   --text-dim: #d9d9d9;
