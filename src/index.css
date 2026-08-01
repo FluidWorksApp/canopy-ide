@@ -4546,6 +4546,10 @@ body.resizing-side * {
 .tabs {
   display: flex;
   overflow-x: auto;
+  /* How much of a stack chip is left showing once the next one has closed over
+     it. Mirrored by NUB_W in tabSticky.ts, which does the pile's arithmetic —
+     stickyChipGuard.test.ts holds the two to the same number. */
+  --tab-nub-w: 28px;
   /* The strip scrolls sideways and only sideways. Left at the default, the
      `auto` on x makes y `auto` too, and the row's 1px of vertical overflow was
      enough for a trackpad flick to rubber-band the whole strip up and down and
@@ -4690,7 +4694,9 @@ body.resizing-side * {
 .tab-dragging {
   opacity: 0.92;
   pointer-events: none;
-  z-index: 10;
+  /* Above the pinned chips too — they stack their own z-indexes so the pile
+     overlaps in the right order, and a tab in hand still belongs on top. */
+  z-index: 40;
   box-shadow:
     0 4px 16px rgba(0, 0, 0, 0.45),
     0 1px 4px rgba(0, 0, 0, 0.3);
@@ -4714,25 +4720,39 @@ body.dragging-tab * {
 /* Agents first-class in the strip: groups render agents | shells | docs, a
    divider between non-empty groups, agent tabs tinted with a live dot, and
    file/PR tabs visibly quieter — workload on the left, reference on the right. */
+/* A run generates no box of its own: its chip, its divider and its tabs are
+   flex items of the strip itself.
+
+   That is what makes the pile work. `position: sticky` is clamped to its
+   containing block, so while a chip was a child of its run it was evicted the
+   moment that run's last tab scrolled past — the chip naming where you were
+   slid off the left edge exactly when you needed it. Sharing the strip as a
+   containing block, a pinned chip has the whole scrollport to hold on to, and
+   the offsets in tabSticky.ts decide where each one stops.
+
+   Everything the runs used to carry — never squeeze to fit, full height
+   whatever it holds — is on the items instead: tabs and chips are both
+   `flex: 0 0 auto`, and the chip is `align-self: stretch`, which is what keeps
+   a folded run (a chip and nothing else) in line with its neighbours rather
+   than sunk to the bottom of the harbor. */
 .tab-group {
-  display: flex;
-  /* Never squeeze a run to fit: the strip scrolls instead. Without this the
-     groups shrink past their tabs and a crowded strip silently compresses to
-     slivers rather than overflowing — and nothing can be sticky in a strip
-     that never scrolls. */
-  flex: 0 0 auto;
-  /* Full height whatever it holds. The harbor bottom-aligns the strip's rows,
-     and a folded run holds nothing but its chip — so it sized to the chip, sank
-     to the bottom, and sat 6.5px below every run that still had a tab in it.
-     Folding one stack visibly dropped it out of line with its neighbours. Tabs
-     are unaffected: the harbor gives them an explicit height, which stretch
-     does not override. */
-  align-self: stretch;
+  display: contents;
 }
 
-.tab-group + .tab-group:not(:empty) {
-  border-left: 2px solid var(--border);
+.tab-group-sep {
+  flex: 0 0 auto;
+  align-self: stretch;
+  width: 2px;
   margin-left: 3px;
+  background: var(--border);
+}
+
+/* Zero-width, so it changes no layout: it exists to be measured. A pinned chip
+   reports where it is being held rather than where it belongs, so the strip
+   asks this instead — see tabSticky.ts. */
+.tab-pin-anchor {
+  flex: 0 0 auto;
+  width: 0;
 }
 
 /* Status grouping (Settings → Agents → Group tabs by status). The agent half of
@@ -4742,16 +4762,17 @@ body.dragging-tab * {
    something you want out of the way rather than something to read past. Tabs
    slide between the stacks (tabFlip.ts) as their agent changes state, and the
    pane under the tab you're on never moves with them. */
-/* The chip pins to the left edge of the scrollport while its own tabs scroll
-   past underneath, and is pushed out by the next chip exactly when its group
-   ends — sticky section headers, turned sideways. Its containing block is the
-   group, which is what makes each chip hand over to the next one.
+/* The chip pins near the left edge of the scrollport while its own tabs scroll
+   past underneath — sticky section headers, turned sideways. Not *at* the edge:
+   it stops after the chips already pinned there, so the runs behind you pile up
+   instead of one pushing out the next (`--pin-left`, set per chip; the pile's
+   arithmetic is tabSticky.ts). Nothing is ever pushed off the strip.
 
    The strip's own background travels with it, so tabs sliding beneath don't
    show through the gap around the chip. */
 .tab-stack {
   position: sticky;
-  left: 0;
+  left: var(--pin-left, 0px);
   z-index: 2;
   display: inline-flex;
   align-items: center;
@@ -4778,6 +4799,21 @@ body.dragging-tab * {
   backdrop-filter: blur(14px) saturate(140%);
 }
 
+/* Closed over by the next chip. It keeps its place in the pile rather than
+   leaving, folded down to its dot the way a card slides under the one dealt on
+   top of it: the run behind you is still named, still coloured by its state,
+   and still one click from coming back. Only the wrapper narrows — the face
+   keeps its full width and is clipped, so the label reads as continuing under
+   the chip in front rather than as a pill that has been cut short, and so
+   measuring the face still says how wide this chip is when shown in full. */
+.tab-stack[data-pin="nub"] {
+  flex-basis: var(--tab-nub-w);
+  overflow: hidden;
+  padding-right: 0;
+  /* Fade begins after the dot, never across it. */
+  mask-image: linear-gradient(to right, #000 79%, transparent);
+}
+
 /* The pill you actually see and click. Separate from the sticky wrapper
    because sticky always forms a stacking context, and the folded stack's card
    edges sit behind this face inside it. */
@@ -4786,6 +4822,9 @@ body.dragging-tab * {
   align-items: center;
   gap: 5px;
   position: relative;
+  /* Never shrinks to its wrapper: a chip collapsed into the pile is one whose
+     face overflows a narrowed wrapper and is clipped by it. */
+  flex: 0 0 auto;
   padding: 3px 6px 3px 7px;
   font-size: 9px;
   /* Both segments are told their height rather than taking it from their

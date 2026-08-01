@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { NUB_W } from "./tabSticky";
 
 // Vitest runs from the repo root; import.meta.url is not a file: URL here.
 const CSS = readFileSync(join(process.cwd(), "src", "index.css"), "utf8");
@@ -46,11 +47,30 @@ describe("sticky stack chips", () => {
     expect(ruleBody(sel)).toMatch(new RegExp(`var\\(\\s*${token}\\s*,\\s*var\\(`));
   });
 
-  it("looks the same pinned as unpinned", () => {
+  it("collapses a chip to the width its arithmetic assumes", () => {
+    // The pile is laid out by CSS (`--pin-left` on each chip) and computed in
+    // tabSticky.ts (`pinOffset`), so the two have to agree on how wide a
+    // collapsed chip is. Disagree by a few pixels and the chips overlap or
+    // leave gaps, which only shows up on a strip crowded enough to pile up.
+    expect(CSS).toContain(`--tab-nub-w: ${NUB_W}px;`);
+    expect(ruleBody('.tab-stack[data-pin="nub"]')).toContain("flex-basis: var(--tab-nub-w)");
+  });
+
+  it("gives every chip the whole strip to hold on to", () => {
+    // A chip's containing block is what evicts it: while the runs were boxes,
+    // sticky clamped each chip to its own run and pushed it off the left edge
+    // the moment that run's last tab scrolled by. The runs generate no box, so
+    // the strip is the containing block and a pinned chip stays pinned.
+    expect(ruleBody(".tab-group")).toContain("display: contents");
+  });
+
+  it("paints the same pinned as unpinned", () => {
     // Pinning is a scroll position, and expanding a stack scrolls the strip —
-    // so any styling keyed off "pinned" means opening one stack restyles a
+    // so any *decoration* keyed off "pinned" means opening one stack restyles a
     // different one, which is exactly how this looked broken. The backdrop is
     // unconditional instead, and invisible either way: it is the bar's colour.
+    // (Collapsing into the pile is not decoration — it is the chip giving up
+    // the room the next one needs, and it is keyed off the pile, not the edge.)
     expect(CSS).not.toContain("tab-stack-stuck");
     expect(ruleBody(".tab-stack")).toMatch(/background:/);
   });
