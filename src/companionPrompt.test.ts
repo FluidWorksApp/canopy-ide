@@ -127,13 +127,58 @@ describe("the brief", () => {
     // project-scoped, and my session sits outside every project." It is
     // scoped, not out of reach; naming the project is all it takes.
     const p = buildCompanionPrompt(base);
-    expect(p).toContain("Notes and research belong to a project");
-    expect(p).toContain("pass");
+    expect(p).toContain("Anything scoped to a project");
+    expect(p).toContain("`project`");
     expect(p).toContain("do not need to start a coding session");
+    expect(p).toContain("not a reason to tell the user you");
   });
 
   it("makes it say which project — it is in none of them", () => {
     expect(buildCompanionPrompt(base)).toContain("**Say which project.**");
+  });
+
+  it("distinguishes a project from a component from a running server", () => {
+    // The confusion this removes: "project" and "directory" used as the same
+    // word, so a project name gets passed where a component path goes — and
+    // "is the API up?" gets answered about a checkout rather than a process.
+    const p = buildCompanionPrompt(base);
+    expect(p).toContain("### How that is put together");
+    expect(p).toContain("It is a name, not");
+    expect(p).toContain("A component IS a directory");
+    expect(p).toContain("a running command is");
+    expect(p).toContain("when it asks for a `dir` it wants a component's path");
+  });
+
+  it("knows it can open research, park notes and set timed reminders", () => {
+    // Each of these existed and none was mentioned, so it answered "remind me
+    // at nine" with a limitation — a feature reported as missing because the
+    // brief never named it.
+    const p = buildCompanionPrompt({
+      ...base,
+      tools: [...base.tools, "canopy_research_write", "canopy_notes_write", "canopy_open_preview"],
+    });
+    expect(p).toContain("## What you can leave behind");
+    expect(p).toContain("canopy_research_write");
+    expect(p).toContain('action: "remind"');
+    expect(p).toContain('in: "2h"');
+    expect(p).toContain("whether or not");
+  });
+
+  it("tells it to name the project when opening a preview", () => {
+    // Without `project` the bridge routes by cwd, which for the companion is
+    // inside no project — so with two projects open the preview never opened.
+    const p = buildCompanionPrompt({
+      ...base,
+      tools: [...base.tools, "canopy_open_preview"],
+    });
+    expect(p).toContain("canopy_open_preview");
+    expect(p).toContain("whose window to");
+  });
+
+  it("leaves out what this session cannot make", () => {
+    const p = buildCompanionPrompt(base);
+    expect(p).not.toContain("## What you can leave behind");
+    expect(p).not.toContain("canopy_research_write");
   });
 
   it("says flatly that it does not edit files, at every authority", () => {

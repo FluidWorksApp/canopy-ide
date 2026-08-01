@@ -162,6 +162,8 @@ function onEvent(event: CompanionEvent): void {
         attempt.ready = true;
         markRun(attempt.cliId);
       }
+      // It came up: the ladder starts fresh for whatever goes wrong next week.
+      failures = 0;
       set({ status: state.status === "working" ? "working" : "ready" });
       return;
     case "delta":
@@ -218,6 +220,9 @@ function onEvent(event: CompanionEvent): void {
       }
       attempt = null;
       set({ status: "failed", error: state.error ?? "The companion's agent stopped." });
+      // A death the stale-resume path did not claim: try again on the ladder
+      // rather than leaving a dead mascot until the user thinks to click it.
+      scheduleRetry();
       return;
     }
   }
@@ -253,11 +258,63 @@ export function isStaleResume(
   return Boolean(attempt && attempt.resumed && !attempt.ready && !healing);
 }
 
-let lastStart: StartOptions | null = null;
+/** How long to wait before trying a failed launch again — `null` when it is
+ *  time to stop and leave it to the user.
+ *
+ *  A launch fails for two kinds of reason, and they want opposite responses.
+ *  Transient ones (the CLI's own server briefly unreachable, a machine still
+ *  waking, a rate limit that clears) fix themselves and the user should never
+ *  have to know. Permanent ones (no such binary, a bad flag) will fail
+ *  identically forever, and retrying them is a spawn loop that bills the user
+ *  for nothing. A short ladder that gives up serves the first without becoming
+ *  the second: three tries over about forty seconds, then the panel's Retry
+ *  button, which is a person deciding rather than a timer guessing.
+ *
+ *  Exported for its test, like `isStaleResume` — the ladder is policy, and
+ *  policy is worth pinning down without a CLI in the loop. */
+export function retryDelay(failures: number): number | null {
+  return [2000, 8000, 30000][failures] ?? null;
+}
 
-export async function startCompanion(opts: StartOptions): Promise<void> {
+let lastStart: StartOptions | null = null;
+/** Consecutive failed launches since the last time one reached `ready`. */
+let failures = 0;
+let retryTimer: number | null = null;
+
+/** Queue another attempt, if the ladder has one left. */
+function scheduleRetry(): void {
+  if (retryTimer != null || !lastStart) return;
+  const wait = retryDelay(failures);
+  failures += 1;
+  if (wait == null) return;
+  retryTimer = window.setTimeout(() => {
+    retryTimer = null;
+    // Something already brought one up (the user hit Retry, a CLI finished
+    // installing) — leave it alone.
+    if (transport || starting) return;
+    void startCompanion(lastStart!, { auto: true });
+  }, wait) as unknown as number;
+}
+
+function cancelRetry(): void {
+  if (retryTimer != null) window.clearTimeout(retryTimer);
+  retryTimer = null;
+}
+
+export async function startCompanion(
+  opts: StartOptions,
+  how?: { auto?: boolean },
+): Promise<void> {
   if (transport || starting) return starting ?? undefined;
   lastStart = opts;
+  // Anything that is not the retry ladder itself is fresh intent — the user
+  // hit Retry, a CLI finished installing, the workspace changed shape — so the
+  // ladder starts over. Otherwise one bad morning would exhaust it for the
+  // rest of the session.
+  if (!how?.auto) {
+    failures = 0;
+    cancelRetry();
+  }
   starting = (async () => {
     const s = getSettings();
     // One resolver, in companion.ts. This used to be a second copy of the same
@@ -359,6 +416,7 @@ export async function startCompanion(opts: StartOptions): Promise<void> {
     } catch (err) {
       transport = null;
       set({ status: "failed", error: String(err) });
+      scheduleRetry();
     }
   })();
   try {
@@ -409,6 +467,9 @@ export function clearRun(cliId: string): void {
 export async function stopCompanion(): Promise<void> {
   const t = transport;
   transport = null;
+  // Switched off deliberately: a pending retry would turn it back on.
+  cancelRetry();
+  failures = 0;
   set({ ...EMPTY, generation: state.generation });
   await t?.stop().catch(() => {});
   await ipc.companionKill().catch(() => {});

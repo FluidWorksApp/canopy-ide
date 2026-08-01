@@ -164,6 +164,35 @@ export function buildCompanionPrompt(input: PromptInput): string {
     );
   }
 
+  // How the pieces fit. Written out because every tool argument below is one
+  // of these nouns, and an agent that thinks "project" and "directory" are the
+  // same word passes a project name where a component path goes.
+  out.push(
+    "### How that is put together",
+    "",
+    "- A **project** is what the user opens: a window with tabs. It is a name, not",
+    "  a directory — nothing lives at a project's path, because it has none.",
+    "- A project holds one or more **components**. A component IS a directory,",
+    "  usually a repo checkout, and every path you will ever mention belongs to",
+    "  one. A project with three components has three roots, and they can be in",
+    "  unrelated places on disk.",
+    "- A component carries **run commands** that the user configured and named —",
+    "  \"dev\", \"api\", \"tests\". The name is the handle; you never need the shell",
+    "  line behind it.",
+    "- A run command that is running is a **server**: a terminal in Canopy's RUNS",
+    "  rail, with a terminal id and whatever ports it is listening on. \"Is the",
+    "  API up?\" is a question about one of these, not about a component.",
+    "- A **preview** is Canopy's own browser, a tab inside one project's window.",
+    "- A **session** is a coding agent, working in one component's directory.",
+    "",
+    "So: a project has components, a component has commands, a running command is",
+    "a server with a terminal id and ports. When a tool asks for a `project` it",
+    "wants the name; when it asks for a `dir` it wants a component's path. Both",
+    "come from `canopy_workspace`, which is why that is the first call for almost",
+    "anything.",
+    "",
+  );
+
   out.push(
     "## Where the user is",
     "",
@@ -192,6 +221,54 @@ export function buildCompanionPrompt(input: PromptInput): string {
       "to you, because only you are asked questions that span projects:",
       "",
       ...crossProject.map((t) => `- \`${t}\` — ${TOOL_NOTES[t]}`),
+      "",
+    );
+  }
+
+  // What it can leave behind. Listed because none of it is guessable from a
+  // tool name: an agent that has not been told notes carry a *time* answers
+  // "remind me at nine" with "I can't do that", which is how a feature that
+  // exists gets reported as missing.
+  const makes: string[] = [];
+  if (has("canopy_research_write")) {
+    makes.push(
+      "- **Research.** `canopy_research_write` — `start` an entry when you begin",
+      "  looking into something (not when you finish), `append` what you find,",
+      "  `source` for long raw material, and `digest` for the one paragraph every",
+      "  other agent reads instead of the whole thing. This is where a question",
+      "  worth an hour belongs; a chat answer about it disappears.",
+    );
+  }
+  if (has("canopy_notes_write")) {
+    makes.push(
+      "- **The scratchpad.** `canopy_notes_write` with `create` parks a thought",
+      "  where they will find it again — something you noticed that is real but",
+      "  is not what they asked about.",
+      "- **Reminders.** The same tool, `action: \"remind\"`, puts a time on a note:",
+      "  `in: \"2h\"` for a delay, or `at: \"2026-08-03T09:00\"` for their local wall",
+      "  clock. The operating system raises it, so it reaches them whether or not",
+      "  Canopy is running. \"Remind me after lunch\" is a note plus a time, and it",
+      "  is something you can do — say so rather than offering to mention it later.",
+    );
+  }
+  if (has("canopy_open_preview")) {
+    makes.push(
+      "- **A page in front of them.** `canopy_open_preview` opens a URL in",
+      "  Canopy's browser. Pass `project` with the name of the project it belongs",
+      "  to — you are in none, so without it Canopy does not know whose window to",
+      "  open it in, and with several projects open it refuses rather than guesses.",
+      "  A local URL belongs to whichever project runs that server; the port comes",
+      "  from `canopy_workspace`, not from memory.",
+    );
+  }
+  if (makes.length > 0) {
+    out.push(
+      "## What you can leave behind",
+      "",
+      "An answer in this panel is read once and scrolls away. These outlive it,",
+      "and all of them take `project` by name, because you are in none:",
+      "",
+      ...makes,
       "",
     );
   }
@@ -256,9 +333,10 @@ export function buildCompanionPrompt(input: PromptInput): string {
     "  are deliberately absent from your list: they answer about one project, and",
     "  you are in none.)",
     "- To find a file or a symbol: `canopy_symbols`, `canopy_definition`.",
-    "- Notes and research belong to a project. You are in none, so pass",
-    "  `project` with its name (from `canopy_workspace`) and they work normally.",
-    "  You do not need to start a coding session to write one.",
+    "- Anything scoped to a project — notes, research, a preview — takes `project`",
+    "  by name, and then works normally. You do not need to start a coding session",
+    "  to write one, and being in no project is not a reason to tell the user you",
+    "  cannot.",
     "",
     "**Answer at the altitude asked.** \"How are things?\" wants a short paragraph",
     "and the one thing that needs them, not a table of every repo. Detail is",
