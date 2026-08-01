@@ -7,8 +7,8 @@
 // on top of one makes the browser host blank the page rather than draw over it.
 //
 // Before this, each consumer answered them by reaching into whatever was
-// nearest: the companion polled `browserViewSnapshots()` on its own 400ms
-// timer, the vault screen and the agent-ops bridge each ran their own
+// nearest: the companion polled the browser layer's view snapshots on its own
+// 400ms timer, the vault screen and the agent-ops bridge each ran their own
 // `.find(v => v.wanted)`, and SpotSearch had the active tab handed down through
 // props. Four readers, four spellings, four things to remember when a fifth
 // surface needs to know. The companion's was also subtly the wrong question,
