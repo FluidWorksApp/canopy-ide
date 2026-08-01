@@ -943,15 +943,31 @@ export function PrView({
   // all polling the same repos. The slow interval below is only a safety net for
   // a PR whose repo the poller isn't watching (its project was closed).
   useEffect(() => {
-    // Armed-but-idle counts: that is the whole point of arming it before the
-    // first comment exists.
-    if (!loop.auto && loop.status !== "waiting" && loop.status !== "ready")
-      return;
+    // The subscription is unconditional: an open PR tab follows its PR whether
+    // or not the review loop is armed. It used to be gated on the loop, which
+    // meant a plain tab froze at whatever was true when it opened — a merge
+    // from the GitHub page, a teammate's push, a check flipping red all stayed
+    // invisible until the tab was closed and reopened. The watcher is already
+    // being paid for; the tab's job is to reflect it.
+    //
+    // Armed-but-idle counts for the loop half: that is the whole point of
+    // arming it before the first comment exists.
+    const loopArmed =
+      loop.auto || loop.status === "waiting" || loop.status === "ready";
     let live = true;
+    // A row change that lands while the window is hidden is not dropped — it
+    // ticks when the user comes back, which is exactly when the stale page
+    // would otherwise be the first thing they read.
+    let missed = false;
     const tick = async () => {
-      if (!live || document.visibilityState !== "visible") return;
+      if (!live) return;
+      if (document.visibilityState !== "visible") {
+        missed = true;
+        return;
+      }
+      missed = false;
       const c = await refreshConv();
-      if (!live || !c) return;
+      if (!live || !c || !loopArmed) return;
       const fresh = newSinceHandled(c, loop);
       if (fresh.length && loop.auto) {
         const g = roundGate(livePr, c, loop);
@@ -980,10 +996,15 @@ export function PrView({
       lastUpdated = row.updated;
       void tick();
     });
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && missed) void tick();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     const id = window.setInterval(() => void tick(), WATCH_FALLBACK_MS);
     return () => {
       live = false;
       unsubscribe();
+      document.removeEventListener("visibilitychange", onVisible);
       window.clearInterval(id);
     };
   }, [loop, pr, livePr, repo, refreshConv, onMicroTask, persist, onNotice]);
