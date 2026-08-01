@@ -152,6 +152,93 @@ describe("settleGroups", () => {
       });
       expect(plain(groups)).toEqual({ a: "attention" });
     });
+
+    it("keeps an inferred fall held forever while you look at the tab", () => {
+      // The behaviour the proven exception does NOT change: a CPU dip on the
+      // tab you are reading never moves it, however long it holds.
+      let state = prev({ a: { group: "active" } });
+      const targets = want({ a: "quiet" });
+      ({ groups: state } = settleGroups(state, targets, DELAY * 10, DELAY, { hold: "a" }));
+      expect(plain(state)).toEqual({ a: "active" });
+    });
+  });
+
+  describe("proven falls", () => {
+    const PROVEN = 5_000;
+    const opts = { proven: new Set(["a"]), provenDelayMs: PROVEN };
+
+    it("lands through the active-tab hold once the short delay elapses", () => {
+      // The CLI said the turn ended. The dot — which is never held — already
+      // says idle; the chip saying Working past the proven delay is the chip
+      // lying about state to preserve position.
+      let state = prev({ a: { group: "active" } });
+      const targets = want({ a: "quiet" });
+      ({ groups: state } = settleGroups(state, targets, 0, DELAY, { ...opts, hold: "a" }));
+      expect(plain(state)).toEqual({ a: "active" });
+      expect(state.get("a")?.pendingSince).toBe(0);
+      ({ groups: state } = settleGroups(state, targets, PROVEN, DELAY, { ...opts, hold: "a" }));
+      expect(plain(state)).toEqual({ a: "quiet" });
+    });
+
+    it("schedules the wake on the short clock, not the settling window", () => {
+      const { wake } = settleGroups(
+        prev({ a: { group: "active" } }),
+        want({ a: "quiet" }),
+        100,
+        DELAY,
+        { ...opts, hold: "a" },
+      );
+      expect(wake).toBe(100 + PROVEN);
+    });
+
+    it("never moves under the pointer, proven or not", () => {
+      const { groups, wake } = settleGroups(
+        prev({ a: { group: "active", pendingSince: 0 } }),
+        want({ a: "quiet" }),
+        PROVEN * 10,
+        DELAY,
+        { ...opts, frozen: true },
+      );
+      expect(plain(groups)).toEqual({ a: "active" });
+      expect(wake).toBeNull();
+    });
+
+    it("does not shortcut a proven promotion — only falls are dampened at all", () => {
+      const { groups } = settleGroups(
+        prev({ a: { group: "quiet" } }),
+        want({ a: "active" }),
+        0,
+        DELAY,
+        opts,
+      );
+      expect(plain(groups)).toEqual({ a: "active" });
+    });
+
+    it("is capped by the settling window, so instant stays instant", () => {
+      // delayMs 0 means the user asked for no dampening; a proven fall must
+      // not be slower than an inferred one.
+      const { groups } = settleGroups(
+        prev({ a: { group: "active" } }),
+        want({ a: "quiet" }),
+        0,
+        0,
+        opts,
+      );
+      expect(plain(groups)).toEqual({ a: "quiet" });
+    });
+
+    it("leaves other tabs' inferred falls on the long clock", () => {
+      const { groups, wake } = settleGroups(
+        prev({ a: { group: "active" }, b: { group: "active" } }),
+        want({ a: "quiet", b: "quiet" }),
+        0,
+        DELAY,
+        opts,
+      );
+      expect(plain(groups)).toEqual({ a: "active", b: "active" });
+      // The earliest due is a's proven fall; b is due a full window later.
+      expect(wake).toBe(PROVEN);
+    });
   });
 });
 
@@ -228,5 +315,11 @@ describe("targetsKey", () => {
     expect(targetsKey(want({ a: "quiet", b: "active" }))).toBe(base);
     expect(targetsKey(want({ a: "active", b: "active" }))).not.toBe(base);
     expect(targetsKey(want({ a: "quiet" }))).not.toBe(base);
+  });
+
+  it("changes when a quiet target becomes proven — the fall is due sooner", () => {
+    const base = targetsKey(want({ a: "quiet" }));
+    expect(targetsKey(want({ a: "quiet" }), new Set(["a"]))).not.toBe(base);
+    expect(targetsKey(want({ a: "quiet" }), new Set(["b"]))).toBe(base);
   });
 });

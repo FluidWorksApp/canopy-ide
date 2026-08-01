@@ -64,8 +64,22 @@ export interface SettleHold {
   frozen?: boolean;
   /** The tab whose pane is in front. It never moves while you are in it —
    *  looking at an agent is exactly when its position must not change under
-   *  you. It settles the moment you go somewhere else. */
+   *  you. It settles the moment you go somewhere else.
+   *
+   *  One exception: a proven fall (below). The hold is a position claim; the
+   *  chip's label is a state claim; when the CLI itself has declared the turn
+   *  over, keeping the tab under a chip that says Working is the chip lying,
+   *  and the dot beside it — which is never held — already says idle. That
+   *  contradiction, not the move, is what reads as broken. */
   hold?: string | null;
+  /** Tabs whose quiet target is a proven verdict — the CLI declared the turn
+   *  or session over, rather than us inferring quiet from a CPU dip. A proven
+   *  fall uses `provenDelayMs` instead of the settling window and is exempt
+   *  from `hold` (never from `frozen`: nothing moves under the pointer). */
+  proven?: ReadonlySet<string>;
+  /** Delay for a proven fall. Capped by the settling window, so turning the
+   *  window down never makes proven falls slower than inferred ones. */
+  provenDelayMs?: number;
 }
 
 /** Fold raw statuses into settled ones. Pure: `now` and `delayMs` are given,
@@ -80,30 +94,34 @@ export function settleGroups(
   targets: Map<string, TabStatus>,
   now: number,
   delayMs: number,
-  { frozen = false, hold = null }: SettleHold = {},
+  { frozen = false, hold = null, proven, provenDelayMs = 0 }: SettleHold = {},
 ): SettleResult {
   const groups = new Map<string, Settled>();
   let wake: number | null = null;
   for (const [id, target] of targets) {
     const was = prev.get(id);
+    const provenFall = target === "quiet" && (proven?.has(id) ?? false);
     // Held: keep the place, and the fall it was part-way through. Nothing is
     // forgotten, so letting go applies what came due rather than restarting
     // every clock — several tabs move at once, which reads as one event.
-    if (was && (frozen || id === hold)) {
+    // A proven fall passes through the hold (see SettleHold) but never
+    // through frozen.
+    if (was && (frozen || (id === hold && !provenFall))) {
       groups.set(id, was);
       continue;
     }
-    if (target !== "quiet" || !was || was.group === "quiet" || delayMs <= 0) {
+    const delay = provenFall ? Math.min(provenDelayMs, delayMs) : delayMs;
+    if (target !== "quiet" || !was || was.group === "quiet" || delay <= 0) {
       groups.set(id, { group: target });
       continue;
     }
     const since = was.pendingSince ?? now;
-    if (now - since >= delayMs) {
+    if (now - since >= delay) {
       groups.set(id, { group: "quiet" });
       continue;
     }
     groups.set(id, { group: was.group, pendingSince: since });
-    const due = since + delayMs;
+    const due = since + delay;
     wake = wake == null ? due : Math.min(wake, due);
   }
   return { groups, wake };
@@ -163,9 +181,16 @@ export function sameGroups(a: Map<string, Settled>, b: Map<string, Settled>): bo
 }
 
 /** Cheap identity for a target map — the hook's effect keys off this rather
- *  than the map, which is rebuilt every render. */
-export function targetsKey(targets: Map<string, TabStatus>): string {
-  return [...targets].map(([id, s]) => `${id}:${s}`).join("|");
+ *  than the map, which is rebuilt every render. Provenness is part of the
+ *  identity: a target that goes from an inferred quiet to a proven one has a
+ *  shorter fall due, and the effect has to re-run to schedule it. */
+export function targetsKey(
+  targets: Map<string, TabStatus>,
+  proven?: ReadonlySet<string>,
+): string {
+  return [...targets]
+    .map(([id, s]) => `${id}:${s}${proven?.has(id) ? ":p" : ""}`)
+    .join("|");
 }
 
 /** Settled buckets for a live strip, with the timer that completes a pending
@@ -173,16 +198,18 @@ export function targetsKey(targets: Map<string, TabStatus>): string {
 export function useSettledGroups(
   targets: Map<string, TabStatus>,
   delayMs: number,
-  { frozen = false, hold = null }: SettleHold = {},
+  { frozen = false, hold = null, proven, provenDelayMs = 0 }: SettleHold = {},
 ): Map<string, TabStatus> {
   const [settled, setSettled] = useState<Map<string, Settled>>(() => new Map());
   // The effect reads the newest map without depending on it: state it wrote
   // itself must not restart the timer, or a pending fall would never land.
   const ref = useRef(settled);
   ref.current = settled;
-  const key = targetsKey(targets);
+  const key = targetsKey(targets, proven);
   const targetsRef = useRef(targets);
   targetsRef.current = targets;
+  const provenRef = useRef(proven);
+  provenRef.current = proven;
 
   // Both holds are effect dependencies, so letting go re-runs immediately: the
   // pointer leaving the strip is the moment the moves it was holding back land.
@@ -193,6 +220,8 @@ export function useSettledGroups(
       const { groups, wake } = settleGroups(ref.current, targetsRef.current, now, delayMs, {
         frozen,
         hold,
+        proven: provenRef.current,
+        provenDelayMs,
       });
       if (!sameGroups(ref.current, groups)) {
         ref.current = groups;
@@ -204,7 +233,7 @@ export function useSettledGroups(
     };
     run();
     return () => window.clearTimeout(timer);
-  }, [key, delayMs, frozen, hold]);
+  }, [key, delayMs, frozen, hold, provenDelayMs]);
 
   return useMemo(() => {
     const out = new Map<string, TabStatus>();

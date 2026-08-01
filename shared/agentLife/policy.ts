@@ -15,6 +15,9 @@ export interface Policy {
   startupGraceSecs: number;
   /** How long quiet must hold before a tab falls into the Idle stack. */
   idleGroupDelayMs: number;
+  /** The same fall when the CLI itself declared the turn over — short, and it
+   *  overrides the active-tab hold, because a proven state outranks position. */
+  provenIdleDelayMs: number;
   /** How old a digest may be before peers stop being told about it. */
   peerMaxAgeSecs: number;
   /** How long after a hook names an agent we may attribute a binary to it. */
