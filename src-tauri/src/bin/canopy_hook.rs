@@ -3210,10 +3210,12 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             // what it is picking up). An agent cannot work that out itself —
             // the record lives in Canopy's provenance store.
             if pty.is_none() && pr.is_none() {
-                return Err("say who to message: ptyId (a terminal id from canopy_agents) \
+                return Err(
+                    "say who to message: ptyId (a terminal id from canopy_agents) \
                             or pr (a pull request number or url, and Canopy finds whoever \
                             raised it)"
-                    .into());
+                        .into(),
+                );
             }
             let body = args
                 .get("text")
@@ -4526,7 +4528,10 @@ mod tests {
             "canopy_message_agent",
             &serde_json::json!({ "pr": "#323", "text": "drop the retry" }),
         );
-        assert!(routed.contains("#323"), "the PR is the thing being approved");
+        assert!(
+            routed.contains("#323"),
+            "the PR is the thing being approved"
+        );
         assert!(routed.contains("raised"));
         assert_eq!(detail.as_deref(), Some("drop the retry"));
     }

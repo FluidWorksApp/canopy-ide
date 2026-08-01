@@ -724,7 +724,10 @@ mod tests {
         with_store(|c| {
             append(c, &edge("s1", 1, Via::JobDone)).unwrap();
             let path = store_path().unwrap();
-            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             writeln!(f, "{{\"repo\": \"/repo\", truncated").unwrap();
             drop(f);
             c.sync();
@@ -745,7 +748,10 @@ mod tests {
 
             // Somebody else appends behind our back.
             let path = store_path().unwrap();
-            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             writeln!(
                 f,
                 "{}",
@@ -942,7 +948,17 @@ mod tests {
         git(&main, &["add", "-A"]);
         git(&main, &["commit", "-qm", "init"]);
         let wt = root.join("wt");
-        git(&main, &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat/x"]);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                wt.to_str().unwrap(),
+                "-b",
+                "feat/x",
+            ],
+        );
 
         let want = repo_key(main.to_str().unwrap());
         assert_eq!(repo_key(wt.to_str().unwrap()), want, "worktree keyed apart");
@@ -973,5 +989,3 @@ mod tests {
         assert!(!belongs(&owned, "/repo-two/src"));
     }
 }
-
-
