@@ -1,0 +1,104 @@
+/* Vitrine — the glass skin. The other three are palette swaps; this one swaps
+   the material too. Every surface is a white wash with no ink of its own,
+   composited over one ambient field painted on <html>, and the panes that
+   float over your work frost what is behind them. Tokens here, the handful of
+   rules that need the material rather than the colour just below. */
+:root[data-theme="vitrine"] {
+  /* Surfaces are alpha, not colour. Nesting deepens the wash on purpose —
+     that is the layering cue the opaque skins get from five distinct greys. */
+  --bg-deep: rgba(255, 255, 255, 0.022);
+  --bg-alt: rgba(255, 255, 255, 0.034);
+  --bg: rgba(255, 255, 255, 0.012);
+  --bg-raised: rgba(255, 255, 255, 0.055);
+  /* Deliberately the least glassy value in the skin. Everything painted with
+     it floats over content rather than beside it, and the frost that would
+     otherwise carry it is not guaranteed: this engine drops backdrop-filter
+     in snapshots and behind an ancestor that has one of its own (a dialog
+     inside .confirm-backdrop is exactly that case). Tint has to hold the
+     legibility on its own; the blur is the refinement on top. */
+  --bg-overlay: rgba(14, 17, 22, 0.92);
+
+  /* Solid mirrors of the five above, for the one consumer that can't
+     composite over the ambient field: the remote portal renders in a browser
+     of its own and only receives the tokens. See readThemeTokens() in
+     SettingsDialog.tsx — it prefers `--x-opaque` when a skin declares one. */
+  --bg-opaque: #07080a;
+  --bg-alt-opaque: #0e1116;
+  --bg-raised-opaque: #171b22;
+  --border-opaque: #242932;
+
+  --border: rgba(255, 255, 255, 0.075);
+  --border-strong: rgba(255, 255, 255, 0.16);
+
+  --text: #edeff1;
+  --text-dim: rgba(237, 239, 241, 0.52);
+  --text-faint: rgba(237, 239, 241, 0.32);
+
+  --accent: #b4f04a;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --danger: #ff6b6b;
+  --ok: #5be08a;
+  --warn: #ffc24b;
+  --magenta: #c29bff;
+  --cyan: #4be3e8;
+  --on-accent: #0a1206;
+  --on-danger: #1a0a0a;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+
+  /* The skin brings its own two voices, both bundled (see main.tsx): Archivo
+     for anything set in latin, JetBrains Mono for labels, counts and code.
+     Only the chrome follows these — the editor and terminal keep their own
+     font settings, which are the user's to pick, not a skin's to override. */
+  --font-ui:
+    "Archivo Variable", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  --font-mono: "JetBrains Mono Variable", "SF Mono", Menlo, Monaco, monospace;
+
+  /* A corner is where glass shows its thickness, so every radius goes up a
+     step. */
+  --r-xs: 6px;
+  --r-sm: 9px;
+  --r-md: 13px;
+  --r-lg: 16px;
+
+  /* A lit lip on top and a cast shadow below — a sheet of glass has both, and
+     the lip is what stops a wash reading as a stain. */
+  --shadow-1: inset 0 1px 0 rgba(255, 255, 255, 0.055);
+  --shadow-2:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09), 0 6px 20px rgba(0, 0, 0, 0.34);
+  --shadow-3:
+    inset 0 1px 0 rgba(255, 255, 255, 0.17), 0 14px 38px rgba(0, 0, 0, 0.46);
+
+  color-scheme: dark;
+
+  /* The field. The only opaque thing in the skin, and the reason the washes
+     above are legible at all. On <html> rather than an element so it costs no
+     extra layer and never repaints: four blooms in the agent hues, a 28px
+     grid so an empty pane doesn't read as flat black, over the base gradient. */
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px) 0 0 / 28px
+      28px,
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px) 0
+      0 / 28px 28px,
+    radial-gradient(
+      46vw 46vw at 4% -8%,
+      rgba(255, 138, 76, 0.2),
+      transparent 66%
+    ),
+    radial-gradient(
+      52vw 52vw at 64% -6%,
+      rgba(126, 166, 255, 0.19),
+      transparent 66%
+    ),
+    radial-gradient(
+      48vw 48vw at 18% 92%,
+      rgba(255, 93, 122, 0.15),
+      transparent 66%
+    ),
+    radial-gradient(
+      44vw 44vw at 94% 78%,
+      rgba(194, 155, 255, 0.17),
+      transparent 66%
+    ),
+    linear-gradient(155deg, #0b0d11, #07080a 52%, #090b0f);
+}

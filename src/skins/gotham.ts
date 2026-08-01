@@ -1,0 +1,36 @@
+import type { SkinDef } from "./types";
+
+export const gotham: SkinDef = {
+  id: "gotham",
+  label: "Gotham",
+  note: "charcoal + gold",
+  preview: {
+    bg: "#0d0f12",
+    raised: "#171b20",
+    text: "#e8e6df",
+    accent: "#d4af37",
+  },
+  term: {
+    background: "#101317",
+    foreground: "#e8e6df",
+    cursor: "#d4af37",
+    selectionBackground: "#3a3320",
+    black: "#2b2f36",
+    red: "#e0483e",
+    green: "#4caf7d",
+    yellow: "#e2943a",
+    blue: "#6b93c9",
+    magenta: "#b78fce",
+    cyan: "#5fb3b3",
+    white: "#8b8d93",
+    brightBlack: "#57595f",
+    brightRed: "#ff6b5e",
+    brightGreen: "#6bcf9a",
+    brightYellow: "#f0a83c",
+    brightBlue: "#8fb4e3",
+    brightMagenta: "#d0aee6",
+    brightCyan: "#7fd4d4",
+    brightWhite: "#e8e6df",
+  },
+  monaco: { base: "vs-dark", colors: { "editor.background": "#0d0f12" } },
+};

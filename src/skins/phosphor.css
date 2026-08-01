@@ -1,0 +1,34 @@
+/* Phosphor — a green CRT, applied to the window rather than to the terminal.
+   The usual way to want this is to theme the terminal green and leave the shell
+   grey; here the greys themselves carry the green, so the tree, the tabs and the
+   status bar are the same emitter as the scrollback and nothing on screen is
+   lit by a second tube.
+
+   The accent is P1, the phosphor a monochrome monitor actually emitted, not a
+   generic UI green. Orchard is this roster's other green and shares nothing with
+   it: Orchard is forest and lime on an editorial palette, hues chosen to sit
+   beside each other. This one has one hue and everything else is a concession
+   to reading code in it. */
+:root[data-theme="phosphor"] {
+  --bg-deep: #060a07;
+  --bg-alt: #0b110c;
+  --bg: #080d09;
+  --bg-raised: #121a13;
+  --bg-overlay: #16211a;
+  --border: #22301f;
+  --border-strong: #3c4d33;
+  --text: #d9ecd3;
+  --text-dim: #8aa082;
+  --text-faint: #5c7057;
+  --accent: #7de03f;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --danger: #ff5a52;
+  --ok: #57e389;
+  --warn: #e8c34a;
+  --magenta: #b98cf0;
+  --cyan: #56d6d0;
+  --on-accent: #06180a;
+  --on-danger: #180808;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  color-scheme: dark;
+}

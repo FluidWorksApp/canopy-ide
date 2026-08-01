@@ -12,6 +12,7 @@ import type { BrowserEngine } from "./browserBounds";
 import type { MascotId } from "./mascots";
 import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
+import { SKINS, type SkinId } from "./skins/registry";
 import {
   formatChord,
   keyLabel as chordKeyLabel,
@@ -20,8 +21,10 @@ import {
   requireKeyChord,
 } from "./shortcuts";
 
-export type Theme =
-  "auto" | "default" | "gotham" | "daylight" | "vitrine" | "custom";
+/** Every skin in the roster, plus the two ids that aren't skins: "auto"
+ *  resolves to one of them, "custom" is Default with the user's accent written
+ *  in at runtime. Adding a skin to src/skins/registry.ts adds it here. */
+export type Theme = "auto" | SkinId | "custom";
 
 /** What "auto" means right now: Default when macOS is in dark mode, Daylight
  *  in light mode. Every consumer of the skin (CSS data-theme, terminal
@@ -48,10 +51,7 @@ export function watchSystemTheme(): () => void {
 
 export const THEMES: { id: Theme; label: string }[] = [
   { id: "auto", label: "Auto" },
-  { id: "default", label: "Default" },
-  { id: "gotham", label: "Gotham" },
-  { id: "daylight", label: "Daylight" },
-  { id: "vitrine", label: "Vitrine" },
+  ...SKINS.map((s) => ({ id: s.id as Theme, label: s.label })),
   { id: "custom", label: "Custom" },
 ];
 

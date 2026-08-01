@@ -1,0 +1,41 @@
+/* Parchment — the light skin for a long session rather than a bright room.
+   Daylight is a clean white; this is paper. The editor surface carries yellow
+   instead of the usual trace of blue, and every hue is pulled down toward ink,
+   so nothing on the page emits light — the screen is something you read off,
+   not something you look into. That is also why the accent is a burnt copper
+   and not a link blue: at the frequency the primary action colour appears, a
+   saturated blue is the one thing on a warm page that still glows.
+
+   The shadows are restated because `:root`'s are cool-black, mixed to sit under
+   a dark shell. Dropped onto paper they read as a grey smudge with a blue cast
+   under every dialog; these are the same elevations mixed from the skin's own
+   ink so a raised surface looks like it is casting a shadow rather than sitting
+   on a stain. */
+:root[data-theme="parchment"] {
+  --bg-deep: #e6ded0;
+  --bg-alt: #efe8dc;
+  --bg: #faf5ec;
+  --bg-raised: #ffffff;
+  --bg-overlay: #ffffff;
+  --border: #ddd3c2;
+  --border-strong: #bfb29d;
+  --text: #2a241c;
+  --text-dim: #665b4d;
+  --text-faint: #948877;
+  --accent: #9a5b28;
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+  --danger: #a83232;
+  --ok: #356e35;
+  --warn: #7d5a0d;
+  --magenta: #71428f;
+  --cyan: #1a666c;
+  --on-accent: #ffffff;
+  --on-danger: #ffffff;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  --shadow-1: 0 1px 2px rgba(42, 36, 28, 0.1);
+  --shadow-2:
+    0 4px 14px rgba(42, 36, 28, 0.12), 0 1px 3px rgba(42, 36, 28, 0.08);
+  --shadow-3:
+    0 24px 64px rgba(42, 36, 28, 0.22), 0 6px 18px rgba(42, 36, 28, 0.12);
+  color-scheme: light;
+}

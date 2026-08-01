@@ -1,0 +1,39 @@
+/* Void — true black and a single white accent, for an OLED panel where #000 is
+   the one colour that costs nothing to draw. Its neighbours in the dark-neutral
+   group pick a temperature (Ember warm, Slate cool); Void has none — every
+   surface is a step on the same grey ramp. And unlike Beacon, it isn't reaching
+   for maximum legibility: it's reaching for a window that mostly isn't lit.
+
+   The accent is white because on a black shell white is already the strongest
+   thing the panel can show, so spending a hue on the primary action would only
+   make it quieter. The status hues stay, since --danger/--ok/--warn carry a
+   meaning the accent no longer does.
+
+   That white accent is also why the two derivations sit at 10% and 45% rather
+   than the 14%/55% every other skin uses. Those percentages were tuned against
+   a mid-luminance hue; mixed from white they land far brighter, and matching
+   them would put a grey fog behind every selected row and a visible halo around
+   every focused input. */
+:root[data-theme="void"] {
+  --bg-deep: #000000;
+  --bg-alt: #0a0a0a;
+  --bg: #050505;
+  --bg-raised: #131313;
+  --bg-overlay: #1a1a1a;
+  --border: #242424;
+  --border-strong: #3d3d3d;
+  --text: #f2f2f2;
+  --text-dim: #9a9a9a;
+  --text-faint: #666666;
+  --accent: #ffffff;
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+  --danger: #ff5f6b;
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --magenta: #c4a2ff;
+  --cyan: #67e8f9;
+  --on-accent: #000000;
+  --on-danger: #14090a;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  color-scheme: dark;
+}

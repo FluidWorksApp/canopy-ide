@@ -23,6 +23,7 @@ import {
   type Settings,
   type Theme,
 } from "../settings";
+import { skinDef } from "../skins/registry";
 import { MASCOTS, mascotDef } from "../mascots";
 import {
   COMPANION_AUTHORITIES,
@@ -132,14 +133,15 @@ const CURSOR_OPTIONS: { id: CursorStyle; label: string }[] = [
   { id: "bar", label: "Bar" },
 ];
 
-/** Mirror of each skin's defining colors in index.css — the preview must
- *  show the palette without applying it. Custom previews the user's own
- *  accent on the Default base. */
-const SKIN_PREVIEWS: Record<
-  Theme,
+/** The preview must show a skin's palette without applying it, so every skin
+ *  carries its own three swatches in src/skins/<id>.ts. Only the two ids that
+ *  aren't skins are spelled out here: Auto previews as a split card — Default
+ *  when the OS is dark, Daylight when light — and Custom previews the user's
+ *  own accent on the Default base. */
+const NON_SKIN_PREVIEWS: Record<
+  "auto" | "custom",
   { bg: string; raised: string; text: string; accent?: string; note: string }
 > = {
-  // Auto previews as a split card: Default when the OS is dark, Daylight when light.
   auto: {
     bg: "linear-gradient(105deg, #1a1b26 50%, #f5f6f8 50%)",
     raised: "#1f2335",
@@ -147,37 +149,14 @@ const SKIN_PREVIEWS: Record<
     accent: "#7aa2f7",
     note: "follows the OS",
   },
-  default: {
-    bg: "#1a1b26",
-    raised: "#1f2335",
-    text: "#c9d1d9",
-    accent: "#7aa2f7",
-    note: "midnight + blue",
-  },
-  gotham: {
-    bg: "#0d0f12",
-    raised: "#171b20",
-    text: "#e8e6df",
-    accent: "#d4af37",
-    note: "charcoal + gold",
-  },
-  daylight: {
-    bg: "#f5f6f8",
-    raised: "#ffffff",
-    text: "#1c1f26",
-    accent: "#3b6fd6",
-    note: "light",
-  },
-  // Previews the field, not a flat surface — the blooms are the skin.
-  vitrine: {
-    bg: "radial-gradient(70% 90% at 12% 0%, rgba(255,138,76,.3), transparent 68%), radial-gradient(70% 90% at 95% 100%, rgba(126,166,255,.28), transparent 68%), linear-gradient(155deg, #0b0d11, #07080a)",
-    raised: "rgba(255,255,255,.16)",
-    text: "#edeff1",
-    accent: "#b4f04a",
-    note: "glass · dark",
-  },
   custom: { bg: "#1a1b26", raised: "#1f2335", text: "#c9d1d9", note: "your accent" },
 };
+
+function skinPreview(id: Theme) {
+  if (id === "auto" || id === "custom") return NON_SKIN_PREVIEWS[id];
+  const s = skinDef(id);
+  return { ...s.preview, note: s.note };
+}
 
 /**
  * Turning the mascot into a companion.
@@ -1205,7 +1184,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 >
                   <div className="skin-grid">
                     {THEMES.map((t) => {
-                      const p = SKIN_PREVIEWS[t.id];
+                      const p = skinPreview(t.id);
                       // Preview the accent the skin would actually render
                       // with — the user's override wins on every skin now.
                       const accent = s.customAccent || p.accent;

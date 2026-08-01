@@ -1,0 +1,53 @@
+/* Pixel — 8-bit phosphor, and only half the skin. The colour is here; the
+   rest of it is material and lives in rules of its own the way Vitrine's
+   frost does — hard edges, a 2px border everywhere, no blur, motion that
+   steps instead of easing.
+
+   The radii are why this block declares more than the eighteen: a pixel skin
+   has no corners at all, so --r-* goes to zero. That is the one thing here
+   that isn't colour, and it is the same licence Vitrine takes when it raises
+   every radius a step — the material demands it, so the token block is the
+   only place it can come from.
+
+   --ring is a flat 2px of the accent with no color-mix. Every other skin
+   fades its ring to about half alpha; a translucent edge is an anti-aliased
+   edge, and an anti-aliased edge is the one thing this skin cannot have.
+
+   Both faces are bundled and imported in main.tsx (@fontsource/press-start-2p,
+   @fontsource/vt323) — this is a desktop app that has to look the same with
+   the network unplugged, so nothing here fetches. Press Start 2P is a label
+   face: at paragraph length it is unreadably wide, which is why it dresses the
+   chrome and VT323 — a terminal face, and comfortable in runs — carries
+   --font-mono, where code, counts and body text actually land. */
+:root[data-theme="pixel"] {
+  --bg-deep: #0a0f0b;
+  --bg-alt: #101711;
+  --bg: #0a0f0b;
+  --bg-raised: #18211a;
+  --bg-overlay: #101711;
+  --border: #2c3d2d;
+  --border-strong: #465b45;
+  --text: #dce8d6;
+  --text-dim: #7e8f79;
+  --text-faint: #5a6a56;
+  --accent: #b4f04a;
+  --accent-soft: color-mix(in srgb, var(--accent) 18%, transparent);
+  --danger: #ff5555;
+  --ok: #57e389;
+  --warn: #ffb000;
+  --magenta: #d67bff;
+  --cyan: #63d8f1;
+  --on-accent: #0a0f0b;
+  --on-danger: #0a0f0b;
+  --ring: 0 0 0 2px var(--accent);
+
+  --r-xs: 0px;
+  --r-sm: 0px;
+  --r-md: 0px;
+  --r-lg: 0px;
+
+  --font-ui: "Press Start 2P", ui-monospace, monospace;
+  --font-mono: "VT323", "SF Mono", Menlo, Monaco, monospace;
+
+  color-scheme: dark;
+}

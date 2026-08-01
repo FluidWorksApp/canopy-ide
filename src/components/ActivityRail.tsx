@@ -15,11 +15,38 @@ import {
   TasksIcon,
   TeamIcon,
 } from "./icons";
+import {
+  PixelAgentsIcon,
+  PixelChangesIcon,
+  PixelFilesIcon,
+  PixelGitIcon,
+  PixelIssuesIcon,
+  PixelNotesIcon,
+  PixelPanelIcon,
+  PixelResearchIcon,
+  PixelReviewsIcon,
+  PixelRunsIcon,
+  PixelSettingsIcon,
+  PixelTasksIcon,
+  PixelTeamIcon,
+  PixelToolsIcon,
+  usePixelSkin,
+} from "./pixelIcons";
 import type { SideTab } from "./ProjectView";
+
+type RailIcon = (p: {
+  size?: number;
+  className?: string;
+}) => React.ReactElement;
 
 interface RailTab {
   key: SideTab;
-  Icon: (p: { size?: number; className?: string }) => React.ReactElement;
+  Icon: RailIcon;
+  /** The 8x8 twin, drawn instead of Icon under the Pixel skin. Every tab has
+   *  one; the field is here rather than inside the icon module because the
+   *  pairing is the rail's opinion about which concept is which, not the icon
+   *  set's. */
+  Pixel: RailIcon;
   title: string;
 }
 
@@ -37,10 +64,16 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
   {
     name: "Project",
     tabs: [
-      { key: "files", Icon: FilesIcon, title: "Components & files" },
+      {
+        key: "files",
+        Icon: FilesIcon,
+        Pixel: PixelFilesIcon,
+        title: "Components & files",
+      },
       {
         key: "servers",
         Icon: ServersIcon,
+        Pixel: PixelRunsIcon,
         title: "Servers — every component you can run, start and manage",
       },
     ],
@@ -48,10 +81,30 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
   {
     name: "Source control & Review",
     tabs: [
-      { key: "changes", Icon: DiffIcon, title: "Session changes" },
-      { key: "git", Icon: GitBranchIcon, title: "Git — branches, commits, worktrees, PRs" },
-      { key: "prs", Icon: PullRequestIcon, title: "Pull requests — every open project, one list" },
-      { key: "trackers", Icon: IssueIcon, title: "Issues — GitHub, Linear, …" },
+      {
+        key: "changes",
+        Icon: DiffIcon,
+        Pixel: PixelChangesIcon,
+        title: "Session changes",
+      },
+      {
+        key: "git",
+        Icon: GitBranchIcon,
+        Pixel: PixelGitIcon,
+        title: "Git — branches, commits, worktrees, PRs",
+      },
+      {
+        key: "prs",
+        Icon: PullRequestIcon,
+        Pixel: PixelReviewsIcon,
+        title: "Pull requests — every open project, one list",
+      },
+      {
+        key: "trackers",
+        Icon: IssueIcon,
+        Pixel: PixelIssuesIcon,
+        title: "Issues — GitHub, Linear, …",
+      },
     ],
   },
   {
@@ -60,8 +113,18 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
       // Agents leads its own group: it is the one the group is named for and
       // the one that carries the pending badge, so it should be the icon the
       // eye lands on when it crosses the boundary.
-      { key: "agents", Icon: AgentsIcon, title: "Agents" },
-      { key: "tasks", Icon: TasksIcon, title: "Tasks — one-shot agent jobs" },
+      {
+        key: "agents",
+        Icon: AgentsIcon,
+        Pixel: PixelAgentsIcon,
+        title: "Agents",
+      },
+      {
+        key: "tasks",
+        Icon: TasksIcon,
+        Pixel: PixelTasksIcon,
+        title: "Tasks — one-shot agent jobs",
+      },
       // Beside Tasks and Research rather than up with Files, because those
       // three are one progression: a thought, the thing you found out about
       // it, the job that does it. A scratchpad filed under "Project" would
@@ -69,6 +132,7 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
       {
         key: "notes",
         Icon: NoteIcon,
+        Pixel: PixelNotesIcon,
         title: "Scratchpad — thoughts, ideas and to-dos you'll pick up later",
       },
       // With the agents rather than with the issues: research is what agents
@@ -76,9 +140,15 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
       {
         key: "research",
         Icon: ResearchIcon,
+        Pixel: PixelResearchIcon,
         title: "Research — what's been investigated, and what shipped from it",
       },
-      { key: "team", Icon: TeamIcon, title: "Team — relay, chat, notifications" },
+      {
+        key: "team",
+        Icon: TeamIcon,
+        Pixel: PixelTeamIcon,
+        title: "Team — relay, chat, notifications",
+      },
     ],
   },
 ];
@@ -92,6 +162,7 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
 const TOOLS_TAB: RailTab = {
   key: "tools",
   Icon: PlugIcon,
+  Pixel: PixelToolsIcon,
   title: "Tools — MCP servers your agents can reach, from every CLI",
 };
 
@@ -143,6 +214,9 @@ function ActivityRailImpl({
   onOpenSettings,
   onToggleSidebar,
 }: ActivityRailProps) {
+  // Asked once for the whole rail, not once per button: it is one question
+  // about the window, and the answer is the same for every icon in it.
+  const pixel = usePixelSkin();
   const tabButton = (t: RailTab, groupName?: string) => (
     <button
       key={t.key}
@@ -165,31 +239,41 @@ function ActivityRailImpl({
       onFocus={() => onHoverTab(t.key)}
       onBlur={onHoverCancel}
     >
-      <t.Icon size={22} />
+      {pixel ? <t.Pixel size={22} /> : <t.Icon size={22} />}
       {t.key === "changes" && changeBadge > 0 && (
         <span className="rail-badge">{Math.min(changeBadge, 99)}</span>
       )}
       {t.key === "servers" && serversBadge > 0 && (
-        <span className="rail-badge rail-badge-live">{Math.min(serversBadge, 99)}</span>
+        <span className="rail-badge rail-badge-live">
+          {Math.min(serversBadge, 99)}
+        </span>
       )}
       {t.key === "prs" && prsBadge > 0 && (
-        <span className="rail-badge rail-badge-urgent">{Math.min(prsBadge, 99)}</span>
+        <span className="rail-badge rail-badge-urgent">
+          {Math.min(prsBadge, 99)}
+        </span>
       )}
       {t.key === "tasks" && tasksBadge > 0 && (
         <span className="rail-badge">{Math.min(tasksBadge, 99)}</span>
       )}
       {t.key === "agents" && pendingCount > 0 && (
-        <span className={`rail-badge ${urgentCount > 0 ? "rail-badge-urgent" : ""}`}>
+        <span
+          className={`rail-badge ${urgentCount > 0 ? "rail-badge-urgent" : ""}`}
+        >
           {pendingCount}
         </span>
       )}
       {t.key === "team" && teamBadge > 0 && (
-        <span className="rail-badge rail-badge-urgent">{Math.min(teamBadge, 99)}</span>
+        <span className="rail-badge rail-badge-urgent">
+          {Math.min(teamBadge, 99)}
+        </span>
       )}
       {t.key === "team" && relayRole !== "off" && (
         <span
           className="rail-conn"
-          title={relayRole === "host" ? "Hosting a relay" : "Connected to a relay"}
+          title={
+            relayRole === "host" ? "Hosting a relay" : "Connected to a relay"
+          }
         />
       )}
     </button>
@@ -201,7 +285,12 @@ function ActivityRailImpl({
     // dead gap between them to fall through.
     <div className="rail" onMouseLeave={() => onHoverLeave()}>
       {RAIL_GROUPS.map((group) => (
-        <div className="rail-group" key={group.name} role="group" aria-label={group.name}>
+        <div
+          className="rail-group"
+          key={group.name}
+          role="group"
+          aria-label={group.name}
+        >
           {group.tabs.map((t) => tabButton(t, group.name))}
         </div>
       ))}
@@ -221,7 +310,7 @@ function ActivityRailImpl({
         onClick={onOpenSettings}
         onMouseEnter={() => onHoverLeave(true)}
       >
-        <SettingsIcon size={22} />
+        {pixel ? <PixelSettingsIcon size={22} /> : <SettingsIcon size={22} />}
       </button>
       <button
         className={`rail-btn ${pinned ? "rail-btn-pinned" : ""}`}
@@ -229,7 +318,16 @@ function ActivityRailImpl({
         onClick={onToggleSidebar}
         onMouseEnter={() => onHoverLeave(true)}
       >
-        <SidebarIcon size={22} collapsed={!pinned} />
+        {/* The twin has no collapsed variant: SidebarIcon points its chevron
+            the way the panel is about to move, and a two-pixel arrowhead on
+            this grid is a smudge. The pinned marker beside it already says
+            which way it goes, and it is the only icon here whose state was
+            ever in the glyph. */}
+        {pixel ? (
+          <PixelPanelIcon size={22} />
+        ) : (
+          <SidebarIcon size={22} collapsed={!pinned} />
+        )}
       </button>
     </div>
   );

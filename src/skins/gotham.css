@@ -1,0 +1,26 @@
+/* Gotham — dark charcoal/gunmetal + gold, pure color-and-type personality
+   (no logos, no marks, nothing but a palette — same idea as a "Dracula" or
+   "Nord" published editor theme). */
+:root[data-theme="gotham"] {
+  --bg-deep: #090b0e;
+  --bg-alt: #101317;
+  --bg: #0d0f12;
+  --bg-raised: #171b20;
+  --bg-overlay: #1e2228;
+  --border: #2b2f36;
+  --border-strong: #3a3f4a;
+  --text: #e8e6df;
+  --text-dim: #8b8d93;
+  --text-faint: #575a60;
+  --accent: #d4af37;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --danger: #e0483e;
+  --ok: #4caf7d;
+  --warn: #e2943a;
+  --magenta: #c792ea;
+  --cyan: #89ddff;
+  --on-accent: #14110a;
+  --on-danger: #14100a;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  color-scheme: dark;
+}

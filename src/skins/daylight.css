@@ -1,0 +1,29 @@
+/* Daylight — clean light theme; matches the design handoff's light token set. */
+:root[data-theme="daylight"] {
+  --bg-deep: #e4e7ee;
+  --bg-alt: #edeff4;
+  --bg: #f7f8fa;
+  --bg-raised: #ffffff;
+  --bg-overlay: #ffffff;
+  --border: #d9dde5;
+  --border-strong: #b9c0cf;
+  --text: #1c1f26;
+  --text-dim: #626a7e;
+  --text-faint: #99a0b2;
+  --accent: #3b6fd6;
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+  --danger: #c9414f;
+  --ok: #2f9e5c;
+  --warn: #a5690f;
+  --magenta: #8250df;
+  --cyan: #1b7c83;
+  --on-accent: #ffffff;
+  --on-danger: #ffffff;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  --shadow-1: 0 1px 2px rgba(28, 31, 38, 0.1);
+  --shadow-2:
+    0 4px 14px rgba(28, 31, 38, 0.12), 0 1px 3px rgba(28, 31, 38, 0.08);
+  --shadow-3:
+    0 24px 64px rgba(28, 31, 38, 0.22), 0 6px 18px rgba(28, 31, 38, 0.12);
+  color-scheme: light;
+}

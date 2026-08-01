@@ -17,6 +17,7 @@ import {
   sanitizeAssociations,
 } from "./fileAssociations";
 import { getSettings } from "./settings";
+import { SKINS, skinDef } from "./skins/registry";
 
 export const monacoReady: Promise<void> = (async () => {
   registerTauriFileSystem();
@@ -27,55 +28,38 @@ export const monacoReady: Promise<void> = (async () => {
   });
   await wrapper.start();
 
-  monaco.editor.defineTheme("canopy-dark", {
-    base: "vs-dark",
-    inherit: true,
-    rules: [],
-    colors: {
-      "editor.background": "#1a1b26",
-    },
-  });
-  monaco.editor.defineTheme("canopy-light", {
-    base: "vs",
-    inherit: true,
-    rules: [],
-    colors: {
-      "editor.background": "#f2f3f7",
-    },
-  });
-  // Vitrine is glass all the way down: the editor paints no surface of its
-  // own and the app's ambient field shows through, tinted by
-  // `.project-content` in index.css. A slab here would be the one opaque
-  // rectangle in the skin, and it covers most of the window.
-  monaco.editor.defineTheme("canopy-vitrine", {
-    base: "vs-dark",
-    inherit: true,
-    rules: [],
-    colors: {
-      "editor.background": "#00000000",
-      "editorGutter.background": "#00000000",
-      "minimap.background": "#00000000",
-      "editorOverviewRuler.background": "#00000000",
-    },
-  });
-  // Monaco doesn't read CSS variables, so it follows the skin by hand:
-  // Daylight maps to canopy-light, Vitrine to canopy-vitrine, everything else
-  // to canopy-dark — once at service startup (editors mount with whatever is
-  // then active) and again on every live skin switch (settings.ts dispatches
-  // canopy:theme).
+  // Monaco doesn't read CSS custom properties, so every skin declares the
+  // editor surface it wants in src/skins/<id>.ts and gets a Monaco theme of
+  // its own here. One definition per skin beats a light/dark fork: a skin
+  // added to the registry can never fall through to somebody else's canvas.
+  for (const s of SKINS) {
+    monaco.editor.defineTheme(`canopy-${s.id}`, {
+      base: s.monaco.base,
+      inherit: true,
+      rules: [],
+      colors: s.monaco.colors,
+    });
+  }
+  // Resolved once at service startup (editors mount with whatever is then
+  // active) and again on every live skin switch (settings.ts dispatches
+  // canopy:theme). Read from localStorage rather than getSettings() because
+  // this runs before the settings module is guaranteed initialised.
   const monacoThemeForSkin = () => {
     try {
       const stored = JSON.parse(localStorage.getItem("canopy.settings") ?? "{}") as {
         theme?: string;
       };
-      if (stored.theme === "vitrine") return "canopy-vitrine";
-      const light =
-        stored.theme === "daylight" ||
-        (stored.theme === "auto" &&
-          !window.matchMedia("(prefers-color-scheme: dark)").matches);
-      return light ? "canopy-light" : "canopy-dark";
+      // "auto" resolves the same way it does everywhere else; "custom" is
+      // Default's surface, which is what skinDef() falls back to.
+      const id =
+        stored.theme === "auto" || !stored.theme
+          ? window.matchMedia("(prefers-color-scheme: dark)").matches
+            ? "default"
+            : "daylight"
+          : stored.theme;
+      return `canopy-${skinDef(id).id}`;
     } catch {
-      return "canopy-dark";
+      return "canopy-default";
     }
   };
   monaco.editor.setTheme(monacoThemeForSkin());

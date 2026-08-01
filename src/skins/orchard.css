@@ -1,0 +1,32 @@
+/* Orchard — deep forest greens under the same lime accent Vitrine wears.
+   The two are not variants of each other: Vitrine is a material, an ambient
+   field with alpha washes over it and frost on the floating panes, and that
+   material costs a compositor pass on every surface that uses it. Orchard is
+   only the hue — five opaque greens, no translucency, nothing showing through.
+   Pick it when the brand colour is what you wanted and the glass was the price
+   you were paying for it: on a slow machine, on an external display where
+   blurred layers band, or simply when a panel edge should be a line rather
+   than a gradient. */
+:root[data-theme="orchard"] {
+  --bg-deep: #0a1310;
+  --bg-alt: #0f1c17;
+  --bg: #0c1713;
+  --bg-raised: #16261f;
+  --bg-overlay: #1c3029;
+  --border: #22382e;
+  --border-strong: #375543;
+  --text: #dfeade;
+  --text-dim: #91a89a;
+  --text-faint: #63786c;
+  --accent: #a8e04a;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --danger: #f0666f;
+  --ok: #62d68a;
+  --warn: #e5b155;
+  --magenta: #bb95ef;
+  --cyan: #62cfd6;
+  --on-accent: #0a1606;
+  --on-danger: #180a0c;
+  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  color-scheme: dark;
+}
