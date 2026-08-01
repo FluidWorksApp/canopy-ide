@@ -20,9 +20,10 @@
 //!      outlive the digest. `forgetting_a_session_leaves_its_edges` says so.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use tauri::State;
 
 use crate::fsx::WorkspaceManager;
@@ -86,10 +87,47 @@ fn key_of(e: &Edge) -> (String, u64, String) {
     (e.repo.clone(), e.pr_number, e.session_id.clone())
 }
 
+/// The one name a repository has here: its **main** checkout, whichever of its
+/// directories you arrived from.
+///
+/// This matters more than it looks. An agent works in a linked worktree, so a
+/// writer standing in one would key the edge to `<repo>/.claude/worktrees/x`
+/// while the PR tab, standing in the main checkout, would look under `<repo>` —
+/// and every row would be invisible to the surface that wanted it.
+/// `--git-common-dir` is shared by every worktree of a repo, so its parent is
+/// the answer both of them agree on.
+///
+/// Memoised: it is a subprocess, and the read path calls it on every PR tab
+/// open. Keyed on the input, and a repo's main checkout does not move while the
+/// app is running.
+fn repo_key(path: &str) -> String {
+    static SEEN: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = seen.lock().ok().and_then(|m| m.get(path).cloned()) {
+        return hit;
+    }
+    // Falling back to the path as given is deliberate: a directory git cannot
+    // speak for still deserves a stable key rather than an error, and the
+    // writer and reader will agree on it for the same reason they would have
+    // agreed on the resolved one.
+    let key = crate::git::common_dir(Path::new(path))
+        .and_then(|d| d.parent().map(|p| p.to_string_lossy().to_string()))
+        .unwrap_or_else(|| path.trim_end_matches('/').to_string());
+    if let Ok(mut m) = seen.lock() {
+        m.insert(path.to_string(), key.clone());
+    }
+    key
+}
+
 /// Years of history in well under a megabyte. Compaction keeps the newest and
 /// only fires past the cap — a row's content is still frozen, the file just has
 /// an end.
 const MAX_EDGES: usize = 5000;
+
+/// How far back a self-seeding backfill looks. Sessions on this machine only go
+/// back so far — 298 digests covered a few months here — so asking for more PRs
+/// than that buys nothing but a slower `gh` call.
+const HISTORY_LIMIT: u32 = 200;
 
 /// Which writer recorded an edge. One field rather than `via` + `confidence`:
 /// confidence is a pure function of the writer, and two fields where one
@@ -318,8 +356,13 @@ pub async fn provenance_record(
     cwd: String,
     via: Via,
 ) -> Result<bool, String> {
+    if repo.trim().is_empty() {
+        return Err("a repo is required".into());
+    }
     let edge = Edge {
-        repo,
+        // Any directory of the repo may be passed — an agent's worktree, a
+        // component subdir — and they all key to the main checkout.
+        repo: repo_key(&repo),
         pr_number,
         pr_url,
         branch,
@@ -359,9 +402,10 @@ pub async fn provenance_for_pr(
     repo: String,
     pr_number: u64,
 ) -> Result<Vec<EdgeOut>, String> {
+    let key = repo_key(&repo);
     query(
         &store,
-        |e| e.repo == repo && e.pr_number == pr_number,
+        |e| e.repo == key && e.pr_number == pr_number,
         MAX_EDGES,
     )
 }
@@ -397,13 +441,36 @@ pub async fn provenance_backfill(
     prs: Vec<PrSeed>,
 ) -> Result<BackfillReport, String> {
     let top = repo_path(&state, &repo)?;
-    let repo_key = top.to_string_lossy().to_string();
+    // Through the same normalizer as every other writer: `repo_path` answers
+    // with the toplevel of whichever checkout it was given, which for a linked
+    // worktree is the worktree itself.
+    let key = repo_key(&top.to_string_lossy());
     let owned = owned_dirs(&top);
+
+    // No seeds means "go and find them" — the merged PRs the watcher never
+    // lists, which is the whole history this is for. Seeds passed in are still
+    // honoured, which is what keeps the join testable without a network.
+    let prs: Vec<PrSeed> = if prs.is_empty() {
+        crate::git::gh_pr_refs(&top, HISTORY_LIMIT)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(number, url, branch)| PrSeed {
+                number,
+                url,
+                branch,
+            })
+            .collect()
+    } else {
+        prs
+    };
+    if prs.is_empty() {
+        return Ok(BackfillReport::default());
+    }
 
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let sessions = PathBuf::from(&home).join(".canopy").join("sessions");
 
-    let (edges, mut report) = sweep(&sessions, &prs, &owned, &repo_key);
+    let (edges, mut report) = sweep(&sessions, &prs, &owned, &key, Via::Backfill);
 
     // Synced once for the whole sweep. Every `append` then checks itself against
     // memory instead of re-reading the file, which is what made a few hundred
@@ -418,13 +485,76 @@ pub async fn provenance_backfill(
     Ok(report)
 }
 
+/// Attribute PRs the watcher has just seen, at the one moment their branch is
+/// certainly current.
+///
+/// This is the writer that catches an ordinary long-running session — one that
+/// pushed a branch and opened a PR by hand, and so never called
+/// `canopy_job_done`. It runs on the watcher's thread, inside a poll that was
+/// going to happen anyway.
+///
+/// Two things keep it off the hot path. It reads no digest at all unless some
+/// PR in the snapshot has no edge yet, which after the first pass is the normal
+/// case. And a PR it has already failed to attribute is not retried for the
+/// life of the app: rows change on every comment and push, and a teammate's PR
+/// will never match a local session, so without this every conversation on
+/// every open PR would re-scan the whole sessions directory.
+pub fn attribute_observed(app: &tauri::AppHandle, repo: &str, prs: &[(u64, String, String)]) {
+    use tauri::Manager;
+    static TRIED: OnceLock<Mutex<std::collections::HashSet<(String, u64)>>> = OnceLock::new();
+    let tried = TRIED.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+
+    let key = repo_key(repo);
+    let Some(store) = app.try_state::<ProvenanceStore>() else {
+        return;
+    };
+    let Ok(mut cache) = store.0.lock() else {
+        return;
+    };
+    cache.sync();
+
+    let wanted: Vec<PrSeed> = {
+        let Ok(mut t) = tried.lock() else {
+            return;
+        };
+        prs.iter()
+            .filter(|(number, _, _)| {
+                let known = cache
+                    .edges
+                    .iter()
+                    .any(|e| e.repo == key && e.pr_number == *number);
+                !known && t.insert((key.clone(), *number))
+            })
+            .map(|(number, url, branch)| PrSeed {
+                number: *number,
+                url: url.clone(),
+                branch: branch.clone(),
+            })
+            .collect()
+    };
+    if wanted.is_empty() {
+        return;
+    }
+
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let sessions = PathBuf::from(&home).join(".canopy").join("sessions");
+    let owned = owned_dirs(Path::new(repo));
+    let (edges, _) = sweep(&sessions, &wanted, &owned, &key, Via::PrWatch);
+    for edge in &edges {
+        let _ = append(&mut cache, edge);
+    }
+}
+
 /// The join itself, with the store kept out of it so it can be tested against a
 /// directory of digests rather than only through a running app.
 fn sweep(
     sessions: &Path,
     prs: &[PrSeed],
     owned: &[PathBuf],
-    repo_key: &str,
+    key: &str,
+    via: Via,
 ) -> (Vec<Edge>, BackfillReport) {
     // By head branch, so a digest costs one hash lookup rather than a scan of
     // every PR — hundreds of PRs against hundreds of digests would otherwise be
@@ -468,7 +598,7 @@ fn sweep(
         }
 
         let edge = Edge {
-            repo: repo_key.to_string(),
+            repo: key.to_string(),
             pr_number: seed.number,
             pr_url: seed.url.clone(),
             branch,
@@ -476,7 +606,7 @@ fn sweep(
             agent: dstr("agent"),
             profile: dstr("profile"),
             cwd,
-            via: Via::Backfill,
+            via,
             // The digest's time, not now — a sweep's clock would sort years of
             // history into one afternoon.
             at: digest.get("updated").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -750,7 +880,7 @@ mod tests {
             },
         ];
         let owned = vec![PathBuf::from("/repo"), PathBuf::from("/scratch/wt-b")];
-        let (edges, report) = sweep(&dir, &prs, &owned, "/repo");
+        let (edges, report) = sweep(&dir, &prs, &owned, "/repo", Via::Backfill);
 
         // notes.txt is not scanned; broken.json is scanned but unparseable.
         assert_eq!(report.scanned, 5);
@@ -787,13 +917,55 @@ mod tests {
         let owned = vec![PathBuf::from("/repo")];
 
         with_store(|c| {
-            let (edges, _) = sweep(&dir, &prs, &owned, "/repo");
+            let (edges, _) = sweep(&dir, &prs, &owned, "/repo", Via::Backfill);
             assert!(append(c, &edges[0]).unwrap());
-            let (again, _) = sweep(&dir, &prs, &owned, "/repo");
+            let (again, _) = sweep(&dir, &prs, &owned, "/repo", Via::Backfill);
             assert!(!append(c, &again[0]).unwrap());
             assert_eq!(read_file().len(), 1);
         });
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The invariant the writers depend on: an agent records from its linked
+    /// worktree and the PR tab reads from the main checkout, and both have to
+    /// land on the same key or every row is invisible to the surface that
+    /// wanted it.
+    #[test]
+    fn a_worktree_and_its_main_checkout_are_one_repo() {
+        let root = std::env::temp_dir().join(format!("canopy-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let main = root.join("repo");
+        std::fs::create_dir_all(&main).unwrap();
+        let git = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        git(&main, &["init", "-q"]);
+        git(&main, &["config", "user.email", "t@t"]);
+        git(&main, &["config", "user.name", "t"]);
+        std::fs::write(main.join("f"), "x").unwrap();
+        git(&main, &["add", "-A"]);
+        git(&main, &["commit", "-qm", "init"]);
+        let wt = root.join("wt");
+        git(&main, &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat/x"]);
+
+        let want = repo_key(main.to_str().unwrap());
+        assert_eq!(repo_key(wt.to_str().unwrap()), want, "worktree keyed apart");
+        // A subdirectory of either is still the same repo.
+        assert_eq!(repo_key(main.join("..").to_str().unwrap()) == want, false);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A path git cannot speak for still gets a stable key rather than an
+    /// error — writer and reader agree on it for the same reason.
+    #[test]
+    fn a_path_that_is_not_a_repo_keys_to_itself() {
+        assert_eq!(repo_key("/nowhere/at/all"), "/nowhere/at/all");
+        assert_eq!(repo_key("/nowhere/at/all/"), "/nowhere/at/all");
     }
 
     /// The guard that keeps backfill from attributing a stranger's session:

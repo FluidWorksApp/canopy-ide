@@ -168,6 +168,7 @@ import {
   updateTaskRun,
   type TaskRun,
 } from "../../taskHistory";
+import { record as recordProvenance } from "../../provenance";
 import {
   askedLine,
   hasIdentity,
@@ -3359,10 +3360,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }
         // Files the session touched, when a hook wrote a digest for it — the
         // same pty→digest binding the Agents panel uses.
-        const files = digestBySurface(
+        const digest = digestBySurface(
           wsDigestsRef.current,
           thisInstanceRef.current,
-        ).get(String(ptyId))?.files;
+        ).get(String(ptyId));
+        const files = digest?.files;
+        // If it opened a PR, write down that this session did. Now, not later:
+        // a micro-task is forgotten seconds from here (finishMicroTask →
+        // sessionForget) and its worktree is deleted by its own last
+        // instruction, so this is the last moment anything can join the two.
+        // Blocked runs record too — a run that pushed a PR and then stopped to
+        // ask something still produced the PR.
+        const ranIn = digest?.cwd ?? a.cwd;
+        void recordProvenance({
+          // The directory it ran in, not a project component: Rust resolves any
+          // directory of a repo to its main checkout, and a task's worktree is
+          // the one thing we always know.
+          repo: ranIn,
+          url: a.url,
+          branch: digest?.branch,
+          sessionId,
+          agent: digest?.agent,
+          profile: digest?.profile,
+          cwd: ranIn,
+          via: "job_done",
+        });
         if (a.status === "blocked") {
           // Blocked is not an ending — the agent is waiting on the user and the
           // run continues. Keep what it said and mark that it asked, so that if

@@ -11,6 +11,7 @@
 // facts, not a component's business.
 import * as ipc from "./ipc";
 import { allRows, applySnapshot } from "./prInbox";
+import { adoptOnce } from "./provenance";
 
 export interface PrWatchState {
   byRepo: Map<string, ipc.PrRow[]>;
@@ -66,6 +67,11 @@ function start() {
       viewer: snap.viewer || state.viewer,
       fetchedMs: snap.fetched_ms,
     });
+    // First sight of a repo is when to adopt whatever history is already on
+    // disk. Here rather than in setPaths because a snapshot proves `gh` can
+    // actually read this repo — asking it for two hundred merged PRs on a
+    // checkout it has no login for would just be a slow failure.
+    adoptOnce(snap.repo);
   });
   void ipc.onPrTick((tick) => {
     emit({

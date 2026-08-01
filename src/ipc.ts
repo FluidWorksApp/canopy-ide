@@ -140,6 +140,9 @@ export interface AgentAction {
     | "close_session";
   route: string;
   dir?: string;
+  /** Where the calling agent was standing. Sent on every action by the sidecar
+   *  (canopy_hook.rs), and the fallback for a run whose hook wrote no digest. */
+  cwd?: string;
   name?: string;
   command?: string;
   url?: string;

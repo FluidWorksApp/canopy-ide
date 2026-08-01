@@ -436,6 +436,19 @@ async fn pass(app: &AppHandle, inner: &Arc<Mutex<Watch>>, repos: &[String]) -> P
             if unchanged {
                 continue;
             }
+            // Whoever produced these, recorded now — while their branch is
+            // still what a live session's digest says it is. This is the only
+            // writer that catches an ordinary session, which raises a PR by
+            // hand and so never calls canopy_job_done. It reads no digest
+            // unless a PR here has no edge yet. See provenance.rs.
+            crate::provenance::attribute_observed(
+                app,
+                repo,
+                &rows
+                    .iter()
+                    .map(|r| (r.number as u64, r.url.clone(), r.branch.clone()))
+                    .collect::<Vec<_>>(),
+            );
             let _ = app.emit(
                 "prs:snapshot",
                 PrSnapshot {

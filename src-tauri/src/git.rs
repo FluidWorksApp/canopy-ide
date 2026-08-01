@@ -1769,6 +1769,43 @@ fn gh_in(repo: &Path) -> Command {
     cmd
 }
 
+/// Every pull request this repo has had, open or not — number, url and head
+/// branch, nothing else.
+///
+/// For provenance's backfill, which adopts the history already on disk and so
+/// wants the merged PRs the watcher never lists. Deliberately a different call
+/// from `gh_pr_list`: that one is the inbox and asks for the twelve fields a
+/// row renders, where this wants three fields and a much longer tail.
+pub(crate) fn gh_pr_refs(top: &Path, limit: u32) -> Result<Vec<(u64, String, String)>, String> {
+    let mut cmd = gh_in(top);
+    cmd.args([
+        "pr",
+        "list",
+        "--limit",
+        &limit.to_string(),
+        "--state",
+        "all",
+        "--json",
+        "number,url,headRefName",
+    ]);
+    let out = run_net(&mut cmd)?;
+    let v: serde_json::Value =
+        serde_json::from_str(&out).map_err(|e| format!("gh returned unexpected output: {e}"))?;
+    Ok(v.as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|r| {
+                    Some((
+                        r.get("number")?.as_u64()?,
+                        r.get("url")?.as_str()?.to_string(),
+                        r.get("headRefName")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// `gh` with no repo context, for calls that name their target with `--repo
 /// OWNER/NAME`. Crash reports use this: they go to Canopy's own tracker and
 /// must not inherit whatever repo the user happens to have open.
