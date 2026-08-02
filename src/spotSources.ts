@@ -8,7 +8,7 @@
 // something native (see openers in ProjectView). A source that can't say what
 // Enter would open drops the row instead of showing it.
 import * as ipc from "./ipc";
-import { fuzzy } from "./fuzzy";
+import { fuzzy, pathScore } from "./fuzzy";
 import type { ServerGroup } from "./servers";
 import type { SubTab, TermSubTab } from "./components/ProjectView/helpers";
 import { tabDisplayLabel } from "./components/ProjectView/helpers";
@@ -108,7 +108,10 @@ export interface SpotContext {
 const CAP = 6;
 
 /** Rank `rows` by fuzzy match on their searchable text; empty query keeps the
- *  given order. */
+ *  given order. Every space-separated term has to match somewhere in the hay,
+ *  so "spot search" and "search spot" both find SpotSearch, and fzf's
+ *  `'exact` / `^prefix` / `suffix$` / `!negate` all work here — see
+ *  shared/fuzzy.ts. */
 function ranked(
   query: string,
   rows: { row: SpotRow; hay: string }[],
@@ -447,9 +450,11 @@ export async function fileRows(query: string, corpus: string[]): Promise<SpotRow
   if (!query.trim()) return [];
   const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
   return corpus
-    .map((p) => ({ p, s: fuzzy(query, base(p)) ?? fuzzy(query, p) }))
+    .map((p) => ({ p, s: pathScore(query, p, base(p)) }))
     .filter((r): r is { p: string; s: number } => r.s !== null)
-    .sort((a, b) => a.s - b.s)
+    // Shortest path breaks a tie, so two files with the same name rank by how
+    // buried they are rather than by whatever order the walk returned them in.
+    .sort((a, b) => a.s - b.s || a.p.length - b.p.length)
     .slice(0, CAP)
     .map((r) => ({
       id: `file:${r.p}`,
