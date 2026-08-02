@@ -24,13 +24,6 @@
 //   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 //   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 //   THE SOFTWARE.
-//
-// The notice above travels with this file because that is what the MIT License
-// asks: an algorithm is not copyrightable, but a transliteration that keeps the
-// constants, the bonus classes and the structure of the original carries its
-// expression, and "hand-written in another language" does not make it ours. It
-// is also recorded in THIRD-PARTY-NOTICES.md, which is where a reader looks for
-// what Canopy ships that it did not write.
 
 /** fzf's matcher, ported by hand — the scoring every palette in the app ranks
  *  by. Same constants as fzf, the same four bonus classes (word boundary,

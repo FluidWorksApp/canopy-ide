@@ -394,11 +394,7 @@ scoring — its constants, its four bonus classes (word boundary, camelCase, pat
 delimiter, first character), its FuzzyMatchV2 alignment, and its query syntax
 (space-separated AND terms, `'exact`, `^prefix`, `suffix$`, `!negate`). One
 file with no install beat both `fzf-for-js` and shelling out to the `fzf`
-binary, which core principle 1 rules out anyway.
-
-Not a dependency is not the same as not licensed: a port that keeps the
-constants and the structure is a derivative work, so fzf's MIT notice
-(Copyright © 2013-2026 Junegunn Choi) travels in that file's header and in
+binary, which core principle 1 rules out anyway. fzf is MIT; see
 [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).
 
 ## License

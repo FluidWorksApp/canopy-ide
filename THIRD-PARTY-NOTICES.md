@@ -12,27 +12,18 @@ It covers what Canopy **distributes**: the Rust dependency closure of the app
 binary (dev-only crates pruned), the production npm closure that is bundled into
 the frontend, and the prebuilt binaries shipped inside the app bundle. Build-only
 tooling — Vite, Rolldown, oxlint, TypeScript, lightningcss and friends — is not
-listed, because it never leaves the build machine.
-
-It also covers code Canopy **ported by hand**. That is not a dependency and
-appears in no manifest, so nothing below can be derived from a lockfile — see
-the vendored-source note under "Notes on specific components", which is
-maintained by hand for exactly that reason.
+listed, because it never leaves the build machine. Hand-ported source is
+listed too, under "Notes on specific components", since it appears in no
+manifest.
 
 Each component appears with the copyright notice taken from its own license
 file; the full text of every license in play is reproduced in the appendix.
 
 ## Notes on specific components
 
-**fzf — MIT (ported source, not a dependency).** `shared/fuzzy.ts` is a hand
-port of fzf's matching and scoring algorithm (`algo/algo.go`): its constants,
-its four bonus classes, its FuzzyMatchV1/V2 alignment and its query syntax. It
-is compiled into the frontend bundle, so Canopy distributes it. An algorithm on
-its own is not copyrightable, but a transliteration that keeps the constants and
-the structure carries the original's expression — so this is a derivative work
-and fzf's notice travels with it, both in the file's own header and here. There
-is no package to list it under, which is why this note is written by hand.
-Copyright (c) 2013-2026 Junegunn Choi; MIT text in the appendix; source:
+**fzf — MIT.** `shared/fuzzy.ts` is a hand port of fzf's matching and scoring
+algorithm (`algo/algo.go`), compiled into the frontend bundle. Copyright (c)
+2013-2026 Junegunn Choi; MIT text in the appendix; source:
 <https://github.com/junegunn/fzf>.
 
 **jschardet 3.1.4 — LGPL-2.1-or-later.** Pulled in transitively by
