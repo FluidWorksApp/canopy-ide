@@ -12,6 +12,7 @@
 // right without this file knowing either exists.
 
 import type { SubTab } from "./components/ProjectView/helpers";
+import { agentIdForCommand } from "./agentIdentity";
 
 /** The palette token a kind is drawn in. Deliberately few: six hues over
  *  fifteen tab types, grouped by what the tab is FOR rather than by what
@@ -50,7 +51,15 @@ export interface TabKind {
  */
 export function tabKind(tab: SubTab): TabKind {
   switch (tab.type) {
-    case "terminal":
+    case "terminal": {
+      // Most agents ARE terminal tabs. The "agent" type below is the workspace
+      // view of a session — its files, diffs and PR — while the session itself
+      // is a CLI running in a pty, and calling that "terminal · canopy" is the
+      // switcher describing the container instead of the contents. The command
+      // is what the tab was launched with, so it names the CLI when there is
+      // one; the same resolver the tab strip and hibernation use.
+      const cli = agentIdForCommand(tab.command);
+      if (cli) return { label: "agent", tone: "agent", detail: cli };
       // A run is a command someone started, not a shell they type in — the two
       // live in different rails and mean different things when you land on one.
       return {
@@ -58,8 +67,12 @@ export function tabKind(tab: SubTab): TabKind {
         tone: "shell",
         detail: basename(tab.cwd),
       };
+    }
     case "agent":
-      return { label: "agent", tone: "agent", detail: tab.agent };
+      // The workspace, not the session: what that agent changed, where it is
+      // committed, which PR came out of it. Named apart from the live session
+      // above so two cards for one agent do not read identically.
+      return { label: "workspace", tone: "agent", detail: tab.agent };
     case "agents":
       return { label: "agents", tone: "agent", detail: "" };
     case "file":

@@ -8,17 +8,30 @@ import type { SubTab } from "./components/ProjectView/helpers";
 const tab = (t: Record<string, unknown>) => tabKind(t as unknown as SubTab);
 
 describe("what a switcher card says it is", () => {
-  it("names which CLI an agent card is running", () => {
-    // Six Claude sessions are six identical titles; the CLI is the thing that
-    // makes the card mean something on its own.
-    expect(tab({ type: "agent", agent: "codex", cwd: "/repo" })).toEqual({
+  it("calls a terminal running a CLI an agent, because that is what it is", () => {
+    // The failure this fixes: every running agent read "terminal · canopy",
+    // which describes the container and not the contents. A session IS a pty —
+    // the "agent" type is the workspace view of one, not the session.
+    expect(tab({ type: "terminal", cwd: "/repo", command: "claude --resume x" })).toEqual({
       label: "agent",
+      tone: "agent",
+      detail: "claude",
+    });
+    expect(tab({ type: "terminal", cwd: "/repo", command: "codex" }).detail).toBe("codex");
+  });
+
+  it("keeps the workspace card distinct from the session card", () => {
+    // Both are "that agent"; one is what it is doing, the other is what it has
+    // changed. Two cards reading identically would be worse than either.
+    expect(tab({ type: "agent", agent: "codex", cwd: "/repo" })).toEqual({
+      label: "workspace",
       tone: "agent",
       detail: "codex",
     });
   });
 
   it("tells a shell from a run, which are different rails and different jobs", () => {
+    // No CLI in the command line: a shell you drive.
     expect(tab({ type: "terminal", cwd: "/a/canopy" }).label).toBe("terminal");
     expect(tab({ type: "terminal", cwd: "/a/canopy", run: true }).label).toBe("run");
     expect(tab({ type: "terminal", cwd: "/a/canopy" }).detail).toBe("canopy");
