@@ -39,6 +39,7 @@ import {
 import type { AgentTarget } from "./TicketsPanel";
 import { NoteReminder } from "./NoteReminder";
 import { Button } from "./ui";
+import { format, matches } from "../shortcuts";
 
 interface NoteViewProps {
   projectId: string;
@@ -317,23 +318,56 @@ export function NoteView({
       {/* The thought itself. Click to edit — the commonest thing you do with a
           parked note is add the bit you remembered afterwards. */}
       {bodyDraft !== null ? (
-        <textarea
-          className="note-body-input"
-          autoFocus
-          ref={fitBody}
-          value={bodyDraft}
-          onChange={(e) => {
-            setBodyDraft(e.target.value);
-            fitBody(e.currentTarget);
-          }}
-          onBlur={commitBody}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") {
-              e.preventDefault();
-              setBodyDraft(null);
-            }
-          }}
-        />
+        <div className="note-edit">
+          <textarea
+            className="note-body-input"
+            autoFocus
+            ref={fitBody}
+            value={bodyDraft}
+            onChange={(e) => {
+              setBodyDraft(e.target.value);
+              fitBody(e.currentTarget);
+            }}
+            onBlur={commitBody}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setBodyDraft(null);
+                return;
+              }
+              // Enter is a newline in a note — this is prose, not a form — so
+              // committing needs a chord. Both of the ones a person would try:
+              // the app's submit chord, and the one every editor has trained.
+              if (matches(e, "submit") || matches(e, "save-file")) {
+                e.preventDefault();
+                commitBody();
+              }
+            }}
+          />
+          {/* Blur commits, and has since this was written — but an invisible
+              save is one nobody trusts, and there was nothing on screen that
+              said the text was safe or how to keep it. mousedown is prevented
+              so the buttons don't blur the textarea out from under themselves,
+              which would commit before Discard could refuse. */}
+          <div className="note-edit-actions">
+            <span className="note-edit-hint">
+              {format("submit")} to save · Esc to discard
+            </span>
+            <Button
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => setBodyDraft(null)}
+            >
+              Discard
+            </Button>
+            <Button
+              variant="accent"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={commitBody}
+            >
+              Save
+            </Button>
+          </div>
+        </div>
       ) : (
         <div
           className="note-body"

@@ -290,7 +290,11 @@ function ActivityRailImpl({
     // Leaving the rail starts the retract clock; the panel itself cancels it
     // when the pointer arrives there. The two are edge-to-edge, so there is no
     // dead gap between them to fall through.
-    <div className="rail" onMouseLeave={() => onHoverLeave()}>
+    // Tooltips open to the right, not below. The rail is a column, and a bubble
+    // under an icon covers the next icon down — which is exactly where the
+    // pointer is going. One attribute on the container: the layer reads it with
+    // `closest`, so every button inside is covered.
+    <div className="rail" data-tip-side="right" onMouseLeave={() => onHoverLeave()}>
       {RAIL_GROUPS.map((group) => (
         <div
           className="rail-group"

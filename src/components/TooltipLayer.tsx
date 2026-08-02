@@ -14,6 +14,7 @@ import {
   upgradable,
   type Placement,
   type TipContent,
+  type TipSide,
 } from "../tooltipTitles";
 
 /** Long enough that dragging the pointer across a dense list doesn't strobe,
@@ -182,13 +183,24 @@ export function TooltipLayer() {
     // offsetWidth/Height, not a rect: the reveal keyframe is running from
     // scale(0.98), and a rect measured mid-animation is 2% short — enough to
     // park the bubble half a pixel off the window edge instead of six.
+    // The trigger says which way it wants to open — only it knows where its
+    // neighbours are. `closest` so a data attribute on the rail covers every
+    // button inside it.
+    const want = anchor.current?.closest<HTMLElement>("[data-tip-side]")?.dataset
+      .tipSide as TipSide | undefined;
     const p = placeTip(
       { top: a.top, bottom: a.bottom, left: a.left, right: a.right, width: a.width, height: a.height },
       { width: el.offsetWidth, height: el.offsetHeight },
       { width: window.innerWidth, height: window.innerHeight },
+      want === "right" || want === "left" ? want : "vertical",
     );
     setPos(p);
-    if (arrow.current) arrow.current.style.left = `${p.arrow}px`;
+    // The arrow runs along whichever edge the bubble is attached by.
+    if (arrow.current) {
+      const beside = p.side === "left" || p.side === "right";
+      arrow.current.style.left = beside ? "" : `${p.arrow}px`;
+      arrow.current.style.top = beside ? `${p.arrow}px` : "";
+    }
   }, [tip]);
 
   if (!tip) return null;
