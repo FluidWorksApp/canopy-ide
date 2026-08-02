@@ -202,18 +202,17 @@ export function ResearchIcon({ size = 18, className }: IconProps) {
   );
 }
 
-/** Scratchpad: a lightbulb.
+/** Scratchpad: a pencil — jotting, not documentation.
  *
  *  It has to survive sitting one row above Research (a page with a magnifier)
- *  and Tasks (a checklist) at 14px, where interior detail turns to mush and
- *  only the silhouette reads. Nothing else in the set is a round top on a short
- *  stem, so this one stays legible when the strokes blur together — and "idea"
- *  is the right word for what the list mostly holds. */
+ *  at 14px, where interior detail turns to mush and only the silhouette
+ *  reads. Nothing else in the set is a diagonal, so the pencil stays legible
+ *  when the strokes blur together. */
 export function NoteIcon({ size = 18, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)}>
-      <path d="M9 17.5a5.8 5.8 0 1 1 6 0v1.2a1.3 1.3 0 0 1-1.3 1.3h-3.4A1.3 1.3 0 0 1 9 18.7z" />
-      <path d="M9.6 17.4h4.8" />
+      <path d="M5.4 18.6l.8-3.4L16.9 4.5a2 2 0 0 1 2.9 2.9L9.1 18.1l-3.7.5z" />
+      <path d="M14.7 6.7l2.9 2.9" />
     </svg>
   );
 }
@@ -256,15 +255,13 @@ export function AgentsIcon({ size = 18, className }: IconProps) {
   );
 }
 
-/** Tasks: a checklist — a ticked row over plain rows. Distinct from Issues
- *  (a circle) and Agents (a bot) at rail size. */
+/** Tasks: a bolt — a one-shot job, fired and done. Not a checklist: the list
+ *  of things to pick up later is the Scratchpad's job. One closed shape, so
+ *  there is no interior detail to mush at 14px. */
 export function TasksIcon({ size = 18, className }: IconProps) {
   return (
     <svg {...svgProps(size, className)}>
-      <path d="M4 6.5l1.8 1.8L9 5" />
-      <path d="M12 6.5h8" />
-      <path d="M4 12.5h16" />
-      <path d="M4 18.5h16" />
+      <path d="M13.4 3.2 5.9 13.5h4.9l-1 7.3 7.6-10.3h-5z" />
     </svg>
   );
 }
