@@ -528,18 +528,44 @@ impl ChromiumManager {
     pub async fn start_cast(&self, tab_id: &str, width: u32, height: u32) -> Result<(), String> {
         let cdp = self.live().await?;
         let s = self.session(tab_id)?;
-        cdp.call(
-            "Page.startScreencast",
-            serde_json::json!({
-                "format": "jpeg",
-                "quality": SCREENCAST_QUALITY,
-                "maxWidth": width.max(1),
-                "maxHeight": height.max(1),
-            }),
-            Some(&s.id),
-        )
-        .await
-        .map(|_| ())
+        // Headless Chrome only casts the ACTIVE page, and a target made by
+        // Target.createTarget is a background tab — without this activation,
+        // Page.startScreencast answers "Not attached to an active page" every
+        // single time and the pane never shows a frame. Re-done on every start
+        // rather than once at open: starting another pane's cast moved
+        // activation there, and this pane has to take it back.
+        let params = serde_json::json!({
+            "format": "jpeg",
+            "quality": SCREENCAST_QUALITY,
+            "maxWidth": width.max(1),
+            "maxHeight": height.max(1),
+        });
+        let mut last = String::new();
+        for attempt in 0..3 {
+            if attempt > 0 {
+                // Activation races the renderer swap of an in-flight
+                // navigation (observed live: the same sequence fails or
+                // succeeds depending on whether the swap has settled), so a
+                // failed start is retried against a fresh activation rather
+                // than reported.
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+            let _ = cdp
+                .call(
+                    "Target.activateTarget",
+                    serde_json::json!({ "targetId": s.target }),
+                    None,
+                )
+                .await;
+            match cdp
+                .call("Page.startScreencast", params.clone(), Some(&s.id))
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
     }
 
     /// Stop streaming — the tab went to the background, or the pane is covered.
