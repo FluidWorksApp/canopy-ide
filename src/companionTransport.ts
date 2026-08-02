@@ -224,22 +224,70 @@ export async function startStructured(
  * The thread id arrives on the FIRST turn rather than being chosen up front, so
  * `onSession` hands it back for storing; every later turn resumes it.
  */
+/** The conversation this id names is gone — the CLI kept the id and lost the
+ *  transcript behind it. Codex says "no rollout found for thread id …", claude
+ *  "No conversation found with session ID: …"; both mean the same thing and
+ *  both are recoverable by forgetting the id. Matched on the phrase rather than
+ *  a code because the code (-32600) is JSON-RPC's "invalid request", which is
+ *  not specific to this at all. */
+const CONVERSATION_GONE = /no rollout found|no conversation found|thread .{0,40}not found|session .{0,40}not found/i;
+
 export class OneshotTransport implements CompanionTransport {
   private host: TransportHost;
   private launch: (message: string, sessionId: string | null) => Promise<void>;
   private sessionId: string | null;
   private onSession: (id: string) => void;
+  private onForget: () => void;
+  /** The turn in flight, kept only so a stale id can be healed by running it
+   *  again — the user typed it once and should not have to type it twice. */
+  private pending: string | null = null;
+  /** A heal is in flight: the process that is about to exit belongs to the
+   *  attempt we just abandoned, so its exit ends nothing. */
+  private replaying = false;
 
   constructor(opts: {
     host: TransportHost;
     sessionId: string | null;
     onSession: (id: string) => void;
+    onForget?: () => void;
     launch: (message: string, sessionId: string | null) => Promise<void>;
   }) {
     this.host = opts.host;
     this.sessionId = opts.sessionId;
     this.onSession = opts.onSession;
+    this.onForget = opts.onForget ?? (() => {});
     this.launch = opts.launch;
+  }
+
+  /** Whether the exit now arriving belongs to an abandoned attempt. Consumed,
+   *  so the replacement turn's own exit still ends the turn. */
+  consumeReplay(): boolean {
+    const was = this.replaying;
+    this.replaying = false;
+    return was;
+  }
+
+  /** A turn that failed only because the conversation it resumed no longer
+   *  exists. The oneshot tier could never recover from this on its own: it
+   *  emits `ready` the moment the transport is built (there is no process to
+   *  wait for), so the stale-resume heal in companionSession — which fires on a
+   *  resume that dies before reaching `ready` — is unreachable here, and every
+   *  turn from then on failed with the same error against the same dead id.
+   *
+   *  Forget the id and run the same turn again as a first meeting. The reply
+   *  comes back without the conversation's history, which is the honest cost:
+   *  the history is what has gone missing. Once only, and only while an id is
+   *  held, so a CLI that fails this way for any other reason cannot loop. */
+  private healStaleThread(message: string): boolean {
+    if (!this.sessionId || !CONVERSATION_GONE.test(message)) return false;
+    const text = this.pending;
+    if (!text) return false;
+    this.sessionId = null;
+    this.pending = null;
+    this.replaying = true;
+    this.onForget();
+    void this.launch(text, null);
+    return true;
   }
 
   /** One JSONL line from `codex exec --json`. */
@@ -276,13 +324,15 @@ export class OneshotTransport implements CompanionTransport {
         }
         return;
       }
-      case "turn.failed":
-        this.host.emit({
-          kind: "error",
-          message: msg.error?.message || "The agent ended the turn with an error.",
-        });
+      case "turn.failed": {
+        const message = msg.error?.message || "The agent ended the turn with an error.";
+        // Silent on purpose when it heals: the user asked a question, and a
+        // dead thread id is Canopy's problem to fix, not a failure to report.
+        if (this.healStaleThread(message)) return;
+        this.host.emit({ kind: "error", message });
         this.host.emit({ kind: "turnEnd" });
         return;
+      }
       case "turn.completed":
         this.host.emit({ kind: "turnEnd" });
         return;
@@ -292,6 +342,7 @@ export class OneshotTransport implements CompanionTransport {
   }
 
   async send(text: string): Promise<void> {
+    this.pending = text;
     await this.launch(text, this.sessionId);
   }
 
@@ -310,6 +361,8 @@ export function startOneshot(
   opts: {
     sessionId: string | null;
     onSession: (id: string) => void;
+    /** Drop the stored id: the conversation it named is gone. */
+    onForget?: () => void;
     cwd?: string;
     env?: [string, string][];
   },
@@ -338,8 +391,11 @@ export function startOneshot(
           }
         } else if (out.kind === "exit") {
           // A turn ending is the process ending, so this is normal — never the
-          // "the agent stopped" that a streaming tier's exit means.
-          host.emit({ kind: "turnEnd" });
+          // "the agent stopped" that a streaming tier's exit means. Except when
+          // the transport has already abandoned this attempt and started the
+          // turn again on a fresh thread: ending the turn here would close the
+          // reply the replacement is about to write into.
+          if (!transport.consumeReplay()) host.emit({ kind: "turnEnd" });
         }
       },
     );
@@ -348,6 +404,7 @@ export function startOneshot(
     host,
     sessionId: opts.sessionId,
     onSession: opts.onSession,
+    onForget: opts.onForget,
     launch: spawn,
   });
   host.emit({ kind: "ready" });

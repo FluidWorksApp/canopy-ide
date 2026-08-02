@@ -168,17 +168,19 @@ describe("recovering a reply from a redrawing terminal", () => {
 });
 
 describe("the oneshot protocol (codex)", () => {
-  function oneshot() {
+  function oneshot(sessionId: string | null = null) {
     const host = collector();
     const sent: { message: string; sessionId: string | null }[] = [];
     let learned: string | null = null;
+    let forgotten = 0;
     const t = new OneshotTransport({
       host,
-      sessionId: null,
+      sessionId,
       onSession: (id) => void (learned = id),
+      onForget: () => void (forgotten += 1),
       launch: async (message, sessionId) => void sent.push({ message, sessionId }),
     });
-    return { t, host, sent, learned: () => learned };
+    return { t, host, sent, learned: () => learned, forgotten: () => forgotten };
   }
 
   it("learns the thread id from the first turn", () => {
@@ -195,6 +197,68 @@ describe("the oneshot protocol (codex)", () => {
     o.t.handleLine(line({ type: "thread.started", thread_id: "T1" }));
     await o.t.send("second question");
     expect(o.sent).toEqual([{ message: "second question", sessionId: "T1" }]);
+  });
+
+  it("starts over when the thread it resumed has gone, without telling the user", async () => {
+    // The failure that left codex companions dead: the CLI keeps the id and
+    // loses the rollout behind it, so every turn fails against the same dead
+    // thread. The oneshot tier cannot fall back on companionSession's stale-
+    // resume heal — it emits `ready` the moment the transport exists, so that
+    // branch is unreachable here.
+    const o = oneshot("DEAD");
+    await o.t.send("can you start the website");
+    o.t.handleLine(
+      line({
+        type: "turn.failed",
+        error: {
+          message:
+            "thread/resume: thread/resume failed: no rollout found for thread id DEAD (code -32600)",
+        },
+      }),
+    );
+    // The same question, asked again as a first meeting.
+    expect(o.sent).toEqual([
+      { message: "can you start the website", sessionId: "DEAD" },
+      { message: "can you start the website", sessionId: null },
+    ]);
+    expect(o.forgotten()).toBe(1);
+    // Nothing shown: the user asked a question, and a dead id is Canopy's
+    // problem to fix rather than a failure to report.
+    expect(o.host.events).not.toContainEqual(
+      expect.objectContaining({ kind: "error" }),
+    );
+    // The abandoned attempt's exit must not end the turn the replacement is
+    // about to answer into.
+    expect(o.t.consumeReplay()).toBe(true);
+    expect(o.t.consumeReplay()).toBe(false);
+  });
+
+  it("only heals once, so a CLI that always says that cannot loop", async () => {
+    const o = oneshot("DEAD");
+    await o.t.send("hello");
+    const gone = line({
+      type: "turn.failed",
+      error: { message: "no rollout found for thread id DEAD" },
+    });
+    o.t.handleLine(gone);
+    o.t.handleLine(gone);
+    expect(o.sent).toHaveLength(2);
+    expect(o.host.events).toContainEqual(
+      expect.objectContaining({ kind: "error" }),
+    );
+  });
+
+  it("reports an ordinary turn failure rather than swallowing it", async () => {
+    const o = oneshot("T1");
+    await o.t.send("hello");
+    o.t.handleLine(
+      line({ type: "turn.failed", error: { message: "usage limit reached" } }),
+    );
+    expect(o.sent).toHaveLength(1);
+    expect(o.host.events).toContainEqual({
+      kind: "error",
+      message: "usage limit reached",
+    });
   });
 
   it("reads the reply out of a completed agent_message", () => {
