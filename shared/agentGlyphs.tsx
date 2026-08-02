@@ -125,6 +125,27 @@ const BRAND: Record<string, (p: P) => ReactElement> = {
   omp: OmpIcon,
 }
 
+/** The hue each mark is drawn in, as data.
+ *
+ *  The marks above already carry these as `fill`, which is right for a logo —
+ *  a brand colour is the one thing in this app that is NOT a skin token,
+ *  because it does not belong to us. But a surface that wants to say "this is
+ *  Claude" in more than a glyph — a label beside it, a rule under a card —
+ *  needs the value rather than the SVG, and reading it back out of a rendered
+ *  node is not a thing a layout can do.
+ *
+ *  Only the marks that have one: opencode draws in currentColor and oh-my-pi
+ *  in a three-stop gradient, and inventing a flat colour for either would be
+ *  us picking a brand colour on their behalf. Absent means "use the skin's
+ *  accent", which is what every caller should fall back to. */
+export const AGENT_BRAND_COLOR: Record<string, string> = {
+  claude: '#D97757',
+  codex: '#7A9DFF',
+  gemini: '#8E75B2',
+  amp: '#F34E3F',
+  aider: '#14b014',
+}
+
 /** An agent CLI's brand mark by registry id, matching the desktop's AgentIcon:
  *  a real logo where one exists, else a terminal glyph. */
 export function AgentGlyph({ agent, s = 20 }: { agent: string; s?: number }) {
