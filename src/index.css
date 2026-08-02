@@ -15221,7 +15221,7 @@ a.btn-sm {
    badge over it. Tabular figures so 1 → 10 doesn't shuffle the glyph sideways
    by a hair on every arrival. */
 .notif-bell-count {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 650;
   line-height: 1;
   font-variant-numeric: tabular-nums;
@@ -21779,14 +21779,14 @@ a.btn-sm {
 
 .agv-title h1 {
   margin: 0;
-  font-size: 21px;
+  font-size: var(--fs-xl);
   font-weight: 620;
   letter-spacing: -0.01em;
 }
 
 .agv-project {
   color: var(--text-faint);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   align-self: flex-end;
   padding-bottom: 3px;
 }
@@ -21808,7 +21808,7 @@ a.btn-sm {
   corner-shape: squircle;
   background: var(--bg-raised);
   color: var(--text-dim);
-  font-size: 11.5px;
+  font-size: var(--fs-sm);
 }
 
 .agv-share-label {
@@ -21817,7 +21817,7 @@ a.btn-sm {
 
 .agv-share-count {
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
 }
 
 .agv-stats {
@@ -21836,7 +21836,7 @@ a.btn-sm {
 }
 
 .agv-stat-value {
-  font-size: 23px;
+  font-size: var(--fs-xl);
   font-weight: 600;
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
@@ -21844,7 +21844,7 @@ a.btn-sm {
 
 .agv-stat-label {
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.6px;
 }
@@ -21883,7 +21883,7 @@ a.btn-sm {
 
 .agv-section-head h2 {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.7px;
@@ -21892,7 +21892,7 @@ a.btn-sm {
 
 .agv-section-note {
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 /* One running session. Auto-fill rather than a fixed column count: on a narrow
@@ -21944,7 +21944,7 @@ a.btn-sm {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   font-weight: 560;
   white-space: nowrap;
   overflow: hidden;
@@ -21957,7 +21957,7 @@ a.btn-sm {
 }
 
 .agv-card-state {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-dim);
 }
 
@@ -21985,7 +21985,7 @@ a.btn-sm {
   corner-shape: squircle;
   background: var(--bg-deep);
   color: var(--text-dim);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   line-height: 17px;
   white-space: nowrap;
   overflow: hidden;
@@ -21994,7 +21994,7 @@ a.btn-sm {
 
 .agv-chip-branch {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-xs);
 }
 
 .agv-chip-attention {
@@ -22022,7 +22022,7 @@ a.btn-sm {
 .agv-task {
   margin: 0;
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -22065,7 +22065,7 @@ a.btn-sm {
 
 .agv-metric {
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -22087,7 +22087,7 @@ a.btn-sm {
 .agv-empty p {
   margin: 0;
   max-width: 44ch;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
 }
 
@@ -22119,7 +22119,7 @@ a.btn-sm {
   padding: 7px 12px;
   border-radius: var(--r-sm);
   corner-shape: squircle;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .agv-term {
@@ -22141,7 +22141,7 @@ a.btn-sm {
 
 .agv-claim-paths {
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -22182,18 +22182,18 @@ a.btn-sm {
 }
 
 .agv-past-agent {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   font-weight: 540;
 }
 
 .agv-past-when {
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
 }
 
 .agv-past-prompt {
   color: var(--text-dim);
-  font-size: 11.5px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -22214,7 +22214,7 @@ a.btn-sm {
   margin: 0;
   padding: 6px 2px 2px;
   color: var(--text-faint);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 /* Integrations, at page density: one row per CLI with its brand mark. */
@@ -22237,7 +22237,7 @@ a.btn-sm {
 
 .hook-setup-roomy .hook-setup-name {
   min-width: 140px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .hook-setup-mark {
@@ -22253,7 +22253,7 @@ a.btn-sm {
   background: var(--bg-deep);
   color: var(--text-dim);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   white-space: pre-wrap;
 }
@@ -22261,12 +22261,12 @@ a.btn-sm {
 .agv-hook-path {
   margin: 10px 0 0;
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
 }
 
 .agv-hook-path code {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-dim);
 }
