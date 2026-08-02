@@ -4,6 +4,7 @@
 // renders these, the loop (prLoop.ts) acts on them, and both are testable
 // without a GitHub round trip.
 import type * as ipc from "./ipc";
+import { basename } from "./paths";
 
 /** Whose words an agent may act on. A review comment becomes an instruction to
  *  something with push access, so anonymous drive-by comments are read by the
@@ -369,10 +370,10 @@ export function alreadyPosted(
 ): boolean {
   const text = sameText(finding.body);
   if (!text) return false;
-  const file = finding.path.split("/").pop();
+  const file = basename(finding.path);
   return threads.some(
     (t) =>
-      t.path.split("/").pop() === file &&
+      basename(t.path) === file &&
       t.comments.some((c) => sameText(c.body) === text),
   );
 }
@@ -431,8 +432,8 @@ export function resolvePath(
   if (paths.includes(want)) return want;
   const suffix = paths.filter((p) => p.endsWith(`/${want}`));
   if (suffix.length === 1) return suffix[0];
-  const base = want.split("/").pop();
-  const byBase = paths.filter((p) => p.split("/").pop() === base);
+  const base = basename(want);
+  const byBase = paths.filter((p) => basename(p) === base);
   return byBase.length === 1 ? byBase[0] : null;
 }
 

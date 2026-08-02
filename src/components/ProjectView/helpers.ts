@@ -7,6 +7,7 @@ import type { Project } from "../../projects";
 import type { TabStatus } from "../../tabGroups";
 import { getSettings } from "../../settings";
 import { claimLabel } from "../../claims";
+import { basename } from "../../paths";
 
 export type SideTab =
   | "files"
@@ -470,7 +471,7 @@ export function tabDisplayLabel(t: SubTab): string {
       return t.branch.branch;
     case "agent":
       return `${t.agent} · ${
-        t.digest?.branch ?? t.cwd.split("/").filter(Boolean).pop() ?? t.agent
+        t.digest?.branch ?? (basename(t.cwd) || t.agent)
       }`;
     case "chat":
       return t.name;

@@ -13,6 +13,7 @@ import { DiffView as GitDiffView, DiffModeEnum } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import { createPatch } from "diff";
 import { Button } from "./ui";
+import { basename } from "../paths";
 
 export interface DiffAction {
   label: string;
@@ -32,7 +33,7 @@ interface DiffViewProps {
 
 export function DiffView({ path, title, original, modified, actions, agentBar }: DiffViewProps) {
   const [split, setSplit] = useState(true);
-  const name = path.split("/").pop() ?? path;
+  const name = basename(path) || path;
 
   // Patch generation is the expensive part; only redo it when content changes.
   const patch = useMemo(

@@ -193,6 +193,7 @@ import {
   type TaskChoice,
 } from "../../taskMenu";
 import { viewerKindFor } from "../viewers";
+import { basename } from "../../paths";
 import {
   blockForOpen,
   looksBinary,
@@ -210,7 +211,7 @@ import { BranchSwitchProvider, useBranchSwitch } from "../../useBranchSwitch";
 import { askDialog } from "../../branchSwitch";
 import { useTabDragGroups, applyOrder } from "../../tabDrag";
 import { agentIdForCommand, identifyAgent } from "../../agentIdentity";
-import { tabNamesByPty } from "../../agentDisplayName";
+import { tabNamesByPty, shellTitle } from "../../agentDisplayName";
 import {
   modelCommandLine,
   modelSwitchFor,
@@ -683,7 +684,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  never reach the screen, only labels do.) */
   const leaveWorktreeEnv = useCallback(
     async (env: { path: string }) => {
-      const name = env.path.split("/").pop() || env.path;
+      const name = basename(env.path) || env.path;
       const action = await ask(
         askDialog({
           title: "Go back to your own checkout?",
@@ -725,7 +726,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const action = await ask(
         askDialog({
           title: "The workspace this project was using is gone",
-          body: `${env.path.split("/").pop() || env.path} isn't there any more, so this project's files come from your own checkout. Nothing you had open has been touched.`,
+          body: `${basename(env.path) || env.path} isn't there any more, so this project's files come from your own checkout. Nothing you had open has been touched.`,
           detail: `${env.path} — was on ${env.branch}`,
           choices: [
             {
@@ -1303,12 +1304,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }
         session.offerTo(
           to,
-          relPath.split("/").pop() ?? relPath,
+          basename(relPath) || relPath,
           languageForPath(abs) ?? null,
         );
         const opener =
           relay.status.members.find((m) => m.id === to)?.name ?? "A teammate";
-        onNotice(`${opener} opened ${relPath.split("/").pop() ?? relPath}`);
+        onNotice(`${opener} opened ${basename(relPath) || relPath}`);
       };
       relay.collab.shareProject(root, project.name, member);
       onNotice(
@@ -3894,7 +3895,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // the user.
         console.warn("open failed", path, err);
         onNotice(
-          `Can't open ${path.split("/").pop()} — ${
+          `Can't open ${basename(path)} — ${
             String(err).includes("outside")
               ? "it's outside this project's folders."
               : "it may have been moved or deleted."
@@ -3938,7 +3939,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           type: "file",
           file: {
             path,
-            name: path.split("/").pop() ?? path,
+            name: basename(path) || path,
             kind,
             view:
               diffOriginal != null
@@ -6114,7 +6115,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         title: t.customTitle ?? t.title,
         ptyId: t.ptyId as number,
         agentId: (byProc ?? byCommand)?.id ?? "agent",
-        dir: t.cwd.split("/").filter(Boolean).pop() ?? "",
+        dir: basename(t.cwd) ?? "",
       };
     });
 
@@ -7577,7 +7578,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   } else closeTab(tab.id);
                 }}
                 onTitle={(title) =>
-                  patchTab(tab.id, { title: title || tab.command || "shell" })
+                  patchTab(tab.id, {
+                    // cmd.exe titles itself with its own full path, which every
+                    // chip then truncates to "C:\\Windows\\syste…".
+                    title: shellTitle(title || tab.command || "shell"),
+                  })
                 }
                 onNotify={(notice) => {
                   // Only a ring if you aren't already looking at it — a ring on
@@ -7769,7 +7774,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                       {r.prompt || <em>(no prompt captured)</em>}
                     </span>
                     <span className="resume-dir">
-                      {r.cwd.split("/").filter(Boolean).pop()}
+                      {basename(r.cwd)}
                     </span>
                     {r.digest.branch && (
                       <span className="resume-branch">⑂ {r.digest.branch}</span>
@@ -7828,7 +7833,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                             {cli?.name ?? t.title}
                           </span>
                           <span className="resume-dir">
-                            {t.cwd.split("/").filter(Boolean).pop()}
+                            {basename(t.cwd)}
                           </span>
                           <Button size="sm"
                             onClick={(e) => {
@@ -7867,7 +7872,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                           )}
                         </span>
                         <span className="resume-dir">
-                          {t.cwd.split("/").filter(Boolean).pop()}
+                          {basename(t.cwd)}
                         </span>
                         {t.run && <span className="resume-branch">run</span>}
                         <Button size="sm"
@@ -8070,7 +8075,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       {rootCreate && (
         <Dialog
           variant="accent"
-          title={`New ${rootCreate.kind === "dir" ? "folder" : "file"} in ${rootCreate.dir.split("/").pop()}`}
+          title={`New ${rootCreate.kind === "dir" ? "folder" : "file"} in ${basename(rootCreate.dir)}`}
           meta={rootCreate.dir}
           dismissLabel="Cancel"
           onDismiss={() => setRootCreate(null)}

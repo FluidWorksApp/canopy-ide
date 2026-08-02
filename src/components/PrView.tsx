@@ -91,6 +91,7 @@ import {
   type PrLoop,
 } from "../prLoop";
 import { Button } from "./ui";
+import { basename } from "../paths";
 // NB: PR diffs arrive as real patches from `gh pr diff`, so they go straight
 // into the renderer. Working-tree diffs (components/DiffView.tsx) have to build
 // their patch first — see the note there about Monaco's diff not computing.
@@ -2517,7 +2518,7 @@ export function PrView({
                             {d.blocking ? "blocking" : "nit"}
                           </span>
                           <span className="pr-draft-where">
-                            {(at?.path ?? d.path).split("/").pop()}:
+                            {basename((at?.path ?? d.path))}:
                             {at?.line ?? d.line}
                             {!at && " ·  not in this diff"}
                           </span>
@@ -2901,7 +2902,7 @@ const ThreadCard = memo(function ThreadCard({
           onClick={() => onJump(t.path)}
           title={t.path}
         >
-          {t.path.split("/").pop()}
+          {basename(t.path)}
           {t.line ? `:${t.line}` : ""}
         </span>
         {t.resolved && <span className="pr-thread-tag">resolved</span>}
@@ -3000,7 +3001,7 @@ const DraftCard = memo(function DraftCard({
           </span>
         )}
         <span className="pr-thread-where">
-          {d.path.split("/").pop()}:{d.line}
+          {basename(d.path)}:{d.line}
         </span>
         <span className={`pr-thread-tag ${d.blocking ? "is-blocking" : ""}`}>
           {d.blocking ? "blocking" : "nit"}

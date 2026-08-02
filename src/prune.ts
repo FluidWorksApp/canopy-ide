@@ -15,6 +15,7 @@
 // because a bulk delete that is one preset away from dropping a day's work is
 // worse than no bulk delete at all.
 import type * as ipc from "./ipc";
+import { basename } from "./paths";
 
 /** How much you'd lose by taking a branch away, in the two units that matter.
  *  Both zero means the work exists somewhere else — on the remote, or on the
@@ -83,7 +84,7 @@ export interface PruneCandidate {
 
 /** The folder's own name — what a person calls a workspace. */
 export const baseName = (path: string) =>
-  path.replace(/\/+$/, "").split("/").pop() || path;
+  basename(path) || path;
 
 /**
  * Why git kept something, in words. Only the refusals a bulk prune actually

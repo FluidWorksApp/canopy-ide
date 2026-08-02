@@ -2,6 +2,7 @@
 // PR's head branch already lives in (if any), and the opening context an agent
 // gets when a PR is handed to it for review.
 import type * as ipc from "./ipc";
+import { basename } from "./paths";
 
 /** A worktree already holding this PR's head branch, if one exists — so a
  *  second review reuses it instead of stacking another checkout. */
@@ -89,5 +90,5 @@ export function repoLabel(remoteUrl: string, repoPath: string): string {
   const tail = url.replace(/^[a-z+]+:\/\/[^/]+\//i, "").replace(/^[^@]*@[^:]+:/, "");
   const parts = tail.split("/").filter(Boolean);
   if (parts.length >= 2) return parts.slice(-2).join("/");
-  return repoPath.replace(/\/+$/, "").split("/").pop() ?? "";
+  return basename(repoPath.replace(/\/+$/, "")) ?? "";
 }

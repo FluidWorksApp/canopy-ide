@@ -10,6 +10,7 @@
 // a line break, a length no filename has, or a pasted image. Any of those and
 // the palette stops offering matches and offers the two things you can do with
 // a sentence — run it, or research it.
+import { basename } from "./paths";
 
 /** Past this many characters, a query is prose. Deliberately generous: real
  *  searches are short ("prview", "max canon", "browser watchdog"), and the cost
@@ -49,7 +50,7 @@ export interface SpotAttachment {
 
 /** The file name alone, for the chip's label. */
 export function attachmentLabel(path: string): string {
-  return path.split("/").pop() || path;
+  return basename(path) || path;
 }
 
 /** The brief an action carries, with the attachments named in it.

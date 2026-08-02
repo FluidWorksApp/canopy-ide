@@ -8,6 +8,7 @@ import type { Notify, RelayHandle } from "../types";
 import { TeamIcon } from "./icons";
 import { offerFileTo } from "./TeamPanel";
 import { Button } from "./ui";
+import { basename } from "../paths";
 
 interface ChatViewProps {
   /** Member id for a DM; null for the everyone channel. */
@@ -70,7 +71,7 @@ export function ChatView({ peer, title, relay, onNotice }: ChatViewProps) {
             void ipc
               .relayOfferFile(peerRef.current, path)
               .then(() =>
-                onNotice(`Offered ${path.split("/").pop()} to ${title} — sends when they accept.`, "success"),
+                onNotice(`Offered ${basename(path)} to ${title} — sends when they accept.`, "success"),
               )
               .catch((err) => onNotice(String(err), "error"));
           }

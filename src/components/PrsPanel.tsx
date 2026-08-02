@@ -13,6 +13,7 @@ import { refresh } from "../prWatchStore";
 import { usePrWatch } from "../usePrWatch";
 import { PullRequestIcon } from "./icons";
 import { Button } from "./ui";
+import { basename } from "../paths";
 
 interface PrsPanelProps {
   /** This project's repos. The panel shows these and nothing else — a PR queue
@@ -92,7 +93,7 @@ export function PrsPanel({ localRepos, onOpen, projectFor }: PrsPanelProps) {
         <div className="prs-errors">
           {errorList.map(([repo, msg]) => (
             <div key={repo} className="prs-error" title={repo}>
-              {repo.split("/").pop()}: {msg}
+              {basename(repo)}: {msg}
             </div>
           ))}
         </div>

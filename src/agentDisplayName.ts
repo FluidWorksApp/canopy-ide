@@ -36,6 +36,30 @@ const GENERIC = new Set([
   "node",
 ]);
 
+/**
+ * A terminal's own title, shortened to something a chip can hold.
+ *
+ * On Unix a shell reports "/bin/zsh" or the directory it is in — short either
+ * way. cmd.exe reports its own full path, so a Windows terminal was titled
+ * `C:\Windows\system32\cmd.exe`, which every surface that shows it then
+ * truncated to `C:\Windows\syste…`: forty characters spent saying nothing,
+ * and two shells side by side reading identically. The tail is the part that
+ * identifies it, so keep that.
+ *
+ * Only for path-shaped titles. Anything a CLI paints ("✳ Fix the redirect")
+ * is left exactly as it is — those are already the good case, and a path
+ * separator in prose must not truncate the prose.
+ */
+export function shellTitle(title: string): string {
+  const t = title.trim();
+  // A drive letter or a UNC root. Unix paths are left alone: "/bin/zsh" is
+  // already short, it is what macOS has always shown, and shortening it to
+  // "zsh" would land in the GENERIC list above and rename every shell row.
+  if (!/^[a-zA-Z]:[\\/]|^\\\\/.test(t)) return t;
+  const tail = t.split(/[\\/]/).filter(Boolean).pop();
+  return tail && tail.length > 0 ? tail : t;
+}
+
 const clean = (s?: string) => (s ?? "").trim();
 
 /** True when an auto title says nothing the CLI's name doesn't already say. */

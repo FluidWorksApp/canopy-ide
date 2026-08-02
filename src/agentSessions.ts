@@ -11,6 +11,7 @@
 // It stays in AgentsPanel, which is always mounted.
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as ipc from "./ipc";
+import { basename } from "./paths";
 import { identifyAgent, observeForLearning, type AgentIdentity } from "./agentIdentity";
 import { POLICY, agentLife } from "../shared/agentLife";
 import type { Life } from "../shared/agentLife";
@@ -189,7 +190,7 @@ export function useAgentSessions(opts: {
         session: s,
         agent: identifyAgent(s.agent_hint, digest),
         digest,
-        dir: (s.cwd || "").split("/").filter(Boolean).pop() ?? "",
+        dir: basename(s.cwd),
       };
     });
   }, [stats, digests, thisInstance, learnedTick]);

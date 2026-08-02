@@ -9,6 +9,7 @@ import { Dialog } from "./Dialog";
 import { WindowedList } from "./WindowedList";
 import { Button } from "./ui";
 import { matches, withShortcut } from "../shortcuts";
+import { basename } from "../paths";
 
 /** Must match .change-row's CSS height — the windowing spacers are the scrollbar. */
 const ROW_H = 26;
@@ -161,7 +162,7 @@ export function ChangesPanel({
       {discarding && (
         <Dialog
           variant="danger"
-          title={`${discarding.file.untracked ? "Delete" : "Discard changes to"} ${discarding.file.path.split("/").pop()}?`}
+          title={`${discarding.file.untracked ? "Delete" : "Discard changes to"} ${basename(discarding.file.path)}?`}
           body={
             discarding.file.untracked
               ? "This file isn't in git yet, so deleting it is the only way to discard it — and nothing can bring it back."
@@ -304,7 +305,7 @@ export function ChangesPanel({
                   <span className={`change-kind change-${kindClass(f)}`}>
                     {badge(f)}
                   </span>
-                  <span className="change-name">{f.path.split("/").pop()}</span>
+                  <span className="change-name">{basename(f.path)}</span>
                   <span className="change-dir">
                     {f.path.split("/").slice(0, -1).join("/")}
                   </span>
