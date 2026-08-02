@@ -288,6 +288,48 @@ describe("the oneshot protocol (codex)", () => {
     expect(o.host.events).toContainEqual({ kind: "reply", text: "CODEX-OK" });
   });
 
+  it("reads the MCP tool name from the field codex actually sends", () => {
+    // Verified against codex-cli 0.146.0. The event is:
+    //   {"type":"mcp_tool_call","server":"canopy","tool":"canopy_project",…}
+    // We read `item.name`, which is never set on these, so the companion ran
+    // tools on codex and showed an empty trail — a panel that answered from
+    // nowhere. The server is dropped when it is our own: "canopy" beside every
+    // canopy_* call is a word repeated on every line.
+    const o = oneshot();
+    o.t.handleLine(
+      line({
+        type: "item.completed",
+        item: {
+          id: "item_1",
+          type: "mcp_tool_call",
+          server: "canopy",
+          tool: "canopy_project",
+          status: "completed",
+        },
+      }),
+    );
+    expect(o.host.events).toContainEqual({
+      kind: "tool",
+      name: "canopy_project",
+      detail: undefined,
+    });
+  });
+
+  it("names the server when the call is not to ours", () => {
+    const o = oneshot();
+    o.t.handleLine(
+      line({
+        type: "item.completed",
+        item: { type: "mcp_tool_call", server: "MCP_DOCKER", tool: "list_containers" },
+      }),
+    );
+    expect(o.host.events).toContainEqual({
+      kind: "tool",
+      name: "list_containers",
+      detail: "MCP_DOCKER",
+    });
+  });
+
   it("surfaces shell and MCP calls as tool chips", () => {
     const o = oneshot();
     o.t.handleLine(

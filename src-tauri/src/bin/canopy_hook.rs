@@ -1771,7 +1771,9 @@ fn parent_of(pid: u32) -> Option<u32> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let out = std::process::Command::new("ps")
+        // Absolute: this runs in a sidecar started by a GUI-launched app, where
+        // PATH may not contain /bin at all (see spawnPathGuard).
+        let out = std::process::Command::new("/bin/ps")
             .args(["-o", "ppid=", "-p", &pid.to_string()])
             .output()
             .ok()?;
@@ -1809,7 +1811,7 @@ fn read_environ(pid: u32) -> Option<Vec<String>> {
         // `ps eww` prints the environment after the command, space separated.
         // Only our own processes are readable, which is the whole population we
         // care about — and the reason this needs no privileges.
-        let out = std::process::Command::new("ps")
+        let out = std::process::Command::new("/bin/ps")
             .args(["eww", "-o", "command=", "-p", &pid.to_string()])
             .output()
             .ok()?;

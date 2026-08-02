@@ -295,7 +295,14 @@ export class OneshotTransport implements CompanionTransport {
     let msg: {
       type?: string;
       thread_id?: string;
-      item?: { type?: string; text?: string; name?: string; command?: string };
+      item?: {
+        type?: string;
+        text?: string;
+        name?: string;
+        tool?: string;
+        server?: string;
+        command?: string;
+      };
       error?: { message?: string };
     };
     try {
@@ -319,8 +326,24 @@ export class OneshotTransport implements CompanionTransport {
           this.host.emit({ kind: "reply", text: item.text });
         } else if (item.type === "command_execution" && item.command) {
           this.host.emit({ kind: "tool", name: "Shell", detail: item.command.slice(0, 60) });
-        } else if (item.type === "mcp_tool_call" && item.name) {
-          this.host.emit({ kind: "tool", name: item.name });
+        } else if (item.type === "mcp_tool_call") {
+          // Codex calls the field `tool`, with the server beside it:
+          //   {"type":"mcp_tool_call","server":"canopy","tool":"canopy_project"}
+          // We read `name`, which is undefined on every one of these — so the
+          // companion ran tools on codex and showed no trail at all, and the
+          // panel looked like it had answered out of thin air. `name` stays as
+          // a fallback rather than a replacement: it costs nothing, and this is
+          // the second field name this event has had.
+          const name = item.tool ?? item.name;
+          if (name) {
+            this.host.emit({
+              kind: "tool",
+              name,
+              // Only when it is not our own server: "canopy" beside every
+              // canopy_* call is a word repeated on every line of the trail.
+              detail: item.server && item.server !== "canopy" ? item.server : undefined,
+            });
+          }
         }
         return;
       }
