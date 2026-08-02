@@ -393,6 +393,25 @@ pub struct ChromiumManager {
     inner: tokio::sync::Mutex<Option<Running>>,
     /// tab id -> the CDP session driving that tab's target.
     sessions: Mutex<HashMap<String, Session>>,
+    /// tab id -> the cast that should be running there. This exists because a
+    /// started cast is not a delivering cast: a cast attached in the same
+    /// breath as a navigation dies with the swapped-out renderer, silently —
+    /// Chrome answers OK and then sends nothing, ever. The watchdog and the
+    /// navigation hook below restart from this record.
+    casts: Mutex<HashMap<String, CastState>>,
+}
+
+struct CastState {
+    width: u32,
+    height: u32,
+    /// Bumped on every (re)start, so a stale watchdog can tell its cast was
+    /// already superseded and stand down.
+    epoch: u64,
+    /// Whether this cast has delivered at least one frame.
+    fed: bool,
+    /// Consecutive restarts that never produced a frame. Bounded, so a pane
+    /// that genuinely cannot cast doesn't restart forever.
+    barren: u32,
 }
 
 struct Running {
@@ -587,7 +606,13 @@ impl ChromiumManager {
     ///
     /// Re-called on resize: Chrome scales frames to the max box given, so a
     /// stale size means a blurry or letterboxed pane rather than a broken one.
-    pub async fn start_cast(&self, tab_id: &str, width: u32, height: u32) -> Result<(), String> {
+    pub async fn start_cast(
+        &self,
+        app: &tauri::AppHandle,
+        tab_id: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
         let cdp = self.live().await?;
         let s = self.session(tab_id)?;
         // Headless Chrome only casts the ACTIVE page, and a target made by
@@ -629,6 +654,22 @@ impl ChromiumManager {
                         "cast started for {tab_id} at {width}x{height} (attempt {})",
                         attempt + 1
                     );
+                    let epoch = {
+                        let mut casts = self.casts.lock().unwrap();
+                        let c = casts.entry(tab_id.to_string()).or_insert(CastState {
+                            width,
+                            height,
+                            epoch: 0,
+                            fed: false,
+                            barren: 0,
+                        });
+                        c.width = width;
+                        c.height = height;
+                        c.epoch += 1;
+                        c.fed = false;
+                        c.epoch
+                    };
+                    arm_cast_watchdog(app, tab_id.to_string(), epoch);
                     return Ok(());
                 }
                 Err(e) => last = e,
@@ -641,6 +682,7 @@ impl ChromiumManager {
     /// Stop streaming — the tab went to the background, or the pane is covered.
     /// Frames for a pane nobody can see are pure cost.
     pub async fn stop_cast(&self, tab_id: &str) -> Result<(), String> {
+        self.casts.lock().unwrap().remove(tab_id);
         let cdp = self.live().await?;
         let s = self.session(tab_id)?;
         cdp.call("Page.stopScreencast", serde_json::json!({}), Some(&s.id))
@@ -810,6 +852,7 @@ impl ChromiumManager {
     }
 
     pub async fn close(&self, tab_id: &str) -> Result<(), String> {
+        self.casts.lock().unwrap().remove(tab_id);
         let Some(s) = self.sessions.lock().unwrap().remove(tab_id) else {
             return Ok(()); // closing a tab that was never open is not an error
         };
@@ -860,6 +903,49 @@ impl ChromiumManager {
 /// screenshots have their own path (snapshot.rs) that is not lossy.
 const SCREENCAST_QUALITY: i64 = 60;
 
+/// How long a freshly started cast gets to deliver its first frame before it
+/// is declared dead and restarted. Observed live: a healthy cast's first frame
+/// lands within ~200 ms; one attached to a renderer the navigation swapped out
+/// never delivers at all.
+const FIRST_FRAME_DEADLINE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// How many barren restarts before giving up. A pane that truly cannot cast
+/// (engine tearing down, tab closing) should not restart forever.
+const MAX_BARREN_RESTARTS: u32 = 4;
+
+/// Check, after a grace period, that the cast actually fed the pane — and
+/// restart it if not. "Started" is Chrome's word, not a delivery guarantee:
+/// the POC for this pipeline watched casts report OK and then send nothing
+/// because the page's renderer was swapped out from under them.
+fn arm_cast_watchdog(app: &tauri::AppHandle, tab_id: String, epoch: u64) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        use tauri::Manager;
+        tokio::time::sleep(FIRST_FRAME_DEADLINE).await;
+        let mgr = app.state::<ChromiumManager>();
+        let restart = {
+            let mut casts = mgr.casts.lock().unwrap();
+            match casts.get_mut(&tab_id) {
+                // Same cast, still starving: restart unless it has proven
+                // barren too many times already.
+                Some(c) if c.epoch == epoch && !c.fed => {
+                    c.barren += 1;
+                    (c.barren <= MAX_BARREN_RESTARTS).then_some((c.width, c.height, c.barren))
+                }
+                // Fed, superseded, or stopped: this watchdog's job is done.
+                _ => None,
+            }
+        };
+        if let Some((w, h, n)) = restart {
+            log::warn!(
+                target: "chromium",
+                "cast for {tab_id} delivered no frame in {FIRST_FRAME_DEADLINE:?} — restarting ({n}/{MAX_BARREN_RESTARTS})"
+            );
+            let _ = mgr.start_cast(&app, &tab_id, w, h).await;
+        }
+    });
+}
+
 /// Turn the frame stream on for a tab, and pump frames to the frontend.
 fn pump_frames(app: tauri::AppHandle, mut rx: tokio::sync::mpsc::UnboundedReceiver<CdpEvent>) {
     tauri::async_runtime::spawn(async move {
@@ -894,6 +980,10 @@ fn pump_frames(app: tauri::AppHandle, mut rx: tokio::sync::mpsc::UnboundedReceiv
                         if seen_frames.insert(ev.session.clone()) {
                             log::info!(target: "chromium", "first frame for tab {tab_id}");
                         }
+                        if let Some(c) = mgr.casts.lock().unwrap().get_mut(&tab_id) {
+                            c.fed = true;
+                            c.barren = 0;
+                        }
                         let _ = app.emit(
                             "chromium:frame",
                             serde_json::json!({
@@ -907,11 +997,16 @@ fn pump_frames(app: tauri::AppHandle, mut rx: tokio::sync::mpsc::UnboundedReceiv
                 }
                 // The page moved: the URL bar and the history buttons are the
                 // frontend's, and it cannot see a navigation it did not cause.
+                // Top frame only — an iframe navigating is not the page moving.
                 "Page.frameNavigated" => {
-                    let url = ev
-                        .params
-                        .get("frame")
-                        .and_then(|f| f.get("url"))
+                    let Some(frame) = ev.params.get("frame") else {
+                        continue;
+                    };
+                    if frame.get("parentId").is_some() {
+                        continue;
+                    }
+                    let url = frame
+                        .get("url")
                         .and_then(|u| u.as_str())
                         .unwrap_or_default()
                         .to_string();
@@ -921,6 +1016,21 @@ fn pump_frames(app: tauri::AppHandle, mut rx: tokio::sync::mpsc::UnboundedReceiv
                             "chromium:nav",
                             serde_json::json!({ "tabId": tab_id, "url": url }),
                         );
+                        // A cross-process navigation kills a running cast
+                        // without a word; restart it on the new document.
+                        let restart = mgr
+                            .casts
+                            .lock()
+                            .unwrap()
+                            .get(&tab_id)
+                            .map(|c| (c.width, c.height));
+                        if let Some((w, h)) = restart {
+                            let app = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let mgr = app.state::<ChromiumManager>();
+                                let _ = mgr.start_cast(&app, &tab_id, w, h).await;
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -1058,7 +1168,7 @@ pub async fn chromium_start_cast(
 ) -> Result<(), String> {
     use tauri::Manager;
     app.state::<ChromiumManager>()
-        .start_cast(&tab_id, width, height)
+        .start_cast(&app, &tab_id, width, height)
         .await
 }
 
@@ -1074,8 +1184,13 @@ pub async fn chromium_stop_cast(app: tauri::AppHandle, tab_id: String) -> Result
 fn picker_source() -> String {
     // __canopyNativeBrowser selects the outbox transport: there is no parent to
     // postMessage to here, exactly as in the child-webview engine.
+    // __canopyPulledBrowser additionally silences the doorbell: this host
+    // drains the outbox over CDP, and the webview doorbell — an assignment to
+    // the canopy-drain: scheme — is a real navigation in a browser with no
+    // policy hook to cancel it. Rung while a page was loading, it cancelled
+    // the load itself: every document died at birth and the cast starved.
     format!(
-        "window.__canopyNativeBrowser = true;\n{}",
+        "window.__canopyNativeBrowser = true;\nwindow.__canopyPulledBrowser = true;\n{}",
         include_str!("preview_picker.js")
     )
 }
