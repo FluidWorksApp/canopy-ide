@@ -22553,3 +22553,366 @@ a.btn-sm {
   font-size: var(--fs-xs);
   color: var(--text-dim);
 }
+
+/* ── Lattice: the material ────────────────────────────────────────────────────
+   The palette is in src/skins/lattice.css. This is the other half, and the
+   half that makes it a TUI rather than a teal Default — the same licence
+   Vitrine takes for its frost and Pixel for its hard edges.
+
+   A terminal UI has no shadows, no fills and no font weights, so every job
+   those normally do collapses onto one hairline. Three rules follow from that,
+   and everything below is one of them:
+
+     1. The box is the grouping. Not a card, not a raised surface — a line
+        around the things that belong together.
+     2. The gap in the box is the label. A heading does not sit above its
+        group; it sits ON the top edge, with the field painted behind it to
+        break the line. `┌─ RUNNING AGENTS 4 ─────┐` is the whole idiom, and it
+        is why every box here gets `position: relative` and its heading gets a
+        background.
+     3. The colour of the line is the focus. Exactly one box is drawn in
+        --accent and the rest in --border-strong. On a keyboard-driven surface
+        the lit border is how you know where the next keystroke lands, which is
+        why :focus-within moves the border and the label together.
+
+   Selection inside a box is a full-width reverse bar — the terminal's own
+   inverse video — never a tint and never a left rule. A tint is a fill, and a
+   fill is the thing this style does not have.
+
+   Everything is one weight of line. There is no second border width to reach
+   for, because a terminal cannot draw one, and that constraint is most of why
+   the style reads as a terminal instead of as a form with thin borders. */
+
+/* ---- 1 & 2: the box, and its label on the edge ---- */
+:root[data-theme="lattice"] .agv-section,
+:root[data-theme="lattice"] .ap-section {
+  margin-top: 26px;
+  padding: 6px 14px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+}
+
+/* The side panel's sections are stacked with a rule between them; a box needs
+   the rule gone or it draws two lines a pixel apart. */
+:root[data-theme="lattice"] .ap-section {
+  border-top: 1px solid var(--border-strong);
+  margin: 26px 10px 0;
+}
+
+/* The heading rides the top edge, with the surface behind it breaking the
+   line. Pulled up by its own height rather than a magic number, so it stays
+   centred on the border whatever the heading's line-height is. */
+:root[data-theme="lattice"] .agv-section-head,
+:root[data-theme="lattice"] .ap-head {
+  position: relative;
+  top: -0.85em;
+  left: 2px;
+  display: inline-flex;
+  width: auto;
+  margin-bottom: -0.5em;
+  padding: 0 7px;
+  background: var(--bg);
+  border-radius: 0;
+}
+
+:root[data-theme="lattice"] .ap-head {
+  background: var(--bg-alt);
+}
+
+/* ---- 3: the lit border ---- */
+:root[data-theme="lattice"] .agv-section:focus-within,
+:root[data-theme="lattice"] .ap-section:focus-within,
+:root[data-theme="lattice"] .agv-card:focus-within {
+  border-color: var(--accent);
+}
+
+:root[data-theme="lattice"] .agv-section:focus-within .agv-section-head h2,
+:root[data-theme="lattice"] .ap-section:focus-within .ap-title {
+  color: var(--accent);
+}
+
+/* ---- the cards inside a box are boxes too ---- */
+:root[data-theme="lattice"] .agv-card,
+:root[data-theme="lattice"] .agv-past-row:hover,
+:root[data-theme="lattice"] .agv-term:hover {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  box-shadow: none;
+}
+
+/* A card that wants you is drawn in the colour that means it, not filled with
+   a wash of it — the tint would be the one fill in a window with none. */
+:root[data-theme="lattice"] .agv-card-attention {
+  background: transparent;
+  border-color: var(--warn);
+}
+
+/* ---- selection is reverse video ---- */
+:root[data-theme="lattice"] .agent-row-active,
+:root[data-theme="lattice"] .tree-row.is-sel,
+:root[data-theme="lattice"] .instr-row.is-sel,
+:root[data-theme="lattice"] .spot-row-active,
+:root[data-theme="lattice"] .palette-row-active {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-radius: 0;
+}
+
+:root[data-theme="lattice"] .agent-row-active .agent-name,
+:root[data-theme="lattice"] .agent-row-active .agent-dir,
+:root[data-theme="lattice"] .agent-row-active .agent-task,
+:root[data-theme="lattice"] .tree-row.is-sel *,
+:root[data-theme="lattice"] .instr-row.is-sel * {
+  color: var(--on-accent);
+}
+
+/* ---- no shadows, anywhere ---- */
+:root[data-theme="lattice"] .modal,
+:root[data-theme="lattice"] .confirm,
+:root[data-theme="lattice"] .ctx-menu,
+:root[data-theme="lattice"] .palette,
+:root[data-theme="lattice"] .notice,
+:root[data-theme="lattice"] .update-toast,
+:root[data-theme="lattice"] .companion-panel,
+:root[data-theme="lattice"] .cnp-tooltip {
+  box-shadow: none;
+  border: 1px solid var(--accent);
+}
+
+/* A pane over your work is the lit one by definition: it has the keyboard.
+   Everything behind it keeps its unlit border, which is the whole signal. */
+:root[data-theme="lattice"] .modal,
+:root[data-theme="lattice"] .confirm,
+:root[data-theme="lattice"] .palette {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ---- one weight of line ---- */
+:root[data-theme="lattice"] .btn,
+:root[data-theme="lattice"] .btn-sm,
+:root[data-theme="lattice"] .btn-icon,
+:root[data-theme="lattice"] .ctl,
+:root[data-theme="lattice"] .agv-chip {
+  border-width: 1px;
+  box-shadow: none;
+}
+
+/* The accent button is the reverse bar in miniature: a terminal has no filled
+   control, so the one that IS filled is the one that has the keyboard. */
+:root[data-theme="lattice"] .btn-accent {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+}
+
+/* ── Tab switcher ────────────────────────────────────────────────────────────
+   The panel Ctrl+Tab holds open, and the one ⌘ raises alongside the number
+   hints. Every card is a live picture of a tab (see src/tabPreview.ts), so the
+   thing being chosen is shown rather than named.
+
+   Not a scrim in the palette's sense: it takes no keyboard and dims only enough
+   to lift the cards off the work behind them. The layer ignores the pointer so
+   a click that misses a card lands on the app, not on a modal nobody asked
+   for. */
+.tsw-layer {
+  position: fixed;
+  inset: 0;
+  /* Above the transient layer (notices, companion) and above the pane bar,
+     below the palettes at 330 — a palette and a held modifier can overlap, and
+     the surface with the keyboard wins. */
+  z-index: 328;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--bg-deep) 34%, transparent);
+  backdrop-filter: blur(5px) saturate(112%);
+  -webkit-backdrop-filter: blur(5px) saturate(112%);
+  animation: palette-backdrop-in 100ms ease-out;
+}
+
+/* The palette's glass, on the same four knobs, so the two overlays read as one
+   material. */
+.tsw-panel {
+  pointer-events: auto;
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  max-width: min(1360px, 94vw);
+  padding: 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+
+  --glass-base: var(--bg-overlay);
+  --glass-sheen: rgba(255, 255, 255, 0.1);
+  --glass-lip: rgba(255, 255, 255, 0.08);
+  --glass-tint: 86%;
+
+  background:
+    radial-gradient(
+      120% 90% at 22% 0%,
+      var(--glass-sheen),
+      color-mix(in srgb, var(--glass-sheen) 25%, transparent) 32%,
+      transparent 68%
+    ),
+    color-mix(in srgb, var(--glass-base) var(--glass-tint), transparent);
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 75%, transparent);
+  border-radius: var(--r-lg);
+  corner-shape: squircle;
+  box-shadow:
+    var(--shadow-3),
+    inset 0 1px 0 var(--glass-lip);
+  animation: palette-in 130ms cubic-bezier(0.2, 0.85, 0.25, 1);
+}
+
+.tsw-panel::-webkit-scrollbar {
+  display: none;
+}
+
+.tsw-card {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  background: color-mix(in srgb, var(--bg-raised) 55%, transparent);
+  cursor: pointer;
+}
+
+.tsw-card:hover {
+  border-color: color-mix(in srgb, var(--border-strong) 60%, transparent);
+}
+
+/* The selection, and the only thing on the panel that has to be readable at a
+   glance: the card you'd land on if you let go now. */
+.tsw-card-sel {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-raised));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.tsw-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 2px;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+}
+
+.tsw-card-sel .tsw-head {
+  color: var(--text);
+}
+
+.tsw-icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+.tsw-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tsw-digit {
+  flex: none;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: var(--r-xs);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  text-align: center;
+}
+
+/* The picture. A clipped window onto a pane laid out at its real size — what is
+   cut off is the bottom and the right of it, the same crop every thumbnail in
+   every switcher makes. */
+.tsw-shot {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  border: 1px solid var(--border);
+  background: var(--bg-deep);
+  contain: strict;
+}
+
+.tsw-scale {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+}
+
+/* A terminal has no clonable picture — xterm paints through its own renderer —
+   so its card is the buffer tail, set small. Deliberately not scaled the way a
+   doc pane is: shrinking a real terminal by five would leave nothing legible,
+   and what makes this card worth looking at is being able to half-read the
+   line an agent is on. */
+.tsw-term {
+  margin: 0;
+  padding: 6px 7px;
+  height: 100%;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 5.5px;
+  line-height: 1.36;
+  white-space: pre;
+  /* The tail is the live end: keep it pinned to the bottom of the box, so the
+     line just written is the line at the edge rather than the first one to be
+     clipped. */
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.tsw-card-sel .tsw-term {
+  color: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tsw-layer,
+  .tsw-panel {
+    animation: none;
+  }
+}
+
+/* A chip riding a reverse bar has to invert with it: a filled pill sitting on
+   the selection is the one thing on screen still drawn as a fill, and it reads
+   as a hole punched in the bar. */
+:root[data-theme="lattice"] .agent-row-active .agent-dir,
+:root[data-theme="lattice"] .agent-row-active .agent-branch,
+:root[data-theme="lattice"] .agent-row-active .agent-account,
+:root[data-theme="lattice"] .agent-row-active .agv-chip {
+  background: transparent;
+  border-color: currentColor;
+  color: var(--on-accent);
+}
+
+/* A count on a box's label is text on a line, not a pill. Everywhere else the
+   badge is a filled lozenge and should stay one — this is only the ones that
+   sit on the border, where a fill breaks the very line the label is cut into. */
+:root[data-theme="lattice"] .agv-section-head .badge,
+:root[data-theme="lattice"] .ap-head .badge {
+  padding: 0;
+  margin-left: 2px;
+  background: transparent;
+  color: var(--accent);
+}
