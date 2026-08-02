@@ -456,7 +456,75 @@ async fn await_devtools_url(
     Ok((found, reader.into_inner()))
 }
 
+/// Clear a stale singleton lock left by a browser a previous Canopy failed to
+/// stop — a dev run killed with ^C, a crash, a force-quit. That orphan keeps
+/// the profile locked, and Chrome's singleton behaviour turns every new launch
+/// into a silent hand-off-and-exit: "the browser exited before it was ready",
+/// forever, until someone finds and kills the orphan by hand. Observed live,
+/// twice in one afternoon.
+///
+/// The profile dir is Canopy's own (see `profile_dir`), so whatever holds its
+/// lock is Canopy's to kill by construction — but the pid in a long-dead lock
+/// may have been reused by anything, so it is killed only after its command
+/// line proves it is a browser on this very profile.
+///
+/// Returns whether there was anything to clear, i.e. whether a relaunch is
+/// worth attempting. On Windows Chrome keeps no `SingletonLock` symlink and
+/// this is a no-op; the launch error stands.
+fn clear_stale_profile_lock(profile: &Path) -> bool {
+    let Ok(target) = std::fs::read_link(profile.join("SingletonLock")) else {
+        return false;
+    };
+    // The symlink's target is "<hostname>-<pid>", nothing more.
+    if let Some(pid) = target
+        .to_string_lossy()
+        .rsplit('-')
+        .next()
+        .and_then(|p| p.parse::<u32>().ok())
+    {
+        let holder = std::process::Command::new(crate::procenv::resolve_command("ps"))
+            .args(["-o", "command=", "-p", &pid.to_string()])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        if holder.contains(&profile.display().to_string()) {
+            let _ = std::process::Command::new(crate::procenv::resolve_command("kill"))
+                .args(["-9", &pid.to_string()])
+                .status();
+        }
+    }
+    for name in ["SingletonLock", "SingletonSocket", "SingletonCookie"] {
+        let _ = std::fs::remove_file(profile.join(name));
+    }
+    true
+}
+
 impl ChromiumManager {
+    /// Spawn the browser and wait for it to announce its DevTools endpoint.
+    async fn launch(
+        exe: &str,
+        profile: &Path,
+        headless: bool,
+    ) -> Result<(tokio::process::Child, String, tokio::process::ChildStderr), String> {
+        let mut child = tokio::process::Command::new(exe)
+            .args(launch_args(profile, "about:blank", headless))
+            .stderr(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("could not start {exe}: {e}"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "the browser gave no stderr to read".to_string())?;
+        match await_devtools_url(stderr).await {
+            Ok((url, rest)) => Ok((child, url, rest)),
+            Err(e) => {
+                let _ = child.kill().await;
+                Err(e)
+            }
+        }
+    }
+
     /// The live connection, launching the browser on first use.
     ///
     /// One browser process serves every tab: a second process would mean a
@@ -476,21 +544,15 @@ impl ChromiumManager {
             *slot = None;
         }
         let profile = profile_dir(app)?;
-        let mut child = tokio::process::Command::new(exe)
-            .args(launch_args(&profile, "about:blank", headless))
-            .stderr(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| format!("could not start {exe}: {e}"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "the browser gave no stderr to read".to_string())?;
-        let (url, rest) = match await_devtools_url(stderr).await {
+        let (child, url, rest) = match Self::launch(exe, &profile, headless).await {
             Ok(v) => v,
-            Err(e) => {
-                let _ = child.kill().await;
-                return Err(e);
+            // An exit-before-ready is what a locked profile looks like; clear
+            // the orphan holding it and try once more before giving up.
+            Err(first) => {
+                if !clear_stale_profile_lock(&profile) {
+                    return Err(first);
+                }
+                Self::launch(exe, &profile, headless).await?
             }
         };
         // Keep draining stderr. A pipe nobody reads fills, and a browser whose
@@ -561,10 +623,18 @@ impl ChromiumManager {
                 .call("Page.startScreencast", params.clone(), Some(&s.id))
                 .await
             {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    log::info!(
+                        target: "chromium",
+                        "cast started for {tab_id} at {width}x{height} (attempt {})",
+                        attempt + 1
+                    );
+                    return Ok(());
+                }
                 Err(e) => last = e,
             }
         }
+        log::warn!(target: "chromium", "cast failed for {tab_id}: {last}");
         Err(last)
     }
 
@@ -698,6 +768,7 @@ impl ChromiumManager {
                 target,
             },
         );
+        log::info!(target: "chromium", "tab {tab_id}: opened, navigating to {url}");
         self.navigate(tab_id, url).await
     }
 
@@ -793,6 +864,7 @@ const SCREENCAST_QUALITY: i64 = 60;
 fn pump_frames(app: tauri::AppHandle, mut rx: tokio::sync::mpsc::UnboundedReceiver<CdpEvent>) {
     tauri::async_runtime::spawn(async move {
         use tauri::{Emitter, Manager};
+        let mut seen_frames = std::collections::HashSet::new();
         while let Some(ev) = rx.recv().await {
             match ev.method.as_str() {
                 "Page.screencastFrame" => {
@@ -819,6 +891,9 @@ fn pump_frames(app: tauri::AppHandle, mut rx: tokio::sync::mpsc::UnboundedReceiv
                             .await;
                     }
                     if let Some(tab_id) = tab {
+                        if seen_frames.insert(ev.session.clone()) {
+                            log::info!(target: "chromium", "first frame for tab {tab_id}");
+                        }
                         let _ = app.emit(
                             "chromium:frame",
                             serde_json::json!({
@@ -826,6 +901,8 @@ fn pump_frames(app: tauri::AppHandle, mut rx: tokio::sync::mpsc::UnboundedReceiv
                                 "frame": format!("data:image/jpeg;base64,{data}"),
                             }),
                         );
+                    } else {
+                        log::warn!(target: "chromium", "frame for unknown session {}", ev.session);
                     }
                 }
                 // The page moved: the URL bar and the history buttons are the
