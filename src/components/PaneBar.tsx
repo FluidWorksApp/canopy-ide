@@ -302,6 +302,24 @@ function PaneBarImpl({
   // closing context menu winning the focus race, and this input mounts from a
   // context menu too. Keyed on the tab, so typing never re-selects the draft.
   const renameInputRef = useRef<HTMLInputElement>(null);
+  // Which tabs are genuinely new, so only those play the appear animation.
+  //
+  // The animation exists so a tab you just opened does not pop in at full
+  // strength. Folding a stack unmounts the tabs inside it (a folded run shows
+  // nothing), so unfolding remounted them and every one replayed the animation
+  // — opacity from 0.3 up, which on the active tab reads as its highlight
+  // arriving half-lit and then snapping to full. Scrolling a strip whose runs
+  // fold and unfold as you go did it repeatedly.
+  //
+  // `stripTabs` is every tab in the strip whether or not its run is folded, so
+  // a tab returning from a fold was already known and does not animate.
+  const seenTabs = useRef<Set<string>>(new Set());
+  const isNewTab = (id: string) => !seenTabs.current.has(id);
+  useEffect(() => {
+    seenTabs.current = new Set(stripTabs.map((t) => t.id));
+  }, [stripTabs]);
+
+
   useEffect(() => {
     if (renamingTabId == null) return;
     const el = renameInputRef.current;
@@ -439,7 +457,7 @@ function PaneBarImpl({
                   key={tab.id}
                   data-flip-id={tab.id}
                   ref={tab.id === activeTabId ? (activeTabElRef as React.RefObject<HTMLDivElement>) : undefined}
-                  className={`tab ${tab.id === activeTabId ? "tab-active" : ""} ${
+                  className={`tab ${isNewTab(tab.id) ? "tab-new" : ""} ${tab.id === activeTabId ? "tab-active" : ""} ${
                     tab.type === "chat" && tab.unread ? "tab-unread" : ""
                   } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""} ${
                     tab.id === flashTabId ? "tab-flash" : ""
