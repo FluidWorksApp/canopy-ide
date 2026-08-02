@@ -24,6 +24,7 @@ import {
 } from "../claims";
 import { BlockedIcon, ClaimIcon, TerminalIcon } from "./icons";
 import { Button } from "./ui";
+import { basename } from "../paths";
 
 export interface ClaimViewProps {
   /** Which claim this tab is on. Never the owner — an agent that claims,
@@ -207,7 +208,7 @@ export function ClaimView({
                 onClick={() => onOpenFile?.(p)}
               >
                 <span className="claim-path-name">
-                  {p.split("/").filter(Boolean).pop()}
+                  {basename(p)}
                 </span>
                 <span className="claim-path-dir">{p}</span>
               </button>

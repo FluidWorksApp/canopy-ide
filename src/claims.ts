@@ -5,6 +5,7 @@
 // detail tab. Deciding "is this still held" or "what do I call it" in each of
 // them is how the three end up disagreeing, so it is decided here.
 import type * as ipc from "./ipc";
+import { basename } from "./paths";
 
 export type ClaimState = "held" | "released" | "dropped" | "superseded";
 
@@ -53,7 +54,7 @@ export function claimOwnerCwd(owner: string): string | null {
 /** A claim at tab width. The files, not the owner: two agents' claims sit side
  *  by side in the strip and what tells them apart is what each is holding. */
 export function claimLabel(claim: ipc.AgentClaim): string {
-  const first = claim.paths[0]?.split("/").filter(Boolean).pop() ?? "claim";
+  const first = basename(claim.paths[0]) || "claim";
   return claim.paths.length > 1 ? `${first} +${claim.paths.length - 1}` : first;
 }
 

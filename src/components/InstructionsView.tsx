@@ -24,6 +24,7 @@ import type { Notify } from "../types";
 import { AgentIcon, BRAND_ICONS, InstructionKindIcon, TrashIcon } from "./icons";
 import { Button } from "./ui";
 import { matches } from "../shortcuts";
+import { basename } from "../paths";
 
 /** Display names for agents Canopy doesn't ship a launcher for. Their files
  *  still turn up on disk — a `.cursor/rules` or a `.windsurfrules` is worth
@@ -122,7 +123,7 @@ function groupOf(f: ipc.InstructionFile): GroupId {
 /** A starting point for a file being created, so "Create" never leaves someone
  *  staring at an empty buffer wondering what goes in it. */
 function template(f: ipc.InstructionFile): string {
-  const name = f.label.split("/").pop()?.replace(/\.mdc?$/, "") ?? "instructions";
+  const name = basename(f.label)?.replace(/\.mdc?$/, "") ?? "instructions";
   if (f.kind === "skill")
     return `---\nname: ${name}\ndescription: What this skill does, and when an agent should reach for it\n---\n\n## Instructions\n\n- \n`;
   if (f.kind === "subagent")
@@ -169,7 +170,7 @@ function Row({
       <span className="instr-row-label">{titled ? f.title : name}</span>
       {!titled && dir !== "" && <span className="instr-row-dir">{dir}</span>}
       {showRoot && f.root !== "" && (
-        <span className="instr-root">{f.root.split("/").filter(Boolean).pop()}</span>
+        <span className="instr-root">{basename(f.root)}</span>
       )}
       {!f.exists && <span className="instr-missing">not created</span>}
       {/* Only when there's something the leading mark didn't already say: a

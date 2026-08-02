@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DiffView, DiffModeEnum, SplitSide } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import { createTwoFilesPatch } from "diff";
+import { basename } from "../paths";
 import { fmtTokens } from "../format";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
@@ -130,7 +131,7 @@ type DiffViewData = {
 // below — so it shows the basename (the full path lives in the tooltip and the
 // diff header) and folds everything past this many into a dropdown.
 const TOUCHED_LIMIT = 6;
-const basename = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
+
 const parentDir = (p: string) =>
   p.split("/").filter(Boolean).slice(-2, -1)[0] ?? "";
 
@@ -1089,7 +1090,7 @@ export function AgentWorkspaceView({
               }
             >
               {ws.isolated ? "isolated worktree" : "shared checkout"} ·{" "}
-              {ws.workdir.split("/").pop()}
+              {basename(ws.workdir)}
             </span>
           )}
           <span className="status-spacer" />

@@ -34,6 +34,7 @@ import { postAttention, resolveAttentionByKey } from "./attention";
 import { prWorktree } from "./prs";
 import { useEscape } from "./useEscape";
 import type { Notify } from "./types";
+import { basename } from "./paths";
 
 /** What the caller wants to be looking at. */
 export type SwitchTarget =
@@ -121,7 +122,7 @@ export const workspacePath = (repo: string, branch: string) =>
 export const prWorkspacePath = (repo: string, number: number) =>
   `${repo}-wt-pr-${number}`;
 
-const baseName = (path: string) => path.replace(/\/+$/, "").split("/").pop() || path;
+const baseName = (path: string) => basename(path.replace(/\/+$/, "")) || path;
 
 /** The branch a target is about, for the copy and for "give it a workspace of
  *  its own". A bare ref is about no branch. */

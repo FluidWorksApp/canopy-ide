@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as ipc from "../ipc";
+import { basename } from "../paths";
 import type { Component, Project } from "../projects";
 import { newProjectId } from "../projects";
 import { useEscape } from "../useEscape";
@@ -29,7 +30,7 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
     const paths = Array.isArray(selection) ? selection : selection ? [selection] : [];
     const additions = paths
       .filter((p) => !components.some((c) => c.path === p))
-      .map((p) => ({ path: p, label: p.split("/").pop() ?? p }));
+      .map((p) => ({ path: p, label: basename(p) || p }));
     if (additions.length) {
       setComponents((prev) => [...prev, ...additions]);
       if (!name && additions[0]) setName(additions[0].label);
