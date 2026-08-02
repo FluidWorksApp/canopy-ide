@@ -1,8 +1,19 @@
 // The pane's one real decision: when a size change is worth restarting the
 // stream for. A pane drag emits hundreds of sizes and each restart costs a
 // round trip and shows a gap, so this has to reject nearly all of them.
-import { describe, expect, it } from "vitest";
-import { paneToPage, worthRecasting } from "./chromiumPane";
+import { act, renderHook } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("./ipc", () => ({
+  chromiumStartCast: vi.fn(() => Promise.resolve()),
+  chromiumStopCast: vi.fn(() => Promise.resolve()),
+  chromiumMetrics: vi.fn(() => Promise.resolve(null)),
+  onChromiumFrame: vi.fn(() => Promise.resolve(() => {})),
+  onChromiumNav: vi.fn(() => Promise.resolve(() => {})),
+}));
+
+import * as ipc from "./ipc";
+import { paneToPage, useChromiumFrame, worthRecasting } from "./chromiumPane";
 
 describe("worthRecasting", () => {
   it("always casts the first time", () => {
@@ -84,5 +95,35 @@ describe("paneToPage", () => {
   it("has no answer before the page has reported a size", () => {
     expect(paneToPage({ x: 1, y: 1 }, { width: 100, height: 100 }, { width: 0, height: 0 })).toBeNull();
     expect(paneToPage({ x: 1, y: 1 }, { width: 0, height: 0 }, page)).toBeNull();
+  });
+});
+
+// The stuck-placeholder race: the pane measures itself before the tab has
+// opened, so the first start-cast fails. If that failure still counted as "the
+// cast is running at this size", no retry would ever happen and the pane would
+// show "Starting the browser…" forever.
+describe("useChromiumFrame", () => {
+  const box = { width: 800, height: 600 };
+
+  it("retries the cast after a start that failed", async () => {
+    const start = vi.mocked(ipc.chromiumStartCast);
+    start.mockClear();
+    start.mockRejectedValueOnce(new Error("no Chromium browser is open for tab t"));
+    const { result } = renderHook(() => useChromiumFrame("t", true));
+    act(() => result.current.fit(box));
+    // Let the rejection land — it is what forgets the recorded size.
+    await act(async () => {});
+    act(() => result.current.fit(box));
+    expect(start).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not restart a cast that succeeded for an unchanged pane", async () => {
+    const start = vi.mocked(ipc.chromiumStartCast);
+    start.mockClear();
+    const { result } = renderHook(() => useChromiumFrame("t", true));
+    act(() => result.current.fit(box));
+    await act(async () => {});
+    act(() => result.current.fit(box));
+    expect(start).toHaveBeenCalledTimes(1);
   });
 });

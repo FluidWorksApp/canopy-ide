@@ -552,7 +552,9 @@ impl ChromiumManager {
             .map(|_| ())
     }
 
-    /// A real picture of the page, as a PNG data URL.
+    /// A real picture of the page, as base64 PNG — the same shape
+    /// browser_snapshot and webview_snapshot answer with, because the callers
+    /// (pageCapture, the agent bridge) are shared across engines.
     ///
     /// Not the cast stream: that is lossy JPEG already scaled down to whatever
     /// the pane happens to be, and a screenshot of it would be a screenshot of
@@ -586,11 +588,10 @@ impl ChromiumManager {
         let out = cdp
             .call("Page.captureScreenshot", params, Some(&s.id))
             .await?;
-        let data = out
-            .get("data")
+        out.get("data")
             .and_then(|d| d.as_str())
-            .ok_or_else(|| "the browser returned no image".to_string())?;
-        Ok(format!("data:image/png;base64,{data}"))
+            .map(|d| d.to_string())
+            .ok_or_else(|| "the browser returned no image".to_string())
     }
 
     /// The page's own dimensions, so the pane can map a click in the picture

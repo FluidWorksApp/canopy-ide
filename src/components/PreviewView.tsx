@@ -4,21 +4,25 @@
 // to an agent through the same AgentLaunchButton + PTY-seed path tickets and
 // PRs use.
 //
-// Two engines sit behind the same toolbar (see browserBounds.chooseEngine):
+// Three engines sit behind the same toolbar (see browserBounds.chooseEngine):
 //
-//   webview — a real child webview at the page's real origin, on a persistent
-//             profile, so a site you log into stays logged in. It is a native
-//             view drawn OVER the window, so this component renders only a
-//             placeholder and hands its rect to browserHost, which is what
-//             actually positions and hides it.
-//   proxy   — the original: an iframe onto a per-origin loopback reverse proxy
-//             (preview.rs). No sessions, but it is the only engine that exists
-//             off macOS.
+//   webview  — a real child webview at the page's real origin, on a persistent
+//              profile, so a site you log into stays logged in. It is a native
+//              view drawn OVER the window, so this component renders only a
+//              placeholder and hands its rect to browserHost, which is what
+//              actually positions and hides it.
+//   chromium — a browser the user installed, launched headless and driven over
+//              CDP. The page is a frame stream painted into an <img>
+//              (chromiumPane.ts), so it is an ordinary DOM element with none of
+//              the webview's occlusion machinery.
+//   proxy    — the original: an iframe onto a per-origin loopback reverse proxy
+//              (preview.rs). No sessions, but it is the only engine that exists
+//              off macOS.
 //
 // Everything below the transport is shared. The same picker script runs in the
-// page under both, and answers the same messages; only how those messages
+// page under all three, and answers the same messages; only how those messages
 // travel differs — postMessage through the iframe, or an evaluated call and a
-// drained outbox through browser.rs.
+// drained outbox through browser.rs / chromium.rs (see browserTransport.ts).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   browserPageChanged,
@@ -31,6 +35,7 @@ import {
   useBrowserEngine,
   useBrowserPane,
 } from "../browserHost";
+import { openOn, resolveChromiumExe, transportFor } from "../browserTransport";
 import { useChromiumFrame } from "../chromiumPane";
 import * as ipc from "../ipc";
 import {
@@ -66,6 +71,11 @@ export const BROWSER_INPUT_EVENT = "canopy:browser-input";
 /** What we ask the platform for, before cropping and storing. Bigger than
  *  MAX_STORED_WIDTH on purpose — see shootPane. */
 const SHOOT_WIDTH = 2400;
+
+/** How often a chromium page's queued picker messages are pulled. Fast enough
+ *  that an annotation click feels immediate; slow enough that an idle page is
+ *  two evaluates a second, not a load. */
+const CHROMIUM_DRAIN_MS = 500;
 
 interface PreviewViewProps {
   /** The owning SubTab's id — how agent browser ops address this view. */
@@ -148,9 +158,23 @@ export function PreviewView({
 }: PreviewViewProps) {
   const engine = useBrowserEngine();
   const native = engine === "webview";
+  const chromium = engine === "chromium";
   // The Chromium engine's page is a frame stream, not a view: the browser runs
   // headless, so there is no window to place and nothing to hide it from.
-  const cast = useChromiumFrame(tabId, engine === "chromium" && visible);
+  const cast = useChromiumFrame(tabId, chromium && visible);
+  // The binary the chromium engine drives — resolved when the engine is, so an
+  // open can't race detection and launch nothing.
+  const [chromiumExe, setChromiumExe] = useState("");
+  useEffect(() => {
+    if (!chromium) return;
+    let stale = false;
+    void ipc.chromiumDetect().then((found) => {
+      if (!stale) setChromiumExe(resolveChromiumExe(getSettings().chromiumPath, found));
+    });
+    return () => {
+      stale = true;
+    };
+  }, [chromium]);
   // What the placeholder stands in with while the native view is out of the
   // way: a still of the page, or the app's own background — never a white hole.
   const pane = useBrowserPane(tabId, native);
@@ -194,20 +218,31 @@ export function PreviewView({
   engineRef.current = engine;
   const nativeRef = useRef(native);
   nativeRef.current = native;
+  const chromiumRef = useRef(chromium);
+  chromiumRef.current = chromium;
+  // How picker messages and ops travel on this engine. Null under the proxy
+  // (and while the engine is still being probed): the page is our own iframe,
+  // and postMessage is the wire.
+  const transport = engine === null ? null : transportFor(engine, chromiumExe);
+  const transportRef = useRef(transport);
+  transportRef.current = transport;
 
   const origin = originOf(url);
 
   const post = useCallback((msg: Record<string, unknown>) => {
-    if (nativeRef.current) void ipc.browserCommand(tabId, msg).catch(() => {});
+    const t = transportRef.current;
+    if (t) void t.command(tabId, msg).catch(() => {});
     else iframeRef.current?.contentWindow?.postMessage(msg, "*");
   }, [tabId]);
 
   // ---------- proxy engine: one proxy per origin ----------
   // (Re)acquired when the tab's origin changes. The proxy is shared and cheap,
   // so it's left running on unmount — the tab may come right back, and app exit
-  // sweeps them all.
+  // sweeps them all. Gated on the engine being decided, not just non-native:
+  // starting a proxy for a page the chromium engine is about to open would be
+  // a server nobody connects to.
   useEffect(() => {
-    if (native || !origin) return;
+    if (engine !== "proxy" || !origin) return;
     let stale = false;
     setProxyError(null);
     ipc
@@ -223,7 +258,7 @@ export function PreviewView({
     return () => {
       stale = true;
     };
-  }, [native, origin]);
+  }, [engine, origin]);
 
   // ---------- webview engine: the native view's lifecycle ----------
   // The placeholder's rect is measured by browserHost on demand rather than
@@ -281,6 +316,66 @@ export function PreviewView({
     ensureOpen.current();
   }, [native, url, visible]);
 
+  // ---------- chromium engine: the headless browser's lifecycle ----------
+  // Lazy for the same reason the webview's open is: the first tab actually
+  // shown is the one that pays for launching the browser. No rect is measured
+  // — the browser has no window to place, and the cast stream sizes itself to
+  // the pane (chromiumPane.fit).
+  const chromiumOpened = useRef(false);
+  // State as well as the ref: the render a successful open causes is what
+  // re-runs cast.fit, whose first start-cast failed while the browser was
+  // still coming up — and what starts the drain loop below.
+  const [chromiumReady, setChromiumReady] = useState(false);
+  const ensureChromiumOpen = useRef<() => void>(() => {});
+  ensureChromiumOpen.current = () => {
+    if (!chromium || chromiumOpened.current || !visible || !url || !chromiumExe) return;
+    const target = url;
+    chromiumOpened.current = true;
+    void openOn("chromium", chromiumExe, tabId, target)?.then(
+      () => setChromiumReady(true),
+      (err) => {
+        chromiumOpened.current = false;
+        onNotice(`Couldn't open ${target}: ${String(err)}`);
+      },
+    );
+  };
+
+  useEffect(() => {
+    if (!chromium) {
+      chromiumOpened.current = false;
+      setChromiumReady(false);
+      return;
+    }
+    ensureChromiumOpen.current();
+    return () => {
+      chromiumOpened.current = false;
+      void ipc.chromiumClose(tabId);
+    };
+  }, [chromium, tabId]);
+
+  useEffect(() => {
+    ensureChromiumOpen.current();
+  }, [chromium, chromiumExe, url, visible]);
+
+  // Real navigations, straight from CDP: the URL bar must be right even for a
+  // page that navigated itself — same job as the webview's nav hook.
+  useEffect(() => {
+    if (!chromium) return;
+    let un: (() => void) | undefined;
+    void ipc
+      .onChromiumNav((n) => {
+        if (n.tabId !== tabId || !n.url || n.url === "about:blank") return;
+        if (n.url !== urlRef.current) {
+          onPatchRef.current({ url: n.url });
+          if (!draftFocused.current) setDraft(n.url);
+        }
+      })
+      .then((u) => {
+        un = u;
+      });
+    return () => un?.();
+  }, [chromium, tabId]);
+
   // ---------- agent browser control ----------
   // Ops arrive from the MCP bridge via ProjectView (see previewAgent.ts) and
   // are answered through ipc.browserResult, which releases the agent's held
@@ -303,7 +398,9 @@ export function PreviewView({
    *  playing to nobody. Under the webview engine an unpainted view is genuinely
    *  hidden, and `visible` is the whole truth. */
   const painted = useCallback(() => {
-    if (nativeRef.current) return visibleRef.current;
+    // Chromium's cast <img> is painted exactly when the tab is in front; the
+    // page itself renders regardless, headless.
+    if (nativeRef.current || chromiumRef.current) return visibleRef.current;
     return (
       iframeRef.current?.checkVisibility?.({
         visibilityProperty: true,
@@ -327,9 +424,11 @@ export function PreviewView({
     back.focus();
   }, []);
 
-  /** The previewed page's real URL for a proxied one the iframe reports. */
+  /** The previewed page's real URL for a proxied one the iframe reports. Under
+   *  the webview and chromium engines the page lives at its real origin, so
+   *  what it reports is already the truth. */
   const unproxied = useCallback((pageUrl: string): string | null => {
-    if (nativeRef.current) return pageUrl;
+    if (nativeRef.current || chromiumRef.current) return pageUrl;
     const p = proxyRef.current;
     if (!p) return null;
     try {
@@ -364,7 +463,9 @@ export function PreviewView({
   const postAgentOp = useCallback(
     (op: ipc.AgentBrowserOp) => {
       const bg = !painted();
-      if (bg && !nativeRef.current) {
+      // Only the proxy's iframe can steal focus — the other engines' pages
+      // live outside this window's focus tree entirely.
+      if (bg && !nativeRef.current && !chromiumRef.current) {
         const active = document.activeElement;
         focusBefore.current =
           active instanceof HTMLElement && active !== iframeRef.current ? active : null;
@@ -386,13 +487,14 @@ export function PreviewView({
         clear: op.clear ?? undefined,
         max: op.max ?? undefined,
       };
-      if (!nativeRef.current) {
+      const t = transportRef.current;
+      if (!t) {
         iframeRef.current?.contentWindow?.postMessage(message, "*");
         return;
       }
       // The read-only ops finish inside the call and come straight back;
       // anything cursor-led answers later, through the drained outbox.
-      void ipc.browserRunOp(tabId, message).then(
+      void t.runOp(tabId, message).then(
         (ack) => {
           if (!ack) {
             const p = pendingOps.current.get(op.id);
@@ -434,8 +536,10 @@ export function PreviewView({
       }
       setDraft(target);
       onPatch({ url: target });
-      if (nativeRef.current) {
-        if (opened.current) void ipc.browserNavigate(tabId, target).catch(() => {});
+      const t = transportRef.current;
+      if (t) {
+        const isOpen = nativeRef.current ? opened.current : chromiumOpened.current;
+        if (isOpen) void t.navigate(tabId, target, null).catch(() => {});
         // Not open yet: the create effect picks the new URL up when the tab is
         // next shown, which is the same moment it would have loaded anyway.
         return;
@@ -540,14 +644,14 @@ export function PreviewView({
   // The picker inside a proxied page talks postMessage; accept only messages
   // from our own iframe's window.
   useEffect(() => {
-    if (native) return;
+    if (engine !== "proxy") return;
     const onMessage = (e: MessageEvent) => {
       if (e.source !== iframeRef.current?.contentWindow) return;
       handleMessage(e.data);
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [native, handleMessage]);
+  }, [engine, handleMessage]);
 
   // A native page's messages arrive drained, in batches, addressed by tab.
   useEffect(() => {
@@ -563,6 +667,30 @@ export function PreviewView({
       });
     return () => un?.();
   }, [native, tabId, handleMessage]);
+
+  // A chromium page's messages must be pulled — a browser we do not host has
+  // no doorbell to ring (see browserTransport). Polled only while the answers
+  // could matter: the pane is on screen, or an op or navigation is waiting on
+  // a background tab.
+  useEffect(() => {
+    const t = transportRef.current;
+    if (!chromium || !chromiumReady || !t || t.pushesEvents) return;
+    const timer = window.setInterval(() => {
+      if (
+        !visibleRef.current &&
+        pendingOps.current.size === 0 &&
+        navWaiters.current.length === 0
+      )
+        return;
+      void t
+        .drain(tabId)
+        .then((events) => {
+          for (const ev of events) handleMessage(ev as Record<string, unknown>);
+        })
+        .catch(() => {});
+    }, CHROMIUM_DRAIN_MS);
+    return () => window.clearInterval(timer);
+  }, [chromium, chromiumReady, tabId, handleMessage]);
 
   // Real navigations, straight from the platform: the URL bar must be right
   // even for a page that never runs our script (an error page, a download).
@@ -613,8 +741,8 @@ export function PreviewView({
   runOpRef.current = (op: ipc.AgentBrowserOp) => {
     if (op.op === "navigate") {
       if (op.url) navigate(op.url);
-      else if (nativeRef.current)
-        void ipc.browserNavigate(tabId, null, op.action ?? "reload").catch(() => {});
+      else if (transportRef.current)
+        void transportRef.current.navigate(tabId, null, op.action ?? "reload").catch(() => {});
       else
         post({
           canopy: "navigate",
@@ -634,6 +762,25 @@ export function PreviewView({
       return;
     }
     if (op.op === "screenshot") {
+      // The chromium engine escapes the "is it on screen" question below
+      // entirely: a headless browser renders the page again on demand, in
+      // front or not, so a background tab photographs perfectly.
+      if (chromiumRef.current) {
+        void ipc
+          .chromiumCapture(tabId)
+          .then(async (image) => {
+            const metrics = await ipc.chromiumMetrics(tabId);
+            await ipc.browserResult(op.id, true, {
+              image,
+              mimeType: "image/png",
+              url: urlRef.current,
+              width: metrics?.w ?? 0,
+              height: metrics?.h ?? 0,
+            });
+          })
+          .catch((err) => ipc.browserResult(op.id, false, String(err)));
+        return;
+      }
       // Pixels, not structure: the DOM snapshot can say a button exists, not
       // that it's sitting on top of the heading.
       //
@@ -861,9 +1008,9 @@ export function PreviewView({
     previewShotContext(urlRef.current, shotsRef.current, serverForUrl(urlRef.current, servers));
 
   const go = (delta: -1 | 0 | 1) => {
-    if (native) {
-      void ipc
-        .browserNavigate(tabId, null, delta === 0 ? "reload" : delta < 0 ? "back" : "forward")
+    if (transport) {
+      void transport
+        .navigate(tabId, null, delta === 0 ? "reload" : delta < 0 ? "back" : "forward")
         .catch(() => {});
     } else {
       post({ canopy: "navigate", delta });

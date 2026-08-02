@@ -129,7 +129,14 @@ export function useChromiumFrame(tabId: string, active: boolean) {
   const fit = (box: { width: number; height: number }) => {
     if (!active || !worthRecasting(size.current, box)) return;
     size.current = box;
-    void ipc.chromiumStartCast(tabId, Math.round(box.width), Math.round(box.height));
+    void ipc
+      .chromiumStartCast(tabId, Math.round(box.width), Math.round(box.height))
+      .catch(() => {
+        // The browser isn't up yet — the pane measures itself before the tab
+        // has opened. Forget the size, so the render that follows the open
+        // retries instead of believing a cast is already running.
+        size.current = null;
+      });
   };
 
   /** Tell the page where the pointer is, and whether that is a pick.
