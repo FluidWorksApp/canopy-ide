@@ -1717,11 +1717,116 @@ Call canopy_project first for component paths, configured run commands, \
 terminal ids, and the ports servers are listening on. Fall back to the shell \
 only for work these tools don't cover.";
 
+/// The bridge address, from our own environment or from the process that
+/// spawned us.
+///
+/// Canopy stamps CANOPY_CTX_PORT and _TOKEN onto every PTY it opens, and every
+/// CLI that inherits its environment passes them down to the MCP servers it
+/// starts. Codex does not: verified against codex-cli 0.146.0, it spawns stdio
+/// MCP servers with twelve core variables and nothing else —
+///
+///   HOME LANG LOGNAME PATH PWD SHELL SHLVL TERM TMPDIR USER _ __CF_USER_TEXT_ENCODING
+///
+/// — so the address never arrives, and every canopy_* call answers "this
+/// session isn't running inside a Canopy terminal" while the tool catalog sits
+/// right there in the CLI's own /mcp listing. Claude passes its whole
+/// environment through, which is why this only ever showed up on one CLI and
+/// looked like a Canopy bug in the other's terminal.
+///
+/// The address is not lost, only withheld one level up: our parent IS the CLI,
+/// and it was started by a Canopy PTY that has both variables. So walk up.
+/// Reading another process's environment is ordinarily a smell; here it is the
+/// same machine, the same user, and a value that process was given expressly to
+/// hand to us.
+///
+/// Bounded, and never a guess: it stops at the first ancestor that has a port,
+/// takes the token from that same process (a port from one instance with a
+/// token from another authenticates against neither), and gives up after a few
+/// levels rather than walking to pid 1.
+fn bridge_env() -> Option<(String, String)> {
+    if let Ok(port) = std::env::var("CANOPY_CTX_PORT") {
+        return Some((port, std::env::var("CANOPY_CTX_TOKEN").unwrap_or_default()));
+    }
+    let mut pid = parent_of(std::process::id())?;
+    for _ in 0..8 {
+        if pid <= 1 {
+            break;
+        }
+        if let Some(found) = env_of(pid) {
+            return Some(found);
+        }
+        pid = parent_of(pid)?;
+    }
+    None
+}
+
+fn parent_of(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // The comm field can contain spaces and parentheses, so ppid is read
+        // relative to the closing paren rather than by splitting the line.
+        let rest = stat.rsplit_once(')')?.1;
+        return rest.split_whitespace().nth(1)?.parse().ok();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "ppid=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    }
+}
+
+/// One process's CANOPY_CTX_PORT/_TOKEN, or None if it has neither.
+fn env_of(pid: u32) -> Option<(String, String)> {
+    let raw = read_environ(pid)?;
+    let mut port = None;
+    let mut token = None;
+    for entry in raw {
+        if let Some(v) = entry.strip_prefix("CANOPY_CTX_PORT=") {
+            port = Some(v.to_string());
+        } else if let Some(v) = entry.strip_prefix("CANOPY_CTX_TOKEN=") {
+            token = Some(v.to_string());
+        }
+    }
+    port.map(|p| (p, token.unwrap_or_default()))
+}
+
+fn read_environ(pid: u32) -> Option<Vec<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        let raw = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+        return Some(
+            raw.split(|b| *b == 0)
+                .map(|e| String::from_utf8_lossy(e).into_owned())
+                .collect(),
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // `ps eww` prints the environment after the command, space separated.
+        // Only our own processes are readable, which is the whole population we
+        // care about — and the reason this needs no privileges.
+        let out = std::process::Command::new("ps")
+            .args(["eww", "-o", "command=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        Some(
+            String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+}
+
 /// Whether the IDE is actually reachable — the bridge env only Canopy's PTYs
 /// export. The MCP registration is user-global, so this is what separates
 /// "running inside Canopy" from "registered on this machine".
 fn in_canopy() -> bool {
-    std::env::var("CANOPY_CTX_PORT").is_ok()
+    bridge_env().is_some()
 }
 
 fn mcp_main() {
@@ -4467,14 +4572,15 @@ fn ctx_request_with_timeout(
     body: Option<String>,
     timeout: std::time::Duration,
 ) -> Result<String, String> {
-    let port: u16 = std::env::var("CANOPY_CTX_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .ok_or(
-            "This session isn't running inside a Canopy terminal, so the Canopy \
-             context tools are unavailable here.",
-        )?;
-    let token = std::env::var("CANOPY_CTX_TOKEN").unwrap_or_default();
+    let (port, token) = bridge_env().ok_or(
+        "This session isn't running inside a Canopy terminal, so the Canopy \
+         context tools are unavailable here.",
+    )?;
+    let port: u16 = port.parse().map_err(|_| {
+        "This session isn't running inside a Canopy terminal, so the Canopy \
+         context tools are unavailable here."
+            .to_string()
+    })?;
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).map_err(|e| {
         format!("Canopy isn't reachable on port {port} ({e}) — is the app still running?")
@@ -4523,6 +4629,45 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The environment is ours to read, so this is the easy half. The half that
+    /// matters — recovering the address from a parent when a CLI scrubbed ours
+    /// — is a property of the process tree and is verified by running the
+    /// sidecar under codex's own twelve-variable environment; see the doc
+    /// comment on `bridge_env`.
+    ///
+    /// One test, not three: the environment is per-process, and cargo runs
+    /// tests in threads of one process — two tests setting these variables at
+    /// once read each other's values.
+    #[test]
+    fn the_bridge_comes_from_our_own_environment_when_it_is_there() {
+        // SAFETY: the variables are set and read back within this test, which
+        // is the only one in the binary that touches them.
+        unsafe {
+            std::env::set_var("CANOPY_CTX_PORT", "12345");
+            std::env::set_var("CANOPY_CTX_TOKEN", "tok");
+        }
+        assert_eq!(bridge_env(), Some(("12345".into(), "tok".into())));
+
+        // A port with no token is still an address worth trying: the token is
+        // checked by the bridge, and answering "not inside Canopy" for a
+        // session that plainly is would be the more misleading failure.
+        unsafe {
+            std::env::remove_var("CANOPY_CTX_TOKEN");
+        }
+        assert_eq!(bridge_env(), Some(("12345".into(), String::new())));
+
+        unsafe {
+            std::env::remove_var("CANOPY_CTX_PORT");
+        }
+    }
+
+    /// Walking up has to terminate, and has to start somewhere real.
+    #[test]
+    fn the_ancestor_walk_can_find_our_own_parent() {
+        assert!(parent_of(std::process::id()).is_some());
+        assert_eq!(parent_of(0), None.or(parent_of(0)));
+    }
 
     fn digest(pty: &str, instance: &str, cwd: &str) -> serde_json::Value {
         serde_json::json!({ "surface": pty, "instance": instance, "cwd": cwd })
