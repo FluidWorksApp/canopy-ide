@@ -125,24 +125,56 @@ describe("settleGroups", () => {
       expect(plain(state)).toEqual({ a: "quiet", b: "quiet" });
     });
 
-    it("never moves the tab you are looking at, and moves the others", () => {
+    it("does not hold the tab you are looking at back from a rise", () => {
+      // This used to hold every move, including this one, and it is the one
+      // move that must not wait: the chip beside the tab said Idle while the
+      // tab's own dot said working or needs-you. The hold is about not moving
+      // a tab out from under you, which is a fall.
       const { groups } = settleGroups(
-        prev({ a: { group: "active" }, b: { group: "active" } }),
-        want({ a: "attention", b: "attention" }),
+        prev({ a: { group: "quiet" }, b: { group: "quiet" } }),
+        want({ a: "attention", b: "active" }),
         0,
         DELAY,
         { hold: "a" },
       );
-      expect(plain(groups)).toEqual({ a: "active", b: "attention" });
+      expect(plain(groups)).toEqual({ a: "attention", b: "active" });
     });
 
-    it("settles the held tab as soon as you go somewhere else", () => {
+    it("still holds the tab you are looking at back from a fall", () => {
+      let state = prev({ a: { group: "active" }, b: { group: "active" } });
+      const targets = want({ a: "quiet", b: "quiet" });
+      // The clock starts on the first pass and both are still where they were.
+      ({ groups: state } = settleGroups(state, targets, 0, DELAY, { hold: "a" }));
+      expect(plain(state)).toEqual({ a: "active", b: "active" });
+      // Past the delay, the one you are not reading lands and the held one does
+      // not — the whole point of the hold.
+      ({ groups: state } = settleGroups(state, targets, DELAY + 1, DELAY, { hold: "a" }));
+      expect(plain(state)).toEqual({ a: "active", b: "quiet" });
+    });
+
+    it("starts the held tab's fall clock when you go somewhere else", () => {
+      // Held from the moment it began falling, so there is no part-way fall to
+      // resume: the delay runs from the release, not from the transition the
+      // hold sat on top of.
       let state = prev({ a: { group: "active" } });
-      const targets = want({ a: "attention" });
+      const targets = want({ a: "quiet" });
       ({ groups: state } = settleGroups(state, targets, 0, DELAY, { hold: "a" }));
       expect(plain(state)).toEqual({ a: "active" });
-      ({ groups: state } = settleGroups(state, targets, 10, DELAY, { hold: "b" }));
-      expect(plain(state)).toEqual({ a: "attention" });
+      ({ groups: state } = settleGroups(state, targets, DELAY + 1, DELAY, { hold: "b" }));
+      expect(plain(state)).toEqual({ a: "active" });
+      ({ groups: state } = settleGroups(state, targets, DELAY * 2 + 2, DELAY, { hold: "b" }));
+      expect(plain(state)).toEqual({ a: "quiet" });
+    });
+
+    it("freezes a rise mid-gesture, where any movement is a misclick", () => {
+      const { groups } = settleGroups(
+        prev({ a: { group: "quiet" } }),
+        want({ a: "attention" }),
+        0,
+        DELAY,
+        { frozen: true, hold: "a" },
+      );
+      expect(plain(groups)).toEqual({ a: "quiet" });
     });
 
     it("still places a tab it has never seen — there is no place to hold", () => {
