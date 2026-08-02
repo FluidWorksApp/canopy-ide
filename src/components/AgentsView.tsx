@@ -20,6 +20,7 @@ import type { LifeState } from "../../shared/agentLife";
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
 import { lastHumanPrompt, useAgentSessions, type SessionRow } from "../agentSessions";
+import { claimOwnerName } from "../claims";
 import { IntegrationsList, useIntegrations } from "./AgentIntegrations";
 import { PendingCard } from "./PendingCard";
 import { Mascot } from "./Mascot";
@@ -102,6 +103,9 @@ export interface AgentsViewProps {
   onRestore?: (cwd: string, cmd: string, title: string, agentId: string) => void;
   /** Open the agent-instructions tab. */
   onOpenInstructions?: (focus?: string) => void;
+  /** Open one file claim as its own tab — who took it, why, and what it has
+   *  turned away since. */
+  onOpenClaim?: (claim: ipc.AgentClaim) => void;
 }
 
 /** One number with its name under it. Five of these across the top is the whole
@@ -172,6 +176,7 @@ export function AgentsView({
   liveSessionIds = [],
   onRestore,
   onOpenInstructions,
+  onOpenClaim,
 }: AgentsViewProps) {
   const { agentSessions, termSessions, restorable, shared, claims, forget, lifeOf } =
     useAgentSessions({ visible: active, roots, stats, liveSessionIds });
@@ -555,19 +560,28 @@ export function AgentsView({
           >
             <div className="agv-claims">
               {claims.map((claim) => (
-                <div key={claim.owner} className="agv-claim">
-                  <span className="agv-claim-owner" title={claim.owner}>
-                    {claim.owner.split(" (")[0]}
+                <div
+                  key={claim.id}
+                  className="agv-claim"
+                  onClick={() => onOpenClaim?.(claim)}
+                  title={`${claim.owner}\n${claim.paths.join("\n")}\nClick to open this claim`}
+                >
+                  <span className="agv-claim-owner">
+                    {claimOwnerName(claim.owner)}
                   </span>
-                  <span className="agv-claim-paths" title={claim.paths.join("\n")}>
+                  <span className="agv-claim-paths">
                     {claim.note ? `${claim.note} — ` : ""}
                     {claim.paths.map((p) => p.split("/").pop()).join(", ")}
                   </span>
                   <span className="agv-spacer" />
+                  <span className="agv-claim-when">{ago(claim.at_ms / 1000)}</span>
                   <Button
                     size="sm"
                     title="Drop this claim — for an agent that died holding it"
-                    onClick={() => void ipc.contextReleaseClaim(claim.owner).catch(() => {})}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void ipc.contextReleaseClaim(claim.owner).catch(() => {});
+                    }}
                   >
                     Release
                   </Button>

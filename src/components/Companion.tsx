@@ -21,6 +21,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import {
+  COMPANION_SUMMON_EVENT,
   DEFAULT_SPOT,
   PANEL,
   clampSpot,
@@ -274,6 +275,17 @@ export function Companion({
   useEffect(() => {
     if (proposal) setOpen(true);
   }, [proposal]);
+
+  // The keyboard summons it (companion.ts raises this when the chord fires).
+  // A toggle rather than an open: the same key that fetches it puts it away,
+  // which is what makes it usable as a glance. Never closes on a pending
+  // proposal, for the same reason Esc doesn't — the question would still be
+  // outstanding with nowhere to answer it.
+  useEffect(() => {
+    const summon = () => setOpen((v) => (proposalRef.current ? true : !v));
+    window.addEventListener(COMPANION_SUMMON_EVENT, summon);
+    return () => window.removeEventListener(COMPANION_SUMMON_EVENT, summon);
+  }, []);
 
   // Esc closes the panel, matching every other overlay in the app. Never while
   // a proposal is up: dismissing the surface is not answering the question, and

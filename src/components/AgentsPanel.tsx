@@ -16,6 +16,7 @@ import {
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
 import { lastHumanPrompt, useAgentSessions } from "../agentSessions";
+import { claimOwnerName } from "../claims";
 import { AGENT_LABELS, IntegrationsList, useIntegrations } from "./AgentIntegrations";
 import { PendingCard } from "./PendingCard";
 import { Mascot } from "./Mascot";
@@ -108,6 +109,9 @@ interface AgentsPanelProps {
   /** Open the agents page — the same material with room for it. The panel is
    *  the glance; the page is where you go when the glance isn't enough. */
   onOpenAgentsPage?: () => void;
+  /** Open one file claim as its own tab — who took it, why, and what it has
+   *  turned away since. */
+  onOpenClaim?: (claim: ipc.AgentClaim) => void;
   /** Which agent CLIs are on PATH, keyed by bin — decides which instruction
    *  formats are worth listing when the file doesn't exist yet. */
   installed?: Record<string, boolean>;
@@ -255,6 +259,7 @@ export function AgentsPanel({
   onNotice,
   onOpenInstructions,
   onOpenAgentsPage,
+  onOpenClaim,
   installed = {},
 }: AgentsPanelProps) {
   // Instruction files: scanned once when the panel comes into view, and again
@@ -871,22 +876,31 @@ export function AgentsPanel({
       )}
 
       {/* Files an agent has claimed (canopy_claim). Advisory, so it only works
-          if it is visible — and if a dead session's claim can be dropped. */}
+          if it is visible — and if a dead session's claim can be dropped. The
+          row opens the claim: at this width it can only ever show a name and
+          some filenames, and every other question about a claim is a sentence
+          long. */}
       {claims.length > 0 && (
         <Section title="Claimed files" count={claims.length} tone="quiet">
           <div className="claim-list">
             {claims.map((claim) => (
-              <div key={claim.owner} className="claim-row">
-                <span className="claim-owner" title={claim.owner}>
-                  {claim.owner.split(" (")[0]}
-                </span>
-                <span className="claim-paths" title={claim.paths.join("\n")}>
+              <div
+                key={claim.id}
+                className={`claim-row ${onOpenClaim ? "claim-row-open" : ""}`}
+                title={`${claim.owner}\n${claim.paths.join("\n")}${
+                  onOpenClaim ? "\nClick to open this claim" : ""
+                }`}
+                onClick={() => onOpenClaim?.(claim)}
+              >
+                <span className="claim-owner">{claimOwnerName(claim.owner)}</span>
+                <span className="claim-paths">
                   {claim.note ? `${claim.note} — ` : ""}
                   {claim.paths.map((p) => p.split("/").pop()).join(", ")}
                 </span>
                 <Button
                   title="Drop this claim — for an agent that died holding it"
-                  onClick={() => {
+                  onClick={(e) => {
+                    e.stopPropagation();
                     void ipc.contextReleaseClaim(claim.owner).catch(() => {});
                   }}>
                   Release

@@ -101,12 +101,23 @@ export function settleGroups(
   for (const [id, target] of targets) {
     const was = prev.get(id);
     const provenFall = target === "quiet" && (proven?.has(id) ?? false);
+    // A rise is never held by the active tab. The hold is there so the strip
+    // does not move the tab you are reading out from under you, and a fall to
+    // Idle is exactly that — but "working" and "needs you" are the opposite:
+    // the tab in front of you is the one whose dot you are actually looking at,
+    // and holding its rise made the chip beside it say Idle while the dot said
+    // otherwise. One session, two answers, on the same screen.
+    //
+    // `frozen` still holds everything. That one is a gesture in progress —
+    // a pointer over the strip, ⌘ held numbering the tabs — where any movement
+    // is a misclick the strip caused, whichever direction it is in.
+    const rising = target !== "quiet";
     // Held: keep the place, and the fall it was part-way through. Nothing is
     // forgotten, so letting go applies what came due rather than restarting
     // every clock — several tabs move at once, which reads as one event.
     // A proven fall passes through the hold (see SettleHold) but never
     // through frozen.
-    if (was && (frozen || (id === hold && !provenFall))) {
+    if (was && (frozen || (id === hold && !rising && !provenFall))) {
       groups.set(id, was);
       continue;
     }

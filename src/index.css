@@ -15221,7 +15221,7 @@ a.btn-sm {
    badge over it. Tabular figures so 1 → 10 doesn't shuffle the glyph sideways
    by a hair on every arrival. */
 .notif-bell-count {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 650;
   line-height: 1;
   font-variant-numeric: tabular-nums;
@@ -18450,6 +18450,260 @@ a.btn-sm {
   flex: 1;
 }
 
+.claim-row-open {
+  cursor: pointer;
+  margin: 0 -4px;
+  padding: 2px 4px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+}
+
+.claim-row-open:hover {
+  background: var(--bg-raised);
+}
+
+/* ---- One claim, as a tab -------------------------------------------------
+   The list has room for a name and some filenames; everything else a claim
+   knows — why it was taken, how long it has been held, who it turned away, how
+   it ended — is a sentence, and lives here. */
+.claim-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+}
+
+.claim-view-head {
+  flex: 0 0 auto;
+  padding: 12px 18px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+
+.claim-view-title {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+.claim-view-mark {
+  color: var(--accent);
+  flex: none;
+}
+
+.claim-view-owner {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Held is the only state that is still about the present, so it is the only
+   one that gets the accent. The three endings differ in cause, not in
+   consequence, and read as one quiet family. */
+.claim-state {
+  flex: none;
+  padding: 0 6px;
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  background: var(--bg-deep);
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.claim-state-held {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.claim-view-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  min-width: 0;
+}
+
+.claim-view-cwd {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.claim-view-age {
+  flex: none;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+.claim-why {
+  margin: 9px 0 0;
+  color: var(--text);
+  font-size: var(--fs-md);
+  line-height: var(--lh-ui);
+}
+
+.claim-why-none {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.claim-gone {
+  margin-top: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-ui);
+}
+
+.claim-view-body {
+  flex: 1;
+  min-height: 0;
+  padding: 14px 18px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+.claim-section h2 {
+  margin: 0 0 8px;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.claim-paths-list,
+.claim-related {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.claim-path-row,
+.claim-related-row {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.claim-path-row:hover,
+.claim-related-row:hover {
+  background: var(--bg-raised);
+}
+
+.claim-path-name {
+  flex: none;
+  font-weight: 520;
+}
+
+.claim-path-dir,
+.claim-related-note,
+.claim-related-when {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.claim-related-owner {
+  flex: none;
+  font-weight: 520;
+}
+
+/* The timeline. One rail down the left with a dot per moment — a claim's whole
+   life is three or four events, and a list that reads top to bottom is what
+   makes "and then bob was turned away" legible as a sequence. */
+.claim-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 4px;
+}
+
+.claim-event {
+  position: relative;
+  padding: 0 0 14px 18px;
+  border-left: 1px solid var(--border);
+}
+
+.claim-event:last-child {
+  border-left-color: transparent;
+  padding-bottom: 0;
+}
+
+.claim-event-dot {
+  position: absolute;
+  left: -4px;
+  top: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.claim-event-refused .claim-event-dot {
+  background: var(--warn);
+}
+
+.claim-event-end .claim-event-dot {
+  background: var(--ok);
+}
+
+.claim-event-head {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.claim-event-title {
+  font-size: var(--fs-sm);
+  font-weight: 520;
+}
+
+.claim-event-when {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.claim-event-note {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 3px 0 0;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-ui);
+}
+
 /* ---------- hibernation ----------
    A project asleep, and the two animations either side of it. Both faces are
    full-cover layers over the project area (never a route the app navigates to)
@@ -20596,6 +20850,20 @@ a.btn-sm {
   align-items: center;
 }
 
+.research-crud .research-mark-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 2px;
+}
+
+.note-crud .note-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 2px;
+}
+
 .note-crud .btn-icon {
   display: inline-flex;
   align-items: center;
@@ -21308,7 +21576,7 @@ a.btn-sm {
 
 .companion-empty {
   margin: 0;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   color: var(--text-dim);
 }
@@ -21337,9 +21605,20 @@ a.btn-sm {
 .companion-body {
   flex: 1;
   min-width: 0;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   line-height: 1.62;
   color: var(--text);
+}
+
+/* A reply is markdown, and `.markdown-body` is sized for reading a document in
+   a tab — 14px and 820px wide. In a 350px panel that made the one thing the
+   companion says bigger than everything around it, including the box you type
+   the next question into. The panel decides its own reading size; the markdown
+   keeps its structure and inherits the type. */
+.companion-body .markdown-body {
+  max-width: none;
+  font-size: inherit;
+  line-height: inherit;
 }
 
 /* The answer has to be readable on its own, so the markdown here is turned
@@ -21347,7 +21626,7 @@ a.btn-sm {
    double the panel's height. */
 .companion-body :is(h1, h2, h3, h4) {
   margin: 6px 0 2px;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
 }
 
 .companion-body p {
@@ -21362,7 +21641,7 @@ a.btn-sm {
 .companion-body pre {
   max-width: 100%;
   overflow-x: auto;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 
 .companion-said {
@@ -21765,14 +22044,14 @@ a.btn-sm {
 
 .agv-title h1 {
   margin: 0;
-  font-size: 21px;
+  font-size: var(--fs-xl);
   font-weight: 620;
   letter-spacing: -0.01em;
 }
 
 .agv-project {
   color: var(--text-faint);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   align-self: flex-end;
   padding-bottom: 3px;
 }
@@ -21794,7 +22073,7 @@ a.btn-sm {
   corner-shape: squircle;
   background: var(--bg-raised);
   color: var(--text-dim);
-  font-size: 11.5px;
+  font-size: var(--fs-sm);
 }
 
 .agv-share-label {
@@ -21803,7 +22082,7 @@ a.btn-sm {
 
 .agv-share-count {
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
 }
 
 .agv-stats {
@@ -21822,7 +22101,7 @@ a.btn-sm {
 }
 
 .agv-stat-value {
-  font-size: 23px;
+  font-size: var(--fs-xl);
   font-weight: 600;
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
@@ -21830,7 +22109,7 @@ a.btn-sm {
 
 .agv-stat-label {
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: var(--fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.6px;
 }
@@ -21869,7 +22148,7 @@ a.btn-sm {
 
 .agv-section-head h2 {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.7px;
@@ -21878,7 +22157,7 @@ a.btn-sm {
 
 .agv-section-note {
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }
 
 /* One running session. Auto-fill rather than a fixed column count: on a narrow
@@ -21930,7 +22209,7 @@ a.btn-sm {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   font-weight: 560;
   white-space: nowrap;
   overflow: hidden;
@@ -21943,7 +22222,7 @@ a.btn-sm {
 }
 
 .agv-card-state {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-dim);
 }
 
@@ -21971,7 +22250,7 @@ a.btn-sm {
   corner-shape: squircle;
   background: var(--bg-deep);
   color: var(--text-dim);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   line-height: 17px;
   white-space: nowrap;
   overflow: hidden;
@@ -21980,7 +22259,7 @@ a.btn-sm {
 
 .agv-chip-branch {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-xs);
 }
 
 .agv-chip-attention {
@@ -22008,7 +22287,7 @@ a.btn-sm {
 .agv-task {
   margin: 0;
   color: var(--text);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -22051,7 +22330,7 @@ a.btn-sm {
 
 .agv-metric {
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -22073,7 +22352,7 @@ a.btn-sm {
 .agv-empty p {
   margin: 0;
   max-width: 44ch;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
 }
 
@@ -22105,10 +22384,11 @@ a.btn-sm {
   padding: 7px 12px;
   border-radius: var(--r-sm);
   corner-shape: squircle;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
-.agv-term {
+.agv-term,
+.agv-claim {
   cursor: pointer;
 }
 
@@ -22127,10 +22407,16 @@ a.btn-sm {
 
 .agv-claim-paths {
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.agv-claim-when {
+  flex: none;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
 }
 
 /* The archive. A row per past session, two lines: what it was, and what you
@@ -22168,18 +22454,18 @@ a.btn-sm {
 }
 
 .agv-past-agent {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   font-weight: 540;
 }
 
 .agv-past-when {
   color: var(--text-faint);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
 }
 
 .agv-past-prompt {
   color: var(--text-dim);
-  font-size: 11.5px;
+  font-size: var(--fs-sm);
   line-height: 1.5;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -22200,7 +22486,7 @@ a.btn-sm {
   margin: 0;
   padding: 6px 2px 2px;
   color: var(--text-faint);
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 /* Integrations, at page density: one row per CLI with its brand mark. */
@@ -22223,7 +22509,7 @@ a.btn-sm {
 
 .hook-setup-roomy .hook-setup-name {
   min-width: 140px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .hook-setup-mark {
@@ -22239,7 +22525,7 @@ a.btn-sm {
   background: var(--bg-deep);
   color: var(--text-dim);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
   white-space: pre-wrap;
 }
@@ -22247,12 +22533,12 @@ a.btn-sm {
 .agv-hook-path {
   margin: 10px 0 0;
   color: var(--text-faint);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   line-height: 1.6;
 }
 
 .agv-hook-path code {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--text-dim);
 }

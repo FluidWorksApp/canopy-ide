@@ -144,6 +144,27 @@ describe("the handoff to an implementing agent", () => {
     expect(ctx).toContain("link");
   });
 
+  it("says what to do when no PR will ever close it", () => {
+    // reconcileMerged only ever moves an entry that has a linked PR. Work that
+    // landed in a commit, was already done, or turned out not to be worth
+    // doing leaves the entry in "implementing" forever — and the agent that
+    // found that out is the only one who knows. The same gap left a scratchpad
+    // note sitting "In progress" after its fix had shipped.
+    const ctx = implementContext(entry());
+    expect(ctx).toContain("append");
+    expect(ctx).toContain("status");
+    expect(ctx).toContain("researched");
+  });
+
+  it("never invites the agent to declare the work implemented", () => {
+    // "implemented" is the module's one piece of evidence rather than
+    // assertion: Canopy writes it when every linked PR has merged. A brief that
+    // asked the agent for it would turn the status back into an opinion.
+    const ctx = implementContext(entry());
+    expect(ctx).toMatch(/Never set "implemented" yourself/);
+    expect(ctx).not.toMatch(/status.{0,40}"implemented"/);
+  });
+
   it("survives an entry that was never digested", () => {
     // An agent died mid-run; the entry has a title and nothing else. The
     // handoff should still say something rather than render "undefined".

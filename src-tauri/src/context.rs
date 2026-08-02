@@ -49,25 +49,71 @@ pub struct ContextBridge {
     /// command (one ticket space for every request/response op, browser or not).
     pending: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<(bool, serde_json::Value)>>>,
     next_op: AtomicU64,
-    /// Advisory file claims, newest last. Several agents routinely share one
-    /// checkout; a claim is how one says "I'm editing these" loudly enough for
-    /// the others (and the Agents panel) to see it. Advisory on purpose —
-    /// nothing here blocks a write, it just stops the collision being invisible.
+    /// Advisory file claims, newest last, held and ended together. Several
+    /// agents routinely share one checkout; a claim is how one says "I'm editing
+    /// these" loudly enough for the others (and the Agents panel) to see it.
+    /// Advisory on purpose — nothing here blocks a write, it just stops the
+    /// collision being invisible.
     claims: Mutex<Vec<Claim>>,
+    /// Claim ids, which only have to be unique within this app run — see
+    /// MAX_ENDED_CLAIMS for why the store never outlives it.
+    next_claim: AtomicU64,
     /// Tools the user switched off in Settings → Agents. `None` until the
     /// frontend publishes, which is the same as "everything is on".
     disabled_tools: Mutex<Option<Vec<String>>>,
 }
 
-/// One agent's advisory claim over a set of paths.
+/// One agent's advisory claim over a set of paths, and everything that has
+/// happened to it since.
+///
+/// A release used to delete the row, so the two questions the user asks of a
+/// claim after the fact — when did that agent let go, and what did it hold up
+/// while it had it — had no answer anywhere. Ending a claim now writes its
+/// ending down instead.
 #[derive(Clone, serde::Serialize)]
 pub struct Claim {
+    /// Identity for the detail tab. The owner cannot be it: an agent that
+    /// claims, releases and claims again is two claims with one owner, and a
+    /// tab opened on the first must not silently start showing the second.
+    pub id: String,
     pub paths: Vec<String>,
     /// Who holds it — the agent's cwd plus whatever name it gave itself.
     pub owner: String,
     pub note: Option<String>,
     pub at_ms: u64,
+    /// None while it is held; this is the only thing that decides whether a
+    /// claim still blocks anyone.
+    pub released_at_ms: Option<u64>,
+    /// How it ended: `agent` (it released), `canopy` (dropped from the UI, for
+    /// an agent that died holding it) or `superseded` (the same owner claimed
+    /// again). The wording is the frontend's business; this is the fact.
+    pub released_by: Option<String>,
+    /// Claims turned away because they overlapped this one, oldest first. The
+    /// collision is the most useful thing a claim ever records — it is the
+    /// moment two agents wanted the same file — and it used to exist only in a
+    /// 409 body the user never saw.
+    pub refusals: Vec<Refusal>,
 }
+
+/// A claim that was refused, recorded against the claim that refused it.
+#[derive(Clone, serde::Serialize)]
+pub struct Refusal {
+    pub owner: String,
+    pub paths: Vec<String>,
+    pub note: Option<String>,
+    pub at_ms: u64,
+}
+
+/// How many ended claims the history keeps.
+///
+/// The store stays in memory, and this cap is its whole retention policy. A
+/// claim's history is worth having while the agents involved are still around
+/// to be asked about it, and every one of them dies with the app — so writing
+/// it under ~/.canopy would buy a log of processes that no longer exist, at the
+/// price of a store to migrate, prune and keep two app instances from
+/// corrupting. The live list is empty after a restart by definition; its
+/// history being empty too is the honest match.
+const MAX_ENDED_CLAIMS: usize = 200;
 
 impl Default for ContextBridge {
     fn default() -> Self {
@@ -80,6 +126,7 @@ impl Default for ContextBridge {
             pending: Mutex::new(HashMap::new()),
             next_op: AtomicU64::new(1),
             claims: Mutex::new(Vec::new()),
+            next_claim: AtomicU64::new(1),
             disabled_tools: Mutex::new(None),
         }
     }
@@ -161,10 +208,29 @@ pub fn context_tools(state: tauri::State<'_, ContextBridge>, disabled: Vec<Strin
     *state.disabled_tools.lock().unwrap() = Some(disabled);
 }
 
-/// Every advisory claim currently held, for the Agents panel.
+/// Every advisory claim currently held, for the Agents panel. Held only: the
+/// count beside "Claimed files" means "files an agent has right now", and an
+/// ended claim is history, not a holder.
 #[tauri::command]
 pub fn context_claims(state: tauri::State<'_, ContextBridge>) -> Vec<Claim> {
-    state.claims.lock().unwrap().clone()
+    state
+        .claims
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.released_at_ms.is_none())
+        .cloned()
+        .collect()
+}
+
+/// Held and ended claims together, newest first — what a claim's detail tab
+/// reads. Separate from `context_claims` so the panel's list keeps meaning what
+/// it always meant.
+#[tauri::command]
+pub fn context_claim_history(state: tauri::State<'_, ContextBridge>) -> Vec<Claim> {
+    let mut all = state.claims.lock().unwrap().clone();
+    all.reverse();
+    all
 }
 
 /// Drop a claim from the UI — the escape hatch for an agent that died holding
@@ -172,7 +238,10 @@ pub fn context_claims(state: tauri::State<'_, ContextBridge>) -> Vec<Claim> {
 #[tauri::command]
 pub fn context_release_claim(app: tauri::AppHandle, owner: String) {
     let bridge = app.state::<ContextBridge>();
-    bridge.claims.lock().unwrap().retain(|c| c.owner != owner);
+    {
+        let mut claims = bridge.claims.lock().unwrap();
+        end_claims(&mut claims, &owner, now_ms(), "canopy");
+    }
     let _ = app.emit("agent:claims", ());
 }
 
@@ -918,7 +987,17 @@ async fn claims_list(
     if !authorized(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     }
-    let claims = app.state::<ContextBridge>().claims.lock().unwrap().clone();
+    // Held only. An agent asks this to find out what it must not touch, and a
+    // claim somebody let go of is not that.
+    let claims: Vec<Claim> = app
+        .state::<ContextBridge>()
+        .claims
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.released_at_ms.is_none())
+        .cloned()
+        .collect();
     (
         StatusCode::OK,
         serde_json::json!({ "claims": claims }).to_string(),
@@ -947,55 +1026,118 @@ async fn claims_post(
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     }
     let bridge = app.state::<ContextBridge>();
-    let msg = {
+    let id = format!("c{}", bridge.next_claim.fetch_add(1, Ordering::Relaxed));
+    let reply = {
         let mut claims = bridge.claims.lock().unwrap();
-        match req.action.as_str() {
-            "release" => {
-                let before = claims.len();
-                claims.retain(|c| c.owner != req.owner);
-                format!("Released {} claim(s).", before - claims.len())
-            }
-            "claim" => {
-                if req.paths.is_empty() {
-                    return (StatusCode::BAD_REQUEST, "claim needs paths".into());
-                }
-                let conflict = claims.iter().find(|c| {
-                    c.owner != req.owner
-                        && c.paths
-                            .iter()
-                            .any(|held| req.paths.iter().any(|want| paths_overlap(held, want)))
-                });
-                if let Some(c) = conflict {
-                    return (
-                        StatusCode::CONFLICT,
-                        format!(
-                            "{} already claimed {} ({}). Pick different files, or ask that agent \
-                             to release them.",
-                            c.owner,
-                            c.paths.join(", "),
-                            c.note.clone().unwrap_or_else(|| "no note".into())
-                        ),
-                    );
-                }
-                claims.retain(|c| c.owner != req.owner);
-                claims.push(Claim {
-                    paths: req.paths.clone(),
-                    owner: req.owner.clone(),
-                    note: req.note.clone(),
-                    at_ms: now_ms(),
-                });
-                format!("Claimed {} path(s).", req.paths.len())
-            }
-            other => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("unknown claim action: {other}"),
-                )
-            }
-        }
+        apply_claim(&mut claims, &req, now_ms(), &id)
     };
-    let _ = app.emit("agent:claims", ());
-    (StatusCode::OK, msg)
+    match reply {
+        ClaimReply::Ok(msg) => {
+            let _ = app.emit("agent:claims", ());
+            (StatusCode::OK, msg)
+        }
+        // The refusal changed the store too — it is now written against the
+        // claim that caused it — so the panel hears about this one as well.
+        ClaimReply::Conflict(msg) => {
+            let _ = app.emit("agent:claims", ());
+            (StatusCode::CONFLICT, msg)
+        }
+        ClaimReply::Bad(msg) => (StatusCode::BAD_REQUEST, msg),
+    }
+}
+
+enum ClaimReply {
+    Ok(String),
+    Conflict(String),
+    Bad(String),
+}
+
+/// The claim rules themselves, over the store the bridge holds.
+///
+/// Lifted out of the handler so they can be tested: that an ended claim blocks
+/// nobody, that a refused claim is recorded against the one that turned it
+/// away, and that neither of those quietly loses the history.
+fn apply_claim(claims: &mut Vec<Claim>, req: &ClaimReq, now: u64, id: &str) -> ClaimReply {
+    match req.action.as_str() {
+        "release" => {
+            let n = end_claims(claims, &req.owner, now, "agent");
+            ClaimReply::Ok(format!("Released {n} claim(s)."))
+        }
+        "claim" => {
+            if req.paths.is_empty() {
+                return ClaimReply::Bad("claim needs paths".into());
+            }
+            let conflict = claims.iter().position(|c| {
+                c.released_at_ms.is_none()
+                    && c.owner != req.owner
+                    && c.paths
+                        .iter()
+                        .any(|held| req.paths.iter().any(|want| paths_overlap(held, want)))
+            });
+            if let Some(i) = conflict {
+                let held = &mut claims[i];
+                held.refusals.push(Refusal {
+                    owner: req.owner.clone(),
+                    paths: req.paths.clone(),
+                    note: req.note.clone(),
+                    at_ms: now,
+                });
+                return ClaimReply::Conflict(format!(
+                    "{} already claimed {} ({}). Pick different files, or ask that agent \
+                     to release them.",
+                    held.owner,
+                    held.paths.join(", "),
+                    held.note.clone().unwrap_or_else(|| "no note".into())
+                ));
+            }
+            end_claims(claims, &req.owner, now, "superseded");
+            claims.push(Claim {
+                id: id.to_string(),
+                paths: req.paths.clone(),
+                owner: req.owner.clone(),
+                note: req.note.clone(),
+                at_ms: now,
+                released_at_ms: None,
+                released_by: None,
+                refusals: Vec::new(),
+            });
+            prune_claims(claims);
+            ClaimReply::Ok(format!("Claimed {} path(s).", req.paths.len()))
+        }
+        other => ClaimReply::Bad(format!("unknown claim action: {other}")),
+    }
+}
+
+/// End every claim this owner still holds, and say how. Returns how many, which
+/// is what the agent is told it released.
+fn end_claims(claims: &mut [Claim], owner: &str, now: u64, how: &str) -> usize {
+    let mut n = 0;
+    for c in claims
+        .iter_mut()
+        .filter(|c| c.owner == owner && c.released_at_ms.is_none())
+    {
+        c.released_at_ms = Some(now);
+        c.released_by = Some(how.to_string());
+        n += 1;
+    }
+    n
+}
+
+/// Forget the oldest endings once the history is longer than it is useful. Only
+/// ended claims are ever dropped — a held one is live state, however old.
+fn prune_claims(claims: &mut Vec<Claim>) {
+    let ended = claims.iter().filter(|c| c.released_at_ms.is_some()).count();
+    if ended <= MAX_ENDED_CLAIMS {
+        return;
+    }
+    let mut to_drop = ended - MAX_ENDED_CLAIMS;
+    claims.retain(|c| {
+        if to_drop > 0 && c.released_at_ms.is_some() {
+            to_drop -= 1;
+            return false;
+        }
+        true
+    });
 }
 
 /// Same file, or one inside the other's directory — a claim on a directory
@@ -2507,6 +2649,162 @@ mod tests {
         // Neighbours with a shared prefix are not the same directory.
         assert!(!paths_overlap("/w/src", "/w/srcs/a.ts"));
         assert!(!paths_overlap("/w/src/a.ts", "/w/src/b.ts"));
+    }
+
+    fn claim_req(action: &str, owner: &str, paths: &[&str]) -> ClaimReq {
+        ClaimReq {
+            action: action.into(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            owner: owner.into(),
+            note: Some(format!("{owner}'s work")),
+        }
+    }
+
+    fn ok(reply: ClaimReply) -> String {
+        match reply {
+            ClaimReply::Ok(m) => m,
+            ClaimReply::Conflict(m) | ClaimReply::Bad(m) => panic!("expected success, got {m}"),
+        }
+    }
+
+    fn held(claims: &[Claim]) -> Vec<&Claim> {
+        claims
+            .iter()
+            .filter(|c| c.released_at_ms.is_none())
+            .collect()
+    }
+
+    #[test]
+    fn a_released_claim_keeps_its_history_and_blocks_nobody() {
+        let mut claims = Vec::new();
+        ok(apply_claim(
+            &mut claims,
+            &claim_req("claim", "alice", &["/w/src/auth.ts"]),
+            100,
+            "c1",
+        ));
+        ok(apply_claim(
+            &mut claims,
+            &claim_req("release", "alice", &[]),
+            200,
+            "c2",
+        ));
+        // The row survives the release — this is the whole point: "when did
+        // that agent let go of it" used to be unanswerable because the release
+        // deleted the only record there was.
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].released_at_ms, Some(200));
+        assert_eq!(claims[0].released_by.as_deref(), Some("agent"));
+        assert!(held(&claims).is_empty());
+        // And it is history, not a holder: the next agent gets the file.
+        ok(apply_claim(
+            &mut claims,
+            &claim_req("claim", "bob", &["/w/src/auth.ts"]),
+            300,
+            "c3",
+        ));
+        assert_eq!(held(&claims).len(), 1);
+        assert_eq!(held(&claims)[0].owner, "bob");
+    }
+
+    #[test]
+    fn a_refused_claim_is_recorded_against_the_one_that_refused_it() {
+        let mut claims = Vec::new();
+        ok(apply_claim(
+            &mut claims,
+            &claim_req("claim", "alice", &["/w/src"]),
+            100,
+            "c1",
+        ));
+        let reply = apply_claim(
+            &mut claims,
+            &claim_req("claim", "bob", &["/w/src/auth.ts"]),
+            150,
+            "c2",
+        );
+        let msg = match reply {
+            ClaimReply::Conflict(m) => m,
+            _ => panic!("an overlapping claim must be refused"),
+        };
+        assert!(msg.contains("alice"));
+        // Refusing bob must not give bob a claim, and must leave a trace on
+        // alice's — the collision is the most useful thing a claim records.
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].refusals.len(), 1);
+        assert_eq!(claims[0].refusals[0].owner, "bob");
+        assert_eq!(claims[0].refusals[0].paths, vec!["/w/src/auth.ts"]);
+        assert_eq!(claims[0].refusals[0].at_ms, 150);
+        // Once alice lets go, the same claim goes through and the refusal is
+        // still there to explain the wait.
+        ok(apply_claim(
+            &mut claims,
+            &claim_req("release", "alice", &[]),
+            200,
+            "c3",
+        ));
+        ok(apply_claim(
+            &mut claims,
+            &claim_req("claim", "bob", &["/w/src/auth.ts"]),
+            250,
+            "c4",
+        ));
+        assert_eq!(claims[0].refusals.len(), 1);
+        assert_eq!(held(&claims).len(), 1);
+    }
+
+    #[test]
+    fn reclaiming_supersedes_rather_than_erases() {
+        let mut claims = Vec::new();
+        ok(apply_claim(
+            &mut claims,
+            &claim_req("claim", "alice", &["/w/a.ts"]),
+            100,
+            "c1",
+        ));
+        ok(apply_claim(
+            &mut claims,
+            &claim_req("claim", "alice", &["/w/b.ts"]),
+            200,
+            "c2",
+        ));
+        assert_eq!(claims.len(), 2);
+        assert_eq!(claims[0].released_by.as_deref(), Some("superseded"));
+        assert_eq!(held(&claims).len(), 1);
+        assert_eq!(held(&claims)[0].id, "c2");
+    }
+
+    #[test]
+    fn the_history_is_capped_but_never_at_a_held_claim() {
+        let mut claims = Vec::new();
+        for n in 0..MAX_ENDED_CLAIMS + 10 {
+            let owner = format!("agent-{n}");
+            ok(apply_claim(
+                &mut claims,
+                &claim_req("claim", &owner, &[&format!("/w/{n}.ts")]),
+                n as u64,
+                &format!("c{n}"),
+            ));
+            ok(apply_claim(
+                &mut claims,
+                &claim_req("release", &owner, &[]),
+                n as u64 + 1,
+                "unused",
+            ));
+        }
+        ok(apply_claim(
+            &mut claims,
+            &claim_req("claim", "live", &["/w/live.ts"]),
+            9999,
+            "c-live",
+        ));
+        assert_eq!(
+            claims.iter().filter(|c| c.released_at_ms.is_some()).count(),
+            MAX_ENDED_CLAIMS
+        );
+        // The oldest endings go first, and the held one is never a candidate.
+        assert_eq!(claims[0].id, "c10");
+        assert_eq!(held(&claims).len(), 1);
+        assert_eq!(held(&claims)[0].id, "c-live");
     }
 
     #[test]

@@ -53,7 +53,7 @@ import { useAttention } from "./useAttention";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { runUiOp, type CompanionOps, type WorkspaceProject } from "./agentOps";
 import { workspaceAgents, workspaceGit, workspaceSearch } from "./companionWorkspace";
-import { companionName } from "./companion";
+import { companionName, summonCompanion } from "./companion";
 import type { CompanionProposal } from "./companionSession";
 import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
 import { useTabDrag } from "./tabDrag";
@@ -926,6 +926,12 @@ export default function App() {
       } else if (matches(e, "toggle-zen")) {
         e.preventDefault();
         toggleZen("keydown");
+      } else if (matches(e, "companion")) {
+        e.preventDefault();
+        // Summoning something that is switched off would silently do nothing,
+        // so say where the switch is rather than swallow the key.
+        if (getSettings().companionEnabled) summonCompanion();
+        else notify(`${companionName()} is turned off — Settings → Companion.`);
       } else if (mod && !e.altKey) {
         // Window zoom: Cmd/Ctrl with +, -, or 0. Match both the main-row and
         // numpad keys; "=" is the unshifted "+" key on US layout; "+" always

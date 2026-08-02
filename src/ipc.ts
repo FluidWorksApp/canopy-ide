@@ -302,14 +302,35 @@ export const onAgentUi = (cb: (op: AgentUiOp) => void): Promise<UnlistenFn> =>
 export const contextTools = (disabled: string[]) =>
   invoke<void>("context_tools", { disabled }).catch(() => {});
 
-/** Advisory file claims agents have taken, for the Agents panel. */
+/** A claim Canopy turned away because it overlapped one already held. */
+export interface AgentClaimRefusal {
+  owner: string;
+  paths: string[];
+  note: string | null;
+  at_ms: number;
+}
+
+/** Advisory file claims agents have taken, for the Agents panel. Ended ones
+ *  keep their row (see context.rs) — a release records itself rather than
+ *  deleting the only evidence the claim ever existed. */
 export interface AgentClaim {
+  /** Stable for this app run; what a claim's detail tab is opened on. */
+  id: string;
   paths: string[];
   owner: string;
   note: string | null;
   at_ms: number;
+  /** Null while the claim is still held. */
+  released_at_ms: number | null;
+  /** "agent" | "canopy" | "superseded" — how it ended. */
+  released_by: string | null;
+  refusals: AgentClaimRefusal[];
 }
+/** Only the claims still held — what the panel counts and what collides. */
 export const contextClaims = () => invoke<AgentClaim[]>("context_claims");
+/** Held and ended together, newest first, for a claim's detail tab. */
+export const contextClaimHistory = () =>
+  invoke<AgentClaim[]>("context_claim_history");
 export const contextReleaseClaim = (owner: string) =>
   invoke<void>("context_release_claim", { owner });
 export const onAgentClaims = (cb: () => void): Promise<UnlistenFn> =>

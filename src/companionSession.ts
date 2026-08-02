@@ -384,6 +384,10 @@ export async function startCompanion(
             updateSettings({
               companionSessions: { ...getSettings().companionSessions, [cli.id]: id },
             }),
+          // The transcript behind the stored id has gone. Forgetting it here is
+          // what stops the next launch resuming the same dead thread — the
+          // transport already recovered the turn in flight.
+          onForget: () => forgetCompanionSession(cli.id),
           cwd,
           env,
         });

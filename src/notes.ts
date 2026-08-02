@@ -349,5 +349,16 @@ export function noteContext(note: ipc.NoteDetail, dir: string): string {
       `For background, this is what was on screen when the note was written — it may be out of date: ${note.context.trim()}`,
     );
   }
+
+  // Close the loop. Handing a note out moved it to `doing`; nothing moved it
+  // back, so a note whose work shipped sat "In progress" until the user noticed
+  // — and the agent that did the work was usually gone by then. The agent knows
+  // both things the user cannot: whether it landed, and what it landed as. It
+  // is asked to say so rather than to decide: "already done" and "not doing
+  // this" are answers the user needs to see, not statuses to set quietly.
+  parts.push(
+    `When you are finished, move this note with canopy_notes_write — status "done" if the work landed (say what carried it: a commit, a PR), ` +
+      `and append what you found if it was already fixed or should not be done. A note nobody closes stays In progress forever.`,
+  );
   return parts.join(" ");
 }

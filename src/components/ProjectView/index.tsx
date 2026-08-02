@@ -31,6 +31,7 @@ import {
   NO_ATTENTION,
   POLICY,
   bucketFor,
+  declaredQuiet,
   ringFor,
   type Life,
   type LifeState,
@@ -295,6 +296,8 @@ import { ErrorBoundary } from "../ErrorBoundary";
 import { TeamPanel } from "../TeamPanel";
 import { McpToolsPanel } from "../McpToolsPanel";
 import { McpView } from "../McpView";
+import { ClaimView } from "../ClaimView";
+import { claimOwnerCwd } from "../../claims";
 import { ChatView } from "../ChatView";
 import { Coachmark } from "../Coachmark";
 import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
@@ -327,6 +330,7 @@ import {
   type TaskHistorySubTab,
   type InstructionsSubTab,
   type McpSubTab,
+  type ClaimSubTab,
   type ChatSubTab,
   type CollabSubTab,
   type SharedProjectSubTab,
@@ -353,6 +357,7 @@ export type {
   TaskHistorySubTab,
   InstructionsSubTab,
   McpSubTab,
+  ClaimSubTab,
   ChatSubTab,
   CollabSubTab,
   SharedProjectSubTab,
@@ -2157,6 +2162,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       const id = tabId();
       setTabs((prev) => [...prev, { id, type: "mcp", server }]);
+      setActiveTabId(id);
+    },
+    [patchTabRaw],
+  );
+
+  /** Open one advisory file claim as its own tab. Keyed on the claim id, not
+   *  the owner: an agent that releases and claims again has two claims, and the
+   *  tab you opened on the first must keep showing the first. */
+  const openClaim = useCallback(
+    (claim: ipc.AgentClaim) => {
+      const existing = tabsRef.current.find(
+        (t): t is ClaimSubTab => t.type === "claim" && t.claimId === claim.id,
+      );
+      if (existing) {
+        // The list's copy is the fresher read of the same row.
+        patchTabRaw(existing.id, { claim } as Partial<SubTab>);
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type: "claim", claimId: claim.id, claim }]);
       setActiveTabId(id);
     },
     [patchTabRaw],
@@ -4230,6 +4256,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // it can never bind a tab to an unrelated session whose recycled pty number
   // happens to collide. Latest event per pty wins.
   const liveSessionByPty = useMemo(() => {
+    // Seeded from each terminal's own launch command first: a tab restored as
+    // `codex resume <id>` names its session outright, and Canopy typed that
+    // command into that pty, so the bond holds from the first frame. Without
+    // the seed, a resumed CLI that emits no hook event until its next prompt
+    // (codex does exactly this) leaves its tab unbound after every restart —
+    // the digest it wrote sits on disk saying "idle" while the strip, seeing
+    // no digest at all, reads the resume banner's paint burst as "working".
+    const m = new Map<number, string>();
+    for (const t of tabs) {
+      if (t.type !== "terminal" || t.ptyId == null) continue;
+      const sid = resumeSessionId(t.command);
+      if (sid) m.set(t.ptyId, sid);
+    }
     const latest = new Map<number, { sid: string; ts: number }>();
     for (const e of projectEvents) {
       const d = e.data;
@@ -4238,10 +4277,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!prev || e.ts >= prev.ts)
         latest.set(d.pty, { sid: d.sessionId, ts: e.ts });
     }
-    const m = new Map<number, string>();
+    // The event stamp wins where both speak: it is from this launch by
+    // construction and follows the session even if the CLI swaps ids.
     for (const [pty, v] of latest) m.set(pty, v.sid);
     return m;
-  }, [projectEvents]);
+  }, [projectEvents, tabs]);
   liveSessionIdsRef.current = liveSessionIds;
   const liveSessionByPtyRef = useRef(liveSessionByPty);
   liveSessionByPtyRef.current = liveSessionByPty;
@@ -4515,6 +4555,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           return push({ id: tabId(), type: "instructions", focus: t.focus });
         case "mcp":
           return push({ id: tabId(), type: "mcp", server: t.server });
+        case "claim":
+          return push({ id: tabId(), type: "claim", claimId: t.claim.id, claim: t.claim });
         case "chat":
           return push({
             id: tabId(),
@@ -5689,7 +5731,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const targets = new Map<string, TabStatus>();
     // Quiet on the CLI's own say-so (turn ended, session ended) rather than
     // ours (a CPU dip). These fall on the short clock and through the
-    // active-tab hold — see SettleHold in tabGroups.ts.
+    // active-tab hold — see SettleHold in tabGroups.ts. The say-so is the
+    // declaration (`via`), not the confidence grade: a needsTrust CLI like
+    // codex never grades "proven", and keying on the grade left its active tab
+    // unable to leave Working while its own dot said idle — see declaredQuiet.
     const provenIds = new Set<string>();
     for (const t of agentTabs) {
       const life = tabLife(t);
@@ -5698,8 +5743,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         (t.ptyId != null ? attention.get(t.ptyId) : undefined) ?? NO_ATTENTION,
       );
       targets.set(t.id, bucket);
-      if (bucket === "quiet" && life.confidence === "proven")
-        provenIds.add(t.id);
+      if (bucket === "quiet" && declaredQuiet(life)) provenIds.add(t.id);
     }
     return { statusTargets: targets, provenQuiet: provenIds };
     // `attentionVersion`, not `attention`: the memory is mutated in place, so
@@ -7191,6 +7235,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               )
             }
             onOpenInstructions={openInstructions}
+            onOpenClaim={openClaim}
           />
         );
       case "task-history":
@@ -7212,6 +7257,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       case "mcp":
         return <McpView server={tab.server} onNotice={onNotice} />;
+      case "claim":
+        return (
+          <ClaimView
+            claimId={tab.claimId}
+            fallback={tab.claim}
+            active={tab.id === activeTabId && visible}
+            // The claim names its owner by directory; this is that directory
+            // resolved to a live terminal, so the page only offers the jump
+            // when there is something to jump to.
+            ownerPtyId={
+              projectStats.find((s) => s.cwd === claimOwnerCwd(tab.claim.owner))?.id ?? null
+            }
+            onJumpToPty={jumpToPty}
+            onOpenFile={(path) => void openFile(path)}
+            onOpenClaim={openClaim}
+          />
+        );
       case "instructions":
         return (
           <InstructionsView
@@ -8478,6 +8540,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onNotice={onNotice}
           onOpenInstructions={openInstructions}
           onOpenAgentsPage={openAgentsPage}
+          onOpenClaim={openClaim}
           installed={installed}
         />
       ))}

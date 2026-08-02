@@ -574,6 +574,18 @@ export function ExchangeIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** Padlock: an advisory file claim. Not a security mark — nothing a claim does
+ *  blocks a write — but "someone is holding this" is what the shape says in one
+ *  glyph, and that is the whole of what a claim means. */
+export function ClaimIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <rect x="4.5" y="10.4" width="15" height="9.4" rx="2.2" />
+      <path d="M8.3 10.4V7.7a3.7 3.7 0 0 1 7.4 0v2.7" />
+    </svg>
+  );
+}
+
 /** Angle brackets around a stem: a code symbol from the language server. */
 export function SymbolIcon({ size = 14, className }: IconProps) {
   return (

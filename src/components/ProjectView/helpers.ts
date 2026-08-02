@@ -6,6 +6,7 @@ import type { DeviceAnnotation } from "../../android";
 import type { Project } from "../../projects";
 import type { TabStatus } from "../../tabGroups";
 import { getSettings } from "../../settings";
+import { claimLabel } from "../../claims";
 
 export type SideTab =
   | "files"
@@ -193,6 +194,19 @@ export interface McpSubTab {
   server: ipc.McpServer;
 }
 
+/** One advisory file claim, opened from the Claimed files list: who holds it,
+ *  why, since when, and — once it ends — how it ended and who it turned away
+ *  meanwhile. Identity is the claim id, not the owner: an agent that claims,
+ *  releases and claims again is two claims, and a tab opened on the first must
+ *  not start showing the second. The row rides along so the header draws before
+ *  the history loads, the way the MCP tab carries its server. */
+export interface ClaimSubTab {
+  id: string;
+  type: "claim";
+  claimId: string;
+  claim: ipc.AgentClaim;
+}
+
 export interface ChatSubTab {
   id: string;
   type: "chat";
@@ -273,6 +287,7 @@ export type SubTab =
   | TaskHistorySubTab
   | InstructionsSubTab
   | McpSubTab
+  | ClaimSubTab
   | ChatSubTab;
 
 /** Every tab that isn't a terminal — the "document" tabs, rendered together
@@ -405,6 +420,10 @@ export function describeTab(tab: SubTab | undefined) {
       return { kind: "instructions", label: "Agent instructions" };
     case "mcp":
       return { kind: "mcp", label: tab.server.name };
+    case "claim":
+      // The owner, not the paths: an agent told the user is looking at a claim
+      // wants to know whose it is before anything else.
+      return { kind: "claim", label: tab.claim.owner, claimId: tab.claimId };
     default:
       return { kind: tab.type };
   }
@@ -467,6 +486,8 @@ export function tabDisplayLabel(t: SubTab): string {
       return "Agent instructions";
     case "mcp":
       return t.server.name;
+    case "claim":
+      return claimLabel(t.claim);
     case "shared-project":
       return t.name;
     case "preview":

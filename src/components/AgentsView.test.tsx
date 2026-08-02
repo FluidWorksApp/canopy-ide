@@ -1,15 +1,17 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { AgentsView } from "./AgentsView";
 import type * as ipcTypes from "../ipc";
 
 const digests: ipcTypes.SessionDigest[] = [];
+const claims: ipcTypes.AgentClaim[] = [];
 
 vi.mock("../ipc", () => ({
   instanceId: () => Promise.resolve("inst-1"),
   sessionDigests: () => Promise.resolve(digests),
-  contextClaims: () => Promise.resolve([]),
+  contextClaims: () => Promise.resolve(claims),
   onAgentClaims: () => Promise.resolve(() => {}),
   onStoreChange: () => Promise.resolve(() => {}),
   onIntegrationHealth: () => Promise.resolve(() => {}),
@@ -85,6 +87,27 @@ describe("the agents page", () => {
     const { container } = page({ stats: [] });
     expect(container.querySelector(".agv-empty")).toBeTruthy();
     expect(container.querySelector(".agv-cards")).toBeNull();
+  });
+
+  it("opens a claim rather than leaving the row dead", async () => {
+    claims.length = 0;
+    claims.push({
+      id: "c1",
+      paths: ["/repo/src/auth.ts"],
+      owner: "canopy (/repo)",
+      note: "Rewriting the login redirect",
+      at_ms: Date.now() - 60_000,
+      released_at_ms: null,
+      released_by: null,
+      refusals: [],
+    });
+    const onOpenClaim = vi.fn();
+    // Claims only load while the page is the tab in front.
+    const { container } = page({ active: true, onOpenClaim });
+    await waitFor(() => expect(container.querySelector(".agv-claim")).toBeTruthy());
+    await userEvent.click(container.querySelector(".agv-claim") as HTMLElement);
+    expect(onOpenClaim).toHaveBeenCalledWith(expect.objectContaining({ id: "c1" }));
+    claims.length = 0;
   });
 
   it("shows a question as an answerable card", () => {
