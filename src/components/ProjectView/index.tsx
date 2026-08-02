@@ -6128,10 +6128,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const agentTabOpen = activeTab?.type === "agent";
   useEffect(() => {
     if (!visible || coachTip) return;
-    if (shellChips.length && shouldShowTip("shells")) setCoachTip("shells");
-    else if (runChips.length && shouldShowTip("runs")) setCoachTip("runs");
+    // The rail tour first, in rail order — what the three groups are, before
+    // any of the surfaces they open. The workspace tip stays in-context: it
+    // teaches a tab that may not exist yet.
+    if (shouldShowTip("rail-project")) setCoachTip("rail-project");
+    else if (shouldShowTip("rail-review")) setCoachTip("rail-review");
+    else if (shouldShowTip("rail-agents")) setCoachTip("rail-agents");
     else if (agentTabOpen && shouldShowTip("agent")) setCoachTip("agent");
-  }, [visible, coachTip, shellChips.length, runChips.length, agentTabOpen]);
+  }, [visible, coachTip, agentTabOpen]);
 
   const dismissCoach = () => {
     if (coachTip) markTipSeen(coachTip);
@@ -6141,15 +6145,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
     CoachTip,
     { selector: string; title: string; body: string }
   > = {
-    shells: {
-      selector: '[data-rail="SHELLS"]',
-      title: "Your shell lives here",
-      body: "Every plain terminal you open shows up in the SHELLS rail — click a chip to jump back to it, ✕ to close it.",
+    "rail-project": {
+      selector: '[data-rail-group="project"]',
+      title: "Your project lives here",
+      body: "Components, files and every server you can start.",
     },
-    runs: {
-      selector: '[data-rail="RUNS"]',
-      title: "Your runs live here",
-      body: "Run commands and dev servers land in the RUNS rail as live services, each with a status dot. Every server you start shows up here.",
+    "rail-review": {
+      selector: '[data-rail-group="review"]',
+      title: "Changes and review",
+      body: "Session diffs, branches, pull requests and issues.",
+    },
+    "rail-agents": {
+      selector: '[data-rail-group="agents"]',
+      title: "Agents and what they produce",
+      body: "Sessions, tasks, notes, research and your team.",
     },
     agent: {
       selector: ".tab.tab-active",

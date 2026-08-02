@@ -10,6 +10,7 @@ import { useState } from "react";
 import { useEscape } from "../useEscape";
 import { Button } from "./ui";
 import { formatHotkey, getSettings } from "../settings";
+import { format } from "../shortcuts";
 
 interface OnboardingProps {
   /** Called when the walkthrough is dismissed any way (Skip, Esc, Done). */
@@ -74,22 +75,9 @@ function Logo({ bg, glyph, fg = "#fff" }: { bg: string; glyph: string; fg?: stri
 
 const SLIDES: Slide[] = [
   {
-    icon: "🌳",
-    title: "Welcome to Canopy",
-    body: "A local-first IDE for coding with agents.",
-    mock: (
-      <Scene vars={{ "--cx0": "250px", "--cy0": "20px", "--cx1": "150px", "--cy1": "62px" } as React.CSSProperties}>
-        <div className="ob-col" style={{ alignItems: "center", justifyContent: "center", height: "100%", gap: 9 }}>
-          <div className="ob-reveal" style={{ fontSize: 22 }}>🌳</div>
-          <div className="ob-reveal ob-chip">no server · no account · no telemetry</div>
-        </div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "▚",
-    title: "The terminal is the hero",
-    body: "Launch any agent CLI in a real terminal.",
+    icon: "✳",
+    title: "Agents are the hero",
+    body: "Natively manage your coding CLIs.",
     mock: (
       <Scene chrome="new project" vars={{ "--cx0": "240px", "--cy0": "24px", "--cx1": "78px", "--cy1": "44px" } as React.CSSProperties}>
         <div className="ob-cards">
@@ -107,74 +95,9 @@ const SLIDES: Slide[] = [
     ),
   },
   {
-    icon: "🎯",
-    title: "One place for every agent",
-    body: "Every session in one panel — answer prompts inline.",
-    mock: (
-      <Scene chrome="Agents" vars={{ "--cx0": "250px", "--cy0": "24px", "--cx1": "116px", "--cy1": "96px" } as React.CSSProperties}>
-        <div className="ob-head">NEEDS YOUR INPUT<span className="ob-badge">1</span></div>
-        <div className="ob-row" style={{ marginBottom: 6 }}>
-          <span className="ob-dot run" /><Logo bg="#d97757" glyph="✳" /><b style={{ color: "var(--text)" }}>claude</b>
-          <span className="ob-chip">⑂ auth</span><span className="grow" /><span className="muted">working</span>
-        </div>
-        <div className="ob-card2">
-          <div style={{ color: "var(--text)" }}>🔔 Allow edit to <span className="ob-mono">src/auth.rs</span>?</div>
-          <div style={{ display: "flex", gap: 6, marginTop: 5 }}>
-            <span className="ob-btn2 ok">✓ Allow</span><span className="ob-btn2">✕ Deny</span>
-          </div>
-        </div>
-      </Scene>
-    ),
-  },
-  {
     icon: "♻️",
-    title: "Sessions survive anything",
-    body: "Close, quit, crash — resume with history intact.",
-    mock: (
-      <Scene chrome="canopy" vars={{ "--cx0": "60px", "--cy0": "22px", "--cx1": "250px", "--cy1": "78px" } as React.CSSProperties}>
-        <div className="ob-head">PICK UP WHERE YOU LEFT OFF<span className="ob-badge">2</span></div>
-        <div className="ob-subhead">Agent sessions — resume with history</div>
-        <div className="ob-row" style={{ marginTop: 4 }}>
-          <Logo bg="#d97757" glyph="✳" /><span className="grow ob-mono" style={{ overflow: "hidden", whiteSpace: "nowrap" }}>"add auth to the api"</span>
-          <span className="ob-chip" style={{ color: "var(--ok)", borderColor: "var(--ok)" }}>⑂ auth</span>
-          <span className="ob-btn">Resume</span>
-        </div>
-        <div className="ob-row ob-reveal" style={{ marginTop: 5, borderColor: "var(--ok)", color: "var(--ok)" }}>
-          <span className="ob-dot ok" />restored · history intact
-        </div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "⇄",
-    title: "Diff-first, never a silent reload",
-    body: "Every edit as a diff. Accept, or keep yours.",
-    mock: (
-      <Scene chrome="Session changes" vars={{ "--cx0": "250px", "--cy0": "24px", "--cx1": "244px", "--cy1": "36px" } as React.CSSProperties}>
-        <div className="ob-diffbar">
-          <span className="ob-difflabel">src/auth.rs</span><span className="ob-chip">Split</span>
-          <span className="grow" />
-          <span className="ob-chip">Keep mine</span><span className="ob-btn">Accept</span>
-        </div>
-        <div className="ob-rowflex" style={{ gap: 4, marginTop: 5 }}>
-          <div className="ob-col grow" style={{ gap: 3 }}>
-            <div className="ob-dline del"><span className="ob-gut">12</span><span className="ob-sign">-</span><span className="ob-bar" style={{ width: "70%" }} /></div>
-            <div className="ob-dline"><span className="ob-gut">13</span><span className="ob-sign"> </span><span className="ob-bar" style={{ width: "55%" }} /></div>
-            <div className="ob-dline del"><span className="ob-gut">14</span><span className="ob-sign">-</span><span className="ob-bar" style={{ width: "62%" }} /></div>
-          </div>
-          <div className="ob-col grow" style={{ gap: 3 }}>
-            <div className="ob-dline add"><span className="ob-gut">12</span><span className="ob-sign">+</span><span className="ob-bar" style={{ width: "80%" }} /></div>
-            <div className="ob-dline"><span className="ob-gut">13</span><span className="ob-sign"> </span><span className="ob-bar" style={{ width: "55%" }} /></div>
-            <div className="ob-dline add"><span className="ob-gut">14</span><span className="ob-sign">+</span><span className="ob-bar" style={{ width: "66%" }} /></div>
-          </div>
-        </div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "📁",
-    title: "Multi-project, multi-component",
-    body: "Many labeled dirs, many projects, side by side.",
+    title: "Sessions and projects",
+    body: "Every session and project, side by side.",
     mock: (
       <Scene vars={{ "--cx0": "60px", "--cy0": "22px", "--cx1": "168px", "--cy1": "12px" } as React.CSSProperties}>
         <div className="ob-ptabs">
@@ -185,15 +108,18 @@ const SLIDES: Slide[] = [
         <div className="ob-cmphead">COMPONENTS</div>
         <div className="ob-cmp">▾ FRONTEND</div>
         <div className="ob-tree">├ src/App.tsx</div>
-        <div className="ob-cmp">▸ BACKEND</div>
-        <div className="ob-cmp">▸ DOCS</div>
+        <div className="ob-row ob-reveal" style={{ marginTop: 6 }}>
+          <Logo bg="#d97757" glyph="✳" />
+          <span className="grow ob-mono" style={{ overflow: "hidden", whiteSpace: "nowrap" }}>"add auth to the api"</span>
+          <span className="ob-btn">Resume</span>
+        </div>
       </Scene>
     ),
   },
   {
     icon: "🔀",
-    title: "Git & PRs, built in",
-    body: "Branches, diffs, PRs — commit without leaving.",
+    title: "Git, PRs and issues",
+    body: "Branches, diffs and tickets, built in.",
     mock: (
       <Scene chrome="Git" vars={{ "--cx0": "250px", "--cy0": "24px", "--cx1": "60px", "--cy1": "96px" } as React.CSSProperties}>
         <div className="ob-branchbar">
@@ -201,7 +127,7 @@ const SLIDES: Slide[] = [
           <span style={{ color: "var(--ok)" }}>↑2</span><span className="muted">↓0</span>
           <span className="grow" /><span className="ob-chip">Push</span>
         </div>
-        <div className="ob-gittabs"><span className="sel">Changes 2</span><span>Branches</span><span>Worktrees</span><span>PRs</span></div>
+        <div className="ob-gittabs"><span className="sel">Changes 2</span><span>Branches</span><span>PRs</span><span>Issues</span></div>
         <div className="ob-gfile"><span className="ob-gcode ok">M </span>src/App.tsx</div>
         <div className="ob-gfile"><span className="ob-gcode ok">M </span>src/index.css</div>
         <div style={{ position: "absolute", right: 9, bottom: 8 }}><span className="ob-btn">Commit 2</span></div>
@@ -209,86 +135,9 @@ const SLIDES: Slide[] = [
     ),
   },
   {
-    icon: "🎫",
-    title: "Your tickets, in the IDE",
-    body: "Start work → a worktree on its branch, plus your agent.",
-    mock: (
-      <Scene chrome="Issues" vars={{ "--cx0": "250px", "--cy0": "24px", "--cx1": "258px", "--cy1": "64px" } as React.CSSProperties}>
-        <div className="ob-pills">
-          <span className="ob-pill"><Logo bg="#2a2e42" glyph="" /> GitHub Issues</span>
-          <span className="ob-pill sel"><span className="ob-lmark" style={{ background: "#7b86e8" }} /> Linear</span>
-        </div>
-        <div className="ob-subhead" style={{ marginTop: 4 }}>IN PROGRESS <span className="ob-badge">3</span></div>
-        <div className="ob-trow">
-          <span className="ob-lmark" style={{ background: "#7b86e8" }} />
-          <span className="ob-tid">ENG-214</span><span className="grow ob-ttitle">fix flaky auth test</span>
-          <span className="ob-mine">you</span><span className="ob-play">▶</span>
-        </div>
-        <div className="ob-row ob-reveal" style={{ marginTop: 5 }}><span className="ob-dot run" />worktree + agent launched</div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "🤝",
-    title: "Team collaboration, peer-to-peer",
-    body: "Join by code. End-to-end encrypted, host to peer.",
-    mock: (
-      <Scene chrome="Team" vars={{ "--cx0": "60px", "--cy0": "24px", "--cx1": "244px", "--cy1": "98px" } as React.CSSProperties}>
-        <div className="ob-row" style={{ border: "none", background: "none", padding: "2px 0" }}>
-          <span className="ob-dot ok" /><span style={{ color: "var(--ok)" }}>Hosting — you are the relay</span>
-        </div>
-        <div className="ob-code">123 4567</div>
-        <div className="ob-card2" style={{ marginTop: 4 }}>
-          <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--text)" }}>
-            <span className="ob-lmark" style={{ background: "var(--accent)" }} />Review PR #42<span className="grow" />
-            <span className="ob-btn">Open</span><span className="ob-chip">Dismiss</span>
-          </div>
-        </div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "📊",
-    title: "See what's actually running",
-    body: "Every run a live service — status, CPU, memory.",
-    mock: (
-      <Scene chrome="report.md" vars={{ "--cx0": "250px", "--cy0": "22px", "--cx1": "96px", "--cy1": "30px" } as React.CSSProperties}>
-        <div className="ob-runsrail">
-          <span className="ob-runslabel">RUNS</span>
-          <span className="ob-runchip sel"><span className="ob-dot run" />dev-server<span className="muted"> ↻ ✕</span></span>
-          <span className="ob-runchip"><span style={{ color: "var(--ok)" }}>✓</span> build</span>
-          <span className="ob-runchip"><span style={{ color: "var(--danger)" }}>✕</span> test</span>
-        </div>
-        <div className="ob-reveal" style={{ marginTop: 8, fontSize: 9, color: "var(--text-dim)", padding: "0 2px" }}>
-          <span className="ob-dot run" style={{ display: "inline-block", marginRight: 5 }} />running — <span className="ob-mono">npm run dev</span> · :5173
-        </div>
-        <div className="ob-statusbar"><span>claude · opus</span><span className="grow" /><span className="ob-mono">12% cpu · 340 MB</span></div>
-      </Scene>
-    ),
-  },
-  {
-    icon: "📄",
-    title: "Open anything, install nothing",
-    body: "Markdown, CSV, PDF, notebooks — rendered native.",
-    mock: (
-      <Scene vars={{ "--cx0": "240px", "--cy0": "14px", "--cx1": "196px", "--cy1": "12px" } as React.CSSProperties}>
-        <div className="ob-ftabs">
-          <span className="ob-ftab ob-taboff">📝 report.md</span>
-          <span className="ob-ftab">📄 spec.pdf</span>
-          <span className="ob-ftab ob-tabon">▦ data.csv</span>
-        </div>
-        <div className="ob-pane ob-reveal">
-          <div className="ob-sheetrow head"><span>A</span><span>B</span><span>C</span></div>
-          <div className="ob-sheetrow"><span>revenue</span><span>1,204</span><span>+8%</span></div>
-          <div className="ob-sheetrow"><span>churn</span><span>2.1%</span><span>−0.3</span></div>
-        </div>
-      </Scene>
-    ),
-  },
-  {
     icon: "🎙️",
     title: "Dictate, don't type",
-    body: "Speak prompts to your agents — far faster than typing. Local, offline.",
+    body: "Speak your prompts. Local, offline.",
     mock: (
       <Scene chrome="dictation" vars={{ "--cx0": "60px", "--cy0": "24px", "--cx1": "40px", "--cy1": "44px" } as React.CSSProperties}>
         <div className="ob-row" style={{ alignItems: "flex-start", minHeight: 34 }}>
@@ -307,43 +156,66 @@ const SLIDES: Slide[] = [
     ),
   },
   {
-    icon: "🌐",
-    title: "Drive your agents from anywhere",
-    body: "A remote control-panel for your own agents.",
+    icon: "🤝",
+    title: "Your team, anywhere",
+    body: "Join by code, drive agents from your phone, send a file.",
     mock: (
-      <Scene chrome="remote portal" vars={{ "--cx0": "250px", "--cy0": "24px", "--cx1": "150px", "--cy1": "88px" } as React.CSSProperties}>
-        <div className="ob-portal">
-          <div className="ob-deck"><span className="ob-recdot ok" />CanopyRemote<span className="grow" /><span className="muted">Connected</span></div>
-          <div className="ob-gauges">
-            <div className="ob-gauge"><b style={{ color: "var(--ok)" }}>2</b>live</div>
-            <div className="ob-gauge"><b style={{ color: "var(--warn)" }}>1</b>needs you</div>
-            <div className="ob-gauge"><b>3</b>idle</div>
+      <Scene chrome="Team" vars={{ "--cx0": "60px", "--cy0": "24px", "--cx1": "244px", "--cy1": "98px" } as React.CSSProperties}>
+        <div className="ob-row" style={{ border: "none", background: "none", padding: "2px 0" }}>
+          <span className="ob-dot ok" /><span style={{ color: "var(--ok)" }}>Hosting — you are the relay</span>
+        </div>
+        <div className="ob-code">123 4567</div>
+        <div className="ob-card2" style={{ marginTop: 4 }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", color: "var(--text)" }}>
+            <span className="ob-lmark" style={{ background: "var(--accent)" }} />Review PR #42<span className="grow" />
+            <span className="ob-btn">Open</span><span className="ob-chip">Dismiss</span>
           </div>
-          <div className="ob-seg"><span className="sel">⚡ Agents</span><span>▢ Projects</span></div>
-          <div className="ob-pcard ob-reveal"><span className="ob-dot ok" /><b>claude</b><span className="grow" /><span className="muted">⑂ auth</span></div>
-          <div className="ob-fab">＋ New agent</div>
         </div>
       </Scene>
     ),
   },
   {
-    icon: "📎",
-    title: "Send files to a teammate",
-    body: "Direct-first, relay fallback. Encrypted host to peer.",
+    icon: "🔎",
+    title: "One search for everything",
+    body: (
+      <>
+        <span className="ob-mono">{format("spot-search")}</span> finds anything, anywhere.
+      </>
+    ),
     mock: (
-      <Scene chrome="Team · Transfers" vars={{ "--cx0": "60px", "--cy0": "24px", "--cx1": "255px", "--cy1": "36px" } as React.CSSProperties}>
-        <div className="ob-subhead">TRANSFERS</div>
-        <div className="ob-xfer">
-          <div className="ob-xhead">
-            <span style={{ color: "var(--accent)", fontWeight: 700 }}>↑</span>
-            <span className="grow">build.zip</span>
-            <span className="ob-swap">
-              <span className="ob-late-off ob-mono muted">63%</span>
-              <span className="ob-late-on ob-mono" style={{ color: "var(--ok)" }}>done</span>
-            </span>
-          </div>
-          <div className="ob-xbar"><div className="ob-fill" /></div>
-          <div className="ob-xsub">2.1 MB / 3.4 MB → ada</div>
+      <Scene chrome={format("spot-search")} vars={{ "--cx0": "250px", "--cy0": "22px", "--cx1": "120px", "--cy1": "58px" } as React.CSSProperties}>
+        <div className="ob-row" style={{ borderColor: "var(--accent)" }}>
+          <span className="ob-mono ob-type" style={{ "--tw": "96px" } as React.CSSProperties}>auth</span>
+        </div>
+        <div className="ob-row ob-reveal" style={{ marginTop: 5 }}>
+          <Logo bg="#d97757" glyph="✳" /><span className="grow">"add auth to the api"</span><span className="ob-chip">session</span>
+        </div>
+        <div className="ob-row ob-reveal" style={{ marginTop: 4 }}>
+          <span className="ob-mono grow">src/auth.rs</span><span className="ob-chip">file</span>
+        </div>
+        <div className="ob-row ob-reveal" style={{ marginTop: 4 }}>
+          <span className="grow">Auth rewrite — what we decided</span><span className="ob-chip">note</span>
+        </div>
+      </Scene>
+    ),
+  },
+  {
+    icon: "📓",
+    title: "Research and scratchpad",
+    body: "Findings and parked thoughts — run from here.",
+    mock: (
+      <Scene chrome="Research" vars={{ "--cx0": "60px", "--cy0": "24px", "--cx1": "250px", "--cy1": "50px" } as React.CSSProperties}>
+        <div className="ob-head">RESEARCH<span className="ob-badge">2</span></div>
+        <div className="ob-row">
+          <span className="ob-tid">0008</span>
+          <span className="grow">why the tab dot and the tile disagree</span>
+          <span className="ob-chip" style={{ color: "var(--ok)", borderColor: "var(--ok)" }}>implemented</span>
+        </div>
+        <div className="ob-subhead" style={{ marginTop: 6 }}>SCRATCHPAD</div>
+        <div className="ob-row ob-reveal">
+          <span className="ob-tid">0005</span>
+          <span className="grow">bring the rail tooltips back</span>
+          <span className="ob-btn">Hand to an agent</span>
         </div>
       </Scene>
     ),
@@ -351,7 +223,7 @@ const SLIDES: Slide[] = [
   {
     icon: "🪶",
     title: "That's the tour",
-    body: "Light, offline, entirely yours. Ready?",
+    body: "Local-first — nothing leaves your machine.",
     mock: (
       <Scene vars={{ "--cx0": "250px", "--cy0": "22px", "--cx1": "150px", "--cy1": "80px" } as React.CSSProperties}>
         <div className="ob-col" style={{ justifyContent: "center", alignItems: "center", height: "100%", gap: 10 }}>
