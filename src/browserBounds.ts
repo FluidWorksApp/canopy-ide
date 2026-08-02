@@ -75,16 +75,12 @@ export function overlaps(a: RectLike, b: RectLike): boolean {
   );
 }
 
-export type BrowserEngine = "webview" | "proxy" | "chromium";
+export type BrowserEngine = "webview" | "proxy";
 
 /** What this machine can actually run, as opposed to what is configured. */
 export interface EngineSupport {
   /** The platform can host a child webview. macOS only — see browser.rs. */
   webview: boolean;
-  /** A Chromium-family browser was found to drive over CDP. Unlike `webview`
-   *  this is not a platform fact but an installation one: it can become true
-   *  while the app is running, because the user went and installed Chrome. */
-  chromium: boolean;
 }
 
 /** Which engine a preview tab actually runs on.
@@ -95,6 +91,5 @@ export interface EngineSupport {
  *  looks like a bug in the page being previewed. */
 export function chooseEngine(setting: BrowserEngine, support: EngineSupport): BrowserEngine {
   if (setting === "webview" && support.webview) return "webview";
-  if (setting === "chromium" && support.chromium) return "chromium";
   return "proxy";
 }

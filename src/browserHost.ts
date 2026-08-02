@@ -815,24 +815,9 @@ export const refreshBrowserViews = schedule;
 let supported: EngineSupport | null = null;
 let probe: Promise<void> | null = null;
 
-/** Ask the platform what it can run. Both questions at once, because the answer
- *  is consumed as one and two staggered probes would make the engine flip once
- *  more at startup than it needs to. */
+/** Ask the platform what it can run. */
 async function probeSupport(): Promise<EngineSupport> {
-  const [webview, browsers] = await Promise.all([
-    ipc.browserSupported(),
-    ipc.chromiumDetect(),
-  ]);
-  return { webview, chromium: browsers.length > 0 };
-}
-
-/** Re-ask after the user installs a browser or points at one by hand.
- *  Chromium support, unlike the child webview, can become true while the app
- *  is running — so it must be re-askable rather than probed once at startup. */
-export async function refreshEngineSupport() {
-  supported = await probeSupport();
-  probe = Promise.resolve();
-  schedule();
+  return { webview: await ipc.browserSupported() };
 }
 
 /** Which engine preview tabs run on, once the platform has been asked. `null`
