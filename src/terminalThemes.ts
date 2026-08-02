@@ -20,9 +20,9 @@ export function terminalTheme(theme: Theme, customAccent?: string): TermTheme {
       ? "gotham"
       : "daylight";
   }
-  // "custom" is the base skin's palette plus the user's accent, which the
-  // substitution below applies — so the lookup falling back to Gotham is
-  // exactly right for it.
+  // A retired id resolves to the base skin, and the accent substitution below
+  // still applies over it — which is what anyone who had picked the old
+  // "custom" theme was actually looking at.
   const palette = skinDef(theme).term;
   const accent = (customAccent ?? "").trim();
   return accent

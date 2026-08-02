@@ -1,0 +1,60 @@
+/* Lattice — a terminal form, in an IDE. The colour is here; the material is
+   the other half of the skin, and it is what makes the palette read as a TUI
+   rather than as a teal Default.
+
+   A TUI has no shadows, no fills and no font weights, so every job those
+   normally do collapses onto one hairline:
+
+     - The box IS the grouping. There is no card and no raised surface behind
+       a group of controls; there is a line around it.
+     - The colour of the line IS the focus. Exactly one pane is drawn in
+       --accent and every other is --border-strong. On a surface built for the
+       keyboard, the lit border is how you know where the next keystroke
+       lands, and it is the rule the rest of the style hangs off.
+     - Selection is a full-width reverse bar — background --accent, ink
+       --on-accent — never a tint and never a left rule.
+
+   Which is why this block declares more than the eighteen tokens. The radii
+   come down to near-square (a terminal cell has no curve to give, but a flat
+   0 belongs to Pixel and would make the two skins the same shape), and
+   --font-ui becomes the mono face because a terminal has no proportional face
+   to switch to: in this skin the UI font and the code font are one font, and
+   that single substitution does more of the work than any colour here.
+
+   --ring is 1px rather than the usual 2px fade. Every other skin softens its
+   focus ring with color-mix; a TUI cannot draw half a cell, and a translucent
+   edge would be the one anti-aliased line in a window of hard ones.
+
+   Deliberately NOT here, because they need a rule beside the component rather
+   than a token: the label inset into the top border with the field's own
+   background painted behind it to break the line, and the always-visible
+   keymap along the bottom edge. Both are Lattice's, both are real, and both
+   belong with the components they dress the way Vitrine's frost does. */
+:root[data-theme="lattice"] {
+  --bg-deep: #06090c;
+  --bg-alt: #0a0e12;
+  --bg: #080b0e;
+  --bg-raised: #10151a;
+  --bg-overlay: #161c22;
+  --border: #1d2831;
+  --border-strong: #2e3d49;
+  --text: #e4e9ed;
+  --text-dim: #93a1ac;
+  --text-faint: #63727e;
+  --accent: #35c3d1;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --danger: #ff6b6b;
+  --ok: #7ec96f;
+  --warn: #e8a33d;
+  --magenta: #c98bdb;
+  --cyan: #6cb6ff;
+  --on-accent: #031416;
+  --on-danger: #1a0707;
+  --ring: 0 0 0 1px var(--accent);
+  --r-xs: 3px;
+  --r-sm: 4px;
+  --r-md: 5px;
+  --r-lg: 5px;
+  --font-ui: var(--font-mono);
+  color-scheme: dark;
+}

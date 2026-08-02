@@ -21,15 +21,32 @@ import {
   requireKeyChord,
 } from "./shortcuts";
 
-/** Every skin in the roster, plus the two ids that aren't skins: "auto"
- *  resolves to one of them, "custom" is the base skin with the user's accent
- *  written in at runtime. Adding a skin to src/skins/registry.ts adds it here.
+/** Every skin in the roster, plus the one id that isn't a skin: "auto",
+ *  which resolves to one of them. Adding a skin to src/skins/registry.ts adds
+ *  it here.
  *
  *  Retiring one is just as cheap and needs no migration: a stored id that has
  *  left the roster stops matching any CSS block, so the app falls through to
  *  the `:root` contract, and skinDef() answers with the base skin for the
- *  terminal and Monaco. */
-export type Theme = "auto" | SkinId | "custom";
+ *  terminal and Monaco.
+ *
+ *  "custom" used to live here — the base skin with the user's accent written
+ *  in at runtime. It was a skin-shaped hole in a list of skins: it had no
+ *  palette of its own, no terminal or Monaco theme, and picking it silently
+ *  swapped whatever skin you were on for Gotham. The accent override it
+ *  existed for was never actually tied to it — `customAccent` applies over
+ *  ANY skin (see applyTheme), which is the model that makes sense: Ember with
+ *  a teal accent is a legitimate thing to want and never required giving up
+ *  Ember. `migrateTheme` moves anyone still holding the id. */
+export type Theme = "auto" | SkinId;
+
+/** A stored theme id, as a Theme — mapping the retired "custom" onto what it
+ *  actually rendered as. Custom was the base skin plus an accent, and the
+ *  accent lives on separately, so Gotham is not an approximation of what that
+ *  user was looking at: it is the same window. */
+export function migrateTheme(stored: unknown): Theme {
+  return stored === "custom" ? "gotham" : (stored as Theme);
+}
 
 /** What "auto" means right now: Gotham when macOS is in dark mode, Daylight
  *  in light mode. Every consumer of the skin (CSS data-theme, terminal
@@ -57,7 +74,6 @@ export function watchSystemTheme(): () => void {
 export const THEMES: { id: Theme; label: string }[] = [
   { id: "auto", label: "Auto" },
   ...SKINS.map((s) => ({ id: s.id as Theme, label: s.label })),
-  { id: "custom", label: "Custom" },
 ];
 
 /** Shared across Monaco and xterm even though neither uses these names
@@ -628,6 +644,8 @@ export function getSettings(): Settings {
   let value: Settings;
   try {
     value = { ...DEFAULTS, ...(JSON.parse(raw ?? "{}") as Partial<Settings>) };
+    // The one stored value that can name something that no longer exists.
+    value.theme = migrateTheme(value.theme);
   } catch {
     value = { ...DEFAULTS };
   }
@@ -676,17 +694,16 @@ export const THEME_CHANGE_EVENT = "canopy:theme";
 
 /** Stamps the theme onto <html data-theme="…">, which is all index.css needs
  *  to flip every color: one attribute, not a re-render or a re-mount. Call on
- *  boot and again whenever the theme (or, for "custom", the accent color)
- *  changes. */
+ *  boot, and again whenever the theme or the accent override changes. */
 
 export function applyTheme(theme: Theme, customAccent?: string): void {
   document.documentElement.dataset.theme = resolveTheme(theme);
   const root = document.documentElement.style;
   const accent = (customAccent ?? "").trim();
   if (accent) {
-    // Orthogonal to the skin: Gotham with a teal accent is a legitimate
-    // thing to want, and forcing a skin change to get one was the wrong
-    // model.
+    // Orthogonal to the skin, and always was: Gotham with a teal accent is a
+    // legitimate thing to want, and forcing a skin change to get one was the
+    // wrong model — which is what the retired "custom" theme made you do.
     root.setProperty("--accent", accent);
     root.setProperty(
       "--on-accent",
