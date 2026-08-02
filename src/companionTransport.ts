@@ -278,7 +278,7 @@ export class OneshotTransport implements CompanionTransport {
    *  comes back without the conversation's history, which is the honest cost:
    *  the history is what has gone missing. Once only, and only while an id is
    *  held, so a CLI that fails this way for any other reason cannot loop. */
-  private healStaleThread(message: string): boolean {
+  healIfConversationGone(message: string): boolean {
     if (!this.sessionId || !CONVERSATION_GONE.test(message)) return false;
     const text = this.pending;
     if (!text) return false;
@@ -328,7 +328,7 @@ export class OneshotTransport implements CompanionTransport {
         const message = msg.error?.message || "The agent ended the turn with an error.";
         // Silent on purpose when it heals: the user asked a question, and a
         // dead thread id is Canopy's problem to fix, not a failure to report.
-        if (this.healStaleThread(message)) return;
+        if (this.healIfConversationGone(message)) return;
         this.host.emit({ kind: "error", message });
         this.host.emit({ kind: "turnEnd" });
         return;
@@ -387,7 +387,13 @@ export function startOneshot(
         if (out.kind === "line") transport.handleLine(out.text);
         else if (out.kind === "stderr") {
           if (/error|fatal|not found|denied|invalid/i.test(out.text)) {
-            host.emit({ kind: "error", message: out.text });
+            // Same recovery as a `turn.failed` naming a missing conversation:
+            // which of the two a CLI uses to report it is an implementation
+            // detail of that CLI, and codex has used both. Heal first, and only
+            // show the line if it was something else.
+            if (!transport.healIfConversationGone(out.text)) {
+              host.emit({ kind: "error", message: out.text });
+            }
           }
         } else if (out.kind === "exit") {
           // A turn ending is the process ending, so this is normal — never the
