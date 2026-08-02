@@ -11,6 +11,7 @@
 //     own API, straight from this machine.
 import * as ipc from "./ipc";
 import { getSettings, updateSettings } from "./settings";
+import { basename } from "./paths";
 
 export interface TrackerAvailability {
   ok: boolean;
@@ -91,7 +92,7 @@ export function ticketWorktree(
     }
     const num = ticket.id.replace(/^#/, "");
     if (!/^\d+$/.test(num)) return false;
-    const tail = w.branch.split("/").pop() ?? w.branch;
+    const tail = basename(w.branch) || w.branch;
     return new RegExp(`^${num}([^0-9]|$)`).test(tail) || tail === `issue-${num}`;
   });
 }

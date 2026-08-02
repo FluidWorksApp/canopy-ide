@@ -8,6 +8,7 @@
 // record) and the run tabs that actually exist. A run tab with no configured
 // command is not dropped — an agent's canopy_start_server, or a command since
 // renamed in project settings, is still a process you need to be able to stop.
+import { basename } from "./paths";
 import type { TermSubTab } from "./components/ProjectView/helpers";
 import type { RunCommand } from "./projects";
 import type { AgentRef } from "./workspaces";
@@ -106,7 +107,7 @@ function componentFor(cwd: string, components: ServerComponent[]): ServerCompone
   return best;
 }
 
-const basename = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
+
 
 /**
  * Components that have servers, with each server's live state. Components with

@@ -23,6 +23,7 @@ import {
   type ServerLaunch,
   type ServerSpec,
 } from "./servers";
+import { basename } from "../paths";
 
 class IpcMessageReader extends AbstractMessageReader implements MessageReader {
   private callback: DataCallback | null = null;
@@ -199,7 +200,7 @@ export async function ensureLanguageServer(path: string, root: string): Promise<
         documentSelector: spec.languages,
         workspaceFolder: {
           uri: monaco.Uri.file(serverRoot) as unknown as import("vscode").Uri,
-          name: serverRoot.split("/").pop() ?? serverRoot,
+          name: basename(serverRoot) || serverRoot,
           index: 0,
         },
         initializationOptions,

@@ -15,6 +15,7 @@
 // `canopy_editor_state`, which the brief points at for anything deeper.
 
 import { createChannel } from "./channel";
+import { basename } from "./paths";
 
 /** The front tab, as `describeTab` describes it — only the fields the
  *  envelope reads are named, and everything is optional because every tab
@@ -88,7 +89,7 @@ export function spotlightEnvelope(spot: CompanionSpotlight): string {
 export function spotlightHint(spot: CompanionSpotlight): string {
   const t = spot.tab;
   if (t?.kind === "file" && t.path) {
-    const base = t.path.split("/").pop() || t.path;
+    const base = basename(t.path) || t.path;
     const line = spot.caret && spot.caret.path === t.path ? `:${spot.caret.line}` : "";
     return `${spot.project} · ${base}${line}`;
   }

@@ -36,6 +36,7 @@ import {
   TrashIcon,
 } from "./icons";
 import { Button, Segmented, TextInput } from "./ui";
+import { basename } from "../paths";
 
 const PER_PAGE = 25;
 
@@ -555,7 +556,7 @@ export function TaskHistoryView({
                                       onClick={() => onOpenFile?.(at)}
                                     >
                                       <DocumentIcon size={11} />
-                                      {at.split("/").pop()}
+                                      {basename(at)}
                                     </button>
                                   );
                                 })}

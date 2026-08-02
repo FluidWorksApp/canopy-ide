@@ -3,6 +3,7 @@
 // guard.
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
+import { basename } from "../paths";
 import { getSettings } from "../settings";
 import { AGENT_CLIS } from "../projects";
 import { agentDisplayName, type TabName } from "../agentDisplayName";
@@ -157,7 +158,7 @@ function SharedDialog({
           shared.map((d) => (
             <div key={d.session_id} className="share-digest">
               <div className="share-digest-head">
-                {d.cwd?.split("/").pop()}
+                {basename(d.cwd)}
                 {d.branch && <span className="share-branch">⎇ {d.branch}</span>}
                 <span className={d.idle ? "share-idle" : "share-active"}>
                   {d.idle ? "idle" : "active"}
@@ -895,7 +896,7 @@ export function AgentsPanel({
                 <span className="claim-owner">{claimOwnerName(claim.owner)}</span>
                 <span className="claim-paths">
                   {claim.note ? `${claim.note} — ` : ""}
-                  {claim.paths.map((p) => p.split("/").pop()).join(", ")}
+                  {claim.paths.map((p) => basename(p)).join(", ")}
                 </span>
                 <Button
                   title="Drop this claim — for an agent that died holding it"
@@ -921,7 +922,7 @@ export function AgentsPanel({
             // runIn is resume_cwd, not cwd: claude looks the conversation up
             // under its project root, so resuming from the subdirectory the
             // agent ran in reports "No conversation found".
-            const dir = runIn.split("/").filter(Boolean).pop() ?? "";
+            const dir = basename(runIn);
             const last = lastHumanPrompt(d.prompts);
             return (
               <div key={d.session_id} className="restore-row">

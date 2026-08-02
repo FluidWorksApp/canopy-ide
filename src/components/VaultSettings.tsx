@@ -25,6 +25,7 @@ import {
   tint,
 } from "../vaultUi";
 import { Button, TextInput } from "./ui";
+import { basename } from "../paths";
 
 function Item({
   name,
@@ -394,7 +395,7 @@ function ImportPanel({ onDone }: { onDone: () => void }) {
         <Button onClick={() => void pick()}>
           {path ? "Choose a different file" : "Choose a file…"}
         </Button>
-        {path && <span className="vault-row-sub">{path.split("/").pop()}</span>}
+        {path && <span className="vault-row-sub">{basename(path)}</span>}
       </div>
       {path && (
         <Field label="Password for that file">

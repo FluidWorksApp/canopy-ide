@@ -18,6 +18,7 @@ import {
 } from "./fileAssociations";
 import { getSettings } from "./settings";
 import { SKINS, skinDef } from "./skins/registry";
+import { basename } from "./paths";
 
 export const monacoReady: Promise<void> = (async () => {
   registerTauriFileSystem();
@@ -86,7 +87,7 @@ export const monacoReady: Promise<void> = (async () => {
 function resolveLanguage(path: string, custom: Record<string, string>): string | undefined {
   const own = customLanguageFor(path, custom);
   if (own) return own;
-  const name = path.split("/").pop() ?? path;
+  const name = basename(path) || path;
   const ext = "." + (name.split(".").pop() ?? "");
   for (const lang of monaco.languages.getLanguages()) {
     if (lang.extensions?.includes(ext) || lang.filenames?.includes(name)) {

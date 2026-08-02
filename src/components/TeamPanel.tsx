@@ -14,6 +14,7 @@ import { trackerKey } from "../trackers";
 import type { Notify, RelayHandle } from "../types";
 import { LiveDot, PullRequestIcon, TeamIcon } from "./icons";
 import { Button } from "./ui";
+import { basename } from "../paths";
 
 interface TeamPanelProps {
   relay: RelayHandle;
@@ -73,7 +74,7 @@ export async function offerFileTo(memberId: string, memberName: string, onNotice
   if (typeof path !== "string") return;
   try {
     await ipc.relayOfferFile(memberId, path);
-    onNotice(`Offered ${path.split("/").pop()} to ${memberName} — sends when they accept.`, "success");
+    onNotice(`Offered ${basename(path)} to ${memberName} — sends when they accept.`, "success");
   } catch (err) {
     onNotice(String(err), "error");
   }

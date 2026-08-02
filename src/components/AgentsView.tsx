@@ -13,6 +13,7 @@
 // agents first — the whole point of looking) and per-session spend.
 import { useEffect, useMemo, useState } from "react";
 import * as ipc from "../ipc";
+import { basename } from "../paths";
 import { getSettings } from "../settings";
 import { agentDisplayName, type TabName } from "../agentDisplayName";
 import { LIFE_META, NO_ATTENTION, bucketFor, reclaimable, silenceLabel } from "../../shared/agentLife";
@@ -571,7 +572,7 @@ export function AgentsView({
                   </span>
                   <span className="agv-claim-paths">
                     {claim.note ? `${claim.note} — ` : ""}
-                    {claim.paths.map((p) => p.split("/").pop()).join(", ")}
+                    {claim.paths.map((p) => basename(p)).join(", ")}
                   </span>
                   <span className="agv-spacer" />
                   <span className="agv-claim-when">{ago(claim.at_ms / 1000)}</span>
@@ -620,7 +621,7 @@ export function AgentsView({
                 // runIn is resume_cwd, not cwd: claude looks the conversation up
                 // under its project root, so resuming from the subdirectory the
                 // agent ran in reports "No conversation found".
-                const dir = runIn.split("/").filter(Boolean).pop() ?? "";
+                const dir = basename(runIn);
                 const last = lastHumanPrompt(d.prompts);
                 return (
                   <div key={d.session_id} className="agv-past-row">
