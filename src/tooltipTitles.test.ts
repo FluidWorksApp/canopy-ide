@@ -151,3 +151,40 @@ describe("placeTip", () => {
     expect(p.top).toBe(6);
   });
 });
+
+describe("opening beside the trigger", () => {
+  // The activity rail is a column of icons: a bubble under one covers the next
+  // one down, which is where the pointer is heading.
+  const rail = { top: 200, bottom: 232, left: 8, right: 40, width: 32, height: 32 };
+  const tip = { width: 160, height: 30 };
+  const view = { width: 1400, height: 900 };
+
+  it("puts the bubble to the right of the icon, centred on it", () => {
+    const p = placeTip(rail, tip, view, "right");
+    expect(p.side).toBe("right");
+    expect(p.left).toBeGreaterThan(rail.right);
+    // Centred on the icon: the bubble's middle sits on the icon's middle.
+    expect(p.top + tip.height / 2).toBe(rail.top + rail.height / 2);
+  });
+
+  it("flips to the other side when the preferred one cannot hold it", () => {
+    // A rail on the right edge of the window.
+    const right = { top: 200, bottom: 232, left: 1360, right: 1392, width: 32, height: 32 };
+    expect(placeTip(right, tip, view, "right").side).toBe("left");
+    // …and back, for a left-preferring trigger with no room on the left.
+    expect(placeTip(rail, tip, view, "left").side).toBe("right");
+  });
+
+  it("keeps the bubble inside the window at the ends of the rail", () => {
+    const top = { top: 2, bottom: 34, left: 8, right: 40, width: 32, height: 32 };
+    const p = placeTip(top, tip, view, "right");
+    expect(p.top).toBeGreaterThanOrEqual(0);
+    const bottom = { top: 880, bottom: 912, left: 8, right: 40, width: 32, height: 32 };
+    const q = placeTip(bottom, tip, view, "right");
+    expect(q.top + tip.height).toBeLessThanOrEqual(view.height);
+  });
+
+  it("still opens vertically when nothing asks otherwise", () => {
+    expect(["top", "bottom"]).toContain(placeTip(rail, tip, view).side);
+  });
+});

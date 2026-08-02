@@ -72,10 +72,18 @@ export interface Box {
   height: number;
 }
 
+/** Which way a trigger wants its bubble to open. Vertical is the default and
+ *  right for anything in a horizontal row — a toolbar, a tab strip. A vertical
+ *  strip is the opposite case: the activity rail is a column of icons, and a
+ *  bubble under one covers the next icon down, which is exactly where the
+ *  pointer is heading. Declared by the trigger (`data-tip-side`), because only
+ *  the trigger knows which way its neighbours lie. */
+export type TipSide = "vertical" | "right" | "left";
+
 export interface Placement {
   left: number;
   top: number;
-  side: "top" | "bottom";
+  side: "top" | "bottom" | "right" | "left";
   /** Arrow offset from the bubble's left edge, in px. */
   arrow: number;
 }
@@ -97,7 +105,27 @@ export function placeTip(
   anchor: Box,
   tip: { width: number; height: number },
   view: { width: number; height: number },
+  prefer: TipSide = "vertical",
 ): Placement {
+  if (prefer !== "vertical") {
+    // Beside the trigger, centred on it. Flips to the other side when the
+    // preferred one cannot hold the bubble — a rail on the right edge of the
+    // window wants its tips on the left — and clamps into the viewport the
+    // same way the vertical case does.
+    const fitsRight = anchor.right + GAP + tip.width <= view.width - MARGIN;
+    const fitsLeft = anchor.left - GAP - tip.width >= MARGIN;
+    const side: "right" | "left" =
+      prefer === "right" ? (fitsRight || !fitsLeft ? "right" : "left") : fitsLeft || !fitsRight ? "left" : "right";
+    const rawLeft = side === "right" ? anchor.right + GAP : anchor.left - GAP - tip.width;
+    const left = Math.max(MARGIN, Math.min(rawLeft, view.width - tip.width - MARGIN));
+    const middle = anchor.top + anchor.height / 2;
+    const top = Math.max(
+      MARGIN,
+      Math.min(middle - tip.height / 2, view.height - tip.height - MARGIN),
+    );
+    const arrow = clamp(middle - top, ARROW_INSET, Math.max(ARROW_INSET, tip.height - ARROW_INSET));
+    return { left, top, side, arrow };
+  }
   const above = anchor.top - GAP - tip.height;
   const fitsAbove = above >= MARGIN;
   const fitsBelow = anchor.bottom + GAP + tip.height <= view.height - MARGIN;

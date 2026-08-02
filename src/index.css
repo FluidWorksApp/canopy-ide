@@ -20669,6 +20669,32 @@ a.btn-sm {
    got a letterbox. It fills the scroll region (100% of the region's height,
    which is definite) and NoteView grows it past that as you type, so the
    region scrolls, never the textarea. */
+/* The editor and the one row that says the text is safe. Sticky rather than
+   after the textarea: a long note scrolls, and a Save button you have to
+   scroll to find is the invisible save this replaces. */
+.note-edit {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.note-edit-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0 10px;
+  background: var(--bg);
+}
+
+.note-edit-hint {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
 .note-body-input {
   flex: 0 0 auto;
   min-height: 100%;
