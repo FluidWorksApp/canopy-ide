@@ -251,10 +251,17 @@ export function NoteView({
                 <PlayIcon />
               </Button>
             )}
+            {/* The one move with a word on it. Everything in this row is a
+                mark, which is right for six equal-weight transitions — except
+                that "ready" and "done" are both a tick, so a note in progress
+                offered two identical ticks meaning "decide to do it" and "it
+                landed". Finishing is also the move you come looking for,
+                especially on a note an agent was handed and never closed. */}
             {moves.includes("done") && (
-              <Button icon title="Done — it landed"
+              <Button size="sm" className="note-done" title="Done — it landed"
                 onClick={() => move("done")}>
-                <CheckIcon />
+                <CheckIcon size={12} />
+                Done
               </Button>
             )}
             {moves.includes("ideation") && (

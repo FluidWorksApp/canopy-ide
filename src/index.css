@@ -20596,6 +20596,13 @@ a.btn-sm {
   align-items: center;
 }
 
+.note-crud .note-done {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 2px;
+}
+
 .note-crud .btn-icon {
   display: inline-flex;
   align-items: center;
