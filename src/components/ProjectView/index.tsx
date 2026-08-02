@@ -4256,6 +4256,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // it can never bind a tab to an unrelated session whose recycled pty number
   // happens to collide. Latest event per pty wins.
   const liveSessionByPty = useMemo(() => {
+    // Seeded from each terminal's own launch command first: a tab restored as
+    // `codex resume <id>` names its session outright, and Canopy typed that
+    // command into that pty, so the bond holds from the first frame. Without
+    // the seed, a resumed CLI that emits no hook event until its next prompt
+    // (codex does exactly this) leaves its tab unbound after every restart —
+    // the digest it wrote sits on disk saying "idle" while the strip, seeing
+    // no digest at all, reads the resume banner's paint burst as "working".
+    const m = new Map<number, string>();
+    for (const t of tabs) {
+      if (t.type !== "terminal" || t.ptyId == null) continue;
+      const sid = resumeSessionId(t.command);
+      if (sid) m.set(t.ptyId, sid);
+    }
     const latest = new Map<number, { sid: string; ts: number }>();
     for (const e of projectEvents) {
       const d = e.data;
@@ -4264,10 +4277,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!prev || e.ts >= prev.ts)
         latest.set(d.pty, { sid: d.sessionId, ts: e.ts });
     }
-    const m = new Map<number, string>();
+    // The event stamp wins where both speak: it is from this launch by
+    // construction and follows the session even if the CLI swaps ids.
     for (const [pty, v] of latest) m.set(pty, v.sid);
     return m;
-  }, [projectEvents]);
+  }, [projectEvents, tabs]);
   liveSessionIdsRef.current = liveSessionIds;
   const liveSessionByPtyRef = useRef(liveSessionByPty);
   liveSessionByPtyRef.current = liveSessionByPty;
