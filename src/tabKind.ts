@@ -13,6 +13,7 @@
 
 import type { SubTab } from "./components/ProjectView/helpers";
 import { agentIdForCommand } from "./agentIdentity";
+import { AGENT_BRAND_COLOR } from "../shared/agentGlyphs";
 
 /** The palette token a kind is drawn in. Deliberately few: six hues over
  *  fifteen tab types, grouped by what the tab is FOR rather than by what
@@ -33,6 +34,9 @@ export type TabTone =
   | "people";
 
 export interface TabKind {
+  /** The CLI behind this card, when there is one — a session or its workspace.
+   *  Drives the brand mark and the brand colour. */
+  agent?: string;
   /** Uppercased on screen; kept lowercase here so tests read as prose. */
   label: string;
   tone: TabTone;
@@ -59,7 +63,7 @@ export function tabKind(tab: SubTab): TabKind {
       // is what the tab was launched with, so it names the CLI when there is
       // one; the same resolver the tab strip and hibernation use.
       const cli = agentIdForCommand(tab.command);
-      if (cli) return { label: "agent", tone: "agent", detail: cli };
+      if (cli) return { label: "agent", tone: "agent", detail: cli, agent: cli };
       // A run is a command someone started, not a shell they type in — the two
       // live in different rails and mean different things when you land on one.
       return {
@@ -72,7 +76,7 @@ export function tabKind(tab: SubTab): TabKind {
       // The workspace, not the session: what that agent changed, where it is
       // committed, which PR came out of it. Named apart from the live session
       // above so two cards for one agent do not read identically.
-      return { label: "workspace", tone: "agent", detail: tab.agent };
+      return { label: "workspace", tone: "agent", detail: tab.agent, agent: tab.agent };
     case "agents":
       return { label: "agents", tone: "agent", detail: "" };
     case "file":
@@ -109,6 +113,17 @@ export function tabKind(tab: SubTab): TabKind {
     case "shared-project":
       return { label: "shared", tone: "people", detail: tab.ownerName };
   }
+}
+
+/** What colour to draw an agent card in: the CLI's own, where it has one.
+ *
+ *  A brand colour is the one value in this app that is not a skin token,
+ *  because it is not ours to choose — Claude's terracotta is Claude's on every
+ *  skin, and that is exactly what makes six agent cards tell themselves apart
+ *  at a glance. Anything without a published mark falls back to the skin's
+ *  accent rather than to a colour we invented for it. */
+export function tabToneColor(kind: TabKind): string | undefined {
+  return kind.agent ? AGENT_BRAND_COLOR[kind.agent] : undefined;
 }
 
 /** The last segment of a path. Both separators, because a Windows tab is a
