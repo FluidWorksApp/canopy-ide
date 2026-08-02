@@ -295,6 +295,8 @@ import { ErrorBoundary } from "../ErrorBoundary";
 import { TeamPanel } from "../TeamPanel";
 import { McpToolsPanel } from "../McpToolsPanel";
 import { McpView } from "../McpView";
+import { ClaimView } from "../ClaimView";
+import { claimOwnerCwd } from "../../claims";
 import { ChatView } from "../ChatView";
 import { Coachmark } from "../Coachmark";
 import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
@@ -327,6 +329,7 @@ import {
   type TaskHistorySubTab,
   type InstructionsSubTab,
   type McpSubTab,
+  type ClaimSubTab,
   type ChatSubTab,
   type CollabSubTab,
   type SharedProjectSubTab,
@@ -353,6 +356,7 @@ export type {
   TaskHistorySubTab,
   InstructionsSubTab,
   McpSubTab,
+  ClaimSubTab,
   ChatSubTab,
   CollabSubTab,
   SharedProjectSubTab,
@@ -2157,6 +2161,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       const id = tabId();
       setTabs((prev) => [...prev, { id, type: "mcp", server }]);
+      setActiveTabId(id);
+    },
+    [patchTabRaw],
+  );
+
+  /** Open one advisory file claim as its own tab. Keyed on the claim id, not
+   *  the owner: an agent that releases and claims again has two claims, and the
+   *  tab you opened on the first must keep showing the first. */
+  const openClaim = useCallback(
+    (claim: ipc.AgentClaim) => {
+      const existing = tabsRef.current.find(
+        (t): t is ClaimSubTab => t.type === "claim" && t.claimId === claim.id,
+      );
+      if (existing) {
+        // The list's copy is the fresher read of the same row.
+        patchTabRaw(existing.id, { claim } as Partial<SubTab>);
+        setActiveTabId(existing.id);
+        return;
+      }
+      const id = tabId();
+      setTabs((prev) => [...prev, { id, type: "claim", claimId: claim.id, claim }]);
       setActiveTabId(id);
     },
     [patchTabRaw],
@@ -4515,6 +4540,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           return push({ id: tabId(), type: "instructions", focus: t.focus });
         case "mcp":
           return push({ id: tabId(), type: "mcp", server: t.server });
+        case "claim":
+          return push({ id: tabId(), type: "claim", claimId: t.claim.id, claim: t.claim });
         case "chat":
           return push({
             id: tabId(),
@@ -7191,6 +7218,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               )
             }
             onOpenInstructions={openInstructions}
+            onOpenClaim={openClaim}
           />
         );
       case "task-history":
@@ -7212,6 +7240,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       case "mcp":
         return <McpView server={tab.server} onNotice={onNotice} />;
+      case "claim":
+        return (
+          <ClaimView
+            claimId={tab.claimId}
+            fallback={tab.claim}
+            active={tab.id === activeTabId && visible}
+            // The claim names its owner by directory; this is that directory
+            // resolved to a live terminal, so the page only offers the jump
+            // when there is something to jump to.
+            ownerPtyId={
+              projectStats.find((s) => s.cwd === claimOwnerCwd(tab.claim.owner))?.id ?? null
+            }
+            onJumpToPty={jumpToPty}
+            onOpenFile={(path) => void openFile(path)}
+            onOpenClaim={openClaim}
+          />
+        );
       case "instructions":
         return (
           <InstructionsView
@@ -8478,6 +8523,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onNotice={onNotice}
           onOpenInstructions={openInstructions}
           onOpenAgentsPage={openAgentsPage}
+          onOpenClaim={openClaim}
           installed={installed}
         />
       ))}

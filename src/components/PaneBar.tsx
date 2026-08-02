@@ -5,6 +5,7 @@ import {
   AgentIcon,
   AgentsIcon,
   ChevronIcon,
+  ClaimIcon,
   CloseIcon,
   CommitIcon,
   GitBranchIcon,
@@ -27,6 +28,7 @@ import type {
   StripGroup,
 } from "./ProjectView";
 import { tabDisplayLabel, previewLabel, deviceLabel } from "./ProjectView";
+import { claimOwnerName } from "../claims";
 import { Button } from "./ui";
 
 export type { SubTab, RailChip };
@@ -48,6 +50,7 @@ function tabTitle(tab: SubTab): string {
     case "task-history": return "Every one-shot task that has finished, and what it reported";
     case "instructions": return "CLAUDE.md, AGENTS.md, skills and subagents — what every agent reads first";
     case "mcp": return `${tab.server.name} — the tools this MCP server exposes, and who can reach it`;
+    case "claim": return `${claimOwnerName(tab.claim.owner)} claimed ${tab.claim.paths.join(", ")}${tab.claim.note ? `\n${tab.claim.note}` : ""}`;
     case "shared-project": return `${tab.name} — shared live by ${tab.ownerName}`;
     case "preview": return tab.url || "Preview";
     case "device": return tab.serial ? `Android device ${tab.serial}` : "Android device";
@@ -72,6 +75,7 @@ function tabText(tab: SubTab): string {
     case "task-history": return "Completed tasks";
     case "instructions": return "Agent instructions";
     case "mcp": return tab.server.name;
+    case "claim": return tabDisplayLabel(tab);
     case "shared-project": return tab.name;
     case "preview": return previewLabel(tab.url);
     case "device": return deviceLabel(tab.serial);
@@ -474,6 +478,8 @@ function PaneBarImpl({
                     <GlobeIcon size={12} className="tab-preview-icon" />
                   ) : tab.type === "mcp" ? (
                     <PlugIcon size={12} className="tab-mcp-icon" />
+                  ) : tab.type === "claim" ? (
+                    <ClaimIcon size={12} className="tab-claim-icon" />
                   ) : tab.type === "agents" ? (
                     <AgentsIcon size={12} className="tab-mcp-icon" />
                   ) : (

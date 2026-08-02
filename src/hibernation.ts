@@ -24,6 +24,7 @@ import type * as ipc from "./ipc";
 import type { ReviewPayload } from "./components/ReviewView";
 import { AGENT_CLIS, restoreCommand, resumeSessionId } from "./projects";
 import { agentIdForCommand } from "./agentIdentity";
+import { claimLabel } from "./claims";
 
 /** A terminal as it will be brought back: a directory, a command line, and —
  *  when it was hosting an agent — the conversation to resume rather than a
@@ -68,6 +69,7 @@ export type SnapshotTab =
   | { kind: "task-history" }
   | { kind: "instructions"; focus?: string }
   | { kind: "mcp"; server: ipc.McpServer }
+  | { kind: "claim"; claim: ipc.AgentClaim }
   | { kind: "chat"; peer: string | null; name: string };
 
 export interface ProjectSnapshot {
@@ -188,6 +190,13 @@ export function snapshotTabs(
       case "mcp":
         out.push({ kind: "mcp", server: t.server });
         break;
+      // The row travels with the tab for the same reason the MCP server's does:
+      // it draws the page before anything is read back. Canopy's claim record
+      // is per app run, so a tab woken in a later one has only this — and the
+      // page says so rather than passing it off as live.
+      case "claim":
+        out.push({ kind: "claim", claim: t.claim });
+        break;
       case "chat":
         out.push({ kind: "chat", peer: t.peer, name: t.name });
         break;
@@ -294,6 +303,8 @@ export function stepLabel(t: SnapshotTab): string {
       return "Reopening agent instructions";
     case "mcp":
       return `Reopening ${t.server.name}`;
+    case "claim":
+      return `Reopening ${claimLabel(t.claim)}`;
     case "chat":
       return `Reopening chat with ${t.name}`;
   }
