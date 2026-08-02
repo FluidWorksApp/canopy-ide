@@ -12,11 +12,11 @@ import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { useBranchSwitch } from "../useBranchSwitch";
 import { splitPatch } from "./PrView";
-import { STATE_META, lastHumanPrompt } from "./AgentsPanel";
+import { lastHumanPrompt } from "../agentSessions";
 import { ashFor } from "../ash";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
-import { agentLife } from "../../shared/agentLife";
+import { LIFE_META, agentLife } from "../../shared/agentLife";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
 import {
@@ -716,7 +716,7 @@ export function AgentWorkspaceView({
     now: Date.now() / 1000,
   });
   const lifecycle = life.state;
-  const st = STATE_META[lifecycle];
+  const st = LIFE_META[lifecycle];
   const task = lastHumanPrompt(digest?.prompts);
   // The working-time clock, preferring the freshly-joined workspace (re-read on
   // every poll) over the digest the panel handed us when the tab opened.

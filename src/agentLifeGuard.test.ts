@@ -72,6 +72,27 @@ function offenders(re: RegExp): string[] {
   return hits;
 }
 
+/** The same sweep, but across line breaks. A formatter splitting
+ *  `digest?.state ?? "idle"` over two lines put `.state` on one and the
+ *  coercion on the next, and the line-by-line scan above matched neither —
+ *  the exact escape this test exists to close. Comments are blanked rather
+ *  than stripped, so match indexes still map to real line numbers. */
+function offendersAcrossLines(re: RegExp): string[] {
+  const hits: string[] = [];
+  for (const rel of files) {
+    const raw = readFileSync(join(ROOT, rel), "utf8");
+    const code = raw
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+      .replace(/^[ \t]*\/\/[^\n]*/gm, (m) => m.replace(/[^\n]/g, " "));
+    const g = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+    for (const m of code.matchAll(g)) {
+      const line = code.slice(0, m.index).split("\n").length;
+      hits.push(`${rel}:${line}  ${m[0].replace(/\s+/g, " ").trim()}`);
+    }
+  }
+  return hits;
+}
+
 describe("nothing outside shared/agentLife decides a lifecycle", () => {
   it("does not compare a raw digest's state against a lifecycle string", () => {
     // Aimed at the receivers that carry a *recorded* state — a digest straight
@@ -80,15 +101,20 @@ describe("nothing outside shared/agentLife decides a lifecycle", () => {
     // derivation, it is a read of the first one.
     const re =
       /\b(digest|d|ws|dg)\??\.state\s*===\s*["'](working|waiting|idle|ended|stale)["']/;
-    expect(offenders(re)).toEqual([]);
+    expect(offendersAcrossLines(re)).toEqual([]);
   });
 
   it("does not coerce a missing state into idle", () => {
-    // The exact failure mode that shipped twice: `d.state || 'idle'` in the
-    // portal and `?? "idle"` in the tasks list, both of which turn "we have no
-    // record of this" into a confident, reclaimable "finished".
-    const re = /\.state\s*(\?\?|\|\|)\s*["'](idle|working)["']/;
-    expect(offenders(re)).toEqual([]);
+    // The exact failure mode that shipped three times: `d.state || 'idle'` in
+    // the portal, `?? "idle"` in the tasks list, and then
+    // `(sid ? …?.state : undefined) ?? "idle"` in the tasks list again —
+    // split across lines AND with a ternary arm between the read and the
+    // coercion, so neither a line-by-line scan nor an adjacency match could
+    // see it. Hence the bounded bridge: up to a short expression tail may sit
+    // between `.state` and the coercion, enough for `: undefined)` and its
+    // kin, not enough to reach across two unrelated statements.
+    const re = /\.state[\s\S]{0,60}?(\?\?|\|\|)\s*["'](idle|working)["']/;
+    expect(offendersAcrossLines(re)).toEqual([]);
   });
 
   it("does not compare CPU against a threshold of its own", () => {

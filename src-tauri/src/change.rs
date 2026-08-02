@@ -32,6 +32,7 @@ use tauri::{AppHandle, Emitter};
 pub enum Store {
     Notes,
     Provenance,
+    Sessions,
 }
 
 impl Store {
@@ -39,6 +40,7 @@ impl Store {
         match self {
             Store::Notes => "notes",
             Store::Provenance => "provenance",
+            Store::Sessions => "sessions",
         }
     }
 
@@ -58,6 +60,11 @@ impl Store {
             // itself several hundred times. Nothing is watching an edge closely
             // enough to notice a quarter second.
             Store::Provenance => Duration::from_millis(250),
+            // Digests are written by the hook binary in another process; the
+            // pulse comes from the bridge that tails its event file, which
+            // already batches on a 500ms poll. The settle only has to fold one
+            // batch's worth of pulses into one event.
+            Store::Sessions => Duration::from_millis(250),
         }
     }
 

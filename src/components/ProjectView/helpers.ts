@@ -154,6 +154,15 @@ export interface AgentSubTab {
   ptyId?: number;
 }
 
+/** Agent management for this project: every running session with room to read
+ *  it, the archive of past ones, and how each CLI is wired in. One per project,
+ *  like the history tab — it is a view of the project's sessions, so a second
+ *  would be a copy. */
+export interface AgentsPageSubTab {
+  id: string;
+  type: "agents";
+}
+
 /** Every micro-task that has finished, with what it reported and the tail of
  *  its terminal. One per project — opening it twice just focuses the first. */
 export interface TaskHistorySubTab {
@@ -260,6 +269,7 @@ export type SubTab =
   | BranchSubTab
   | ReviewSubTab
   | AgentSubTab
+  | AgentsPageSubTab
   | TaskHistorySubTab
   | InstructionsSubTab
   | McpSubTab
@@ -387,6 +397,8 @@ export function describeTab(tab: SubTab | undefined) {
       return { kind: "branch", label: tab.branch.branch };
     case "agent":
       return { kind: "agent", label: tab.agent, cwd: tab.cwd, ptyId: tab.ptyId ?? null };
+    case "agents":
+      return { kind: "agents", label: "Agents" };
     case "task-history":
       return { kind: "task-history", label: "Completed tasks" };
     case "instructions":
@@ -447,6 +459,8 @@ export function tabDisplayLabel(t: SubTab): string {
       return t.name;
     case "review":
       return t.review.title;
+    case "agents":
+      return "Agents";
     case "task-history":
       return "Completed tasks";
     case "instructions":

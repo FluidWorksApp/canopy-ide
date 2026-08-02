@@ -301,8 +301,6 @@ fn create(
     let nav_tab = tab_id.clone();
     let load_app = app.clone();
     let load_tab = tab_id.clone();
-    let title_app = app.clone();
-    let title_tab = tab_id.clone();
     let popup_app = app.clone();
     let popup_tab = tab_id.clone();
 
@@ -335,12 +333,6 @@ fn create(
                 emit_nav(&load_app, &load_tab, payload.url().as_str(), false);
                 drain(load_app.clone(), load_tab.clone());
             }
-        })
-        .on_document_title_changed(move |_wv, title| {
-            let _ = title_app.emit(
-                "browser:title",
-                serde_json::json!({ "tabId": title_tab, "title": title }),
-            );
         })
         // target=_blank and window.open: one tab, one view. Opening a real OS
         // window would put a webview outside every rule the host maintains
@@ -507,7 +499,6 @@ fn repaint_if_blank(app: tauri::AppHandle, tab_id: String) {
         }
         // Nothing cheap worked, so do what the user was doing by hand. A page
         // that has never rendered has nothing on screen to lose.
-        let _ = app.emit("browser:repaint", serde_json::json!({ "tabId": tab_id }));
         let _ = wv.reload();
     });
 }

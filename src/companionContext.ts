@@ -14,6 +14,8 @@
 // editor state (open tabs, selection, other projects) stays behind
 // `canopy_editor_state`, which the brief points at for anything deeper.
 
+import { createChannel } from "./channel";
+
 /** The front tab, as `describeTab` describes it — only the fields the
  *  envelope reads are named, and everything is optional because every tab
  *  kind carries a different subset. */
@@ -32,16 +34,16 @@ export interface CompanionSpotlight {
   caret: { path: string; line: number } | null;
 }
 
-let current: { owner: string; spot: CompanionSpotlight } | null = null;
-const listeners = new Set<() => void>();
+const board = createChannel<{ owner: string; spot: CompanionSpotlight } | null>(
+  null,
+  // Publishers run on every render; only a real change notifies.
+  { same: (a, b) => JSON.stringify(a) === JSON.stringify(b) },
+);
 
-export function subscribeSpotlight(cb: () => void): () => void {
-  listeners.add(cb);
-  return () => listeners.delete(cb);
-}
+export const subscribeSpotlight = board.subscribe;
 
 export function companionSpotlight(): CompanionSpotlight | null {
-  return current?.spot ?? null;
+  return board.get()?.spot ?? null;
 }
 
 /** Publish (or clear) the spotlight. `owner` is the publishing project's id:
@@ -51,12 +53,8 @@ export function setCompanionSpotlight(
   owner: string,
   spot: CompanionSpotlight | null,
 ): void {
-  if (!spot && current?.owner !== owner) return;
-  const next = spot ? { owner, spot } : null;
-  // Publishers run on every render; only a real change notifies.
-  if (JSON.stringify(next) === JSON.stringify(current)) return;
-  current = next;
-  for (const cb of [...listeners]) cb();
+  if (!spot && board.get()?.owner !== owner) return;
+  board.set(spot ? { owner, spot } : null);
 }
 
 /** What the front tab should be called in prose. Absent for a tab kind with

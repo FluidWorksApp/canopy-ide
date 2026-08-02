@@ -64,6 +64,7 @@ export type SnapshotTab =
       sessionId?: string;
       digest?: ipc.SessionDigest;
     }
+  | { kind: "agents" }
   | { kind: "task-history" }
   | { kind: "instructions"; focus?: string }
   | { kind: "mcp"; server: ipc.McpServer }
@@ -172,6 +173,9 @@ export function snapshotTabs(
           sessionId: t.sessionId,
           digest: t.digest,
         });
+        break;
+      case "agents":
+        out.push({ kind: "agents" });
         break;
       case "task-history":
         out.push({ kind: "task-history" });
@@ -282,6 +286,8 @@ export function stepLabel(t: SnapshotTab): string {
       return `Reopening review ${t.review.title}`;
     case "agent":
       return `Reopening ${t.agent}'s workspace`;
+    case "agents":
+      return "Reopening the agents page";
     case "task-history":
       return "Reopening completed tasks";
     case "instructions":

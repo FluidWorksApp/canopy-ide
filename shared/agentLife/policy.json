@@ -19,6 +19,9 @@
   "$comment_idlegroup": "How long quiet must hold before a tab falls into the Idle stack. Animation, not derivation — an agent between tool calls dips quiet for a second at a time and a strip that reshuffles on every dip is unusable.",
   "idleGroupDelayMs": 60000,
 
+  "$comment_provenidle": "The same fall when the CLI itself declared the turn over (a proven verdict, not a CPU dip). Long enough to absorb an agent chaining straight into its next turn, short enough that a chip saying Working over a dot saying idle is a moment, not a lie. A proven fall also overrides the active-tab hold: the chip's label is a state claim, and a state the CLI has declared outranks keeping the tab's position.",
+  "provenIdleDelayMs": 5000,
+
   "$comment_peer": "How old a session digest may be before other agents stop being told about it.",
   "peerMaxAgeSecs": 1800,
 

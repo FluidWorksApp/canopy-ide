@@ -111,15 +111,21 @@ export type Attention =
 export const NO_ATTENTION: Attention = { kind: "none" };
 
 /** Display metadata. One table, so a dot, a chip and a mascot cannot disagree
- *  about what "waiting" looks like. */
+ *  about what "waiting" looks like. `working` is the only state that pulses —
+ *  a moving dot in a column of still ones is where the eye lands first.
+ *  `unknown` is what every other state decays into when nothing corroborates
+ *  it: pointedly not `idle`, because a session that stopped telling us
+ *  anything has not told us it finished, and `idle` is what hibernation
+ *  reclaims. (This absorbed `STATE_META` in src/agentSessions.ts — two tables
+ *  for the same six states is how a row and a card come to disagree.) */
 export const LIFE_META: Record<
   LifeState,
-  { label: string; tip: string }
+  { cls: string; label: string }
 > = {
-  starting: { label: "starting", tip: "Starting up" },
-  working: { label: "working", tip: "Working on a turn" },
-  waiting: { label: "waiting", tip: "Blocked on you" },
-  idle: { label: "idle", tip: "Finished — waiting for you to type" },
-  ended: { label: "ended", tip: "Session closed" },
-  unknown: { label: "unknown", tip: "No signal — we've lost track of this one" },
+  starting: { cls: "st-starting", label: "starting up" },
+  working: { cls: "st-working", label: "working" },
+  waiting: { cls: "st-waiting", label: "waiting on you" },
+  idle: { cls: "st-idle", label: "idle — finished a turn" },
+  ended: { cls: "st-ended", label: "session ended" },
+  unknown: { cls: "st-unknown", label: "no signal — may have stopped" },
 };

@@ -516,6 +516,13 @@ pub fn start_hook_bridge(app: AppHandle) {
                     .collect();
                 if !batch.is_empty() {
                     let _ = app.emit("agent:events", batch);
+                    // Every hook event is also a digest write by the hook
+                    // binary — a process that cannot call this channel itself.
+                    // The bridge is where those writes become visible in-app,
+                    // so it is the bridge that speaks for them. Store-only
+                    // CLIs (omp) write digests with no event alongside; the
+                    // frontend keeps a slow fallback poll for exactly those.
+                    crate::change::pulse(crate::change::Store::Sessions, "", "");
                 }
             }
         })
@@ -1195,12 +1202,18 @@ pub async fn session_forget(session_id: String) -> Result<(), String> {
     // digest removal that is the actual point of forgetting.
     let _ = std::fs::remove_file(dir.join(format!("{session_id}.edits.jsonl")));
     let path = dir.join(format!("{session_id}.json"));
-    match std::fs::remove_file(&path) {
+    let removed = match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
         // Already gone is the desired end state, not a failure.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.to_string()),
+    };
+    if removed.is_ok() {
+        // The delete boundary: no digest write happens here for the bridge to
+        // speak for, so the forget announces itself.
+        crate::change::pulse(crate::change::Store::Sessions, "", &session_id);
     }
+    removed
 }
 
 /// Claude's project-bucket name for a directory: every non-alphanumeric
@@ -1218,21 +1231,15 @@ fn claude_bucket(path: &str) -> String {
         .collect()
 }
 
-/// The bucket that actually holds `session_id`'s transcript, found by scanning
-/// the project dirs for the file itself.
+/// Bucket name + path of the file that actually holds `session_id`'s
+/// transcript, found by scanning the project dirs for the file itself.
 ///
-/// Deterministic: an exact filename match on a uuid. Never newest-by-mtime and
-/// never a title match — those guess, and a wrong guess resumes a stranger's
-/// conversation.
+/// Deterministic: an exact filename match on a uuid, in registry order. Never
+/// newest-by-mtime and never a title match — those guess, and a wrong guess
+/// resumes a stranger's conversation.
+///
 /// Scans every profile's transcript store: a session under a second login
 /// writes inside that profile's config dir.
-fn transcript_bucket(session_id: &str) -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    claude_transcript_file(&home, session_id).map(|(bucket, _)| bucket)
-}
-
-/// Bucket name + path of a session's transcript, across profile roots. Exact
-/// filename match on a uuid, in registry order.
 fn claude_transcript_file(home: &str, session_id: &str) -> Option<(String, std::path::PathBuf)> {
     let name = format!("{session_id}.jsonl");
     for (_, root) in crate::profiles::roots(home) {
@@ -1290,17 +1297,30 @@ fn resume_location(digest: &serde_json::Value) -> (String, bool) {
     // Nothing on disk anywhere: the agent started but was never talked to, or
     // died before writing. Every `--resume` against it fails, so callers must
     // not offer the button.
-    let Some(bucket) = transcript_bucket(session_id) else {
+    let Some((bucket, file)) = std::env::var("HOME")
+        .ok()
+        .and_then(|home| claude_transcript_file(&home, session_id))
+    else {
         return (cwd, false);
     };
 
     let now = digest["cwd"].as_str().unwrap_or("");
-    match resume_dir(&cwd, now, &bucket) {
+    match resume_dir(&cwd, now, &bucket).or_else(|| transcript_dir(&file, &bucket)) {
+        // The transcript is filed under a directory that no longer exists — a
+        // worktree since removed is the everyday case, and this repo's own
+        // .claude/worktrees are deleted as a matter of course. `--resume` only
+        // finds the conversation from that exact path (the bucket *is* the
+        // path, encoded), and a terminal opened in a missing cwd falls back to
+        // the home directory, so the button could only ever answer "No
+        // conversation found" from ~. Derived on every poll and never written
+        // down: if the path comes back, so does the offer.
+        Some(dir) if !std::path::Path::new(&dir).is_dir() => (dir, false),
         Some(dir) => (dir, true),
-        // The transcript exists, but neither directory the session reported has
-        // an ancestor mapping to its bucket — it was launched outside this path
-        // entirely. Resume from here would fail, so say so rather than offer a
-        // button that reports "No conversation found".
+        // The transcript exists, but neither the directories the session
+        // reported nor the transcript itself names one that maps to its bucket —
+        // it was launched outside this path entirely. Resume from here would
+        // fail, so say so rather than offer a button that reports "No
+        // conversation found".
         None => (cwd, false),
     }
 }
@@ -1331,6 +1351,62 @@ fn resume_dir(launch: &str, now: &str, bucket: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The directory the transcript itself says the session ran in — the answer when
+/// neither directory the digest reports leads to the bucket holding it.
+///
+/// Both reported directories can be wrong at once, and routinely are: claude
+/// writes a `relocated` record and re-files the transcript when a session is
+/// moved (Canopy's EnterWorktree, into `.claude/worktrees/<name>`), which the
+/// upward walk can only follow while `cwd` still points at the worktree. A
+/// hook that later reports from somewhere else — including a failed resume run
+/// in the wrong directory, which is how this loop starts — overwrites `cwd` and
+/// takes the last trail to the worktree with it. The transcript keeps that
+/// trail, because claude stamps the directory onto the entries themselves.
+///
+/// Checked against the bucket before it is trusted, and against disk: the file
+/// is a log of everywhere the session has been, and only the directory whose
+/// encoding is the bucket now holding it is the one `--resume` resolves from.
+fn transcript_dir(file: &std::path::Path, bucket: &str) -> Option<String> {
+    // The tail, not the file: transcripts run to megabytes, this is on a path
+    // walked for every session on a poll, and a relocation is appended — so the
+    // record that matters is at the end. The first line of the window is
+    // dropped, being whatever the cut landed in the middle of.
+    let (raw, cut) = tail_of(file, 64 * 1024)?;
+    let mut lines: Vec<&str> = raw.lines().collect();
+    if cut && !lines.is_empty() {
+        lines.remove(0);
+    }
+    // Newest first: a session that moved twice resumes from where it ended up.
+    for line in lines.iter().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        for key in ["relocatedCwd", "cwd"] {
+            let Some(dir) = v[key].as_str() else { continue };
+            if claude_bucket(dir) == bucket && std::path::Path::new(dir).is_dir() {
+                return Some(dir.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The last `max` bytes of a file, as text, and whether the file was longer
+/// than that. Lossy on purpose — a window that starts mid-character must still
+/// yield the lines after it.
+fn tail_of(file: &std::path::Path, max: u64) -> Option<(String, bool)> {
+    use std::io::{Read, Seek};
+    let mut f = std::fs::File::open(file).ok()?;
+    let len = f.metadata().ok()?.len();
+    let cut = len > max;
+    if cut {
+        f.seek(std::io::SeekFrom::Start(len - max)).ok()?;
+    }
+    let mut buf = Vec::new();
+    f.take(max).read_to_end(&mut buf).ok()?;
+    Some((String::from_utf8_lossy(&buf).into_owned(), cut))
 }
 
 /// Live digests of agent sessions, for showing the user exactly what would be
@@ -4898,6 +4974,55 @@ mod tests {
         );
         // A transcript filed under neither chain — nothing to offer.
         assert_eq!(resume_dir(root, tree, &claude_bucket("/other/repo")), None);
+    }
+
+    /// The case no walk can reach: a session relocated into a worktree whose
+    /// digest has since had its `cwd` overwritten from somewhere else entirely
+    /// — which is what a failed resume run in the wrong directory does to it.
+    /// Neither reported chain touches the worktree any more, and the only
+    /// surviving record of where the conversation lives is the transcript.
+    #[test]
+    fn transcript_dir_recovers_a_relocated_worktree() {
+        let dir =
+            std::env::temp_dir().join(format!("canopy-transcript-dir-{}", std::process::id()));
+        let tree = dir.join(".claude/worktrees/wt-fix");
+        std::fs::create_dir_all(&tree).unwrap();
+        let file = dir.join("session.jsonl");
+        let tree_s = tree.to_string_lossy().to_string();
+        let root_s = dir.to_string_lossy().to_string();
+        std::fs::write(
+            &file,
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::json!({ "type": "user", "cwd": root_s }),
+                serde_json::json!({ "type": "assistant", "cwd": root_s }),
+                serde_json::json!({ "type": "relocated", "relocatedCwd": tree_s }),
+            ),
+        )
+        .unwrap();
+
+        // Filed under the worktree's bucket: that is where it resumes from,
+        // even though every `cwd` entry in the file says the repo root.
+        assert_eq!(
+            super::transcript_dir(&file, &claude_bucket(&tree_s)).as_deref(),
+            Some(tree_s.as_str())
+        );
+        // Filed under the root's bucket — the session moved back, or never
+        // moved: the entries' own cwd answers, not the relocation.
+        assert_eq!(
+            super::transcript_dir(&file, &claude_bucket(&root_s)).as_deref(),
+            Some(root_s.as_str())
+        );
+        // A bucket nothing in the file maps to is never guessed at.
+        assert_eq!(
+            super::transcript_dir(&file, &claude_bucket("/somewhere/else")),
+            None
+        );
+        // Nor is a directory the file names that is no longer on disk — a
+        // resume there fails exactly as if it were never recorded.
+        std::fs::remove_dir_all(&tree).unwrap();
+        assert_eq!(super::transcript_dir(&file, &claude_bucket(&tree_s)), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The encoding is many-to-one, which is why a bucket name is never decoded

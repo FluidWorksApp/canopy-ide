@@ -35,7 +35,8 @@ import {
   type Life,
   type LifeState,
 } from "../../../shared/agentLife";
-import { lifeFor, useAttentionMemory, useFirstSeen } from "../../agentLifeStore";
+import { lifeFor, signalFor, useAttentionMemory, useFirstSeen } from "../../agentLifeStore";
+import { DIGEST_FALLBACK_MS, subscribeSessionDigests } from "../../sessionDigests";
 
 /** The one CPU floor. There used to be four numbers answering this question in
  *  this file and its neighbours — 0, 2, 10 and 300 — for two genuinely
@@ -97,7 +98,7 @@ import {
   TeamIcon,
   TerminalIcon,
 } from "../icons";
-import type { OpenFile } from "../../types";
+import type { AgentEventEntry, OpenFile } from "../../types";
 import {
   derivePending,
   eventsForProject,
@@ -118,6 +119,7 @@ import {
 } from "../../microRuns";
 import { renderPtyText } from "../../ptyText";
 import { scheduleReap } from "../../runReap";
+import { watchFailedRestore } from "../../restoreReap";
 import { followLink, type DeepLink } from "../../deepLinks";
 import {
   addressPrCommentsTask,
@@ -214,7 +216,9 @@ import {
   type ModelChoice,
 } from "../../agentModels";
 import { refreshChoices } from "../../modelCatalog";
-import { AgentsPanel, digestBySurface } from "../AgentsPanel";
+import { AgentsPanel } from "../AgentsPanel";
+import { AgentsView } from "../AgentsView";
+import { digestBySurface } from "../../agentSessions";
 import { StatusBar } from "../StatusBar";
 import { Palette, type PaletteMode } from "../Palette";
 import { LaunchPalette } from "../LaunchPalette";
@@ -268,6 +272,7 @@ import {
   forgetSessions,
   markRestored,
   restorableFrom,
+  resumeCwd,
   type Restorable,
 } from "../../restorable";
 import {
@@ -776,7 +781,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // What the human has not dealt with, per terminal — the other axis. Held here
   // rather than on the tab because it must survive a tab re-render and must
   // NOT survive the terminal: `forget` runs when a pty goes.
-  const { push: pushAttention, memory: attentionMemory } = useAttentionMemory();
+  const {
+    push: pushAttention,
+    memory: attentionMemory,
+    version: attentionVersion,
+  } = useAttentionMemory();
   const attentionRef = useRef(pushAttention);
   attentionRef.current = pushAttention;
   // One clock for every lifecycle verdict in this view. A verdict decays with
@@ -931,13 +940,59 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Pending self-closes for finished chore runs, by tab id. Held so leaving the
   // project doesn't leave a timer holding a closure over tabs that are gone.
   const reapTimers = useRef(new Map<string, number>());
+  // Restores still waiting to see whether the CLI accepts them, by tab id.
+  const restoreWatches = useRef(new Map<string, () => void>());
   useEffect(
     () => () => {
       for (const t of reapTimers.current.values()) window.clearTimeout(t);
       reapTimers.current.clear();
+      for (const cancel of restoreWatches.current.values()) cancel();
+      restoreWatches.current.clear();
     },
     [],
   );
+
+  /** Watch a resume the CLI may refuse, and take both the dead tab and the row
+   *  that offered it away if it does — see restoreReap.ts for why all three of
+   *  its conditions are needed. Armed from addTerminal rather than from each
+   *  Restore button because every surface that reopens a session funnels
+   *  through there, and the command names the session outright. */
+  const armRestoreReap = useCallback((tab: string, sessionId: string) => {
+    restoreWatches.current.get(tab)?.();
+    const cancel = watchFailedRestore({
+      sessionId,
+      ptyId: () =>
+        tabsRef.current.find(
+          (t): t is TermSubTab => t.type === "terminal" && t.id === tab,
+        )?.ptyId ?? null,
+      read: (ptyId) => ipc.ptyOutput(ptyId, 16 * 1024),
+      look: (ptyId) => {
+        const s = statsRef.current.find((x) => x.id === ptyId);
+        return s
+          ? {
+              agentRunning: s.agent_hint != null,
+              sinceInputMs: s.since_input_ms,
+            }
+          : undefined;
+      },
+      reap: () => {
+        restoreWatches.current.delete(tab);
+        closeTabRef.current(tab);
+        // Tombstone at the transcript's current mtime, which is the reversible
+        // half of Forget: a session genuinely written to again comes back.
+        // Nothing on disk is deleted — deleting the digest is the user's call,
+        // and the digest is also the record of what that session cost.
+        void ipc
+          .sessionDigests(rootsRef.current)
+          .then((all) => {
+            const d = all.find((x) => x.session_id === sessionId);
+            if (d) forgetSessions([d]);
+          })
+          .catch(() => {});
+      },
+    });
+    restoreWatches.current.set(tab, cancel);
+  }, []);
 
   const addTerminal = useCallback(
     (
@@ -989,11 +1044,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
         },
       ]);
       setActiveTabId(id);
+      // A resume the CLI refuses leaves a dead shell in this tab and a row that
+      // will offer the same doomed button tomorrow. The command carries the
+      // session id, so nothing has to be passed in for this to know which
+      // conversation was asked for.
+      const resuming = resumeSessionId(command);
+      if (resuming) armRestoreReap(id, resuming);
       // Returned so callers that must talk to the new terminal (seeding an
       // agent with an opening prompt) can find its pty once it spawns.
       return id;
     },
-    [],
+    [armRestoreReap],
   );
 
   /** Open (or re-focus) a tab attached to a PTY that already exists — one the
@@ -1514,9 +1575,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // agent behind it.
         .sessionDigests(digestRootsRef.current)
         .then((d) => {
+          // On any directory the session names, not only the one it last
+          // reported from: `cwd` drifts (a cd, a relocation into a worktree, a
+          // resume that ran in the wrong place), and matching on it alone drops
+          // the session out of the very surfaces that would put it right.
           const mine = d.filter((x) =>
-            digestRootsRef.current.some(
-              (r) => x.cwd === r || (x.cwd ?? "").startsWith(r + "/"),
+            [x.resume_cwd, x.launch_cwd, x.cwd].some(
+              (dir) =>
+                !!dir &&
+                digestRootsRef.current.some(
+                  (r) => dir === r || dir.startsWith(r + "/"),
+                ),
             ),
           );
           // Bail when unchanged — otherwise this was an unconditional full
@@ -1530,10 +1599,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
         })
         .catch(() => {});
     load();
-    // Hidden projects still need digests (job_done handling reads them), just
-    // not at the visible cadence.
-    const t = setInterval(load, visible ? 4000 : 20_000);
-    return () => clearInterval(t);
+    // Event-driven via the change channel; the interval is only the fallback
+    // for store-only CLIs whose digests move with no hook event to pulse on.
+    // Hidden projects still need digests (job_done handling reads them) — the
+    // pulse serves them too, at no polling cost.
+    const un = subscribeSessionDigests(load);
+    const t = setInterval(load, visible ? DIGEST_FALLBACK_MS : 60_000);
+    return () => {
+      un();
+      clearInterval(t);
+    };
   }, [visible]);
 
   // Restorable agent sessions, loaded while the launcher (empty state) is on
@@ -1559,9 +1634,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         })
         .catch(() => live && setRestorable([]));
     load();
-    const t = setInterval(load, 5000);
+    const un = subscribeSessionDigests(load);
+    const t = setInterval(load, DIGEST_FALLBACK_MS);
     return () => {
       live = false;
+      un();
       clearInterval(t);
     };
   }, [tabs.length, visible]);
@@ -2050,6 +2127,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [patchTabRaw],
   );
+
+  /** Open the agents page, or focus it if it's already up. One per project:
+   *  it is a view of this project's sessions, so a second would be a copy. */
+  const openAgentsPage = useCallback(() => {
+    const existing = tabsRef.current.find((t) => t.type === "agents");
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    const id = tabId();
+    setTabs((prev) => [...prev, { id, type: "agents" }]);
+    setActiveTabId(id);
+  }, []);
 
   /** Open one MCP server as its own tab, reusing the one already open for it.
    *  Identity is the server key — the same server reached through two CLIs is
@@ -4156,6 +4246,38 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const liveSessionByPtyRef = useRef(liveSessionByPty);
   liveSessionByPtyRef.current = liveSessionByPty;
 
+  // The fast lane: hook events land on the attention axis within the bridge's
+  // 500ms batch, rather than waiting seconds for the digest poll. This is what
+  // makes `blocked` — and with it bucketFor's event-stream promotion — real:
+  // the reducer has spoken this input's type from the start, but nothing ever
+  // produced it, so a permission prompt only reached the strip when the digest
+  // caught up. `signalFor` is the same mapping the producer uses.
+  //
+  // A WeakSet, not an index: the buffer is capped and App drops old entries
+  // from the front, so a position would drift; an entry's identity doesn't.
+  const seenHookEvents = useRef(new WeakSet<AgentEventEntry>());
+  useEffect(() => {
+    for (const e of projectEvents) {
+      const d = e.data;
+      if (!d || d.pty == null) continue;
+      if (seenHookEvents.current.has(e)) continue;
+      seenHookEvents.current.add(e);
+      const signal = signalFor(d);
+      if (!signal) continue;
+      const cli = d.agent || null;
+      attentionRef.current(d.pty, { t: "hook", at: e.ts, signal }, cli);
+      // A flag raised by the tab you are watching is already seen (same rule
+      // as the OSC and quiet paths): looking clears `unseen`, and you are
+      // looking. A `blocked` survives this on purpose — glancing at a
+      // question does not answer it.
+      const tab = tabsRef.current.find(
+        (t): t is TermSubTab => t.type === "terminal" && t.ptyId === d.pty,
+      );
+      if (tab && tab.id === activeTabIdRef.current && visibleRef.current)
+        attentionRef.current(d.pty, { t: "focus", at: e.ts, visible: true }, cli);
+    }
+  }, [projectEvents]);
+
   /** Every session that is up, and how to reach it: its terminal here, or null
    *  when it is running somewhere this window cannot type into.
    *
@@ -4385,6 +4507,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             sessionId: t.sessionId,
             digest: t.digest,
           });
+        case "agents":
+          return push({ id: tabId(), type: "agents" });
         case "task-history":
           return push({ id: tabId(), type: "task-history" });
         case "instructions":
@@ -4514,8 +4638,33 @@ const ProjectViewBody = memo(function ProjectViewBody({
           note: `${agentId} can't be resumed to receive the comments.`,
         };
       }
+      // Where the conversation is filed, not the directory the caller happens
+      // to be showing it in. The two are the same only until the session moves
+      // — a worktree, a cd — and callers hand over whichever they hold: a
+      // workspace tab's cwd, a provenance edge's. Asked for at the moment of
+      // resuming rather than read off a poll, because this is one IPC call on a
+      // rare click and the alternative is opening the wrong directory whenever
+      // the poll is idle.
+      const digest = (
+        await ipc.sessionDigests(digestRootsRef.current).catch(() => [])
+      ).find((d) => d.session_id === sessionId);
+      // `restoreCommand` only says the CLI can reopen by id; `resumable` is the
+      // backend's verdict on whether this particular transcript can still be
+      // reached (agents.rs resume_location) — false when the directory it is
+      // filed under is gone, a deleted worktree being the everyday case. Spawn
+      // anyway and the pty falls back to ~, the resume answers "No conversation
+      // found", and that run's hooks write the home directory onto the digest,
+      // so every later attempt starts from ~ too. The restorable list drops such
+      // rows for the same reason (restorable.ts).
+      if (digest?.resumable === false) {
+        return {
+          delivered: false,
+          note: `${agentId} can't be resumed — its directory is gone, so there's nothing to resume.`,
+        };
+      }
+      const runIn = resumeCwd(digest, cwd);
       addTerminal(
-        cwd,
+        runIn,
         cmd,
         agentId,
         AGENT_CLIS.find((c) => c.id === agentId)?.icon,
@@ -5422,21 +5571,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Re-read on every render: the memory is a ref, and `useAttentionMemory`
   // bumps a counter when it changes, so this is always current.
   const attention = attentionMemory.current;
-  const tabLife = useCallback(
-    (t: TermSubTab): Life => {
-      const stats = t.ptyId != null ? statsByPty.get(t.ptyId) : undefined;
-      const sid = t.ptyId != null ? liveSessionByPty.get(t.ptyId) : undefined;
+  const lifeForPty = useCallback(
+    (ptyId: number | null | undefined): Life => {
+      const stats = ptyId != null ? statsByPty.get(ptyId) : undefined;
+      const sid = ptyId != null ? liveSessionByPty.get(ptyId) : undefined;
       const digest = sid
         ? wsDigests.find((d) => d.session_id === sid)
         : undefined;
       return lifeFor({
         digest: (digest ?? null) as never,
         stats,
-        firstSeen: t.ptyId != null ? firstSeen.get(t.ptyId) : undefined,
+        firstSeen: ptyId != null ? firstSeen.get(ptyId) : undefined,
         now: lifeClock / 1000,
       });
     },
     [statsByPty, liveSessionByPty, wsDigests, firstSeen, lifeClock],
+  );
+  const tabLife = useCallback(
+    (t: TermSubTab): Life => lifeForPty(t.ptyId),
+    [lifeForPty],
   );
   const tabState = useCallback(
     (t: TermSubTab): LifeState => tabLife(t).state,
@@ -5450,11 +5603,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const runningMicro: RunningMicroTask[] = useMemo(
     () => [
       ...microRuns.map((r) => {
-        const sid = liveSessionByPty.get(r.ptyId);
-        const state =
-          (sid
-            ? wsDigests.find((d) => d.session_id === sid)?.state
-            : undefined) ?? "idle";
+        // Through the ladder, exactly like the tab dots — a detached run with
+        // no digest is `unknown`, never a confident "idle" (that coercion is
+        // what the guard test bans: "we have no record" is not "finished").
+        const state = lifeForPty(r.ptyId).state;
         return {
           ptyId: r.ptyId,
           title: r.label,
@@ -5485,8 +5637,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       microRuns,
       tabs,
       tabState,
-      liveSessionByPty,
-      wsDigests,
+      lifeForPty,
       projectEvents,
       microClock,
     ],
@@ -5534,20 +5685,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // tab whether or not grouping is on: the state machine is cheap, and keeping
   // it running means turning the setting back on doesn't start every tab from
   // scratch in the wrong bucket.
-  const statusTargets = useMemo(
-    () =>
-      new Map<string, TabStatus>(
-        agentTabs.map((t) => [
-          t.id,
-          bucketFor(
-            tabLife(t),
-            (t.ptyId != null ? attention.get(t.ptyId) : undefined) ??
-              NO_ATTENTION,
-          ),
-        ]),
-      ),
-    [agentTabs, tabLife, attention],
-  );
+  const { statusTargets, provenQuiet } = useMemo(() => {
+    const targets = new Map<string, TabStatus>();
+    // Quiet on the CLI's own say-so (turn ended, session ended) rather than
+    // ours (a CPU dip). These fall on the short clock and through the
+    // active-tab hold — see SettleHold in tabGroups.ts.
+    const provenIds = new Set<string>();
+    for (const t of agentTabs) {
+      const life = tabLife(t);
+      const bucket = bucketFor(
+        life,
+        (t.ptyId != null ? attention.get(t.ptyId) : undefined) ?? NO_ATTENTION,
+      );
+      targets.set(t.id, bucket);
+      if (bucket === "quiet" && life.confidence === "proven")
+        provenIds.add(t.id);
+    }
+    return { statusTargets: targets, provenQuiet: provenIds };
+    // `attentionVersion`, not `attention`: the memory is mutated in place, so
+    // its identity can never invalidate this memo — the version is what says
+    // an attention-only change happened (a permission block arriving on the
+    // fast lane with no stats tick alongside it).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentTabs, tabLife, attentionVersion]);
   // …and it only ever moves when moving costs you nothing. Mid-gesture is
   // never such a moment: a tab that slides out from under a cursor already on
   // its way down is a misclick the strip caused, and ⌘ held numbers the tabs
@@ -5560,6 +5720,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const settledStatus = useSettledGroups(statusTargets, tabPrefs.idleDelayMs, {
     frozen: pointerInStrip || tabHints,
     hold: activeTabId,
+    proven: provenQuiet,
+    provenDelayMs: POLICY.provenIdleDelayMs,
   });
   // Fall back to the raw status for a tab the settler hasn't seen yet (its
   // effect runs after this render), so a new tab is never briefly homeless.
@@ -6626,7 +6788,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
           const d = action.digest;
           void openAgent({
             agent: d.agent ?? "agent",
-            cwd: d.cwd ?? d.launch_cwd ?? componentsRef.current[0]?.path ?? "",
+            // The directory the conversation lives in, not the one the agent
+            // last reported from: this becomes the workspace tab's cwd, and
+            // everything that tab offers to do with the session — resuming it
+            // to deliver a message, above all — runs there.
+            cwd: resumeCwd(d, componentsRef.current[0]?.path ?? ""),
             // The pty id only means anything inside the launch that assigned
             // it — a digest from another instance binds by session id instead.
             ptyId:
@@ -6994,6 +7160,37 @@ const ProjectViewBody = memo(function ProjectViewBody({
               startAgentInDir(dir, agentId, text, "Device feedback");
             }}
             projects={components.map((c) => ({ label: c.label, path: c.path }))}
+          />
+        );
+      case "agents":
+        return (
+          <AgentsView
+            active={tab.id === activeTabId && visible}
+            projectName={project.name}
+            roots={roots}
+            stats={projectStats}
+            hookPath={hookPath}
+            pending={pending}
+            onDismissPending={onDismissPending}
+            onAnswer={answerQuestions}
+            onRespond={respondPermission}
+            onJumpToTerminal={jumpToTerminal}
+            onJumpToPty={jumpToPty}
+            onPreviewUrl={openPreview}
+            onOpenAgent={(p) => void openAgent(p)}
+            tabNames={tabNames}
+            shareContext={Boolean(project.shareContext)}
+            onShareContext={onShareContext}
+            liveSessionIds={liveSessionIds}
+            onRestore={(cwd, cmd, title, agentId) =>
+              addTerminal(
+                cwd,
+                cmd,
+                title,
+                AGENT_CLIS.find((c) => c.id === agentId)?.icon,
+              )
+            }
+            onOpenInstructions={openInstructions}
           />
         );
       case "task-history":
@@ -8280,6 +8477,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
           onNotice={onNotice}
           onOpenInstructions={openInstructions}
+          onOpenAgentsPage={openAgentsPage}
           installed={installed}
         />
       ))}

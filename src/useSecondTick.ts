@@ -1,4 +1,5 @@
 import { useEffect, useReducer } from "react";
+import { createChannel } from "./channel";
 
 // One interval for the whole app, shared by every component that needs a clock
 // on screen to advance. A running-agent panel can hold a dozen live timers, and
@@ -8,26 +9,16 @@ import { useEffect, useReducer } from "react";
 // Subscribing is also what keeps the interval alive: with nothing on screen
 // counting there is no timer at all, so an app sitting on a diff view is not
 // paying for a heartbeat nobody reads.
-const subscribers = new Set<() => void>();
 let timer: number | undefined;
-
-function subscribe(fn: () => void): () => void {
-  subscribers.add(fn);
-  if (timer === undefined) {
-    timer = window.setInterval(() => {
-      // Copied: a subscriber that unmounts on this tick must not reshape the
-      // set mid-iteration.
-      for (const f of [...subscribers]) f();
-    }, 1000);
-  }
-  return () => {
-    subscribers.delete(fn);
-    if (subscribers.size === 0 && timer !== undefined) {
-      window.clearInterval(timer);
-      timer = undefined;
-    }
-  };
-}
+const clock = createChannel(0, {
+  onActive: () => {
+    timer = window.setInterval(() => clock.set(clock.get() + 1), 1000);
+  },
+  onIdle: () => {
+    window.clearInterval(timer);
+    timer = undefined;
+  },
+});
 
 /**
  * Re-render this component once a second while `running` is true.
@@ -40,5 +31,5 @@ function subscribe(fn: () => void): () => void {
  */
 export function useSecondTick(running: boolean): void {
   const [, tick] = useReducer((n: number) => n + 1, 0);
-  useEffect(() => (running ? subscribe(tick) : undefined), [running, tick]);
+  useEffect(() => (running ? clock.subscribe(tick) : undefined), [running, tick]);
 }

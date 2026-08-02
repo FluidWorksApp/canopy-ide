@@ -3,6 +3,7 @@ import type React from "react";
 import type { LifeState } from "../../shared/agentLife";
 import {
   AgentIcon,
+  AgentsIcon,
   ChevronIcon,
   CloseIcon,
   CommitIcon,
@@ -43,6 +44,7 @@ function tabTitle(tab: SubTab): string {
     case "chat": return tab.peer === null ? "Team chat — everyone on the relay" : `Direct chat with ${tab.name}`;
     case "collab": return `${tab.name} — live, owned by ${tab.ownerName}`;
     case "review": return `Review from ${tab.review.from}: ${tab.review.title}`;
+    case "agents": return "Every agent session in this project — running, past, and how each CLI is wired in";
     case "task-history": return "Every one-shot task that has finished, and what it reported";
     case "instructions": return "CLAUDE.md, AGENTS.md, skills and subagents — what every agent reads first";
     case "mcp": return `${tab.server.name} — the tools this MCP server exposes, and who can reach it`;
@@ -66,6 +68,7 @@ function tabText(tab: SubTab): string {
     case "chat": return tab.name;
     case "collab": return `${tab.name} ⇄`;
     case "review": return tab.review.title;
+    case "agents": return "Agents";
     case "task-history": return "Completed tasks";
     case "instructions": return "Agent instructions";
     case "mcp": return tab.server.name;
@@ -471,6 +474,8 @@ function PaneBarImpl({
                     <GlobeIcon size={12} className="tab-preview-icon" />
                   ) : tab.type === "mcp" ? (
                     <PlugIcon size={12} className="tab-mcp-icon" />
+                  ) : tab.type === "agents" ? (
+                    <AgentsIcon size={12} className="tab-mcp-icon" />
                   ) : (
                     <>
                       {tab.type === "file" && collabPaths.has(tab.file.path) && (
