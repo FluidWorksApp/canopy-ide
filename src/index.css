@@ -22775,17 +22775,94 @@ a.btn-sm {
   display: none;
 }
 
+/* One width for every card, and it is the picture's.
+   Without it the card is as wide as its widest child, and the head's
+   max-content — icon plus the WHOLE title plus the digit — is what that turns
+   out to be: `flex: 1; min-width: 0` on the title only shrinks it once
+   something else has already set the width. So one long tab name made one
+   card twice the size of its neighbours, and a strip of thumbnails you are
+   scanning at speed has to be a grid or it is a list. */
 .tsw-card {
   flex: none;
+  width: 252px; /* SHOT_W + the padding either side */
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
   padding: 8px;
   border: 1px solid transparent;
   border-radius: var(--r-md);
   corner-shape: squircle;
   background: color-mix(in srgb, var(--bg-raised) 55%, transparent);
   cursor: pointer;
+}
+
+/* What kind of tab this is, and — where the title leaves it open — which one:
+   which CLI, which repo, which directory. Reading order is deliberate: the
+   kind is the word you scan for, the detail is what you confirm on.
+
+   The tone drives the icon and the kind word together. It is a hue from the
+   skin's own eighteen, never a literal, so this reads correctly on a light
+   skin and on Lattice without knowing either exists. */
+.tsw-kind {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  padding: 0 2px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.tsw-kind-label {
+  flex: none;
+  color: var(--tsw-tone, var(--text-dim));
+  font-weight: 600;
+}
+
+.tsw-kind-sep,
+.tsw-kind-detail {
+  color: var(--text-faint);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* The icon wears the tone too, so the colour is on the card twice — once as a
+   glyph you see before you read, once as the word that says what it means. */
+.tsw-icon {
+  color: var(--tsw-tone, var(--text-dim));
+}
+
+/* Six tones over fifteen tab types, grouped by what a tab is FOR. Eleven
+   colours would tell nothing apart; these are the distinctions you actually
+   make while the panel is up. */
+.tsw-tone-agent {
+  --tsw-tone: var(--accent);
+}
+
+.tsw-tone-doc {
+  --tsw-tone: var(--cyan);
+}
+
+.tsw-tone-shell {
+  --tsw-tone: var(--text-dim);
+}
+
+.tsw-tone-review {
+  --tsw-tone: var(--magenta);
+}
+
+.tsw-tone-external {
+  --tsw-tone: var(--ok);
+}
+
+.tsw-tone-people {
+  --tsw-tone: var(--warn);
 }
 
 .tsw-card:hover {
@@ -22818,6 +22895,13 @@ a.btn-sm {
   flex: none;
   display: flex;
   align-items: center;
+}
+
+/* An agent card's mark is the CLI's own brand glyph, which carries its own
+   identity — tinting it would make every agent the same colour, which is the
+   one thing the card is trying not to do. */
+.tsw-card .tsw-icon svg[data-brand] {
+  color: inherit;
 }
 
 .tsw-title {
@@ -22915,4 +22999,15 @@ a.btn-sm {
   margin-left: 2px;
   background: transparent;
   color: var(--accent);
+}
+
+/* What a card shows when there is no picture to take. */
+.tsw-blank {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+  opacity: 0.5;
 }

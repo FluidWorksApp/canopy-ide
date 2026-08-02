@@ -190,7 +190,7 @@
     },
     {
       "id": "tab-jump",
-      "label": "Jump to a tab — hold {mod} and the tabs show their numbers",
+      "label": "Jump to a tab — hold {mod} for the switcher, and the tabs show their numbers",
       "surface": "app",
       "chord": {
         "mods": [
@@ -279,7 +279,7 @@
     },
     {
       "id": "cycle-tab-prev",
-      "label": "Previous tab (the browser and IDE chord)",
+      "label": "Previous tab — hold Ctrl and the switcher stays up, with a live picture of each",
       "surface": "app",
       "chord": {
         "mods": [
@@ -292,7 +292,7 @@
     },
     {
       "id": "cycle-tab-next",
-      "label": "Next tab (the browser and IDE chord)",
+      "label": "Next tab — hold Ctrl and the switcher stays up, with a live picture of each",
       "surface": "app",
       "chord": {
         "mods": [

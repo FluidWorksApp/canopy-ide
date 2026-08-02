@@ -304,6 +304,7 @@ import { Coachmark } from "../Coachmark";
 import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
 import { ActivityRail } from "../ActivityRail";
 import { PaneBar } from "../PaneBar";
+import { TabSwitcher } from "../TabSwitcher";
 import { useCliLauncher } from "./hooks/useCliLauncher";
 
 import {
@@ -650,6 +651,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  Only for the project on screen — a hidden project numbering its tabs
    *  would be nine badges nobody can see and a keypress that lands elsewhere. */
   const tabHints = useHeldModifier("tabs", visible);
+  /** Ctrl+Tab held: the tab the release would land on, as an index into `tabs`.
+   *  Null when the switcher isn't up. Nothing switches while it is — the panel
+   *  is the preview, and walking six tabs costs one tab change, not six. */
+  const [switcherIdx, setSwitcherIdx] = useState<number | null>(null);
+  const switcherIdxRef = useRef<number | null>(null);
+  switcherIdxRef.current = switcherIdx;
   // When set, the whole project's file surface (tree, quick-open, search, new
   // terminals) points at this worktree instead of the main checkout — so an
   // agent's worktree becomes the environment you actually work in.
@@ -758,9 +765,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const baselines = useRef(new Map<string, string>());
   const recentSaves = useRef(new Map<string, number>());
   const termHandles = useRef(new Map<string, TermHandle | null>());
+  /** The live tail of a terminal tab, for its thumbnail: a read of the xterm
+   *  buffer that is already in memory. No capture and no screenshot — what it
+   *  returns is what the pty has painted by the moment it is asked, which is
+   *  what makes a card of an agent mid-run move while you hold the key. */
+  const termTailFor = useCallback(
+    (id: string) => termHandles.current.get(id)?.captureText(4000) ?? null,
+    [],
+  );
   /** The view's own root, for SpotSearch's page screenshot — its rect is what
    *  "the page behind the palette" means. */
   const rootRef = useRef<HTMLDivElement>(null);
+  /** The pane area every tab is mounted in. The switcher's thumbnails are found
+   *  and sized through it: one rect for all of them, because every pane is the
+   *  same box. */
+  const contentRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   /** The tabs in the order the pane bar draws them — what ⌘1..9 counts, and
@@ -3236,6 +3255,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const i = list.findIndex((t) => t.id === activeTabIdRef.current);
       setActiveTabId(list[(i + dir + list.length) % list.length].id);
     };
+    // Ctrl+Tab's half of that: move the switcher's selection rather than the
+    // tab. The panel it opens is what makes the difference visible — you pick
+    // the tab you can see, and the switch happens once, when Ctrl comes up.
+    const stepSwitcher = (dir: 1 | -1) => {
+      const list = tabsRef.current;
+      if (list.length < 2) return;
+      const from =
+        switcherIdxRef.current ??
+        Math.max(
+          0,
+          list.findIndex((t) => t.id === activeTabIdRef.current),
+        );
+      const next = (from + dir + list.length) % list.length;
+      switcherIdxRef.current = next;
+      setSwitcherIdx(next);
+    };
     // The tab-cycle chord is a native menu accelerator, but when focus is in
     // the webview (Monaco/xterm) macOS never routes it to the menu — the
     // unhandled key just rings the system bell ("tuk"). Handle it here in
@@ -3294,7 +3329,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // would send it to the shell as a completion request, and it is the
       // browser's own focus key — so it stops at the capture phase rather than
       // merely losing its default action.
-      if (e.code === "Tab") e.stopPropagation();
+      if (e.code === "Tab") {
+        e.stopPropagation();
+        lastKeydownNav.t = Date.now();
+        // Only the held chord gets the switcher. ⌃⌘→ and Ctrl+PageDown are
+        // aimed moves — you press one and you are there — and putting a panel
+        // in front of them would be a modal answer to a direct question.
+        stepSwitcher(dir);
+        return;
+      }
       lastKeydownNav.t = Date.now();
       cycleTabs(dir);
     };
@@ -3355,6 +3398,53 @@ const ProjectViewBody = memo(function ProjectViewBody({
       window.removeEventListener("menu:new-launcher", newLauncher);
     };
   }, [visible, project.components, addTerminal, refreshInstalled, refreshUpdates]);
+
+  const switcherOpen = switcherIdx !== null;
+  /** Letting go is the choice. One tab change, however far you walked. */
+  const commitSwitcher = useCallback(() => {
+    const idx = switcherIdxRef.current;
+    switcherIdxRef.current = null;
+    setSwitcherIdx(null);
+    // A tab can close under the switcher (a chore reaping itself, an agent
+    // finishing) — an index that no longer names one simply lands nowhere.
+    const tab = idx === null ? undefined : tabsRef.current[idx];
+    if (tab) setActiveTabId(tab.id);
+  }, []);
+  const cancelSwitcher = useCallback(() => {
+    switcherIdxRef.current = null;
+    setSwitcherIdx(null);
+  }, []);
+  // A held panel ends the way a held key ends. Escape takes it back — you are
+  // where you were — and so does the window losing focus: ⌘-tabbing away leaves
+  // the modifier's keyup on the other side of the switch, so blur is the only
+  // signal left that the hold is over.
+  useEffect(() => {
+    if (!switcherOpen) return;
+    if (!visible) {
+      cancelSwitcher();
+      return;
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      // Tab's own keyup arrives with Ctrl still down: that is the walk, not the
+      // end of it.
+      if (e.key === "Control" || !e.getModifierState("Control"))
+        commitSwitcher();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      cancelSwitcher();
+    };
+    window.addEventListener("keyup", onKeyUp, true);
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("blur", cancelSwitcher);
+    return () => {
+      window.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("blur", cancelSwitcher);
+    };
+  }, [switcherOpen, visible, commitSwitcher, cancelSwitcher]);
 
   // An agent asked the IDE to do something through the MCP bridge — start a
   // run command, or open a preview. App routed it here by matching the action's
@@ -5863,10 +5953,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   ]);
   // The number hints, and the digits that jump to them, count what is on
   // screen — a hint on a tab folded into a stack would point at nothing.
-  barTabsRef.current = useMemo(
-    () => tabGroups.flatMap((g) => g.shown),
-    [tabGroups],
-  );
+  const barTabs = useMemo(() => tabGroups.flatMap((g) => g.shown), [tabGroups]);
+  barTabsRef.current = barTabs;
 
   // Drag to reorder, confined to the run the tab was picked up from: a tab can
   // only be dropped among its own kind, and a tab dropped outside simply snaps
@@ -7465,12 +7553,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
         onOpenAllTabs={onOpenAllTabs}
         activeTabElRef={activeTabElRef}
       />
-      <div className="project-content">
+      <div className="project-content" ref={contentRef}>
         {tabs
           .filter((t): t is TermSubTab => t.type === "terminal")
           .map((tab) => (
             <div
               key={tab.id}
+              // Which tab's pane this is, for the switcher's thumbnails: they
+              // are clones of the live host, and a hidden host has to be
+              // findable without the pane knowing anything about them.
+              data-tab-id={tab.id}
               className="fill term-host"
               style={{
                 display: tab.id === activeTabId && visible ? "block" : "none",
@@ -7614,6 +7706,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         {docTabs.map((tab) => (
           <div
             key={tab.id}
+            data-tab-id={tab.id}
             className="fill doc-host"
             style={hostStyle(
               tab.id === activeTabId && visible,
@@ -8711,6 +8804,32 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ctx={spotCtx}
           onAction={onSpotAction}
           onClose={() => setSpotOpen(false)}
+        />
+      )}
+      {/* Two ways in, one panel. Ctrl+Tab walks it and holds it open; ⌘ held
+          numbers it, so the digit you were already going to press has a picture
+          beside it. The ⌘ layer shows what the pane bar shows (folded stacks
+          have no number to press), Ctrl+Tab shows what it cycles. */}
+      {switcherOpen && visible && tabs.length > 1 && (
+        <TabSwitcher
+          tabs={tabs}
+          selectedId={tabs[switcherIdx]?.id ?? activeTabId ?? ""}
+          paneRef={contentRef}
+          termText={termTailFor}
+          onPick={(id) => {
+            cancelSwitcher();
+            setActiveTabId(id);
+          }}
+        />
+      )}
+      {!switcherOpen && tabHints && visible && barTabs.length > 1 && (
+        <TabSwitcher
+          tabs={barTabs}
+          selectedId={activeTabId ?? ""}
+          digits
+          paneRef={contentRef}
+          termText={termTailFor}
+          onPick={setActiveTabId}
         />
       )}
       {coachTip && visible && (
