@@ -56,8 +56,8 @@ export const monacoReady: Promise<void> = (async () => {
             ? "gotham"
             : "daylight"
           : stored.theme;
-      // skinDef() resolves anything unknown to the base skin, which is what
-      // "custom" and any retired id land on.
+      // skinDef() resolves anything unknown to the base skin, which is where
+      // a retired id lands.
       return `canopy-${skinDef(id).id}`;
     } catch {
       return "canopy-gotham";

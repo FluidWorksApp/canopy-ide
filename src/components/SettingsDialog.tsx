@@ -135,11 +135,10 @@ const CURSOR_OPTIONS: { id: CursorStyle; label: string }[] = [
 
 /** The preview must show a skin's palette without applying it, so every skin
  *  carries its own three swatches in src/skins/<id>.ts. Only the two ids that
- *  aren't skins are spelled out here: Auto previews as a split card — Default
- *  when the OS is dark, Daylight when light — and Custom previews the user's
- *  own accent on the Default base. */
+ *  isn't a skin is spelled out here: Auto previews as a split card — Gotham
+ *  when the OS is dark, Daylight when light. */
 const NON_SKIN_PREVIEWS: Record<
-  "auto" | "custom",
+  "auto",
   { bg: string; raised: string; text: string; accent?: string; note: string }
 > = {
   // The two halves are what Auto actually resolves to: Gotham in dark, Daylight
@@ -151,12 +150,10 @@ const NON_SKIN_PREVIEWS: Record<
     accent: "#d4af37",
     note: "follows the OS",
   },
-  // Custom is the base skin's palette with the user's own accent on top.
-  custom: { bg: "#0d0f12", raised: "#171b20", text: "#e8e6df", note: "your accent" },
 };
 
 function skinPreview(id: Theme) {
-  if (id === "auto" || id === "custom") return NON_SKIN_PREVIEWS[id];
+  if (id === "auto") return NON_SKIN_PREVIEWS[id];
   const s = skinDef(id);
   return { ...s.preview, note: s.note };
 }

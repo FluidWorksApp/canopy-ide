@@ -26,6 +26,7 @@ import { dusk } from "./dusk";
 import { orchard } from "./orchard";
 import { plum } from "./plum";
 import { pixel } from "./pixel";
+import { lattice } from "./lattice";
 
 export const SKINS = [
   // Gotham is the base skin: its palette is the `:root` contract in index.css,
@@ -48,7 +49,9 @@ export const SKINS = [
   // Saturated editorial.
   orchard,
   plum,
-  // The 8-bit skin, registered as a real skin rather than a mode.
+  // The two whose identity is material as much as palette, registered as real
+  // skins because those overrides need a selector to hang off.
+  lattice,
   pixel,
 ] as const satisfies readonly SkinDef[];
 

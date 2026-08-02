@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { SKINS, skinDef } from "./registry";
-import { THEMES } from "../settings";
+import { THEMES, migrateTheme } from "../settings";
 import { terminalTheme } from "../terminalThemes";
 
 const DIR = join(process.cwd(), "src", "skins");
@@ -47,12 +47,20 @@ describe("the skin roster", () => {
     expect(new Set(SKINS.map((s) => s.label)).size).toBe(SKINS.length);
   });
 
-  it("offers every skin in the picker, between Auto and Custom", () => {
-    expect(THEMES.map((t) => t.id)).toEqual([
-      "auto",
-      ...SKINS.map((s) => s.id),
-      "custom",
-    ]);
+  it("offers every skin in the picker, after Auto", () => {
+    // Auto is the only entry that isn't a skin. "custom" used to sit at the
+    // end — a skin-shaped hole with no palette, no terminal and no Monaco
+    // theme, which picking silently swapped for Gotham. The accent override it
+    // existed for applies over every skin instead.
+    expect(THEMES.map((t) => t.id)).toEqual(["auto", ...SKINS.map((s) => s.id)]);
+  });
+
+  it("moves anyone still holding the retired custom id onto what it rendered as", () => {
+    // Custom was the base skin plus a separate accent, so this is not an
+    // approximation: it is the same window they were looking at.
+    expect(migrateTheme("custom")).toBe("gotham");
+    expect(migrateTheme("phosphor")).toBe("phosphor");
+    expect(migrateTheme("auto")).toBe("auto");
   });
 
   it("gives every skin a terminal background of its own", () => {
