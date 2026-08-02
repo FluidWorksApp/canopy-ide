@@ -60,8 +60,9 @@ interface RailTab {
  *  boundary padding — whitespace with no rule in it and no run of icons on
  *  either side to explain it. Both answer "what is in this project", which is
  *  a real enough pairing to sit under one boundary. */
-const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
+const RAIL_GROUPS: { id: string; name: string; tabs: RailTab[] }[] = [
   {
+    id: "project",
     name: "Project",
     tabs: [
       {
@@ -79,6 +80,7 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
     ],
   },
   {
+    id: "review",
     name: "Source control & Review",
     tabs: [
       {
@@ -108,6 +110,7 @@ const RAIL_GROUPS: { name: string; tabs: RailTab[] }[] = [
     ],
   },
   {
+    id: "agents",
     name: "Agents",
     tabs: [
       // Agents leads its own group: it is the one the group is named for and
@@ -301,6 +304,10 @@ function ActivityRailImpl({
           key={group.name}
           role="group"
           aria-label={group.name}
+          /* A stable handle for the first-run tour. The aria-label is copy and
+             will be reworded; a coachmark that missed its target would point
+             at nothing and be dismissed unseen. */
+          data-rail-group={group.id}
         >
           {group.tabs.map((t) => tabButton(t, group.name))}
         </div>
