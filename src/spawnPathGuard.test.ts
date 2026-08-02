@@ -113,7 +113,7 @@ describe("procenv is the one place that answers this", () => {
   });
 
   it("is used by the spawns that need it", () => {
-    for (const file of ["companion.rs", "stagehand.rs"]) {
+    for (const file of ["companion.rs"]) {
       const text = readFileSync(join(RUST, file), "utf8");
       expect(text, `${file} should resolve through procenv`).toContain("procenv::");
     }

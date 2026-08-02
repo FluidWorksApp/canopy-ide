@@ -22,12 +22,6 @@
 (function () {
   "use strict";
   var NATIVE = !!window.__canopyNativeBrowser;
-  // The chromium engine reads the outbox by evaluating drain() over CDP — no
-  // doorbell exists, and ringing the webview's one is fatal there: assigning
-  // canopy-drain: with no policy hook to cancel it starts a real navigation,
-  // and doing that while the page is still loading cancels the page load
-  // itself. Every document died at birth this way; frames never came.
-  var PULLED = !!window.__canopyPulledBrowser;
   // Under the proxy the picker belongs to the framed page only; the app's own
   // window loads it too and must skip. A native child webview IS the top
   // window, so that test has to stand down there.
@@ -62,7 +56,6 @@
    *  the page is untouched, and the host knows to drain without polling. The
    *  counter matters: re-assigning the same URL is a no-op. */
   function signal() {
-    if (PULLED) return; // no doorbell to ring — the chromium host polls drain()
     if (signalPending) return;
     signalPending = true;
     setTimeout(function () {
