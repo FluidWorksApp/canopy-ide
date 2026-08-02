@@ -482,13 +482,13 @@ fn clear_stale_profile_lock(profile: &Path) -> bool {
         .next()
         .and_then(|p| p.parse::<u32>().ok())
     {
-        let holder = std::process::Command::new("ps")
+        let holder = std::process::Command::new(crate::procenv::resolve_command("ps"))
             .args(["-o", "command=", "-p", &pid.to_string()])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default();
         if holder.contains(&profile.display().to_string()) {
-            let _ = std::process::Command::new("kill")
+            let _ = std::process::Command::new(crate::procenv::resolve_command("kill"))
                 .args(["-9", &pid.to_string()])
                 .status();
         }
