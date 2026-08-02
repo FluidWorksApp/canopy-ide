@@ -42,7 +42,7 @@ import {
   tailLines,
   PREVIEW_TICK_MS,
 } from "../tabPreview";
-import { tabKind } from "../tabKind";
+import { tabKind, tabToneColor } from "../tabKind";
 
 /** The card's picture box, in CSS pixels — kept here rather than read back from
  *  the DOM because the scale factor has to be known before the first paint, and
@@ -58,8 +58,13 @@ const TERM_ROWS = 26;
 
 function tabIcon(tab: SubTab, size = 12) {
   switch (tab.type) {
-    case "terminal":
-      return <TerminalIcon size={size} />;
+    case "terminal": {
+      // A session's mark is its CLI's own, drawn in its own brand colour — the
+      // thing that tells six agent cards apart before you have read a word of
+      // any of them. A shell with no CLI keeps the terminal glyph.
+      const cli = tabKind(tab).agent;
+      return cli ? <AgentIcon id={cli} size={size} /> : <TerminalIcon size={size} />;
+    }
     case "pr":
     case "review":
       return <PullRequestIcon size={size} />;
@@ -230,16 +235,39 @@ export function TabSwitcher({
     selRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [selectedId]);
 
+  const at = Math.max(0, tabs.findIndex((t) => t.id === selectedId));
+  const selected = tabs[at];
+
   return (
     <div className="tsw-layer" role="presentation">
+      <div className="tsw-frame">
+        {/* Chrome, because a bare row of thumbnails says nothing about itself:
+            what you are looking at, which one you are on, and how far the
+            strip runs. The title is the selected tab's, in full — the cards
+            ellipsize at 236px and the one you are about to land on is the one
+            worth spelling out. */}
+        <div className="tsw-bar">
+          <span className="tsw-bar-title" title={selected ? tabDisplayLabel(selected) : ""}>
+            {selected ? tabDisplayLabel(selected) : "No tabs"}
+          </span>
+          <span className="tsw-bar-count">
+            <span className="tsw-bar-at">{tabs.length ? at + 1 : 0}</span>
+            <span className="tsw-bar-of"> / {tabs.length}</span>
+          </span>
+        </div>
       <div className="tsw-panel" role="listbox" aria-label="Open tabs">
         {tabs.map((tab, i) => {
           const kind = tabKind(tab);
+          const brand = tabToneColor(kind);
           return (
           <div
             key={tab.id}
             ref={tab.id === selectedId ? selRef : undefined}
             className={`tsw-card tsw-tone-${kind.tone} ${tab.id === selectedId ? "tsw-card-sel" : ""}`}
+            // The CLI's own colour where there is one; the class's tone
+            // otherwise. Inline because the value is data, not a skin token —
+            // see tabToneColor.
+            style={brand ? ({ "--tsw-tone": brand } as React.CSSProperties) : undefined}
             role="option"
             aria-selected={tab.id === selectedId}
             onClick={() => onPick(tab.id)}
@@ -275,6 +303,7 @@ export function TabSwitcher({
           </div>
           );
         })}
+      </div>
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { tabKind } from "./tabKind";
+import { tabKind, tabToneColor } from "./tabKind";
 import type { SubTab } from "./components/ProjectView/helpers";
 
 /** Fixtures carry only the fields tabKind actually reads. The cast is the
@@ -16,6 +16,7 @@ describe("what a switcher card says it is", () => {
       label: "agent",
       tone: "agent",
       detail: "claude",
+      agent: "claude",
     });
     expect(tab({ type: "terminal", cwd: "/repo", command: "codex" }).detail).toBe("codex");
   });
@@ -27,6 +28,7 @@ describe("what a switcher card says it is", () => {
       label: "workspace",
       tone: "agent",
       detail: "codex",
+      agent: "codex",
     });
   });
 
@@ -69,6 +71,18 @@ describe("what a switcher card says it is", () => {
     expect(tab({ type: "research", researchId: "1", title: "r" }).tone).toBe("doc");
     expect(tab({ type: "mcp", server: {} }).tone).toBe("external");
     expect(tab({ type: "chat", peer: null, name: "all" }).tone).toBe("people");
+  });
+
+  it("draws an agent in its own brand colour, and anything else in the skin's", () => {
+    // A brand colour is the one value here that is not a skin token: Claude's
+    // terracotta is Claude's on every skin, which is what makes six agent
+    // cards tell themselves apart. A CLI with no published mark falls back to
+    // the accent rather than to a colour we picked on its behalf.
+    const claude = tab({ type: "terminal", cwd: "/r", command: "claude" });
+    expect(tabToneColor(claude)).toBe("#D97757");
+    expect(tabToneColor(tab({ type: "terminal", cwd: "/r", command: "codex" }))).toBe("#7A9DFF");
+    expect(tabToneColor(tab({ type: "terminal", cwd: "/r", command: "opencode" }))).toBeUndefined();
+    expect(tabToneColor(tab({ type: "note", noteId: "1", title: "n" }))).toBeUndefined();
   });
 
   it("says who a chat is with, and 'everyone' for the room", () => {

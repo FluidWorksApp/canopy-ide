@@ -22736,16 +22736,16 @@ a.btn-sm {
 
 /* The palette's glass, on the same four knobs, so the two overlays read as one
    material. */
-.tsw-panel {
+/* The switcher's own frame. The strip used to be the whole thing — a row of
+   cards floating with nothing to say what they were, how many there were, or
+   where in them you had walked to. A panel you hold a key to read should
+   answer all three before you have focused on any one card. */
+.tsw-frame {
   pointer-events: auto;
   display: flex;
-  align-items: stretch;
-  gap: 10px;
+  flex-direction: column;
+  min-width: 0;
   max-width: min(1360px, 94vw);
-  padding: 12px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
 
   --glass-base: var(--bg-overlay);
   --glass-sheen: rgba(255, 255, 255, 0.1);
@@ -22769,6 +22769,53 @@ a.btn-sm {
     var(--shadow-3),
     inset 0 1px 0 var(--glass-lip);
   animation: palette-in 130ms cubic-bezier(0.2, 0.85, 0.25, 1);
+}
+
+.tsw-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 11px 16px 9px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* The selected tab's name, in full: the cards ellipsize at 236px, and the one
+   you are about to land on is the one worth spelling out. */
+.tsw-bar-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 560;
+}
+
+.tsw-bar-count {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.tsw-bar-at {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.tsw-bar-of {
+  color: var(--text-faint);
+}
+
+.tsw-panel {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  padding: 14px 16px 16px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
 }
 
 .tsw-panel::-webkit-scrollbar {
