@@ -539,3 +539,17 @@ export function panelPlacement(
   const top = Math.max(0, Math.min(at.top, view.height - panelHeight));
   return { left, top, side };
 }
+
+/** Summoning it from the keyboard.
+ *
+ *  The panel's open state is the component's own — it is one mounted instance
+ *  and nothing else has ever needed to move it — so this is a nudge rather than
+ *  a store: App raises it when the chord fires, the companion decides what to
+ *  do with it (open and take focus, or put itself away). A shortcut that had to
+ *  own the state would mean hoisting the panel's whole open/close life into
+ *  App for one keypress.
+ */
+export const COMPANION_SUMMON_EVENT = "canopy:companion-summon";
+
+export const summonCompanion = () =>
+  window.dispatchEvent(new CustomEvent(COMPANION_SUMMON_EVENT));

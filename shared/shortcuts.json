@@ -488,6 +488,34 @@
       "note": "Off Mac, Mod is Ctrl and plain Ctrl+D is shell EOF — it would close the terminal you were dictating into. This is the default only; Settings can rebind it."
     },
     {
+      "id": "companion",
+      "label": "Ask the companion — summon it, or put it away",
+      "surface": "app",
+      "chord": {
+        "mods": [
+          "Mod"
+        ],
+        "key": "Slash"
+      },
+      "platform": {
+        "windows": {
+          "mods": [
+            "Mod",
+            "Shift"
+          ],
+          "key": "Slash"
+        },
+        "linux": {
+          "mods": [
+            "Mod",
+            "Shift"
+          ],
+          "key": "Slash"
+        }
+      },
+      "note": "Off macOS Mod is Ctrl, and Ctrl+/ is readline's undo — a key the shell needs far more often than Canopy does. Ctrl+Shift is the namespace terminal emulators already reserve for app commands, and it keeps the key, so the chord is the Mac one plus Shift."
+    },
+    {
       "id": "save-file",
       "label": "Save the file you are editing",
       "surface": "app",
