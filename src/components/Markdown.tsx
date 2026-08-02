@@ -184,28 +184,46 @@ export const Markdown = memo(function Markdown({
     const blocks = el.querySelectorAll("code.language-mermaid");
     if (blocks.length === 0) return;
     let cancelled = false;
-    void import("mermaid").then(({ default: mermaid }) => {
-      if (cancelled) return;
-      mermaid.initialize({ startOnLoad: false, theme: "dark" });
-      blocks.forEach((block, i) => {
-        const pre = block.parentElement;
-        if (!pre) return;
-        const container = document.createElement("div");
-        container.className = "mermaid-diagram";
-        pre.replaceWith(container);
-        mermaid
-          // Ids must be unique across every diagram alive in the document, not
-          // just within this one render — two markdown panes open at once
-          // otherwise collide and the second overwrites the first.
-          .render(`mmd-${diagramSeq++}-${i}`, block.textContent ?? "")
-          .then(({ svg }) => {
-            if (!cancelled) container.innerHTML = svg;
-          })
-          .catch((err) => {
-            container.innerHTML = `<pre class="mermaid-error">mermaid: ${String(err)}</pre>`;
-          });
+    import("mermaid")
+      .then(({ default: mermaid }) => {
+        if (cancelled) return;
+        mermaid.initialize({ startOnLoad: false, theme: "dark" });
+        blocks.forEach((block, i) => {
+          const pre = block.parentElement;
+          if (!pre) return;
+          const container = document.createElement("div");
+          container.className = "mermaid-diagram";
+          pre.replaceWith(container);
+          mermaid
+            // Ids must be unique across every diagram alive in the document,
+            // not just within this one render — two markdown panes open at
+            // once otherwise collide and the second overwrites the first.
+            .render(`mmd-${diagramSeq++}-${i}`, block.textContent ?? "")
+            .then(({ svg }) => {
+              if (!cancelled) container.innerHTML = svg;
+            })
+            .catch((err) => {
+              container.innerHTML = `<pre class="mermaid-error">mermaid: ${String(err)}</pre>`;
+            });
+        });
+      })
+      .catch((err) => {
+        // The import itself failed — a dev server started before the
+        // dependency was installed, a broken chunk in a packaged build. This
+        // used to be an unhandled rejection: the fence stayed raw source with
+        // no hint anything was ever going to happen to it, which reads as "no
+        // mermaid support" and files a bug against the wrong layer. Say so on
+        // the block instead.
+        if (cancelled) return;
+        blocks.forEach((block) => {
+          block.closest("pre")?.classList.add("mermaid-unavailable");
+          block.setAttribute(
+            "title",
+            "Diagram renderer failed to load — restart the app to retry",
+          );
+        });
+        console.warn("[markdown] mermaid failed to load:", err);
       });
-    });
     return () => {
       cancelled = true;
     };

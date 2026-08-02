@@ -6463,6 +6463,13 @@ body.dragging-tab * {
   color: var(--danger);
 }
 
+/* The renderer itself failed to load (see Markdown.tsx): the source stays
+   readable, dimmed with a warning edge so it doesn't pass as a plain fence. */
+.mermaid-unavailable {
+  opacity: 0.75;
+  border-left: 2px solid var(--warn, #b58900);
+}
+
 /* sheets */
 
 .sheet-view {
