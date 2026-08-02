@@ -5054,7 +5054,11 @@ body.dragging-tab * {
 
 /* Dealt back out: tabs returning from a stack fade up rather than blinking in,
    while the FLIP slides everything after them out of the way. */
-.tab {
+/* Only a tab that has just been opened. A tab coming back from a folded stack
+   is remounted but is not new, and replaying this on it made the active tab's
+   highlight arrive half-lit and then snap to full — see isNewTab in
+   PaneBar.tsx. */
+.tab-new {
   animation: tab-appear 200ms ease-out;
 }
 

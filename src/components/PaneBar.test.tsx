@@ -294,3 +294,35 @@ describe("PaneBar stacks", () => {
     expect(chips.map((c) => c.style.getPropertyValue("--pin-left"))).toEqual(["0px", `${NUB_W}px`]);
   });
 });
+
+describe("the appear animation", () => {
+  // Folding a stack unmounts the tabs inside it, so unfolding remounted them
+  // and every one replayed the pop-in — on the active tab that reads as its
+  // highlight arriving half-lit and snapping to full. Only a tab the strip has
+  // not seen before is new.
+  const a = term("a", "one");
+  const b = term("b", "two");
+  const folded = (tabs: SubTab[]): StripGroup => ({ ...run("r", tabs), shown: [] });
+
+  it("plays for a tab that has just opened, not for one back from a fold", () => {
+    const view = render(paneBar({ tabGroups: [run("r", [a, b])], stripTabs: [a, b] }));
+    const cls = (id: string) =>
+      view.container.querySelector<HTMLElement>(`[data-flip-id="${id}"]`)?.className ?? "";
+    expect(cls("a")).toContain("tab-new");
+
+    // Same tabs again: nothing is new any more.
+    view.rerender(paneBar({ tabGroups: [run("r", [a, b])], stripTabs: [a, b] }));
+    expect(cls("a")).not.toContain("tab-new");
+
+    // Folded, then unfolded — the run stops showing them, but the strip still
+    // has them, so coming back is not an arrival.
+    view.rerender(paneBar({ tabGroups: [folded([a, b])], stripTabs: [a, b] }));
+    view.rerender(paneBar({ tabGroups: [run("r", [a, b])], stripTabs: [a, b] }));
+    expect(cls("a")).not.toContain("tab-new");
+
+    // A genuinely new tab still announces itself.
+    const c = term("c", "three");
+    view.rerender(paneBar({ tabGroups: [run("r", [a, b, c])], stripTabs: [a, b, c] }));
+    expect(cls("c")).toContain("tab-new");
+  });
+});
