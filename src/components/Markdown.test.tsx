@@ -1,7 +1,20 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { renderMarkdown } from "../markdown";
 import { Markdown, toggleTaskAt } from "./Markdown";
+
+// The real library is ~2MB and needs a layout engine; the pass under test is
+// ours (find the fence, swap in a container, insert what render returned),
+// not mermaid's.
+vi.mock("mermaid", () => ({
+  default: {
+    initialize: vi.fn(),
+    render: vi.fn((id: string) =>
+      Promise.resolve({ svg: `<svg data-testid="diagram" data-id="${id}"></svg>` }),
+    ),
+  },
+}));
 
 describe("toggleTaskAt", () => {
   const doc = "- [ ] first\n- [x] second\n- [ ] third";
@@ -25,6 +38,40 @@ describe("toggleTaskAt", () => {
 
   it("is a no-op for an index that isn't there", () => {
     expect(toggleTaskAt(doc, 9)).toBe(doc);
+  });
+});
+
+describe("mermaid", () => {
+  const fence = "```mermaid\nflowchart TB\n  a --> b\n```";
+
+  it("keeps the language class through sanitising — the pass depends on it", () => {
+    // If DOMPurify ever drops `class` from code elements, the mermaid pass
+    // silently finds nothing and every diagram in the app reverts to raw
+    // source with no error anywhere. This is the tripwire.
+    expect(renderMarkdown(fence)).toContain("language-mermaid");
+  });
+
+  it("replaces the fence with a rendered diagram", async () => {
+    const { container } = render(<Markdown text={fence} />);
+    await waitFor(() =>
+      expect(container.querySelector(".mermaid-diagram svg")).toBeTruthy(),
+    );
+    // The source fence is gone — a diagram AND its source is neither.
+    expect(container.querySelector("code.language-mermaid")).toBeNull();
+  });
+
+  it("gives every diagram a distinct id", async () => {
+    // The counter is module-scoped: ids are unique across every diagram alive
+    // in the document, not just within one render — two panes open at once
+    // otherwise collide and the second overwrites the first.
+    const { container } = render(<Markdown text={`${fence}\n\n${fence}`} />);
+    await waitFor(() =>
+      expect(container.querySelectorAll(".mermaid-diagram svg")).toHaveLength(2),
+    );
+    const ids = [...container.querySelectorAll(".mermaid-diagram svg")].map((s) =>
+      s.getAttribute("data-id"),
+    );
+    expect(new Set(ids).size).toBe(2);
   });
 });
 
