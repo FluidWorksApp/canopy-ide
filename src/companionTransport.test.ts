@@ -233,6 +233,25 @@ describe("the oneshot protocol (codex)", () => {
     expect(o.t.consumeReplay()).toBe(false);
   });
 
+  it("heals on the bytes codex actually prints, which never reach handleLine", async () => {
+    // Verified against codex 2026-08-02: `codex exec resume <dead-id>` writes
+    // nothing to stdout, prints this one line to stderr and exits 1. So there
+    // is no `turn.failed` JSONL to read — the stderr filter is the only place
+    // this can be caught, which is why healing lives behind a method the spawn
+    // closure can call rather than inside handleLine.
+    const o = oneshot("d811f427-426f-420a-a215-32407360fda5");
+    await o.t.send("can you start the website");
+    const stderr =
+      "Error: thread/resume: thread/resume failed: no rollout found for thread id " +
+      "d811f427-426f-420a-a215-32407360fda5 (code -32600)";
+    expect(o.t.healIfConversationGone(stderr)).toBe(true);
+    expect(o.sent[1]).toEqual({
+      message: "can you start the website",
+      sessionId: null,
+    });
+    expect(o.forgotten()).toBe(1);
+  });
+
   it("only heals once, so a CLI that always says that cannot loop", async () => {
     const o = oneshot("DEAD");
     await o.t.send("hello");
