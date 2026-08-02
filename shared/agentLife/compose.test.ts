@@ -1,6 +1,6 @@
 // The two axes, and the rule that keeps them apart.
 import { describe, expect, it } from "vitest";
-import { bucketFor, dotFor, isRunning, rankSessions, reclaimable, ringFor } from "./compose";
+import { bucketFor, declaredQuiet, dotFor, isRunning, rankSessions, reclaimable, ringFor } from "./compose";
 import { reduceAttention } from "./attention";
 import { LIFE_STATES, NO_ATTENTION, type Attention, type Life, type LifeState } from "./vocabulary";
 
@@ -155,6 +155,33 @@ describe("reclaimable — the destruction gate", () => {
 
   it("does not count an unread ring as a reason to keep a finished session", () => {
     expect(reclaimable(life("idle"), unseen)).toBe(true);
+  });
+});
+
+describe("declaredQuiet — the strip's fast fall", () => {
+  it("passes a reported turn end — the needsTrust CLI's own declaration", () => {
+    // The screenshot bug: codex's Stop arrived, the dot read idle, and the
+    // active tab still could not leave Working because codex never grades
+    // "proven". The declaration is what matters, not the grade.
+    expect(declaredQuiet(life("idle", { confidence: "reported", via: "turn-boundary" }))).toBe(true);
+    expect(declaredQuiet(life("ended", { confidence: "reported", via: "session-end" }))).toBe(true);
+  });
+
+  it("passes every proven finish, whatever the rung", () => {
+    expect(declaredQuiet(life("ended", { via: "process-gone" }))).toBe(true);
+    expect(declaredQuiet(life("idle"))).toBe(true);
+  });
+
+  it("refuses a quiet we merely inferred", () => {
+    expect(declaredQuiet(life("idle", { confidence: "inferred", via: "cpu" }))).toBe(false);
+    expect(declaredQuiet(life("unknown", { confidence: "inferred", via: "none" }))).toBe(false);
+  });
+
+  it("refuses every non-finished state", () => {
+    for (const s of LIFE_STATES) {
+      if (s === "idle" || s === "ended") continue;
+      expect(declaredQuiet(life(s)), s).toBe(false);
+    }
   });
 });
 

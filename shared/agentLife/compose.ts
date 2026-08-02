@@ -51,6 +51,28 @@ export function ringFor(attention: Attention): boolean {
   return attention.kind === "unseen";
 }
 
+/**
+ * Whether the CLI itself declared this session quiet — the predicate the tab
+ * strip's fast fall keys on.
+ *
+ * Keyed on the declaration (`via`), not on `confidence`. A `turn-boundary` or
+ * `session-end` verdict only exists because that event actually arrived from
+ * the CLI's own hooks, and an event that arrived is a declaration whatever the
+ * manifest thinks of the plumbing it came through: `needsTrust` demotes codex
+ * to "reported" so nothing *destructive* fires on a possibly-frozen digest
+ * (`reclaimable` above stays proven-only, on purpose), but gating the strip's
+ * fall on that same grade meant a codex tab you were watching could never
+ * leave Working — the chip said Working over a dot that said idle, after the
+ * CLI itself had said "turn over". The chip's label is a state claim; the CLI's
+ * own declaration outranks the trust grade for a move that costs nothing and
+ * reverses instantly on the next sign of life.
+ */
+export function declaredQuiet(life: Life): boolean {
+  if (life.state !== "idle" && life.state !== "ended") return false;
+  if (life.confidence === "proven") return true;
+  return life.via === "turn-boundary" || life.via === "session-end";
+}
+
 /** What the status dot shows. One value, straight from the lifecycle axis. */
 export function dotFor(life: Life): LifeState {
   return life.state;

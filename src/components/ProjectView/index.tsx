@@ -31,6 +31,7 @@ import {
   NO_ATTENTION,
   POLICY,
   bucketFor,
+  declaredQuiet,
   ringFor,
   type Life,
   type LifeState,
@@ -5716,7 +5717,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const targets = new Map<string, TabStatus>();
     // Quiet on the CLI's own say-so (turn ended, session ended) rather than
     // ours (a CPU dip). These fall on the short clock and through the
-    // active-tab hold — see SettleHold in tabGroups.ts.
+    // active-tab hold — see SettleHold in tabGroups.ts. The say-so is the
+    // declaration (`via`), not the confidence grade: a needsTrust CLI like
+    // codex never grades "proven", and keying on the grade left its active tab
+    // unable to leave Working while its own dot said idle — see declaredQuiet.
     const provenIds = new Set<string>();
     for (const t of agentTabs) {
       const life = tabLife(t);
@@ -5725,8 +5729,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         (t.ptyId != null ? attention.get(t.ptyId) : undefined) ?? NO_ATTENTION,
       );
       targets.set(t.id, bucket);
-      if (bucket === "quiet" && life.confidence === "proven")
-        provenIds.add(t.id);
+      if (bucket === "quiet" && declaredQuiet(life)) provenIds.add(t.id);
     }
     return { statusTargets: targets, provenQuiet: provenIds };
     // `attentionVersion`, not `attention`: the memory is mutated in place, so
