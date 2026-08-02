@@ -122,7 +122,9 @@
 :root[data-theme="vitrine"] .note-remind-menu,
 :root[data-theme="vitrine"] .cnp-tooltip,
 :root[data-theme="vitrine"] .notice,
-:root[data-theme="vitrine"] .update-toast {
+:root[data-theme="vitrine"] .update-toast,
+:root[data-theme="vitrine"] .companion-panel,
+:root[data-theme="vitrine"] .companion-notice {
   background:
     linear-gradient(rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.02)),
     var(--bg-overlay);
@@ -257,6 +259,8 @@
 :root[data-theme="pixel"] .notice,
 :root[data-theme="pixel"] .update-toast,
 :root[data-theme="pixel"] .palette,
+:root[data-theme="pixel"] .companion-panel,
+:root[data-theme="pixel"] .companion-notice,
 :root[data-theme="pixel"] .btn,
 :root[data-theme="pixel"] .btn-sm,
 :root[data-theme="pixel"] .btn-icon {
@@ -18328,7 +18332,7 @@ a.btn-sm {
 
 .assoc-error {
   font-size: 11px;
-  color: var(--danger, #f7768e);
+  color: var(--danger);
 }
 
 /* Bounded so the shipped table can be long without pushing the rest of the
@@ -21461,7 +21465,9 @@ a.btn-sm {
   padding: 12px 14px;
   background: var(--bg-overlay);
   border: 1px solid var(--border-strong);
-  border-radius: 16px;
+  /* The skin's own corner, not a number: Pixel has none and Lattice's are
+     near-square, and this panel floats over everything they dress. */
+  border-radius: var(--r-lg);
   box-shadow: var(--shadow-2);
   animation: companion-in 0.21s cubic-bezier(0.2, 0.9, 0.2, 1) both;
 }
@@ -21504,7 +21510,7 @@ a.btn-sm {
 }
 
 .companion-dot-failed {
-  background: var(--danger, #f7768e);
+  background: var(--danger);
 }
 
 @keyframes companion-pulse {
@@ -21775,17 +21781,17 @@ a.btn-sm {
   display: block;
   margin-top: 4px;
   font-size: 12px;
-  color: var(--danger, #f7768e);
+  color: var(--danger);
 }
 
 .companion-error {
   flex: none;
   padding: 6px 8px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--danger, #f7768e) 12%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
   font-size: 11.5px;
   line-height: 1.5;
-  color: var(--danger, #f7768e);
+  color: var(--danger);
 }
 
 .companion-sees {
@@ -21822,12 +21828,17 @@ a.btn-sm {
   min-width: 0;
   max-height: 96px;
   padding: 7px 10px;
-  background: var(--bg-elev, rgba(255, 255, 255, 0.05));
+  /* A recess, not a raise. --bg-raised is the panel's own surface on the light
+     skins, which put a white field inside a white panel and left the border
+     doing all the work; --bg-deep is a step under every skin's overlay, which
+     is what an input is. (It was var(--bg-elev, …) — a token Canopy has never
+     had, so every skin fell through to a 5% white wash.) */
+  background: var(--bg-deep);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   color: var(--text);
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   line-height: 1.45;
   resize: none;
   outline: none;
