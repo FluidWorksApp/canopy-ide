@@ -337,11 +337,18 @@ export function ResearchView({
               are the CRUD of an entry — frequent, small, and not worth six
               same-sized words competing with the one action that matters. */}
           <span className="research-crud">
+            {/* The one move with a word on it, for the same reason the note
+                header spells out Done: it is the move you come looking for —
+                on an entry whose run died, or one an agent left in
+                "implementing" with no PR to close it — and a bare tick in a row
+                of marks is not something you find when you are looking for a
+                way to finish. */}
             {moves.includes("researched") && (
-              <Button icon
+              <Button size="sm" className="research-mark-done"
                 title="Mark researched — there is a finding here"
                 onClick={() => move("researched")}>
-                <CheckIcon />
+                <CheckIcon size={12} />
+                Researched
               </Button>
             )}
             {moves.includes("researching") && (

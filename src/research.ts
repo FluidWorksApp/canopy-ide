@@ -314,6 +314,18 @@ export function implementContext(entry: ipc.ResearchDetail): string {
       : "",
     `Call \`canopy_research get\` with id ${entry.id} for the full write-up and its sources before you start.`,
     `When you raise the PR, call \`canopy_research_write\` with action "link" and the PR so the entry records what implemented it.`,
+    // The arm the PR path doesn't cover. An entry sits in "implementing" until
+    // its linked PRs merge (reconcileMerged), which is right when there is a
+    // PR — and leaves the entry stuck forever when the work landed in a commit,
+    // was already done, or turned out not to be worth doing. The agent is the
+    // only one who knows which; nobody else is going to come back and say so.
+    //
+    // Pointedly not "set it to implemented": that status is the module's one
+    // piece of evidence rather than assertion, and it is Canopy that writes it,
+    // when every linked PR has actually merged.
+    `If no PR carries this — it landed in a commit, it was already done, or it should not be done —` +
+      ` say so on the entry with action "append" and move it back with action "status" ("researched", or "blocked" if it needs the user).` +
+      ` Never set "implemented" yourself: Canopy sets it when the linked PRs merge, and an entry nobody closes sits in "implementing" forever.`,
   ];
   return parts.filter(Boolean).join(" ");
 }
