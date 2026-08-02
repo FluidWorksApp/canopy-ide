@@ -1,3 +1,37 @@
+// Portions of this file are a hand port of fzf's matching and scoring
+// algorithm (algo/algo.go), and are therefore a derivative work of fzf.
+//
+//   fzf — https://github.com/junegunn/fzf
+//
+//   The MIT License (MIT)
+//
+//   Copyright (c) 2013-2026 Junegunn Choi
+//
+//   Permission is hereby granted, free of charge, to any person obtaining a copy
+//   of this software and associated documentation files (the "Software"), to deal
+//   in the Software without restriction, including without limitation the rights
+//   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//   copies of the Software, and to permit persons to whom the Software is
+//   furnished to do so, subject to the following conditions:
+//
+//   The above copyright notice and this permission notice shall be included in
+//   all copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+//   THE SOFTWARE.
+//
+// The notice above travels with this file because that is what the MIT License
+// asks: an algorithm is not copyrightable, but a transliteration that keeps the
+// constants, the bonus classes and the structure of the original carries its
+// expression, and "hand-written in another language" does not make it ours. It
+// is also recorded in THIRD-PARTY-NOTICES.md, which is where a reader looks for
+// what Canopy ships that it did not write.
+
 /** fzf's matcher, ported by hand — the scoring every palette in the app ranks
  *  by. Same constants as fzf, the same four bonus classes (word boundary,
  *  camelCase, path delimiter, first character), and the same space-separated
