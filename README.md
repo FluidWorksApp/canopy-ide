@@ -388,6 +388,15 @@ Design rules:
 | `hex` | encoding identity keys/signatures on the wire and in the pin store |
 | `tauri-plugin-notification` (+ npm counterpart) | native notifications for team-relay chat/commands/transfers landing while the app is unfocused |
 
+Deliberately *not* a dependency: the fuzzy matcher behind ⌘K, quick-open and
+the palettes. `shared/fuzzy.ts` is a hand port of [fzf](https://github.com/junegunn/fzf)'s
+scoring — its constants, its four bonus classes (word boundary, camelCase, path
+delimiter, first character), its FuzzyMatchV2 alignment, and its query syntax
+(space-separated AND terms, `'exact`, `^prefix`, `suffix$`, `!negate`). One
+file with no install beat both `fzf-for-js` and shelling out to the `fzf`
+binary, which core principle 1 rules out anyway. fzf is MIT; see
+[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).
+
 ## License
 
 Canopy is open source under the [MIT License](./LICENSE.md) — free to use,

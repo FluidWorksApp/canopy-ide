@@ -502,12 +502,19 @@ It covers what Canopy **distributes**: the Rust dependency closure of the app
 binary (dev-only crates pruned), the production npm closure that is bundled into
 the frontend, and the prebuilt binaries shipped inside the app bundle. Build-only
 tooling — Vite, Rolldown, oxlint, TypeScript, lightningcss and friends — is not
-listed, because it never leaves the build machine.
+listed, because it never leaves the build machine. Hand-ported source is
+listed too, under "Notes on specific components", since it appears in no
+manifest.
 
 Each component appears with the copyright notice taken from its own license
 file; the full text of every license in play is reproduced in the appendix.
 
 ## Notes on specific components
+
+**fzf — MIT.** \`shared/fuzzy.ts\` is a hand port of fzf's matching and scoring
+algorithm (\`algo/algo.go\`), compiled into the frontend bundle. Copyright (c)
+2013-2026 Junegunn Choi; MIT text in the appendix; source:
+<https://github.com/junegunn/fzf>.
 
 **jschardet ${npm.find((p) => p.name === "jschardet")?.version ?? ""} — LGPL-2.1-or-later.** Pulled in transitively by
 \`@codingame/monaco-vscode-api\` for character-set detection, and included in the
