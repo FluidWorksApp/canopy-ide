@@ -500,9 +500,11 @@ export const chromiumStartCast = (tabId: string, width: number, height: number) 
 export const chromiumStopCast = (tabId: string) =>
   invoke<void>("chromium_stop_cast", { tabId }).catch(() => {});
 
-/** A full-quality PNG of a headless Chromium page. Unlike the WebKit engines'
- *  capture this renders the page again rather than photographing a view, so it
- *  works on a background tab and owes nothing to the lossy cast stream. */
+/** A full-quality PNG (base64, no data: prefix — the same shape the other
+ *  engines' snapshots answer with) of a headless Chromium page. Unlike the
+ *  WebKit engines' capture this renders the page again rather than
+ *  photographing a view, so it works on a background tab and owes nothing to
+ *  the lossy cast stream. */
 export const chromiumCapture = (
   tabId: string,
   clip?: [number, number, number, number],
