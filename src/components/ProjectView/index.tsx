@@ -8666,6 +8666,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             sideTab={sideTab}
             open={sideOpen}
             pinned={pinned}
+            hoverPeeks={sidePrefs.hover}
             changeBadge={changeCount + collabEditedCount}
             serversBadge={serversRunning}
             prsBadge={prsBadge}

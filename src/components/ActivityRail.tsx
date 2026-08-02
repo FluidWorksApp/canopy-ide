@@ -172,6 +172,10 @@ interface ActivityRailProps {
   open: boolean;
   /** Latched open by a click or Cmd+B, so it outlives the pointer. */
   pinned: boolean;
+  /** Hovering a tab slides its panel out (Appearance → "Hover to view"). When
+   *  it's off the tabs get their native tooltips back — with no panel coming,
+   *  the tooltip is once again the only thing that names an icon. */
+  hoverPeeks: boolean;
   changeBadge: number;
   /** Servers currently up. A count rather than a dot: "is anything running"
    *  and "did I leave four of them running" are different questions. */
@@ -199,6 +203,7 @@ function ActivityRailImpl({
   sideTab,
   open,
   pinned,
+  hoverPeeks,
   changeBadge,
   serversBadge,
   prsBadge,
@@ -223,11 +228,13 @@ function ActivityRailImpl({
       className={`rail-btn ${open && sideTab === t.key ? "rail-btn-active" : ""} ${
         pinned && sideTab === t.key ? "rail-btn-pinned" : ""
       }`}
-      /* No `title`. Hovering these now slides the panel out, and the
-         native tooltip fires on the same gesture — it lands on top of
-         the thing it was describing, a second later and less useful,
-         because the panel's own header already says what it is. The
-         label survives for screen readers, which get no panel. */
+      /* No `title` while hover-to-peek is on: the same gesture slides the
+         panel out, and the tooltip would land on top of the thing it was
+         describing, a second later and less useful, because the panel's
+         own header already says what it is. With the setting off no panel
+         comes, so the tooltip is back to being the only name the icon has.
+         The label survives for screen readers either way. */
+      title={hoverPeeks ? undefined : t.title}
       aria-label={groupName ? `${groupName} — ${t.title}` : t.title}
       onClick={() => onSelectTab(t.key)}
       /* The dwell is armed on the icon and disarmed the moment the

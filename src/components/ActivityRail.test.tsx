@@ -8,6 +8,7 @@ const props = {
   sideTab: "files" as const,
   open: false,
   pinned: false,
+  hoverPeeks: true,
   changeBadge: 0,
   serversBadge: 0,
   prsBadge: 0,
@@ -49,6 +50,26 @@ describe("ActivityRail", () => {
       "Settings (Cmd+,)",
       "Pin sidebar open (Cmd+B)",
     ]);
+  });
+
+  // With hover-to-peek on, a tab's tooltip would fire on the same gesture that
+  // slides its panel out, so the tabs drop `title`. With it off no panel comes
+  // on hover, and the tooltip is the only thing that names an icon — it must
+  // come back, or the rail is a column of unlabelled glyphs.
+  it("gives the tabs tooltips only when hover-to-peek is off", () => {
+    const withHover = render(<ActivityRail {...props} />);
+    const files = () =>
+      [...withHover.container.querySelectorAll("button")].find(
+        (b) => b.getAttribute("aria-label") === "Project — Components & files",
+      );
+    expect(files()?.getAttribute("title")).toBeNull();
+
+    withHover.rerender(<ActivityRail {...props} hoverPeeks={false} />);
+    expect(files()?.getAttribute("title")).toBe("Components & files");
+    // The foot buttons never lost theirs; the setting must not touch them.
+    expect(
+      withHover.container.querySelector('[title="Settings (Cmd+,)"]'),
+    ).not.toBeNull();
   });
 
   // Tools left the tab groups but not the tab behaviour: it still opens a
