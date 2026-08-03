@@ -2689,7 +2689,7 @@ fn research_tool_defs() -> Vec<serde_json::Value> {
                 "recommendation": { "type": "string", "description": "What to do about it, in a sentence or two" },
                 "open_questions": { "type": "array", "items": { "type": "string" }, "description": "What is still unresolved" },
                 "tags": { "type": "array", "items": { "type": "string" } },
-                "status": { "type": "string", "description": "status: researching | researched | implementing | implemented | blocked | superseded | archived" },
+                "status": { "type": "string", "description": "status: one step at a time along researching → researched → implementing, or blocked | superseded | archived. Never \"implemented\" — Canopy writes that itself when every PR you linked has merged; if no PR carries the work, say so with \"append\" and leave the entry in researched." },
                 "note": { "type": "string", "description": "status: why it moved" },
                 "pr": { "type": "object", "description": "link: { repo, number, url, state } — the PR implementing this" },
                 "ticket": { "type": "object", "description": "link: { id, title, url }" },
