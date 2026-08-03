@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { forgetSessions, restorableFrom, resumeCwd } from "./restorable";
+import {
+  forgetSessions,
+  markRestored,
+  markUserClosed,
+  restorableFrom,
+  resumeCwd,
+} from "./restorable";
 import type { SessionDigest } from "./ipc";
 
 // A digest for a session whose terminal is gone: `surface` names a pty id, and
@@ -65,6 +71,52 @@ describe("restorableFrom", () => {
     const old = digest();
     delete old.micro;
     expect(restorableFrom([old], [], [])).toHaveLength(1);
+  });
+
+  it("hides explicitly closed sessions by default without hiding other dead sessions", () => {
+    markUserClosed("closed");
+    const rows = restorableFrom(
+      [digest({ session_id: "closed" }), digest({ session_id: "interrupted" })],
+      [],
+      [],
+    );
+    expect(rows.map((r) => r.digest.session_id)).toEqual(["interrupted"]);
+  });
+
+  it("offers explicitly closed sessions when the setting opts in", () => {
+    markUserClosed("closed");
+    expect(
+      restorableFrom([digest({ session_id: "closed" })], [], [], true),
+    ).toHaveLength(1);
+  });
+
+  it("clears close intent when the user restores the session", () => {
+    markUserClosed("closed");
+    markRestored("closed");
+    // Expire the click bridge by presenting the restored process once, then
+    // model a later app exit. The old close must no longer suppress recovery.
+    const stats = [
+      {
+        id: 7, title: "claude", cwd: "/repo", total_cpu: 0, total_mem_bytes: 0,
+        procs: [], ports: [], agent_hint: null,
+        quiet_ms: null, since_input_ms: null, output_bytes: 0,
+      },
+    ];
+    restorableFrom([digest({ session_id: "closed" })], stats, ["closed"]);
+    expect(restorableFrom([digest({ session_id: "closed" })], [], [])).toHaveLength(1);
+  });
+
+  it("does not lose close intent while the terminal is shutting down", () => {
+    markUserClosed("closed");
+    const stats = [
+      {
+        id: 7, title: "claude", cwd: "/repo", total_cpu: 0, total_mem_bytes: 0,
+        procs: [], ports: [], agent_hint: null,
+        quiet_ms: null, since_input_ms: null, output_bytes: 0,
+      },
+    ];
+    expect(restorableFrom([digest({ session_id: "closed" })], stats, ["closed"])).toHaveLength(0);
+    expect(restorableFrom([digest({ session_id: "closed" })], [], [])).toHaveLength(0);
   });
 
   /** `--resume <id>` resolves inside the CLI's own config dir. */

@@ -63,11 +63,48 @@ const lastHumanPrompt = (prompts?: string[]) =>
  *  was when the app started. */
 const restoredAt = new Map<string, number>();
 
+/** Sessions dismissed by an explicit tab-close gesture. This is deliberately
+ * separate from forgotten sessions: Settings can opt back into showing these,
+ * while Forget is permanent until the transcript changes. */
+const USER_CLOSED_KEY = "canopy.user-closed-sessions";
+
+function readUserClosed(): Set<string> {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(USER_CLOSED_KEY) ?? "[]") as string[]);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeUserClosed(sessionIds: Set<string>) {
+  try {
+    localStorage.setItem(USER_CLOSED_KEY, JSON.stringify([...sessionIds]));
+  } catch {
+    // Losing this convenience marker may show one extra restore row; never block
+    // closing a terminal because storage is unavailable.
+  }
+}
+
+export function markUserClosed(sessionId: string) {
+  const sessionIds = readUserClosed();
+  sessionIds.add(sessionId);
+  writeUserClosed(sessionIds);
+}
+
+function clearUserClosed(sessionId: string) {
+  const sessionIds = readUserClosed();
+  if (!sessionIds.delete(sessionId)) return;
+  writeUserClosed(sessionIds);
+}
+
 /** Long enough to cover a CLI booting; short enough that a restore which
  *  never produced a process doesn't hide the row for the rest of the run. */
 const RESTORE_GRACE_MS = 90_000;
 
 export function markRestored(sessionId: string) {
+  // A session deliberately picked back up is new live work. A previous close
+  // must not hide it if the app later exits unexpectedly.
+  clearUserClosed(sessionId);
   restoredAt.set(sessionId, Date.now());
 }
 
@@ -132,9 +169,11 @@ export function restorableFrom(
   digests: ipc.SessionDigest[],
   stats: ipc.SessionStats[],
   liveSessionIds: string[],
+  restoreUserClosedSessions = false,
 ): Restorable[] {
   const alivePtys = new Set(stats.map((s) => String(s.id)));
   const forgotten = readForgotten();
+  const userClosed = readUserClosed();
   const dead = (d: ipc.SessionDigest) => !!d.surface && !alivePtys.has(d.surface);
   const liveAgents = liveAgentsFrom(stats);
   // Same CLI, same directory, running right now — that work is open, whatever
@@ -171,6 +210,11 @@ export function restorableFrom(
         restoredAt.delete(id);
         return false;
       }
+
+      // Clicking a tab's close control or invoking Close Tab means "I'm done
+      // looking at this", not "recover this after a crash". Keep the transcript
+      // intact so the opt-in setting can still offer it.
+      if (!restoreUserClosedSessions && userClosed.has(id)) return false;
 
       // Just restored and the process hasn't shown up yet.
       const clicked = restoredAt.get(id);
