@@ -108,7 +108,7 @@ import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
 import { stopWorkspaceServers } from "./lsp/client";
 import { sweepStaleRuns } from "./taskHistory";
 import {
-  digitFromCode,
+  digitFromEvent,
   hintModifierOnly,
   useHeldModifier,
 } from "./useHeldModifier";
@@ -1942,7 +1942,7 @@ export default function App() {
     // Capture phase: a focused terminal or editor would otherwise swallow the
     // digit (and on macOS ⌥3 would type "£" into the shell).
     const onKeydown = (e: KeyboardEvent) => {
-      const digit = digitFromCode(e.code);
+      const digit = digitFromEvent(e);
       if (digit === null || !hintModifierOnly(e, "projects")) return;
       const { openIds, projects } = wsRef.current;
       // The same order the pills are drawn in: ids without a project are

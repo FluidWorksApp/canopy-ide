@@ -169,8 +169,7 @@ export interface PaneBarProps {
   openStacks: Record<string, boolean>;
   onToggleStack: (key: string) => void;
   /** Offer everything a run is hiding — folded or scrolled behind the pin. */
-  /** True while ⌘/Ctrl is held: the first nine tabs show the digit that jumps
-   *  to them, numbered left to right across the groups (see useHeldModifier). */
+  /** Whether the first nine tabs show their direct-jump digits. */
   showHints: boolean;
   // rail data
   shellChips: RailChip[];

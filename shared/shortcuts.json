@@ -190,7 +190,7 @@
     },
     {
       "id": "tab-jump",
-      "label": "Jump to a tab — hold {mod} for the switcher, and the tabs show their numbers",
+      "label": "Jump to a tab — hold {mod} to show tab numbers",
       "surface": "app",
       "chord": {
         "mods": [

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { digitFromCode, hintModifierOnly } from "./useHeldModifier";
+import { digitFromCode, digitFromEvent, hintModifierOnly } from "./useHeldModifier";
 import { IS_MAC } from "./platform";
 
 /** A KeyboardEvent stand-in — only the modifier flags matter here. */
@@ -29,6 +29,14 @@ describe("digitFromCode", () => {
     expect(digitFromCode("Numpad0")).toBeNull();
     expect(digitFromCode("KeyN")).toBeNull();
     expect(digitFromCode("ArrowLeft")).toBeNull();
+  });
+});
+
+describe("digitFromEvent", () => {
+  it("recognises an Option-modified digit when WebKit omits code", () => {
+    expect(
+      digitFromEvent(ev({ code: "", key: "£", keyCode: 51, altKey: true })),
+    ).toBe(3);
   });
 });
 

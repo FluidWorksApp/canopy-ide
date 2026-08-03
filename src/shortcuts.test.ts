@@ -326,7 +326,6 @@ describe("main's own chords", () => {
     const win = helpRows("windows").find((r) => r.id === "tab-jump")!;
     expect(mac.keys).toBe("⌘1…9");
     expect(win.keys).toBe("Ctrl+1…9");
-    // …and the prose that names the key follows the platform too.
     expect(mac.label).toContain("hold ⌘");
     expect(win.label).toContain("hold Ctrl");
   });

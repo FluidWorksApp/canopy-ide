@@ -35,6 +35,17 @@ export function digitFromCode(code: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/** Physical 1-9 from a keyboard event. WebKit can omit `code` after Option
+ *  turns the key into a symbol, so retain the legacy numeric fallback. */
+export function digitFromEvent(e: KeyboardEvent): number | null {
+  const code = digitFromCode(e.code);
+  if (code !== null) return code;
+  const keyCode = e.keyCode || e.which;
+  if (keyCode >= 49 && keyCode <= 57) return keyCode - 48;
+  if (keyCode >= 97 && keyCode <= 105) return keyCode - 96;
+  return null;
+}
+
 /** A modifier tapped and released on its own is usually on its way somewhere
  *  else (⌘C, Alt-tab). Waiting a beat keeps the hints out of that traffic. */
 const HOLD_MS = 350;
@@ -73,7 +84,7 @@ export function useHeldModifier(which: HintKey, enabled = true): boolean {
       }
       // The digits are what the hints are for — pressing one keeps them up so
       // a second jump doesn't need the modifier released and held again.
-      if (digitFromCode(e.code) !== null && hintModifierOnly(e, which)) return;
+      if (digitFromEvent(e) !== null && hintModifierOnly(e, which)) return;
       clear();
     };
     const onKeyUp = (e: KeyboardEvent) => {

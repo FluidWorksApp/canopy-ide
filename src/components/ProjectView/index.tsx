@@ -647,9 +647,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [launcherOpen, setLauncherOpen] = useState(false);
   /** SpotSearch (⌘K) — the omnibox over everything this project knows. */
   const [spotOpen, setSpotOpen] = useState(false);
-  /** ⌘/Ctrl held: number the tabs, so ⌘3 stops being something to memorise.
-   *  Only for the project on screen — a hidden project numbering its tabs
-   *  would be nine badges nobody can see and a keypress that lands elsewhere. */
+  /** Holding the tab-jump modifier reveals the direct-jump numbers in the bar. */
   const tabHints = useHeldModifier("tabs", visible);
   /** Ctrl+Tab held: the tab the release would land on, as an index into `tabs`.
    *  Null when the switcher isn't up. Nothing switches while it is — the panel
@@ -5845,10 +5843,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, [agentTabs, tabLife, attentionVersion]);
   // …and it only ever moves when moving costs you nothing. Mid-gesture is
   // never such a moment: a tab that slides out from under a cursor already on
-  // its way down is a misclick the strip caused, and ⌘ held numbers the tabs
-  // 1-9 by position, so a tab moving between reading the digit and pressing it
-  // sends you somewhere you didn't ask for. Both freeze the whole strip;
-  // everything they held back lands together the moment you finish. See
+  // its way down is a misclick the strip caused. Pointer use and visible number
+  // hints freeze the strip; everything held back lands when they end. See
   // SettleHold — the settling window makes a move rare, these make it wait for
   // you. (The pointer listeners live with stripRef, further down.)
   const [pointerInStrip, setPointerInStrip] = useState(false);
@@ -8815,10 +8811,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onClose={() => setSpotOpen(false)}
         />
       )}
-      {/* Two ways in, one panel. Ctrl+Tab walks it and holds it open; ⌘ held
-          numbers it, so the digit you were already going to press has a picture
-          beside it. The ⌘ layer shows what the pane bar shows (folded stacks
-          have no number to press), Ctrl+Tab shows what it cycles. */}
+      {/* Ctrl+Tab walks the switcher; releasing Ctrl commits the selection. */}
       {switcherOpen && visible && tabs.length > 1 && (
         <TabSwitcher
           tabs={tabs}
@@ -8829,16 +8822,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
             cancelSwitcher();
             setActiveTabId(id);
           }}
-        />
-      )}
-      {!switcherOpen && tabHints && visible && barTabs.length > 1 && (
-        <TabSwitcher
-          tabs={barTabs}
-          selectedId={activeTabId ?? ""}
-          digits
-          paneRef={contentRef}
-          termText={termTailFor}
-          onPick={setActiveTabId}
         />
       )}
       {coachTip && visible && (
