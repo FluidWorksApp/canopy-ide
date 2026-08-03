@@ -64,6 +64,13 @@ export interface CompanionMessage {
   tools?: CompanionTool[];
   /** A message that reports a failure rather than an answer. */
   failed?: boolean;
+  attachments?: CompanionAttachment[];
+}
+
+export interface CompanionAttachment {
+  name: string;
+  path: string;
+  type: string;
 }
 
 /** Something the companion proposes to do, waiting on the user.
@@ -480,15 +487,19 @@ export async function stopCompanion(): Promise<void> {
 /** Send a message. Adds the user's turn and an empty reply for the stream to
  *  fill, so the chat shows the question landing immediately rather than after
  *  the first token. */
-export async function sendToCompanion(text: string): Promise<void> {
+export async function sendToCompanion(
+  text: string,
+  attachments: CompanionAttachment[] = [],
+): Promise<void> {
   const body = text.trim();
-  if (!body || !transport || state.status === "working") return;
+  if ((!body && attachments.length === 0) || !transport || state.status === "working") return;
+  const shown = body || (attachments.length === 1 ? `Attached ${attachments[0].name}` : `Attached ${attachments.length} files`);
   set({
     status: "working",
     error: null,
     messages: [
       ...state.messages,
-      { id: nextId(), who: "you", text: body },
+      { id: nextId(), who: "you", text: shown, attachments },
       { id: nextId(), who: "ash", text: "" },
     ],
   });
@@ -498,7 +509,13 @@ export async function sendToCompanion(text: string): Promise<void> {
   // user moves — the file in front of them at question three is not the one
   // from question one.
   const spot = companionSpotlight();
-  const wire = spot ? `${spotlightEnvelope(spot)}\n\n${body}` : body;
+  const files = attachments.length
+    ? `\n\nAttached files (open these with your file tools before answering):\n${attachments
+        .map((a) => `- ${a.path} (${a.type || "file"})`)
+        .join("\n")}`
+    : "";
+  const prompt = `${body}${files}`.trim();
+  const wire = spot ? `${spotlightEnvelope(spot)}\n\n${prompt}` : prompt;
   try {
     await transport.send(wire);
   } catch (err) {

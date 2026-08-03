@@ -359,7 +359,7 @@ export function Companion({
           onAnswer={onAnswerProposal}
           onInstall={onInstallCli}
           onRetry={onRetry}
-          onSend={(text) => void sendToCompanion(text)}
+          onSend={(text, attachments) => void sendToCompanion(text, attachments)}
           onClose={() => setOpen(false)}
         />
       )}

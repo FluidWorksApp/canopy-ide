@@ -112,7 +112,15 @@ describe("authority withholds rather than asks", () => {
       expect(tools).toContain("canopy_diagnostics");
       expect(tools).toContain("canopy_workspace");
       expect(tools).toContain("canopy_workspace_git");
+      expect(tools).toContain("canopy_workspace_prs");
+      expect(tools).toContain("canopy_pr_details");
     }
+  });
+
+  it("keeps PR writes behind companion authority", () => {
+    expect(companionToolNames([], "read")).not.toContain("canopy_pr_action");
+    expect(companionToolNames([], "confirm")).toContain("canopy_pr_action");
+    expect(companionToolNames([], "auto")).toContain("canopy_pr_action");
   });
 
   it("still honours Settings → Agents for the shared tools", () => {

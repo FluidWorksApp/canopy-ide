@@ -2251,6 +2251,7 @@ const COMPANION_MUTATING_TOOLS: &[&str] = &[
     "canopy_browser_type",
     "canopy_browser_eval",
     "canopy_browser_navigate",
+    "canopy_pr_action",
 ];
 
 /// The companion's authority, applied to the tool list.
@@ -2605,6 +2606,40 @@ fn companion_tool_defs() -> Vec<serde_json::Value> {
                 "query": { "type": "string", "description": "What to look for" },
                 "limit": { "type": "integer", "description": "Rows to return (default 20, max 100)" }
             }, "required": ["query"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_workspace_prs",
+            "description": "Every open pull request across the repos in the workspace, with project and local repo path attached. Optionally narrow to one project. Use the returned `repo` path with canopy_pr_details and canopy_pr_action. To have an agent review a PR or address its comments, call canopy_message_agent with the PR URL and the instruction — that reuses or starts the PR's coding session rather than making the companion edit code itself.",
+            "inputSchema": { "type": "object", "properties": {
+                "project": { "type": "string", "description": "Just this project, by name. Omit for all projects" }
+            }, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_pr_details",
+            "description": "A pull request's body, live conversation, reviews, inline threads, candidate reviewers and state. `includeDiff` adds the full patch and `includeLogs` adds failing check logs; leave them off until needed to keep the result small.",
+            "inputSchema": { "type": "object", "properties": {
+                "repo": { "type": "string", "description": "Absolute local repo path from canopy_workspace_prs" },
+                "number": { "type": "integer", "description": "Pull request number" },
+                "includeDiff": { "type": "boolean", "description": "Include the PR patch (default false)" },
+                "includeLogs": { "type": "boolean", "description": "Include failing check logs (default false)" }
+            }, "required": ["repo", "number"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_pr_action",
+            "description": "Act on a pull request through the same GitHub operations as Canopy's PR view. Actions: review (requires review; optional body), request_review (reviewers), reply (threadId + body), resolve (threadId + resolved), update_branch, auto_merge (method + enable), merge (method), ready, close (optional deleteBranch). For code-changing work such as reviewing the diff or addressing comments, use canopy_message_agent with the PR URL instead.",
+            "inputSchema": { "type": "object", "properties": {
+                "repo": { "type": "string", "description": "Absolute local repo path from canopy_workspace_prs" },
+                "number": { "type": "integer", "description": "Pull request number" },
+                "action": { "type": "string", "enum": ["review", "request_review", "reply", "resolve", "update_branch", "auto_merge", "merge", "ready", "close"] },
+                "review": { "type": "string", "enum": ["approve", "comment", "request-changes"], "description": "review: review event" },
+                "body": { "type": "string", "description": "review/reply: comment body" },
+                "reviewers": { "type": "array", "items": { "type": "string" }, "description": "request_review: GitHub logins" },
+                "threadId": { "type": "string", "description": "reply/resolve: thread id from canopy_pr_details" },
+                "resolved": { "type": "boolean", "description": "resolve: true to resolve, false to reopen" },
+                "method": { "type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge/auto_merge method (default squash)" },
+                "enable": { "type": "boolean", "description": "auto_merge: enable or disable (default true)" },
+                "deleteBranch": { "type": "boolean", "description": "close: also delete the branch (default false)" }
+            }, "required": ["repo", "number", "action"], "additionalProperties": false }
         }),
         serde_json::json!({
             "name": "canopy_open_project",
@@ -3139,6 +3174,13 @@ fn describe_action(name: &str, args: &serde_json::Value) -> (String, Option<Stri
             "Run JavaScript in the preview".into(),
             arg("code").map(|c| c.chars().take(160).collect()),
         ),
+        "canopy_pr_action" => (
+            format!("{} pull request", arg("action").unwrap_or_else(|| "Update".into())),
+            arg("repo").map(|repo| match args.get("number").and_then(|v| v.as_u64()) {
+                Some(number) => format!("{repo}#{number}"),
+                None => repo,
+            }),
+        ),
         other => (format!("Run {other}"), None),
     }
 }
@@ -3501,6 +3543,8 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
         | "canopy_workspace_git"
         | "canopy_workspace_agents"
         | "canopy_workspace_search"
+        | "canopy_workspace_prs"
+        | "canopy_pr_details"
         | "canopy_open_project"
         | "canopy_recall"
         | "canopy_remember" => {
@@ -3538,6 +3582,24 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             // companion tool is one descriptor and one case in agentOps.ts.
             body["op"] = serde_json::json!(name.trim_start_matches("canopy_"));
             text(ui_op(name.trim_start_matches("canopy_"), &body, 25))
+        }
+        "canopy_pr_action" => {
+            if !is_companion_session() {
+                return Err("canopy_pr_action belongs to Canopy's companion and is not available to this session".into());
+            }
+            for field in ["repo", "action"] {
+                if args
+                    .get(field)
+                    .and_then(|v| v.as_str())
+                    .map_or(true, str::is_empty)
+                {
+                    return Err(format!("missing required argument: {field}"));
+                }
+            }
+            if args.get("number").and_then(|v| v.as_u64()).is_none() {
+                return Err("missing required argument: number".into());
+            }
+            text(ui_op("pr_action", args, 25))
         }
         "canopy_confirm" => {
             if !is_companion_session() {

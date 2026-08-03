@@ -2007,6 +2007,25 @@ struct UiOp {
     about: Option<String>,
     #[serde(default)]
     forget: bool,
+    /// Companion PR operations. The repo path is checked against the workspace
+    /// by the UI before any existing GitHub command is called.
+    repo: Option<String>,
+    number: Option<u64>,
+    #[serde(rename = "includeDiff")]
+    include_diff: Option<bool>,
+    #[serde(rename = "includeLogs")]
+    include_logs: Option<bool>,
+    body: Option<String>,
+    review: Option<String>,
+    #[serde(default)]
+    reviewers: Vec<String>,
+    #[serde(rename = "threadId")]
+    thread_id: Option<String>,
+    resolved: Option<bool>,
+    method: Option<String>,
+    enable: Option<bool>,
+    #[serde(rename = "deleteBranch")]
+    delete_branch: Option<bool>,
 }
 
 const UI_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -2070,8 +2089,8 @@ async fn ui_op(
         }
         // Reads over the whole workspace. They talk to state the app already
         // holds, so they answer as fast as the language-server ops do.
-        "workspace" | "workspace_git" | "workspace_agents" | "open_project" | "recall"
-        | "remember" => UI_OP_TIMEOUT,
+        "workspace" | "workspace_git" | "workspace_agents" | "workspace_prs" | "pr_details"
+        | "pr_action" | "open_project" | "recall" | "remember" => UI_OP_TIMEOUT,
         "workspace_search" => {
             if op.query.as_deref().map_or(true, |q| q.trim().is_empty()) {
                 return (
@@ -2125,6 +2144,18 @@ async fn ui_op(
             "fact": op.fact,
             "about": op.about,
             "forget": op.forget,
+            "repo": op.repo,
+            "number": op.number,
+            "includeDiff": op.include_diff,
+            "includeLogs": op.include_logs,
+            "body": op.body,
+            "review": op.review,
+            "reviewers": op.reviewers,
+            "threadId": op.thread_id,
+            "resolved": op.resolved,
+            "method": op.method,
+            "enable": op.enable,
+            "deleteBranch": op.delete_branch,
         }),
     );
 

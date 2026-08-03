@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render } from "@testing-library/react";
+import { fireEvent, render, waitFor } from "@testing-library/react";
 import { CompanionChat } from "./CompanionChat";
 import type { CompanionState, CompanionTool } from "../companionSession";
 
@@ -8,6 +8,14 @@ import type { CompanionState, CompanionTool } from "../companionSession";
 // drags a parser and a sanitizer in with it.
 vi.mock("./Markdown", () => ({
   Markdown: ({ text }: { text: string }) => <p>{text}</p>,
+}));
+
+const { saveAttachment } = vi.hoisted(() => ({
+  saveAttachment: vi.fn(async (name: string, _base64: string) => `/tmp/${name}`),
+}));
+vi.mock("../ipc", () => ({
+  companionSaveAttachment: (name: string, base64: string) => saveAttachment(name, base64),
+  jsLog: vi.fn(),
 }));
 
 const noop = () => {};
@@ -129,5 +137,30 @@ describe("the expand control", () => {
     const panel = document.querySelector(".companion-panel") as HTMLElement;
     expect(panel.style.width).toBe("620px");
     expect(panel.getAttribute("role")).toBe("dialog");
+  });
+});
+
+describe("attachments", () => {
+  it("stages a selected file and sends its path with the message", async () => {
+    const onSend = vi.fn();
+    mount(state([], "ready"), { onSend });
+    const picker = document.querySelector(".companion-file-input") as HTMLInputElement;
+    fireEvent.change(picker, {
+      target: { files: [new File(["pixels"], "screen.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(document.querySelector(".companion-file")?.textContent).toContain("screen.png"));
+    fireEvent.click(document.querySelector(".companion-send") as HTMLElement);
+    expect(onSend).toHaveBeenCalledWith("", [
+      { name: "screen.png", path: "/tmp/screen.png", type: "image/png" },
+    ]);
+  });
+
+  it("allows a pasted attachment to stand on its own", async () => {
+    mount(state([], "ready"));
+    const input = document.querySelector(".companion-input") as HTMLTextAreaElement;
+    fireEvent.paste(input, {
+      clipboardData: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+    });
+    await waitFor(() => expect(document.querySelector(".companion-send")?.hasAttribute("disabled")).toBe(false));
   });
 });
