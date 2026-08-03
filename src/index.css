@@ -8532,7 +8532,10 @@ input[type="radio"]:disabled {
   cursor: pointer;
   color: var(--text);
   text-align: left;
-  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
 }
 
 .skin-select-trigger:hover,
@@ -8553,53 +8556,95 @@ input[type="radio"]:disabled {
   left: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 5px;
+  gap: 8px;
   width: min(620px, calc(100vw - 340px));
   max-height: min(420px, calc(100vh - 245px));
-  padding: 7px;
+  padding: 9px;
   overflow-y: auto;
   border: 1px solid var(--border-strong);
   border-radius: var(--r-lg);
   corner-shape: squircle;
   background: var(--bg-overlay);
+  backdrop-filter: blur(18px) saturate(1.15);
   box-shadow: var(--shadow-lg);
 }
 
 .skin-select-option {
   position: relative;
   min-width: 0;
-  border-color: transparent;
-  background: transparent;
+  border-color: var(--border);
+  background: var(--bg-raised);
 }
 
 .skin-select-option:hover,
 .skin-select-option:focus-visible {
   background: var(--bg-hover);
+  border-color: var(--border-strong);
 }
 
 .skin-select-option.selected {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--border-strong));
   background: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
-/* The swatch is the skin's own canvas with its three defining colours on it,
-   so it needs no border of its own — a rim here would be this skin's border
-   drawn around another skin's surface. */
+/* A miniature surface stack rather than three unrelated colour dots. The outer
+   field is the app canvas; the inset panel is its foreground surface, with a
+   real accent and text drawn on top. A light and dark rim keeps the extent of
+   every canvas visible, including black-on-black and white-on-white previews. */
 .skin-preview {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex: 0 0 112px;
-  padding: 12px 11px;
+  flex: 0 0 120px;
+  height: 40px;
+  padding: 6px;
+  overflow: hidden;
   border-radius: var(--r-sm);
   corner-shape: squircle;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    0 0 0 1px rgba(0, 0, 0, 0.3);
 }
 
-.skin-chip {
-  width: 11px;
-  height: 11px;
+.skin-preview-panel {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 72%;
+  height: 100%;
+  margin-left: auto;
+  padding: 6px 7px;
+  border-radius: calc(var(--r-sm) - 3px);
+  box-shadow:
+    0 3px 8px rgba(0, 0, 0, 0.28),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+.skin-preview-accent {
+  width: 10px;
+  height: 10px;
   flex: 0 0 auto;
   border-radius: 50%;
-  border: 1px solid rgba(0, 0, 0, 0.25);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28);
+}
+
+.skin-preview-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.skin-preview-line {
+  width: 100%;
+  height: 3px;
+  border-radius: 2px;
+  opacity: 0.9;
+}
+
+.skin-preview-line.short {
+  width: 62%;
+  opacity: 0.5;
 }
 
 .skin-name {

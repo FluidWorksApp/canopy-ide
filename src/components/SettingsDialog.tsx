@@ -172,9 +172,13 @@ function SkinChoice({ theme, accent }: { theme: Theme; accent: string }) {
   return (
     <>
       <span className="skin-preview" style={{ background: p.bg }} aria-hidden="true">
-        <span className="skin-chip" style={{ background: accent || p.accent }} />
-        <span className="skin-chip" style={{ background: p.raised }} />
-        <span className="skin-chip" style={{ background: p.text }} />
+        <span className="skin-preview-panel" style={{ background: p.raised }}>
+          <span className="skin-preview-accent" style={{ background: accent || p.accent }} />
+          <span className="skin-preview-copy">
+            <span className="skin-preview-line" style={{ background: p.text }} />
+            <span className="skin-preview-line short" style={{ background: p.text }} />
+          </span>
+        </span>
       </span>
       <span className="skin-copy">
         <span className="skin-name">{THEMES.find((t) => t.id === theme)?.label}</span>
