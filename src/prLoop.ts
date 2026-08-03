@@ -160,6 +160,16 @@ export function newSinceHandled(conv: ipc.PrConversation, loop: PrLoop): string[
   return actionable(conv).ids.filter((id) => !seen.has(id));
 }
 
+/** Return actionable ids that have not been announced in this mounted PR tab,
+ * then remember every id in the current snapshot. This is deliberately separate
+ * from `handled`: showing a toast does not mean an agent addressed the comment. */
+export function takeUnnoticed(conv: ipc.PrConversation, noticed: Set<string>): string[] {
+  const ids = actionable(conv).ids;
+  const fresh = ids.filter((id) => !noticed.has(id));
+  ids.forEach((id) => noticed.add(id));
+  return fresh;
+}
+
 export interface RoundGate {
   ok: boolean;
   /** Why not, in words the UI can show as a tooltip. */

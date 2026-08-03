@@ -88,6 +88,7 @@ import {
   resetLoop,
   roundGate,
   saveLoop,
+  takeUnnoticed,
   type PrLoop,
 } from "../prLoop";
 import { Button } from "./ui";
@@ -377,6 +378,9 @@ export function PrView({
   // question a refusal really is, and it outlives this tab closing itself.
   const { switchTo } = useBranchSwitch();
   const fileRefs = useRef(new Map<string, HTMLDivElement>());
+  /** Comment ids already announced while this PR tab is mounted. A toast is not
+   *  an agent handoff, so these cannot live in the loop's `handled` ledger. */
+  const noticedComments = useRef<{ key: string; ids: Set<string> } | null>(null);
   // Latest-value refs so the callbacks handed to memoized children can stay
   // identity-stable while still seeing the current props/conversation.
   const noticeRef = useRef(onNotice);
@@ -535,7 +539,14 @@ export function PrView({
       .ghPrDiff(repo, pr.number)
       .then((d) => live && setPatch(d))
       .catch((e) => live && setError(String(e)));
-    void refreshConv();
+    void refreshConv().then((c) => {
+      if (!live || !c) return;
+      const key = `${repo}#${pr.number}`;
+      if (noticedComments.current?.key === key) return;
+      const ids = new Set<string>();
+      takeUnnoticed(c, ids);
+      noticedComments.current = { key, ids };
+    });
     // What an earlier Review left behind: the map the body renders, and the
     // findings, staged as drafts again so re-opening the tab doesn't lose them.
     void ipc
@@ -987,6 +998,15 @@ export function PrView({
       missed = false;
       const c = await refreshConv();
       if (!live || !c || !loopArmed) return;
+      const noticeKey = `${repo}#${pr.number}`;
+      let noticeTracker = noticedComments.current;
+      if (noticeTracker?.key !== noticeKey) {
+        noticeTracker = { key: noticeKey, ids: new Set<string>() };
+        noticedComments.current = noticeTracker;
+        // The first successful snapshot is the baseline, not a new event.
+        takeUnnoticed(c, noticeTracker.ids);
+      }
+      const unnoticed = takeUnnoticed(c, noticeTracker.ids);
       const fresh = newSinceHandled(c, loop);
       if (fresh.length && loop.auto) {
         const g = roundGate(livePr, c, loop);
@@ -1004,8 +1024,8 @@ export function PrView({
           persist({ ...loop, status: "blocked", blockedReason: g.reason });
         return;
       }
-      if (fresh.length) {
-        onNotice(`#${pr.number}: ${fresh.length} new comment(s).`, "info", {
+      if (unnoticed.length) {
+        onNotice(`#${pr.number}: ${unnoticed.length} new comment(s).`, "info", {
           body: pr.title,
         });
       } else if (isLandable(c) && loop.status !== "ready") {
