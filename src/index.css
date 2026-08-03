@@ -4296,6 +4296,11 @@ body.resizing-side * {
 .tabs-harbor {
   position: relative;
   align-items: flex-end;
+  /* The section itself is the snap area, not its header. A section wider than
+     the scrollport remains freely scrollable, while `always` on the next
+     section traps a trackpad fling at their header-collision point. WebKit owns
+     the deceleration and never exposes/cancels wheel events in application JS. */
+  scroll-snap-type: x proximity;
   /* The row hangs 1px into the pane bar's bottom border, so the docked blob can
      paint over that hairline and read as fused with the editor below. The pull
      is on this box rather than on the tabs and the blob inside it: content that
@@ -4401,23 +4406,18 @@ body.dragging-tab * {
 /* Agents first-class in the strip: groups render agents | shells | docs, a
    divider between non-empty groups, agent tabs tinted with a live dot, and
    file/PR tabs visibly quieter — workload on the left, reference on the right. */
-/* A run generates no box of its own: its chip, its divider and its tabs are
-   flex items of the strip itself.
-
-   That is what makes the pile work. `position: sticky` is clamped to its
-   containing block, so while a chip was a child of its run it was evicted the
-   moment that run's last tab scrolled past — the chip naming where you were
-   slid off the left edge exactly when you needed it. Sharing the strip as a
-   containing block, a pinned chip has the whole scrollport to hold on to, and
-   the offsets in tabSticky.ts decide where each one stops.
-
-   Everything the runs used to carry — never squeeze to fit, full height
-   whatever it holds — is on the items instead: tabs and chips are both
-   `flex: 0 0 auto`, and the chip is `align-self: stretch`, which is what keeps
-   a folded run (a chip and nothing else) in line with its neighbours rather
-   than sunk to the bottom of the harbor. */
+/* Each run is a real horizontal section. That boundary is what gives native
+   sticky its push-off behavior: the header holds at the left while its tabs
+   pass, then the next full header pushes it out as the section ends. Headers
+   never resize, collapse, or switch positioning mode during the gesture. A
+   proximity container leaves ordinary resting positions inside a section free;
+   `always` below only traps a fling that crosses a section boundary. */
 .tab-group {
-  display: contents;
+  display: inline-flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  scroll-snap-align: none start;
+  scroll-snap-stop: always;
 }
 
 .tab-group-sep {
@@ -4436,8 +4436,8 @@ body.dragging-tab * {
   width: 0;
 }
 
-/* Scroll room for the last chip to reach its place in the queue — exactly the
-   shortfall, measured by useChipPins, and 0 whenever the strip is long enough
+/* Scroll room for the final section header to reach the edge — exactly the
+   shortfall, measured by useStickyLayout, and 0 whenever the strip is long enough
    already. Never a fixed gap: dead space at the end of a strip that didn't
    need any is a strip that scrolls past its own last tab. */
 .tab-strip-tail {
@@ -4452,24 +4452,13 @@ body.dragging-tab * {
    something you want out of the way rather than something to read past. Tabs
    slide between the stacks (tabFlip.ts) as their agent changes state, and the
    pane under the tab you're on never moves with them. */
-/* The chip holds a place near the left edge of the scrollport while its own
-   tabs scroll past underneath — sticky section headers, turned sideways. Not
-   *at* the edge: it stops after the chips already queued there, so the runs
-   behind you line up instead of one pushing out the next (`--pin-left`, set per
-   chip; the queue's arithmetic is tabSticky.ts). Nothing is ever pushed off the
-   strip.
-
-   `relative` until it has arrived, `sticky` from then on (data-pin, set by
-   useChipPins). Sticky from the start would take hold as soon as the chip's
-   natural place passed the offset — which is a chip's width before the one
-   still shown in full has given up its room, so the two overlapped and the
-   arriving chip read as half a word glued to the last one. Taking hold only on
-   arrival means it takes hold exactly where it already was.
-
+/* A chip sticks at the scrollport's left edge while its own section remains.
+   Its section boundary pushes it away, and the next full chip replaces it.
    The strip's own background travels with it, so tabs sliding beneath don't
    show through the gap around the chip. */
 .tab-stack {
-  position: relative;
+  position: sticky;
+  left: var(--pin-left, 0px);
   z-index: 2;
   display: inline-flex;
   align-items: center;
@@ -4484,11 +4473,9 @@ body.dragging-tab * {
   background: var(--bg-alt-opaque, var(--bg-alt));
   flex: 0 0 auto;
   user-select: none;
-}
-
-.tab-stack[data-pin] {
-  position: sticky;
-  left: var(--pin-left, 0px);
+  /* The edge header occludes tabs travelling underneath it. Later headers
+     slide over earlier ones because their z-index follows strip order. */
+  box-shadow: 10px 0 14px -12px rgba(0, 0, 0, 0.9);
 }
 
 /* The glass skin's bar is a wash over an ambient field that shifts across the
@@ -4499,28 +4486,6 @@ body.dragging-tab * {
 :root[data-theme="vitrine"] .tab-stack {
   background: transparent;
   backdrop-filter: blur(14px) saturate(140%);
-}
-
-/* Already passed: the chip drops its name and its caret and queues up beside
-   the others, still a whole pill — its state colour, its icon, its count.
-   Not a deck: chips overlapping each other, each showing an edge of the one
-   behind, left you with a row of half-glyphs and no way to tell them apart.
-   They line up instead, in the order they always appear in — attention, then
-   working, then idle, then the document runs — so a compact chip is read by
-   its place as much as by its face, and the row it makes is the same row every
-   time. What it drops is the two things it can afford to: the name, which the
-   colour and the order already say, and the fold caret, which belongs to a run
-   whose tabs are on screen. */
-.tab-stack[data-pin="compact"] {
-  flex-basis: var(--tab-nub-w);
-  justify-content: center;
-  padding: 0 3px;
-  overflow: hidden;
-}
-
-.tab-stack[data-pin="compact"] .tab-stack-name,
-.tab-stack[data-pin="compact"] .tab-stack-chevron {
-  display: none;
 }
 
 /* The pill you actually see and click. Separate from the sticky wrapper

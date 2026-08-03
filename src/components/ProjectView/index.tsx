@@ -51,7 +51,7 @@ import { DIGEST_FALLBACK_MS, subscribeSessionDigests } from "../../sessionDigest
  *  different questions ("is anything running" and "is this runaway") that had
  *  drifted into sharing a threshold. */
 const QUIET_CPU = POLICY.quietCpuPercent;
-import { ANCHOR_ATTR, pinOffset, revealScroll } from "../../tabSticky";
+import { contentLeft, revealScroll } from "../../tabSticky";
 import { clearActiveTab, setActiveTab } from "../../activeView";
 import { useFlipStrip } from "../../tabFlip";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
@@ -6216,8 +6216,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             // Always this order, whatever is in them: needs you, working,
             // idle. Read off STATUS_ORDER rather than spelled out here, so
             // there is one place that says what the priority is — the strip
-            // reads by position as much as by label, and a compact chip on the
-            // left has only its position and its colour to go on.
+            // stays stable even while sessions move between states.
             ...STATUS_ORDER.map((s) =>
               run(s, STATUS_LABEL[s], s, null, { attention: attentionTabs, active: workingTabs, quiet: quietTabs }[s]),
             ),
@@ -6306,20 +6305,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!root || !el || root.offsetParent === null) return;
       const group = el.closest(".tab-group");
       const chip = group?.querySelector<HTMLElement>("[data-stack-chip]");
-      // What the queue will cover once this run's own chip is pinned: the
-      // compact chips of every run before it, then this one with its name on.
-      // Its remembered full width, not its current one — a chip queued up on
-      // the left measures compact, and this run is about to be the one shown in
-      // full (see useChipPins).
-      const anchor = group?.querySelector(`[${ANCHOR_ATTR}]`);
-      const at = anchor ? [...root.querySelectorAll(`[${ANCHOR_ATTR}]`)].indexOf(anchor) : -1;
-      const pinned = chip
-        ? pinOffset(Math.max(0, at)) + (Number(chip.dataset.fullW) || chip.offsetWidth)
-        : 0;
+      // One full section chip owns the edge, so revealing a tab only has to
+      // clear that chip.
+      const pinned = chip?.offsetWidth ?? 0;
       const to = revealScroll(
         root.scrollLeft,
         root.clientWidth,
-        el.offsetLeft,
+        contentLeft(root, el),
         el.offsetWidth,
         pinned,
       );

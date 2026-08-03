@@ -14,7 +14,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { NUB_W } from "./tabSticky";
 
 // Vitest runs from the repo root; import.meta.url is not a file: URL here.
 const CSS = [
@@ -50,30 +49,24 @@ describe("sticky stack chips", () => {
     expect(ruleBody(sel)).toMatch(new RegExp(`var\\(\\s*${token}\\s*,\\s*var\\(`));
   });
 
-  it("compacts a chip to the width its arithmetic assumes", () => {
-    // The queue is laid out by CSS (`--pin-left` on each chip) and computed in
-    // tabSticky.ts (`pinOffset`), so the two have to agree on how wide a
-    // compact chip is. Disagree by a few pixels and the chips overlap or leave
-    // gaps — which only shows up on a strip crowded enough to queue up.
-    expect(CSS).toContain(`--tab-nub-w: ${NUB_W}px;`);
-    expect(ruleBody('.tab-stack[data-pin="compact"]')).toContain("flex-basis: var(--tab-nub-w)");
+  it("never changes chip layout width at a handover", () => {
+    // Resizing a sticky item while scrolling makes WebKit correct scrollLeft,
+    // which is the violent reverse jump this interaction must avoid.
+    expect(CSS).not.toContain('.tab-stack[data-pin="compact"]');
+    expect(CSS).not.toContain("tab-stack-take-edge");
+    expect(CSS).not.toMatch(/\.tab-stack\[data-pin[^}]+(?:width|flex-basis|max-width|min-width)/s);
   });
 
-  it("queues compact chips beside each other, never over each other", () => {
-    // Chips overlapping by a few pixels each — a deck rather than a queue — is
-    // a row of half-glyphs: the state colour is there, but which run each one
-    // is is not. A compact chip drops its name and keeps its whole face.
-    const body = ruleBody('.tab-stack[data-pin="compact"]');
-    expect(body).not.toMatch(/mask-image/);
-    expect(CSS).toContain('.tab-stack[data-pin="compact"] .tab-stack-name');
+  it("gives every chip a section boundary for native push-off", () => {
+    const group = ruleBody(".tab-group");
+    expect(group).toContain("display: inline-flex");
+    expect(group).not.toContain("display: contents");
   });
 
-  it("gives every chip the whole strip to hold on to", () => {
-    // A chip's containing block is what evicts it: while the runs were boxes,
-    // sticky clamped each chip to its own run and pushed it off the left edge
-    // the moment that run's last tab scrolled by. The runs generate no box, so
-    // the strip is the containing block and a pinned chip stays pinned.
-    expect(ruleBody(".tab-group")).toContain("display: contents");
+  it("leaves momentum to native scroll snapping", () => {
+    expect(ruleBody(".tabs-harbor")).toContain("scroll-snap-type: x proximity");
+    expect(ruleBody(".tab-group")).toContain("scroll-snap-stop: always");
+    expect(ruleBody(".tab-group")).toContain("scroll-snap-align: none start");
   });
 
   it("paints the same pinned as unpinned", () => {
@@ -81,8 +74,6 @@ describe("sticky stack chips", () => {
     // so any *decoration* keyed off "pinned" means opening one stack restyles a
     // different one, which is exactly how this looked broken. The backdrop is
     // unconditional instead, and invisible either way: it is the bar's colour.
-    // (Going compact is not decoration — it is the chip giving up the room the
-    // next one needs, and it is keyed off the queue, not off the edge.)
     expect(CSS).not.toContain("tab-stack-stuck");
     expect(ruleBody(".tab-stack")).toMatch(/background:/);
   });

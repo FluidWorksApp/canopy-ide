@@ -3,7 +3,7 @@ import { createRef } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { PaneBar } from "./PaneBar";
-import { ANCHOR_ATTR, NUB_W } from "../tabSticky";
+import { ANCHOR_ATTR } from "../tabSticky";
 import type { StripGroup, SubTab, TermSubTab } from "./ProjectView/helpers";
 
 // The bar's own module graph, not ProjectView's: PaneBar only needs two label
@@ -247,10 +247,7 @@ describe("PaneBar stacks", () => {
     expect(itemProps.mock.calls.map(([id]) => id)).toEqual(["t1", "t2"]);
   });
 
-  it("gives each chip its own place in the queue, one compact chip apart", () => {
-    // Where a chip stops when the strip scrolls onto it: after the chips
-    // already queued there, never on top of them. Every chip pinning at 0 is
-    // the bug this replaced — the run you were in shunted the last one away.
+  it("gives every chip the same handover edge", () => {
     render(
       paneBar({
         tabGroups: [
@@ -261,15 +258,7 @@ describe("PaneBar stacks", () => {
       }),
     );
     const chips = [...document.querySelectorAll<HTMLElement>("[data-stack-chip]")];
-    expect(chips.map((c) => c.style.getPropertyValue("--pin-left"))).toEqual([
-      "0px",
-      `${NUB_W}px`,
-      `${2 * NUB_W}px`,
-    ]);
-    // A chip arriving passes over the one pinned in front of it, covering it
-    // from the right — so the one coming in stays readable, and the one going
-    // out is worn down to about the width it settles at. Underneath instead is
-    // what left a sliver of a name poking out from behind the chip in front.
+    expect(chips.map((c) => c.style.getPropertyValue("--pin-left"))).toEqual(["0px", "0px", "0px"]);
     const z = chips.map((c) => Number(c.style.zIndex));
     expect(z[0]).toBeLessThan(z[1]);
     expect(z[1]).toBeLessThan(z[2]);
@@ -277,10 +266,7 @@ describe("PaneBar stacks", () => {
     expect(document.querySelectorAll(`[${ANCHOR_ATTR}]`)).toHaveLength(3);
   });
 
-  it("counts the queue over the runs it draws, not the ones it was handed", () => {
-    // An empty run renders nothing, so it takes no place in the queue: leave a
-    // gap where a closed run's chip used to pin and every chip after it stops
-    // one chip's width too far in, with the strip showing through the hole.
+  it("draws no sticky section for an empty run", () => {
     render(
       paneBar({
         tabGroups: [
@@ -291,7 +277,7 @@ describe("PaneBar stacks", () => {
       }),
     );
     const chips = [...document.querySelectorAll<HTMLElement>("[data-stack-chip]")];
-    expect(chips.map((c) => c.style.getPropertyValue("--pin-left"))).toEqual(["0px", `${NUB_W}px`]);
+    expect(chips.map((c) => c.style.getPropertyValue("--pin-left"))).toEqual(["0px", "0px"]);
   });
 });
 
