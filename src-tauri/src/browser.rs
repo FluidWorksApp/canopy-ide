@@ -228,6 +228,9 @@ pub async fn browser_open(
     // loaded yet paints white, which against a dark theme reads as a broken
     // pane rather than an empty one.
     background: Option<Vec<u8>>,
+    // A PiP-owned browser starts behind the user's current tab. Creating it
+    // hidden avoids one frame of the full native view flashing over their work.
+    visible: bool,
 ) -> Result<(), String> {
     if !SUPPORTED {
         return Err("the embedded browser needs macOS on this build".into());
@@ -240,7 +243,9 @@ pub async fn browser_open(
     if app.state::<BrowserManager>().label(&tab_id).is_some() {
         return browser_navigate(app, tab_id, Some(url), None).await;
     }
-    create(app, window, tab_id, url, x, y, width, height, background)
+    create(
+        app, window, tab_id, url, x, y, width, height, background, visible,
+    )
 }
 
 /// Paint the webview's own empty space in the app's colour.
@@ -280,6 +285,7 @@ fn create(
     width: f64,
     height: f64,
     background: Option<Vec<u8>>,
+    visible: bool,
 ) -> Result<(), String> {
     use tauri::utils::config::BackgroundThrottlingPolicy;
     use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
@@ -358,6 +364,10 @@ fn create(
             tint(&view, [r, g, b]);
         }
     }
+    if !visible {
+        view.hide()
+            .map_err(|e| format!("couldn't hide the browser view: {e}"))?;
+    }
 
     let initial = Rect {
         x,
@@ -371,7 +381,7 @@ fn create(
             bounds: initial,
             repaint_tried: false,
             label,
-            visible: true,
+            visible,
         },
     );
     Ok(())
@@ -388,6 +398,7 @@ fn create(
     _width: f64,
     _height: f64,
     _background: Option<Vec<u8>>,
+    _visible: bool,
 ) -> Result<(), String> {
     Err("the embedded browser needs macOS on this build".into())
 }

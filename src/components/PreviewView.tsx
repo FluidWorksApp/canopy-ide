@@ -83,6 +83,10 @@ interface PreviewViewProps {
    *  this only tunes the agent-cursor choreography; under the webview engine it
    *  is what puts the native view on screen at all. */
   visible: boolean;
+  /** A passive PiP is pulling frames from this page. This also creates a native
+   *  browser that has never been shown full-size, so an attention-free agent can
+   *  work without first taking over the user's tab. */
+  streaming?: boolean;
   /** Persist navigation / annotation changes onto the tab, so they survive a
    *  switch away and back (the view itself unmounts like every doc tab). */
   onPatch: (patch: {
@@ -140,6 +144,7 @@ export function PreviewView({
   shots,
   dir,
   visible,
+  streaming = false,
   onPatch,
   servers,
   agentTargets,
@@ -183,6 +188,8 @@ export function PreviewView({
   shotsRef.current = shots;
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
+  const streamingRef = useRef(streaming);
+  streamingRef.current = streaming;
   // ProjectView hands down a fresh arrow every render, so an effect that
   // depends on it re-subscribes constantly — and a Tauri listener is registered
   // asynchronously, so each churn leaves a window with nothing listening. A
@@ -259,12 +266,31 @@ export function PreviewView({
   const opened = useRef(false);
   const ensureOpen = useRef<() => void>(() => {});
   ensureOpen.current = () => {
-    if (!nativeRef.current || opened.current || !visibleRef.current || !urlRef.current) return;
-    const r = hostRef.current?.getBoundingClientRect();
-    if (!r || r.width < 2 || r.height < 2) return;
+    if (
+      !nativeRef.current ||
+      opened.current ||
+      (!visibleRef.current && !streamingRef.current) ||
+      !urlRef.current
+    ) return;
+    const measured = hostRef.current?.getBoundingClientRect();
+    const r = measured && measured.width >= 2 && measured.height >= 2
+      ? measured
+      : streamingRef.current
+        ? { x: 0, y: 0, width: 1280, height: 720 }
+        : null;
+    if (!r) return;
     const target = urlRef.current;
     opened.current = true;
-    void ipc.browserOpen(tabId, target, r.x, r.y, r.width, r.height, themeRgb()).then(
+    void ipc.browserOpen(
+      tabId,
+      target,
+      r.x,
+      r.y,
+      r.width,
+      r.height,
+      themeRgb(),
+      visibleRef.current,
+    ).then(
       () => refreshBrowserViews(),
       (err) => {
         opened.current = false;
@@ -288,7 +314,7 @@ export function PreviewView({
 
   useEffect(() => {
     ensureOpen.current();
-  }, [native, url, visible]);
+  }, [native, url, visible, streaming]);
 
   // ---------- agent browser control ----------
   // Ops arrive from the MCP bridge via ProjectView (see previewAgent.ts) and

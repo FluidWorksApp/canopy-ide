@@ -5142,6 +5142,130 @@ body.dragging-tab * {
   letter-spacing: 0.06em;
 }
 
+/* ---------- Agent browser picture in picture ----------
+   A read-only stream of the native browser the agent already owns. It sits by
+   the workspace edge and never changes the active tab. Only the left grip
+   resizes, so the frame's captured aspect ratio remains authoritative. */
+.agent-browser-pip {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 18;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  border-radius: 12px;
+  corner-shape: squircle;
+  background: color-mix(in srgb, var(--bg-raised) 94%, transparent);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(12px) saturate(135%);
+  -webkit-backdrop-filter: blur(12px) saturate(135%);
+}
+.agent-browser-pip.minimized {
+  width: min(320px, calc(100% - 36px)) !important;
+}
+.agent-browser-pip-head {
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px 0 10px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+.agent-browser-pip.minimized .agent-browser-pip-head {
+  border-bottom: 0;
+}
+.agent-browser-pip-agent,
+.agent-browser-pip-page {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+.agent-browser-pip-agent {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+}
+.agent-browser-pip-agent span,
+.agent-browser-pip-page {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-browser-pip-page {
+  flex: 1;
+  font-size: 10px;
+}
+.agent-browser-pip-action {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.agent-browser-pip-action:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.agent-browser-pip-frame {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.agent-browser-pip-frame img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+  pointer-events: none;
+  -webkit-user-drag: none;
+}
+.agent-browser-pip-readonly {
+  position: absolute;
+  right: 8px;
+  bottom: 7px;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: rgba(8, 10, 14, 0.72);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+}
+.agent-browser-pip-resize {
+  position: absolute;
+  left: 0;
+  inset-block: 0;
+  width: 8px;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.agent-browser-pip-resize:hover,
+.agent-browser-pip-resize:active {
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+@media (max-width: 640px) {
+  .agent-browser-pip {
+    right: 10px;
+    bottom: 10px;
+    max-width: calc(100% - 20px);
+  }
+}
+
 .workspace-overlay-layer {
   position: absolute;
   inset: 0;

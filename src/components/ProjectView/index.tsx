@@ -268,6 +268,7 @@ import { CommitView } from "../CommitView";
 import { ReviewView, type ReviewPayload } from "../ReviewView";
 import { BranchView } from "../BranchView";
 import { AgentWorkspaceView } from "../AgentWorkspaceView";
+import { AgentBrowserPip } from "../AgentBrowserPip";
 import { BROWSER_INPUT_EVENT, PreviewView } from "../PreviewView";
 import DeviceView from "../DeviceView";
 import type { PreviewServer } from "../../preview";
@@ -542,6 +543,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // has to be hidden, which is a layout question, so it belongs up here.
   const browserEngine = useBrowserEngine();
   const [sideTab, setSideTab] = useState<SideTab>("files");
+  const [browserPip, setBrowserPip] = useState<{ tabId: string; ptyId: number } | null>(null);
+  const dismissedBrowserPips = useRef(new Set<string>());
   // The side panel is a hover overlay, not a docked column. `pinned` is the
   // click/Cmd+B latch that keeps it out; `peeking` is the transient hover state
   // that the debounce below retracts. Either one shows it.
@@ -3906,7 +3909,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return;
       }
       if (a.kind === "open_preview" && a.url) {
-        openPreview(a.url, a.ptyId, getSettings().agentAskForAttention);
+        // Agent-owned browser activity is watched in the PiP, not by replacing
+        // the tab the user is working in. A non-agent caller retains the normal
+        // attention preference because there is no session to attach a PiP to.
+        const id = openPreview(
+          a.url,
+          a.ptyId,
+          a.ptyId == null && getSettings().agentAskForAttention,
+        );
+        if (a.ptyId != null) setBrowserPip({ tabId: id, ptyId: a.ptyId });
       } else if (a.kind === "start_server" && a.dir && a.command) {
         // `command` is the resolved command line, `name` its label — the same
         // pair the component-commands ▶ uses. Reuse a tab already on it.
@@ -4045,11 +4056,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // answering the bridge, happens in the view; only the no-tab case must answer
   // here or the agent would wait out the bridge's timeout.
   //
-  // No op steals the front tab, screenshot included. Opening the preview brings
-  // it forward once — that is the moment worth showing, and it is the only one.
-  // After that an agent must never move what you are looking at: an agent that
-  // screenshots its own work every few seconds was yanking the user off the file
-  // they were editing every few seconds, which is the whole of the complaint.
+  // No op steals the front tab, navigation included. A new agent-owned preview
+  // opens behind the user's work and is surfaced by the passive PiP instead.
+  // An agent that snapshots its own work every few seconds must never yank the
+  // user off the file they are editing.
   //
   // An open preview tab stays laid out while it's in the background (see the
   // doc-host styling below) so its page keeps real geometry and the ops that
@@ -4089,21 +4099,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // An agent navigating an empty picker is creating the session just as
         // surely as open_preview does. Never overwrite an existing preview's
         // provenance merely because another agent later drives its page.
-        if (
-          op.op === "navigate" &&
-          op.url &&
-          !tab.url &&
-          tab.initiatorPtyId == null &&
-          op.ptyId != null
-        ) {
+        if (tab.initiatorPtyId == null && op.ptyId != null) {
           patchTabRaw(tab.id, { initiatorPtyId: op.ptyId } as Partial<SubTab>);
+        }
+        if (op.ptyId != null && !dismissedBrowserPips.current.has(tab.id)) {
+          setBrowserPip({ tabId: tab.id, ptyId: op.ptyId });
         }
         dispatchBrowserOp(tab.id, op);
       } else if (op.op === "navigate" && op.url) {
-        dispatchBrowserOp(
-          openPreview(op.url, op.ptyId, getSettings().agentAskForAttention),
-          op,
-        );
+        const id = openPreview(op.url, op.ptyId, false);
+        if (op.ptyId != null) setBrowserPip({ tabId: id, ptyId: op.ptyId });
+        dispatchBrowserOp(id, op);
       } else {
         void ipc.browserResult(
           op.id,
@@ -7581,6 +7587,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             shots={tab.shots ?? []}
             dir={componentsRef.current[0]?.path ?? firstRoot}
             visible={tab.id === activeTabId && visible}
+            streaming={browserPip?.tabId === tab.id}
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             servers={previewServers}
             agentTargets={agentTargets}
@@ -8427,6 +8434,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
             </div>
           </>
         )}
+        {browserPip && (() => {
+          const tab = tabs.find(
+            (t): t is PreviewSubTab => t.type === "preview" && t.id === browserPip.tabId,
+          );
+          // When the user deliberately opens the full browser, it is already the
+          // live view and the smaller duplicate would only cover its corner.
+          if (!tab?.url || tab.id === activeTabId) return null;
+          const agent = agentTargets.find((a) => a.ptyId === browserPip.ptyId);
+          return (
+            <AgentBrowserPip
+              key={tab.id}
+              tabId={tab.id}
+              url={tab.url}
+              agentId={agent?.agentId ?? "agent"}
+              agentTitle={agent?.title || "Agent browser"}
+              supported={browserEngine === "webview"}
+              onClose={() => {
+                dismissedBrowserPips.current.add(tab.id);
+                setBrowserPip(null);
+              }}
+            />
+          );
+        })()}
       </div>
     </div>
   );
