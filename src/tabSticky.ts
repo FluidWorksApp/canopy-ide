@@ -34,6 +34,23 @@ import {
  *  the queue's arithmetic happens here and its layout happens there. */
 export const NUB_W = 50;
 
+/** Trackpad travel consumed at a run boundary before the sticky chip peels
+ * away. Long enough to stop momentum from carrying through the handover, but
+ * short enough that one deliberate drag can still cross it. */
+export const PEEL_RESISTANCE = 72;
+
+export type PeelLatch = {
+  stop: number;
+  pull: number;
+  direction: -1 | 1;
+};
+
+export type ResistantScroll = {
+  scrollLeft: number;
+  latch: PeelLatch | null;
+  handled: boolean;
+};
+
 /** Where chip `index` pins: behind it sit that many compact chips. */
 export function pinOffset(index: number): number {
   return index * NUB_W;
@@ -53,6 +70,51 @@ export function pinnedThrough(scrollLeft: number, anchors: number[]): number {
     if (left < scrollLeft + pinOffset(i)) last = i;
   });
   return last;
+}
+
+/** Apply one horizontal-scroll delta against the sticky-chip handovers.
+ *
+ * The first delta that would cross a handover lands exactly on it. Continued
+ * travel in that direction is consumed by the latch until `resistance` has
+ * been spent, then any excess carries through. The same seam and resistance
+ * apply in both directions. Moving away from a caught seam is never resisted. */
+export function resistPeel(
+  scrollLeft: number,
+  delta: number,
+  stops: number[],
+  latch: PeelLatch | null,
+  resistance = PEEL_RESISTANCE,
+): ResistantScroll {
+  if (delta === 0) return { scrollLeft, latch, handled: false };
+  const direction: -1 | 1 = delta < 0 ? -1 : 1;
+
+  if (latch) {
+    if (direction !== latch.direction)
+      return { scrollLeft, latch: null, handled: false };
+    const pull = latch.pull + Math.abs(delta);
+    if (pull <= resistance)
+      return {
+        scrollLeft: latch.stop,
+        latch: { ...latch, pull },
+        handled: true,
+      };
+    return {
+      scrollLeft: latch.stop + direction * (pull - resistance),
+      latch: null,
+      handled: true,
+    };
+  }
+
+  const target = scrollLeft + delta;
+  const stop = direction > 0
+    ? stops.find((at) => at > scrollLeft && at <= target)
+    : [...stops].reverse().find((at) => at < scrollLeft && at >= target);
+  if (stop == null) return { scrollLeft: target, latch: null, handled: false };
+  return {
+    scrollLeft: stop,
+    latch: { stop, pull: 0, direction },
+    handled: true,
+  };
 }
 
 /** Where the strip must scroll to for a tab to be genuinely visible, or null if
@@ -179,4 +241,41 @@ export function useChipPins(
   useLayoutEffect(measure);
 
   return pins;
+}
+
+/** Give each sticky-chip handover a physical catch on trackpad/wheel scroll.
+ * Native scrolling is left alone between handovers; only a crossing and its
+ * resisted continuation are cancelled and positioned here. */
+export function usePeelResistance(containerRef: RefObject<HTMLElement | null>): void {
+  const latchRef = useRef<PeelLatch | null>(null);
+
+  useEffect(() => {
+    const root = containerRef.current;
+    if (!root) return;
+    const wheel = (event: WheelEvent) => {
+      let delta = event.deltaX;
+      if (Math.abs(delta) < 0.01 && event.shiftKey) delta = event.deltaY;
+      if (Math.abs(delta) < 0.01) return;
+      if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) delta *= 16;
+      else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) delta *= root.clientWidth;
+
+      const anchors = [...root.querySelectorAll<HTMLElement>(`[${ANCHOR_ATTR}]`)];
+      // The first chip has no earlier chip to peel away from, so the left edge
+      // is not a handover and must not feel like an extra scroll boundary.
+      const stops = anchors
+        .map((anchor, index) => anchor.offsetLeft - pinOffset(index))
+        .slice(1);
+      let latch = latchRef.current;
+      // A click, active-tab reveal or layout change can move the strip without
+      // passing through this wheel handler. Do not leave an old catch behind.
+      if (latch && Math.abs(root.scrollLeft - latch.stop) > 1) latch = null;
+      const next = resistPeel(root.scrollLeft, delta, stops, latch);
+      latchRef.current = next.latch;
+      if (!next.handled) return;
+      event.preventDefault();
+      root.scrollLeft = next.scrollLeft;
+    };
+    root.addEventListener("wheel", wheel, { passive: false });
+    return () => root.removeEventListener("wheel", wheel);
+  }, [containerRef]);
 }

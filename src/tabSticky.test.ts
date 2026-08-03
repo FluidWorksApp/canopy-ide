@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { NUB_W, pinOffset, pinnedThrough, revealScroll, samePins } from "./tabSticky";
+import {
+  NUB_W,
+  PEEL_RESISTANCE,
+  pinOffset,
+  pinnedThrough,
+  resistPeel,
+  revealScroll,
+  samePins,
+} from "./tabSticky";
 
 // A chip 60px wide, followed by three 100px tabs — one run of the strip.
 const CHIP = 60;
@@ -40,6 +48,60 @@ describe("pinnedThrough", () => {
 
   it("has nothing to pin when the strip has no chips", () => {
     expect(pinnedThrough(500, [])).toBe(-1);
+  });
+});
+
+describe("resistPeel", () => {
+  const stops = [0, 350, 800];
+
+  it("catches a forward scroll exactly where the next chip arrives", () => {
+    const step = resistPeel(320, 60, stops, null);
+    expect(step).toEqual({
+      scrollLeft: 350,
+      latch: { stop: 350, pull: 0, direction: 1 },
+      handled: true,
+    });
+  });
+
+  it("holds there until continued forward travel spends the resistance", () => {
+    const latch = { stop: 350, pull: 0, direction: 1 as const };
+    const held = resistPeel(350, PEEL_RESISTANCE - 1, stops, latch);
+    expect(held.scrollLeft).toBe(350);
+    expect(held.latch?.pull).toBe(PEEL_RESISTANCE - 1);
+
+    const released = resistPeel(350, 8, stops, held.latch);
+    expect(released.scrollLeft).toBe(357);
+    expect(released.latch).toBeNull();
+  });
+
+  it("applies the same catch and resistance in reverse", () => {
+    const caught = resistPeel(390, -60, stops, null);
+    expect(caught).toEqual({
+      scrollLeft: 350,
+      latch: { stop: 350, pull: 0, direction: -1 },
+      handled: true,
+    });
+    const held = resistPeel(350, -PEEL_RESISTANCE, stops, caught.latch);
+    expect(held.scrollLeft).toBe(350);
+    expect(held.latch?.pull).toBe(PEEL_RESISTANCE);
+    expect(resistPeel(350, -10, stops, held.latch).scrollLeft).toBe(340);
+  });
+
+  it("does not resist reversing away from a caught seam", () => {
+    const latch = { stop: 350, pull: 20, direction: 1 as const };
+    expect(resistPeel(350, -12, stops, latch)).toEqual({
+      scrollLeft: 350,
+      latch: null,
+      handled: false,
+    });
+  });
+
+  it("leaves ordinary scrolling between handovers native", () => {
+    expect(resistPeel(400, 20, stops, null)).toEqual({
+      scrollLeft: 420,
+      latch: null,
+      handled: false,
+    });
   });
 });
 
