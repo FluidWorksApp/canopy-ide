@@ -485,7 +485,8 @@ export const browserOpen = (
   width: number,
   height: number,
   background?: [number, number, number],
-) => invoke<void>("browser_open", { tabId, url, x, y, width, height, background });
+  visible = true,
+) => invoke<void>("browser_open", { tabId, url, x, y, width, height, background, visible });
 
 export const browserNavigate = (
   tabId: string,
