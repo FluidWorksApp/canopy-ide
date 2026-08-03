@@ -1742,7 +1742,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               <>
                 <Item
                   name="Markdown research import"
-                  desc="Sweep open project folders for Markdown files and adopt them into Research. Existing entries are matched by file path and never duplicated."
+                  desc="Sweep open project folders for research-like Markdown. Repository policies, legal and release files, agent instructions, templates, dependencies, generated output, and fixtures are ignored."
                 >
                   <Checkbox
                     checked={s.autoImportMarkdownResearch}
