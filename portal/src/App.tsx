@@ -23,6 +23,7 @@ import {
   type Digest,
   type Project,
   type Pty,
+  type RemoteCli,
   type Stat,
   type Usage,
   type Workspace,
@@ -114,11 +115,13 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [roots, setRoots] = useState<string[]>([])
   const [stats, setStats] = useState<Map<number, Stat>>(new Map())
   const [livePtys, setLivePtys] = useState<Pty[]>([])
+  const [clis, setClis] = useState<RemoteCli[]>([])
   const [events, setEvents] = useState<AgentEventEntry[]>([])
 
   // ---- navigation ----
   const [projectId, setProjectId] = useState<string>()
   const [panelId, setPanelId] = useState(PANELS[0].id)
+  const [home, setHome] = useState(true)
   const [tabs, setTabs] = useState<Target[]>([])
   const [activeKey, setActiveKey] = useState<string>()
   const [newAgent, setNewAgent] = useState(false)
@@ -130,6 +133,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
 
   const openTarget = useCallback((t: Target) => {
     const key = targetKey(t)
+    setHome(false)
     setTabs((prev) => (prev.some((x) => targetKey(x) === key) ? prev : [...prev, t]))
     setActiveKey(key)
   }, [])
@@ -153,12 +157,21 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
         const openIds = ws?.openIds
         // Only the projects open in the IDE (its tabs), not every one ever
         // registered — the same scope the server now applies to sessions.
-        setProjects(openIds && openIds.length ? all.filter((p) => openIds.includes(p.id)) : all)
+        const visible = openIds && openIds.length ? all.filter((p) => openIds.includes(p.id)) : all
+        setProjects(visible)
+        setProjectId((current) =>
+          current && visible.some((project) => project.id === current)
+            ? current
+            : ws.activeId && visible.some((project) => project.id === ws.activeId)
+              ? ws.activeId
+              : visible[0]?.id,
+        )
         setSessions((m.sessions as Digest[]) ?? [])
         setUsage((m.usage as Usage[]) ?? [])
         setInstance(m.instance ?? '')
         setRoots((m.roots as string[]) ?? [])
         setLivePtys((m.ptys as Pty[]) ?? [])
+        setClis((m.clis as RemoteCli[]) ?? [])
         applyTheme(m.theme as Record<string, string> | undefined)
       } else if (m.t === 'event') {
         if (m.name === 'pty:stats') {
@@ -217,8 +230,8 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
   }, [openTarget])
 
   const rows = useMemo(
-    () => buildRows(sessions, usage, stats, instance, livePtys),
-    [sessions, usage, stats, instance, livePtys],
+    () => buildRows(sessions, usage, stats, instance, livePtys, clis),
+    [sessions, usage, stats, instance, livePtys, clis],
   )
   const pending = useMemo(() => derivePending(events), [events])
 
@@ -251,8 +264,23 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     })
   }, [])
 
-  const spawn = useCallback((cwd: string, command?: string) => {
-    wireRef.current?.send({ t: 'spawn', cwd, command })
+  const spawn = useCallback((
+    cwd: string,
+    command?: string,
+    options?: { agent?: string; profile?: string },
+  ) => {
+    wireRef.current?.send({ t: 'spawn', cwd, command, ...options })
+  }, [])
+
+  const goHome = useCallback((id?: string) => {
+    if (id) setProjectId(id)
+    setHome(true)
+    setActiveKey(undefined)
+  }, [])
+
+  const goPanel = useCallback((id: string) => {
+    setHome(false)
+    setPanelId(id)
   }, [])
 
   if (!transportRef.current || !rpcRef.current) return null
@@ -266,6 +294,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     rows,
     stats,
     pending,
+    clis,
     openKey: activeKey,
     open: openTarget,
     spawn,
@@ -275,13 +304,15 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     ctx,
     up,
     panelId,
-    onPanel: setPanelId,
+    onPanel: goPanel,
+    home,
+    onHome: goHome,
     tabs,
     activeKey,
     onSelectTab: setActiveKey,
     onCloseTab: closeTab,
     projects,
-    onProject: setProjectId,
+    onProject: goHome,
     onNewAgent: () => setNewAgent(true),
     onLogout,
   }
@@ -298,6 +329,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
         <NewAgentSheet
           projects={projects}
           initialProjectId={project?.id}
+          clis={clis}
           onLaunch={spawn}
           onClose={() => setNewAgent(false)}
         />

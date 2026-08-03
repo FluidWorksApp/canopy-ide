@@ -90,6 +90,14 @@ export const IconFolder = (p: IconProps) => (
   </Svg>
 )
 
+export const IconHome = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="m3 10 9-7 9 7" />
+    <path d="M5 9v11h14V9" />
+    <path d="M9 20v-7h6v7" />
+  </Svg>
+)
+
 /** A wall clock: a time of day. Deliberately not the stopwatch. */
 export const IconClock = (p: IconProps) => (
   <Svg {...p}>

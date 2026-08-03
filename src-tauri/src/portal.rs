@@ -70,6 +70,8 @@ pub struct RemoteManager {
     /// Canopy theme tokens the desktop pushes (var name → color), so the portal
     /// can render in the same skin. Persists across enable/disable.
     theme: Arc<Mutex<Option<Value>>>,
+    /// Browser-safe projection of the desktop's resolved agent CLI registry.
+    clis: Arc<Mutex<Value>>,
     /// The session scope, cached — see `open_scope`.
     roots: RootsCache,
 }
@@ -127,6 +129,7 @@ struct Portal {
     events: broadcast::Sender<String>,
     /// Shared handle to the desktop-pushed theme tokens (see RemoteManager).
     theme: Arc<Mutex<Option<Value>>>,
+    clis: Arc<Mutex<Value>>,
     /// Shared handle to the cached scoping roots (see RemoteManager).
     roots: RootsCache,
     /// Replay and single-flight bookkeeping for desktop-executed verbs. Shared
@@ -232,6 +235,7 @@ pub async fn remote_enable(
         tokens,
         events: events_tx,
         theme: mgr.theme.clone(),
+        clis: mgr.clis.clone(),
         roots: mgr.roots.clone(),
         verbs: Arc::new(VerbRouter::default()),
     };
@@ -329,6 +333,15 @@ pub async fn remote_set_theme(
     mgr: tauri::State<'_, RemoteManager>,
 ) -> Result<(), String> {
     *mgr.theme.lock().unwrap() = Some(theme);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remote_set_clis(
+    clis: Value,
+    mgr: tauri::State<'_, RemoteManager>,
+) -> Result<(), String> {
+    *mgr.clis.lock().unwrap() = clis;
     Ok(())
 }
 
@@ -468,8 +481,9 @@ async fn ws_conn(mut socket: WebSocket, p: Portal) {
 
     // Initial snapshot.
     let theme0 = p.theme.lock().unwrap().clone();
+    let clis0 = p.clis.lock().unwrap().clone();
     if out_tx
-        .send(snapshot_msg(&p.app, theme0, &p.roots).await)
+        .send(snapshot_msg(&p.app, theme0, clis0, &p.roots).await)
         .await
         .is_err()
     {
@@ -567,13 +581,31 @@ fn handle_client_msg(
             // then attach to. `command` (an agent CLI) runs in `cwd` if given.
             let cwd = v.get("cwd").and_then(|x| x.as_str()).map(String::from);
             let command = v.get("command").and_then(|x| x.as_str()).map(String::from);
+            let agent = v.get("agent").and_then(|x| x.as_str()).map(String::from);
+            let profile = v.get("profile").and_then(|x| x.as_str()).map(String::from);
             let app = p.app.clone();
             let out = out.clone();
             tokio::spawn(async move {
-                let msg = match app
-                    .state::<PtyManager>()
-                    .spawn_headless(app.clone(), cwd, command)
-                {
+                let account = match (std::env::var("HOME").ok(), agent, profile) {
+                    (Some(home), Some(agent), None) => {
+                        let profile = crate::profiles::active(&home);
+                        Ok(Some(crate::profiles::env_for(&home, &agent, &profile)))
+                    }
+                    (_, None, None) => Ok(None),
+                    (Some(home), Some(agent), Some(profile)) => {
+                        let exists = crate::profiles::list(&home).iter().any(|p| p.id == profile);
+                        if exists {
+                            Ok(Some(crate::profiles::env_for(&home, &agent, &profile)))
+                        } else {
+                            Err(format!("profile '{profile}' no longer exists"))
+                        }
+                    }
+                    _ => Err("a restored profile requires its agent id".into()),
+                };
+                let msg = match account.and_then(|account| {
+                    app.state::<PtyManager>()
+                        .spawn_headless(app.clone(), cwd, command, account)
+                }) {
                     Ok(id) => json!({ "t": "spawned", "pty": id }),
                     Err(e) => json!({ "t": "spawn-error", "message": e }),
                 };
@@ -592,9 +624,12 @@ fn handle_client_msg(
             let out = out.clone();
             let app = p.app.clone();
             let theme = p.theme.lock().unwrap().clone();
+            let clis = p.clis.lock().unwrap().clone();
             let roots = p.roots.clone();
             tokio::spawn(async move {
-                let _ = out.send(snapshot_msg(&app, theme, &roots).await).await;
+                let _ = out
+                    .send(snapshot_msg(&app, theme, clis, &roots).await)
+                    .await;
             });
         }
         _ => {}
@@ -772,7 +807,12 @@ const MAX_FILES: usize = 40;
 /// differs from ProjectView here: the desktop relates agents to every worktree,
 /// while this list is about the checkouts explicitly open in the IDE. Other
 /// worktrees are boundaries, not roots, so their sessions do not swamp Recent.
-async fn snapshot_msg(app: &AppHandle, theme: Option<Value>, roots_cache: &RootsCache) -> String {
+async fn snapshot_msg(
+    app: &AppHandle,
+    theme: Option<Value>,
+    clis: Value,
+    roots_cache: &RootsCache,
+) -> String {
     let projects = crate::fsx::store_load()
         .await
         .unwrap_or_else(|_| "null".into());
@@ -798,8 +838,36 @@ async fn snapshot_msg(app: &AppHandle, theme: Option<Value>, roots_cache: &Roots
         "roots": scope.roots,
         "instance": crate::pty::instance_token(),
         "theme": theme,
+        "clis": clis,
     })
     .to_string()
+}
+
+/// Full resumable history for roots the browser selected, scoped on the host
+/// before prompts, paths or profile metadata cross the socket.
+pub async fn remote_session_digests(
+    app: &AppHandle,
+    requested: Vec<String>,
+) -> Result<Vec<Value>, String> {
+    let projects = crate::fsx::store_load().await?;
+    let projects: Value = serde_json::from_str(&projects).unwrap_or(Value::Null);
+    let scope = open_scope(app, &projects).await;
+    let roots = scope
+        .roots
+        .iter()
+        .filter(|root| requested.iter().any(|wanted| wanted == *root))
+        .cloned()
+        .collect::<Vec<_>>();
+    if roots.is_empty() && !requested.is_empty() {
+        return Err("requested session roots are not open in Canopy".into());
+    }
+    let sessions = crate::agents::session_digests(Some(roots.clone())).await?;
+    let exclusions = worktree_exclusions(app, &roots);
+    Ok(sessions
+        .into_iter()
+        .filter(|digest| digest_in_scope(digest, &roots, &exclusions))
+        .map(trim_digest)
+        .collect())
 }
 
 fn now_secs() -> i64 {
@@ -879,9 +947,17 @@ async fn open_scope(app: &AppHandle, store: &Value) -> SessionScope {
     // nothing else, and git.rs says so at the top of `list_worktrees` — "anything
     // that only needs to know *which* worktree holds a branch calls
     // scan_worktrees instead". This is one of those callers.
+    let other_worktrees = worktree_exclusions(app, &roots);
+    SessionScope {
+        roots,
+        other_worktrees,
+    }
+}
+
+fn worktree_exclusions(app: &AppHandle, roots: &[String]) -> Vec<String> {
     let mut other_worktrees: Vec<String> = Vec::new();
     let state = app.state::<crate::fsx::WorkspaceManager>();
-    for root in &roots {
+    for root in roots {
         let Ok(top) = crate::fsx::check_scope(&state, std::path::Path::new(root)) else {
             continue;
         };
@@ -896,10 +972,7 @@ async fn open_scope(app: &AppHandle, store: &Value) -> SessionScope {
     }
     other_worktrees.sort();
     other_worktrees.dedup();
-    SessionScope {
-        roots,
-        other_worktrees,
-    }
+    other_worktrees
 }
 
 /// Keep the sessions that belong to `roots`, drop the ones that stopped being

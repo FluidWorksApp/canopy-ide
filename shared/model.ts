@@ -40,6 +40,10 @@ export interface Digest {
   updated?: number
   resumable?: boolean
   resume_cwd?: string
+  launch_cwd?: string
+  profile?: string
+  micro?: boolean
+  foreign?: boolean
   /** The session's working-time clock, kept by canopy_hook.rs — see
    *  agentDuration.ts. Absent on digests written before it existed. */
   active_secs?: number
@@ -110,19 +114,27 @@ export interface AgentRow {
   files?: string[]
   resumeCwd?: string
   sessionId?: string
+  profile?: string
+  resumable?: boolean
 }
 
-/** The shell command that resumes an agent's saved session in its CLI. */
-export function resumeCommand(agent: string, sessionId?: string): string {
+export const SESSION_ID_TOKEN = '__CANOPY_SESSION_ID__'
+
+/** The desktop's resolved CLI registry, projected into a browser-safe shape. */
+export interface RemoteCli {
+  id: string
+  name: string
+  command: string
+  resumeTemplate?: string
+  available: boolean
+  custom?: boolean
+}
+
+/** Build only verified resume commands. Unknown CLIs never get a guessed flag. */
+export function commandToResume(cli: RemoteCli | undefined, sessionId?: string): string | null {
   const id = sessionId?.trim()
-  switch (agent) {
-    case 'claude':
-      return id ? `claude --resume ${id}` : 'claude --continue'
-    case 'codex':
-      return id ? `codex resume ${id}` : 'codex'
-    default:
-      return id ? `${agent} --resume ${id}` : `${agent} --resume`
-  }
+  if (!id || !cli?.resumeTemplate?.includes(SESSION_ID_TOKEN)) return null
+  return cli.resumeTemplate.replaceAll(SESSION_ID_TOKEN, id)
 }
 
 export const STATE_LABEL: Record<string, string> = {
@@ -174,6 +186,7 @@ export function buildRows(
   stats: Map<number, Stat>,
   _instance: string,
   livePtys: Pty[],
+  clis: readonly RemoteCli[] = [],
 ): AgentRow[] {
   const usageBy = new Map(usage.map((u) => [u.session_id, u]))
 
@@ -235,6 +248,8 @@ export function buildRows(
         files: d.files,
         resumeCwd: d.resume_cwd ?? d.cwd,
         sessionId: d.session_id,
+        profile: d.profile,
+        resumable: d.resumable,
       }
     })
 
@@ -255,7 +270,7 @@ export function buildRows(
       const life = agentLife({
         pty: {
           kind: 'live',
-          hint: { bin: agentFromTitle(p.title) ?? 'shell', interactive: true },
+          hint: { bin: agentFromTitle(p.title, clis) ?? 'shell', interactive: true },
           cpu: stat?.total_cpu ?? 0,
           quietForMs: stat?.quiet_ms ?? undefined,
           sinceInputMs: stat?.since_input_ms ?? undefined,
@@ -264,7 +279,7 @@ export function buildRows(
       })
       return {
         key: `pty:${p.id}`,
-        agent: agentFromTitle(p.title) ?? 'shell',
+        agent: agentFromTitle(p.title, clis) ?? 'shell',
         state: life.state,
         cwd: p.cwd,
         title: p.title?.trim() || undefined,
@@ -282,9 +297,20 @@ export function buildRows(
 
 /** The agent CLI a terminal is running, read off its title ("claude",
  *  "codex — canopy"). Undefined for an ordinary shell. */
-export function agentFromTitle(title?: string): string | undefined {
+export function agentFromTitle(title?: string, clis: readonly RemoteCli[] = []): string | undefined {
   const word = title?.trim().toLowerCase().split(/[\s—:/\\]+/)[0]
-  return word && word !== 'shell' && word in AGENT_META ? word : undefined
+  if (!word || word === 'shell') return undefined
+  if (word in AGENT_META) return word
+  const match = clis.find((cli) => {
+    const command = cli.command.trim()
+    const head = command.startsWith("'")
+      ? command.slice(1, command.indexOf("'", 1))
+      : command.startsWith('"')
+        ? command.slice(1, command.indexOf('"', 1))
+        : command.split(/\s+/)[0]
+    return cli.id === word || head?.split(/[/\\]/).pop()?.toLowerCase() === word
+  })
+  return match?.id
 }
 
 /** The single project an agent belongs to: the one with the deepest (most
@@ -332,6 +358,7 @@ export const AGENT_META: Record<string, AgentMeta> = {
   claude: { glyph: '✳', hue: '#d97757', label: 'Claude' },
   codex: { glyph: '⬢', hue: '#10a37f', label: 'Codex' },
   gemini: { glyph: '✦', hue: '#6d7cf5', label: 'Gemini' },
+  agy: { glyph: '◇', hue: '#f59e0b', label: 'Antigravity' },
   aider: { glyph: '◆', hue: '#14b8a6', label: 'Aider' },
   opencode: { glyph: '⬣', hue: '#a855f7', label: 'opencode' },
   amp: { glyph: '✺', hue: '#f97316', label: 'Amp' },

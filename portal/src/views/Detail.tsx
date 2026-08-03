@@ -9,7 +9,7 @@ import { useState } from 'react'
 import { AgentTerminal } from '@shared/AgentTerminal'
 import { AgentBadge } from '@shared/components'
 import { IconBack, IconBranch, IconFile, IconSend, IconStop, IconTerminal } from '@shared/icons'
-import { agentMeta, basename, resumeCommand, type AgentRow } from '@shared/model'
+import { agentMeta, basename, commandToResume, type AgentRow } from '@shared/model'
 import { useAsync } from '../useAsync'
 import { useHardwareKeyboard } from '../useMedia'
 import { AsyncBody } from '../panels/ui'
@@ -571,13 +571,12 @@ function HistoryDetail({
 }
 
 function ResumeButton({ ctx, row }: { ctx: PanelCtx; row: AgentRow }) {
-  if (!row.resumeCwd) return null
+  const command = commandToResume(ctx.clis.find((cli) => cli.id === row.agent), row.sessionId)
+  if (!row.resumeCwd || row.resumable === false || !command) return null
   return (
     <button
       className="primary sm"
-      // resumeCommand lives in shared/model, so the phone and the desktop revive
-      // a session with the same CLI incantation.
-      onClick={() => ctx.spawn(row.resumeCwd!, resumeCommand(row.agent, row.sessionId))}
+      onClick={() => ctx.spawn(row.resumeCwd!, command, { agent: row.agent, profile: row.profile })}
     >
       Resume
     </button>
