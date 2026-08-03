@@ -16,6 +16,7 @@ import {
   resetLoop,
   roundGate,
   saveLoop,
+  takeUnnoticed,
 } from "./prLoop";
 import type * as ipc from "./ipc";
 
@@ -151,6 +152,20 @@ describe("newSinceHandled", () => {
   it("returns nothing when the only comments are ones we already took", () => {
     const l = beginRound(emptyLoop("/repo", 7), ["T_1"], "head1");
     expect(newSinceHandled(conv({ threads: [thread("T_1")] }), l)).toEqual([]);
+  });
+});
+
+describe("takeUnnoticed", () => {
+  it("announces each actionable comment only once without marking it handled", () => {
+    const noticed = new Set<string>();
+    const first = conv({ threads: [thread("T_1")] });
+
+    expect(takeUnnoticed(first, noticed)).toEqual(["T_1"]);
+    expect(takeUnnoticed(first, noticed)).toEqual([]);
+    expect(takeUnnoticed(conv({ threads: [thread("T_1"), thread("T_2")] }), noticed)).toEqual([
+      "T_2",
+    ]);
+    expect(newSinceHandled(first, emptyLoop("/repo", 7))).toEqual(["T_1"]);
   });
 });
 
