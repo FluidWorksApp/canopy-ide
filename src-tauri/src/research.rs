@@ -158,6 +158,102 @@ impl Status {
     fn can_move_to(self, to: Status) -> bool {
         self == to || self.next().contains(&to)
     }
+
+    /// The shortest legal route from here to `to`, excluding this state itself.
+    /// A refused move is nearly always a state two hops away rather than an
+    /// illegal one, and an agent told only its immediate neighbours has to
+    /// rediscover the machine one refusal at a time. `None` when there is no
+    /// route at all — archived is an ending, and saying so beats a list.
+    fn route_to(self, to: Status) -> Option<Vec<Status>> {
+        let mut seen = vec![self];
+        let mut frontier: Vec<Vec<Status>> = vec![Vec::new()];
+        while !frontier.is_empty() {
+            let mut onward = Vec::new();
+            for path in frontier {
+                let at = path.last().copied().unwrap_or(self);
+                for &step in at.next() {
+                    if step == to {
+                        let mut found = path.clone();
+                        found.push(step);
+                        return Some(found);
+                    }
+                    if seen.contains(&step) {
+                        continue;
+                    }
+                    seen.push(step);
+                    let mut branch = path.clone();
+                    branch.push(step);
+                    onward.push(branch);
+                }
+            }
+            frontier = onward;
+        }
+        None
+    }
+}
+
+/// Render a route the way an agent should read it: "researching → researched →
+/// implementing", one call per arrow.
+fn route_str(from: Status, route: &[Status]) -> String {
+    std::iter::once(from.as_str())
+        .chain(route.iter().map(|s| s.as_str()))
+        .collect::<Vec<_>>()
+        .join(" → ")
+}
+
+/// Why a move was refused, and what to do instead.
+///
+/// This message is the module's most-read piece of prose: every agent that
+/// researched something and then implemented it tries `researching` →
+/// `implemented` and lands here. Listing the immediate neighbours told it the
+/// move was wrong without telling it the right one, so it guessed again. The
+/// route is therefore spelled out, and `implemented` — the one status Canopy
+/// writes itself, off a merged pull request — says so rather than looking like
+/// a state the agent simply approached from the wrong side.
+fn transition_error(from: Status, to: Status) -> String {
+    let onward = if from.next().is_empty() {
+        format!("nothing moves out of {}", from.as_str())
+    } else {
+        format!(
+            "from here it can go to: {}",
+            from.next()
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    if to == Status::Implemented {
+        let via = match from.route_to(Status::Implementing) {
+            Some(route) => format!(
+                " Move it to implementing when the work starts ({}), and record the pull \
+                 request with action \"link\".",
+                route_str(from, &route)
+            ),
+            None => String::new(),
+        };
+        return format!(
+            "{} cannot become implemented — that status is Canopy's to write, and it \
+             writes it when every pull request linked to the entry has merged.{} If no \
+             pull request carries the work, say so with action \"append\" and leave the \
+             entry in researched rather than declaring it shipped. {onward}.",
+            from.as_str(),
+            via
+        );
+    }
+    match from.route_to(to) {
+        Some(route) => format!(
+            "{} cannot become {} in one move — {onward}. The route is {}, one call per step.",
+            from.as_str(),
+            to.as_str(),
+            route_str(from, &route)
+        ),
+        None => format!(
+            "{} cannot become {} — {onward}.",
+            from.as_str(),
+            to.as_str()
+        ),
+    }
 }
 
 // ---- the record -----------------------------------------------------------
@@ -1010,16 +1106,7 @@ fn set_status_impl(
     let mut meta = read_meta(&dir)?;
     let from = meta.status;
     if !from.can_move_to(to) {
-        return Err(format!(
-            "{} cannot become {} — from here it can go to: {}",
-            from.as_str(),
-            to.as_str(),
-            from.next()
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+        return Err(transition_error(from, to));
     }
     if from != to {
         meta.status = to;
@@ -1743,6 +1830,35 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_names_the_route_rather_than_only_the_neighbours() {
+        // The refusal every agent hits: researched the thing, built the thing,
+        // tried to say so. The answer has to be the rule, not a list.
+        let err = transition_error(Status::Researching, Status::Implemented);
+        assert!(err.contains("merged"), "{err}");
+        assert!(err.contains("action \"link\""), "{err}");
+        assert!(
+            err.contains("researching → researched → implementing"),
+            "{err}"
+        );
+        // A move that is merely two hops away gets the walk, one call per step.
+        let err = transition_error(Status::Open, Status::Implementing);
+        assert!(
+            err.contains("open → researching → researched → implementing"),
+            "{err}"
+        );
+        assert!(err.contains("one call per step"), "{err}");
+        // And where there is no route, saying so beats offering a list of one.
+        let err = transition_error(Status::Archived, Status::Researching);
+        assert!(err.contains("nothing moves out of archived"), "{err}");
+        assert!(!err.contains("→"), "{err}");
+        assert_eq!(Status::Archived.route_to(Status::Researching), None);
+        assert_eq!(
+            Status::Blocked.route_to(Status::Implemented),
+            Some(vec![Status::Implementing, Status::Implemented])
+        );
+    }
+
+    #[test]
     fn status_round_trips_through_its_wire_name() {
         for s in [
             Status::Open,
@@ -1854,6 +1970,14 @@ mod tests {
         assert!(err.contains("cannot become"), "{err}");
         // And the error says where it *can* go, so the agent can correct itself.
         assert!(err.contains("researched"), "{err}");
+        // It also says why this one in particular is refused, and names the route
+        // to implementing — the refusal every agent that researched-then-built
+        // hits, and the one they used to answer by guessing statuses.
+        assert!(err.contains("merged"), "{err}");
+        assert!(
+            err.contains("researching → researched → implementing"),
+            "{err}"
+        );
 
         set_status_impl("p1".into(), s.id.clone(), "researched".into(), None, None).unwrap();
         set_status_impl("p1".into(), s.id.clone(), "implementing".into(), None, None).unwrap();
