@@ -3,7 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // The routing is the contract: a preview tab's pixels live in a native child
 // webview, and a rect capture of the main webview there is a picture of the
 // empty placeholder underneath — the blank-screenshot bug.
-const browserSnapshot = vi.fn(async (_tabId: string, _max?: number) => "child-png");
+const browserSnapshot = vi.fn(async (_tabId: string, _max?: number) => ({
+  image: "child-png",
+  width: 900,
+  height: 600,
+}));
 const webviewSnapshot = vi.fn(
   async (_x: number, _y: number, _w: number, _h: number, _max?: number) => "rect-png",
 );
@@ -25,7 +29,7 @@ const fileTab = { id: "tab-2", type: "file", file: { path: "/p/a.ts" } } as unkn
 beforeEach(() => {
   browserSnapshot.mockClear();
   webviewSnapshot.mockClear();
-  browserSnapshot.mockResolvedValue("child-png");
+  browserSnapshot.mockResolvedValue({ image: "child-png", width: 900, height: 600 });
 });
 
 describe("capturePixels", () => {

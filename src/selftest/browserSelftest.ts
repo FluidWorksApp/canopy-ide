@@ -238,6 +238,11 @@ async function samplePane(rect: DOMRect): Promise<Sampled | string> {
   } catch (err) {
     return `snapshot refused: ${err}`;
   }
+  return measure(png);
+}
+
+/** How much of a base64 PNG is white, and how much of it is the fixture page. */
+async function measure(png: string): Promise<Sampled | string> {
   const img = new Image();
   img.src = `data:image/png;base64,${png}`;
   try {
@@ -562,6 +567,61 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
         viewSays,
       );
       return `back after ${Date.now() - away}ms`;
+    });
+
+    // ---- a preview nobody is looking at can still be photographed ----
+    // The complaint this answers: an agent had to have the preview tab in front
+    // to take a screenshot of it, and Canopy will not move the user's front tab
+    // to take a picture — so an agent working while the user reads a file could
+    // never see its own page. It never had to: WKWebView's snapshot API is the
+    // page painting itself in the web process, not a read of the compositor.
+    // Nothing proved that, so the refusal stood, and this is where the proof
+    // belongs — there is no compositor in vitest and no window in cargo test.
+    await step("background-shot", "A preview that isn't in front still photographs", async () => {
+      if (!target) throw new StepFailure("no view to photograph");
+      const backToThePreview = async () => {
+        for (let i = 0; i < 6 && view()?.shown !== true; i++) {
+          window.dispatchEvent(new CustomEvent(i % 2 === 0 ? "menu:prev-tab" : "menu:next-tab"));
+          for (let w = 0; w < 30 && view()?.shown !== true; w++) await sleep(50);
+        }
+      };
+      window.dispatchEvent(new CustomEvent("menu:new-terminal"));
+      await until(
+        "the page stayed on screen after another tab took the front",
+        view,
+        (v) => v?.shown !== true,
+        DEADLINE.nav,
+        viewSays,
+      );
+      let shot: ipc.BrowserShot;
+      try {
+        shot = await ipc.browserSnapshot(target, 240);
+      } catch (err) {
+        throw new StepFailure(`the hidden view refused to snapshot: ${err}`);
+      } finally {
+        await backToThePreview();
+      }
+      // The size has to come from the view. The pane's own placeholder is
+      // `display: none` behind another tab, so a caller measuring the DOM would
+      // report a zero-sized picture of a page that is 900 points wide.
+      if (!(shot.width > 0 && shot.height > 0)) {
+        throw new StepFailure(`the capture came back sizeless (${shot.width}×${shot.height})`);
+      }
+      const sample = await measure(shot.image);
+      if (typeof sample === "string") {
+        notes.push(`advisory: background capture not sampled — ${sample}`);
+        return `captured ${Math.round(shot.width)}×${Math.round(shot.height)} (not sampled)`;
+      }
+      const pct = (n: number) => `${Math.round(n * 100)}%`;
+      const detail = `${Math.round(shot.width)}×${Math.round(shot.height)} white=${pct(sample.white)} page=${pct(sample.page)}`;
+      // A blank sheet is the regression itself, so that one is red. The
+      // proportions either side of it are advisory, like every other pixel
+      // check here: a theme or a scrollbar moves them a few points.
+      if (sample.white > 0.95) {
+        throw new StepFailure(`the hidden view came back blank (${detail})`);
+      }
+      if (sample.page < 0.05) notes.push(`advisory: no page colours in the background capture (${detail})`);
+      return detail;
     });
 
     // ---- the companion gets out of the way, and comes back ----
