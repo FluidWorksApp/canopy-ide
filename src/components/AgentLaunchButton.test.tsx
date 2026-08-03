@@ -9,6 +9,7 @@ const origin: AgentTarget = {
   ptyId: 42,
   agentId: "opencode",
   dir: "canopy",
+  cwd: "/repo/canopy",
 };
 
 const other: AgentTarget = {

@@ -67,6 +67,12 @@ import { CollabView } from "../CollabView";
 import { SharedProjectView } from "../SharedProjectView";
 import type { AgentCli } from "../../projects";
 import {
+  reloadPlan,
+  reloading,
+  reloadSummary,
+  type ReloadItem,
+} from "../../accountSwitch";
+import {
   activeProfile,
   launchEnv,
   launchEnvSync,
@@ -648,6 +654,58 @@ const ProjectViewBody = memo(function ProjectViewBody({
     };
   }, []);
 
+  // Offer to bring the agents already running over to the account just
+  // switched to. Only the project in front asks: the others are left running
+  // as they are, which is what "don't touch them" has to mean for a switch
+  // made from a global chip.
+  const [reloadAsk, setReloadAsk] = useState<{
+    profile: string;
+    label: string;
+    plan: ReloadItem[];
+  } | null>(null);
+  useEffect(() => {
+    const onSwitch = (e: Event) => {
+      const to = (e as CustomEvent).detail?.profileId as string | undefined;
+      // Creating a profile fires the same event without a target.
+      if (!to || !visibleRef.current) return;
+      const open = agentTargetsRef.current.map((a) => ({
+        tabId: a.tabId,
+        agentId: a.agentId,
+        cwd: a.cwd,
+        label: a.title,
+      }));
+      if (open.length === 0) return;
+      void Promise.all([
+        ipc.profileAccounts(to),
+        ipc.sessionDigests(rootsRef.current),
+      ])
+        .then(([accounts, digests]) => {
+          const plan = reloadPlan({
+            open,
+            accounts,
+            restorables: restorableFrom(
+              digests,
+              statsRef.current,
+              liveSessionIdsRef.current,
+            ),
+            profile: to,
+          });
+          // Nothing this account can take over — say nothing rather than open
+          // a dialog whose only answer is "no".
+          if (reloading(plan).length === 0) return;
+          setReloadAsk({
+            profile: to,
+            label: profilesRef.current.find((p) => p.id === to)?.label ?? to,
+            plan,
+          });
+        })
+        .catch(() => {});
+    };
+    window.addEventListener(PROFILE_CHANGE_EVENT, onSwitch);
+    return () => window.removeEventListener(PROFILE_CHANGE_EVENT, onSwitch);
+  }, []);
+
+
   /** What the ＋ menu says about the account it launches into. Null on the
    *  default one. `missing` is the footgun: an account holding a Claude login
    *  but no Codex one is legitimate, and a surprise login prompt isn't. */
@@ -662,6 +720,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     ).map((c) => c.id);
     return { label, missing };
   }, [activeProfileId, profiles, activeAccounts]);
+
+  const profilesRef = useRef<ipc.AgentProfile[]>([]);
+  profilesRef.current = profiles;
 
   /** One name per account, wherever it appears. */
   const profileLabels = useMemo(
@@ -1868,6 +1929,34 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [addTerminal],
   );
+
+  /** Carry out an accepted reload: each eligible agent's terminal is replaced
+   *  by one running under the new account, in the same directory. The old
+   *  session is not lost — its transcript stays in the account that made it,
+   *  and it comes back on that account's restorable list. */
+  const runReload = useCallback(async (ask: NonNullable<typeof reloadAsk>) => {
+    setReloadAsk(null);
+    await primeLaunchEnv();
+    for (const item of reloading(ask.plan)) {
+      const cli = AGENT_CLIS.find((c) => c.id === item.agent.agentId);
+      if (!cli || !item.action) continue;
+      const env = launchEnvSync(cli.id);
+      // No env means the account could not be resolved after all; leaving the
+      // agent where it is beats moving it somewhere we cannot name.
+      if (env.length === 0) continue;
+      closeTabRef.current(item.agent.tabId);
+      if (item.action.kind === "resume") markRestored(item.action.sessionId);
+      addTerminal(
+        item.action.kind === "resume" ? item.action.cwd : item.agent.cwd,
+        item.action.kind === "resume" ? item.action.command : shellBin(cli.bin),
+        cli.name,
+        cli.icon,
+        false,
+        env,
+        ask.profile,
+      );
+    }
+  }, [addTerminal]);
 
   // Which rows "Restore all" would actually reopen. Every row in the block, in
   // the order the block renders them, each with the thunk that opens it — so
@@ -6415,8 +6504,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ptyId: t.ptyId as number,
         agentId: (byProc ?? byCommand)?.id ?? "agent",
         dir: basename(t.cwd) ?? "",
+        cwd: t.cwd,
       };
     });
+
+  const agentTargetsRef = useRef<AgentTarget[]>([]);
+  agentTargetsRef.current = agentTargets;
 
   // The session changeset shaped for the agent context builder: component
   // label plus each file's repo-relative path.
@@ -8358,6 +8451,36 @@ const ProjectViewBody = memo(function ProjectViewBody({
           items={compMenu.menu.items}
           onClose={compMenu.close}
         />
+      )}
+      {reloadAsk && (
+        <Dialog
+          variant="accent"
+          title={`Reload agents as ${reloadAsk.label}?`}
+          body="An agent keeps the account it started on until it is reloaded. Reloading picks up this account's own work in the same folder — the conversations already open stay where they are, on the account that made them."
+          meta={`${reloading(reloadAsk.plan).length} of ${reloadAsk.plan.length} agents in this project`}
+          dismissLabel="Leave them"
+          onDismiss={() => setReloadAsk(null)}
+          actions={[
+            {
+              label: `Reload ${reloading(reloadAsk.plan).length}`,
+              primary: true,
+              onClick: () => void runReload(reloadAsk),
+            },
+          ]}
+        >
+          <div className="reload-plan">
+            {reloadAsk.plan.map((item) => (
+              <div
+                key={item.agent.tabId}
+                className={`reload-row ${item.action ? "" : "reload-row-skip"}`}
+              >
+                <AgentIcon id={item.agent.agentId} size={13} />
+                <span className="reload-agent">{item.agent.label}</span>
+                <span className="reload-what">{reloadSummary(item)}</span>
+              </div>
+            ))}
+          </div>
+        </Dialog>
       )}
       {confirmResume && (
         <Dialog

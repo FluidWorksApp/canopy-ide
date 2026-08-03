@@ -31,6 +31,8 @@ export interface AgentTarget {
   agentId: string;
   /** Directory it is working in — what tells two claudes apart. */
   dir: string;
+  /** Its full working directory. `dir` is this, shortened for display. */
+  cwd: string;
 }
 
 interface TicketsPanelProps {
