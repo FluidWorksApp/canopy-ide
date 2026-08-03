@@ -366,7 +366,9 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
   // doesn't exist.
   {
     id: "agy",
-    name: "Antigravity CLI",
+    // "Antigravity", not "Antigravity CLI": Google's own name for the product,
+    // and the launcher card wrapped to two lines with the suffix.
+    name: "Antigravity",
     bin: "agy",
     icon: "◇",
     install: "curl -fsSL https://antigravity.google/cli/install.sh | bash",

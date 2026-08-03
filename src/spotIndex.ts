@@ -48,7 +48,7 @@ export const INDEXABLE_AGENTS: IndexableAgent[] = [
   },
   {
     id: "agy",
-    label: "Antigravity CLI",
+    label: "Antigravity",
     store: "~/.gemini/antigravity-cli/conversations/*.db",
     note: "Stored as protobuf; the text is recovered from the blobs, so snippets can read roughly.",
   },

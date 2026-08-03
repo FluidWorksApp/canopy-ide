@@ -136,6 +136,7 @@ export function DownloadIcon({ size = 14, className }: IconProps) {
 export {
   AiderIcon,
   AmpIcon,
+  AntigravityIcon,
   ClaudeIcon,
   CodexIcon,
   GeminiIcon,
@@ -145,6 +146,7 @@ export {
 import {
   AiderIcon as Aider,
   AmpIcon as Amp,
+  AntigravityIcon as Antigravity,
   ClaudeIcon as Claude,
   CodexIcon as Codex,
   GeminiIcon as Gemini,
@@ -160,6 +162,7 @@ export const BRAND_ICONS: Record<string, (p: IconProps) => ReactElement> = {
   aider: Aider,
   opencode: OpenCode,
   omp: Omp,
+  agy: Antigravity,
 };
 
 // ---------- sidebar rail ----------

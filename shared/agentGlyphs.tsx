@@ -12,7 +12,8 @@
 //   OpenCode — lobe-icons `opencode` / opencode.ai favicon (currentColor)
 //   Aider    — lettermark in brand green (#14b014); it has no vector mark
 //   oh-my-pi — omp.sh/favicon.svg, pink→purple→cyan gradient
-//   others   — a terminal glyph (matches the app's Shell / Antigravity rows)
+//   Antigravity — lobe-icons `antigravity`, in Google's four brand colours
+//   others   — a terminal glyph (matches the app's Shell row)
 
 import type { ReactElement } from 'react'
 
@@ -108,9 +109,37 @@ export function OmpIcon({ size = 14, className }: P) {
   )
 }
 
-/** Terminal glyph — the app's fallback for CLIs with no brand mark (Shell,
- *  Antigravity), and for anything unknown. The set's shell, at the set's
- *  weight; it was a bare chevron and underscore at a weight of its own. */
+/** Antigravity — the rising plume from Google's mark, one path on the 24 grid.
+ *
+ *  Their own colour version is a dozen gaussian-blurred blobs behind a mask,
+ *  which is a poster, not a 14px row icon: at this size it collapses to grey
+ *  mud. The colours are still theirs, so the reduction keeps them as a
+ *  gradient in the order the blobs sit — green low-left, yellow and red
+ *  through the top, blue down the right — rather than us flattening their
+ *  four-colour brand to one hue we chose. */
+export function AntigravityIcon({ size = 14, className }: P) {
+  const id = 'agy-g-portal'
+  return (
+    <svg {...brand(size, className, '0 0 24 24')} fillRule="evenodd">
+      <defs>
+        <linearGradient id={id} x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stopColor="#00B95C" />
+          <stop offset="0.32" stopColor="#FFE432" />
+          <stop offset="0.62" stopColor="#FC413D" />
+          <stop offset="1" stopColor="#3186FF" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M21.751 22.607c1.34 1.005 3.35.335 1.508-1.508C17.73 15.74 18.904 1 12.037 1 5.17 1 6.342 15.74.815 21.1c-2.01 2.009.167 2.511 1.507 1.506 5.192-3.517 4.857-9.714 9.715-9.714 4.857 0 4.522 6.197 9.714 9.715z"
+        fill={`url(#${id})`}
+      />
+    </svg>
+  )
+}
+
+/** Terminal glyph — the app's fallback for CLIs with no brand mark (Shell),
+ *  and for anything unknown. The set's shell, at the set's weight; it was a
+ *  bare chevron and underscore at a weight of its own. */
 export function TerminalGlyph({ size = 14, className }: P) {
   return <IconTerminal size={size} className={className} />
 }
@@ -123,6 +152,7 @@ const BRAND: Record<string, (p: P) => ReactElement> = {
   aider: AiderIcon,
   opencode: OpenCodeIcon,
   omp: OmpIcon,
+  agy: AntigravityIcon,
 }
 
 /** The hue each mark is drawn in, as data.
@@ -134,9 +164,9 @@ const BRAND: Record<string, (p: P) => ReactElement> = {
  *  needs the value rather than the SVG, and reading it back out of a rendered
  *  node is not a thing a layout can do.
  *
- *  Only the marks that have one: opencode draws in currentColor and oh-my-pi
- *  in a three-stop gradient, and inventing a flat colour for either would be
- *  us picking a brand colour on their behalf. Absent means "use the skin's
+ *  Only the marks that have one: opencode draws in currentColor, and oh-my-pi
+ *  and Antigravity in gradients, and inventing a flat colour for any of them
+ *  would be us picking a brand colour on their behalf. Absent means "use the skin's
  *  accent", which is what every caller should fall back to. */
 export const AGENT_BRAND_COLOR: Record<string, string> = {
   claude: '#D97757',
