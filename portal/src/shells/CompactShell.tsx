@@ -7,11 +7,12 @@
 // else lives one tap deeper rather than being cut.
 
 import { useState } from 'react'
-import { IconClose, IconFolder, IconMenu, IconPlus, IconPower } from '@shared/icons'
+import { IconClose, IconFolder, IconHome, IconMenu, IconPlus, IconPower } from '@shared/icons'
 import { COMPACT_PRIMARY, PANELS } from '../panels'
 import { targetKey } from '../panels/types'
 import { Detail } from '../views/Detail'
 import { BusyDot, type ShellProps } from './WideShell'
+import { ProjectHome } from '../ProjectHome'
 
 export function CompactShell(props: ShellProps) {
   const { ctx, up, panelId, onPanel, tabs, activeKey, onCloseTab, projects, onProject } = props
@@ -33,13 +34,13 @@ export function CompactShell(props: ShellProps) {
     (p): p is (typeof PANELS)[number] => !!p,
   )
   const secondary = PANELS.filter((p) => !COMPACT_PRIMARY.includes(p.id))
-  const inMore = secondary.some((p) => p.id === panelId)
+  const inMore = !props.home && secondary.some((p) => p.id === panelId)
 
   return (
     <div className="compact">
       <header className="cbar">
         <span className={`mark-dot ${up ? 'live' : 'down'}`} />
-        <span className="cbar-title">{panel.title}</span>
+        <span className="cbar-title">{props.home ? 'Home' : panel.title}</span>
         <BusyDot ctx={ctx} />
         {projects.length > 1 ? (
           <label className="proj-pick">
@@ -61,7 +62,11 @@ export function CompactShell(props: ShellProps) {
       </header>
 
       <div className="pane-scroll compact-scroll">
-        <panel.List ctx={ctx} />
+        {props.home ? (
+          <ProjectHome ctx={ctx} clis={ctx.clis} compact onNewAgent={props.onNewAgent} />
+        ) : (
+          <panel.List ctx={ctx} />
+        )}
       </div>
 
       {panel.id === 'agents' && ctx.project && (
@@ -71,15 +76,19 @@ export function CompactShell(props: ShellProps) {
       )}
 
       <nav className="tabbar" aria-label="Panels">
+        <button className={props.home ? 'on' : ''} onClick={() => props.onHome(ctx.project?.id)} aria-current={props.home}>
+          <span className="tb-i"><IconHome s={20} /></span>
+          <span className="tb-l">Home</span>
+        </button>
         {primary.map((p) => {
           const n = p.badge?.(ctx) ?? 0
           const hot = p.urgent?.(ctx) ?? false
           return (
             <button
               key={p.id}
-              className={p.id === panelId ? 'on' : ''}
+              className={!props.home && p.id === panelId ? 'on' : ''}
               onClick={() => onPanel(p.id)}
-              aria-current={p.id === panelId}
+              aria-current={!props.home && p.id === panelId}
             >
               <span className="tb-i">
                 <p.Icon s={20} />

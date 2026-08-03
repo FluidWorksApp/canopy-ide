@@ -7,7 +7,7 @@
 // on a laptop and a tab on a phone by being added to one list.
 
 import type { ReactNode } from 'react'
-import type { AgentRow, Project, Stat } from '@shared/model'
+import type { AgentRow, Project, RemoteCli, Stat } from '@shared/model'
 import type { PendingItem } from '@shared/notifications'
 import type { Rpc } from '../rpc'
 import type { Transport } from '@shared/transport'
@@ -67,11 +67,16 @@ export interface PanelCtx {
   rows: AgentRow[]
   stats: Map<number, Stat>
   pending: PendingItem[]
+  clis: RemoteCli[]
   /** What the detail pane is showing, so a list can mark its own row. */
   openKey?: string
   open: (t: Target) => void
   /** Start a terminal running `command` in `cwd` (undefined = a plain shell). */
-  spawn: (cwd: string, command?: string) => void
+  spawn: (
+    cwd: string,
+    command?: string,
+    options?: { agent?: string; profile?: string },
+  ) => void
 }
 
 /** A repo path for the git-family commands: any directory inside the repo does,

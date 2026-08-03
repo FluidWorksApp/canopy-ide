@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
 import { currentPlatform, type Platform } from "./shortcuts";
+import { SESSION_ID_TOKEN, type RemoteCli } from "../shared/model";
 
 export interface RunCommand {
   name: string;
@@ -599,6 +600,19 @@ function bindCli(def: AgentCliDef, bin: string): AgentCli {
  * pointing at the pre-override version.
  */
 export const AGENT_CLIS: AgentCli[] = [];
+
+/** Browser-safe projection of the resolved launcher registry. Remote receives
+ * commands, availability and verified resume syntax, never installers. */
+export function remoteCliMetadata(installed: Record<string, boolean>): RemoteCli[] {
+  return AGENT_CLIS.map((cli) => ({
+    id: cli.id,
+    name: cli.name,
+    command: shellBin(cli.bin),
+    resumeTemplate: cli.resume?.(SESSION_ID_TOKEN),
+    available: !!installed[cli.bin],
+    custom: cli.custom,
+  }));
+}
 
 /** Fired after the registry is re-resolved, so open menus re-render with the
  *  new binary rather than waiting for an unrelated state change. */

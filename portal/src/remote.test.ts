@@ -38,8 +38,8 @@ describe('the panel rail', () => {
   })
 
   it("keeps the phone's primary tabs to a thumb's reach", () => {
-    // Four plus More. A fifth makes each target too narrow to hit reliably.
-    expect(COMPACT_PRIMARY.length).toBe(4)
+    // Home + three panels + More. A sixth makes each target too narrow.
+    expect(COMPACT_PRIMARY.length).toBe(3)
     for (const id of COMPACT_PRIMARY) expect(panelById(id)).toBeDefined()
   })
 
@@ -47,6 +47,14 @@ describe('the panel rail', () => {
     // It is why you picked the phone up.
     expect(PANELS[0].id).toBe('notifications')
     expect(COMPACT_PRIMARY[0]).toBe('notifications')
+  })
+
+  it('renders project Home in both shells without pretending it is a module panel', () => {
+    const wide = readFileSync(join(process.cwd(), 'portal/src/shells/WideShell.tsx'), 'utf8')
+    const compact = readFileSync(join(process.cwd(), 'portal/src/shells/CompactShell.tsx'), 'utf8')
+    expect(wide).toContain('<ProjectHome')
+    expect(compact).toContain('<ProjectHome')
+    expect(PANELS.some((panel) => panel.id === 'home')).toBe(false)
   })
 
   it('places every wide panel in desktop-style chrome exactly once', () => {
@@ -103,6 +111,14 @@ describe('the shared theme contract', () => {
     const app = readFileSync(join(process.cwd(), 'src/App.tsx'), 'utf8')
     expect(app).toContain('remoteSetTheme(readRemoteThemeTokens())')
     expect(app).toContain('addEventListener(THEME_CHANGE_EVENT, publish)')
+  })
+
+  it('publishes the resolved desktop CLI registry instead of hard-coding Remote', () => {
+    const app = readFileSync(join(process.cwd(), 'src/App.tsx'), 'utf8')
+    const launcher = readFileSync(join(process.cwd(), 'portal/src/NewAgentSheet.tsx'), 'utf8')
+    expect(app).toContain('remoteSetClis(remoteCliMetadata(installed))')
+    expect(launcher).not.toContain("const CLIS =")
+    expect(launcher).toContain('clis: RemoteCli[]')
   })
 })
 

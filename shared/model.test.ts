@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { agentFromTitle, buildRows, type Digest, type Pty, type Stat } from './model'
+import { agentFromTitle, buildRows, commandToResume, SESSION_ID_TOKEN, type Digest, type Pty, type Stat } from './model'
 
 const ROOT = '/home/dev/canopy'
 const noStats = new Map<number, Stat>()
@@ -98,5 +98,26 @@ describe('agentFromTitle', () => {
     ['', undefined],
   ])('%s -> %s', (title, expected) => {
     expect(agentFromTitle(title)).toBe(expected)
+  })
+
+  it('maps an overridden executable back to its registry id', () => {
+    expect(agentFromTitle('acme-claude — canopy', [{
+      id: 'claude', name: 'Claude', command: 'acme-claude', available: true,
+    }])).toBe('claude')
+    expect(agentFromTitle('claude-enterprise', [{
+      id: 'claude', name: 'Claude', command: "'/opt/Acme CLI/claude-enterprise'", available: true,
+    }])).toBe('claude')
+  })
+})
+
+describe('commandToResume', () => {
+  it('expands only a verified template', () => {
+    expect(commandToResume({ id: 'amp', name: 'Amp', command: 'amp', available: true, resumeTemplate: `amp threads continue ${SESSION_ID_TOKEN}` }, 'T-1'))
+      .toBe('amp threads continue T-1')
+  })
+
+  it('does not invent resume syntax', () => {
+    expect(commandToResume({ id: 'aider', name: 'Aider', command: 'aider', available: true }, 's1')).toBeNull()
+    expect(commandToResume(undefined, 's1')).toBeNull()
   })
 })

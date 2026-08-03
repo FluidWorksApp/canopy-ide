@@ -17,12 +17,15 @@ import { targetKey } from '../panels/types'
 import { Detail } from '../views/Detail'
 import { PanelHead } from '../panels/ui'
 import type { Project } from '@shared/model'
+import { ProjectHome } from '../ProjectHome'
 
 export interface ShellProps {
   ctx: PanelCtx
   up: boolean
   panelId: string
   onPanel: (id: string) => void
+  home: boolean
+  onHome: (id?: string) => void
   /** Open detail tabs, oldest first, and which one is in front. */
   tabs: Target[]
   activeKey?: string
@@ -68,11 +71,11 @@ export function WideShell(props: ShellProps) {
         </div>
         <span className="titlebar-spacer" />
         <button
-          className={`project-tab portal-top-icon ${panelId === 'notifications' ? 'project-tab-active' : ''}`}
+          className={`project-tab portal-top-icon ${!props.home && panelId === 'notifications' ? 'project-tab-active' : ''}`}
           onClick={() => onPanel('notifications')}
           title="Notifications"
           aria-label="Notifications"
-          aria-current={panelId === 'notifications' ? 'page' : undefined}
+          aria-current={!props.home && panelId === 'notifications' ? 'page' : undefined}
         >
           <IconBell s={14} />
           {notificationCount > 0 && (
@@ -98,28 +101,32 @@ export function WideShell(props: ShellProps) {
         {WIDE_RAIL_GROUPS.map((group) => (
           <div className="rail-group" role="group" aria-label={group.label} key={group.id}>
             {group.panels.map((id) => panelById(id)).filter(Boolean).map((p) => (
-              <RailButton key={p!.id} panel={p!} ctx={ctx} active={p!.id === panelId} onPanel={onPanel} />
+              <RailButton key={p!.id} panel={p!} ctx={ctx} active={!props.home && p!.id === panelId} onPanel={onPanel} />
             ))}
           </div>
         ))}
         <span className="rail-spacer" />
         <div className="rail-group portal-rail-footer" role="group" aria-label="Tools">
           {WIDE_RAIL_FOOTER.map((id) => panelById(id)).filter(Boolean).map((p) => (
-            <RailButton key={p!.id} panel={p!} ctx={ctx} active={p!.id === panelId} onPanel={onPanel} />
+            <RailButton key={p!.id} panel={p!} ctx={ctx} active={!props.home && p!.id === panelId} onPanel={onPanel} />
           ))}
         </div>
       </nav>
 
-      <section className="pane list-pane" aria-label={panel.title}>
-        <PanelHead title={panel.title} count={panel.badge?.(ctx)}>
-          <BusyDot ctx={ctx} />
-        </PanelHead>
-        <div className="pane-scroll">
-          <panel.List ctx={ctx} />
-        </div>
-      </section>
-
-      <section className="pane detail-pane">
+      {props.home ? (
+        <section className="pane home-pane">
+          <ProjectHome ctx={ctx} clis={ctx.clis} onNewAgent={props.onNewAgent} />
+        </section>
+      ) : <>
+        <section className="pane list-pane" aria-label={panel.title}>
+          <PanelHead title={panel.title} count={panel.badge?.(ctx)}>
+            <BusyDot ctx={ctx} />
+          </PanelHead>
+          <div className="pane-scroll">
+            <panel.List ctx={ctx} />
+          </div>
+        </section>
+        <section className="pane detail-pane">
         {tabs.length > 0 && (
           <div className="pane-bar portal-pane-bar">
             <div className="tabs" role="tablist">
@@ -182,7 +189,8 @@ export function WideShell(props: ShellProps) {
             <p>Pick something on the left.</p>
           </div>
         )}
-      </section>
+        </section>
+      </>}
     </div>
   )
 }

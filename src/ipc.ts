@@ -2763,6 +2763,8 @@ export const remoteRotatePin = () => invoke<RemoteStatus>("remote_rotate_pin");
  *  desktop's skin. */
 export const remoteSetTheme = (theme: Record<string, string>) =>
   invoke<void>("remote_set_theme", { theme });
+export const remoteSetClis = (clis: import("../shared/model").RemoteCli[]) =>
+  invoke<void>("remote_set_clis", { clis });
 /** A QR SVG for any URL (LAN address or the active tunnel URL). */
 export const remoteQr = (text: string) =>
   invoke<string | null>("remote_qr", { text });

@@ -125,7 +125,9 @@ pub async fn dispatch(
             let roots = args
                 .get("roots")
                 .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok());
-            crate::agents::session_digests(roots).await.map(Value::from)
+            crate::portal::remote_session_digests(app, roots.unwrap_or_default())
+                .await
+                .map(Value::from)
         }
 
         "agent_usage" => crate::agents::agent_usage()

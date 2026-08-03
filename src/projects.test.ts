@@ -9,6 +9,7 @@ import {
   customCliIssue,
   newCustomCliId,
   refreshAgentClis,
+  remoteCliMetadata,
   restoreCommand,
   resumeSessionId,
   SHELL_PATTERN,
@@ -79,6 +80,30 @@ describe("restoreCommand", () => {
 
   it("returns null for agents that can't resume by id (aider)", () => {
     expect(restoreCommand("aider", "x")).toBeNull();
+  });
+});
+
+describe("remoteCliMetadata", () => {
+  it("projects resolved binaries and verified resume syntax", () => {
+    rebind({ claude: "/opt/Acme CLI/claude" });
+    const rows = remoteCliMetadata({ "/opt/Acme CLI/claude": true });
+    expect(rows.find((row) => row.id === "claude")).toMatchObject({
+      command: "'/opt/Acme CLI/claude'",
+      available: true,
+      resumeTemplate: "'/opt/Acme CLI/claude' --resume __CANOPY_SESSION_ID__",
+    });
+    expect(rows.find((row) => row.id === "aider")?.resumeTemplate).toBeUndefined();
+    expect(rows.find((row) => row.id === "agy")?.resumeTemplate).toContain("--conversation");
+  });
+
+  it("includes custom CLIs without exposing an installer", () => {
+    addClis([{ id: "acme", name: "Acme", bin: "acme", resumeArgs: "continue {id}" }]);
+    expect(remoteCliMetadata({ acme: true }).find((row) => row.id === "acme")).toMatchObject({
+      command: "acme",
+      available: true,
+      custom: true,
+      resumeTemplate: "acme continue __CANOPY_SESSION_ID__",
+    });
   });
 });
 

@@ -5,32 +5,33 @@
 import { useState } from 'react'
 import { AgentBadge } from '@shared/components'
 import { IconBolt, IconFolder, IconTerminal } from '@shared/icons'
-import { agentMeta, type Project } from '@shared/model'
-
-const CLIS = ['claude', 'codex', 'gemini', 'aider', 'opencode', 'amp', 'omp']
+import { agentMeta, type Project, type RemoteCli } from '@shared/model'
 
 /** Pick a project → component (cwd) → agent CLI, and launch a fresh terminal. */
 export function NewAgentSheet({
   projects,
   initialProjectId,
+  clis,
   onLaunch,
   onClose,
 }: {
   projects: Project[]
   initialProjectId?: string
-  onLaunch: (cwd: string, command?: string) => void
+  clis: RemoteCli[]
+  onLaunch: (cwd: string, command?: string, options?: { agent?: string }) => void
   onClose: () => void
 }) {
   const [projectId, setProjectId] = useState(initialProjectId ?? projects[0]?.id ?? '')
   const project = projects.find((p) => p.id === projectId) ?? projects[0]
   const comps = project?.components ?? []
   const [path, setPath] = useState(comps[0]?.path ?? '')
-  const [cli, setCli] = useState('claude')
+  const [cli, setCli] = useState(clis.find((item) => item.available)?.id ?? 'shell')
 
   const launch = () => {
     const cwd = path || comps[0]?.path
     if (!cwd) return
-    onLaunch(cwd, cli === 'shell' ? undefined : cli)
+    const item = clis.find((candidate) => candidate.id === cli)
+    onLaunch(cwd, cli === 'shell' ? undefined : item?.command, item ? { agent: item.id } : undefined)
   }
 
   return (
@@ -78,17 +79,19 @@ export function NewAgentSheet({
 
         <label>Agent</label>
         <div className="cli-grid">
-          {[...CLIS, 'shell'].map((c) => {
+          {[...clis.map((item) => item.id), 'shell'].map((c) => {
             const m = agentMeta(c)
+            const item = clis.find((candidate) => candidate.id === c)
             return (
               <button
                 key={c}
                 className={`cli ${cli === c ? 'on' : ''}`}
                 style={{ ['--hue' as string]: m.hue }}
                 onClick={() => setCli(c)}
+                disabled={item ? !item.available : false}
               >
                 <AgentBadge agent={c} sz={26} />
-                <span>{m.label}</span>
+                <span>{item?.name ?? m.label}</span>
               </button>
             )
           })}

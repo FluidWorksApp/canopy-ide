@@ -94,6 +94,7 @@ import {
   AGENT_CLIS_CHANGED_EVENT,
   CLI_INSTALLS_CHANGED_EVENT,
   checkInstalledClis,
+  remoteCliMetadata,
 } from "./projects";
 import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
@@ -1054,6 +1055,22 @@ export default function App() {
     publish();
     window.addEventListener(THEME_CHANGE_EVENT, publish);
     return () => window.removeEventListener(THEME_CHANGE_EVENT, publish);
+  }, []);
+
+  // Remote launches from the same resolved registry as desktop: custom CLIs,
+  // binary overrides, availability and verified resume syntax included.
+  useEffect(() => {
+    const publish = () =>
+      void checkInstalledClis()
+        .then((installed) => ipc.remoteSetClis(remoteCliMetadata(installed)))
+        .catch(() => {});
+    publish();
+    window.addEventListener(AGENT_CLIS_CHANGED_EVENT, publish);
+    window.addEventListener(CLI_INSTALLS_CHANGED_EVENT, publish);
+    return () => {
+      window.removeEventListener(AGENT_CLIS_CHANGED_EVENT, publish);
+      window.removeEventListener(CLI_INSTALLS_CHANGED_EVENT, publish);
+    };
   }, []);
 
   // `canopy <dir>` delivery. Cold start: the arg waited in Rust state while

@@ -28,10 +28,8 @@ export const PANELS: PanelDef[] = [
   usagePanel,
 ]
 
-/** What a phone shows without opening the More sheet. Four plus More is the
- *  most a thumb reaches comfortably, and these four are what someone away from
- *  their desk actually opens. */
-export const COMPACT_PRIMARY = ['notifications', 'agents', 'changes', 'files']
+/** Home plus these three panels and More fills the phone's five destinations. */
+export const COMPACT_PRIMARY = ['notifications', 'agents', 'changes']
 
 /** Wide Remote uses the desktop rail's information architecture. The panel
  * renderers stay remote-specific; only their placement is shared vocabulary. */

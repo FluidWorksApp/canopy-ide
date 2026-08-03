@@ -552,14 +552,17 @@ impl PtyManager {
         app: AppHandle<R>,
         cwd: Option<String>,
         command: Option<String>,
+        account_override: Option<Vec<(String, String)>>,
     ) -> Result<u32, String> {
         // A remote launch uses the same account as a desktop one; this path
         // has no webview to ask, so it reads profiles::active.
-        let account = std::env::var("HOME")
-            .ok()
-            .zip(command.as_deref())
-            .map(|(home, cmd)| crate::profiles::env_for_command(&home, cmd))
-            .filter(|e| !e.is_empty());
+        let account = account_override.or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .zip(command.as_deref())
+                .map(|(home, cmd)| crate::profiles::env_for_command(&home, cmd))
+                .filter(|e| !e.is_empty())
+        });
         let res = self.spawn(app.clone(), 120, 32, cwd, None, None, None, None, account)?;
         if let Some(cmd) = command {
             let cmd = cmd.trim();
@@ -1126,6 +1129,7 @@ mod tests {
                 app.handle().clone(),
                 Some("/tmp".into()),
                 Some("echo REGRESS_MARKER".into()),
+                None,
             )
             .expect("spawn");
         let seen = wait_for(&pm, id, "REGRESS_MARKER", Duration::from_secs(8));
@@ -1238,7 +1242,7 @@ mod tests {
         let app = tauri::test::mock_app();
         let pm = PtyManager::default();
         let id = pm
-            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None)
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None, None)
             .expect("spawn");
         thread::sleep(Duration::from_millis(400)); // let the shell come up
         pm.write(id, "echo WRITE_MARKER\r").expect("write");
@@ -1257,7 +1261,7 @@ mod tests {
         let app = tauri::test::mock_app();
         let pm = Arc::new(PtyManager::default());
         let id = pm
-            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None)
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None, None)
             .expect("spawn");
         thread::sleep(Duration::from_millis(400)); // let the shell come up
 
@@ -1306,6 +1310,7 @@ mod tests {
                 app.handle().clone(),
                 Some("/tmp".into()),
                 Some("echo SNAPSHOT_MARKER".into()),
+                None,
             )
             .expect("spawn");
         assert!(
@@ -1324,7 +1329,7 @@ mod tests {
         let app = tauri::test::mock_app();
         let pm = PtyManager::default();
         let id = pm
-            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None)
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None, None)
             .expect("spawn");
         assert!(pm.get(id).is_some());
         pm.kill(id).expect("kill");
