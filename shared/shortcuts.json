@@ -28,7 +28,86 @@
     "carry a note saying which. Canopy is terminal-first: a chord that silently",
     "eats a shell key is worse than one the user has to learn."
   ],
-  "version": 1,
+  "version": 2,
+  "profiles": {
+    "canopy": {
+      "label": "Canopy",
+      "description": "Terminal-first shortcuts designed for Canopy."
+    },
+    "vscode": {
+      "label": "VS Code",
+      "description": "Familiar VS Code navigation and workbench shortcuts.",
+      "overrides": {
+        "quick-open": {
+          "chord": { "mods": ["Mod"], "key": "KeyP" }
+        },
+        "spot-search": {
+          "chord": { "mods": ["Mod", "Shift"], "key": "KeyP" }
+        },
+        "toggle-sidebar": {
+          "chord": { "mods": ["Mod"], "key": "KeyB" }
+        },
+        "close-tab": {
+          "chord": { "mods": ["Mod"], "key": "KeyW" }
+        }
+      }
+    },
+    "jetbrains": {
+      "label": "JetBrains",
+      "description": "Navigation shortcuts shared by IntelliJ IDEA, WebStorm, PyCharm and other JetBrains IDEs.",
+      "overrides": {
+        "quick-open": {
+          "chord": { "mods": ["Mod", "Shift"], "key": "KeyO" },
+          "platform": {
+            "windows": { "mods": ["Mod", "Shift"], "key": "KeyN" },
+            "linux": { "mods": ["Mod", "Shift"], "key": "KeyN" }
+          }
+        },
+        "new-project": {
+          "chord": { "mods": ["Mod", "Shift"], "key": "KeyN" },
+          "platform": {
+            "windows": { "mods": ["Mod", "Alt", "Shift"], "key": "KeyN" },
+            "linux": { "mods": ["Mod", "Alt", "Shift"], "key": "KeyN" }
+          }
+        },
+        "open-workspace": {
+          "chord": { "mods": ["Mod", "Alt", "Shift"], "key": "KeyO" }
+        },
+        "settings": {
+          "chord": { "mods": ["Mod"], "key": "Comma" },
+          "platform": {
+            "windows": { "mods": ["Mod", "Alt"], "key": "KeyS" },
+            "linux": { "mods": ["Mod", "Alt"], "key": "KeyS" }
+          }
+        },
+        "close-tab": {
+          "chord": { "mods": ["Mod"], "key": "KeyW" },
+          "platform": {
+            "windows": { "mods": ["Mod"], "key": "F4" },
+            "linux": { "mods": ["Mod"], "key": "F4" }
+          }
+        }
+      }
+    },
+    "sublime": {
+      "label": "Sublime Text",
+      "description": "Goto Anything and command shortcuts from Sublime Text.",
+      "overrides": {
+        "quick-open": {
+          "chord": { "mods": ["Mod"], "key": "KeyP" }
+        },
+        "spot-search": {
+          "chord": { "mods": ["Mod", "Shift"], "key": "KeyP" }
+        },
+        "close-tab": {
+          "chord": { "mods": ["Mod"], "key": "KeyW" }
+        },
+        "toggle-zen": {
+          "chord": { "mods": ["Shift"], "key": "F11" }
+        }
+      }
+    }
+  },
   "shortcuts": [
     {
       "id": "new-launcher",

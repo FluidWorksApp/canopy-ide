@@ -91,7 +91,14 @@ import {
   languageLabel,
   normalizePattern,
 } from "../fileAssociations";
-import { format, formatChord, modifierOnly, resolve } from "../shortcuts";
+import {
+  format,
+  formatChord,
+  modifierOnly,
+  resolve,
+  SHORTCUT_PROFILES,
+  type ShortcutProfile,
+} from "../shortcuts";
 
 export type SettingsTab =
   | "appearance"
@@ -1656,6 +1663,25 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
 
             {tab === "editor" && (
               <>
+                <Item
+                  name="Keyboard shortcuts"
+                  tag="Cross-platform"
+                  desc={SHORTCUT_PROFILES.find((p) => p.id === s.keymapProfile)?.description}
+                >
+                  <Select
+                    width="lg"
+                    value={s.keymapProfile}
+                    onChange={(e) =>
+                      patch({ keymapProfile: e.target.value as ShortcutProfile })
+                    }
+                  >
+                    {SHORTCUT_PROFILES.map((profile) => (
+                      <option key={profile.id} value={profile.id}>
+                        {profile.label}
+                      </option>
+                    ))}
+                  </Select>
+                </Item>
                 <Item
                   name="Font and cursor"
                   tag="New files only"

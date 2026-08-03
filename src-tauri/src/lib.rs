@@ -52,7 +52,6 @@ mod webview_keys;
 mod winproc;
 mod wsbridge;
 
-use shortcuts::accel;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
 
@@ -85,7 +84,8 @@ pub(crate) const MENU_SHORTCUT_IDS: &[&str] = &[
 
 /// Custom menu: keeps Edit (clipboard in WKWebView needs it) but replaces the
 /// default Cmd+W "Close Window" with tab-scoped shortcuts the frontend handles.
-fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+fn build_menu(app: &tauri::AppHandle, profile: &str) -> tauri::Result<Menu<tauri::Wry>> {
+    let accel = |id: &str| shortcuts::accel(id, profile);
     let app_menu = Submenu::with_items(
         app,
         "Canopy",
@@ -325,6 +325,16 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(app, &[&app_menu, &file, &edit, &go, &tabs, &window, &help])
 }
 
+#[tauri::command]
+fn set_shortcut_profile(app: tauri::AppHandle, profile: String) -> Result<(), String> {
+    if !shortcuts::has_profile(&profile) {
+        return Err(format!("unknown shortcut profile: {profile}"));
+    }
+    let menu = build_menu(&app, &profile).map_err(|e| e.to_string())?;
+    app.set_menu(menu).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Frontend error bridge: WebView console/errors surface in the dev terminal.
 #[tauri::command]
 fn js_log(level: String, message: String) {
@@ -479,7 +489,7 @@ pub fn run() {
             context::start(app.handle().clone());
             // Only does anything when this launch asked to test itself.
             selftest::start(app.handle());
-            let menu = build_menu(app.handle())?;
+            let menu = build_menu(app.handle(), "canopy")?;
             app.set_menu(menu)?;
             app.on_menu_event(|app, event| {
                 let _ = app.emit("menu", event.id().0.clone());
@@ -488,6 +498,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             js_log,
+            set_shortcut_profile,
             crash::report_crash,
             crash::send_crash,
             crash::take_pending_crash,

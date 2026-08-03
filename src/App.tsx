@@ -1036,6 +1036,19 @@ export default function App() {
     if (loaded && shouldOnboard()) setOnboarding(true);
   }, [loaded]);
 
+  // The webview resolves shortcuts from settings on every keydown. Native menu
+  // accelerators need the same profile pushed across the Tauri boundary, both
+  // on launch and whenever onboarding or Settings changes it.
+  useEffect(() => {
+    const sync = () => {
+      void ipc.setShortcutProfile(getSettings().keymapProfile).catch((err) =>
+        console.warn("failed to apply native shortcut profile", err),
+      );
+    };
+    sync();
+    return subscribeSettings(sync);
+  }, []);
+
   // Keep the bridge's copy of the tool switches (Settings → Agents) current.
   // Republished on every settings write, because the sidecar reads it when an
   // agent asks for its tool list — which can be at any moment.

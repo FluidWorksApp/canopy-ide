@@ -8,9 +8,9 @@
 // prefers-reduced-motion stops the motion and shows the resting state.
 import { useState } from "react";
 import { useEscape } from "../useEscape";
-import { Button } from "./ui";
-import { formatHotkey, getSettings } from "../settings";
-import { format } from "../shortcuts";
+import { Button, Select } from "./ui";
+import { formatHotkey, getSettings, updateSettings } from "../settings";
+import { format, SHORTCUT_PROFILES, type ShortcutProfile } from "../shortcuts";
 
 interface OnboardingProps {
   /** Called when the walkthrough is dismissed any way (Skip, Esc, Done). */
@@ -74,6 +74,21 @@ function Logo({ bg, glyph, fg = "#fff" }: { bg: string; glyph: string; fg?: stri
 }
 
 const SLIDES: Slide[] = [
+  {
+    icon: "⌨",
+    title: "Keep your muscle memory",
+    body: "Start with the shortcuts you already know.",
+    mock: (
+      <Scene chrome="keyboard shortcuts" vars={{ "--cx0": "248px", "--cy0": "22px", "--cx1": "150px", "--cy1": "67px" } as React.CSSProperties}>
+        <div className="ob-col" style={{ gap: 5 }}>
+          <div className="ob-row"><span className="grow">Canopy</span><span className="ob-chip">terminal-first</span></div>
+          <div className="ob-row"><span className="grow">VS Code</span><span className="ob-mono">Ctrl+P</span></div>
+          <div className="ob-row"><span className="grow">JetBrains</span><span className="ob-mono">Ctrl+Shift+N</span></div>
+          <div className="ob-row"><span className="grow">Sublime Text</span><span className="ob-mono">Ctrl+P</span></div>
+        </div>
+      </Scene>
+    ),
+  },
   {
     icon: "✳",
     title: "Agents are the hero",
@@ -237,6 +252,9 @@ const SLIDES: Slide[] = [
 
 export function Onboarding({ onClose, onCreateProject }: OnboardingProps) {
   const [step, setStep] = useState(0);
+  const [profile, setProfile] = useState<ShortcutProfile>(
+    () => getSettings().keymapProfile,
+  );
   useEscape(onClose, true);
 
   const last = step === SLIDES.length - 1;
@@ -260,6 +278,24 @@ export function Onboarding({ onClose, onCreateProject }: OnboardingProps) {
             <span aria-hidden>{slide.icon}</span> {slide.title}
           </div>
           <p className="onboarding-body">{slide.body}</p>
+          {step === 0 && (
+            <Select
+              width="lg"
+              aria-label="Keyboard shortcut profile"
+              value={profile}
+              onChange={(e) => {
+                const next = e.target.value as ShortcutProfile;
+                setProfile(next);
+                updateSettings({ keymapProfile: next });
+              }}
+            >
+              {SHORTCUT_PROFILES.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label} — {option.description}
+                </option>
+              ))}
+            </Select>
+          )}
         </div>
 
         <div className="onboarding-dots" role="tablist" aria-label="Walkthrough progress">

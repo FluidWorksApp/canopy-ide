@@ -55,7 +55,48 @@ interface RawShortcut {
   note?: string;
 }
 
-const SHORTCUTS = (manifest as { shortcuts: RawShortcut[] }).shortcuts;
+interface RawProfileOverride {
+  chord: RawChord;
+  platform?: Partial<Record<Platform, RawChord | null>>;
+}
+
+interface RawProfile {
+  label: string;
+  description: string;
+  overrides?: Record<string, RawProfileOverride>;
+}
+
+export type ShortcutProfile = "canopy" | "vscode" | "jetbrains" | "sublime";
+
+const parsedManifest = manifest as {
+  shortcuts: RawShortcut[];
+  profiles: Record<ShortcutProfile, RawProfile>;
+};
+const SHORTCUTS = parsedManifest.shortcuts;
+const PROFILES = parsedManifest.profiles;
+
+export const SHORTCUT_PROFILES = (Object.entries(PROFILES) as [ShortcutProfile, RawProfile][]).map(
+  ([id, profile]) => ({ id, label: profile.label, description: profile.description }),
+);
+
+export function isShortcutProfile(value: unknown): value is ShortcutProfile {
+  return typeof value === "string" && value in PROFILES;
+}
+
+/** Read directly from the settings envelope to avoid a settings -> shortcuts
+ * runtime cycle. Resolution happens on keydown, so a changed profile is live
+ * immediately without remounting every surface that uses a shortcut. */
+export function currentShortcutProfile(): ShortcutProfile {
+  if (typeof localStorage === "undefined") return "canopy";
+  try {
+    const value = (JSON.parse(localStorage.getItem("canopy.settings") ?? "{}") as {
+      keymapProfile?: unknown;
+    }).keymapProfile;
+    return isShortcutProfile(value) ? value : "canopy";
+  } catch {
+    return "canopy";
+  }
+}
 
 export type ShortcutId = string;
 
@@ -87,12 +128,18 @@ function toChord(raw: RawChord, platform: Platform): Chord {
 /** The chord for `id` on `platform`, or null when it is deliberately unbound
  *  there (`"platform": { "windows": null }` in the manifest). Throws on an
  *  unknown id — a typo'd shortcut should fail loudly, not silently never fire. */
-export function resolve(id: ShortcutId, platform: Platform = currentPlatform()): Chord | null {
+export function resolve(
+  id: ShortcutId,
+  platform: Platform = currentPlatform(),
+  profile: ShortcutProfile = currentShortcutProfile(),
+): Chord | null {
   const s = byId.get(id);
   if (!s) throw new Error(`unknown shortcut id: ${id}`);
-  const override = s.platform && platform in s.platform ? s.platform[platform] : undefined;
+  const profileOverride = PROFILES[profile].overrides?.[id];
+  const source = profileOverride ?? s;
+  const override = source.platform && platform in source.platform ? source.platform[platform] : undefined;
   if (override === null) return null;
-  return toChord(override ?? s.chord, platform);
+  return toChord(override ?? source.chord, platform);
 }
 
 /** Does this keydown match `id` on the current platform?
@@ -104,8 +151,9 @@ export function matches(
   e: Pick<KeyboardEvent, "code" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey">,
   id: ShortcutId,
   platform: Platform = currentPlatform(),
+  profile: ShortcutProfile = currentShortcutProfile(),
 ): boolean {
-  const c = resolve(id, platform);
+  const c = resolve(id, platform, profile);
   return c !== null && c.code !== null && matchesChord(e, c);
 }
 
@@ -131,8 +179,9 @@ export function modifierOnly(
   e: Pick<KeyboardEvent, "metaKey" | "ctrlKey" | "altKey" | "shiftKey">,
   id: ShortcutId,
   platform: Platform = currentPlatform(),
+  profile: ShortcutProfile = currentShortcutProfile(),
 ): boolean {
-  const c = resolve(id, platform);
+  const c = resolve(id, platform, profile);
   return (
     c !== null &&
     e.metaKey === c.meta &&
@@ -149,8 +198,9 @@ export function matchesModifierClick(
   e: Pick<MouseEvent, "metaKey" | "ctrlKey" | "altKey" | "shiftKey">,
   id: ShortcutId,
   platform: Platform = currentPlatform(),
+  profile: ShortcutProfile = currentShortcutProfile(),
 ): boolean {
-  const c = resolve(id, platform);
+  const c = resolve(id, platform, profile);
   if (!c) return false;
   return e.metaKey === c.meta && e.ctrlKey === c.ctrl && e.altKey === c.alt;
 }
@@ -273,8 +323,12 @@ export function formatChord(c: Chord, platform: Platform = currentPlatform()): s
  *
  *  A manifest `keyLabel` replaces just the key and keeps the platform's own
  *  modifiers — "⌘1…9" / "Ctrl+1…9" for a chord whose key is really a range. */
-export function format(id: ShortcutId, platform: Platform = currentPlatform()): string {
-  const c = resolve(id, platform);
+export function format(
+  id: ShortcutId,
+  platform: Platform = currentPlatform(),
+  profile: ShortcutProfile = currentShortcutProfile(),
+): string {
+  const c = resolve(id, platform, profile);
   if (!c) return "";
   const override = byId.get(id)?.keyLabel;
   if (!override) return formatChord(c, platform);
@@ -309,12 +363,15 @@ export function fillLabel(label: string, platform: Platform = currentPlatform())
 /** Every shortcut worth showing the user, in manifest order, formatted for
  *  this platform. Unbound and `help: false` entries are dropped, which is how
  *  the Mac-only terminal chords disappear from the Windows help table. */
-export function helpRows(platform: Platform = currentPlatform()): ShortcutRow[] {
+export function helpRows(
+  platform: Platform = currentPlatform(),
+  profile: ShortcutProfile = currentShortcutProfile(),
+): ShortcutRow[] {
   return SHORTCUTS.filter((s) => s.help !== false)
     .map((s) => ({
       id: s.id,
       label: fillLabel(s.label, platform),
-      keys: format(s.id, platform),
+      keys: format(s.id, platform, profile),
       surface: s.surface,
     }))
     .filter((r) => r.keys !== "");
@@ -367,19 +424,25 @@ const ACCEL_MODS: Record<Mod, string> = {
  *  to a physical key. Accelerators are built from this rather than from the
  *  resolved flags: Tauri has its own token for "Mod" (CmdOrCtrl), and going
  *  through flags would lose the distinction between it and a literal Control. */
-function rawFor(id: ShortcutId, platform: Platform): RawChord | null {
+function rawFor(id: ShortcutId, platform: Platform, profile: ShortcutProfile): RawChord | null {
   const s = byId.get(id);
   if (!s) throw new Error(`unknown shortcut id: ${id}`);
-  const override = s.platform && platform in s.platform ? s.platform[platform] : undefined;
+  const profileOverride = PROFILES[profile].overrides?.[id];
+  const source = profileOverride ?? s;
+  const override = source.platform && platform in source.platform ? source.platform[platform] : undefined;
   if (override === null) return null;
-  return override ?? s.chord;
+  return override ?? source.chord;
 }
 
 /** The accelerator string Tauri's menu wants for `id` on `platform`. The Rust
  *  side computes this from the same manifest; shortcuts.test.ts asserts the two
  *  agree, so this is the contract between them rather than a second opinion. */
-export function accelerator(id: ShortcutId, platform: Platform = currentPlatform()): string | null {
-  const raw = rawFor(id, platform);
+export function accelerator(
+  id: ShortcutId,
+  platform: Platform = currentPlatform(),
+  profile: ShortcutProfile = currentShortcutProfile(),
+): string | null {
+  const raw = rawFor(id, platform, profile);
   if (!raw || !raw.key) return null;
   const order: Mod[] = ["Ctrl", "Mod", "Alt", "Shift", "Meta"];
   const parts = order.filter((m) => raw.mods.includes(m)).map((m) => ACCEL_MODS[m]);

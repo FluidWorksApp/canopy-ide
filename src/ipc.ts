@@ -3,6 +3,13 @@
 // frontend touches IPC.
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { ShortcutProfile } from "./shortcuts";
+
+// ---------- App shell ----------
+
+/** Rebuild the native menu so its accelerators match the live webview profile. */
+export const setShortcutProfile = (profile: ShortcutProfile) =>
+  invoke<void>("set_shortcut_profile", { profile });
 
 // ---------- PTY ----------
 
