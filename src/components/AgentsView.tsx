@@ -17,7 +17,7 @@ import { basename } from "../paths";
 import { getSettings } from "../settings";
 import { agentDisplayName, type TabName } from "../agentDisplayName";
 import { LIFE_META, NO_ATTENTION, bucketFor, reclaimable, silenceLabel } from "../../shared/agentLife";
-import type { LifeState } from "../../shared/agentLife";
+import type { Attention, LifeState } from "../../shared/agentLife";
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
 import { lastHumanPrompt, useAgentSessions, type SessionRow } from "../agentSessions";
@@ -107,6 +107,14 @@ export interface AgentsViewProps {
   /** Open one file claim as its own tab — who took it, why, and what it has
    *  turned away since. */
   onOpenClaim?: (claim: ipc.AgentClaim) => void;
+  /** Toasts for actions that can fail out of view (releasing a claim). */
+  onNotice?: (msg: string) => void;
+  /** The attention axis for one terminal — the same memory the tab strip
+   *  reads. Without it this page fed `bucketFor`/`reclaimable` a constant
+   *  NO_ATTENTION: the "waiting on you" stat under-counted, blocked-first
+   *  sorting missed attention-blocked agents, and the hibernate button was
+   *  offered for one the attention channel knew was waiting on you. */
+  attentionFor?: (ptyId: number) => Attention;
 }
 
 /** One number with its name under it. Five of these across the top is the whole
@@ -178,7 +186,14 @@ export function AgentsView({
   onRestore,
   onOpenInstructions,
   onOpenClaim,
+  onNotice,
+  attentionFor,
 }: AgentsViewProps) {
+  // Same fallback as the panel: no wired memory means "no claim either way".
+  const attentionOf = useMemo(
+    () => attentionFor ?? (() => NO_ATTENTION),
+    [attentionFor],
+  );
   const { agentSessions, termSessions, restorable, shared, claims, forget, lifeOf } =
     useAgentSessions({ visible: active, roots, stats, liveSessionIds });
   const integrations = useIntegrations(active);
@@ -201,18 +216,28 @@ export function AgentsView({
 
   const now = Date.now() / 1000;
   const cards = useMemo(() => {
+    // An attention-blocked agent belongs at the front whatever its lifecycle
+    // rung says — the fast lane knows about a permission prompt before the
+    // digest poll does — so the bucket outranks the fine-grained state order.
+    const needsYou = (c: { life: ReturnType<typeof lifeOf>; attention: Attention }) =>
+      bucketFor(c.life, c.attention) === "attention" ? 0 : 1;
     return agentSessions
-      .map((row) => ({ row, life: lifeOf(row) }))
+      .map((row) => ({
+        row,
+        life: lifeOf(row),
+        attention: attentionOf(row.session.id),
+      }))
       .sort(
         (a, b) =>
+          needsYou(a) - needsYou(b) ||
           RANK[a.life.state] - RANK[b.life.state] ||
           (b.row.digest?.updated ?? 0) - (a.row.digest?.updated ?? 0),
       );
-  }, [agentSessions, lifeOf]);
+  }, [agentSessions, lifeOf, attentionOf]);
 
   const working = cards.filter((c) => c.life.state === "working").length;
   const blocked = cards.filter(
-    (c) => bucketFor(c.life, NO_ATTENTION) === "attention",
+    (c) => bucketFor(c.life, c.attention) === "attention",
   ).length;
   const liveSpend = cards.reduce((sum, c) => {
     const u = c.row.digest?.session_id
@@ -236,7 +261,15 @@ export function AgentsView({
     );
   }, [restorable, query]);
 
-  const agentCard = ({ row, life }: { row: SessionRow; life: ReturnType<typeof lifeOf> }) => {
+  const agentCard = ({
+    row,
+    life,
+    attention,
+  }: {
+    row: SessionRow;
+    life: ReturnType<typeof lifeOf>;
+    attention: Attention;
+  }) => {
     const { session: s, agent, digest, dir } = row;
     const runaway =
       s.total_cpu > settings.runawayCpuPercent ||
@@ -249,7 +282,7 @@ export function AgentsView({
         : life.note || st.label;
     // Only reclaim an agent that has *provably* finished — never one mid-turn,
     // never one blocked, and never one we have merely lost track of.
-    const canHibernate = reclaimable(life, NO_ATTENTION);
+    const canHibernate = reclaimable(life, attention);
     const task = lastHumanPrompt(digest?.prompts);
     const name = agentDisplayName({
       tab: tabNames?.get(s.id),
@@ -258,7 +291,7 @@ export function AgentsView({
     });
     const u = digest?.session_id ? usageById.get(digest.session_id) : undefined;
     const cost = u ? sessionCost(u) : null;
-    const blockedHere = bucketFor(life, NO_ATTENTION) === "attention";
+    const blockedHere = bucketFor(life, attention) === "attention";
     return (
       <article
         key={s.id}
@@ -574,6 +607,20 @@ export function AgentsView({
                     {claim.note ? `${claim.note} — ` : ""}
                     {claim.paths.map((p) => basename(p)).join(", ")}
                   </span>
+                  {/* A contested file is the most useful mesh signal, and it
+                      used to be invisible outside the claim's own tab. */}
+                  {claim.refusals.length > 0 && (
+                    <span
+                      className="claim-refusals"
+                      title={`${claim.refusals.length} other claim${
+                        claim.refusals.length === 1 ? "" : "s"
+                      } on these files ${
+                        claim.refusals.length === 1 ? "was" : "were"
+                      } turned away — open the claim to see who`}
+                    >
+                      ⛔ {claim.refusals.length} turned away
+                    </span>
+                  )}
                   <span className="agv-spacer" />
                   <span className="agv-claim-when">{ago(claim.at_ms / 1000)}</span>
                   <Button
@@ -581,7 +628,13 @@ export function AgentsView({
                     title="Drop this claim — for an agent that died holding it"
                     onClick={(e) => {
                       e.stopPropagation();
-                      void ipc.contextReleaseClaim(claim.owner).catch(() => {});
+                      // A release that failed silently looks exactly like a
+                      // claim that won't die.
+                      void ipc
+                        .contextReleaseClaim(claim.owner_key)
+                        .catch((err) =>
+                          onNotice?.(`Couldn't release this claim: ${err}`),
+                        );
                     }}
                   >
                     Release

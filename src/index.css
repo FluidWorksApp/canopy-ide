@@ -12705,15 +12705,20 @@ input[type="radio"]:disabled {
   color: var(--accent);
   font-size: 10px;
 }
-.share-active {
-  color: var(--ok);
-  font-size: 9px;
-  margin-left: auto;
-}
-.share-idle {
+/* The ladder's verdict, not the legacy idle boolean — colored by the same
+   st-* classes every other lifecycle surface uses. */
+.share-state {
   color: var(--text-dim);
   font-size: 9px;
   margin-left: auto;
+  white-space: nowrap;
+}
+.share-state.st-working,
+.share-state.st-starting {
+  color: var(--ok);
+}
+.share-state.st-waiting {
+  color: var(--warn);
 }
 
 .share-prompt {
@@ -18539,6 +18544,15 @@ a.btn-sm {
   background: var(--bg-raised);
 }
 
+/* A contested claim: how many other agents were turned away from these files.
+   Shared by the panel's row and the page's — the same fact at two widths. */
+.claim-refusals {
+  flex: none;
+  color: var(--warn);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 /* ---- One claim, as a tab -------------------------------------------------
    The list has room for a name and some filenames; everything else a claim
    knows — why it was taken, how long it has been held, who it turned away, how
@@ -18779,6 +18793,24 @@ a.btn-sm {
   color: var(--text-dim);
   font-size: var(--fs-xs);
   line-height: var(--lh-ui);
+}
+
+/* A file a refused agent wanted — the same way out as the file list above,
+   at timeline size. */
+.claim-refused-path {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+}
+
+.claim-refused-path:hover {
+  text-decoration-color: currentColor;
 }
 
 /* ---------- hibernation ----------
@@ -23221,4 +23253,40 @@ a.btn-sm {
   justify-content: center;
   color: var(--text-faint);
   opacity: 0.5;
+}
+
+/* ---- Agent messages ------------------------------------------------------
+   One agent typing into another's session. The route is the point — who
+   reached into whom — so it leads, and an unsent one is called out, because a
+   message still sitting in a dead composer is the failure worth acting on. */
+.mesh-msg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mesh-msg {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 8px;
+  min-width: 0;
+}
+.mesh-msg-route {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.mesh-msg-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+}
+.mesh-msg-flag {
+  flex: none;
+  color: var(--warn);
+  font-size: 10px;
 }

@@ -10,9 +10,11 @@ import { agentDisplayName, type TabName } from "../agentDisplayName";
 import {
   LIFE_META,
   NO_ATTENTION,
+  agentLife,
   bucketFor,
   reclaimable,
   silenceLabel,
+  type Attention,
 } from "../../shared/agentLife";
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
@@ -116,6 +118,12 @@ interface AgentsPanelProps {
   /** Which agent CLIs are on PATH, keyed by bin — decides which instruction
    *  formats are worth listing when the file doesn't exist yet. */
   installed?: Record<string, boolean>;
+  /** The attention axis for one terminal — the same memory the tab strip
+   *  reads (useAttentionMemory in ProjectView). Without it every row here fed
+   *  `bucketFor`/`reclaimable` a constant NO_ATTENTION, which blanked the
+   *  "needs you" chip and — worse — let auto-hibernation reclaim an agent the
+   *  attention channel knew was blocked on you. */
+  attentionFor?: (ptyId: number) => Attention;
 }
 
 /** Compact relative age; the panel is narrow and "3h" beats a timestamp. */
@@ -155,13 +163,24 @@ function SharedDialog({
         {shared.length === 0 ? (
           <p className="share-none">Nothing yet — a session appears here once it runs a prompt.</p>
         ) : (
-          shared.map((d) => (
+          shared.map((d) => {
+            // The ladder's verdict, not the legacy `idle` boolean: that field
+            // predates `state`, so absent read as "active" and a stale true
+            // read as "idle" for a session long dead. No pty evidence reaches
+            // this dialog, so the verdict decays on silence alone — the same
+            // conservative half of the rule the workspace header applies.
+            const life = agentLife({
+              digest: d as never,
+              now: Date.now() / 1000,
+            });
+            const meta = LIFE_META[life.state];
+            return (
             <div key={d.session_id} className="share-digest">
               <div className="share-digest-head">
                 {basename(d.cwd)}
                 {d.branch && <span className="share-branch">⎇ {d.branch}</span>}
-                <span className={d.idle ? "share-idle" : "share-active"}>
-                  {d.idle ? "idle" : "active"}
+                <span className={`share-state ${meta.cls}`} title={life.note}>
+                  {meta.label}
                 </span>
               </div>
               {(d.prompts ?? []).slice(-2).map((p, i) => (
@@ -173,7 +192,8 @@ function SharedDialog({
                 <div className="share-files">{(d.files ?? []).slice(-6).join(", ")}</div>
               )}
             </div>
-          ))
+            );
+          })
         )}
         <div className="modal-actions">
           <Button onClick={onClose}>
@@ -262,7 +282,17 @@ export function AgentsPanel({
   onOpenAgentsPage,
   onOpenClaim,
   installed = {},
+  attentionFor,
 }: AgentsPanelProps) {
+  // A host that wires no attention memory gets the old constant — "no claim
+  // either way" — never a crash. Everything below must go through this, not
+  // NO_ATTENTION directly. Memoized because the auto-hibernation effect
+  // depends on it: a fresh fallback closure per render is the every-render
+  // effect this panel just got rid of.
+  const attentionOf = useMemo(
+    () => attentionFor ?? (() => NO_ATTENTION),
+    [attentionFor],
+  );
   // Instruction files: scanned once when the panel comes into view, and again
   // when the project's roots change. It's a bounded filesystem walk, but it is
   // still a walk — so nothing runs while another side tab is in front, and the
@@ -337,7 +367,17 @@ export function AgentsPanel({
   // read the agents page makes. An agent session and a plain shell answer
   // different questions ("what is it working on?" vs "what's running in it?"),
   // so they get separate heads; every session appears under exactly one.
-  const { sessions, agentSessions, termSessions, restorable, shared, claims, forget, lifeOf } =
+  const {
+    sessions,
+    agentSessions,
+    termSessions,
+    restorable,
+    shared,
+    claims,
+    messages,
+    forget,
+    lifeOf,
+  } =
     useAgentSessions({ visible, roots, stats, liveSessionIds });
 
   // Agents are running but not one of them has a digest — nothing is streaming
@@ -406,13 +446,25 @@ export function AgentsPanel({
   // a session-end event at all, so for those the cap is only enforced once a
   // turn provably ends; the toast says so rather than silently doing nothing.
   const hibernatedRef = useRef<Set<number>>(new Set());
+  // Which roster the refusal toast last spoke for. The effect re-runs on every
+  // stats tick (cpu numbers move, so `agentSessions` recomputes), and without
+  // this the "nothing was reclaimed" branch re-toasted every ~2 seconds for as
+  // long as the project stayed over the cap — the refusal is worth saying once
+  // per roster, not once per poll.
+  const refusedForRef = useRef<string | null>(null);
   useEffect(() => {
     if (!settings.autoHibernate) return;
     const cap = Math.max(1, settings.maxLiveAgents);
     const live = agentSessions.filter((x) => !hibernatedRef.current.has(x.session.id));
-    if (live.length <= cap) return;
+    if (live.length <= cap) {
+      refusedForRef.current = null;
+      return;
+    }
     const spare = live
-      .filter((x) => reclaimable(lifeOf(x), NO_ATTENTION))
+      // The real attention, per pty: reclaimable's guard exists precisely so
+      // the cap cannot kill an agent the attention channel knows is blocked
+      // on you, and feeding it NO_ATTENTION here disarmed that guard.
+      .filter((x) => reclaimable(lifeOf(x), attentionOf(x.session.id)))
       .sort((a, b) => (a.digest?.updated ?? 0) - (b.digest?.updated ?? 0));
     const victims = spare.slice(0, live.length - cap);
     for (const v of victims) {
@@ -420,6 +472,7 @@ export function AgentsPanel({
       hibernate(v.session.id);
     }
     if (victims.length > 0) {
+      refusedForRef.current = null;
       onNotice?.(
         `Hibernated ${victims.length} idle agent${
           victims.length > 1 ? "s" : ""
@@ -427,12 +480,16 @@ export function AgentsPanel({
       );
     } else {
       // Saying nothing here is what makes "the cap is not working" look like a
-      // bug rather than a refusal.
-      onNotice?.(
-        `Over the agent cap, but none of these have provably finished — nothing was reclaimed.`,
-      );
+      // bug rather than a refusal — but say it once per roster.
+      const key = live.map((x) => x.session.id).join(",");
+      if (refusedForRef.current !== key) {
+        refusedForRef.current = key;
+        onNotice?.(
+          `Over the agent cap, but none of these have provably finished — nothing was reclaimed.`,
+        );
+      }
     }
-  }, [agentSessions, settings.autoHibernate, settings.maxLiveAgents, onNotice]);
+  }, [agentSessions, settings.autoHibernate, settings.maxLiveAgents, onNotice, lifeOf, attentionOf]);
 
   const sessionRow = (row: (typeof sessions)[number]) => {
     const { session: s, agent, dir, digest } = row;
@@ -455,7 +512,7 @@ export function AgentsPanel({
     // to read `idle` (its one integration shipped a message Canopy wrote and
     // then re-parsed into "finished"), so this button offered to kill a session
     // sitting on a y/n confirm.
-    const canHibernate = !!agent && reclaimable(life, NO_ATTENTION);
+    const canHibernate = !!agent && reclaimable(life, attentionOf(s.id));
     // What the human last asked for. The highest-signal line about a session:
     // "fix the login redirect" identifies it in a way that cpu, memory and a
     // directory never will.
@@ -565,7 +622,7 @@ export function AgentsPanel({
           {/* Blocked on you, stated on the row itself so it survives whether
               or not the transient card is up and whichever tab is focused —
               the durable "needs input" signal, not a fleeting event. */}
-          {bucketFor(life, NO_ATTENTION) === "attention" && (
+          {bucketFor(life, attentionOf(s.id)) === "attention" && (
             <span className="agent-needs-you" title="This agent is waiting for your answer">
               needs you
             </span>
@@ -898,14 +955,71 @@ export function AgentsPanel({
                   {claim.note ? `${claim.note} — ` : ""}
                   {claim.paths.map((p) => basename(p)).join(", ")}
                 </span>
+                {/* A contested file is the most useful thing this list can
+                    say — until now the turned-away agents were only visible
+                    inside an already-open claim tab. */}
+                {claim.refusals.length > 0 && (
+                  <span
+                    className="claim-refusals"
+                    title={`${claim.refusals.length} other claim${
+                      claim.refusals.length === 1 ? "" : "s"
+                    } on these files ${
+                      claim.refusals.length === 1 ? "was" : "were"
+                    } turned away — open the claim to see who`}
+                  >
+                    ⛔ {claim.refusals.length}
+                  </span>
+                )}
                 <Button
                   title="Drop this claim — for an agent that died holding it"
                   onClick={(e) => {
                     e.stopPropagation();
-                    void ipc.contextReleaseClaim(claim.owner).catch(() => {});
+                    // A release that failed and said nothing looks exactly
+                    // like a claim that won't die.
+                    void ipc
+                      .contextReleaseClaim(claim.owner_key)
+                      .catch((err) =>
+                        onNotice?.(`Couldn't release this claim: ${err}`),
+                      );
                   }}>
                   Release
                 </Button>
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {/* Messages agents have typed into each other (canopy_message_agent).
+          One arrives in its target's composer indistinguishable from the user
+          typing, so without this the only trace of one agent reaching into
+          another was a toast that had already gone. Newest first, and the ones
+          that never got their return are the ones worth seeing. */}
+      {messages.length > 0 && (
+        <Section title="Agent messages" count={messages.length} tone="quiet">
+          <div className="mesh-msg-list">
+            {[...messages].reverse().map((m) => (
+              <div
+                key={m.id}
+                className={`mesh-msg ${m.submitted ? "" : "mesh-msg-unsent"}`}
+                title={`${m.from_cwd ?? "the Canopy companion"} → terminal ${m.to_pty_id}\n\n${m.text}`}
+              >
+                <span className="mesh-msg-route">
+                  {m.from_pty_id == null
+                    ? "companion"
+                    : `terminal ${m.from_pty_id}`}
+                  {" → "}
+                  {`terminal ${m.to_pty_id}`}
+                </span>
+                <span className="mesh-msg-text">{m.text}</span>
+                {!m.submitted && (
+                  <span
+                    className="mesh-msg-flag"
+                    title="The terminal went away before the return that submits it — this may still be sitting unsent in its composer."
+                  >
+                    unsent
+                  </span>
+                )}
               </div>
             ))}
           </div>

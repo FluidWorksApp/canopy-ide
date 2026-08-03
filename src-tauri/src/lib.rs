@@ -728,6 +728,7 @@ pub fn run() {
             context::context_claims,
             context::context_claim_history,
             context::context_release_claim,
+            context::context_messages,
             context::browser_result,
             snapshot::webview_snapshot,
             snapshot::browser_snapshot,

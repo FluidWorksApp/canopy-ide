@@ -1,17 +1,28 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
-import { renderHook } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { renderHook, waitFor } from "@testing-library/react";
 import type * as ipcTypes from "./ipc";
 import { useAgentSessions } from "./agentSessions";
+
+// Mutable seam so single tests can delay the claims-listener handshake.
+const seams = vi.hoisted(() => ({
+  onAgentClaims: undefined as (() => Promise<() => void>) | undefined,
+}));
 
 vi.mock("./ipc", () => ({
   instanceId: () => Promise.resolve("inst-1"),
   sessionDigests: () => Promise.resolve([]),
   contextClaims: () => Promise.resolve([]),
-  onAgentClaims: () => Promise.resolve(() => {}),
+  onAgentClaims: () => seams.onAgentClaims?.() ?? Promise.resolve(() => {}),
+  contextMessages: () => Promise.resolve([]),
+  onAgentMessage: () => Promise.resolve(() => {}),
   onStoreChange: () => Promise.resolve(() => {}),
   sessionForget: () => Promise.resolve(),
 }));
+
+beforeEach(() => {
+  seams.onAgentClaims = undefined;
+});
 
 const session = (over: Partial<ipcTypes.SessionStats> = {}): ipcTypes.SessionStats => ({
   id: 7,
@@ -61,5 +72,59 @@ describe("useAgentSessions.lifeOf", () => {
     expect(la.state).toBe(lb.state);
     expect(la.via).toBe(lb.via);
     expect(la.confidence).toBe(lb.confidence);
+  });
+});
+
+describe("useAgentSessions identities", () => {
+  it("keeps the derived lists stable across a re-render that changed nothing", () => {
+    // agentSessions/termSessions used to be re-cut per render, which handed
+    // AgentsPanel's auto-hibernation effect a fresh dependency every render —
+    // and its over-the-cap toast fired on every stats tick. Same for
+    // `restorable`, whose dep was the ids array's identity rather than its
+    // contents (callers rebuild that array every render).
+    const stats = [session({ id: 7 }), session({ id: 9, agent_hint: null })];
+    const { result, rerender } = renderHook(
+      (p: Parameters<typeof useAgentSessions>[0]) => useAgentSessions(p),
+      {
+        initialProps: {
+          visible: false,
+          roots: ["/repo"],
+          stats,
+          liveSessionIds: ["s-1"],
+        },
+      },
+    );
+    const before = result.current;
+    // New array identities, same contents — what every parent render produces.
+    rerender({
+      visible: false,
+      roots: ["/repo"],
+      stats,
+      liveSessionIds: ["s-1"],
+    });
+    expect(result.current.agentSessions).toBe(before.agentSessions);
+    expect(result.current.termSessions).toBe(before.termSessions);
+    expect(result.current.restorable).toBe(before.restorable);
+  });
+});
+
+describe("the claims listener", () => {
+  it("unsubscribes even when listen() resolves after cleanup ran", async () => {
+    // The race: the effect tore down before listen() resolved, so cleanup saw
+    // `un === undefined` and the listener leaked for the rest of the run.
+    const un = vi.fn();
+    let hand!: (u: () => void) => void;
+    seams.onAgentClaims = () => new Promise((res) => (hand = res));
+    const { unmount } = renderHook(() =>
+      useAgentSessions({
+        visible: true,
+        roots: ["/repo"],
+        stats: [session()],
+        liveSessionIds: [],
+      }),
+    );
+    unmount();
+    hand(un);
+    await waitFor(() => expect(un).toHaveBeenCalled());
   });
 });

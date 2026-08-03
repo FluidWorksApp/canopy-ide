@@ -293,6 +293,24 @@ export const sameJson = (a: unknown, b: unknown) =>
 export const sameMap = (a: Map<string, string>, b: Map<string, string>) =>
   a.size === b.size && [...b].every(([k, v]) => a.get(k) === v);
 
+/** The digest as this view hands it to the lifecycle ladder: the workspace
+ *  join's fresher copy of each field over the digest the panel opened the tab
+ *  with. `store` and `foreign` must ride along — the ladder keys
+ *  `digestUsable` on them, and rebuilding the digest without them made a
+ *  store-only or foreign-instance row read as a real state instead of
+ *  `unknown`. Exported for the test that pins exactly that. */
+export const workspaceLifeDigest = (
+  ws: Pick<ipc.AgentWorkspace, "state" | "state_via" | "updated"> | null,
+  digest?: ipc.SessionDigest,
+) => ({
+  state: ws?.state ?? digest?.state,
+  state_via: ws?.state_via ?? digest?.state_via,
+  updated: ws?.updated ?? digest?.updated,
+  agent: digest?.agent,
+  store: digest?.store,
+  foreign: digest?.foreign,
+});
+
 // The inline composer the diff viewer drops on a line when you click the "+".
 // Deliberately tiny: a textarea, add/cancel, and the submit chord. The saved
 // comment lives in the workspace's state — and so does the half-typed one:
@@ -704,12 +722,7 @@ export function AgentWorkspaceView({
   // twelve pixels from a stopped stopwatch and both were doing what they were
   // told.
   const life = agentLife({
-    digest: {
-      state: ws?.state ?? digest?.state,
-      state_via: ws?.state_via ?? digest?.state_via,
-      updated: ws?.updated ?? digest?.updated,
-      agent: digest?.agent,
-    } as never,
+    digest: workspaceLifeDigest(ws, digest) as never,
     // No process evidence reaches this view, so a working claim decays on
     // silence alone. That is the conservative half of the rule the Agents panel
     // applies with the process tree to hand: it under-reports a busy agent

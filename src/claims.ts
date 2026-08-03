@@ -44,11 +44,38 @@ export const CLAIM_STATE_BLURB: Record<ClaimState, string> = {
 export const claimOwnerName = (owner: string) => owner.split(" (")[0];
 
 /** The directory inside the owner string — an agent identifies itself by where
- *  it is working (see claim_owner in canopy_hook.rs), and that is the only
- *  handle a claim has on the session behind it. */
+ *  it is working (see claim_owner in canopy_hook.rs). Display only: for
+ *  resolving a claim to a live terminal use {@link claimOwnerPty}, because an
+ *  agent that cd'd into a subdirectory no longer matches this string. */
 export function claimOwnerCwd(owner: string): string | null {
   const m = /\(([^)]*)\)\s*$/.exec(owner);
   return m?.[1] || null;
+}
+
+/** The live terminal behind a claim, or null when there isn't one.
+ *
+ *  `pty_id` is exact and survives an agent that cd'd; the cwd parsed out of
+ *  the owner string is the legacy fallback for claims recorded before the
+ *  field existed. A pty id from another app launch must never resolve — ids
+ *  restart at 1 every run, so the same number names someone else's terminal —
+ *  which is what the `instance` check refuses. */
+export function claimOwnerPty(
+  claim: ipc.AgentClaim,
+  stats: readonly { id: number; cwd: string }[],
+  thisInstance: string | null,
+): number | null {
+  const sameLaunch =
+    !claim.instance || !thisInstance || claim.instance === thisInstance;
+  if (
+    claim.pty_id != null &&
+    sameLaunch &&
+    stats.some((s) => s.id === claim.pty_id)
+  ) {
+    return claim.pty_id;
+  }
+  const cwd = claimOwnerCwd(claim.owner);
+  if (!cwd) return null;
+  return stats.find((s) => s.cwd === cwd)?.id ?? null;
 }
 
 /** A claim at tab width. The files, not the owner: two agents' claims sit side

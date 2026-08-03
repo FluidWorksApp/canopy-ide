@@ -43,7 +43,16 @@ pub struct ContextBridge {
     /// Per-project snapshots the frontend publishes, keyed by project id.
     snapshots: Mutex<HashMap<String, serde_json::Value>>,
     port: OnceLock<u16>,
+    /// The process-wide credential, for callers Canopy starts itself that are
+    /// not a terminal — the companion. It names nobody, so anything that has to
+    /// know *which* agent is asking refuses it; see `Caller`.
     token: String,
+    /// One credential per terminal, minted at spawn and dropped at exit. This
+    /// is what makes "who is calling" answerable at all: with a single shared
+    /// token every identity claim had to be a body field the caller filled in
+    /// itself, so an agent could name any owner, release anyone's claim, and be
+    /// believed. The token is the identity, and the caller cannot choose it.
+    agents: Mutex<HashMap<String, AgentIdentity>>,
     /// Browser-control and UI ops in flight: the HTTP handler parks a sender
     /// here and waits; the frontend answers through the `browser_result`
     /// command (one ticket space for every request/response op, browser or not).
@@ -61,7 +70,79 @@ pub struct ContextBridge {
     /// Tools the user switched off in Settings → Agents. `None` until the
     /// frontend publishes, which is the same as "everything is on".
     disabled_tools: Mutex<Option<Vec<String>>>,
+    /// Every message one agent has typed into another's terminal this run,
+    /// newest last. A message used to leave no trace anywhere: it arrived in
+    /// the target's composer looking exactly like something the user had typed,
+    /// so neither the user nor the receiving agent could tell that another
+    /// agent had reached in.
+    messages: Mutex<Vec<MeshMessage>>,
+    next_message: AtomicU64,
 }
+
+/// Who is on the other end of a bridge request, established from the
+/// credential rather than from anything the caller wrote in the body.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentIdentity {
+    pub pty_id: u32,
+    /// The app run that spawned the terminal. Pty ids restart at 1 every
+    /// launch, so the id alone names a different terminal after a restart.
+    pub instance: String,
+    pub cwd: String,
+}
+
+impl AgentIdentity {
+    /// The identity a claim is keyed by, and the thing two agents sharing one
+    /// checkout must not have in common. The cwd is deliberately absent: it is
+    /// what the old owner string was built from, and it is the same for every
+    /// agent in a shared checkout — which is exactly the case claims exist for.
+    pub fn key(&self) -> String {
+        format!("pty:{}:{}", self.instance, self.pty_id)
+    }
+}
+
+/// A caller the bridge has authenticated.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Caller {
+    /// A terminal Canopy spawned, holding the token minted for it.
+    Agent(AgentIdentity),
+    /// The process-wide token. Trusted — Canopy handed it out — but anonymous,
+    /// so it can act for itself and never for a named agent.
+    Root,
+}
+
+impl Caller {
+    fn agent(&self) -> Option<&AgentIdentity> {
+        match self {
+            Caller::Agent(a) => Some(a),
+            Caller::Root => None,
+        }
+    }
+}
+
+/// One agent-to-agent message, as delivered.
+#[derive(Clone, serde::Serialize)]
+pub struct MeshMessage {
+    pub id: String,
+    /// The terminal that sent it, when the sender was an agent. `None` is the
+    /// companion or another root-token caller.
+    pub from_pty_id: Option<u32>,
+    pub from_cwd: Option<String>,
+    pub to_pty_id: u32,
+    /// What was actually written into the target — after flattening and
+    /// sanitising, not what the sender passed. The record is of the delivery.
+    pub text: String,
+    pub at_ms: u64,
+    /// False when the terminal died before the return that submits it could be
+    /// written, which leaves the message sitting unsent in the target's
+    /// composer. Previously this failure was discarded and nobody ever learned
+    /// the message had not landed.
+    pub submitted: bool,
+}
+
+/// How many delivered messages the log keeps. Same reasoning as
+/// MAX_ENDED_CLAIMS: it is worth having while the agents involved are alive,
+/// and they all die with the app.
+const MAX_MESSAGES: usize = 200;
 
 /// One agent's advisory claim over a set of paths, and everything that has
 /// happened to it since.
@@ -77,8 +158,23 @@ pub struct Claim {
     /// tab opened on the first must not silently start showing the second.
     pub id: String,
     pub paths: Vec<String>,
-    /// Who holds it — the agent's cwd plus whatever name it gave itself.
+    /// Who holds it, for a human to read — the agent's cwd plus whatever name
+    /// it gave itself. Display only: it is supplied by the caller, and every
+    /// agent in a shared checkout writes the same one.
     pub owner: String,
+    /// Who holds it, for the rules to compare. Derived from the caller's
+    /// credential (see `AgentIdentity::key`), never from the body.
+    ///
+    /// Splitting this from `owner` is the whole fix for the defect that made
+    /// claims useless where they mattered most: the conflict test was
+    /// `owner != owner`, and two agents sharing a checkout had the same owner
+    /// string — so they never collided with each other, and the second one's
+    /// claim silently superseded the first's.
+    pub owner_key: String,
+    /// The terminal behind the claim, so a claim can be swept when its agent
+    /// dies and resolved to a live session without parsing a display string.
+    pub pty_id: Option<u32>,
+    pub instance: Option<String>,
     pub note: Option<String>,
     pub at_ms: u64,
     /// None while it is held; this is the only thing that decides whether a
@@ -104,6 +200,16 @@ pub struct Refusal {
     pub at_ms: u64,
 }
 
+/// How many refusals one held claim remembers.
+///
+/// Unbounded, this is a hole: the 409 tells the refused agent to "pick
+/// different files, or ask that agent to release them", and an agent that
+/// instead retries in a loop appends a refusal per attempt forever — each one
+/// re-serialised into every claims response thereafter. The newest are the ones
+/// worth keeping; a contested path says the same thing at ten refusals as at
+/// ten thousand.
+const MAX_REFUSALS: usize = 50;
+
 /// How many ended claims the history keeps.
 ///
 /// The store stays in memory, and this cap is its whole retention policy. A
@@ -123,20 +229,89 @@ impl Default for ContextBridge {
             snapshots: Mutex::new(HashMap::new()),
             port: OnceLock::new(),
             token: hex::encode(bytes),
+            agents: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             next_op: AtomicU64::new(1),
             claims: Mutex::new(Vec::new()),
             next_claim: AtomicU64::new(1),
             disabled_tools: Mutex::new(None),
+            messages: Mutex::new(Vec::new()),
+            next_message: AtomicU64::new(1),
         }
     }
 }
 
+fn random_token() -> String {
+    let mut bytes = [0u8; 16];
+    let _ = getrandom::getrandom(&mut bytes);
+    hex::encode(bytes)
+}
+
 impl ContextBridge {
-    /// What a spawning PTY should export, once the listener is up.
+    /// What Canopy's own non-terminal children export (the companion). Names
+    /// nobody on purpose — see `token`.
     pub fn env(&self) -> Option<(u16, String)> {
         self.port.get().map(|p| (*p, self.token.clone()))
     }
+
+    /// Mint this terminal's own credential. Called once per spawn, before the
+    /// child exists, so the token is in its environment from its first
+    /// instruction and there is no window in which it holds someone else's.
+    pub fn mint_agent(&self, pty_id: u32, cwd: &str) -> Option<(u16, String)> {
+        let port = *self.port.get()?;
+        let token = random_token();
+        self.agents.lock().unwrap().insert(
+            token.clone(),
+            AgentIdentity {
+                pty_id,
+                instance: crate::pty::instance_token().to_string(),
+                cwd: cwd.to_string(),
+            },
+        );
+        Some((port, token))
+    }
+
+    /// Drop a terminal's credential when the terminal goes. Returns the
+    /// identity it named, which is what the claim sweep needs — after this the
+    /// bridge can no longer answer "who was pty 7", so the caller must be given
+    /// it here rather than looking it up afterwards.
+    pub fn retire_agent(&self, pty_id: u32) -> Option<AgentIdentity> {
+        let mut agents = self.agents.lock().unwrap();
+        let instance = crate::pty::instance_token();
+        let token = agents
+            .iter()
+            .find(|(_, a)| a.pty_id == pty_id && a.instance == instance)
+            .map(|(t, _)| t.clone())?;
+        agents.remove(&token)
+    }
+
+    fn identify(&self, presented: &str) -> Option<Caller> {
+        if constant_time_eq(presented, &self.token) {
+            return Some(Caller::Root);
+        }
+        // Not constant-time against the agent map, and it does not need to be:
+        // a hit is a full-length random token the attacker would have to
+        // possess, and the map is keyed by the token itself, so there is no
+        // per-candidate comparison to time.
+        self.agents
+            .lock()
+            .unwrap()
+            .get(presented)
+            .cloned()
+            .map(Caller::Agent)
+    }
+}
+
+/// Compare without leaking where the first difference was. The token travels
+/// over loopback to processes Canopy started, so this is defence in depth
+/// rather than a live hole — but a byte-by-byte `==` on a credential is worth
+/// no argument.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Bind the loopback listener and serve until app exit. Called once from
@@ -236,13 +411,18 @@ pub fn context_claim_history(state: tauri::State<'_, ContextBridge>) -> Vec<Clai
 /// Drop a claim from the UI — the escape hatch for an agent that died holding
 /// one, so a stale claim is never permanent.
 #[tauri::command]
-pub fn context_release_claim(app: tauri::AppHandle, owner: String) {
-    let bridge = app.state::<ContextBridge>();
-    {
-        let mut claims = bridge.claims.lock().unwrap();
-        end_claims(&mut claims, &owner, now_ms(), "canopy");
-    }
-    let _ = app.emit("agent:claims", ());
+pub fn context_release_claim(app: tauri::AppHandle, owner_key: String) {
+    with_claims(&app, |claims| {
+        let n = end_claims(claims, &owner_key, now_ms(), "canopy");
+        ((), n > 0)
+    });
+}
+
+/// Every message one agent has typed into another this run, newest last — the
+/// evidence that used to exist nowhere.
+#[tauri::command]
+pub fn context_messages(state: tauri::State<'_, ContextBridge>) -> Vec<MeshMessage> {
+    state.messages.lock().unwrap().clone()
 }
 
 /// The frontend's answer to a browser-control op: `data` is a JSON document
@@ -258,13 +438,22 @@ pub fn browser_result(state: tauri::State<'_, ContextBridge>, id: u64, ok: bool,
 
 // ---- HTTP handlers --------------------------------------------------------
 
-fn authorized(app: &tauri::AppHandle, headers: &HeaderMap) -> bool {
-    let want = &app.state::<ContextBridge>().token;
-    headers
+/// Who is asking, or `None` if the credential is not one Canopy issued.
+///
+/// Every handler that acts *for* a caller — claims, messages — must use this
+/// rather than `authorized`, because the identity it returns is the only one
+/// the caller did not choose for itself.
+fn caller(app: &tauri::AppHandle, headers: &HeaderMap) -> Option<Caller> {
+    let presented = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|t| t == want)
+        .and_then(|v| v.strip_prefix("Bearer "))?;
+    app.state::<ContextBridge>().identify(presented)
+}
+
+/// For handlers that only serve context back and so do not care who asked.
+fn authorized(app: &tauri::AppHandle, headers: &HeaderMap) -> bool {
+    caller(app, headers).is_some()
 }
 
 async fn snapshot(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
@@ -984,11 +1173,17 @@ async fn claims_list(
     State(app): State<tauri::AppHandle>,
     headers: HeaderMap,
 ) -> (StatusCode, String) {
-    if !authorized(&app, &headers) {
+    let Some(who) = caller(&app, &headers) else {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
-    }
+    };
     // Held only. An agent asks this to find out what it must not touch, and a
     // claim somebody let go of is not that.
+    //
+    // Scoped to the caller's own tree. Unscoped, this shipped every open
+    // project's claimed paths and owner directories to every agent — including
+    // when the user had shared context switched off for the project, whose
+    // whole promise is that one session cannot be read from another.
+    let cwd = who.agent().map(|a| a.cwd.clone());
     let claims: Vec<Claim> = app
         .state::<ContextBridge>()
         .claims
@@ -996,6 +1191,11 @@ async fn claims_list(
         .unwrap()
         .iter()
         .filter(|c| c.released_at_ms.is_none())
+        .filter(|c| match cwd.as_deref() {
+            Some(cwd) => claim_concerns(c, cwd),
+            // The companion asks on the user's behalf, not an agent's.
+            None => true,
+        })
         .cloned()
         .collect();
     (
@@ -1004,12 +1204,31 @@ async fn claims_list(
     )
 }
 
+/// Whether a claim is any of this caller's business: it holds files under the
+/// caller's directory, or its owner works in a directory that contains (or sits
+/// inside) the caller's. Deliberately a tree test rather than a project lookup
+/// — a claim is about files, and the question an agent is really asking is
+/// "could this collide with me".
+fn claim_concerns(claim: &Claim, cwd: &str) -> bool {
+    claim_owner_cwd(&claim.owner).is_some_and(|owner_cwd| paths_overlap(&owner_cwd, cwd))
+        || claim.paths.iter().any(|p| paths_overlap(p, cwd))
+}
+
+/// The directory out of a display owner string ("name (/path)"). Display-only
+/// parsing, and never used to decide who holds what — that is `owner_key`.
+fn claim_owner_cwd(owner: &str) -> Option<String> {
+    let start = owner.rfind('(')?;
+    let end = owner.rfind(')')?;
+    (end > start).then(|| owner[start + 1..end].to_string())
+}
+
 #[derive(serde::Deserialize)]
 struct ClaimReq {
     /// claim | release
     action: String,
     #[serde(default)]
     paths: Vec<String>,
+    /// What to call the holder in the UI. Display only — see `Claim::owner`.
     owner: String,
     note: Option<String>,
 }
@@ -1020,29 +1239,142 @@ struct ClaimReq {
 async fn claims_post(
     State(app): State<tauri::AppHandle>,
     headers: HeaderMap,
-    Json(req): Json<ClaimReq>,
+    Json(mut req): Json<ClaimReq>,
 ) -> (StatusCode, String) {
-    if !authorized(&app, &headers) {
+    let Some(who) = caller(&app, &headers) else {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
-    }
+    };
     let bridge = app.state::<ContextBridge>();
     let id = format!("c{}", bridge.next_claim.fetch_add(1, Ordering::Relaxed));
-    let reply = {
-        let mut claims = bridge.claims.lock().unwrap();
-        apply_claim(&mut claims, &req, now_ms(), &id)
-    };
+    let holder = ClaimIdentity::of(&who, &req.owner);
+    // Relative paths are resolved against the caller's own directory, and `..`
+    // is folded out, before anything compares them. Two agents claiming the
+    // same file by different spellings both used to succeed: the overlap test
+    // is string-prefix, so "src/auth" and "/repo/src/auth" never met.
+    req.paths = req
+        .paths
+        .iter()
+        .map(|p| normalize_claim_path(p, who.agent().map(|a| a.cwd.as_str())))
+        .collect();
+    let reply = with_claims(&app, |claims| {
+        let reply = apply_claim(claims, &req, &holder, now_ms(), &id);
+        // A refusal is a write too — it is recorded against the claim that
+        // turned it away — so it announces like any other.
+        let changed = !matches!(reply, ClaimReply::Bad(_));
+        (reply, changed)
+    });
     match reply {
-        ClaimReply::Ok(msg) => {
-            let _ = app.emit("agent:claims", ());
-            (StatusCode::OK, msg)
+        Some(ClaimReply::Ok(msg)) => (StatusCode::OK, msg),
+        Some(ClaimReply::Conflict(msg)) => (StatusCode::CONFLICT, msg),
+        Some(ClaimReply::Bad(msg)) => (StatusCode::BAD_REQUEST, msg),
+        // The bridge answered, so its own state must exist; saying so beats a
+        // success the caller would believe.
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the claim store isn't available".into(),
+        ),
+    }
+}
+
+/// The one door to the claim store, and therefore the one place that says it
+/// moved.
+///
+/// `change.rs` argues this at length for the stores under ~/.canopy: announcing
+/// from the callers is what leaves a write silent, and the fix is to put the
+/// announce where the write is. Claims are in-memory and single-process, so
+/// they keep their own event rather than joining the `store:change` channel —
+/// but the boundary rule is the same one, and it is enforced by there being no
+/// other way to reach the lock.
+fn with_claims<R: tauri::Runtime, T>(
+    app: &tauri::AppHandle<R>,
+    f: impl FnOnce(&mut Vec<Claim>) -> (T, bool),
+) -> Option<T> {
+    // try_state, and generic over the runtime, so the sweep on pty exit comes
+    // through this door too — a second way to write claims is how the announce
+    // goes missing again.
+    let bridge = app.try_state::<ContextBridge>()?;
+    let (out, changed) = {
+        let mut claims = bridge.claims.lock().unwrap();
+        f(&mut claims)
+    };
+    if changed {
+        let _ = app.emit("agent:claims", ());
+    }
+    Some(out)
+}
+
+/// Who a claim belongs to, resolved from the credential.
+struct ClaimIdentity {
+    key: String,
+    display: String,
+    pty_id: Option<u32>,
+    instance: Option<String>,
+}
+
+impl ClaimIdentity {
+    fn of(who: &Caller, display: &str) -> Self {
+        match who.agent() {
+            Some(a) => Self {
+                key: a.key(),
+                display: display.to_string(),
+                pty_id: Some(a.pty_id),
+                instance: Some(a.instance.clone()),
+            },
+            // The companion has no terminal, so it cannot be told apart from
+            // another root-token caller by anything but what it calls itself.
+            // Keyed separately so it can never collide with a real agent's key.
+            None => Self {
+                key: format!("root:{display}"),
+                display: display.to_string(),
+                pty_id: None,
+                instance: None,
+            },
         }
-        // The refusal changed the store too — it is now written against the
-        // claim that caused it — so the panel hears about this one as well.
-        ClaimReply::Conflict(msg) => {
-            let _ = app.emit("agent:claims", ());
-            (StatusCode::CONFLICT, msg)
+    }
+}
+
+/// Fold `.` and `..` out of a path and resolve a relative one against the
+/// agent's directory, without touching the filesystem — a claim is often taken
+/// on a file that does not exist yet.
+fn normalize_claim_path(raw: &str, base: Option<&str>) -> String {
+    // On Windows a backslash is a separator, and `..` spelled with them was
+    // invisible to a `/`-only split — which put the traversal straight back,
+    // backslash-spelled, into every check built on this. On Unix a backslash is
+    // a legal filename character and must be left alone.
+    let raw = if cfg!(windows) {
+        std::borrow::Cow::Owned(raw.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(raw)
+    };
+    let trimmed = raw.trim();
+    let joined = match (trimmed.starts_with('/'), base) {
+        (false, Some(base)) if !trimmed.is_empty() => {
+            format!("{}/{}", base.trim_end_matches('/'), trimmed)
         }
-        ClaimReply::Bad(msg) => (StatusCode::BAD_REQUEST, msg),
+        _ => trimmed.to_string(),
+    };
+    let absolute = joined.starts_with('/');
+    let mut out: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                // A leading `..` on a relative path has nothing to pop and must
+                // survive, or two different paths flatten into one.
+                if matches!(out.last(), Some(&last) if last != "..") {
+                    out.pop();
+                } else if !absolute {
+                    out.push("..");
+                }
+            }
+            p => out.push(p),
+        }
+    }
+    let body = out.join("/");
+    if absolute {
+        format!("/{body}")
+    } else {
+        body
     }
 }
 
@@ -1057,44 +1389,98 @@ enum ClaimReply {
 /// Lifted out of the handler so they can be tested: that an ended claim blocks
 /// nobody, that a refused claim is recorded against the one that turned it
 /// away, and that neither of those quietly loses the history.
-fn apply_claim(claims: &mut Vec<Claim>, req: &ClaimReq, now: u64, id: &str) -> ClaimReply {
+fn apply_claim(
+    claims: &mut Vec<Claim>,
+    req: &ClaimReq,
+    who: &ClaimIdentity,
+    now: u64,
+    id: &str,
+) -> ClaimReply {
     match req.action.as_str() {
         "release" => {
-            let n = end_claims(claims, &req.owner, now, "agent");
+            // Keyed by identity, so releasing ends the caller's own claims and
+            // only those. Keyed by the display string, as it was, an agent
+            // could end anyone's claims simply by naming them — and two agents
+            // in one checkout ended each other's without meaning to, because
+            // they shared a name.
+            let n = end_claims(claims, &who.key, now, "agent");
             ClaimReply::Ok(format!("Released {n} claim(s)."))
         }
         "claim" => {
             if req.paths.is_empty() {
                 return ClaimReply::Bad("claim needs paths".into());
             }
-            let conflict = claims.iter().position(|c| {
-                c.released_at_ms.is_none()
-                    && c.owner != req.owner
-                    && c.paths
-                        .iter()
-                        .any(|held| req.paths.iter().any(|want| paths_overlap(held, want)))
-            });
-            if let Some(i) = conflict {
-                let held = &mut claims[i];
-                held.refusals.push(Refusal {
-                    owner: req.owner.clone(),
-                    paths: req.paths.clone(),
-                    note: req.note.clone(),
-                    at_ms: now,
-                });
+            // A path that normalises to nothing, or to the root, overlaps
+            // everything: `paths_overlap` is a prefix test, so an empty string
+            // is a prefix of every path there is. Claiming one would collide
+            // with every held claim in the app — reading back the first
+            // holder's directory and note on the way — and, if nothing were
+            // held, would take a claim that refused every other agent
+            // everywhere until it was released.
+            if let Some(bad) = req
+                .paths
+                .iter()
+                .find(|p| p.is_empty() || p.as_str() == "/" || !p.starts_with('/'))
+            {
+                return ClaimReply::Bad(format!(
+                    "\"{bad}\" isn't a file or directory this claim can name — claim the actual \
+                     paths you're about to work on."
+                ));
+            }
+            let colliding: Vec<usize> = claims
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    c.released_at_ms.is_none()
+                        && c.owner_key != who.key
+                        && c.paths
+                            .iter()
+                            .any(|held| req.paths.iter().any(|want| paths_overlap(held, want)))
+                })
+                .map(|(i, _)| i)
+                .collect();
+            if !colliding.is_empty() {
+                // Recorded against every holder it collided with, not just the
+                // first. A claim spanning files held by three agents used to
+                // tell one of them and leave the other two believing their
+                // files were uncontested.
+                for &i in &colliding {
+                    let held = &mut claims[i];
+                    held.refusals.push(Refusal {
+                        owner: who.display.clone(),
+                        paths: req.paths.clone(),
+                        note: req.note.clone(),
+                        at_ms: now,
+                    });
+                    if held.refusals.len() > MAX_REFUSALS {
+                        let excess = held.refusals.len() - MAX_REFUSALS;
+                        held.refusals.drain(0..excess);
+                    }
+                }
+                let held = &claims[colliding[0]];
+                let others = colliding.len() - 1;
+                let also = match others {
+                    0 => String::new(),
+                    1 => " (and one other agent holds some of them too)".into(),
+                    n => format!(" (and {n} other agents hold some of them too)"),
+                };
                 return ClaimReply::Conflict(format!(
-                    "{} already claimed {} ({}). Pick different files, or ask that agent \
+                    "{} already claimed {} ({}){}. Pick different files, or ask that agent \
                      to release them.",
                     held.owner,
                     held.paths.join(", "),
-                    held.note.clone().unwrap_or_else(|| "no note".into())
+                    held.note.clone().unwrap_or_else(|| "no note".into()),
+                    also
                 ));
             }
-            end_claims(claims, &req.owner, now, "superseded");
+            end_claims(claims, &who.key, now, "superseded");
             claims.push(Claim {
                 id: id.to_string(),
                 paths: req.paths.clone(),
-                owner: req.owner.clone(),
+                owner: who.display.clone(),
+                owner_key: who.key.clone(),
+                pty_id: who.pty_id,
+                instance: who.instance.clone(),
                 note: req.note.clone(),
                 at_ms: now,
                 released_at_ms: None,
@@ -1108,19 +1494,37 @@ fn apply_claim(claims: &mut Vec<Claim>, req: &ClaimReq, now: u64, id: &str) -> C
     }
 }
 
-/// End every claim this owner still holds, and say how. Returns how many, which
-/// is what the agent is told it released.
-fn end_claims(claims: &mut [Claim], owner: &str, now: u64, how: &str) -> usize {
+/// End every claim this identity still holds, and say how. Returns how many,
+/// which is what the agent is told it released.
+fn end_claims(claims: &mut [Claim], owner_key: &str, now: u64, how: &str) -> usize {
     let mut n = 0;
     for c in claims
         .iter_mut()
-        .filter(|c| c.owner == owner && c.released_at_ms.is_none())
+        .filter(|c| c.owner_key == owner_key && c.released_at_ms.is_none())
     {
         c.released_at_ms = Some(now);
         c.released_by = Some(how.to_string());
         n += 1;
     }
     n
+}
+
+/// Let go of everything a terminal was holding, because the terminal is gone.
+///
+/// Without this a crashed agent's claim was permanent until a human noticed the
+/// row and pressed Release: the store is in memory, nothing watched pty exits,
+/// and the claim carried no terminal to sweep by even if something had.
+pub fn release_claims_for_pty<R: tauri::Runtime>(app: &tauri::AppHandle<R>, pty_id: u32) {
+    let Some(identity) = app
+        .try_state::<ContextBridge>()
+        .and_then(|b| b.retire_agent(pty_id))
+    else {
+        return;
+    };
+    with_claims(app, |claims| {
+        let n = end_claims(claims, &identity.key(), now_ms(), "canopy");
+        ((), n > 0)
+    });
 }
 
 /// Forget the oldest endings once the history is longer than it is useful. Only
@@ -1220,6 +1624,51 @@ fn human_bytes(n: u64) -> String {
 /// rather than folding the CR into a paste, short enough not to feel deferred.
 const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// How a message announces where it came from.
+///
+/// The receiving agent is otherwise being handed something indistinguishable
+/// from its own user typing, so "another agent asked me to do this" was not a
+/// thing it could establish — and anything carried in the message inherited the
+/// user's authority by default. Both delivery routes use this, or the one that
+/// doesn't becomes the way around it.
+fn sender_tag(who: &Caller) -> String {
+    match who.agent() {
+        Some(a) => format!(
+            "[canopy: message from the agent in {} (terminal {})]",
+            a.cwd, a.pty_id
+        ),
+        None => "[canopy: message from the Canopy companion]".to_string(),
+    }
+}
+
+/// What is safe to type into somebody else's terminal.
+///
+/// Newlines have to go because a newline in a TUI composer submits, and a
+/// half-sent message is worse than a flattened one. Everything else in C0 has
+/// to go because it is not text at all: ESC opens a control sequence the target
+/// TUI will act on, ^C interrupts whatever it is doing, ^D ends its input. The
+/// read direction has had `strip_ansi` since the beginning; this is the write
+/// direction finally getting its counterpart.
+fn sanitize_message(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last_space = false;
+    for ch in text.chars() {
+        let keep = if ch.is_control() { ' ' } else { ch };
+        // Collapse the runs the substitution creates, so a multi-line handoff
+        // does not arrive padded with the ghosts of its own line breaks.
+        if keep == ' ' {
+            if !last_space && !out.is_empty() {
+                out.push(' ');
+            }
+            last_space = true;
+        } else {
+            out.push(keep);
+            last_space = false;
+        }
+    }
+    out.trim().to_string()
+}
+
 /// A write the frontend has to perform (start a run command, open a preview
 /// tab, restart a server): validated here against the published snapshots, then
 /// handed to the UI over the app event bus. Kept an event (not a direct call)
@@ -1285,9 +1734,9 @@ async fn action(
     headers: HeaderMap,
     Json(act): Json<Action>,
 ) -> (StatusCode, String) {
-    if !authorized(&app, &headers) {
+    let Some(who) = caller(&app, &headers) else {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
-    }
+    };
     let snaps = app.state::<ContextBridge>();
     let msg = match act.kind.as_str() {
         "start_server" => {
@@ -1355,6 +1804,9 @@ async fn action(
             let Some(id) = act.pty_id else {
                 return (StatusCode::BAD_REQUEST, "stop_server needs ptyId".into());
             };
+            if let Err(e) = may_act_on_terminal(&who, id, terminal_role(&app, id), "stop") {
+                return (StatusCode::FORBIDDEN, e);
+            }
             // A pure backend kill — no UI state to thread, and the pty:exit it
             // triggers updates the tab on its own. Scoped to real Canopy ptys:
             // an id that isn't one is refused, not silently ignored.
@@ -1377,6 +1829,9 @@ async fn action(
                     StatusCode::NOT_FOUND,
                     format!("No running Canopy terminal with id {id} (see canopy_project)"),
                 );
+            }
+            if let Err(e) = may_act_on_terminal(&who, id, terminal_role(&app, id), "restart") {
+                return (StatusCode::FORBIDDEN, e);
             }
             // Restart reuses the tab (and its command), which only the owning
             // ProjectView can do — route it there. `route` isn't a path here, so
@@ -1511,6 +1966,19 @@ async fn action(
                     format!("{path} isn't a file on this machine"),
                 );
             }
+            // Inside a workspace, like every other path the bridge accepts. The
+            // check used to be `is_file()` alone, which made this a way to put
+            // any readable file on the machine — ~/.ssh/id_rsa, another
+            // project's source — in front of the user in their own editor.
+            if !within_a_workspace(&app, path) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "{path} is outside every open project, and the bridge only opens files \
+                         inside one"
+                    ),
+                );
+            }
             // The file's own directory routes it: an agent naming a path in a
             // project other than its cwd's still lands in the right window.
             let route = std::path::Path::new(path)
@@ -1565,6 +2033,18 @@ async fn action(
                         "message_agent needs ptyId or pr".into(),
                     );
                 };
+                // Prepared here, exactly as the ptyId form is. The frontend
+                // types this string into a terminal verbatim, so leaving it
+                // raw meant the whole route around a PR skipped the flattening,
+                // the control-byte stripping and the provenance tag — every
+                // property the other branch had just gained.
+                let body = sanitize_message(text);
+                if body.is_empty() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "message_agent needs text with something in it".into(),
+                    );
+                }
                 let _ = app.emit(
                     "agent:action",
                     serde_json::json!({
@@ -1572,27 +2052,37 @@ async fn action(
                         "route": act.cwd.clone().unwrap_or_default(),
                         "cwd": act.cwd,
                         "pr": pr,
-                        "text": text,
+                        "text": format!("{} {body}", sender_tag(&who)),
                     }),
                 );
+                // Handed over, not delivered — and said that way. Canopy may
+                // find no open PR by that number, or no project to route it to,
+                // and both of those are reported to the user rather than back
+                // here. Claiming delivery in that case is how an agent came to
+                // believe it had handed work off that nobody ever received.
                 return (
                     StatusCode::OK,
                     format!(
-                        "Routing to whoever raised {pr}: typed into that session if it is still \
-                         running, its conversation reopened if not, and a fresh agent told what \
-                         it is picking up if there is nothing left to reopen. It answers in its \
-                         own session, not here."
+                        "Asked Canopy to find whoever raised {pr}: it types into that session if \
+                         it is still running, reopens its conversation if not, and starts a fresh \
+                         agent if there is nothing left to reopen. None of that is confirmed \
+                         here — if no open {pr} exists in this project the user is told and \
+                         nothing is delivered. Check canopy_agents for a session working on it."
                     ),
                 );
             }
-            let (Some(id), Some(text)) = (act.pty_id, Some(text)) else {
+            let Some(id) = act.pty_id else {
                 return (
                     StatusCode::BAD_REQUEST,
                     "message_agent needs ptyId and text".into(),
                 );
             };
             // Straight into the other agent's stdin, exactly as if the user had
-            // typed it — that IS the interface every agent CLI exposes.
+            // typed it — that IS the interface every agent CLI exposes. Which
+            // is also why the target has to be an agent: the check used to be
+            // "is there a terminal with this id", and pty ids are small
+            // sequential integers, so a message aimed at a plain shell tab was
+            // a line of text followed by a return — a command, run as the user.
             let manager = app.state::<crate::pty::PtyManager>();
             if manager.get(id).is_none() {
                 return (
@@ -1600,9 +2090,52 @@ async fn action(
                     format!("No running Canopy terminal with id {id} (see canopy_agents)"),
                 );
             }
-            let body = text.replace(['\r', '\n'], " ");
-            if let Err(e) = manager.write(id, &body) {
+            if let Err(e) = may_message_terminal(id, terminal_role(&app, id)) {
+                return (StatusCode::FORBIDDEN, e);
+            }
+            if who.agent().is_some_and(|a| a.pty_id == id) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "That's your own terminal — say it to the user instead.".into(),
+                );
+            }
+            // Everything below C0 goes, not just the newlines. The old flatten
+            // passed ESC and the rest through untouched, so a message could
+            // carry ^C to interrupt the target mid-turn, or CSI sequences that
+            // drive its TUI's keybindings rather than landing in its composer.
+            let body = sanitize_message(text);
+            if body.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "message_agent needs text with something in it".into(),
+                );
+            }
+            // The receiving agent is told where this came from. Without it a
+            // message is indistinguishable from the user typing, so "another
+            // agent asked me to do this" was not a thing the target could
+            // establish — and anything carried in the message inherited the
+            // user's authority by default.
+            let line = format!("{} {body}", sender_tag(&who));
+            if let Err(e) = manager.write(id, &line) {
                 return (StatusCode::BAD_REQUEST, e);
+            }
+            let msg_id = format!("m{}", snaps.next_message.fetch_add(1, Ordering::Relaxed));
+            {
+                let mut log = snaps.messages.lock().unwrap();
+                log.push(MeshMessage {
+                    id: msg_id.clone(),
+                    from_pty_id: who.agent().map(|a| a.pty_id),
+                    from_cwd: who.agent().map(|a| a.cwd.clone()),
+                    to_pty_id: id,
+                    text: body.clone(),
+                    at_ms: now_ms(),
+                    // Not yet: the return that submits it is still to come.
+                    submitted: false,
+                });
+                if log.len() > MAX_MESSAGES {
+                    let excess = log.len() - MAX_MESSAGES;
+                    log.drain(0..excess);
+                }
             }
             // The return has to arrive as its own write, a beat later. An agent
             // TUI reads a burst that ends in CR as a paste and keeps the whole
@@ -1611,13 +2144,45 @@ async fn action(
             // unsent until the user pressed enter. Every send from the desktop
             // has always split the two; only this one didn't.
             let send = app.clone();
+            let sent_id = msg_id.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(SUBMIT_DELAY).await;
-                let _ = send.state::<crate::pty::PtyManager>().write(id, "\r");
+                // Re-checked, because 250ms is long enough for the terminal to
+                // have gone. The result of this write used to be discarded, so
+                // a message left sitting unsent in a dead composer looked
+                // exactly like a delivered one.
+                let bridge = send.state::<ContextBridge>();
+                let submitted = send
+                    .state::<crate::pty::PtyManager>()
+                    .write(id, "\r")
+                    .is_ok();
+                if submitted {
+                    if let Some(m) = bridge
+                        .messages
+                        .lock()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|m| m.id == sent_id)
+                    {
+                        m.submitted = true;
+                    }
+                }
+                // The user is told either way: an agent reaching into another
+                // agent's session is exactly the "something happened over here"
+                // the attention channel exists for, and it used to happen
+                // entirely in silence.
+                let _ = send.emit(
+                    "agent:message",
+                    serde_json::json!({
+                        "id": sent_id,
+                        "toPtyId": id,
+                        "submitted": submitted,
+                    }),
+                );
             });
             format!(
-                "Sent to terminal {id}. It answers in its own session — read its reply with \
-                 canopy_server_output({id})."
+                "Sent to terminal {id}, tagged as coming from you. It answers in its own \
+                 session — read its reply with canopy_server_output({id})."
             )
         }
         other => return (StatusCode::BAD_REQUEST, format!("unknown action: {other}")),
@@ -2556,22 +3121,13 @@ async fn files(
     // Only directories the workspace actually contains: the bridge must not be
     // a token-gated read of arbitrary paths. A published component (or a
     // subdirectory of one) is in scope; anything else is refused.
-    let dir = std::path::PathBuf::from(&params.dir);
-    let allowed = {
-        let bridge = app.state::<ContextBridge>();
-        let snaps = bridge.snapshots.lock().unwrap();
-        snaps.values().any(|p| {
-            p.get("components")
-                .and_then(|c| c.as_array())
-                .is_some_and(|comps| {
-                    comps.iter().any(|c| {
-                        c.get("path")
-                            .and_then(|p| p.as_str())
-                            .is_some_and(|root| dir.starts_with(root))
-                    })
-                })
-        })
-    };
+    //
+    // Normalised first. `Path::starts_with` compares components and does not
+    // resolve `..`, so "/repo/../../etc" started with "/repo" and was allowed
+    // straight back out of the workspace it was being checked against.
+    let normalized = normalize_claim_path(&params.dir, None);
+    let dir = std::path::PathBuf::from(&normalized);
+    let allowed = within_a_workspace(&app, &normalized);
     if !allowed {
         return (
             StatusCode::FORBIDDEN,
@@ -2587,6 +3143,121 @@ async fn files(
         StatusCode::OK,
         serde_json::json!({ "files": list, "truncated": truncated }).to_string(),
     )
+}
+
+/// Whether a normalised path sits inside a component of some open project.
+///
+/// One answer, shared by every handler that takes a path from an agent, so a
+/// new one cannot quietly be laxer than the others — which is how `open_file`
+/// came to accept anything on the disk while `/ctx/files` was checking roots
+/// two hundred lines away.
+fn within_a_workspace(app: &tauri::AppHandle, path: &str) -> bool {
+    let normalized = normalize_claim_path(path, None);
+    let target = std::path::Path::new(&normalized);
+    let bridge = app.state::<ContextBridge>();
+    let snaps = bridge.snapshots.lock().unwrap();
+    snaps.values().any(|p| {
+        p.get("components")
+            .and_then(|c| c.as_array())
+            .is_some_and(|comps| {
+                comps.iter().any(|c| {
+                    c.get("path")
+                        .and_then(|p| p.as_str())
+                        .is_some_and(|root| target.starts_with(normalize_claim_path(root, None)))
+                })
+            })
+    })
+}
+
+/// What a terminal is running, as far as the monitor has been able to tell.
+///
+/// Read from the same `agent_hint` the frontend renders agent cards from, so
+/// the tools' idea of "that is an agent" is the user's idea of it. Every PTY
+/// Canopy opens holds a bridge credential — that is about identity, not about
+/// what is running — so the registry cannot answer this and must not be asked.
+///
+/// `Unknown` is a third answer and not a synonym for either of the others. The
+/// monitor classifies on a tick, so a freshly spawned terminal has no verdict
+/// yet, and a CLI it cannot name never gets one. Both consumers below have to
+/// decide what to do about that, and they decide *differently* — which is the
+/// whole reason this is not a bool.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum TerminalRole {
+    Agent,
+    NotAgent,
+    Unknown,
+}
+
+fn terminal_role(app: &tauri::AppHandle, pty_id: u32) -> TerminalRole {
+    match app
+        .state::<crate::agents::StatsCache>()
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|s| s.id == pty_id)
+    {
+        Some(s) if s.agent_hint.is_some() => TerminalRole::Agent,
+        Some(_) => TerminalRole::NotAgent,
+        None => TerminalRole::Unknown,
+    }
+}
+
+/// Whether this caller may type into that terminal.
+///
+/// Only a terminal known to be running an agent. An unclassified one is
+/// refused, because the cost of being wrong here is that a line of text plus a
+/// return runs as a command in somebody's shell.
+fn may_message_terminal(pty_id: u32, role: TerminalRole) -> Result<(), String> {
+    match role {
+        TerminalRole::Agent => Ok(()),
+        TerminalRole::NotAgent => Err(format!(
+            "Terminal {pty_id} isn't an agent session — it's a shell or a run, and typing into \
+             it would execute what you sent. canopy_agents lists the sessions you can message."
+        )),
+        TerminalRole::Unknown => Err(format!(
+            "Canopy can't yet tell what terminal {pty_id} is running, so it won't type into it. \
+             If it has only just started, call canopy_agents again in a moment."
+        )),
+    }
+}
+
+/// Whether this caller may stop or restart that terminal.
+///
+/// An agent owns its own terminal and nobody else's. `close_session` has always
+/// been careful about this — it takes no id at all, so it can name no other
+/// terminal — but `stop_server` took an arbitrary one with no check, which made
+/// the restriction decorative: any agent could SIGTERM any other agent's
+/// session by guessing a small integer.
+///
+/// `Unknown` is refused here for the same reason `Agent` is, and this is the
+/// half that is easy to get backwards: reading "not classified yet" as "not an
+/// agent" would leave a newly spawned session killable for as long as the
+/// monitor takes to reach it, and a CLI the monitor cannot name killable
+/// forever. Stopping a dev server one tick later costs nothing; the reverse
+/// mistake ends somebody's work.
+fn may_act_on_terminal(
+    who: &Caller,
+    pty_id: u32,
+    role: TerminalRole,
+    verb: &str,
+) -> Result<(), String> {
+    if role == TerminalRole::NotAgent {
+        return Ok(());
+    }
+    // Your own session, or the user's own control surface acting for them —
+    // the companion is how a runaway agent gets stopped.
+    if who.agent().is_none_or(|a| a.pty_id == pty_id) {
+        return Ok(());
+    }
+    let what = match role {
+        TerminalRole::Unknown => "may be another agent's session",
+        _ => "is another agent's session",
+    };
+    Err(format!(
+        "Terminal {pty_id} {what}, not a server — you can't {verb} it. Send it a message with \
+         canopy_message_agent, or ask the user."
+    ))
 }
 
 /// Breadth-first file walk, relative paths, ignore-list applied. BFS so a cap
@@ -2725,10 +3396,44 @@ mod tests {
         }
     }
 
+    /// An agent in its own terminal. The identity is the terminal, so two of
+    /// these are two agents however alike their display names are.
+    fn who(name: &str, pty_id: u32) -> ClaimIdentity {
+        ClaimIdentity {
+            key: format!("pty:test:{pty_id}"),
+            display: name.into(),
+            pty_id: Some(pty_id),
+            instance: Some("test".into()),
+        }
+    }
+
+    /// Distinct agents whose display names differ, which is the easy case.
+    fn named(name: &str) -> ClaimIdentity {
+        let pty = name.bytes().fold(0u32, |a, b| a.wrapping_mul(31) + b as u32);
+        who(name, pty)
+    }
+
+    fn claim(claims: &mut Vec<Claim>, w: &ClaimIdentity, paths: &[&str], now: u64, id: &str) -> ClaimReply {
+        apply_claim(claims, &claim_req("claim", &w.display, paths), w, now, id)
+    }
+
+    fn release(claims: &mut Vec<Claim>, w: &ClaimIdentity, now: u64) -> ClaimReply {
+        apply_claim(claims, &claim_req("release", &w.display, &[]), w, now, "unused")
+    }
+
     fn ok(reply: ClaimReply) -> String {
         match reply {
             ClaimReply::Ok(m) => m,
             ClaimReply::Conflict(m) | ClaimReply::Bad(m) => panic!("expected success, got {m}"),
+        }
+    }
+
+    fn conflict(reply: ClaimReply) -> String {
+        match reply {
+            ClaimReply::Conflict(m) => m,
+            ClaimReply::Ok(m) | ClaimReply::Bad(m) => {
+                panic!("expected an overlapping claim to be refused, got {m}")
+            }
         }
     }
 
@@ -2741,19 +3446,9 @@ mod tests {
 
     #[test]
     fn a_released_claim_keeps_its_history_and_blocks_nobody() {
-        let mut claims = Vec::new();
-        ok(apply_claim(
-            &mut claims,
-            &claim_req("claim", "alice", &["/w/src/auth.ts"]),
-            100,
-            "c1",
-        ));
-        ok(apply_claim(
-            &mut claims,
-            &claim_req("release", "alice", &[]),
-            200,
-            "c2",
-        ));
+        let (mut claims, alice, bob) = (Vec::new(), named("alice"), named("bob"));
+        ok(claim(&mut claims, &alice, &["/w/src/auth.ts"], 100, "c1"));
+        ok(release(&mut claims, &alice, 200));
         // The row survives the release — this is the whole point: "when did
         // that agent let go of it" used to be unanswerable because the release
         // deleted the only record there was.
@@ -2762,35 +3457,16 @@ mod tests {
         assert_eq!(claims[0].released_by.as_deref(), Some("agent"));
         assert!(held(&claims).is_empty());
         // And it is history, not a holder: the next agent gets the file.
-        ok(apply_claim(
-            &mut claims,
-            &claim_req("claim", "bob", &["/w/src/auth.ts"]),
-            300,
-            "c3",
-        ));
+        ok(claim(&mut claims, &bob, &["/w/src/auth.ts"], 300, "c3"));
         assert_eq!(held(&claims).len(), 1);
         assert_eq!(held(&claims)[0].owner, "bob");
     }
 
     #[test]
     fn a_refused_claim_is_recorded_against_the_one_that_refused_it() {
-        let mut claims = Vec::new();
-        ok(apply_claim(
-            &mut claims,
-            &claim_req("claim", "alice", &["/w/src"]),
-            100,
-            "c1",
-        ));
-        let reply = apply_claim(
-            &mut claims,
-            &claim_req("claim", "bob", &["/w/src/auth.ts"]),
-            150,
-            "c2",
-        );
-        let msg = match reply {
-            ClaimReply::Conflict(m) => m,
-            _ => panic!("an overlapping claim must be refused"),
-        };
+        let (mut claims, alice, bob) = (Vec::new(), named("alice"), named("bob"));
+        ok(claim(&mut claims, &alice, &["/w/src"], 100, "c1"));
+        let msg = conflict(claim(&mut claims, &bob, &["/w/src/auth.ts"], 150, "c2"));
         assert!(msg.contains("alice"));
         // Refusing bob must not give bob a claim, and must leave a trace on
         // alice's — the collision is the most useful thing a claim records.
@@ -2801,37 +3477,99 @@ mod tests {
         assert_eq!(claims[0].refusals[0].at_ms, 150);
         // Once alice lets go, the same claim goes through and the refusal is
         // still there to explain the wait.
-        ok(apply_claim(
-            &mut claims,
-            &claim_req("release", "alice", &[]),
-            200,
-            "c3",
-        ));
-        ok(apply_claim(
-            &mut claims,
-            &claim_req("claim", "bob", &["/w/src/auth.ts"]),
-            250,
-            "c4",
-        ));
+        ok(release(&mut claims, &alice, 200));
+        ok(claim(&mut claims, &bob, &["/w/src/auth.ts"], 250, "c4"));
         assert_eq!(claims[0].refusals.len(), 1);
         assert_eq!(held(&claims).len(), 1);
     }
 
+    /// The defect claims existed for and could not survive: the conflict test
+    /// was owner-string against owner-string, and `claim_owner` built that
+    /// string out of the cwd — so the agents most likely to collide, the ones
+    /// sharing a checkout, were the one pair that never could.
+    #[test]
+    fn two_agents_in_one_checkout_still_collide() {
+        let mut claims = Vec::new();
+        // Same display name, because they really are in the same directory.
+        let (first, second) = (who("canopy (/w)", 1), who("canopy (/w)", 2));
+        ok(claim(&mut claims, &first, &["/w/src/auth.ts"], 100, "c1"));
+        let msg = conflict(claim(&mut claims, &second, &["/w/src/auth.ts"], 150, "c2"));
+        assert!(msg.contains("/w/src/auth.ts"));
+        // And the second agent's attempt must not have quietly taken the first
+        // one's claim away, which is what superseding by owner string did.
+        assert_eq!(held(&claims).len(), 1);
+        assert_eq!(held(&claims)[0].id, "c1");
+        assert_eq!(held(&claims)[0].owner_key, first.key);
+    }
+
+    /// Releasing ends your own claims and nobody else's. Keyed by the display
+    /// string, `release` ended every claim that named the same directory — so
+    /// one agent finishing dropped its neighbour's protection too.
+    #[test]
+    fn releasing_cannot_reach_another_agents_claims() {
+        let mut claims = Vec::new();
+        let (first, second) = (who("canopy (/w)", 1), who("canopy (/w)", 2));
+        ok(claim(&mut claims, &first, &["/w/a.ts"], 100, "c1"));
+        ok(claim(&mut claims, &second, &["/w/b.ts"], 110, "c2"));
+        assert_eq!(ok(release(&mut claims, &second, 200)), "Released 1 claim(s).");
+        let still = held(&claims);
+        assert_eq!(still.len(), 1);
+        assert_eq!(still[0].id, "c1");
+    }
+
+    /// A claim spanning files held by several agents told the first one and
+    /// left the rest believing their files were uncontested.
+    #[test]
+    fn every_holder_it_collided_with_hears_about_it() {
+        let (mut claims, a, b, greedy) = (Vec::new(), named("a"), named("b"), named("greedy"));
+        ok(claim(&mut claims, &a, &["/w/one.ts"], 100, "c1"));
+        ok(claim(&mut claims, &b, &["/w/two.ts"], 110, "c2"));
+        let msg = conflict(claim(
+            &mut claims,
+            &greedy,
+            &["/w/one.ts", "/w/two.ts"],
+            120,
+            "c3",
+        ));
+        assert!(msg.contains("one other agent"), "got: {msg}");
+        assert_eq!(claims[0].refusals.len(), 1);
+        assert_eq!(claims[1].refusals.len(), 1);
+    }
+
+    /// An agent that answers a 409 by retrying — which the refusal text
+    /// invites — must not be able to grow the holder's record without limit.
+    #[test]
+    fn refusals_are_capped() {
+        let (mut claims, holder, pest) = (Vec::new(), named("holder"), named("pest"));
+        ok(claim(&mut claims, &holder, &["/w/hot.ts"], 100, "c1"));
+        for n in 0..MAX_REFUSALS + 25 {
+            conflict(claim(&mut claims, &pest, &["/w/hot.ts"], 200 + n as u64, "cx"));
+        }
+        assert_eq!(claims[0].refusals.len(), MAX_REFUSALS);
+        // The newest survive: an old refusal says nothing a recent one doesn't.
+        let last = claims[0].refusals.last().unwrap().at_ms;
+        assert_eq!(last, 200 + (MAX_REFUSALS + 24) as u64);
+    }
+
+    /// A dead agent's claim used to be permanent until a human pressed
+    /// Release. The sweep needs the terminal on the claim to find it.
+    #[test]
+    fn a_claim_records_the_terminal_behind_it() {
+        let mut claims = Vec::new();
+        let agent = who("canopy (/w)", 7);
+        ok(claim(&mut claims, &agent, &["/w/a.ts"], 100, "c1"));
+        assert_eq!(claims[0].pty_id, Some(7));
+        assert_eq!(claims[0].instance.as_deref(), Some("test"));
+        // Which is exactly what the exit sweep ends them by.
+        assert_eq!(end_claims(&mut claims, &agent.key, 200, "canopy"), 1);
+        assert_eq!(claims[0].released_by.as_deref(), Some("canopy"));
+    }
+
     #[test]
     fn reclaiming_supersedes_rather_than_erases() {
-        let mut claims = Vec::new();
-        ok(apply_claim(
-            &mut claims,
-            &claim_req("claim", "alice", &["/w/a.ts"]),
-            100,
-            "c1",
-        ));
-        ok(apply_claim(
-            &mut claims,
-            &claim_req("claim", "alice", &["/w/b.ts"]),
-            200,
-            "c2",
-        ));
+        let (mut claims, alice) = (Vec::new(), named("alice"));
+        ok(claim(&mut claims, &alice, &["/w/a.ts"], 100, "c1"));
+        ok(claim(&mut claims, &alice, &["/w/b.ts"], 200, "c2"));
         assert_eq!(claims.len(), 2);
         assert_eq!(claims[0].released_by.as_deref(), Some("superseded"));
         assert_eq!(held(&claims).len(), 1);
@@ -2842,26 +3580,17 @@ mod tests {
     fn the_history_is_capped_but_never_at_a_held_claim() {
         let mut claims = Vec::new();
         for n in 0..MAX_ENDED_CLAIMS + 10 {
-            let owner = format!("agent-{n}");
-            ok(apply_claim(
+            let agent = who(&format!("agent-{n}"), n as u32 + 1);
+            ok(claim(
                 &mut claims,
-                &claim_req("claim", &owner, &[&format!("/w/{n}.ts")]),
+                &agent,
+                &[&format!("/w/{n}.ts")],
                 n as u64,
                 &format!("c{n}"),
             ));
-            ok(apply_claim(
-                &mut claims,
-                &claim_req("release", &owner, &[]),
-                n as u64 + 1,
-                "unused",
-            ));
+            ok(release(&mut claims, &agent, n as u64 + 1));
         }
-        ok(apply_claim(
-            &mut claims,
-            &claim_req("claim", "live", &["/w/live.ts"]),
-            9999,
-            "c-live",
-        ));
+        ok(claim(&mut claims, &named("live"), &["/w/live.ts"], 9999, "c-live"));
         assert_eq!(
             claims.iter().filter(|c| c.released_at_ms.is_some()).count(),
             MAX_ENDED_CLAIMS
@@ -2870,6 +3599,232 @@ mod tests {
         assert_eq!(claims[0].id, "c10");
         assert_eq!(held(&claims).len(), 1);
         assert_eq!(held(&claims)[0].id, "c-live");
+    }
+
+    /// Two spellings of one file must meet. Prefix comparison alone let an
+    /// agent claim `src/auth.ts` while another held `/w/src/auth.ts`, and both
+    /// walked away believing they had it exclusively.
+    #[test]
+    fn claim_paths_are_normalised_before_they_are_compared() {
+        let base = Some("/w");
+        assert_eq!(normalize_claim_path("src/auth.ts", base), "/w/src/auth.ts");
+        assert_eq!(normalize_claim_path("./src/auth.ts", base), "/w/src/auth.ts");
+        assert_eq!(
+            normalize_claim_path("/w/src/../src/auth.ts", base),
+            "/w/src/auth.ts"
+        );
+        assert_eq!(normalize_claim_path("/w/src/", base), "/w/src");
+        // With no base to resolve against, a relative path stays relative
+        // rather than being invented into an absolute one.
+        assert_eq!(normalize_claim_path("src/auth.ts", None), "src/auth.ts");
+        // A leading `..` has nothing to pop and must survive, or two unrelated
+        // paths flatten into the same string.
+        assert_eq!(normalize_claim_path("../sibling/a.ts", None), "../sibling/a.ts");
+
+        let (mut claims, a, b) = (Vec::new(), named("a"), named("b"));
+        ok(claim(&mut claims, &a, &["/w/src/auth.ts"], 100, "c1"));
+        let spelled_differently = normalize_claim_path("src/../src/auth.ts", base);
+        conflict(claim(&mut claims, &b, &[&spelled_differently], 150, "c2"));
+    }
+
+    /// `Path::starts_with` compares components and does not resolve `..`, so
+    /// this exact string passed the workspace check and walked straight back
+    /// out of the workspace it was being checked against.
+    #[test]
+    fn traversal_cannot_escape_a_workspace_root() {
+        let escape = normalize_claim_path("/Users/me/repo/../../../etc", None);
+        assert_eq!(escape, "/etc");
+        assert!(!std::path::Path::new(&escape).starts_with("/Users/me/repo"));
+        // And the honest case still resolves inside.
+        let inside = normalize_claim_path("/Users/me/repo/src/../lib", None);
+        assert!(std::path::Path::new(&inside).starts_with("/Users/me/repo"));
+    }
+
+    /// Everything that is not text is stripped, not just the newlines. A
+    /// message used to be able to carry ^C to interrupt the target mid-turn,
+    /// or escape sequences its TUI would act on rather than display.
+    #[test]
+    fn a_message_carries_no_control_bytes() {
+        assert_eq!(sanitize_message("hello\r\nworld"), "hello world");
+        assert_eq!(sanitize_message("stop\u{3}now"), "stop now");
+        assert_eq!(sanitize_message("\u{1b}[201~escaped"), "[201~escaped");
+        assert_eq!(sanitize_message("a\u{4}\u{7}b"), "a b");
+        // Runs left by the substitution collapse, and the edges are trimmed,
+        // so a multi-line handoff does not arrive padded with its line breaks.
+        assert_eq!(sanitize_message("  a\n\n\n  b  "), "a b");
+        assert_eq!(sanitize_message("\r\n\u{3}"), "");
+        // Ordinary text, including non-ASCII, is untouched.
+        assert_eq!(sanitize_message("rebase onto main — then push"), "rebase onto main — then push");
+    }
+
+    /// The identity is the terminal, so two agents in one directory are two
+    /// identities — and the same terminal in a later app run is not the same
+    /// agent, because pty ids restart at 1.
+    #[test]
+    fn an_identity_is_a_terminal_not_a_directory() {
+        let a = AgentIdentity { pty_id: 1, instance: "run-a".into(), cwd: "/w".into() };
+        let b = AgentIdentity { pty_id: 2, instance: "run-a".into(), cwd: "/w".into() };
+        let recycled = AgentIdentity { pty_id: 1, instance: "run-b".into(), cwd: "/w".into() };
+        assert_ne!(a.key(), b.key());
+        assert_ne!(a.key(), recycled.key());
+        assert_eq!(a.key(), AgentIdentity { pty_id: 1, instance: "run-a".into(), cwd: "/elsewhere".into() }.key());
+    }
+
+    /// The registry is what makes "who is calling" answerable, and what tells
+    /// an agent session apart from the user's own shell — the question
+    /// `message_agent` was never asking before it typed into one.
+    #[test]
+    fn a_terminals_credential_names_it_and_dies_with_it() {
+        let bridge = ContextBridge::default();
+        let _ = bridge.port.set(4242);
+
+        let (port, token) = bridge.mint_agent(7, "/w/app").expect("port is set");
+        assert_eq!(port, 4242);
+
+        match bridge.identify(&token) {
+            Some(Caller::Agent(a)) => {
+                assert_eq!(a.pty_id, 7);
+                assert_eq!(a.cwd, "/w/app");
+            }
+            other => panic!("the minted token must name its terminal, got {other:?}"),
+        }
+        // The process-wide token is trusted but nameless, so it can never act
+        // as some particular agent.
+        assert_eq!(bridge.identify(&bridge.token), Some(Caller::Root));
+        assert_eq!(bridge.identify("not a token"), None);
+
+        // Two terminals in one directory get two credentials and two
+        // identities, which is the whole point.
+        let (_, second) = bridge.mint_agent(8, "/w/app").unwrap();
+        assert_ne!(token, second);
+        let key_of = |t: &str| match bridge.identify(t) {
+            Some(Caller::Agent(a)) => a.key(),
+            _ => panic!("expected an agent"),
+        };
+        assert_ne!(key_of(&token), key_of(&second));
+
+        // Retiring hands back the identity the sweep needs, and the credential
+        // stops working immediately.
+        let retired = bridge.retire_agent(7).expect("pty 7 was registered");
+        assert_eq!(retired.pty_id, 7);
+        assert_eq!(bridge.identify(&token), None);
+        assert!(bridge.retire_agent(7).is_none());
+        // The other terminal is untouched by its neighbour's exit.
+        assert!(matches!(bridge.identify(&second), Some(Caller::Agent(_))));
+    }
+
+    /// An agent owns its own terminal and nobody else's. `close_session` was
+    /// careful about this and `stop_server` was not, which made the
+    /// restriction decorative.
+    #[test]
+    fn one_agent_cannot_stop_anothers_session() {
+        let bridge = ContextBridge::default();
+        let _ = bridge.port.set(1);
+        let (_, mine) = bridge.mint_agent(1, "/w").unwrap();
+        let me = bridge.identify(&mine).unwrap();
+        use TerminalRole::{Agent, NotAgent};
+
+        // Another agent's session: refused, with somewhere else to go.
+        let err = may_act_on_terminal(&me, 2, Agent, "stop").unwrap_err();
+        assert!(err.contains("canopy_message_agent"), "got: {err}");
+        // My own: allowed.
+        assert!(may_act_on_terminal(&me, 1, Agent, "stop").is_ok());
+        // A dev server or a shell stays fair game — stopping one is the point
+        // of the tool.
+        assert!(may_act_on_terminal(&me, 99, NotAgent, "stop").is_ok());
+        // The user's own control surface can stop a runaway agent; the rule is
+        // about one agent reaching for another, not about Canopy itself.
+        assert!(may_act_on_terminal(&Caller::Root, 2, Agent, "stop").is_ok());
+    }
+
+    /// The half that is easy to get backwards. The monitor classifies on a
+    /// tick, so a session that has only just started — and any CLI the monitor
+    /// cannot name at all — is `Unknown`; reading that as "not an agent" would
+    /// leave it killable by any other agent for as long as that lasts.
+    #[test]
+    fn an_unclassified_terminal_is_protected_but_not_messaged() {
+        let bridge = ContextBridge::default();
+        let _ = bridge.port.set(1);
+        let (_, mine) = bridge.mint_agent(1, "/w").unwrap();
+        let me = bridge.identify(&mine).unwrap();
+
+        // Stopping: refused while we cannot tell, and the wording says why.
+        let err = may_act_on_terminal(&me, 2, TerminalRole::Unknown, "stop").unwrap_err();
+        assert!(err.contains("may be another agent's session"), "got: {err}");
+        // Messaging: also refused, but for the opposite reason — typing into
+        // something that might be a shell runs what you sent.
+        let err = may_message_terminal(2, TerminalRole::Unknown).unwrap_err();
+        assert!(err.contains("can't yet tell"), "got: {err}");
+        // And a known agent is messageable, a known shell is not.
+        assert!(may_message_terminal(2, TerminalRole::Agent).is_ok());
+        assert!(may_message_terminal(2, TerminalRole::NotAgent).is_err());
+    }
+
+    /// `paths_overlap` is a prefix test, so a path that normalises to nothing
+    /// is a prefix of every path there is: claiming one collided with every
+    /// held claim in the app — reading back the first holder on the way — and
+    /// on an empty store took a claim that refused everybody everywhere.
+    #[test]
+    fn a_claim_cannot_name_everything() {
+        let (mut claims, greedy, honest) = (Vec::new(), named("greedy"), named("honest"));
+        for wildcard in ["", "/", "   ", "src/relative.ts"] {
+            match claim(&mut claims, &greedy, &[wildcard], 100, "c1") {
+                ClaimReply::Bad(_) => {}
+                other => panic!(
+                    "{wildcard:?} must be refused as a claim, got {}",
+                    match other {
+                        ClaimReply::Ok(m) | ClaimReply::Conflict(m) | ClaimReply::Bad(m) => m,
+                    }
+                ),
+            }
+        }
+        assert!(claims.is_empty(), "a refused claim must not be stored");
+        // A real path still works, and still only collides with itself.
+        ok(claim(&mut claims, &honest, &["/w/real.ts"], 100, "c1"));
+        assert_eq!(held(&claims).len(), 1);
+    }
+
+    #[test]
+    fn a_credential_comparison_does_not_leak_its_prefix() {
+        assert!(constant_time_eq("abc123", "abc123"));
+        assert!(!constant_time_eq("abc123", "abc124"));
+        assert!(!constant_time_eq("abc", "abc1"));
+        assert!(constant_time_eq("", ""));
+    }
+
+    /// Claims are the caller's business only when they could collide with it.
+    /// Unscoped, an agent learned every open project's claimed paths — even
+    /// with shared context switched off for its own.
+    #[test]
+    fn claims_are_scoped_to_the_callers_tree() {
+        let mine = Claim {
+            id: "c1".into(),
+            paths: vec!["/w/app/src/a.ts".into()],
+            owner: "app (/w/app)".into(),
+            owner_key: "pty:test:1".into(),
+            pty_id: Some(1),
+            instance: Some("test".into()),
+            note: None,
+            at_ms: 0,
+            released_at_ms: None,
+            released_by: None,
+            refusals: Vec::new(),
+        };
+        let theirs = Claim {
+            paths: vec!["/w/other/src/b.ts".into()],
+            owner: "other (/w/other)".into(),
+            ..mine.clone()
+        };
+        assert!(claim_concerns(&mine, "/w/app"));
+        assert!(!claim_concerns(&theirs, "/w/app"));
+        // A subdirectory of the claimed tree still concerns me.
+        assert!(claim_concerns(&mine, "/w/app/src"));
+    }
+
+    #[test]
+    fn an_owner_display_string_yields_its_directory() {
+        assert_eq!(claim_owner_cwd("canopy (/w/canopy)").as_deref(), Some("/w/canopy"));
+        assert_eq!(claim_owner_cwd("no directory here"), None);
     }
 
     #[test]

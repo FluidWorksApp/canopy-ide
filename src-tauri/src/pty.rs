@@ -661,25 +661,56 @@ impl PtyManager {
         // #5" from another's — which silently binds one agent's digest to another's
         // terminal in the panel. This tag makes the pairing unambiguous.
         cmd.env("CANOPY_INSTANCE", instance_token());
+        let cwd = cwd
+            .or_else(|| dirs_home())
+            .unwrap_or_else(|| "/".to_string());
         // Where the context bridge answers (see context.rs): `canopy-hook --mcp`,
         // spawned by an agent CLI in this terminal, inherits these and gains the
         // Canopy context tools. try_state: tests' mock app doesn't manage it.
+        //
+        // The token is minted for this terminal alone, so the bridge can tell
+        // which session is calling without taking its word for it. Every PTY
+        // used to carry the same one, which left "who is asking" answerable
+        // only from body fields the caller filled in itself.
         if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
-            if let Some((port, token)) = ctx.env() {
+            if let Some((port, token)) = ctx.mint_agent(id, &cwd) {
                 cmd.env("CANOPY_CTX_PORT", port.to_string());
                 cmd.env("CANOPY_CTX_TOKEN", token);
             }
         }
-        let cwd = cwd
-            .or_else(|| dirs_home())
-            .unwrap_or_else(|| "/".to_string());
         cmd.cwd(&cwd);
 
-        let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+        // The credential was minted before the child so it could be in its
+        // environment from the first instruction. Every failure between there
+        // and the session being registered has to hand it back: nothing is
+        // watching for an exit yet, so a credential left behind names a
+        // terminal that will never appear and never be swept — and on the paths
+        // below the child is already running and already holding it.
+        let retire = || {
+            if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
+                ctx.retire_agent(id);
+            }
+        };
+        let child = match pair.slave.spawn_command(cmd) {
+            Ok(child) => child,
+            Err(e) => {
+                retire();
+                return Err(e.to_string());
+            }
+        };
         drop(pair.slave);
 
-        let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-        let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+        let (mut reader, mut writer) = match pair
+            .master
+            .try_clone_reader()
+            .and_then(|r| pair.master.take_writer().map(|w| (r, w)))
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                retire();
+                return Err(e.to_string());
+            }
+        };
 
         let pid = child.process_id();
         let killer = child.clone_killer();
@@ -855,6 +886,12 @@ impl PtyManager {
                         }
                     }
                     sessions.lock().unwrap().remove(&session.id);
+                    // The terminal's bridge credential dies with it, and so do
+                    // the advisory claims it was holding. Nothing used to watch
+                    // for this: an agent that crashed mid-edit held its files
+                    // against every other agent until a human noticed the row
+                    // and pressed Release.
+                    crate::context::release_claims_for_pty(&app, session.id);
                     let _ = app.emit(
                         "pty:exit",
                         PtyExit {

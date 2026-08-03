@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
-import { CommentComposer, sameJson, sameMap } from "./AgentWorkspaceView";
+import { CommentComposer, sameJson, sameMap, workspaceLifeDigest } from "./AgentWorkspaceView";
+import { agentLife } from "../../shared/agentLife";
 import { resolve } from "../shortcuts";
 
 // The submit chord as this platform actually spells it: ⌘⏎ on a Mac, Ctrl+⏎
@@ -72,6 +73,57 @@ describe("comment composer drafts", () => {
     fireEvent.change(box, { target: { value: "  needs a test  " } });
     fireEvent.keyDown(box, submitKey);
     expect(onAdd).toHaveBeenCalledWith("needs a test");
+  });
+});
+
+describe("the digest handed to the lifecycle ladder", () => {
+  // The view rebuilds a digest out of the workspace join and the one the tab
+  // opened with. The ladder decides `digestUsable` off `store` and `foreign`
+  // as well as the state fields, so dropping them in transit turned "no
+  // lifecycle was ever recorded" into a confident verdict.
+  const now = Math.floor(Date.now() / 1000);
+
+  it("keeps the store flag, so a store-only digest reads unknown — not a real state", () => {
+    const life = agentLife({
+      digest: workspaceLifeDigest(null, {
+        session_id: "s-1",
+        agent: "claude",
+        state: "idle",
+        state_via: "turn-boundary",
+        updated: now - 10,
+        store: true,
+      }) as never,
+      now,
+    });
+    expect(life.state).toBe("unknown");
+    expect(life.reason).toBe("store-only");
+  });
+
+  it("keeps the foreign flag, so another launch's digest is not trusted", () => {
+    const life = agentLife({
+      digest: workspaceLifeDigest(null, {
+        session_id: "s-1",
+        agent: "claude",
+        state: "working",
+        state_via: "tool-activity",
+        updated: now - 10,
+        foreign: true,
+      }) as never,
+      now,
+    });
+    expect(life.state).toBe("unknown");
+    expect(life.reason).toBe("foreign-instance");
+  });
+
+  it("still believes an honest hook digest, workspace fields first", () => {
+    const life = agentLife({
+      digest: workspaceLifeDigest(
+        { state: "working", state_via: "tool-activity", updated: now - 10 },
+        { session_id: "s-1", agent: "claude", state: "idle", updated: now - 900 },
+      ) as never,
+      now,
+    });
+    expect(life.state).toBe("working");
   });
 });
 

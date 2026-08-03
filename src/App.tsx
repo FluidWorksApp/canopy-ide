@@ -684,6 +684,25 @@ export default function App() {
           });
         }
       }),
+      // One agent reached into another agent's session. It lands in that
+      // terminal as keystrokes, indistinguishable from the user typing, so
+      // this is the only thing that tells the user it happened at all — and
+      // "it didn't submit" is the case they most need, because the message is
+      // then sitting in a composer waiting for a return nobody will press.
+      ipc.onAgentMessage((m) => {
+        postAttention({
+          kind: "fyi",
+          tone: m.submitted ? "info" : "warn",
+          title: m.submitted
+            ? `An agent sent a message to terminal ${m.toPtyId}`
+            : `A message to terminal ${m.toPtyId} was never sent`,
+          body: m.submitted
+            ? "It arrived as if typed there, and that session answers in its own tab."
+            : "The terminal went away before it could be submitted; it may be sitting unsent.",
+          source: "agent",
+          where: { kind: "terminal", ptyId: m.toPtyId },
+        });
+      }),
       ipc.onRelayCommand((m) => {
         setRelayInbox((prev) =>
           prev.some((x) => x.id === m.id) ? prev : [...prev, m],
