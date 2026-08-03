@@ -19,6 +19,18 @@ vi.mock("../clipboardStore", () => ({
 
 import { ClipboardHistory } from "./ClipboardHistory";
 
+const chordEvent = () => {
+  const chord = resolve("clipboard-history")!;
+  return {
+    code: chord.code!,
+    key: "v",
+    metaKey: chord.meta,
+    ctrlKey: chord.ctrl,
+    altKey: chord.alt,
+    shiftKey: chord.shift,
+  };
+};
+
 const clip = (id: number): Clip => ({
   id,
   ts: Math.floor(Date.now() / 1000) - id,
@@ -40,13 +52,23 @@ beforeEach(() => {
 });
 
 describe("ClipboardHistory", () => {
+  it("shows no tray icon while history is off", () => {
+    render(<ClipboardHistory visible />);
+    expect(
+      screen.queryByRole("button", { name: /Clipboard history/ }),
+    ).toBeNull();
+  });
+
   it("keeps capture opt-in and enables it only from the explicit action", () => {
     render(<ClipboardHistory visible />);
-    fireEvent.click(screen.getByRole("button", { name: /Clipboard history/ }));
+    fireEvent.keyDown(window, chordEvent());
 
     expect(screen.getByText(/History is off/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Enable history" }));
     expect(getSettings().clipboardHistory).toBe(true);
+    expect(
+      screen.getByRole("button", { name: /Clipboard history/ }),
+    ).toBeTruthy();
   });
 
   it("shows only the latest ten clips in the clickable list", () => {
@@ -62,15 +84,7 @@ describe("ClipboardHistory", () => {
   it("shows cycling and pastes the highlighted clip when modifiers are released", async () => {
     updateSettings({ clipboardHistory: true });
     render(<ClipboardHistory visible />);
-    const chord = resolve("clipboard-history")!;
-    const down = {
-      code: chord.code!,
-      key: "v",
-      metaKey: chord.meta,
-      ctrlKey: chord.ctrl,
-      altKey: chord.alt,
-      shiftKey: chord.shift,
-    };
+    const down = chordEvent();
 
     fireEvent.keyDown(window, down);
     expect(screen.getAllByRole("option")[0]).toHaveAttribute(
