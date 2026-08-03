@@ -319,8 +319,12 @@ cargo build --manifest-path src-tauri/Cargo.toml
 | `src/` | React + Vite frontend (components, IPC wrappers, editor) |
 | `src-tauri/src/` | Rust core — `pty.rs`, `lsp.rs`, `fsx.rs`, `git.rs`, `agents.rs` |
 | `src-tauri/src/bin/canopy_hook.rs` | the agent-hook helper (a second binary) |
-| `packages/ui/` | shared UI primitives (`@canopy/ui`) |
+| `shared/` | browser-safe models, policy, and UI shared by desktop and Remote |
+| `portal/` | the embedded Canopy Remote React application |
+| `packages/ui/` | independently buildable UI package (`@canopy/ui`) |
 | `scripts/` | sidecar build + release tooling |
+| `docs/architecture.md` | contributor architecture guide and system map |
+| `docs/architecture-llm.md` | compact architecture context for coding agents |
 | `SPEC.md` | the full product spec |
 | `RELEASING.md` | how signed releases are cut |
 
@@ -330,6 +334,10 @@ keeps it approachable. Keep native process ownership in Rust; the frontend never
 spawns anything itself.
 
 ## Architecture
+
+For the full contributor-oriented system map, runtime flows, trust boundaries,
+and extension guide, see [docs/architecture.md](./docs/architecture.md). Coding
+agents can use the compact [LLM context](./docs/architecture-llm.md).
 
 ```
 ┌────────────────────────── Tauri (Rust core) ──────────────────────────┐
