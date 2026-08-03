@@ -20,7 +20,7 @@ describe("getSettings / updateSettings", () => {
     expect(s.trackerKeys).toEqual({});
     expect(s.tabSwitchMode).toBe("recent");
     expect(s.restoreUserClosedSessions).toBe(false);
-    expect(s.agentAskForAttention).toBe(true);
+    expect(s.agentAskForAttention).toBe(false);
   });
 
   it("overlays stored values on top of defaults", () => {

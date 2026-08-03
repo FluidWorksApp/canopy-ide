@@ -591,7 +591,7 @@ export const DEFAULTS: Settings = {
   tabSwitchMode: "recent",
   idleGroupDelaySeconds: 60,
   customMicroTasks: [],
-  agentAskForAttention: true,
+  agentAskForAttention: false,
   disabledTools: [],
   autoImportMarkdownResearch: true,
   trackerKeys: {},
