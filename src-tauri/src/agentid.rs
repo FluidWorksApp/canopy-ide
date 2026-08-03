@@ -39,7 +39,7 @@ pub struct AgentHint {
     /// followed, because the name you invoked is the name you recognise.
     pub bin: String,
     /// Package that ships the resolved executable, when one can be determined:
-    /// `npm:@anthropic-ai/claude-code`, `brew:omp`, `pypi:aider-chat`. This is
+    /// `npm:@anthropic-ai/claude-code`, `brew:omp`, `py:aider`. This is
     /// what survives an enterprise wrapper renaming the binary.
     pub pkg: Option<String>,
     /// Canonical path of the resolved executable — stable across the shims that

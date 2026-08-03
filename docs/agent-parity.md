@@ -124,7 +124,7 @@ The load-bearing pieces every feature hangs off:
 
 ### oh-my-pi (`omp`, v17.x)
 - **TS extensions** (`~/.omp/agent/extensions/`, `--extension file.ts`): session
-  lifecycle, `before_agent_start`/`agent_settled`, `tool_call`, `tool_result`,
+  lifecycle, `before_agent_start`/`agent_end`, `tool_call`, `tool_result`,
   plus observability events `tool_approval_requested/resolved`.
 - Sessions: `~/.omp/agent/sessions/<dir>/<ts>_<id>.jsonl` — assistant entries
   carry `provider`, `model`, and `usage` **including computed cost** — the

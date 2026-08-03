@@ -67,7 +67,7 @@
       "structuredBlock": ["Notification"],
       "notification": "block",
       "verifiedAt": "2026-08-03",
-      "$note": "The extension maps before_agent_start/agent_settled/session_shutdown and tool approval events onto Canopy's normalized wire names with explicit signals. Installed in omp's auto-discovered agent/extensions directory."
+      "$note": "The extension maps before_agent_start/agent_end/session_shutdown and tool approval events onto Canopy's normalized wire names with explicit signals. Installed in omp's auto-discovered agent/extensions directory."
     },
     {
       "id": "amp",

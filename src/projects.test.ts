@@ -164,13 +164,21 @@ describe("agentForPkg", () => {
   });
 
   it("names the package the install command installs", () => {
-    // A package identity that doesn't match what `install` puts on disk would
-    // silently identify nothing, so keep the two in step.
+    // Every identity needs a known source prefix. The first entry is the
+    // preferred install and must match the command; later entries are aliases
+    // for legacy or alternate official distribution channels.
     for (const cli of AGENT_CLIS) {
-      const pkg = cli.pkgs?.[0];
-      if (!pkg) continue;
-      const [kind, name] = [pkg.slice(0, pkg.indexOf(":")), pkg.slice(pkg.indexOf(":") + 1)];
-      expect(["npm", "brew", "py"]).toContain(kind);
+      const packages = cli.pkgs ?? [];
+      for (const pkg of packages) {
+        const kind = pkg.slice(0, pkg.indexOf(":"));
+        expect(["npm", "brew", "py"]).toContain(kind);
+      }
+      const primary = packages[0];
+      if (!primary) continue;
+      const [kind, name] = [
+        primary.slice(0, primary.indexOf(":")),
+        primary.slice(primary.indexOf(":") + 1),
+      ];
       if (kind === "npm") expect(cli.install).toContain(name);
     }
   });
