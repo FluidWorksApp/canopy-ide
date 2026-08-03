@@ -335,8 +335,28 @@ fn js_log(level: String, message: String) {
     }
 }
 
+/// Apps started by launchd inherit macOS's 256-descriptor soft limit. Canopy
+/// owns several descriptors per terminal in addition to WebKit, SQLite, file
+/// watchers, and short-lived command pipes, so a busy workspace can otherwise
+/// fail to open a PTY with EMFILE even though the system hard limit is higher.
+#[cfg(target_os = "macos")]
+fn raise_file_descriptor_limit() {
+    const TARGET: libc::rlim_t = 4096;
+
+    unsafe {
+        let mut limit: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < TARGET {
+            limit.rlim_cur = TARGET.min(limit.rlim_max);
+            let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    raise_file_descriptor_limit();
+
     // Install the ring crypto provider process-wide so rustls has a default —
     // the team relay's internet path dials wss:// through a tunnel via
     // tokio-tungstenite, whose rustls connector builds its config from the
