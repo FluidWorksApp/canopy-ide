@@ -47,6 +47,11 @@ portal/dist/*
 pnpm-lock.yaml
 .claude/
 
+# graphify scan output (detect index, stat cache, converted docs). Machine-local
+# — it embeds absolute paths and the local interpreter — and the tool rewrites it
+# on every run, so it only ever shows up as untracked noise in `git status`.
+/graphify-out/
+
 # CI-staged ONNX Runtime libraries (bundled as app resources; not committed)
 src-tauri/onnxruntime/*.dylib
 src-tauri/onnxruntime/*.so
