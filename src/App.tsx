@@ -1738,6 +1738,23 @@ export default function App() {
     let un: (() => void) | undefined;
     void ipc
       .onAgentBrowser(async (op) => {
+        if (op.op === "screenshot" && op.scope === "ide") {
+          try {
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            const image = await ipc.webviewSnapshot(0, 0, width, height, op.max ?? undefined);
+            void ipc.browserResult(op.id, true, {
+              image,
+              mimeType: "image/png",
+              url: "Canopy",
+              width,
+              height,
+            });
+          } catch (err) {
+            void ipc.browserResult(op.id, false, String(err));
+          }
+          return;
+        }
         const projectId =
           projectForCwd(op.route) ??
           (wsRef.current.openIds.length === 1

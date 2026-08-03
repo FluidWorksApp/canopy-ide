@@ -9,7 +9,6 @@ const open = (over: Partial<Parameters<typeof LaunchPalette>[0]> = {}) => {
     installed: {} as Record<string, boolean>,
     cliUpdates: {},
     onShell: vi.fn(),
-    onPreview: vi.fn(),
     onLaunchCli: vi.fn(),
     onClose: vi.fn(),
     ...over,
@@ -21,10 +20,10 @@ const open = (over: Partial<Parameters<typeof LaunchPalette>[0]> = {}) => {
 const claude = () => AGENT_CLIS.find((c) => c.id === "claude")!;
 
 describe("LaunchPalette", () => {
-  it("lists the shell, the preview and every agent CLI", () => {
+  it("lists the shell and every agent CLI", () => {
     open();
     expect(screen.getByText("Shell")).toBeInTheDocument();
-    expect(screen.getByText("Preview")).toBeInTheDocument();
+    expect(screen.queryByText("Preview")).not.toBeInTheDocument();
     for (const cli of AGENT_CLIS) {
       expect(screen.getByText(cli.name)).toBeInTheDocument();
     }
@@ -48,9 +47,9 @@ describe("LaunchPalette", () => {
   });
 
   it("moves the selection with the arrow keys", async () => {
-    const { onPreview } = open();
+    const { onLaunchCli } = open();
     await userEvent.keyboard("{ArrowDown}{Enter}");
-    expect(onPreview).toHaveBeenCalledOnce();
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0]);
   });
 
   it("does not run off the end of the list", async () => {

@@ -2832,8 +2832,9 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_screenshot",
-            "description": "A picture of the previewed page as rendered, returned as an image. Use it whenever the question is how something LOOKS — overlap, contrast, spacing, cut-off text — which the DOM snapshot cannot see. Needs the preview tab to be in front, because it reads composited pixels: Canopy will not move the user's front tab for you, so this fails while they are working elsewhere. Everything else — snapshot, click, type, eval, console, network — works on a background tab.",
+            "description": "Screenshot the browser preview or Canopy IDE. Defaults to browser.",
             "inputSchema": { "type": "object", "properties": {
+                "scope": { "type": "string", "enum": ["browser", "ide"], "description": "Capture browser (default) or ide" },
                 "max": { "type": "integer", "description": "Widest the image should be, in pixels (default 1200)" },
                 "url": { "type": "string", "description": "Which preview tab, when several are open" },
                 "project": { "type": "string", "description": "Which project's preview to drive, by name. Only needed when you are not running inside one — the companion always is not" }
