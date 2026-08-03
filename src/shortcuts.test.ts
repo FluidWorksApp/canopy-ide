@@ -17,6 +17,7 @@ import termTsx from "./components/Term.tsx?raw";
 import {
   ALL_PLATFORMS,
   accelerator,
+  currentShortcutProfile,
   format,
   formatChord,
   helpRows,
@@ -26,6 +27,7 @@ import {
   matches,
   matchesModifierClick,
   resolve,
+  SHORTCUT_PROFILES,
   withShortcut,
   type Platform,
 } from "./shortcuts";
@@ -71,6 +73,51 @@ describe("resolve", () => {
 
   it("throws on an unknown id rather than silently never firing", () => {
     expect(() => resolve("not-a-shortcut")).toThrow(/unknown shortcut/);
+  });
+});
+
+describe("shortcut profiles", () => {
+  it("ships the onboarding presets with Canopy as the default", () => {
+    expect(SHORTCUT_PROFILES.map((profile) => profile.id)).toEqual([
+      "canopy",
+      "vscode",
+      "jetbrains",
+      "sublime",
+    ]);
+    expect(currentShortcutProfile()).toBe("canopy");
+  });
+
+  it("maps familiar commands per profile and platform", () => {
+    expect(format("quick-open", "windows", "vscode")).toBe("Ctrl+P");
+    expect(format("spot-search", "windows", "vscode")).toBe("Ctrl+Shift+P");
+    expect(format("quick-open", "macos", "jetbrains")).toBe("⇧⌘O");
+    expect(format("quick-open", "linux", "jetbrains")).toBe("Ctrl+Shift+N");
+    expect(format("settings", "windows", "jetbrains")).toBe("Ctrl+Alt+S");
+    expect(format("toggle-zen", "windows", "sublime")).toBe("Shift+F11");
+  });
+
+  it("keeps every shipped profile collision-free on every platform", () => {
+    for (const profile of SHORTCUT_PROFILES) {
+      for (const platform of ALL_PLATFORMS) {
+        const seen = new Map<string, string>();
+        for (const id of globallyBoundIds()) {
+          const chord = resolve(id, platform, profile.id);
+          if (!chord?.code) continue;
+          const key = `${chord.meta}${chord.ctrl}${chord.alt}${chord.shift}${chord.code}`;
+          expect(
+            seen.get(key),
+            `${id} collides with ${seen.get(key)} on ${platform} in ${profile.id}`,
+          ).toBeUndefined();
+          seen.set(key, id);
+        }
+      }
+    }
+  });
+
+  it("produces matching profile-aware native accelerators", () => {
+    expect(accelerator("quick-open", "windows", "vscode")).toBe("CmdOrCtrl+P");
+    expect(accelerator("settings", "windows", "jetbrains")).toBe("CmdOrCtrl+Alt+S");
+    expect(accelerator("toggle-zen", "macos", "sublime")).toBe("Shift+F11");
   });
 });
 

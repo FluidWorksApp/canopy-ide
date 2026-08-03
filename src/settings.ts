@@ -15,10 +15,12 @@ import { IS_MAC } from "./platform";
 import { SKINS, type SkinId } from "./skins/registry";
 import {
   formatChord,
+  isShortcutProfile,
   keyLabel as chordKeyLabel,
   matchesChord,
   modifierLabel,
   requireKeyChord,
+  type ShortcutProfile,
 } from "./shortcuts";
 
 /** Every skin in the roster, plus the one id that isn't a skin: "auto",
@@ -220,6 +222,9 @@ export const EDITOR_FONT_DEFAULT =
 
 export interface Settings {
   scrollback: number;
+  /** Workbench shortcut preset. Imported editor-specific customizations can be
+   * layered above this later without changing the semantic command catalog. */
+  keymapProfile: ShortcutProfile;
   /** Terminal font size — kept under its original name for backward compat
    *  with everyone who already has it in localStorage. */
   fontSize: number;
@@ -563,6 +568,7 @@ export interface Settings {
 // which is exactly why `webgl` is gone rather than defaulted to false.
 export const DEFAULTS: Settings = {
   scrollback: 10_000,
+  keymapProfile: "canopy",
   fontSize: 13,
   runawayCpuPercent: 300,
   runawayMemBytes: 4 * 1024 * 1024 * 1024,
@@ -660,6 +666,7 @@ export function getSettings(): Settings {
     value = { ...DEFAULTS, ...(JSON.parse(raw ?? "{}") as Partial<Settings>) };
     // The one stored value that can name something that no longer exists.
     value.theme = migrateTheme(value.theme);
+    if (!isShortcutProfile(value.keymapProfile)) value.keymapProfile = "canopy";
     // The chromium engine is gone; anyone who had it selected gets the
     // default back rather than an unknown value every chooseEngine call
     // would have to defend against.

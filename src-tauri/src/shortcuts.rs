@@ -40,7 +40,25 @@ struct Shortcut {
 }
 
 #[derive(Deserialize)]
+struct ProfileOverride {
+    chord: Chord,
+    #[serde(default)]
+    platform: HashMap<String, Option<Chord>>,
+}
+
+#[derive(Deserialize)]
+struct Profile {
+    #[allow(dead_code)]
+    label: String,
+    #[allow(dead_code)]
+    description: String,
+    #[serde(default)]
+    overrides: HashMap<String, ProfileOverride>,
+}
+
+#[derive(Deserialize)]
 struct Manifest {
+    profiles: HashMap<String, Profile>,
     shortcuts: Vec<Shortcut>,
 }
 
@@ -82,22 +100,31 @@ fn accel_key(code: &str) -> String {
     }
 }
 
-fn chord_for(id: &str, platform: &str) -> Option<&'static Chord> {
+fn chord_for(id: &str, platform: &str, profile: &str) -> Option<&'static Chord> {
     let s = manifest()
         .shortcuts
         .iter()
         .find(|s| s.id == id)
         .unwrap_or_else(|| panic!("unknown shortcut id: {id}"));
-    match s.platform.get(platform) {
+    let profile = manifest()
+        .profiles
+        .get(profile)
+        .unwrap_or_else(|| panic!("unknown shortcut profile: {profile}"));
+    let (chord, platform_overrides) = profile
+        .overrides
+        .get(id)
+        .map(|binding| (&binding.chord, &binding.platform))
+        .unwrap_or((&s.chord, &s.platform));
+    match platform_overrides.get(platform) {
         // Present and null: deliberately unbound on this platform.
         Some(None) => None,
         Some(Some(c)) => Some(c),
-        None => Some(&s.chord),
+        None => Some(chord),
     }
 }
 
-fn accelerator_for(id: &str, platform: &str) -> Option<String> {
-    let c = chord_for(id, platform)?;
+fn accelerator_for(id: &str, platform: &str, profile: &str) -> Option<String> {
+    let c = chord_for(id, platform, profile)?;
     let key = c.key.as_deref()?;
     // Fixed order so the string is stable and comparable with the TS side.
     let order = ["Ctrl", "Mod", "Alt", "Shift", "Meta"];
@@ -114,8 +141,12 @@ fn accelerator_for(id: &str, platform: &str) -> Option<String> {
 /// when the manifest leaves it unbound here. Panics on an unknown id — a menu
 /// item pointing at a shortcut that does not exist is a bug that should stop
 /// the build's first run, not quietly ship a menu row with no key.
-pub fn accel(id: &str) -> Option<String> {
-    accelerator_for(id, PLATFORM)
+pub fn accel(id: &str, profile: &str) -> Option<String> {
+    accelerator_for(id, PLATFORM, profile)
+}
+
+pub fn has_profile(profile: &str) -> bool {
+    manifest().profiles.contains_key(profile)
 }
 
 #[cfg(test)]
@@ -130,11 +161,11 @@ mod tests {
     #[test]
     fn mod_becomes_cmdorctrl_and_ctrl_stays_literal() {
         assert_eq!(
-            accelerator_for("quick-open", "macos").as_deref(),
+            accelerator_for("quick-open", "macos", "canopy").as_deref(),
             Some("CmdOrCtrl+P")
         );
         assert_eq!(
-            accelerator_for("next-tab", "macos").as_deref(),
+            accelerator_for("next-tab", "macos", "canopy").as_deref(),
             Some("Control+CmdOrCtrl+Right")
         );
     }
@@ -144,35 +175,40 @@ mod tests {
     #[test]
     fn tab_and_project_navigation_differ_off_mac() {
         assert_eq!(
-            accelerator_for("next-tab", "windows").as_deref(),
+            accelerator_for("next-tab", "windows", "canopy").as_deref(),
             Some("CmdOrCtrl+PageDown")
         );
         assert_eq!(
-            accelerator_for("prev-tab", "linux").as_deref(),
+            accelerator_for("prev-tab", "linux", "canopy").as_deref(),
             Some("CmdOrCtrl+PageUp")
         );
         assert_eq!(
-            accelerator_for("next-project", "windows").as_deref(),
+            accelerator_for("next-project", "windows", "canopy").as_deref(),
             Some("CmdOrCtrl+Alt+PageDown")
         );
     }
 
     #[test]
     fn an_unbound_platform_has_no_accelerator() {
-        assert_eq!(accelerator_for("term-line-start", "windows"), None);
-        assert!(accelerator_for("term-line-start", "macos").is_some());
+        assert_eq!(
+            accelerator_for("term-line-start", "windows", "canopy"),
+            None
+        );
+        assert!(accelerator_for("term-line-start", "macos", "canopy").is_some());
     }
 
     /// Every id the menu builder asks for must exist, on every platform we
     /// ship — a typo would otherwise only panic on the OS nobody tested.
     #[test]
     fn every_menu_id_resolves_on_every_platform() {
-        for id in crate::MENU_SHORTCUT_IDS {
-            for platform in ["macos", "windows", "linux"] {
-                assert!(
-                    accelerator_for(id, platform).is_some(),
-                    "{id} has no accelerator on {platform}"
-                );
+        for profile in manifest().profiles.keys() {
+            for id in crate::MENU_SHORTCUT_IDS {
+                for platform in ["macos", "windows", "linux"] {
+                    assert!(
+                        accelerator_for(id, platform, profile).is_some(),
+                        "{id} has no accelerator on {platform} in {profile}"
+                    );
+                }
             }
         }
     }
@@ -184,7 +220,7 @@ mod tests {
     fn no_off_mac_chord_asks_for_both_mod_and_ctrl() {
         for s in &manifest().shortcuts {
             for platform in ["windows", "linux"] {
-                let Some(c) = chord_for(&s.id, platform) else {
+                let Some(c) = chord_for(&s.id, platform, "canopy") else {
                     continue;
                 };
                 let has = |m: &str| c.mods.iter().any(|x| x == m);
