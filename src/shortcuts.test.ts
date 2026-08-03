@@ -262,6 +262,19 @@ describe("the manifest itself", () => {
 });
 
 describe("main's own chords", () => {
+  it("keeps clipboard history off the platform paste chords", () => {
+    expect(format("clipboard-history", "macos")).toBe("⇧⌘V");
+    expect(format("clipboard-history", "windows")).toBe("Ctrl+Alt+Shift+V");
+    expect(format("clipboard-history", "linux")).toBe("Ctrl+Alt+Shift+V");
+    expect(
+      matches(
+        key("KeyV", { meta: true, shift: true }),
+        "clipboard-history",
+        "macos",
+      ),
+    ).toBe(true);
+  });
+
   it("puts SpotSearch on the platform's own key", () => {
     expect(format("spot-search", "macos")).toBe("⌘K");
     // Ctrl+K is kill-line; off a Mac the chord takes Shift so the shell keeps it.

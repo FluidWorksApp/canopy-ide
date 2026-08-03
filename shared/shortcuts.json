@@ -398,6 +398,37 @@
       "note": "Off macOS Mod is Ctrl, and plain Ctrl+K is kill-line in readline — a key the shell needs far more often than Canopy does. Ctrl+Shift is the namespace every terminal emulator already reserves for app commands (Windows Terminal and GNOME Terminal put copy/paste/new-tab there), and it keeps the letter, so the chord is the Mac one plus Shift."
     },
     {
+      "id": "clipboard-history",
+      "label": "Clipboard history — hold the modifiers, tap V to cycle, release to paste",
+      "surface": "app",
+      "chord": {
+        "mods": [
+          "Mod",
+          "Shift"
+        ],
+        "key": "KeyV"
+      },
+      "platform": {
+        "windows": {
+          "mods": [
+            "Mod",
+            "Alt",
+            "Shift"
+          ],
+          "key": "KeyV"
+        },
+        "linux": {
+          "mods": [
+            "Mod",
+            "Alt",
+            "Shift"
+          ],
+          "key": "KeyV"
+        }
+      },
+      "note": "Cmd+Shift+V is the familiar paste-history chord on macOS. Off macOS Ctrl+Shift+V belongs to terminal paste and Ctrl+Alt+V is the default dictation-history cycle, so clipboard history adds both Alt and Shift rather than stealing either existing paste path."
+    },
+    {
       "id": "toggle-sidebar",
       "label": "Toggle sidebar",
       "surface": "menu",

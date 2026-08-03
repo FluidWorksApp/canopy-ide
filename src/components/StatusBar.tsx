@@ -39,6 +39,7 @@ import {
 } from "./ContextMenu";
 import { Dialog } from "./Dialog";
 import { BroomIcon, HeartIcon, StatsIcon } from "./icons";
+import { ClipboardHistory } from "./ClipboardHistory";
 import type { AgentEventEntry } from "../types";
 import { modelCommandLine, type ModelSwitch } from "../agentModels";
 import { useBranchSwitch } from "../useBranchSwitch";
@@ -1188,6 +1189,7 @@ export const StatusBar = memo(function StatusBar({
           </div>
         )}
       </span>
+      <ClipboardHistory visible={visible} />
       <CleanupDialog
         open={cleanupOpen}
         roots={allRoots}

@@ -35,32 +35,10 @@ import {
   timeAgo,
   type TranscriptEntry,
 } from "../dictationHistory";
+import { insertTextAtCursor } from "../insertText";
 
 type Phase =
   "idle" | "downloading" | "loading" | "recording" | "transcribing" | "notice";
-
-/** Route the text to wherever the cursor is. Ordinary fields (chat input,
- *  commit message, Monaco's hidden textarea) take execCommand — it fires the
- *  input events React and Monaco already listen for. xterm's helper textarea
- *  ignores DOM insertion, so terminals — also the fallback when nothing
- *  focusable holds focus — get the text over the same event the active Term
- *  uses for file drops, which lands it in xterm's ordered paste path. */
-function insertText(text: string) {
-  const el = document.activeElement as HTMLElement | null;
-  const isField =
-    el &&
-    !el.classList.contains("xterm-helper-textarea") &&
-    (el.tagName === "TEXTAREA" ||
-      el.tagName === "INPUT" ||
-      el.isContentEditable);
-  if (isField) {
-    document.execCommand("insertText", false, text);
-  } else {
-    window.dispatchEvent(
-      new CustomEvent("canopy:dictation-text", { detail: text }),
-    );
-  }
-}
 
 /** The animated visualiser. Its rAF loop runs only while the pill is mounted,
  *  which is only while the mic is open — an idle 60fps canvas is exactly the
@@ -235,7 +213,7 @@ export function Dictation() {
               )
             : null;
         if (field && edit) applyEdit(field, edit);
-        else insertText(text);
+        else insertTextAtCursor(text);
         // One press of the trigger is one entry, however long it ran and
         // however many passes the model needed to get through it.
         pushTranscript(text);
@@ -317,7 +295,7 @@ export function Dictation() {
         show: (entries, index) => setPicker({ entries, index }),
         commit: (entry) => {
           setPicker(null);
-          insertText(entry.text);
+          insertTextAtCursor(entry.text);
         },
         dismiss: () => setPicker(null),
       },
