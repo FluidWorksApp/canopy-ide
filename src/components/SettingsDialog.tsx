@@ -1712,6 +1712,16 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
             {tab === "privacy" && (
               <>
                 <Item
+                  name="Markdown research import"
+                  desc="Sweep open project folders for Markdown files and adopt them into Research. Existing entries are matched by file path and never duplicated."
+                >
+                  <Checkbox
+                    checked={s.autoImportMarkdownResearch}
+                    onChange={(v) => patch({ autoImportMarkdownResearch: v })}
+                    label="Automatically import project Markdown"
+                  />
+                </Item>
+                <Item
                   name="Crash reporting"
                   desc="An anonymous email to the maintainers — the error and stack, app version and OS. Filing a GitHub issue instead is always offered."
                 >

@@ -383,6 +383,11 @@ export interface Settings {
    *  a disabled tool costs the agent no context at all. */
   disabledTools: string[];
 
+  /** Adopt loose Markdown files under open project roots into Research. On by
+   *  default so existing project knowledge becomes findable; path-based
+   *  deduplication makes repeated sweeps safe. */
+  autoImportMarkdownResearch: boolean;
+
   // ---- SpotSearch (⌘K) ----
   /** Sources the omnibox must not ask (ids from spotSources.ts). Stored as the
    *  exceptions, like `disabledTools`, so a source added in a later version is
@@ -560,6 +565,7 @@ export const DEFAULTS: Settings = {
   idleGroupDelaySeconds: 60,
   customMicroTasks: [],
   disabledTools: [],
+  autoImportMarkdownResearch: true,
   trackerKeys: {},
   theme: "gotham",
   customAccent: "",
