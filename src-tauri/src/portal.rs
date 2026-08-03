@@ -761,18 +761,17 @@ const MAX_PROMPTS: usize = 12;
 /// Files kept per offline session, for the "files touched" list.
 const MAX_FILES: usize = 40;
 
-/// Projects + agent sessions + usage + live PTYs + theme, as the desktop reads
-/// them. `ptys` is the authoritative live set (from PtyManager) so the client
-/// knows which agents are attachable without waiting on the pty:stats event.
+/// Projects + agent sessions + usage + live PTYs + theme. `ptys` is the scoped
+/// subset of PtyManager's authoritative live set, so the client knows which of
+/// this checkout's agents are attachable without waiting on the pty:stats event.
 ///
 /// Scoped, deliberately. `session_digests(None)` walks every hook record on the
 /// machine *and* every conversation in every CLI's own store — on a working
 /// machine that is hundreds of sessions from dozens of checkouts, and it was
-/// being re-sent whole every four seconds to a phone. The IDE never does that:
-/// both callers (`AgentsPanel`, `ProjectView`) pass the open project's roots and
-/// then filter by cwd prefix again. This does the same, from the same source of
-/// truth — the checkouts the IDE currently has open. Other worktrees are
-/// boundaries, not roots: their sessions belong to those other checkouts.
+/// being re-sent whole every four seconds to a phone. The remote deliberately
+/// differs from ProjectView here: the desktop relates agents to every worktree,
+/// while this list is about the checkouts explicitly open in the IDE. Other
+/// worktrees are boundaries, not roots, so their sessions do not swamp Recent.
 async fn snapshot_msg(app: &AppHandle, theme: Option<Value>, roots_cache: &RootsCache) -> String {
     let projects = crate::fsx::store_load()
         .await
@@ -887,11 +886,12 @@ async fn open_scope(app: &AppHandle, store: &Value) -> SessionScope {
             continue;
         };
         if let Ok(trees) = crate::git::scan_worktrees(&top) {
-            other_worktrees.extend(trees.into_iter().map(|t| t.path).filter(|tree| {
-                !roots
-                    .iter()
-                    .any(|root| within(Some(root), std::slice::from_ref(tree)))
-            }));
+            other_worktrees.extend(
+                trees
+                    .into_iter()
+                    .map(|t| t.path)
+                    .filter(|tree| is_other_worktree(tree, &roots)),
+            );
         }
     }
     other_worktrees.sort();
@@ -913,10 +913,7 @@ fn scope_sessions(
 ) -> Vec<Value> {
     sessions
         .into_iter()
-        .filter(|d| {
-            let cwd = d.get("cwd").and_then(|v| v.as_str());
-            in_scope(cwd, roots, other_worktrees)
-        })
+        .filter(|d| digest_in_scope(d, roots, other_worktrees))
         .filter(|d| {
             // Only a session we can positively say has finished starts a
             // clock. Two changes from the `state == "ended"` test this
@@ -942,20 +939,36 @@ fn scope_sessions(
         .collect()
 }
 
-/// True when `cwd` is one of `roots` or sits inside one. Same rule the desktop
-/// applies in JS after its own `sessionDigests` call.
+/// Path containment with a separator boundary, not a plain string prefix.
+fn path_within(path: &str, root: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let root = root.trim_end_matches('/');
+    path == root || path.starts_with(&format!("{root}/"))
+}
+
 fn within(cwd: Option<&str>, roots: &[String]) -> bool {
-    let Some(cwd) = cwd.map(|c| c.trim_end_matches('/')) else {
+    let Some(cwd) = cwd else {
         return false;
     };
-    roots.iter().any(|r| {
-        let r = r.trim_end_matches('/');
-        cwd == r || cwd.starts_with(&format!("{r}/"))
-    })
+    roots.iter().any(|root| path_within(cwd, root))
 }
 
 fn in_scope(cwd: Option<&str>, roots: &[String], other_worktrees: &[String]) -> bool {
     within(cwd, roots) && !within(cwd, other_worktrees)
+}
+
+fn digest_in_scope(digest: &Value, roots: &[String], other_worktrees: &[String]) -> bool {
+    ["resume_cwd", "launch_cwd", "cwd"].iter().any(|key| {
+        in_scope(
+            digest.get(key).and_then(|v| v.as_str()),
+            roots,
+            other_worktrees,
+        )
+    })
+}
+
+fn is_other_worktree(tree: &str, roots: &[String]) -> bool {
+    !roots.iter().any(|root| path_within(root, tree))
 }
 
 fn trim_digest(mut d: Value) -> Value {
@@ -1139,6 +1152,18 @@ mod tests {
     }
 
     #[test]
+    fn worktree_boundaries_keep_only_explicitly_open_checkouts() {
+        let main = vec!["/w/canopy".to_string()];
+        let nested = vec!["/w/canopy/.claude/worktrees/x".to_string()];
+        // A nested worktree is a boundary below the open main checkout.
+        assert!(is_other_worktree("/w/canopy/.claude/worktrees/x", &main,));
+        // The same worktree is not a boundary when it is the open checkout.
+        assert!(!is_other_worktree("/w/canopy/.claude/worktrees/x", &nested,));
+        // An ancestor cannot pass the narrower inclusion root, so needs no boundary.
+        assert!(!is_other_worktree("/w/canopy", &nested));
+    }
+
+    #[test]
     fn scope_keeps_only_the_open_checkout() {
         let roots = vec!["/w/canopy".into()];
         let other_worktrees = vec![
@@ -1177,6 +1202,24 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["cwd"], roots[0]);
+    }
+
+    #[test]
+    fn scope_checks_every_directory_a_session_names() {
+        let roots = vec!["/w/canopy".into()];
+        let other_worktrees = vec!["/w/canopy/.claude/worktrees/x".into()];
+        let now = 1_000_000;
+        for key in ["resume_cwd", "launch_cwd", "cwd"] {
+            let mut moved = json!({
+                "cwd": "/w/canopy/.claude/worktrees/x",
+                "state": "working",
+                "updated": now,
+                "agent": "claude",
+            });
+            moved[key] = json!("/w/canopy");
+            let out = scope_sessions(vec![moved], &roots, &other_worktrees, now);
+            assert_eq!(out.len(), 1, "{key} should retain the session");
+        }
     }
 
     #[test]
