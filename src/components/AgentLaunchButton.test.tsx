@@ -1,0 +1,60 @@
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { AgentLaunchButton } from "./AgentLaunchButton";
+import type { AgentTarget } from "./TicketsPanel";
+
+const origin: AgentTarget = {
+  tabId: "agent-tab",
+  title: "Origin agent",
+  ptyId: 42,
+  agentId: "opencode",
+  dir: "canopy",
+};
+
+const other: AgentTarget = {
+  ...origin,
+  tabId: "other-tab",
+  title: "Other agent",
+  ptyId: 43,
+};
+
+const props = () => ({
+  label: "Send feedback",
+  agentTargets: [origin],
+  installed: { opencode: true },
+  newAgentLabel: "New agent",
+  onStart: vi.fn(),
+  onSend: vi.fn(),
+});
+
+describe("AgentLaunchButton", () => {
+  it("sends the primary action to the originating agent", () => {
+    const p = props();
+    render(<AgentLaunchButton {...p} primaryTarget={origin} />);
+
+    fireEvent.click(screen.getByTitle("Send this back to Origin agent"));
+
+    expect(p.onSend).toHaveBeenCalledWith(origin);
+    expect(p.onStart).not.toHaveBeenCalled();
+  });
+
+  it("starts the preferred agent when no originating agent exists", () => {
+    const p = props();
+    render(<AgentLaunchButton {...p} />);
+
+    fireEvent.click(screen.getByText("Send feedback", { exact: false }).closest("button")!);
+
+    expect(p.onStart).toHaveBeenCalledTimes(1);
+    expect(p.onSend).not.toHaveBeenCalled();
+  });
+
+  it("keeps other running agents in the caret menu", () => {
+    const p = { ...props(), agentTargets: [origin, other] };
+    render(<AgentLaunchButton {...p} primaryTarget={origin} />);
+
+    fireEvent.click(screen.getByTitle("Send to another agent, or start a new one"));
+    fireEvent.click(screen.getByText("Other agent"));
+
+    expect(p.onSend).toHaveBeenCalledWith(other);
+  });
+});

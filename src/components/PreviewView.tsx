@@ -93,6 +93,8 @@ interface PreviewViewProps {
    *  component — what the empty tab offers, and what links a URL to a codebase. */
   servers: PreviewServer[];
   agentTargets: AgentTarget[];
+  /** The live agent that opened this preview, if it is still available. */
+  initiatorTarget?: AgentTarget;
   installed: Record<string, boolean>;
   onSendToAgent: (target: AgentTarget, text: string) => void;
   /** `cwd` is the serving component's directory when the URL is linked to one. */
@@ -140,6 +142,7 @@ export function PreviewView({
   onPatch,
   servers,
   agentTargets,
+  initiatorTarget,
   installed,
   onSendToAgent,
   onStartNew,
@@ -1083,6 +1086,7 @@ export function PreviewView({
                   <AgentLaunchButton
                     label="Send screenshot"
                     agentTargets={agentTargets}
+                    primaryTarget={initiatorTarget}
                     installed={installed}
                     newAgentLabel={
                       linked?.componentLabel
@@ -1154,6 +1158,7 @@ export function PreviewView({
                   <AgentLaunchButton
                     label="Send feedback"
                     agentTargets={agentTargets}
+                    primaryTarget={initiatorTarget}
                     installed={installed}
                     newAgentLabel={
                       linked?.componentLabel

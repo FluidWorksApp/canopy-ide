@@ -210,6 +210,8 @@ export interface AgentBrowserOp {
     | "network"
     | "screenshot";
   route: string;
+  /** Agent terminal that initiated this browser session, when there is one. */
+  ptyId?: number | null;
   scope?: "browser" | "ide" | null;
   url?: string | null;
   action?: string | null;

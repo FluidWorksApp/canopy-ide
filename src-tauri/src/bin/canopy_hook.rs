@@ -3414,6 +3414,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "kind": "open_preview",
                 "cwd": cwd(),
                 "url": url,
+                "ptyId": std::env::var("CANOPY_PTY").ok().and_then(|v| v.parse::<u64>().ok()),
                 // Which window it lands in. Absent for a coding agent, whose
                 // cwd already answers it; the companion sits in no project, so
                 // without this its previews had nowhere to go the moment a
@@ -4612,6 +4613,9 @@ fn browser_op(op: &str, args: &serde_json::Value) -> Result<String, String> {
     }
     body["op"] = serde_json::json!(op);
     body["cwd"] = serde_json::json!(cwd());
+    body["ptyId"] = serde_json::json!(std::env::var("CANOPY_PTY")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok()));
     ctx_request_with_timeout(
         "POST",
         "/ctx/browser",
