@@ -70,21 +70,30 @@ pub struct RemoteManager {
     /// Canopy theme tokens the desktop pushes (var name → color), so the portal
     /// can render in the same skin. Persists across enable/disable.
     theme: Arc<Mutex<Option<Value>>>,
-    /// The scoping roots, cached — see `open_roots`.
+    /// The session scope, cached — see `open_scope`.
     roots: RootsCache,
 }
 
-/// Cached scoping roots and when they were computed.
+#[derive(Clone, Default)]
+struct SessionScope {
+    /// Components explicitly opened in the IDE.
+    roots: Vec<String>,
+    /// Other worktrees of those repositories. A nested worktree is still under
+    /// its main checkout by path, so these are explicit exclusion boundaries.
+    other_worktrees: Vec<String>,
+}
+
+/// Cached session scope and when it was computed.
 ///
 /// Recomputing them means asking git for each repo's worktrees, and the
 /// snapshot runs every four seconds per connected client. Worktrees appear when
 /// someone creates one — minutes apart at best — so this is the difference
 /// between a couple of git processes a minute and a couple of git processes a
 /// second, for identical output.
-type RootsCache = Arc<Mutex<Option<(std::time::Instant, Vec<String>)>>>;
+type RootsCache = Arc<Mutex<Option<(std::time::Instant, SessionScope)>>>;
 
-/// How long a roots list stays good. A worktree created on the desktop shows up
-/// in the phone's scope within this; nothing else depends on it being fresher.
+/// How long a scope stays good. A worktree created on the desktop is excluded
+/// from the phone's current-checkout list within this.
 const ROOTS_TTL: Duration = Duration::from_secs(60);
 
 struct Running {
@@ -762,27 +771,32 @@ const MAX_FILES: usize = 40;
 /// being re-sent whole every four seconds to a phone. The IDE never does that:
 /// both callers (`AgentsPanel`, `ProjectView`) pass the open project's roots and
 /// then filter by cwd prefix again. This does the same, from the same source of
-/// truth — the roots of the projects the IDE currently has open, plus each
-/// repo's worktrees, so an agent in another workspace is still reachable.
+/// truth — the checkouts the IDE currently has open. Other worktrees are
+/// boundaries, not roots: their sessions belong to those other checkouts.
 async fn snapshot_msg(app: &AppHandle, theme: Option<Value>, roots_cache: &RootsCache) -> String {
     let projects = crate::fsx::store_load()
         .await
         .unwrap_or_else(|_| "null".into());
     let projects: Value = serde_json::from_str(&projects).unwrap_or(Value::Null);
-    let roots = cached_roots(app, &projects, roots_cache).await;
-    let sessions = crate::agents::session_digests(Some(roots.clone()))
+    let scope = cached_scope(app, &projects, roots_cache).await;
+    let sessions = crate::agents::session_digests(Some(scope.roots.clone()))
         .await
         .unwrap_or_default();
-    let sessions = scope_sessions(sessions, &roots, now_secs());
+    let sessions = scope_sessions(sessions, &scope.roots, &scope.other_worktrees, now_secs());
     let usage = crate::agents::agent_usage().await.unwrap_or_default();
-    let ptys = app.state::<PtyManager>().summaries();
+    let ptys = app
+        .state::<PtyManager>()
+        .summaries()
+        .into_iter()
+        .filter(|pty| in_scope(Some(&pty.cwd), &scope.roots, &scope.other_worktrees))
+        .collect::<Vec<_>>();
     json!({
         "t": "snapshot",
         "projects": projects,
         "sessions": sessions,
         "usage": usage,
         "ptys": ptys,
-        "roots": roots,
+        "roots": scope.roots,
         "instance": crate::pty::instance_token(),
         "theme": theme,
     })
@@ -803,31 +817,31 @@ fn now_secs() -> i64 {
 /// that measured 3.4 seconds of git per refresh — which does not merely waste
 /// CPU, it starves every panel request queued behind it, so opening a file read
 /// as "the network is slow" when the network was idle.
-async fn cached_roots(app: &AppHandle, store: &Value, cache: &RootsCache) -> Vec<String> {
+async fn cached_scope(app: &AppHandle, store: &Value, cache: &RootsCache) -> SessionScope {
     {
         let guard = cache.lock().unwrap();
-        if let Some((at, roots)) = guard.as_ref() {
+        if let Some((at, scope)) = guard.as_ref() {
             if at.elapsed() < ROOTS_TTL {
-                return roots.clone();
+                return scope.clone();
             }
         }
     }
-    let roots = open_roots(app, store).await;
-    *cache.lock().unwrap() = Some((std::time::Instant::now(), roots.clone()));
-    roots
+    let scope = open_scope(app, store).await;
+    *cache.lock().unwrap() = Some((std::time::Instant::now(), scope.clone()));
+    scope
 }
 
-/// The directories the IDE currently has open: each open project's components,
-/// plus every worktree of the repos behind them.
+/// The directories the IDE currently has open, plus the other worktrees that
+/// must be excluded even when they are nested below one of those directories.
 ///
 /// `openIds` is the IDE's own tab list. When the store predates it (or nothing
 /// is open) we fall back to every registered project rather than sending an
 /// empty list, because an empty scope reads to the phone as "you have nothing",
 /// which is a worse lie than a slightly wide one.
-async fn open_roots(app: &AppHandle, store: &Value) -> Vec<String> {
+async fn open_scope(app: &AppHandle, store: &Value) -> SessionScope {
     let projects = store.get("projects").and_then(|p| p.as_array());
     let Some(projects) = projects else {
-        return Vec::new();
+        return SessionScope::default();
     };
     let open: Option<HashSet<&str>> = store
         .get("openIds")
@@ -854,38 +868,55 @@ async fn open_roots(app: &AppHandle, store: &Value) -> Vec<String> {
         }
     }
 
-    // Worktrees of those components. An agent working in `.claude/worktrees/x`
-    // has a cwd under the worktree, not under the checkout, so without this the
-    // scope drops exactly the agents the user most wants to reach.
+    roots.sort();
+    roots.dedup();
+
+    // Discover worktrees as exclusion boundaries. A worktree explicitly opened
+    // as a component remains in scope; every sibling or nested worktree belongs
+    // to a different checkout and must not lengthen this project's Recent list.
     //
     // `scan_worktrees`, NOT `git_worktrees`: the latter also counts uncommitted
     // files, which is a `git status` per worktree. Scoping needs the paths and
     // nothing else, and git.rs says so at the top of `list_worktrees` — "anything
     // that only needs to know *which* worktree holds a branch calls
     // scan_worktrees instead". This is one of those callers.
-    let mut extra: Vec<String> = Vec::new();
+    let mut other_worktrees: Vec<String> = Vec::new();
     let state = app.state::<crate::fsx::WorkspaceManager>();
     for root in &roots {
         let Ok(top) = crate::fsx::check_scope(&state, std::path::Path::new(root)) else {
             continue;
         };
         if let Ok(trees) = crate::git::scan_worktrees(&top) {
-            extra.extend(trees.into_iter().map(|t| t.path));
+            other_worktrees.extend(trees.into_iter().map(|t| t.path).filter(|tree| {
+                !roots
+                    .iter()
+                    .any(|root| within(Some(root), std::slice::from_ref(tree)))
+            }));
         }
     }
-    roots.extend(extra);
-    roots.sort();
-    roots.dedup();
-    roots
+    other_worktrees.sort();
+    other_worktrees.dedup();
+    SessionScope {
+        roots,
+        other_worktrees,
+    }
 }
 
 /// Keep the sessions that belong to `roots`, drop the ones that stopped being
 /// interesting, and trim what survives to the fields a list row and a history
 /// view actually read.
-fn scope_sessions(sessions: Vec<Value>, roots: &[String], now: i64) -> Vec<Value> {
+fn scope_sessions(
+    sessions: Vec<Value>,
+    roots: &[String],
+    other_worktrees: &[String],
+    now: i64,
+) -> Vec<Value> {
     sessions
         .into_iter()
-        .filter(|d| within(d.get("cwd").and_then(|v| v.as_str()), roots))
+        .filter(|d| {
+            let cwd = d.get("cwd").and_then(|v| v.as_str());
+            in_scope(cwd, roots, other_worktrees)
+        })
         .filter(|d| {
             // Only a session we can positively say has finished starts a
             // clock. Two changes from the `state == "ended"` test this
@@ -921,6 +952,10 @@ fn within(cwd: Option<&str>, roots: &[String]) -> bool {
         let r = r.trim_end_matches('/');
         cwd == r || cwd.starts_with(&format!("{r}/"))
     })
+}
+
+fn in_scope(cwd: Option<&str>, roots: &[String], other_worktrees: &[String]) -> bool {
+    within(cwd, roots) && !within(cwd, other_worktrees)
 }
 
 fn trim_digest(mut d: Value) -> Value {
@@ -1092,19 +1127,56 @@ mod tests {
     }
 
     #[test]
-    fn scope_keeps_the_open_projects_and_drops_the_rest_of_the_machine() {
+    fn checkout_scope_subtracts_nested_worktrees() {
+        let roots = vec!["/w/canopy".to_string()];
+        let others = vec!["/w/canopy/.claude/worktrees/x".to_string()];
+        assert!(in_scope(Some("/w/canopy/src"), &roots, &others));
+        assert!(!in_scope(
+            Some("/w/canopy/.claude/worktrees/x/src"),
+            &roots,
+            &others,
+        ));
+    }
+
+    #[test]
+    fn scope_keeps_only_the_open_checkout() {
         let roots = vec!["/w/canopy".into()];
+        let other_worktrees = vec![
+            "/w/canopy/.claude/worktrees/x".into(),
+            "/w/canopy-feature".into(),
+        ];
         let now = 1_000_000;
         let out = scope_sessions(
             vec![
                 digest("/w/canopy", "working", now),
                 digest("/w/canopy/.claude/worktrees/x", "idle", now),
+                digest("/w/canopy-feature", "working", now),
                 digest("/w/some-other-repo", "working", now),
             ],
             &roots,
+            &other_worktrees,
             now,
         );
-        assert_eq!(out.len(), 2, "the other checkout must not travel");
+        assert_eq!(out.len(), 1, "other worktrees must not travel");
+        assert_eq!(out[0]["cwd"], "/w/canopy");
+    }
+
+    #[test]
+    fn scope_keeps_a_worktree_when_it_is_the_open_component() {
+        let roots = vec!["/w/canopy/.claude/worktrees/x".into()];
+        let other_worktrees = vec!["/w/canopy/.claude/worktrees/y".into()];
+        let now = 1_000_000;
+        let out = scope_sessions(
+            vec![
+                digest("/w/canopy/.claude/worktrees/x", "working", now),
+                digest("/w/canopy/.claude/worktrees/y", "working", now),
+            ],
+            &roots,
+            &other_worktrees,
+            now,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["cwd"], roots[0]);
     }
 
     #[test]
@@ -1123,6 +1195,7 @@ mod tests {
                 digest("/w/canopy", "working", stale),
             ],
             &roots,
+            &[],
             now,
         );
         assert_eq!(out.len(), 2);
