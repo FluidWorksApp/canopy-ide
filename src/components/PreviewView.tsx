@@ -45,6 +45,7 @@ import {
   CAPTURE_MODES,
   captureModeLabel,
   cropCapture,
+  planAgentShot,
   thumbnail,
   type CaptureMode,
   type CaptureRect,
@@ -651,38 +652,53 @@ export function PreviewView({
       // Pixels, not structure: the DOM snapshot can say a button exists, not
       // that it's sitting on top of the heading.
       //
-      // Alone among the ops this one needs the tab actually in front — a
-      // snapshot reads what is composited, and a hidden view has nothing in it.
-      //
-      // Nothing brings it forward to make that true. It used to: an agent asking
-      // for a screenshot moved the user's front tab, every time, which for an
-      // agent that photographs its own work is a window that will not sit still.
-      // So this reports what it found instead. The delay lets a paint land for
-      // the case where the tab IS in front and has only just got there.
+      // Nothing brings the tab forward to make this work. It used to: an agent
+      // asking for a screenshot moved the user's front tab, every time, which
+      // for an agent that photographs its own work is a window that will not sit
+      // still. Under the webview engine that costs nothing — the page paints its
+      // own snapshot, front tab or not — so a background preview is captured
+      // where it stands. planAgentShot holds the rule and the proxy engine's one
+      // real limit. The delay lets a paint land for a tab that has only just
+      // come forward.
       setTimeout(() => {
         const el = nativeRef.current ? hostRef.current : iframeRef.current;
-        const rect = el?.getBoundingClientRect();
-        if (!rect || !painted() || rect.width < 1 || rect.height < 1) {
-          void ipc.browserResult(
-            op.id,
-            false,
-            "The preview tab isn't in front, so there are no pixels to capture — and Canopy will not move the user's front tab to take a picture. The page itself is fine: canopy_browser_snapshot reads it, and click/type/eval all work on a background tab. If you genuinely need to see it rendered, ask the user to bring the preview tab forward.",
-          );
+        const plan = planAgentShot({
+          native: !!nativeRef.current,
+          opened: opened.current,
+          painted: painted(),
+          rect: el?.getBoundingClientRect() ?? null,
+        });
+        if (plan.take === "no") {
+          void ipc.browserResult(op.id, false, plan.reason);
           return;
         }
         // Under the webview engine the page is its own view, so it is captured
-        // whole; under the proxy it is one rectangle of this window's webview.
-        const shot = nativeRef.current
-          ? ipc.browserSnapshot(tabId, op.max ?? undefined)
-          : ipc.webviewSnapshot(rect.x, rect.y, rect.width, rect.height, op.max ?? undefined);
+        // whole and reports its own size; under the proxy it is one rectangle of
+        // this window's webview.
+        const shot =
+          plan.take === "view"
+            ? ipc.browserSnapshot(tabId, op.max ?? undefined)
+            : ipc
+                .webviewSnapshot(
+                  plan.rect.x,
+                  plan.rect.y,
+                  plan.rect.width,
+                  plan.rect.height,
+                  op.max ?? undefined,
+                )
+                .then((image) => ({
+                  image,
+                  width: plan.rect.width,
+                  height: plan.rect.height,
+                }));
         void shot
-          .then((image) =>
+          .then(({ image, width, height }) =>
             ipc.browserResult(op.id, true, {
               image,
               mimeType: "image/png",
               url: urlRef.current,
-              width: Math.round(rect.width),
-              height: Math.round(rect.height),
+              width: Math.round(width),
+              height: Math.round(height),
             }),
           )
           .catch((err) => ipc.browserResult(op.id, false, String(err)));
@@ -744,7 +760,7 @@ export function PreviewView({
     // Asked for at more than we keep: the snapshot is capped before we see it,
     // and a region crop out of a 1200px-wide still of a retina page is mush.
     const png = nativeRef.current
-      ? await ipc.browserSnapshot(tabId, SHOOT_WIDTH)
+      ? (await ipc.browserSnapshot(tabId, SHOOT_WIDTH)).image
       : await ipc.webviewSnapshot(rect.x, rect.y, rect.width, rect.height, SHOOT_WIDTH);
     return { png, cssWidth: rect.width };
   }, [painted, tabId]);

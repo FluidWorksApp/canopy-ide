@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fitWidth, pixelScale, scaleRect } from "./pageCapture";
+import { fitWidth, pixelScale, planAgentShot, scaleRect } from "./pageCapture";
 import { previewShotContext, type PreviewShot } from "./preview";
 
 const shot = (over: Partial<PreviewShot> = {}): PreviewShot => ({
@@ -73,6 +73,84 @@ describe("fitWidth", () => {
       width: 400,
       height: 300,
     });
+  });
+});
+
+describe("planAgentShot", () => {
+  // The complaint this answers: an agent had to have the preview tab in front
+  // to photograph it, on an engine where being in front was never the
+  // requirement — WKWebView's snapshot is the page painting itself, not a read
+  // of the screen. A background tab is captured where it stands.
+  const backgrounded = {
+    native: true,
+    opened: true,
+    painted: false,
+    rect: { x: 0, y: 0, width: 0, height: 0 },
+  };
+
+  it("captures a webview-engine tab that isn't in front", () => {
+    expect(planAgentShot(backgrounded)).toEqual({ take: "view" });
+  });
+
+  it("captures the front tab the same way — one path, whatever is on screen", () => {
+    expect(
+      planAgentShot({
+        native: true,
+        opened: true,
+        painted: true,
+        rect: { x: 0, y: 40, width: 900, height: 600 },
+      }),
+    ).toEqual({ take: "view" });
+  });
+
+  // display: none placeholder, so the rect is zeros. The size has to come back
+  // from the view, and never from here.
+  it("never reads the pane's rect for a native view", () => {
+    const plan = planAgentShot({ ...backgrounded, rect: null });
+    expect(plan).toEqual({ take: "view" });
+  });
+
+  it("says so when the tab has never been shown, so there is no page yet", () => {
+    const plan = planAgentShot({ ...backgrounded, opened: false });
+    expect(plan.take).toBe("no");
+    if (plan.take === "no") {
+      expect(plan.reason).toContain("canopy_browser_navigate");
+    }
+  });
+
+  it("crops this window for a proxy preview that is on screen", () => {
+    const rect = { x: 12, y: 40, width: 900, height: 600 };
+    expect(
+      planAgentShot({ native: false, opened: true, painted: true, rect }),
+    ).toEqual({ take: "rect", rect });
+  });
+
+  // The one real refusal: the pixels at a backgrounded iframe's rect belong to
+  // whichever tab IS in front, and a picture of the wrong tab is worse than
+  // none. It must not offer to front the tab itself.
+  it("refuses a backgrounded proxy preview rather than photographing another tab", () => {
+    const plan = planAgentShot({
+      native: false,
+      opened: true,
+      painted: false,
+      rect: { x: 12, y: 40, width: 900, height: 600 },
+    });
+    expect(plan.take).toBe("no");
+    if (plan.take === "no") {
+      expect(plan.reason).toContain("canopy_browser_snapshot");
+      expect(plan.reason).toContain("webview engine");
+    }
+  });
+
+  it("refuses a proxy preview with no box to crop to", () => {
+    expect(
+      planAgentShot({
+        native: false,
+        opened: true,
+        painted: true,
+        rect: { x: 0, y: 0, width: 0, height: 0 },
+      }).take,
+    ).toBe("no");
   });
 });
 

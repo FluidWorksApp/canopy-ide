@@ -135,6 +135,69 @@ export async function cropCapture(
   return { png: toBase64(canvas), width: out.width, height: out.height };
 }
 
+/** Where an agent's `canopy_screenshot` gets its pixels from, given where the
+ *  preview tab happens to be. Pure, and out here rather than inside the view,
+ *  because it is the rule the whole feature turns on and it is not otherwise
+ *  reachable from a test — the thing it decides is a compositor.
+ *
+ *  No op moves the user's front tab, screenshot included. What differs between
+ *  the engines is whether that costs anything:
+ *
+ *    * webview engine — the page is its own child webview, and WKWebView's
+ *      snapshot API is the page painting itself, not a read of the screen. A
+ *      background tab photographs exactly as well as the front one, so being in
+ *      front was never the requirement it was taken for.
+ *    * proxy engine — the page is an iframe in this window, so the only way to
+ *      capture it is to crop this window's pixels. A backgrounded proxy preview
+ *      is laid out but unpainted (`hostStyle`), and the pixels at its rect
+ *      belong to whichever tab IS in front. There is nothing to take, and a
+ *      picture of the wrong tab would be worse than none.
+ */
+export type AgentShot =
+  /** Capture the child webview whole; it knows its own size. */
+  | { take: "view" }
+  /** Crop this window's webview to the iframe's rect. */
+  | { take: "rect"; rect: { x: number; y: number; width: number; height: number } }
+  | { take: "no"; reason: string };
+
+export function planAgentShot(view: {
+  /** Webview engine (a native child view) rather than the proxy's iframe. */
+  native: boolean;
+  /** Webview engine: the child view exists — a tab shown at least once. */
+  opened: boolean;
+  /** Proxy engine: the iframe is really being painted right now. */
+  painted: boolean;
+  /** The pane's rect in this window, if it has one. */
+  rect: { x: number; y: number; width: number; height: number } | null;
+}): AgentShot {
+  if (view.native) {
+    if (!view.opened) {
+      return {
+        take: "no",
+        reason:
+          "This preview tab has never been shown, so its page hasn't been created yet — " +
+          "there is nothing rendered to photograph. Call canopy_browser_navigate with the " +
+          "url to open it.",
+      };
+    }
+    return { take: "view" };
+  }
+  const { rect } = view;
+  if (!view.painted || !rect || rect.width < 1 || rect.height < 1) {
+    return {
+      take: "no",
+      reason:
+        "This preview runs the proxy engine, where the page is an iframe in Canopy's own " +
+        "window — and the tab isn't in front, so the pixels at its place on screen belong to " +
+        "another tab. Canopy will not move the user's front tab to take a picture. The page " +
+        "itself is fine: canopy_browser_snapshot reads it, and click/type/eval all work on a " +
+        "background tab. Settings → Browser → the webview engine (the default) screenshots in " +
+        "the background; otherwise ask the user to bring the preview tab forward.",
+    };
+  }
+  return { take: "rect", rect };
+}
+
 /** A small inline copy for the review panel. */
 export async function thumbnail(
   base64Png: string,

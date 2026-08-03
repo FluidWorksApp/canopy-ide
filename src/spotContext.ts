@@ -71,7 +71,7 @@ export async function capturePixels(input: SpotCaptureInput): Promise<string> {
   const rect = input.rect!;
   if (input.activeTab?.type === "preview") {
     try {
-      return await ipc.browserSnapshot(input.activeTab.id, 1400);
+      return (await ipc.browserSnapshot(input.activeTab.id, 1400)).image;
     } catch {
       // No native view behind this tab (proxy engine) — fall through.
     }

@@ -16,6 +16,14 @@
 //! webview engine the page IS its own view, so there is nothing to crop to and
 //! nothing else in the frame — the whole child webview is the picture.
 //!
+//! Because it is the page's own API and not a screen grab, it does not read the
+//! compositor: `takeSnapshotWithConfiguration:` asks the web process to paint
+//! the rect fresh. So a child webview answers with its page whether or not that
+//! view is on screen — hidden behind another tab, or hidden since before it ever
+//! painted, verified both ways against WebKit. That is what lets an agent
+//! photograph a preview it is not looking at, which is the point: nothing in
+//! Canopy moves the user's front tab to take a picture.
+//!
 //! Both resolve to a `Webview`, never a `WebviewWindow`. Tauri only calls a
 //! window a `WebviewWindow` while it hosts exactly one webview, so the app's own
 //! window stopped answering to that the moment a preview tab added a child —
@@ -70,6 +78,20 @@ pub async fn webview_snapshot(
     .await
 }
 
+/// A capture and the size, in logical points, it was taken at.
+///
+/// The size is measured here rather than passed in because the caller often
+/// cannot know it: a preview tab that isn't the front tab has a `display: none`
+/// placeholder, so its rect in the app's DOM is zeros at exactly the moment an
+/// agent asks for a picture of the page.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Shot {
+    pub image: String,
+    pub width: f64,
+    pub height: f64,
+}
+
 /// PNG of one embedded-browser view, whole. A rect would be meaningless here:
 /// the view's own origin is its top-left corner, and nothing of the app is
 /// inside it.
@@ -78,7 +100,7 @@ pub async fn browser_snapshot(
     app: tauri::AppHandle,
     tab_id: String,
     max_width: Option<f64>,
-) -> Result<String, String> {
+) -> Result<Shot, String> {
     let view = crate::browser::webview(&app, &tab_id)?;
     let size = view
         .size()
@@ -87,16 +109,23 @@ pub async fn browser_snapshot(
         .window()
         .scale_factor()
         .map_err(|e| format!("cannot measure the browser view: {e}"))?;
-    capture(
+    let width = f64::from(size.width) / scale;
+    let height = f64::from(size.height) / scale;
+    let image = capture(
         view,
         0.0,
         0.0,
-        f64::from(size.width) / scale,
-        f64::from(size.height) / scale,
+        width,
+        height,
         max_width.unwrap_or(1200.0),
         Encoding::Png,
     )
-    .await
+    .await?;
+    Ok(Shot {
+        image,
+        width,
+        height,
+    })
 }
 
 /// The freeze-frame: a JPEG of a browser view, taken while it is still on

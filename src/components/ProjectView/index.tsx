@@ -4027,10 +4027,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // doc-host styling below) so its page keeps real geometry and the ops that
   // need it — snapshot, click, type, eval — work unwatched.
   //
-  // Screenshot is the one op that genuinely cannot: it reads composited pixels,
-  // and a backgrounded native view has none. So it fails, and says so, rather
-  // than fronting the tab to make itself work. PreviewView's message points at
-  // canopy_browser_snapshot, which reads the same page without the window.
+  // Screenshot included, under the webview engine: a child webview paints its
+  // own snapshot in the web process, so it answers with its page whether or not
+  // it is the tab on screen. Only the proxy engine, where the page is an iframe
+  // and the only pixels available are this window's, has to refuse — see
+  // planAgentShot, which holds both halves of that rule.
   useEffect(() => {
     const originOf = (u: string): string | null => {
       try {
