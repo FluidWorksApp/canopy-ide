@@ -280,6 +280,7 @@ import { AgentQueryBar } from "../AgentQueryBar";
 import {
   forgetSessions,
   markRestored,
+  markUserClosed,
   restorableFrom,
   resumeCwd,
   type Restorable,
@@ -551,10 +552,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [autoImportMarkdownResearch, setAutoImportMarkdownResearch] = useState(
     () => getSettings().autoImportMarkdownResearch,
   );
+  const [restoreUserClosedSessions, setRestoreUserClosedSessions] = useState(
+    () => getSettings().restoreUserClosedSessions,
+  );
   useEffect(() => {
     const refresh = () => {
       setSidePrefs(sidebarPrefs());
       setAutoImportMarkdownResearch(getSettings().autoImportMarkdownResearch);
+      setRestoreUserClosedSessions(getSettings().restoreUserClosedSessions);
     };
     window.addEventListener(SETTINGS_CHANGE_EVENT, refresh);
     return () => window.removeEventListener(SETTINGS_CHANGE_EVENT, refresh);
@@ -821,7 +826,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** The tabs in the order the pane bar draws them — what ⌘1..9 counts, and
    *  filled in below once the groups are known. */
   const barTabsRef = useRef<SubTab[]>([]);
-  const closeTabRef = useRef<(id: string) => void>(() => {});
+  const closeTabRef = useRef<(
+    id: string,
+    origin?: "automatic" | "user",
+  ) => void>(() => {});
   /** Set from stopMicroRun below, for the teardown paths that run before it is
    *  in scope (hibernation, unmount) — a detached task must never outlive the
    *  project it was launched from. */
@@ -1743,7 +1751,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ),
           );
           setRestorable(
-            restorableFrom(mine, statsRef.current, liveSessionIdsRef.current),
+            restorableFrom(
+              mine,
+              statsRef.current,
+              liveSessionIdsRef.current,
+              restoreUserClosedSessions,
+            ),
           );
         })
         .catch(() => live && setRestorable([]));
@@ -1755,7 +1768,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       un();
       clearInterval(t);
     };
-  }, [tabs.length, visible]);
+  }, [tabs.length, visible, restoreUserClosedSessions]);
 
   // Remember the terminal layout so it can be offered back on the empty
   // state. Snapshotted on change rather than on unmount: a crash or a force
@@ -3062,8 +3075,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  the same reason: the tool result and the agent's last words have to land
    *  before the terminal goes. What happens at the end differs, though — this
    *  is a session the user started, so it is *closed*, not reaped: the tab's
-   *  unmount kills the PTY and the session stays in restorables, exactly as if
-   *  the user had clicked ×. */
+   *  unmount kills the PTY and the session stays in restorables. Unlike an
+   *  explicit tab-close gesture, the agent asking to close itself is not a
+   *  reason to suppress recovery. */
   const selfClose = useRef(
     new Map<number, { tabId: string; since: number; timer: number }>(),
   );
@@ -3319,7 +3333,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     if (!visible) return;
     const closeTabHandler = () => {
-      if (activeTabIdRef.current) closeTabRef.current(activeTabIdRef.current);
+      if (activeTabIdRef.current)
+        closeTabRef.current(activeTabIdRef.current, "user");
     };
     const newTerminalHandler = () => {
       const first = componentsRef.current[0];
@@ -4021,13 +4036,32 @@ const ProjectViewBody = memo(function ProjectViewBody({
     );
   }, []);
 
-  const closeTab = useCallback((id: string) => {
+  const closeTab = useCallback((
+    id: string,
+    origin: "automatic" | "user" = "automatic",
+  ) => {
     // The last moment the terminal's scrollback exists: the handle goes on the
     // next line and the buffer dies with the unmount. Both endings pass through
     // here — job_done's self-close and the user closing the tab — so capturing
     // once here covers a finished task and an abandoned one alike. recordTaskEnd
     // ignores a run that already settled, so "stopped" can't clobber "done".
     const closingTab = tabsRef.current.find((t) => t.id === id);
+    if (
+      origin === "user" &&
+      closingTab?.type === "terminal" &&
+      closingTab.ptyId != null &&
+      closingTab.attachId == null
+    ) {
+      // Hook events are the authoritative bond. Store-only agents have no
+      // events, so fall back to the current-launch digest for this surface.
+      const sessionId =
+        liveSessionByPtyRef.current.get(closingTab.ptyId) ??
+        digestBySurface(
+          wsDigestsRef.current,
+          thisInstanceRef.current,
+        ).get(String(closingTab.ptyId))?.session_id;
+      if (sessionId) markUserClosed(sessionId);
+    }
     if (closingTab?.type === "terminal" && closingTab.micro?.runId) {
       const runId = closingTab.micro.runId;
       const output =
@@ -6230,7 +6264,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         title: tab.customTitle ?? tab.title,
         tooltip: `${tab.command ?? "shell"} — ${tab.cwd}`,
         onSelect: () => setActiveTabId(tab.id),
-        onClose: () => closeTab(tab.id),
+        onClose: () => closeTab(tab.id, "user"),
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [shellTabs, activeTabId, closeTab],
@@ -6266,7 +6300,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             </Button>
           ) : undefined,
           onSelect: () => setActiveTabId(tab.id),
-          onClose: () => closeTab(tab.id),
+          onClose: () => closeTab(tab.id, "user"),
         };
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -6955,11 +6989,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   if (tab.type === "terminal") startRename(tab);
                 },
               },
-              { label: "Close", danger: true, onClick: () => closeTab(tab.id) },
+              { label: "Close", danger: true, onClick: () => closeTab(tab.id, "user") },
             ]
           : [
               ...taskItem,
-              { label: "Close", danger: true, onClick: () => closeTab(tab.id) },
+              { label: "Close", danger: true, onClick: () => closeTab(tab.id, "user") },
             ];
       tabMenu.open(e, items);
     },
@@ -7714,7 +7748,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         isTerminalTab={activeTermTab !== null}
         onSelectTab={onSelectTab}
         onTabContextMenu={onTabContextMenu}
-        onCloseTab={closeTab}
+        onCloseTab={(id) => closeTab(id, "user")}
         onCommitRename={commitRename}
         onCancelRename={cancelRename}
         onRenameDraftChange={setRenameDraft}

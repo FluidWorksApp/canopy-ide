@@ -366,6 +366,10 @@ export interface Settings {
    *  only sessions that are idle or ended (never mid-turn) and beyond
    *  `maxLiveAgents`, oldest first, are hibernated; each stays resumable. */
   autoHibernate: boolean;
+  /** Offer sessions whose agent tab the user explicitly closed. Off by default:
+   *  Restorable is primarily crash/app-shutdown recovery, and repeatedly opening
+   *  and closing work should not grow that list. */
+  restoreUserClosedSessions: boolean;
   /** How many agent terminals to keep live per project before auto-hibernation
    *  starts reclaiming the stalest idle ones. */
   maxLiveAgents: number;
@@ -570,6 +574,7 @@ export const DEFAULTS: Settings = {
   relayName: "",
   relayAddr: "",
   autoHibernate: false,
+  restoreUserClosedSessions: false,
   maxLiveAgents: 8,
   groupTabsByStatus: true,
   tabSwitchMode: "recent",

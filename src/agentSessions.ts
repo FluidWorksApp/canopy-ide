@@ -9,7 +9,7 @@
 // Deliberately not here: auto-hibernation. That acts on the machine rather than
 // describing it, and two mounted surfaces running it would pick victims twice.
 // It stays in AgentsPanel, which is always mounted.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import * as ipc from "./ipc";
 import { basename } from "./paths";
 import { identifyAgent, observeForLearning, type AgentIdentity } from "./agentIdentity";
@@ -18,6 +18,7 @@ import type { Life } from "../shared/agentLife";
 import { ptyEvidenceFor, useFirstSeen } from "./agentLifeStore";
 import { DIGEST_FALLBACK_MS, subscribeSessionDigests } from "./sessionDigests";
 import { forgetSessions, restorableFrom } from "./restorable";
+import { getSettings, subscribeSettings } from "./settings";
 
 /** Last thing the *human* typed. Hooks also record injected payloads
     (`<task-notification>…`, shared-context blocks) as prompts; an XML-ish
@@ -205,10 +206,15 @@ export function useAgentSessions(opts: {
   // rebuild the ids array every render, and keying on its identity would
   // recompute (and re-render everything downstream) on every stats tick.
   const liveKey = liveSessionIds.join(",");
+  const restoreUserClosedSessions = useSyncExternalStore(
+    subscribeSettings,
+    () => getSettings().restoreUserClosedSessions,
+    () => false,
+  );
   const restorable = useMemo(
-    () => restorableFrom(digests, stats, liveSessionIds),
+    () => restorableFrom(digests, stats, liveSessionIds, restoreUserClosedSessions),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [digests, stats, liveKey],
+    [digests, stats, liveKey, restoreUserClosedSessions],
   );
 
   // Bumped when the hook stream teaches us a binary (see observeForLearning),

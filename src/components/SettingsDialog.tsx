@@ -1610,6 +1610,16 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item
+                  name="Restore sessions I close"
+                  desc="By default, Restorable only keeps sessions whose agent tab you did not explicitly close."
+                >
+                  <Checkbox
+                    checked={s.restoreUserClosedSessions}
+                    onChange={(v) => patch({ restoreUserClosedSessions: v })}
+                    label="Include sessions closed with the tab close button or shortcut"
+                  />
+                </Item>
+                <Item
                   name="Set up new workspaces"
                   desc="Copy the gitignored config and install dependencies, so it builds right away."
                 >
