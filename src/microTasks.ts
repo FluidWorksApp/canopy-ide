@@ -993,9 +993,39 @@ export function customTaskDef(c: CustomMicroTask): MicroTaskDef<{ dir: string }>
     cwd: (p) => p.dir,
     buildContext: (_p, userQuery) => {
       const query = oneLine(userQuery);
-      return oneLine(c.brief) + (query ? ` The user adds: "${query}".` : "");
+      return (
+        oneLine(c.brief) +
+        (query ? ` The user adds: "${query}".` : "") +
+        ` ${prHandoffProtocol()}`
+      );
     },
   };
+}
+
+/** How a task the user wrote themselves is expected to land a code change.
+ *
+ *  Every built-in above says this for itself, in the terms its own job needs —
+ *  Fix CI commits and pushes onto the PR's branch, Review changes nothing, a
+ *  note deliberately stops short of a branch. A task the user typed says
+ *  nothing about it at all: the brief is the job, and the agent is left to
+ *  guess what to do with the edits when it's done. Guessing has two bad
+ *  endings, and both happen in the shared checkout — work left uncommitted for
+ *  the next agent to clobber, or committed straight onto whatever branch was
+ *  sitting there. So the answer is stated once, here, and appended to every
+ *  user-written brief: a worktree of its own, and a PR at the end. */
+export function prHandoffProtocol(): string {
+  return (
+    `If the job turns out to need a code change, ship it as a pull request rather than leaving ` +
+    `edits behind. Prefer making the change in a git worktree of its own — \`git worktree add ` +
+    `<path> -b <branch>\` off the current branch — rather than editing this checkout directly: ` +
+    `other agents share it, and uncommitted work here is lost the moment one of them switches ` +
+    `branch. Then commit, push (\`git push -u origin <branch>\`), open the PR as a draft with ` +
+    `\`gh pr create --draft\` — the user decides when it is ready for review — remove the ` +
+    `worktree you made (\`git worktree remove <path>\`), and pass the PR's URL to ` +
+    `canopy_job_done. Never merge it — that stays with the user. If the job needs no code ` +
+    `change, or a PR genuinely isn't possible (no repo, no remote, or the brief above told you ` +
+    `not to), skip all of this and say which in your summary.`
+  );
 }
 
 export const ADHOC_TASK_ID = "adhoc";
@@ -1048,7 +1078,11 @@ export function adhocTaskDef(brief: string, label?: string): MicroTaskDef<{ dir:
     cwd: (p) => p.dir,
     buildContext: (_p, userQuery) => {
       const query = oneLine(userQuery);
-      return job + (query ? ` The user adds: "${query}".` : "");
+      return (
+        job +
+        (query ? ` The user adds: "${query}".` : "") +
+        ` ${prHandoffProtocol()}`
+      );
     },
   };
 }
