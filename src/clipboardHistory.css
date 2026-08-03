@@ -1,5 +1,6 @@
-/* Clipboard history is the final tray control: always discoverable in the
-   bottom-right corner, with a keyboard-first panel that escapes tray clipping. */
+/* Clipboard history is the final tray control: in the bottom-right corner
+   whenever history is on, with a keyboard-first panel that escapes tray
+   clipping. */
 .status-clipboard-anchor {
   position: sticky;
   right: 0;

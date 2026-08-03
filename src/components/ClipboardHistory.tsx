@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import * as clipboardStore from "../clipboardStore";
 import * as ipc from "../ipc";
 import { insertTextAtCursor } from "../insertText";
-import { getSettings, updateSettings } from "../settings";
+import { getSettings, subscribeSettings, updateSettings } from "../settings";
 import { format, matches, resolve } from "../shortcuts";
 import { ClipboardIcon } from "./icons";
 import "../clipboardHistory.css";
@@ -29,16 +29,23 @@ function modifiersHeld(e: KeyboardEvent): boolean {
 }
 
 /** The status-tray clipboard. A click leaves the list open for browsing; the
- * shortcut is a hold-to-cycle picker whose modifier release pastes the choice. */
+ * shortcut is a hold-to-cycle picker whose modifier release pastes the choice.
+ * With history off there is nothing to browse, so the tray icon goes away and
+ * the shortcut is what's left — the feature stays, only the badge for it is
+ * conditional. */
 export function ClipboardHistory({ visible }: { visible: boolean }) {
   const [open, setOpen] = useState(false);
   const [clips, setClips] = useState<ipc.Clip[]>([]);
   const [index, setIndex] = useState(0);
-  const [enabled, setEnabled] = useState(() => getSettings().clipboardHistory);
-  const [error, setError] = useState("");
-  const [position, setPosition] = useState<{ right: number; bottom: number } | null>(
-    null,
+  const enabled = useSyncExternalStore(
+    subscribeSettings,
+    () => getSettings().clipboardHistory,
   );
+  const [error, setError] = useState("");
+  const [position, setPosition] = useState<{
+    right: number;
+    bottom: number;
+  } | null>(null);
   const anchor = useRef<HTMLSpanElement>(null);
   const target = useRef<Element | null>(null);
   const openRef = useRef(false);
@@ -62,7 +69,6 @@ export function ClipboardHistory({ visible }: { visible: boolean }) {
     openRef.current = true;
     setClips(next);
     setIndex(0);
-    setEnabled(getSettings().clipboardHistory);
     setError("");
     setOpen(true);
     place();
@@ -101,7 +107,10 @@ export function ClipboardHistory({ visible }: { visible: boolean }) {
     const refresh = () => {
       const next = clipboardStore.getSnapshot().slice(0, MAX_VISIBLE);
       clipsRef.current = next;
-      indexRef.current = Math.min(indexRef.current, Math.max(0, next.length - 1));
+      indexRef.current = Math.min(
+        indexRef.current,
+        Math.max(0, next.length - 1),
+      );
       setClips(next);
       setIndex(indexRef.current);
     };
@@ -175,6 +184,75 @@ export function ClipboardHistory({ visible }: { visible: boolean }) {
   }, [open]);
 
   const shortcut = format("clipboard-history");
+  const menu = open && (
+    <div
+      className="status-menu clipboard-history-menu"
+      style={
+        position
+          ? {
+              position: "fixed",
+              right: position.right,
+              bottom: position.bottom,
+            }
+          : undefined
+      }
+    >
+      <div className="clipboard-history-head">
+        <span>Clipboard</span>
+        <kbd>{shortcut}</kbd>
+      </div>
+      {!enabled ? (
+        <div className="clipboard-history-empty">
+          <span>History is off. Canopy is not reading your clipboard.</span>
+          <button
+            className="btn-mini"
+            onClick={() => updateSettings({ clipboardHistory: true })}
+          >
+            Enable history
+          </button>
+        </div>
+      ) : clips.length === 0 ? (
+        <div className="clipboard-history-empty">
+          Copy something to see it here.
+        </div>
+      ) : (
+        <div
+          className="clipboard-history-list"
+          role="listbox"
+          aria-label="Recent clipboard"
+        >
+          {clips.map((clip, i) => (
+            <button
+              key={clip.id}
+              className={`clipboard-history-row${i === index ? " is-selected" : ""}`}
+              role="option"
+              aria-selected={i === index}
+              onMouseEnter={() => {
+                indexRef.current = i;
+                setIndex(i);
+              }}
+              onClick={() => commit(clip)}
+            >
+              <span className="clipboard-history-text">
+                {clip.preview || `${clip.chars.toLocaleString()} characters`}
+              </span>
+              <span className="clipboard-history-age">{age(clip.ts)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {error && <div className="clipboard-history-error">{error}</div>}
+      <div className="clipboard-history-hint">
+        hold {shortcut} · tap V to cycle · release to paste
+      </div>
+    </div>
+  );
+
+  // Off means there is no tray icon at all — not a chip that opens onto "it's
+  // off". The panel still has a home: the shortcut opens it in the corner the
+  // icon would have occupied, and that is where history gets turned back on.
+  if (!enabled) return menu || null;
+
   return (
     <span className="status-item status-clipboard-anchor" ref={anchor}>
       <button
@@ -189,62 +267,7 @@ export function ClipboardHistory({ visible }: { visible: boolean }) {
       >
         <ClipboardIcon size={13} />
       </button>
-      {open && (
-        <div
-          className="status-menu clipboard-history-menu"
-          style={
-            position
-              ? { position: "fixed", right: position.right, bottom: position.bottom }
-              : undefined
-          }
-        >
-          <div className="clipboard-history-head">
-            <span>Clipboard</span>
-            <kbd>{shortcut}</kbd>
-          </div>
-          {!enabled ? (
-            <div className="clipboard-history-empty">
-              <span>History is off. Canopy is not reading your clipboard.</span>
-              <button
-                className="btn-mini"
-                onClick={() => {
-                  updateSettings({ clipboardHistory: true });
-                  setEnabled(true);
-                }}
-              >
-                Enable history
-              </button>
-            </div>
-          ) : clips.length === 0 ? (
-            <div className="clipboard-history-empty">Copy something to see it here.</div>
-          ) : (
-            <div className="clipboard-history-list" role="listbox" aria-label="Recent clipboard">
-              {clips.map((clip, i) => (
-                <button
-                  key={clip.id}
-                  className={`clipboard-history-row${i === index ? " is-selected" : ""}`}
-                  role="option"
-                  aria-selected={i === index}
-                  onMouseEnter={() => {
-                    indexRef.current = i;
-                    setIndex(i);
-                  }}
-                  onClick={() => commit(clip)}
-                >
-                  <span className="clipboard-history-text">
-                    {clip.preview || `${clip.chars.toLocaleString()} characters`}
-                  </span>
-                  <span className="clipboard-history-age">{age(clip.ts)}</span>
-                </button>
-              ))}
-            </div>
-          )}
-          {error && <div className="clipboard-history-error">{error}</div>}
-          <div className="clipboard-history-hint">
-            hold {shortcut} · tap V to cycle · release to paste
-          </div>
-        </div>
-      )}
+      {menu}
     </span>
   );
 }
