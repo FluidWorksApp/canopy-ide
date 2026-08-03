@@ -11,8 +11,10 @@ import {
   fixCiTask,
   followUpsTask,
   microTaskProtocol,
+  noteTask,
   oneLine,
   prArtifactPath,
+  prHandoffProtocol,
   prReviewTask,
   progressBrief,
   raisePrTask,
@@ -664,6 +666,66 @@ describe("customTaskDef", () => {
   });
 });
 
+describe("prHandoffProtocol", () => {
+  const pr = {
+    number: 12,
+    title: "Tighten the parser",
+    url: "https://github.com/o/r/pull/12",
+    branch: "fix/parser",
+    base: "main",
+    mine: true,
+  } as never;
+
+  it("asks for a worktree, a draft PR, and nothing merged", () => {
+    const p = prHandoffProtocol();
+    expect(p).toContain("git worktree add");
+    expect(p).toContain("gh pr create --draft");
+    expect(p).toContain("Never merge it");
+    expect(p).toContain("canopy_job_done");
+    expect(p).not.toMatch(/[\r\n]/);
+  });
+
+  /** A brief that says "review this" or "explain that" shouldn't end with an
+   *  agent opening an empty PR — the clause has to stay conditional. */
+  it("stays conditional on the job actually needing a code change", () => {
+    expect(prHandoffProtocol()).toMatch(/^If the job turns out to need a code change/);
+    expect(prHandoffProtocol()).toContain("If the job needs no code change");
+  });
+
+  /** The built-ins each say what happens to their edits — Fix CI pushes to the
+   *  PR's branch, Review changes nothing, a note stops short of a branch. Only
+   *  the tasks a user typed have nothing to say about it. */
+  it("is appended to user-written tasks and to no built-in", () => {
+    const marker = "gh pr create --draft";
+    expect(
+      customTaskDef({
+        id: "abc",
+        label: "L",
+        icon: "",
+        placeholder: "",
+        brief: "Add a thing",
+      }).buildContext({ dir: "/p" }, ""),
+    ).toContain(marker);
+    expect(adhocTaskDef("Add a thing").buildContext({ dir: "/p" }, "")).toContain(
+      marker,
+    );
+    expect(
+      noteTask.buildContext(
+        {
+          dir: "/p",
+          projectId: "p",
+          noteId: "n",
+          title: "A thought",
+          brief: "A thought",
+        },
+        "",
+      ),
+    ).not.toContain(marker);
+    expect(raisePrTask.buildContext(payload(), "")).not.toContain(marker);
+    expect(prReviewTask.buildContext({ repo: "/repo", pr }, "")).not.toContain(marker);
+  });
+});
+
 describe("adhocLabel", () => {
   it("names a one-off after the head of its brief, cut on a word", () => {
     expect(adhocLabel("Bump the changelog")).toBe("Bump the changelog");
@@ -702,7 +764,7 @@ describe("adhocTaskDef", () => {
     expect(def.label).toBe("Bump the changelog and tag it.");
     expect(def.cwd({ dir: "/proj" })).toBe("/proj");
     const ctx = def.buildContext({ dir: "/proj" }, "");
-    expect(ctx).toBe("Bump the changelog and tag it.");
+    expect(ctx.startsWith("Bump the changelog and tag it.")).toBe(true);
     expect(ctx).not.toMatch(/[\r\n]/);
     // Not in the registry: a one-off is never listed, only run.
     expect(MICRO_TASKS.map((t) => t.id)).not.toContain(def.id);
