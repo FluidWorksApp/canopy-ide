@@ -56,6 +56,7 @@ import { workspaceAgents, workspaceGit, workspaceSearch } from "./companionWorks
 import { companionName, summonCompanion } from "./companion";
 import type { CompanionProposal } from "./companionSession";
 import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
+import { readRemoteThemeTokens } from "./remoteTheme";
 import { useTabDrag } from "./tabDrag";
 import * as prWatch from "./prWatchStore";
 import * as clipboardStore from "./clipboardStore";
@@ -1020,6 +1021,17 @@ export default function App() {
   // agent asks for its tool list — which can be at any moment.
   useEffect(() => {
     const publish = () => void ipc.contextTools(getSettings().disabledTools);
+    publish();
+    window.addEventListener(THEME_CHANGE_EVENT, publish);
+    return () => window.removeEventListener(THEME_CHANGE_EVENT, publish);
+  }, []);
+
+  // Remote is another shell over this app, not another theme implementation.
+  // Rust keeps this cheap snapshot even while Remote is off, so every way of
+  // enabling the shared server starts with the current skin already available.
+  useEffect(() => {
+    const publish = () =>
+      void ipc.remoteSetTheme(readRemoteThemeTokens()).catch(() => {});
     publish();
     window.addEventListener(THEME_CHANGE_EVENT, publish);
     return () => window.removeEventListener(THEME_CHANGE_EVENT, publish);

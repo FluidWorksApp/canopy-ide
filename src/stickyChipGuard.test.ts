@@ -17,7 +17,10 @@ import { join } from "node:path";
 import { NUB_W } from "./tabSticky";
 
 // Vitest runs from the repo root; import.meta.url is not a file: URL here.
-const CSS = readFileSync(join(process.cwd(), "src", "index.css"), "utf8");
+const CSS = [
+  readFileSync(join(process.cwd(), "shared", "chrome.css"), "utf8"),
+  readFileSync(join(process.cwd(), "src", "index.css"), "utf8"),
+].join("\n");
 
 /** The declarations inside a top-level rule, by exact selector. */
 function ruleBody(selector: string): string {

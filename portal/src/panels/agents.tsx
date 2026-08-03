@@ -4,7 +4,7 @@
 // carries for every live process tree.
 
 import { AgentBadge } from '@shared/components'
-import { IconBolt, IconServer, IconTerminal } from '@shared/icons'
+import { AgentsIcon, IconTerminal, ServersIcon } from '@shared/icons'
 import { agentMeta, basename, fmtMem, fmtTokens, type AgentRow } from '@shared/model'
 import { formatDuration, hasWorkingTime, workingTime } from '@shared/agentDuration'
 import { Pill, Row, SubHead } from './ui'
@@ -64,7 +64,7 @@ function forProject(ctx: PanelCtx): AgentRow[] {
 export const agentsPanel: PanelDef = {
   id: 'agents',
   title: 'Agents',
-  Icon: IconBolt,
+  Icon: AgentsIcon,
   scope: 'project',
   badge: (ctx) => forProject(ctx).filter((r) => !r.terminal).length,
   urgent: (ctx) => forProject(ctx).some((r) => r.needsYou),
@@ -79,7 +79,7 @@ export const agentsPanel: PanelDef = {
       <>
         {live.length > 0 && (
           <>
-            <SubHead icon={<IconBolt s={12} />} title="Active" n={live.length} />
+            <SubHead icon={<AgentsIcon s={12} />} title="Active" n={live.length} />
             {live.map((r) => agentRow(ctx, r, r.key))}
           </>
         )}
@@ -132,7 +132,7 @@ export const terminalsPanel: PanelDef = {
 export const serversPanel: PanelDef = {
   id: 'servers',
   title: 'Servers',
-  Icon: IconServer,
+  Icon: ServersIcon,
   scope: 'project',
   badge: (ctx) => listening(ctx).length,
   List({ ctx }) {
@@ -150,7 +150,7 @@ export const serversPanel: PanelDef = {
           <Row
             key={s.id}
             on={ctx.openKey === `terminal:${s.id}`}
-            icon={<IconServer s={16} />}
+            icon={<ServersIcon s={16} />}
             title={s.title?.trim() || basename(s.cwd)}
             sub={basename(s.cwd)}
             meta={s.ports.map((p) => (

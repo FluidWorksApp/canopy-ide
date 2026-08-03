@@ -41,7 +41,7 @@ button.card.on:active {
 }
 
 /* left status edge — flat solid, coloured by run state */
-.rail {
+.agent-card-rail {
   position: absolute;
   left: 0;
   top: -1px;
@@ -50,14 +50,14 @@ button.card.on:active {
   border-radius: 12px 0 0 12px;
   background: var(--_dim);
 }
-.rail.working {
+.agent-card-rail.working {
   background: var(--ok, #46a758);
 }
-.rail.waiting {
+.agent-card-rail.waiting {
   background: var(--warn, #d8a23a);
 }
-.rail.idle,
-.rail.ended {
+.agent-card-rail.idle,
+.agent-card-rail.ended {
   background: transparent;
 }
 

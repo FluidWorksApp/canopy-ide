@@ -10,8 +10,8 @@
 // time is the phone's constraint, not this one's.
 
 import { useEffect, useState } from 'react'
-import { IconClose, IconFolder, IconPlus, IconPower } from '@shared/icons'
-import { PANELS } from '../panels'
+import { IconBell, IconClose, IconFolder, IconPlus, IconPower } from '@shared/icons'
+import { PANELS, WIDE_RAIL_FOOTER, WIDE_RAIL_GROUPS, panelById } from '../panels'
 import type { PanelCtx, Target } from '../panels/types'
 import { targetKey } from '../panels/types'
 import { Detail } from '../views/Detail'
@@ -38,43 +38,81 @@ export function WideShell(props: ShellProps) {
   const { ctx, up, panelId, onPanel, tabs, activeKey, onSelectTab, onCloseTab } = props
   const panel = PANELS.find((p) => p.id === panelId) ?? PANELS[0]
   const active = tabs.find((t) => targetKey(t) === activeKey)
+  const notifications = panelById('notifications')
+  const notificationCount = notifications?.badge?.(ctx) ?? 0
+  const notificationsHot = notifications?.urgent?.(ctx) ?? false
 
   return (
     <div className="wide">
-      <nav className="prail" aria-label="Panels">
-        <div className="prail-mark" title={up ? 'Connected' : 'Reconnecting…'}>
+      <header className="titlebar portal-titlebar">
+        <span
+          className="portal-connection"
+          title={up ? 'Connected' : 'Reconnecting…'}
+          role="status"
+          aria-live="polite"
+        >
           <span className={`mark-dot ${up ? 'live' : 'down'}`} />
-        </div>
-        {PANELS.map((p) => {
-          const n = p.badge?.(ctx) ?? 0
-          const hot = p.urgent?.(ctx) ?? false
-          return (
+          {up ? 'Remote' : 'Reconnecting…'}
+        </span>
+        <div className="project-tabs" aria-label="Open projects">
+          {props.projects.map((project) => (
             <button
-              key={p.id}
-              className={`prail-btn ${p.id === panelId ? 'on' : ''}`}
-              onClick={() => onPanel(p.id)}
-              title={p.title}
-              aria-label={p.title}
-              aria-current={p.id === panelId}
+              key={project.id}
+              className={`project-tab ${project.id === ctx.project?.id ? 'project-tab-active' : ''}`}
+              onClick={() => props.onProject(project.id)}
+              aria-current={project.id === ctx.project?.id ? 'page' : undefined}
             >
-              <p.Icon s={19} />
-              {n > 0 && <span className={`prail-n ${hot ? 'hot' : ''}`}>{n}</span>}
+              <span>{project.name}</span>
             </button>
-          )
-        })}
-        <span className="prail-fill" />
-        <button className="prail-btn" onClick={props.onLogout} title="Sign out" aria-label="Sign out">
+          ))}
+        </div>
+        <span className="titlebar-spacer" />
+        <button
+          className={`project-tab portal-top-icon ${panelId === 'notifications' ? 'project-tab-active' : ''}`}
+          onClick={() => onPanel('notifications')}
+          title="Notifications"
+          aria-label="Notifications"
+          aria-current={panelId === 'notifications' ? 'page' : undefined}
+        >
+          <IconBell s={14} />
+          {notificationCount > 0 && (
+            <span className={`rail-badge portal-title-badge ${notificationsHot ? 'rail-badge-hot' : ''}`}>
+              {Math.min(notificationCount, 99)}
+            </span>
+          )}
+        </button>
+        <button className="project-tab portal-top-action" onClick={props.onNewAgent}>
+          <IconPlus s={13} /> <span>Agent</span>
+        </button>
+        <button
+          className="project-tab portal-top-icon"
+          onClick={props.onLogout}
+          title="Sign out"
+          aria-label="Sign out"
+        >
           <IconPower s={18} />
         </button>
+      </header>
+
+      <nav className="rail portal-rail" aria-label="Panels">
+        {WIDE_RAIL_GROUPS.map((group) => (
+          <div className="rail-group" role="group" aria-label={group.label} key={group.id}>
+            {group.panels.map((id) => panelById(id)).filter(Boolean).map((p) => (
+              <RailButton key={p!.id} panel={p!} ctx={ctx} active={p!.id === panelId} onPanel={onPanel} />
+            ))}
+          </div>
+        ))}
+        <span className="rail-spacer" />
+        <div className="rail-group portal-rail-footer" role="group" aria-label="Tools">
+          {WIDE_RAIL_FOOTER.map((id) => panelById(id)).filter(Boolean).map((p) => (
+            <RailButton key={p!.id} panel={p!} ctx={ctx} active={p!.id === panelId} onPanel={onPanel} />
+          ))}
+        </div>
       </nav>
 
       <section className="pane list-pane" aria-label={panel.title}>
         <PanelHead title={panel.title} count={panel.badge?.(ctx)}>
           <BusyDot ctx={ctx} />
-          <ProjectPicker {...props} />
-          <button className="ghost sm" onClick={props.onNewAgent}>
-            <IconPlus s={14} /> Agent
-          </button>
         </PanelHead>
         <div className="pane-scroll">
           <panel.List ctx={ctx} />
@@ -83,16 +121,41 @@ export function WideShell(props: ShellProps) {
 
       <section className="pane detail-pane">
         {tabs.length > 0 && (
-          <div className="tabstrip" role="tablist">
+          <div className="pane-bar portal-pane-bar">
+            <div className="tabs" role="tablist">
             {tabs.map((t) => {
               const key = targetKey(t)
               return (
-                <div key={key} className={`tab ${key === activeKey ? 'on' : ''}`}>
-                  <button className="tab-label" role="tab" onClick={() => onSelectTab(key)}>
+                <div
+                  key={key}
+                  className={`tab ${key === activeKey ? 'tab-active' : ''}`}
+                  role="presentation"
+                >
+                  <button
+                    className="tab-title portal-tab-label"
+                    role="tab"
+                    aria-selected={key === activeKey}
+                    aria-controls="portal-detail-panel"
+                    tabIndex={key === activeKey ? 0 : -1}
+                    data-portal-tab={key}
+                    onClick={() => onSelectTab(key)}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+                      event.preventDefault()
+                      const at = tabs.findIndex((candidate) => targetKey(candidate) === key)
+                      const delta = event.key === 'ArrowRight' ? 1 : -1
+                      const next = tabs[(at + delta + tabs.length) % tabs.length]
+                      const nextKey = targetKey(next)
+                      onSelectTab(nextKey)
+                      requestAnimationFrame(() => {
+                        document.querySelector<HTMLElement>(`[data-portal-tab="${CSS.escape(nextKey)}"]`)?.focus()
+                      })
+                    }}
+                  >
                     {tabLabel(t)}
                   </button>
                   <button
-                    className="tab-x"
+                    className="tab-close"
                     onClick={() => onCloseTab(key)}
                     aria-label={`Close ${tabLabel(t)}`}
                   >
@@ -101,10 +164,18 @@ export function WideShell(props: ShellProps) {
                 </div>
               )
             })}
+            </div>
           </div>
         )}
         {active ? (
-          <Detail ctx={ctx} target={active} onBack={() => onCloseTab(activeKey!)} showBack={false} />
+          <div
+            className="portal-tabpanel"
+            id="portal-detail-panel"
+            role="tabpanel"
+            aria-label={tabLabel(active)}
+          >
+            <Detail ctx={ctx} target={active} onBack={() => onCloseTab(activeKey!)} showBack={false} />
+          </div>
         ) : (
           <div className="detail-idle">
             <panel.Icon s={30} />
@@ -113,6 +184,33 @@ export function WideShell(props: ShellProps) {
         )}
       </section>
     </div>
+  )
+}
+
+function RailButton({
+  panel,
+  ctx,
+  active,
+  onPanel,
+}: {
+  panel: (typeof PANELS)[number]
+  ctx: PanelCtx
+  active: boolean
+  onPanel: (id: string) => void
+}) {
+  const n = panel.badge?.(ctx) ?? 0
+  const hot = panel.urgent?.(ctx) ?? false
+  return (
+    <button
+      className={`rail-btn ${active ? 'rail-btn-active' : ''}`}
+      onClick={() => onPanel(panel.id)}
+      title={panel.title}
+      aria-label={panel.title}
+      aria-current={active}
+    >
+      <panel.Icon s={22} />
+      {n > 0 && <span className={`rail-badge ${hot ? 'rail-badge-hot' : ''}`}>{Math.min(n, 99)}</span>}
+    </button>
   )
 }
 

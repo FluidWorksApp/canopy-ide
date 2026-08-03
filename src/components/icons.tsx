@@ -41,6 +41,7 @@ function svgProps(size: number, className?: string) {
 import { IconIssue, IconStop, IconTerminal } from "../../shared/icons";
 
 export {
+  AgentsIcon,
   ChevronIcon,
   IconBell as BellIcon,
   IconCheck as CheckIcon,
@@ -54,6 +55,8 @@ export {
   IconPlug as PlugIcon,
   IconPr as PullRequestIcon,
   IconSearch as SearchIcon,
+  ResearchIcon,
+  ServersIcon,
   IconStopwatch as StopwatchIcon,
 } from "../../shared/icons";
 
@@ -115,29 +118,6 @@ export function LiveDot({ size = 10, className }: IconProps) {
   );
 }
 
-/** Server rack + play: the rail's execution tab. Two stacked rack units with a
- *  status LED each say "the things this project runs"; the play mark says they
- *  are yours to start. A wrench used to stand in for the rack and kept reading
- *  as settings.
- *
- *  The rack is kept left of x=15 so the play mark has the bottom-right corner
- *  to itself. Not the top right: the rail's running-count badge lands there and
- *  would eat the play mark exactly when servers are up. The play is stroked in
- *  currentColor like the rest of it — it was filled with --ok green, which made
- *  this the one two-colour glyph in the rail and left it green on Daylight and
- *  every other light skin. */
-export function ServersIcon({ size = 18, className }: IconProps) {
-  return (
-    <svg {...svgProps(size, className)}>
-      <path d="M2.5 4.5h11v5.5h-11zM2.5 14h11v5.5h-11z" />
-      <path d="M10.4 7.25h1.4M10.4 16.75h1.4" />
-      <circle cx="5.4" cy="7.3" r="1" fill="currentColor" stroke="none" />
-      <circle cx="5.4" cy="16.8" r="1" fill="currentColor" stroke="none" />
-      <path d="M16.4 14.2l5.4 3.3-5.4 3.3z" />
-    </svg>
-  );
-}
-
 /** Pull: work coming down onto the line. */
 export function DownloadIcon({ size = 14, className }: IconProps) {
   return (
@@ -188,20 +168,6 @@ export const BRAND_ICONS: Record<string, (p: IconProps) => ReactElement> = {
 // mark — the Agents rail button used Claude's asterisk, which read as "Claude"
 // rather than "agents".
 
-/** Research: a magnifier over a page. The page is what distinguishes it from a
- *  plain search glass — this is a *written* finding, not a query — and at rail
- *  size the two strokes of the document edge are enough to read as one. */
-export function ResearchIcon({ size = 18, className }: IconProps) {
-  return (
-    <svg {...svgProps(size, className)}>
-      <path d="M13.5 20.5H6.5a1.5 1.5 0 0 1-1.5-1.5V5a1.5 1.5 0 0 1 1.5-1.5h7L19 9v3" />
-      <path d="M13 3.6V9.5h5.6" />
-      <circle cx="15.2" cy="16.2" r="3.1" />
-      <path d="M17.5 18.5L20 21" />
-    </svg>
-  );
-}
-
 /** Scratchpad: a pencil — jotting, not documentation.
  *
  *  It has to survive sitting one row above Research (a page with a magnifier)
@@ -238,19 +204,6 @@ export function BlockedIcon({ size = 14, className }: IconProps) {
     <svg {...svgProps(size, className)}>
       <circle cx="12" cy="12" r="8.5" />
       <path d="M6.2 6.2l11.6 11.6" />
-    </svg>
-  );
-}
-
-/** Agents: a bot head. Distinct from every CLI brand mark on purpose. */
-export function AgentsIcon({ size = 18, className }: IconProps) {
-  return (
-    <svg {...svgProps(size, className)}>
-      <path d="M4 12a3.5 3.5 0 0 1 3.5-3.5h9A3.5 3.5 0 0 1 20 12v4a3.5 3.5 0 0 1-3.5 3.5h-9A3.5 3.5 0 0 1 4 16z" />
-      <path d="M12 8.5V5" />
-      <circle cx="12" cy="3.6" r="1.4" fill="currentColor" stroke="none" />
-      <circle cx="9" cy="14" r="1.45" fill="currentColor" stroke="none" />
-      <circle cx="15" cy="14" r="1.45" fill="currentColor" stroke="none" />
     </svg>
   );
 }

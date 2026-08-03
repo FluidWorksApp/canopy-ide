@@ -11,7 +11,7 @@ import { KEYBOARD_QUERY, WIDE_QUERY } from './useMedia'
 import { isStaged, rel, statusWord } from './panels/code'
 import { targetKey, type Target } from './panels/types'
 import { tabLabel } from './shells/WideShell'
-import { COMPACT_PRIMARY, PANELS, panelById } from './panels'
+import { COMPACT_PRIMARY, PANELS, WIDE_RAIL_FOOTER, WIDE_RAIL_GROUPS, panelById } from './panels'
 import { alertFor } from './notify'
 import type { PendingItem } from '@shared/notifications'
 import { MANIFESTS } from '@shared/remote/modules'
@@ -47,6 +47,62 @@ describe('the panel rail', () => {
     // It is why you picked the phone up.
     expect(PANELS[0].id).toBe('notifications')
     expect(COMPACT_PRIMARY[0]).toBe('notifications')
+  })
+
+  it('places every wide panel in desktop-style chrome exactly once', () => {
+    const placed = [
+      'notifications',
+      ...WIDE_RAIL_GROUPS.flatMap((group) => group.panels),
+      ...WIDE_RAIL_FOOTER,
+    ]
+    expect(new Set(placed).size).toBe(placed.length)
+    expect(new Set(placed)).toEqual(new Set(PANELS.map((panel) => panel.id)))
+  })
+
+  it('consumes the shared desktop chrome contract', () => {
+    const shell = readFileSync(join(process.cwd(), 'portal/src/shells/WideShell.tsx'), 'utf8')
+    const chrome = readFileSync(join(process.cwd(), 'shared/chrome.css'), 'utf8')
+    for (const cls of ['titlebar', 'project-tabs', 'project-tab', 'rail', 'rail-group', 'rail-btn', 'pane-bar', 'tabs', 'tab-active']) {
+      expect(shell).toContain(cls)
+      expect(chrome).toContain(`.${cls}`)
+    }
+    expect(shell).not.toContain('prail')
+    expect(shell).not.toContain('tabstrip')
+  })
+
+  it('keeps the wide tab strip keyboard and screen-reader navigable', () => {
+    const shell = readFileSync(join(process.cwd(), 'portal/src/shells/WideShell.tsx'), 'utf8')
+    expect(shell).toContain("role=\"tablist\"")
+    expect(shell).toContain("role=\"tabpanel\"")
+    expect(shell).toContain('aria-selected={key === activeKey}')
+    expect(shell).toContain("event.key !== 'ArrowLeft'")
+    expect(shell).toContain("event.key !== 'ArrowRight'")
+  })
+})
+
+describe('the shared theme contract', () => {
+  it('publishes the chrome tokens Remote needs', () => {
+    const source = readFileSync(join(process.cwd(), 'src/remoteTheme.ts'), 'utf8')
+    for (const token of [
+      'bg-deep',
+      'bg-overlay',
+      'border-strong',
+      'text-faint',
+      'accent-soft',
+      'r-xs',
+      'shadow-1',
+      'font-ui',
+      'fs-md',
+      'dur-fast',
+    ]) {
+      expect(source).toContain(`"${token}"`)
+    }
+  })
+
+  it('republishes the theme while Settings is closed', () => {
+    const app = readFileSync(join(process.cwd(), 'src/App.tsx'), 'utf8')
+    expect(app).toContain('remoteSetTheme(readRemoteThemeTokens())')
+    expect(app).toContain('addEventListener(THEME_CHANGE_EVENT, publish)')
   })
 })
 

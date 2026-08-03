@@ -1,3 +1,5 @@
+@import "../shared/tokens.css";
+@import "../shared/chrome.css";
 @import "../shared/fileTree.css";
 /* One token block per skin. See src/skins/skins.css — and src/skins/types.ts
    for why a skin is a directory entry rather than an edit in five files. */
@@ -9,88 +11,6 @@
    "paper" white the way a real document does, regardless of app theme) is one
    of these custom properties. Switching themes is one attribute flip on
    <html data-theme="…"> (see settings.ts applyTheme()); nothing re-renders. */
-:root {
-  /* ---- surfaces, back to front (shell → panel → editor → raised → overlay) ---- */
-  --bg-deep: #090b0e; /* window shell: titlebar, activity rail, status bar */
-  --bg-alt: #101317; /* side panels, terminal */
-  --bg: #0d0f12; /* editor canvas */
-  --bg-raised: #171b20; /* cards, inputs, hover */
-  --bg-overlay: #1e2228; /* palette, menus, toasts */
-
-  /* ---- borders ---- */
-  --border: #2b2f36;
-  --border-strong: #3a3f4a; /* lifted elements: active tabs, project pills */
-
-  /* ---- text ---- */
-  --text: #e8e6df;
-  --text-dim: #8b8d93;
-  --text-faint: #575a60;
-
-  /* ---- status — accent doubles as the primary action colour ---- */
-  --accent: #d4af37;
-  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
-  --danger: #e0483e;
-  --ok: #4caf7d;
-  --warn: #e2943a;
-  --magenta: #c792ea; /* agent identity, decorative chips */
-  --cyan: #89ddff; /* links, secondary info */
-
-  /* ---- ink on filled surfaces ---- */
-  --on-accent: #14110a;
-  --on-danger: #14100a;
-
-  /* ---- focus ring — one rule everywhere: box-shadow: var(--ring) ---- */
-  --ring: 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
-
-  /* ---- radius — squircle-flavored; pair with corner-shape: squircle ---- */
-  --r-xs: 5px; /* chips, badges, status pills */
-  --r-sm: 8px; /* buttons, inputs, tree-row hover */
-  --r-md: 12px; /* tabs, cards, panels */
-  --r-lg: 16px; /* palette, dialogs, toasts */
-
-  /* ---- pane-bar rails — one width so the right edge never moves ---- */
-  --rail-chip-w: 172px;
-
-  /* ---- elevation — layered, cool-black ---- */
-  --shadow-1: 0 1px 2px rgba(6, 8, 18, 0.28);
-  --shadow-2: 0 4px 14px rgba(6, 8, 18, 0.35), 0 1px 3px rgba(6, 8, 18, 0.3);
-  --shadow-3: 0 24px 64px rgba(4, 6, 16, 0.55), 0 6px 18px rgba(4, 6, 16, 0.35);
-
-  /* ---- motion ---- */
-  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --dur-fast: 120ms; /* hover, press */
-  --dur-press: 90ms; /* the give under a click — always faster than the hover */
-  --dur-med: 200ms; /* panel reveal, sliding indicators */
-  --dur-pop: 260ms; /* overlays: palette, toast (rise 6px + scale .98) */
-
-  /* ---- spacing — 4px grid ---- */
-  --sp-1: 4px;
-  --sp-2: 8px;
-  --sp-3: 12px;
-  --sp-4: 16px;
-  --sp-5: 24px;
-  --sp-6: 32px;
-  --sp-7: 40px;
-  --sp-8: 48px;
-
-  /* ---- typography ---- */
-  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono:
-    "SF Mono", Menlo, Monaco, "JetBrains Mono", "Fira Code", monospace;
-  --fs-xs: 11px; /* badges, tab meta, status bar */
-  --fs-sm: 12px; /* buttons, tree rows, tabs */
-  --fs-md: 13px; /* base UI + editor default */
-  --fs-lg: 15px; /* panel titles, palette input */
-  --fs-xl: 18px; /* dialog titles */
-  --lh-tight: 1.25;
-  --lh-ui: 1.45;
-  --lh-code: 1.6;
-
-  font-family: var(--font-ui);
-  font-size: var(--fs-md);
-  color-scheme: dark;
-}
-
 /* html, body and #root all paint var(--bg); three stacked washes would come
    out an opaque grey and bury the field. The field painted on <html> by the
    token block (src/skins/vitrine.css) is this stack's background — everything
@@ -585,17 +505,6 @@ body,
 
 /* ---------- chrome ---------- */
 
-.titlebar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 10px;
-  height: 34px;
-  background: var(--bg-deep);
-  border-bottom: 1px solid var(--border);
-  flex: 0 0 auto;
-}
-
 /* macOS frameless "Overlay" titlebar: the native traffic lights float over our
    content at the top-left, so reserve ~78px on the left for them. The bar
    itself is the window drag handle (data-tauri-drag-region in TitleBar.tsx).
@@ -624,10 +533,6 @@ body,
   font-weight: 700;
   color: var(--accent);
   margin-right: 6px;
-}
-
-.titlebar-spacer {
-  flex: 1;
 }
 
 /* Always-visible "live collaboration in progress" indicator. Sits in the
@@ -717,103 +622,6 @@ body,
 }
 
 /* ---------- project tabs (top bar) ---------- */
-
-.project-tabs {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  overflow-x: auto;
-  /* Already scrollable (data was always reachable) — scrollbar-width:none
-     just hid any hint of it. See the .run-rail comment for why both
-     properties are set rather than just scrollbar-width. */
-  scrollbar-width: thin;
-}
-
-.project-tabs::-webkit-scrollbar {
-  height: 4px;
-}
-
-.project-tabs::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 2px;
-}
-
-/* Floating squircle pills on the deep shell surface — no bottom-notch "folder
-   tab" anymore. Inactive pills are quiet text; the active pill lifts onto the
-   raised surface with a strong border and shadow-1. */
-.project-tab {
-  /* Containing block for the ⌥-held number badge — see .tab-hint. */
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  height: 24px;
-  padding: 0 6px 0 10px;
-  border-radius: var(--r-xs);
-  corner-shape: squircle;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-dim);
-  cursor: pointer;
-  border: 1px solid transparent;
-  white-space: nowrap;
-  /* The same 200px an editor tab gets, for the same reason: one project called
-     after a long worktree path took the whole strip, and everything else you
-     had open — and the ＋ — went off the end of a row people don't think to
-     scroll. The strip still scrolls when there are genuinely many. */
-  max-width: 200px;
-  transition:
-    background var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out),
-    border-color var(--dur-fast) var(--ease-out),
-    box-shadow var(--dur-fast) var(--ease-out);
-}
-
-/* The name is the one child of a pill that carries no class of its own — the
-   frost, the badge, the ⌥ hint and the ✕ all do — and it is the only part
-   whose length isn't ours. It takes the squeeze. */
-.project-tab > span:not([class]) {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Everything else in the pill keeps its size: an icon that shrinks is a
-   smudge, and a ✕ that shrinks is a miss. */
-.project-tab > .project-tab-frost,
-.project-tab > .badge,
-.project-tab > .tab-close {
-  flex: 0 0 auto;
-}
-
-.project-tab:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--bg-raised) 60%, transparent);
-}
-
-.project-tab-active {
-  color: var(--text);
-  background: var(--bg-raised);
-  border-color: var(--border-strong);
-  box-shadow: var(--shadow-1);
-  font-weight: 600;
-}
-
-/* The pill's close slot is reserved and fades in on hover / when active, so
-   pills don't jump width as the ✕ appears. */
-.project-tab .tab-close {
-  opacity: 0;
-  transition:
-    opacity var(--dur-fast) var(--ease-out),
-    background var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
-}
-
-.project-tab:hover .tab-close,
-.project-tab-active .tab-close {
-  opacity: 1;
-}
 
 .project-manage-btn {
   display: inline-flex;
@@ -1099,131 +907,9 @@ body,
 
 /* ---------- rail (collapsed sidebar) ---------- */
 
-.rail {
-  width: 54px;
-  flex: 0 0 54px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  /* Full-bleed items: no rail padding or gaps — they run edge to edge. */
-  gap: 0;
-  padding: 0;
-  position: relative;
-  z-index: 1;
-  /* Vertical aurora wash: accent at the top, magenta mid, cyan at the foot,
-     over the deep shell surface. Purely decorative — sits behind the icons. */
-  background:
-    radial-gradient(
-      120% 40% at 50% 0%,
-      color-mix(in srgb, var(--accent) 22%, transparent),
-      transparent 70%
-    ),
-    radial-gradient(
-      140% 34% at 50% 46%,
-      color-mix(in srgb, var(--magenta) 12%, transparent),
-      transparent 72%
-    ),
-    radial-gradient(
-      150% 40% at 50% 100%,
-      color-mix(in srgb, var(--cyan) 13%, transparent),
-      transparent 74%
-    ),
-    var(--bg-deep);
-  /* Hairline inner edge instead of a hard border, so the wash never merges
-     into the file tree. */
-  box-shadow: inset -1px 0 0 color-mix(in srgb, var(--border) 70%, transparent);
-}
-
-/* Project / Source control & Review / Agents. The rail is icon-width,
-   so the grouping can't be labelled — a hairline plus a little air is the whole
-   signal. Inset box-shadow rather than border-top: the buttons are full-bleed
-   and a real border would inset the active wash by a pixel. */
-.rail-group {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  width: 100%;
-  padding: 5px 0;
-}
-
-.rail-group + .rail-group {
-  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--border) 60%, transparent);
-}
-
 /* merge rail + side panel into one visual panel: divider only against main */
 .sidebar {
   border-right: none;
-}
-
-.rail-btn {
-  position: relative;
-  /* Centres an SVG rather than a glyph: the rail carries real icons now. */
-  display: grid;
-  place-items: center;
-  width: 54px;
-  height: 46px;
-  background: none;
-  border: none;
-  border-radius: 0;
-  color: var(--text-dim);
-  font-size: 15px;
-  cursor: pointer;
-  transition:
-    background var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
-}
-
-/* No hover background — matches the handoff (default vs active only). The icon
-   just brightens so the item still confirms it's the click target, without a
-   wash that would out-shout the subtle accent-soft active state. */
-.rail-btn:hover {
-  color: var(--text);
-}
-
-.rail-btn-active {
-  /* Icon stays white (same as hover); the accent-soft wash + left accent bar
-     carry the "active" signal, not the icon color. The Pixel skin cannot draw
-     a 14% wash and inverts the whole tile instead — see the
-     :root[data-theme="pixel"] run at the top of this file. */
-  color: var(--text);
-  background: var(--accent-soft);
-}
-
-/* 3px squircle accent bar on the active item's left edge. */
-.rail-btn-active::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  border-radius: 0 var(--r-xs) var(--r-xs) 0;
-  corner-shape: squircle;
-  background: var(--accent);
-}
-
-.rail-badge {
-  position: absolute;
-  z-index: 2;
-  top: 5px;
-  right: 9px;
-  min-width: 15px;
-  height: 15px;
-  padding: 0 3px;
-  display: grid;
-  place-items: center;
-  background: var(--accent);
-  color: var(--on-accent);
-  border-radius: 999px;
-  font-size: 9.5px;
-  font-weight: 700;
-  line-height: 1;
-  /* Ring against the deep rail so the badge reads as a floating count. */
-  box-shadow: 0 0 0 2px var(--bg-deep);
-}
-
-.rail-spacer {
-  flex: 1;
 }
 
 /* Pinned reads as "this one is latched", distinct from the wash a hovered peek
@@ -4603,82 +4289,6 @@ body.resizing-side * {
 
 /* ---------- tabs (editor + terminal) ---------- */
 
-.pane-bar {
-  display: flex;
-  align-items: center;
-  background: var(--bg-alt);
-  border-bottom: 1px solid var(--border);
-  flex: 0 0 auto;
-  /* Harbor tabs stand 34px so the gliding docked shape reads as fused with the
-     editor surface below. */
-  min-height: 34px;
-}
-
-.tabs {
-  display: flex;
-  overflow-x: auto;
-  /* How wide a stack chip is once it has queued up on the left: its icon and
-     its count, without its name. Mirrored by NUB_W in tabSticky.ts, which does
-     the queue's arithmetic — stickyChipGuard.test.ts holds the two together. */
-  --tab-nub-w: 50px;
-  /* The strip scrolls sideways and only sideways. Left at the default, the
-     `auto` on x makes y `auto` too, and the row's 1px of vertical overflow was
-     enough for a trackpad flick to rubber-band the whole strip up and down and
-     spring back — a bar that visibly wobbles under the pointer. The bleed that
-     caused it now lives on this box's own margin (see .tabs-harbor), so there
-     is nothing left to clip here. */
-  overflow-y: hidden;
-  flex: 1;
-  /* Positioned so it is the offsetParent of every tab: the regroup animation
-     measures tabs in strip-local coordinates (see tabFlip.ts), which is what
-     makes it immune to the strip itself scrolling or moving. */
-  position: relative;
-  /* No visible scrollbar on the tab row: this WebView renders the overlay
-     scrollbar as a thick bar under the tabs. The active tab scrolls itself
-     into view (see the follow effect) and shift/trackpad wheel still scroll,
-     so scrollability isn't lost — just the ugly bar. */
-  scrollbar-width: none;
-  /* A sideways flick that runs out of tabs stops here rather than handing the
-     leftover momentum to the pane below. */
-  overscroll-behavior: contain;
-}
-
-.tabs::-webkit-scrollbar {
-  display: none;
-}
-
-.tab {
-  /* Containing block for the ⌘-held number badge, which overlays the tab
-     rather than taking a slot in it. */
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  font-size: 12px;
-  color: var(--text-dim);
-  cursor: pointer;
-  border-right: 1px solid var(--border);
-  white-space: nowrap;
-  /* A single tab never dominates the strip — long PR/ticket titles ellipsize
-     instead of pushing everything else off-screen. */
-  max-width: 200px;
-  flex: 0 0 auto;
-}
-
-.tab-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.tab-active {
-  color: var(--text);
-  background: var(--bg);
-  box-shadow: inset 0 2px 0 var(--accent);
-}
-
 /* ---------- harbor tabs ----------
    The active tab's docked "fused to the editor" shape is a single gliding
    element (.tab-harbor-blob) that slides between tabs instead of the .tab-active
@@ -5124,25 +4734,6 @@ body.dragging-tab * {
 
 /* A proper square slot for the CloseIcon SVG — grid-centered so the 12px glyph
    sits dead-center, with a hover danger tint + soft danger wash. */
-.tab-close {
-  display: grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-  color: var(--text-dim);
-  border-radius: var(--r-xs);
-  corner-shape: squircle;
-  transition:
-    background var(--dur-fast) var(--ease-out),
-    color var(--dur-fast) var(--ease-out);
-}
-
-.tab-close:hover {
-  color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 14%, transparent);
-}
-
 .tab-external {
   color: var(--warn);
 }

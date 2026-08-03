@@ -1,13 +1,9 @@
-// The rail, in order.
+// Remote's feature registry. Compact mode reads this order; wide mode places
+// the same panels through WIDE_RAIL_GROUPS below.
 //
-// Both shells render this list and nothing else: the wide one turns it into an
-// icon rail beside a list pane, the compact one into a bottom tab bar plus a
-// "More" sheet. Adding a remote module means adding its panel here — neither
-// shell has a name of a feature anywhere in it.
-//
-// The order is the desktop's rail order, because muscle memory is the whole
-// point of a rail: Notifications first (it is why you picked the phone up),
-// then the working surfaces, then the reference ones.
+// Adding a remote module means adding its panel here, then choosing its wide
+// group. Compact leads with notifications because that is why you pick up the
+// phone; wide follows the desktop's grouped activity rail instead.
 
 import { agentsPanel, serversPanel, terminalsPanel } from './agents'
 import { notificationsPanel, usagePanel } from './alerts'
@@ -36,6 +32,17 @@ export const PANELS: PanelDef[] = [
  *  most a thumb reaches comfortably, and these four are what someone away from
  *  their desk actually opens. */
 export const COMPACT_PRIMARY = ['notifications', 'agents', 'changes', 'files']
+
+/** Wide Remote uses the desktop rail's information architecture. The panel
+ * renderers stay remote-specific; only their placement is shared vocabulary. */
+export const WIDE_RAIL_GROUPS = [
+  { id: 'project', label: 'Project', panels: ['files', 'servers'] },
+  { id: 'review', label: 'Source control & Review', panels: ['changes', 'git', 'prs', 'tickets'] },
+  { id: 'agents', label: 'Agents', panels: ['agents', 'research', 'instructions'] },
+  { id: 'runtime', label: 'Runtime', panels: ['terminals'] },
+] as const
+
+export const WIDE_RAIL_FOOTER = ['tools', 'usage'] as const
 
 export function panelById(id: string): PanelDef | undefined {
   return PANELS.find((p) => p.id === id)
