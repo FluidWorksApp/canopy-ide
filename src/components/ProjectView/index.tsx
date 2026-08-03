@@ -896,7 +896,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  project it was launched from. */
   const stopMicroRunRef = useRef<(ptyId: number) => void>(() => {});
   const openFileRef = useRef<
-    (path: string, opts?: { diff?: boolean }) => Promise<void>
+    (path: string, opts?: { diff?: boolean; activate?: boolean }) => Promise<void>
   >(async () => {});
 
   // Process stats for THIS project's terminals only. Subscribed here rather
@@ -1182,6 +1182,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // Stamped on top of the workspace port. Usually derived below.
       extraEnv?: [string, string][],
       profile?: string,
+      activate = true,
     ) => {
       const id = tabId();
       // Every terminal opened inside a workspace gets that workspace's port,
@@ -1217,7 +1218,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           chore: run === "chore" || undefined,
         },
       ]);
-      setActiveTabId(id);
+      if (activate) setActiveTabId(id);
       // A resume the CLI refuses leaves a dead shell in this tab and a row that
       // will offer the same doomed button tomorrow. The command carries the
       // session id, so nothing has to be passed in for this to know which
@@ -1237,12 +1238,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  tab rather than stacking duplicates. Returns the tab's id, which is how a
    *  caller that opened a viewer can close it again. */
   const attachTerminal = useCallback(
-    (ptyId: number, cwd: string, title: string, icon = "📱"): string => {
+    (
+      ptyId: number,
+      cwd: string,
+      title: string,
+      icon = "📱",
+      activate = true,
+    ): string => {
       const existing = tabsRef.current.find(
         (t): t is TermSubTab => t.type === "terminal" && t.attachId === ptyId,
       );
       if (existing) {
-        setActiveTabId(existing.id);
+        if (activate) setActiveTabId(existing.id);
         return existing.id;
       }
       const id = tabId();
@@ -1258,7 +1265,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           icon,
         },
       ]);
-      setActiveTabId(id);
+      if (activate) setActiveTabId(id);
       return id;
     },
     [],
@@ -1274,9 +1281,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ptyId: number;
         cwd: string;
         title: string;
+        activate?: boolean;
       };
       if (d?.projectId !== project.id) return;
-      attachTerminal(d.ptyId, d.cwd, d.title);
+      attachTerminal(d.ptyId, d.cwd, d.title, "📱", d.activate !== false);
     };
     window.addEventListener("canopy:attach-terminal", onAttach);
     return () => window.removeEventListener("canopy:attach-terminal", onAttach);
@@ -1336,26 +1344,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** Open an embedded-browser preview tab. With no URL the tab opens on the
    *  pick-a-server form; a URL (a run rail's detected server, a reopened tab)
    *  loads immediately. Returns the new tab's id (agent ops target it). */
-  const openPreview = useCallback((url = "", initiatorPtyId?: number | null) => {
-    const id = tabId();
-    setTabs((prev) => [
-      ...prev,
-      {
-        id,
-        type: "preview",
-        url,
-        annotations: [],
-        ...(initiatorPtyId != null ? { initiatorPtyId } : {}),
-      },
-    ]);
-    setActiveTabId(id);
-    // The panel that opened this is almost always still over the pane, and a
-    // browser view cannot be drawn under it — so the page you just asked for
-    // would be hidden by the thing you asked with. Closing it is what the user
-    // was about to do anyway.
-    dismissPeekRef.current();
-    return id;
-  }, []);
+  const openPreview = useCallback(
+    (url = "", initiatorPtyId?: number | null, activate = true) => {
+      const id = tabId();
+      setTabs((prev) => [
+        ...prev,
+        {
+          id,
+          type: "preview",
+          url,
+          annotations: [],
+          ...(initiatorPtyId != null ? { initiatorPtyId } : {}),
+        },
+      ]);
+      if (activate) setActiveTabId(id);
+      // The panel that opened this is almost always still over the pane, and a
+      // browser view cannot be drawn under it — so the page you just asked for
+      // would be hidden by the thing you asked with. Closing it is what the user
+      // was about to do anyway.
+      if (activate) dismissPeekRef.current();
+      return id;
+    },
+    [],
+  );
 
   /** Open an Android device tab. With no serial it opens on the pick-a-device
    *  form; the project defaults to the first component, which is what resolves
@@ -3858,8 +3869,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // A detached run does not steal the window — the toast App raised
           // said what happened, and the Tasks row now says "Needs you" with the
           // terminal one click away.
-          if (tab) setActiveTabId(tab.id);
-          else
+          if (tab) {
+            if (getSettings().agentAskForAttention) setActiveTabId(tab.id);
+          } else {
             updateMicroRuns((runs) =>
               patchRun(runs, ptyId, {
                 blocked: true,
@@ -3869,6 +3881,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 ...(named.icon ? { icon: named.icon } : {}),
               }),
             );
+          }
         } else {
           if (runId)
             recordTaskEnd(runId, {
@@ -3893,7 +3906,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return;
       }
       if (a.kind === "open_preview" && a.url) {
-        openPreview(a.url, a.ptyId);
+        openPreview(a.url, a.ptyId, getSettings().agentAskForAttention);
       } else if (a.kind === "start_server" && a.dir && a.command) {
         // `command` is the resolved command line, `name` its label — the same
         // pair the component-commands ▶ uses. Reuse a tab already on it.
@@ -3904,9 +3917,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
             t.cwd === a.dir &&
             t.command === a.command,
         );
-        if (existing && !existing.exited) setActiveTabId(existing.id);
+        if (existing && !existing.exited) {
+          if (getSettings().agentAskForAttention) setActiveTabId(existing.id);
+        }
         else if (existing) restartRun(existing.id);
-        else addTerminal(a.dir, a.command, a.name || a.command, "▶", true);
+        else
+          addTerminal(
+            a.dir,
+            a.command,
+            a.name || a.command,
+            "▶",
+            true,
+            undefined,
+            undefined,
+            getSettings().agentAskForAttention,
+          );
       } else if ((a.kind === "open_file" || a.kind === "show_diff") && a.path) {
         // "Look at line 340" — put the file in front of the user and land on
         // the line. The reveal is an event because the tab may already be open,
@@ -3914,7 +3939,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         const path = a.path;
         const line = a.line;
         void openFileRef
-          .current(path, { diff: a.kind === "show_diff" })
+          .current(path, {
+            diff: a.kind === "show_diff",
+            activate: getSettings().agentAskForAttention,
+          })
           .then(() => {
             if (line)
               requestAnimationFrame(() =>
@@ -4072,7 +4100,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }
         dispatchBrowserOp(tab.id, op);
       } else if (op.op === "navigate" && op.url) {
-        dispatchBrowserOp(openPreview(op.url, op.ptyId), op);
+        dispatchBrowserOp(
+          openPreview(op.url, op.ptyId, getSettings().agentAskForAttention),
+          op,
+        );
       } else {
         void ipc.browserResult(
           op.id,
@@ -4235,7 +4266,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // ---------- files ----------
 
   const openFile = useCallback(
-    async (path: string, opts?: { diff?: boolean; force?: boolean }) => {
+    async (
+      path: string,
+      opts?: { diff?: boolean; force?: boolean; activate?: boolean },
+    ) => {
       const existing = tabsRef.current.find(
         (t) => t.type === "file" && t.file.path === path,
       ) as FileSubTab | undefined;
@@ -4302,7 +4336,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ? { view: "diff" as const, diffOriginal }
             : {}),
         });
-        setActiveTabId(existing.id);
+        if (opts?.activate !== false) setActiveTabId(existing.id);
         return;
       }
       const id = tabId();
@@ -4329,7 +4363,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           },
         },
       ]);
-      setActiveTabId(id);
+      if (opts?.activate !== false) setActiveTabId(id);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rootsKey, patchFile],

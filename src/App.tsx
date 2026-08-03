@@ -1398,6 +1398,33 @@ export default function App() {
     [wakeProject],
   );
 
+  /** Make a project capable of receiving an agent action without necessarily
+   * selecting it. Agents still need a mounted ProjectView to open background
+   * tabs and drive previews; opening it is separate from taking attention. */
+  const prepareProjectForAgentAction = useCallback(
+    async (id: string, foreground: boolean) => {
+      if (foreground) {
+        await openForActionRef.current(id);
+        return;
+      }
+      const state = wsRef.current;
+      const project = state.projects.find((p) => p.id === id);
+      if (!project) return;
+      if (!state.openIds.includes(id)) {
+        if (!isHibernating(id)) {
+          for (const c of project.components) {
+            await ipc
+              .workspaceAdd(c.path)
+              .catch((e) => console.warn("scope add failed", e));
+          }
+        }
+        update({ openIds: [...state.openIds, id] });
+      }
+      if (isHibernating(id)) wakeProject(id);
+    },
+    [update, wakeProject],
+  );
+
   const restoreStep = useCallback(
     (id: string, done: number, total: number, label: string) =>
       setWaking((prev) =>
@@ -1538,7 +1565,10 @@ export default function App() {
           );
           return;
         }
-        await openForActionRef.current(projectId);
+        await prepareProjectForAgentAction(
+          projectId,
+          getSettings().agentAskForAttention,
+        );
         // A beat so a not-yet-open project's ProjectView mounts and registers
         // its listener before the event fires; attachTerminal is idempotent by
         // pty id, so a redundant dispatch just re-focuses the tab. A timer, not
@@ -1549,7 +1579,13 @@ export default function App() {
           () =>
             window.dispatchEvent(
               new CustomEvent("canopy:attach-terminal", {
-                detail: { projectId, ptyId: e.id, cwd: e.cwd, title: e.title },
+                detail: {
+                  projectId,
+                  ptyId: e.id,
+                  cwd: e.cwd,
+                  title: e.title,
+                  activate: getSettings().agentAskForAttention,
+                },
               }),
             ),
           80,
@@ -1559,7 +1595,7 @@ export default function App() {
         un = u;
       });
     return () => un?.();
-  }, [notify]);
+  }, [notify, prepareProjectForAgentAction]);
 
   // A clicked notification, or a `canopy 'canopy://…'` from a terminal.
   //
@@ -1783,7 +1819,10 @@ export default function App() {
           );
           return;
         }
-        await openForActionRef.current(projectId);
+        await prepareProjectForAgentAction(
+          projectId,
+          getSettings().agentAskForAttention,
+        );
         // Timer, not rAF — see the attach-terminal dispatch above.
         window.setTimeout(
           () =>
@@ -1799,7 +1838,7 @@ export default function App() {
         un = u;
       });
     return () => un?.();
-  }, [notify, projectIdentity]);
+  }, [notify, prepareProjectForAgentAction, projectIdentity]);
 
   // A browser-control op (canopy_browser_*). Routed like agent:action, but
   // request/response: an op that can't reach a project must answer the bridge
@@ -1854,7 +1893,14 @@ export default function App() {
           );
           return;
         }
-        await openForActionRef.current(projectId);
+        // Driving an existing page is background work. Only the first explicit
+        // navigation may ask for attention; snapshots/clicks/eval must never
+        // yank the user into another project on every tool call.
+        const mayTakeFocus =
+          op.op === "navigate" &&
+          Boolean(op.url) &&
+          getSettings().agentAskForAttention;
+        await prepareProjectForAgentAction(projectId, mayTakeFocus);
         // Timer, not rAF: rAF starves while the window is occluded, which held
         // the agent's request open until the bridge's timeout even though the
         // op would have run fine — the whole preview pipeline (React commits,
@@ -1873,7 +1919,7 @@ export default function App() {
         un = u;
       });
     return () => un?.();
-  }, []);
+  }, [prepareProjectForAgentAction]);
 
   // The ops only this window can answer (canopy_diagnostics, canopy_references,
   // canopy_definition, canopy_tickets, canopy_reviews, canopy_ask_user). Unlike

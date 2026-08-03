@@ -395,6 +395,11 @@ export interface Settings {
    *  adoptLegacyCustomTasks() empties this on first launch. Kept so that
    *  migration has something to read; nothing writes tasks here any more. */
   customMicroTasks: CustomMicroTask[];
+  /** Let an agent-requested reveal select its project and tab. Off keeps files,
+   * previews, and run tabs available in the background without interrupting
+   * whatever the user is doing. Questions and notices still reach the shared
+   * attention queue; this only controls automatic focus changes. */
+  agentAskForAttention: boolean;
   /** canopy_* MCP tools the user switched off (Settings → Agents). Stored as
    *  the exceptions, not the whole set, so a tool added in a later version is
    *  on by default rather than invisible to everyone who ever opened this
@@ -586,6 +591,7 @@ export const DEFAULTS: Settings = {
   tabSwitchMode: "recent",
   idleGroupDelaySeconds: 60,
   customMicroTasks: [],
+  agentAskForAttention: true,
   disabledTools: [],
   autoImportMarkdownResearch: true,
   trackerKeys: {},
