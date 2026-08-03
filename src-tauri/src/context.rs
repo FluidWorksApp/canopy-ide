@@ -1633,6 +1633,8 @@ struct BrowserOp {
     /// companion) whose cwd is inside none of them.
     #[serde(default)]
     project: Option<String>,
+    /// screenshot: browser (default) | ide.
+    scope: Option<String>,
     url: Option<String>,
     /// navigate: back | forward | reload (when no url is given).
     action: Option<String>,
@@ -1873,7 +1875,15 @@ async fn browser(
         // page collects its own traffic (see preview_picker.js) and this became
         // an ordinary page round-trip like the rest. `/ctx/network` below still
         // reads the proxy log directly, for a preview running that engine.
-        "snapshot" | "console" | "network" | "screenshot" => {}
+        "snapshot" | "console" | "network" => {}
+        "screenshot" => {
+            if !matches!(op.scope.as_deref(), None | Some("browser") | Some("ide")) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "scope must be browser or ide".into(),
+                );
+            }
+        }
         other => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -1885,9 +1895,13 @@ async fn browser(
     // Which window's preview this drives. Checked before a ticket is minted:
     // an unknown project name must come back as an error the agent can read,
     // not as a request nobody answers until the timeout.
-    let route = match route_for_project(&app, op.project.as_deref(), op.cwd.as_deref()) {
-        Ok(route) => route,
-        Err(e) => return (StatusCode::BAD_REQUEST, e),
+    let route = if op.op == "screenshot" && op.scope.as_deref() == Some("ide") {
+        op.cwd.clone().unwrap_or_default()
+    } else {
+        match route_for_project(&app, op.project.as_deref(), op.cwd.as_deref()) {
+            Ok(route) => route,
+            Err(e) => return (StatusCode::BAD_REQUEST, e),
+        }
     };
 
     let bridge = app.state::<ContextBridge>();
@@ -1901,6 +1915,7 @@ async fn browser(
             "id": id,
             "op": op.op,
             "route": route,
+            "scope": op.scope,
             "url": op.url,
             "action": op.action,
             "ref": op.r#ref,

@@ -210,6 +210,7 @@ export interface AgentBrowserOp {
     | "network"
     | "screenshot";
   route: string;
+  scope?: "browser" | "ide" | null;
   url?: string | null;
   action?: string | null;
   ref?: number | null;

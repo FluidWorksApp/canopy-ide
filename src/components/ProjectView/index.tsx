@@ -8796,7 +8796,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
           cliUpdates={cliUpdates}
           targetLabel={components[0]?.label}
           onShell={onNewShell}
-          onPreview={() => openPreview()}
           onLaunchCli={(cli) => launchCli(cli)}
           onClose={() => setLauncherOpen(false)}
         />

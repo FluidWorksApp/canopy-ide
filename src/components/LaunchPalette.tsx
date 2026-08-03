@@ -1,16 +1,15 @@
-// The keyboard route into the ＋ menu (Cmd/Ctrl+N): the same launchers — shell,
-// preview, every agent CLI — as a type-to-filter list, so opening a new tab
+// The keyboard route into the ＋ menu (Cmd/Ctrl+N): shell and every agent CLI
+// as a type-to-filter list, so opening a new tab
 // never has to go through the mouse. Same overlay shape as Quick Open, on
 // purpose: two palettes that look alike are one thing to learn.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AGENT_CLIS, type AgentCli } from "../projects";
-import { AgentIcon, GlobeIcon, TerminalIcon } from "./icons";
+import { AgentIcon, TerminalIcon } from "./icons";
 import { fuzzy } from "../fuzzy";
 import { useEscapeLayer } from "../useEscape";
 
 type Row =
   | { kind: "shell" }
-  | { kind: "preview" }
   | { kind: "cli"; cli: AgentCli };
 
 interface LaunchPaletteProps {
@@ -23,21 +22,19 @@ interface LaunchPaletteProps {
   /** Where the launch lands — shown in the footer so it isn't a guess. */
   targetLabel?: string;
   onShell: () => void;
-  onPreview: () => void;
   onLaunchCli: (cli: AgentCli) => void;
   onClose: () => void;
 }
 
 const rowKey = (r: Row) => (r.kind === "cli" ? `cli:${r.cli.id}` : r.kind);
 const rowLabel = (r: Row) =>
-  r.kind === "cli" ? r.cli.name : r.kind === "shell" ? "Shell" : "Preview";
+  r.kind === "cli" ? r.cli.name : "Shell";
 
 export function LaunchPalette({
   installed,
   cliUpdates,
   targetLabel,
   onShell,
-  onPreview,
   onLaunchCli,
   onClose,
 }: LaunchPaletteProps) {
@@ -55,7 +52,6 @@ export function LaunchPalette({
   const rows: Row[] = useMemo(() => {
     const all: Row[] = [
       { kind: "shell" },
-      { kind: "preview" },
       ...AGENT_CLIS.map((cli) => ({ kind: "cli" as const, cli })),
     ];
     if (!query.trim()) return all;
@@ -76,7 +72,6 @@ export function LaunchPalette({
     if (!row) return;
     onClose();
     if (row.kind === "shell") onShell();
-    else if (row.kind === "preview") onPreview();
     else onLaunchCli(row.cli);
   };
 
@@ -87,7 +82,7 @@ export function LaunchPalette({
           ref={inputRef}
           className="palette-input"
           value={query}
-          placeholder="New shell, preview, or agent…"
+          placeholder="New shell or agent…"
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Escape") {
@@ -120,8 +115,6 @@ export function LaunchPalette({
                 <span className="launch-icon">
                   {r.kind === "shell" ? (
                     <TerminalIcon size={15} />
-                  ) : r.kind === "preview" ? (
-                    <GlobeIcon size={15} />
                   ) : (
                     <AgentIcon id={r.cli.id} size={15} />
                   )}
