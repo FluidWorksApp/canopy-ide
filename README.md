@@ -326,6 +326,8 @@ cargo build --manifest-path src-tauri/Cargo.toml
 | `docs/architecture.md` | contributor architecture guide and system map |
 | `docs/architecture-llm.md` | compact architecture context for coding agents |
 | `docs/contributor-integrations.md` | messaging buses and contribution recipes |
+| `docs/contributions/` | step-by-step playbooks for each contribution type |
+| `docs/core-rust-system.md` | Rust core roles, services, boundaries, and lifecycle |
 | `SPEC.md` | the full product spec |
 | `RELEASING.md` | how signed releases are cut |
 
@@ -342,6 +344,9 @@ agents can use the compact [LLM context](./docs/architecture-llm.md).
 To add a theme, component, feature, agent tool, search source, tracker, or Remote
 surface without duplicating infrastructure, use the
 [contributor integration guide](./docs/contributor-integrations.md).
+Each path also has a focused, diagrammed
+[contribution playbook](./docs/contributions/README.md). Native contributors
+should start with the [Core Rust System](./docs/core-rust-system.md).
 
 ```
 ┌────────────────────────── Tauri (Rust core) ──────────────────────────┐

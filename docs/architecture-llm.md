@@ -3,7 +3,8 @@
 > Purpose: compact repository context for coding agents. Read this before
 > proposing or making a cross-boundary change. The canonical human explanation
 > is [Canopy Architecture](./architecture.md). Contribution-specific routing
-> is in [Contributor Integration Guide](./contributor-integrations.md).
+> is in [Contributor Integration Guide](./contributor-integrations.md). Native
+> ownership is expanded in [Core Rust System](./core-rust-system.md).
 
 ## System identity
 

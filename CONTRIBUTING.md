@@ -84,6 +84,9 @@ For the system map and trust boundaries, read
 points, messaging buses, theme recipe, shared-component rules, and feature
 checklists, read
 [docs/contributor-integrations.md](./docs/contributor-integrations.md).
+For a focused start-to-finish recipe, choose a
+[contribution playbook](./docs/contributions/README.md). Native changes should
+also read [Core Rust System](./docs/core-rust-system.md).
 
 ## Hook into existing infrastructure
 

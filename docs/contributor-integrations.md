@@ -12,23 +12,26 @@ through explicit, typed integration points. The central rule is:
 
 ## 1. Choose your contribution path
 
-| Contribution | Start here | Reuse this seam |
+Each contribution type has a focused, diagrammed playbook under
+[`docs/contributions/`](./contributions/README.md).
+
+| Contribution | Playbook | Reuse this seam |
 |---|---|---|
-| Theme or visual skin | `src/skins/` | `SKINS` registry and CSS token contract |
-| Reusable UI primitive | `shared/` | Shared component plus platform adapters |
-| Desktop-only UI | `src/components/` | Existing feature component and `ProjectView` composition |
-| New project tab or panel | `ProjectView/helpers.ts` and `ProjectView/index.tsx` | Existing tab union, opener, render dispatch, restore paths |
-| Native capability | Owning `src-tauri/src/*.rs` module | Tauri command, managed state, typed `src/ipc.ts` wrapper |
-| Agent-visible tool | `context.rs` and `canopy_hook.rs` | Token-gated context bridge and MCP descriptors |
-| Search result source | `src/spotSources.ts` | `registerSpotSource` and optional `registerSpotIcon` |
-| Issue tracker | `src/trackers.ts` | `TrackerProvider` registry plus native fetch command if needed |
-| Coding-agent CLI | `src/projects.ts` | Agent CLI registry and verified launch/resume templates |
-| Automated micro-task | `src/microTasks.ts` | `MicroTaskDef` and `MICRO_TASKS` registry |
-| Durable Canopy data | `notes.rs` and `research.rs` | Rust store, atomic write, store invalidation, frontend cache |
-| Canopy Remote feature | `shared/remote/`, `remote/mod.rs`, `portal/src/panels/` | Manifest request, Rust grant, generic RPC, panel registry |
-| New file renderer | `src/components/viewers.tsx` | `ViewerKind`, extension dispatch, byte-based offline viewer |
-| Keyboard shortcut | `shared/shortcuts.json` | Shared manifest consumed by Rust menus and WebView handlers |
-| Team collaboration message | `relay.rs` and `src/types.ts` | Existing relay protocol and app-wide `RelayHandle` |
+| Theme or visual skin | [Theme](./contributions/theme.md) | `SKINS` registry and CSS token contract |
+| Reusable UI primitive | [Component](./contributions/component.md) | Shared component plus platform adapters |
+| Desktop-only UI | [Desktop feature](./contributions/desktop-feature.md) | Existing feature component and `ProjectView` composition |
+| New project tab or panel | [Project surface](./contributions/project-surface.md) | Existing tab union, opener, render dispatch, restore paths |
+| Native capability | [Native capability](./contributions/native-capability.md) | Tauri command, managed state, typed `src/ipc.ts` wrapper |
+| Agent-visible tool | [Agent tool](./contributions/agent-tool.md) | Token-gated context bridge and MCP descriptors |
+| Search result source | [Search source](./contributions/search-source.md) | `registerSpotSource` and optional `registerSpotIcon` |
+| Issue tracker | [Tracker](./contributions/tracker.md) | `TrackerProvider` registry plus native fetch command if needed |
+| Coding-agent CLI | [Agent CLI](./contributions/agent-cli.md) | Agent CLI registry and verified launch/resume templates |
+| Automated micro-task | [Micro-task](./contributions/micro-task.md) | `MicroTaskDef` and `MICRO_TASKS` registry |
+| Durable Canopy data | [Durable store](./contributions/durable-store.md) | Rust store, atomic write, store invalidation, frontend cache |
+| Canopy Remote feature | [Remote feature](./contributions/remote-feature.md) | Manifest request, Rust grant, generic RPC, panel registry |
+| New file renderer | [File viewer](./contributions/file-viewer.md) | `ViewerKind`, extension dispatch, byte-based offline viewer |
+| Keyboard shortcut | [Shortcut](./contributions/shortcut.md) | Shared manifest consumed by Rust menus and WebView handlers |
+| Team collaboration message | [Relay message](./contributions/relay-message.md) | Existing relay protocol and app-wide `RelayHandle` |
 
 If the contribution does not fit a row, identify its authoritative state owner
 before writing code. A feature without one clear owner usually becomes two

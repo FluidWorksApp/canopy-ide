@@ -15,6 +15,10 @@ For concrete contribution recipes, including messaging buses, themes, shared
 components, registries, agent tools, and Remote features, see
 [Contributor Integration Guide](./contributor-integrations.md).
 
+For a module-by-module account of native ownership, managed services, process
+and thread lifecycles, persistence, and security enforcement, see
+[Core Rust System](./core-rust-system.md).
+
 ## 1. System in one paragraph
 
 Canopy is a local-first desktop IDE for working with coding agents. The desktop
@@ -115,6 +119,10 @@ framework-free module beside it rather than being added directly to this
 component.
 
 ### 4.2 Rust core
+
+The detailed native architecture is documented separately in
+[Core Rust System](./core-rust-system.md). The summary below identifies the
+composition root and major service boundaries.
 
 `src-tauri/src/main.rs` delegates to `app_lib::run()` in
 `src-tauri/src/lib.rs`. `run()` is the native composition root. It installs
