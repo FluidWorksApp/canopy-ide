@@ -2,7 +2,8 @@
 
 > Purpose: compact repository context for coding agents. Read this before
 > proposing or making a cross-boundary change. The canonical human explanation
-> is [Canopy Architecture](./architecture.md).
+> is [Canopy Architecture](./architecture.md). Contribution-specific routing
+> is in [Contributor Integration Guide](./contributor-integrations.md).
 
 ## System identity
 
@@ -123,6 +124,10 @@ When two files appear to describe the same thing, use these precedence rules.
    is stale.
 
 ## Change routing
+
+The detailed bus decision table and contribution recipes live in
+`docs/contributor-integrations.md`. Reuse those seams instead of inventing a
+parallel store, event, socket, modal, component, or registry.
 
 ### UI-only desktop change
 

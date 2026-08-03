@@ -79,6 +79,36 @@ cargo test --manifest-path src-tauri/Cargo.toml --no-default-features git::tests
 | `SPEC.md` | the full product spec |
 | `RELEASING.md` | how signed releases are cut |
 
+For the system map and trust boundaries, read
+[docs/architecture.md](./docs/architecture.md). For the practical extension
+points, messaging buses, theme recipe, shared-component rules, and feature
+checklists, read
+[docs/contributor-integrations.md](./docs/contributor-integrations.md).
+
+## Hook into existing infrastructure
+
+Canopy has explicit integration points rather than a general plugin host. Before
+adding infrastructure, use the existing seam:
+
+| Contribution | Existing seam |
+|---|---|
+| Theme | `src/skins/registry.ts` plus one `SkinDef` and CSS token block |
+| Shared component | `shared/` with injected desktop and Remote adapters |
+| Native feature | Rust owner, Tauri command registry, typed `src/ipc.ts` wrapper |
+| In-memory shared state | `createChannel` in `src/channel.ts` |
+| Durable-store refresh | Rust `change::pulse` and frontend `registerStore` |
+| Search source | `registerSpotSource` and optional `registerSpotIcon` |
+| Tracker | `TrackerProvider` in `src/trackers.ts` |
+| Agent CLI or tool | CLI registry, hook sidecar, token-gated context bridge |
+| Remote surface | shared manifest request, explicit Rust grant, portal panel |
+| Team message | existing encrypted relay and app-wide `RelayHandle` |
+
+The [integration guide](./docs/contributor-integrations.md) explains when to use
+props, module channels, Tauri events, store invalidation, targeted project
+events, agent request tickets, Remote RPC, or the team relay. Do not add a new
+global event, socket, store, or duplicate component until that table shows none
+of the existing paths fits.
+
 ## House style
 
 - **Match the surrounding code** — naming, formatting, and idiom.

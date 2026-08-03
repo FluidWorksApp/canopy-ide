@@ -11,6 +11,10 @@ boundaries, and which files a contributor should change for common features.
 For a compact context document intended for coding agents, see
 [Architecture: LLM Context](./architecture-llm.md).
 
+For concrete contribution recipes, including messaging buses, themes, shared
+components, registries, agent tools, and Remote features, see
+[Contributor Integration Guide](./contributor-integrations.md).
+
 ## 1. System in one paragraph
 
 Canopy is a local-first desktop IDE for working with coding agents. The desktop
@@ -390,6 +394,10 @@ written atomically. The frontend cache refreshes after mutation or invalidation.
 The SpotSearch database indexes these stores as derived data and can be rebuilt.
 
 ## 9. Extension guide
+
+This section summarizes the extension points. The
+[Contributor Integration Guide](./contributor-integrations.md) provides the
+bus-selection table, exact files, examples, and verification steps.
 
 ### Add a desktop-only feature
 
