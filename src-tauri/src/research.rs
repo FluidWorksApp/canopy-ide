@@ -34,6 +34,7 @@
 // rebuildable, and no code here reads from it.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
@@ -1237,6 +1238,21 @@ fn imported_digest(body: &str) -> String {
     clip(&para, DIGEST_MAX)
 }
 
+fn canonical_path(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| PathBuf::from(path))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn links_file(meta: &Meta, path: &str) -> bool {
+    let canonical = canonical_path(path);
+    meta.links
+        .files
+        .iter()
+        .any(|linked| canonical_path(linked) == canonical)
+}
+
 /// Is this file already an entry? Import is a button the user can press twice,
 /// and the second press should take them to what the first one made rather
 /// than making a duplicate of it.
@@ -1244,7 +1260,7 @@ fn imported_digest(body: &str) -> String {
 pub fn research_for_file(project_id: String, path: String) -> Result<Option<String>, String> {
     Ok(load_project(&project_id)?
         .into_iter()
-        .find(|m| m.links.files.iter().any(|f| f == &path))
+        .find(|m| links_file(m, &path))
         .map(|m| m.id))
 }
 
@@ -1276,16 +1292,41 @@ fn import_impl(
     path: String,
     instance: Option<String>,
 ) -> Result<Summary, String> {
+    import_impl_inner(project_id, project_name, roots, path, instance, true)
+}
+
+fn import_impl_inner(
+    project_id: String,
+    project_name: Option<String>,
+    roots: Option<Vec<String>>,
+    path: String,
+    instance: Option<String>,
+    check_existing: bool,
+) -> Result<Summary, String> {
+    let path = canonical_path(&path);
     let file = PathBuf::from(&path);
     let roots = roots.unwrap_or_default();
     // Only files belonging to this project. The store is otherwise reachable
     // with any path at all, and "import" is not a licence to read the disk.
-    if !roots.iter().any(|r| {
-        let r = r.trim_end_matches('/');
-        !r.is_empty() && path.starts_with(&format!("{r}/"))
+    if !roots.iter().any(|root| {
+        let root = canonical_path(root);
+        file.starts_with(Path::new(&root)) && file != Path::new(&root)
     }) {
         return Err(format!("{path} is not inside this project"));
     }
+
+    // The file path is the identity. A repeated import resolves to the entry
+    // already carrying it; the Markdown is not kept in sync because an agent or
+    // person may have improved the imported body after adoption.
+    if check_existing {
+        let existing = load_project(&project_id)?
+            .into_iter()
+            .find(|meta| links_file(meta, &path));
+        if let Some(meta) = existing {
+            return Ok(summarize(&meta));
+        }
+    }
+
     let bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
     if bytes as usize > SOURCE_MAX {
         return Err(format!(
@@ -1296,17 +1337,6 @@ fn import_impl(
     let text = std::fs::read_to_string(&file).map_err(|e| format!("cannot read {path}: {e}"))?;
     if text.trim().is_empty() {
         return Err(format!("{path} is empty — there is nothing to import yet."));
-    }
-
-    let existing = load_project(&project_id)?
-        .into_iter()
-        .find(|m| m.links.files.iter().any(|f| f == &path));
-    if let Some(m) = existing {
-        return Err(format!(
-            "{path} is already research entry {} (\"{}\") — open that instead of \
-             importing it twice.",
-            m.id, m.title
-        ));
     }
 
     let title = imported_title(&text, &file);
@@ -1325,32 +1355,7 @@ fn import_impl(
     let dir = entry_dir(&project_id, &summary.id)?;
     let mut meta = read_meta(&dir)?;
 
-    // The text goes in the body when it fits and in a source when it does not,
-    // never both — a duplicated document is two things to keep in step.
-    if text.len() <= BODY_MAX {
-        write_atomic(&body_path(&dir), &text)?;
-    } else {
-        let name = file
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "imported.md".into());
-        let rel = format!("sources/01-{}", slugify(&name));
-        write_atomic(&dir.join(&rel), &text)?;
-        meta.sources.push(SourceRef {
-            file: rel,
-            title: name,
-            origin: format!("imported from {path}"),
-            bytes: text.len() as u64,
-        });
-        write_atomic(
-            &body_path(&dir),
-            &format!(
-                "# {}\n\nImported from `{path}`. The document was too long for the \
-                 write-up, so it is kept whole as a source.\n",
-                meta.title
-            ),
-        )?;
-    }
+    write_imported_content(&dir, &mut meta, &file, &path, &text)?;
 
     meta.digest = imported_digest(&text);
     meta.tags.push("imported".into());
@@ -1369,6 +1374,139 @@ fn import_impl(
     meta.updated_at = now_secs();
     write_meta(&dir, &meta)?;
     Ok(summarize(&meta))
+}
+
+fn write_imported_content(
+    dir: &Path,
+    meta: &mut Meta,
+    file: &Path,
+    path: &str,
+    text: &str,
+) -> Result<(), String> {
+    // The text goes in the body when it fits and in a source when it does not,
+    // never both — a duplicated document is two things to keep in step.
+    if text.len() <= BODY_MAX {
+        return write_atomic(&body_path(dir), text);
+    }
+
+    let name = file
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "imported.md".into());
+    let rel = format!("sources/imported-{}", slugify(&name));
+    write_atomic(&dir.join(&rel), text)?;
+    meta.sources.push(SourceRef {
+        file: rel,
+        title: name,
+        origin: format!("imported from {path}"),
+        bytes: text.len() as u64,
+    });
+    write_atomic(
+        &body_path(dir),
+        &format!(
+            "# {}\n\nImported from `{path}`. The document was too long for the \
+             write-up, so it is kept whole as a source.\n",
+            meta.title
+        ),
+    )
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SweepSummary {
+    imported: usize,
+    matched: usize,
+    skipped: usize,
+}
+
+fn markdown_files(roots: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    for root in roots {
+        let root = canonical_path(root);
+        let mut builder = ignore::WalkBuilder::new(&root);
+        builder
+            .hidden(false)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .parents(true)
+            .require_git(false)
+            .follow_links(false)
+            .filter_entry(|entry| {
+                let name = entry.file_name().to_string_lossy();
+                !entry.file_type().is_some_and(|kind| kind.is_dir())
+                    || (!matches!(
+                        name.as_ref(),
+                        ".git" | ".canopy" | "node_modules" | "target" | "dist" | "build"
+                    ))
+            });
+        for entry in builder.build().flatten() {
+            let path = entry.path();
+            if entry.file_type().is_some_and(|kind| kind.is_file())
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+            {
+                seen.insert(canonical_path(&path.to_string_lossy()));
+            }
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// Adopt every git-visible Markdown document under the project's roots. The
+/// import itself is path-keyed and idempotent, so opening a project repeatedly or a
+/// watcher delivering the same write twice cannot create duplicate entries.
+#[tauri::command]
+pub fn research_sweep(
+    app: AppHandle,
+    store: State<'_, ResearchStore>,
+    project_id: String,
+    project_name: Option<String>,
+    roots: Vec<String>,
+) -> Result<SweepSummary, String> {
+    // Traversal can be the expensive part in a large monorepo. Do it before
+    // taking the research write lock so unrelated entries remain responsive.
+    let files = markdown_files(&roots);
+    let matched = files.len();
+    let _guard = store.0.lock().unwrap();
+    let mut before: HashSet<String> = load_project(&project_id)?
+        .into_iter()
+        .flat_map(|meta| meta.links.files)
+        .map(|path| canonical_path(&path))
+        .collect();
+    let mut imported = 0;
+    let mut skipped = 0;
+
+    for path in files {
+        if before.contains(&path) {
+            continue;
+        }
+        match import_impl_inner(
+            project_id.clone(),
+            project_name.clone(),
+            Some(roots.clone()),
+            path.clone(),
+            None,
+            false,
+        ) {
+            Ok(_) => {
+                imported += 1;
+                before.insert(path);
+            }
+            Err(_) => skipped += 1,
+        }
+    }
+
+    let summary = SweepSummary {
+        imported,
+        matched,
+        skipped,
+    };
+    if imported > 0 {
+        let _ = app.emit(RESEARCH_CHANGED, &project_id);
+    }
+    Ok(summary)
 }
 
 /// Where an entry lives on disk. The launcher exports this to a research
@@ -2028,15 +2166,70 @@ mod tests {
 
         let d = research_get("p1".into(), s.id.clone()).unwrap();
         // It points back at the file, and the file is still there.
-        assert_eq!(d.links.files, vec![path.clone()]);
+        assert_eq!(d.links.files, vec![canonical_path(&path)]);
         assert!(md.exists(), "import must not move or delete the original");
         assert!(d.body.contains("Stripe stays the ledger"));
 
-        // Twice is not two entries — the button is one the user can press
-        // again, and the second press should find the first one's work.
-        let err = import_impl("p1".into(), None, Some(roots), path.clone(), None).unwrap_err();
-        assert!(err.contains(&s.id), "{err}");
+        // Twice is not two entries. The path resolves to the first entry, and a
+        // changed source does not overwrite improvements made after import.
+        std::fs::write(&md, "# Tiered donations\n\nStripe is still the ledger.\n").unwrap();
+        let again = import_impl("p1".into(), None, Some(roots), path.clone(), None).unwrap();
+        assert_eq!(again.id, s.id);
+        assert_eq!(again.digest, "Stripe stays the ledger.");
+        assert_eq!(load_project("p1").unwrap().len(), 1);
         assert_eq!(research_for_file("p1".into(), path).unwrap(), Some(s.id));
+    }
+
+    #[test]
+    fn import_paths_are_canonical_deduplication_keys() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempHome::new("import-canonical");
+        let repo = home.0.join("repo");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let md = repo.join("docs").join("finding.md");
+        std::fs::write(&md, "# Finding\n\nOne answer.\n").unwrap();
+        let roots = vec![repo.to_string_lossy().to_string()];
+
+        let direct = md.to_string_lossy().to_string();
+        let dotted = repo
+            .join("docs")
+            .join("..")
+            .join("docs")
+            .join("finding.md")
+            .to_string_lossy()
+            .to_string();
+        let first =
+            import_impl("p1".into(), None, Some(roots.clone()), direct.clone(), None).unwrap();
+        let second = import_impl("p1".into(), None, Some(roots), dotted.clone(), None).unwrap();
+
+        assert_eq!(second.id, first.id);
+        assert_eq!(load_project("p1").unwrap().len(), 1);
+        assert_eq!(
+            research_for_file("p1".into(), dotted).unwrap(),
+            Some(first.id)
+        );
+    }
+
+    #[test]
+    fn markdown_sweep_honors_ignores_and_deduplicates_overlapping_roots() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempHome::new("markdown-sweep");
+        let repo = home.0.join("repo");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::create_dir_all(repo.join("node_modules/pkg")).unwrap();
+        std::fs::write(repo.join(".gitignore"), "ignored.md\n").unwrap();
+        std::fs::write(repo.join("README.md"), "# Read me\n").unwrap();
+        std::fs::write(repo.join("ignored.md"), "# Ignored\n").unwrap();
+        std::fs::write(repo.join("docs/finding.MD"), "# Finding\n").unwrap();
+        std::fs::write(repo.join("node_modules/pkg/notes.md"), "# Dependency\n").unwrap();
+
+        let files = markdown_files(&[
+            repo.to_string_lossy().to_string(),
+            repo.join("docs").to_string_lossy().to_string(),
+        ]);
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|path| path.ends_with("README.md")));
+        assert!(files.iter().any(|path| path.ends_with("finding.MD")));
     }
 
     #[test]

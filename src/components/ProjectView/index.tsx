@@ -954,6 +954,49 @@ const ProjectViewBody = memo(function ProjectViewBody({
   componentsRef.current = components;
   const rootsRef = useRef(roots);
   rootsRef.current = roots;
+
+  // Loose Markdown is research wherever it was written. Sweep on open and
+  // root changes, then again after a short quiet period when a watcher reports
+  // a Markdown write. The backend resolves by canonical path, so duplicate
+  // watcher events and overlapping component roots remain idempotent.
+  useEffect(() => {
+    let alive = true;
+    let timer: number | undefined;
+    const sweep = () => {
+      if (!alive) return;
+      void ipc.researchSweep({
+        projectId: project.id,
+        projectName: project.name,
+        roots: rootsRef.current,
+      }).catch(() => {});
+    };
+    sweep();
+    const sub = ipc.onFsChange((event) => {
+      const normalizedRoot = event.root.replaceAll("\\", "/").replace(/\/$/, "");
+      const belongs = rootsRef.current.some((root) => {
+        const normalized = root.replaceAll("\\", "/").replace(/\/$/, "");
+        return (
+          normalized === normalizedRoot ||
+          normalized.startsWith(normalizedRoot + "/") ||
+          normalizedRoot.startsWith(normalized + "/")
+        );
+      });
+      if (
+        !belongs ||
+        event.kind === "remove" ||
+        !event.paths.some((path) => path.toLowerCase().endsWith(".md"))
+      ) {
+        return;
+      }
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(sweep, 500);
+    });
+    return () => {
+      alive = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+      void sub.then((unlisten) => unlisten());
+    };
+  }, [project.id, project.name, rootsKey]);
   // Set from the memo below; the restore loader reads it without having to
   // re-subscribe every time an event arrives.
   const liveSessionIdsRef = useRef<string[]>([]);

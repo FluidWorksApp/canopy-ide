@@ -1021,6 +1021,20 @@ export const researchImport = (args: {
   instance?: string;
 }) => invoke<ResearchSummary>("research_import", { ...args });
 
+export interface ResearchSweepSummary {
+  imported: number;
+  matched: number;
+  skipped: number;
+}
+
+/** Adopt all git-visible Markdown files under the project roots. Repeated
+ *  sweeps resolve entries by canonical source path instead of duplicating them. */
+export const researchSweep = (args: {
+  projectId: string;
+  projectName?: string;
+  roots: string[];
+}) => invoke<ResearchSweepSummary>("research_sweep", { ...args });
+
 /** The entry that already adopted this file, if one has. */
 export const researchForFile = (projectId: string, path: string) =>
   invoke<string | null>("research_for_file", { projectId, path });
