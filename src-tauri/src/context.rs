@@ -2029,6 +2029,10 @@ struct UiOp {
 }
 
 const UI_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// PR reads shell out to GitHub and failing logs may require several downloads.
+/// Keep the bridge alive past git.rs's network ceilings so a write never lands
+/// after its caller was told it failed and invited to retry.
+const PR_UI_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 /// A question waits on a human, so it gets minutes — bounded so a forgotten
 /// dialog can't pin an agent forever.
 const MAX_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
@@ -2087,10 +2091,13 @@ async fn ui_op(
             // this waits on a person exactly like `ask` does.
             MAX_ASK_TIMEOUT
         }
-        // Reads over the whole workspace. They talk to state the app already
-        // holds, so they answer as fast as the language-server ops do.
-        "workspace" | "workspace_git" | "workspace_agents" | "workspace_prs" | "pr_details"
-        | "pr_action" | "open_project" | "recall" | "remember" => UI_OP_TIMEOUT,
+        // These read state the app already holds, so they answer as fast as the
+        // language-server ops do.
+        "workspace" | "workspace_git" | "workspace_agents" | "open_project" | "recall"
+        | "remember" => UI_OP_TIMEOUT,
+        // These delegate to GitHub. A details call can download several failing
+        // logs, and writes must not time out locally while the remote succeeds.
+        "workspace_prs" | "pr_details" | "pr_action" => PR_UI_OP_TIMEOUT,
         "workspace_search" => {
             if op.query.as_deref().map_or(true, |q| q.trim().is_empty()) {
                 return (
@@ -2172,7 +2179,9 @@ async fn ui_op(
                 .lock()
                 .unwrap()
                 .remove(&id);
-            let why = if op.op == "ask" || op.op == "vault" || op.op == "confirm" {
+            let why = if op.op == "pr_action" {
+                "The GitHub action did not finish in time. Its outcome is unknown — inspect the pull request before deciding whether to try anything again."
+            } else if op.op == "ask" || op.op == "vault" || op.op == "confirm" {
                 "The user didn't answer in time — carry on without them, or ask again."
             } else {
                 "Canopy didn't answer in time. The window may be busy, or the language server \

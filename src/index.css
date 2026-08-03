@@ -21876,6 +21876,13 @@ a.btn-sm {
   min-width: 0;
 }
 
+.companion-attachment-error {
+  margin-bottom: 5px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--danger);
+}
+
 .companion-files,
 .companion-sent-files {
   display: flex;

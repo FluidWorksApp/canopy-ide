@@ -429,11 +429,14 @@ function companionRepos(ctx: UiOpContext, project?: string | null): { project: s
 
 async function workspacePrs(ctx: UiOpContext, project?: string | null) {
   const errors: { project: string; repo: string; error: string }[] = [];
+  const possiblyTruncatedRepos = new Set<string>();
   const fetched = (
     await Promise.all(
       companionRepos(ctx, project).map(async ({ project: name, repo }) => {
         try {
-          return (await ipc.ghPrList(repo)).map((pr) => ({ project: name, repo, ...pr }));
+          const prs = await ipc.ghPrList(repo);
+          if (prs.length === 50) possiblyTruncatedRepos.add(repo);
+          return prs.map((pr) => ({ project: name, repo, ...pr }));
         } catch (err) {
           errors.push({ project: name, repo, error: String(err) });
           return [];
@@ -446,7 +449,12 @@ async function workspacePrs(ctx: UiOpContext, project?: string | null) {
   // fold those duplicate queries on GitHub's stable PR URL before returning.
   const rows = [...new Map(fetched.map((pr) => [pr.url, pr])).values()];
   rows.sort((a, b) => b.updated.localeCompare(a.updated));
-  return { pullRequests: rows, errors };
+  return {
+    pullRequests: rows,
+    errors,
+    limitPerRepo: 50,
+    possiblyTruncatedRepos: [...possiblyTruncatedRepos],
+  };
 }
 
 function checkedCompanionRepo(ctx: UiOpContext, repo: string | null | undefined): string {

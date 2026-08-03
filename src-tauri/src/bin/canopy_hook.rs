@@ -2609,7 +2609,7 @@ fn companion_tool_defs() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "canopy_workspace_prs",
-            "description": "Every open pull request across the repos in the workspace, with project and local repo path attached. Optionally narrow to one project. Use the returned `repo` path with canopy_pr_details and canopy_pr_action. To have an agent review a PR or address its comments, call canopy_message_agent with the PR URL and the instruction — that reuses or starts the PR's coding session rather than making the companion edit code itself.",
+            "description": "Up to 50 open pull requests per repo across the workspace, with project and local repo path attached. The result names repos that may be truncated. Optionally narrow to one project. Use the returned `repo` path with canopy_pr_details and canopy_pr_action. To have an agent review a PR or address its comments, call canopy_message_agent with the PR URL and the instruction — that reuses or starts the PR's coding session rather than making the companion edit code itself.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": "Just this project, by name. Omit for all projects" }
             }, "additionalProperties": false }
@@ -3581,7 +3581,12 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             // The op name is the tool name without the prefix, so adding a
             // companion tool is one descriptor and one case in agentOps.ts.
             body["op"] = serde_json::json!(name.trim_start_matches("canopy_"));
-            text(ui_op(name.trim_start_matches("canopy_"), &body, 25))
+            let timeout = if matches!(name, "canopy_workspace_prs" | "canopy_pr_details") {
+                605
+            } else {
+                25
+            };
+            text(ui_op(name.trim_start_matches("canopy_"), &body, timeout))
         }
         "canopy_pr_action" => {
             if !is_companion_session() {
@@ -3599,7 +3604,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             if args.get("number").and_then(|v| v.as_u64()).is_none() {
                 return Err("missing required argument: number".into());
             }
-            text(ui_op("pr_action", args, 25))
+            text(ui_op("pr_action", args, 605))
         }
         "canopy_confirm" => {
             if !is_companion_session() {

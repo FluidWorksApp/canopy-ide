@@ -68,6 +68,8 @@ export function CompanionChat({
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<CompanionAttachment[]>([]);
   const [attaching, setAttaching] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const attachingRef = useRef(false);
   const log = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
 
@@ -109,24 +111,32 @@ export function CompanionChat({
   const canSend = (draft.trim().length > 0 || attachments.length > 0) && !busy && !dead && !attaching;
 
   const attach = async (files: File[]) => {
-    if (files.length === 0) return;
+    if (files.length === 0 || attachingRef.current) return;
+    attachingRef.current = true;
     setAttaching(true);
+    setAttachmentError(null);
+    const failed: string[] = [];
     try {
       for (const file of files) {
-        const base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onerror = () => reject(reader.error);
-          reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
-          reader.readAsDataURL(file);
-        });
-        if (!base64) continue;
-        const path = await ipc.companionSaveAttachment(file.name, base64);
-        setAttachments((prev) => [...prev, { name: file.name, path, type: file.type }]);
+        try {
+          const base64 = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(reader.error);
+            reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
+            reader.readAsDataURL(file);
+          });
+          if (!base64) throw new Error("the file was empty");
+          const path = await ipc.companionSaveAttachment(file.name, base64);
+          setAttachments((prev) => [...prev, { name: file.name, path, type: file.type }]);
+        } catch (err) {
+          failed.push(`${file.name}: ${String(err)}`);
+          void ipc.jsLog("warn", `companion: could not attach ${file.name}: ${String(err)}`);
+        }
       }
-    } catch (err) {
-      void ipc.jsLog("warn", `companion: could not attach a file: ${String(err)}`);
     } finally {
+      attachingRef.current = false;
       setAttaching(false);
+      setAttachmentError(failed.length ? failed.join("; ") : null);
       input.current?.focus();
     }
   };
@@ -316,6 +326,11 @@ export function CompanionChat({
           {attaching ? "…" : "+"}
         </label>
         <div className="companion-compose-body">
+          {attachmentError && (
+            <div className="companion-attachment-error" role="alert">
+              {attachmentError}
+            </div>
+          )}
           {attachments.length > 0 && (
             <div className="companion-files">
               {attachments.map((a) => (
