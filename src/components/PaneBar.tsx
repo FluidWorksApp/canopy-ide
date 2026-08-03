@@ -20,7 +20,13 @@ import {
 import type { AgentCli } from "../projects";
 import { AGENT_CLIS } from "../projects";
 import type { TabDrag } from "../tabDrag";
-import { ANCHOR_ATTR, GROUP_ATTR, pinOffset, useChipPins } from "../tabSticky";
+import {
+  ANCHOR_ATTR,
+  GROUP_ATTR,
+  pinOffset,
+  useChipPins,
+  usePeelResistance,
+} from "../tabSticky";
 import type {
   SubTab,
   TermSubTab,
@@ -344,6 +350,7 @@ function PaneBarImpl({
   // queue is counted over what is actually on screen — otherwise closing the
   // last PR would leave a gap where its chip used to pin.
   const pins = useChipPins(stripRef);
+  usePeelResistance(stripRef);
   const drawn = tabGroups.filter((g) => g.tabs.length > 0);
   const pinIndex = new Map<string, number>();
   for (const g of drawn) if (g.label) pinIndex.set(g.key, pinIndex.size);
