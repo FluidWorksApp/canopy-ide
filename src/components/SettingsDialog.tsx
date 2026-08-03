@@ -1428,6 +1428,17 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
             {tab === "agents" && (
               <>
                 <Item
+                  name="Ask for attention"
+                  desc="Control whether an agent can bring the project or tab it is working on to the front."
+                >
+                  <Checkbox
+                    checked={s.agentAskForAttention}
+                    onChange={(v) => patch({ agentAskForAttention: v })}
+                    label="Let agents switch focus to files, previews, and run tabs"
+                    hint="Off keeps their work in the background; questions and notices still appear."
+                  />
+                </Item>
+                <Item
                   name="Default agent"
                   desc="What the Start button launches; pick another per ticket."
                 >

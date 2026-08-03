@@ -20,6 +20,7 @@ describe("getSettings / updateSettings", () => {
     expect(s.trackerKeys).toEqual({});
     expect(s.tabSwitchMode).toBe("recent");
     expect(s.restoreUserClosedSessions).toBe(false);
+    expect(s.agentAskForAttention).toBe(false);
   });
 
   it("overlays stored values on top of defaults", () => {
@@ -35,12 +36,14 @@ describe("getSettings / updateSettings", () => {
       customAccent: "#ff0000",
       tabSwitchMode: "order",
       restoreUserClosedSessions: true,
+      agentAskForAttention: false,
     });
     const s = getSettings();
     expect(s.theme).toBe("gotham");
     expect(s.customAccent).toBe("#ff0000");
     expect(s.tabSwitchMode).toBe("order");
     expect(s.restoreUserClosedSessions).toBe(true);
+    expect(s.agentAskForAttention).toBe(false);
   });
 
   it("merges successive patches rather than replacing the whole object", () => {
