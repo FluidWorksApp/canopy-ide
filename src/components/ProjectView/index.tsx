@@ -532,8 +532,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  state rather than read inline: these decide what effects are registered,
    *  and a change has to take hold without reopening the project. */
   const [sidePrefs, setSidePrefs] = useState(sidebarPrefs);
+  const [autoImportMarkdownResearch, setAutoImportMarkdownResearch] = useState(
+    () => getSettings().autoImportMarkdownResearch,
+  );
   useEffect(() => {
-    const refresh = () => setSidePrefs(sidebarPrefs());
+    const refresh = () => {
+      setSidePrefs(sidebarPrefs());
+      setAutoImportMarkdownResearch(getSettings().autoImportMarkdownResearch);
+    };
     window.addEventListener(SETTINGS_CHANGE_EVENT, refresh);
     return () => window.removeEventListener(SETTINGS_CHANGE_EVENT, refresh);
   }, []);
@@ -960,6 +966,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // a Markdown write. The backend resolves by canonical path, so duplicate
   // watcher events and overlapping component roots remain idempotent.
   useEffect(() => {
+    if (!autoImportMarkdownResearch) return;
     let alive = true;
     let timer: number | undefined;
     const sweep = () => {
@@ -996,7 +1003,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (timer !== undefined) window.clearTimeout(timer);
       void sub.then((unlisten) => unlisten());
     };
-  }, [project.id, project.name, rootsKey]);
+  }, [autoImportMarkdownResearch, project.id, project.name, rootsKey]);
   // Set from the memo below; the restore loader reads it without having to
   // re-subscribe every time an event arrives.
   const liveSessionIdsRef = useRef<string[]>([]);
