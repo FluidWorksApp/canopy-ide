@@ -3409,16 +3409,30 @@ mod tests {
 
     /// Distinct agents whose display names differ, which is the easy case.
     fn named(name: &str) -> ClaimIdentity {
-        let pty = name.bytes().fold(0u32, |a, b| a.wrapping_mul(31) + b as u32);
+        let pty = name
+            .bytes()
+            .fold(0u32, |a, b| a.wrapping_mul(31) + b as u32);
         who(name, pty)
     }
 
-    fn claim(claims: &mut Vec<Claim>, w: &ClaimIdentity, paths: &[&str], now: u64, id: &str) -> ClaimReply {
+    fn claim(
+        claims: &mut Vec<Claim>,
+        w: &ClaimIdentity,
+        paths: &[&str],
+        now: u64,
+        id: &str,
+    ) -> ClaimReply {
         apply_claim(claims, &claim_req("claim", &w.display, paths), w, now, id)
     }
 
     fn release(claims: &mut Vec<Claim>, w: &ClaimIdentity, now: u64) -> ClaimReply {
-        apply_claim(claims, &claim_req("release", &w.display, &[]), w, now, "unused")
+        apply_claim(
+            claims,
+            &claim_req("release", &w.display, &[]),
+            w,
+            now,
+            "unused",
+        )
     }
 
     fn ok(reply: ClaimReply) -> String {
@@ -3511,7 +3525,10 @@ mod tests {
         let (first, second) = (who("canopy (/w)", 1), who("canopy (/w)", 2));
         ok(claim(&mut claims, &first, &["/w/a.ts"], 100, "c1"));
         ok(claim(&mut claims, &second, &["/w/b.ts"], 110, "c2"));
-        assert_eq!(ok(release(&mut claims, &second, 200)), "Released 1 claim(s).");
+        assert_eq!(
+            ok(release(&mut claims, &second, 200)),
+            "Released 1 claim(s)."
+        );
         let still = held(&claims);
         assert_eq!(still.len(), 1);
         assert_eq!(still[0].id, "c1");
@@ -3543,7 +3560,13 @@ mod tests {
         let (mut claims, holder, pest) = (Vec::new(), named("holder"), named("pest"));
         ok(claim(&mut claims, &holder, &["/w/hot.ts"], 100, "c1"));
         for n in 0..MAX_REFUSALS + 25 {
-            conflict(claim(&mut claims, &pest, &["/w/hot.ts"], 200 + n as u64, "cx"));
+            conflict(claim(
+                &mut claims,
+                &pest,
+                &["/w/hot.ts"],
+                200 + n as u64,
+                "cx",
+            ));
         }
         assert_eq!(claims[0].refusals.len(), MAX_REFUSALS);
         // The newest survive: an old refusal says nothing a recent one doesn't.
@@ -3590,7 +3613,13 @@ mod tests {
             ));
             ok(release(&mut claims, &agent, n as u64 + 1));
         }
-        ok(claim(&mut claims, &named("live"), &["/w/live.ts"], 9999, "c-live"));
+        ok(claim(
+            &mut claims,
+            &named("live"),
+            &["/w/live.ts"],
+            9999,
+            "c-live",
+        ));
         assert_eq!(
             claims.iter().filter(|c| c.released_at_ms.is_some()).count(),
             MAX_ENDED_CLAIMS
@@ -3608,7 +3637,10 @@ mod tests {
     fn claim_paths_are_normalised_before_they_are_compared() {
         let base = Some("/w");
         assert_eq!(normalize_claim_path("src/auth.ts", base), "/w/src/auth.ts");
-        assert_eq!(normalize_claim_path("./src/auth.ts", base), "/w/src/auth.ts");
+        assert_eq!(
+            normalize_claim_path("./src/auth.ts", base),
+            "/w/src/auth.ts"
+        );
         assert_eq!(
             normalize_claim_path("/w/src/../src/auth.ts", base),
             "/w/src/auth.ts"
@@ -3619,7 +3651,10 @@ mod tests {
         assert_eq!(normalize_claim_path("src/auth.ts", None), "src/auth.ts");
         // A leading `..` has nothing to pop and must survive, or two unrelated
         // paths flatten into the same string.
-        assert_eq!(normalize_claim_path("../sibling/a.ts", None), "../sibling/a.ts");
+        assert_eq!(
+            normalize_claim_path("../sibling/a.ts", None),
+            "../sibling/a.ts"
+        );
 
         let (mut claims, a, b) = (Vec::new(), named("a"), named("b"));
         ok(claim(&mut claims, &a, &["/w/src/auth.ts"], 100, "c1"));
@@ -3654,7 +3689,10 @@ mod tests {
         assert_eq!(sanitize_message("  a\n\n\n  b  "), "a b");
         assert_eq!(sanitize_message("\r\n\u{3}"), "");
         // Ordinary text, including non-ASCII, is untouched.
-        assert_eq!(sanitize_message("rebase onto main — then push"), "rebase onto main — then push");
+        assert_eq!(
+            sanitize_message("rebase onto main — then push"),
+            "rebase onto main — then push"
+        );
     }
 
     /// The identity is the terminal, so two agents in one directory are two
@@ -3662,12 +3700,32 @@ mod tests {
     /// agent, because pty ids restart at 1.
     #[test]
     fn an_identity_is_a_terminal_not_a_directory() {
-        let a = AgentIdentity { pty_id: 1, instance: "run-a".into(), cwd: "/w".into() };
-        let b = AgentIdentity { pty_id: 2, instance: "run-a".into(), cwd: "/w".into() };
-        let recycled = AgentIdentity { pty_id: 1, instance: "run-b".into(), cwd: "/w".into() };
+        let a = AgentIdentity {
+            pty_id: 1,
+            instance: "run-a".into(),
+            cwd: "/w".into(),
+        };
+        let b = AgentIdentity {
+            pty_id: 2,
+            instance: "run-a".into(),
+            cwd: "/w".into(),
+        };
+        let recycled = AgentIdentity {
+            pty_id: 1,
+            instance: "run-b".into(),
+            cwd: "/w".into(),
+        };
         assert_ne!(a.key(), b.key());
         assert_ne!(a.key(), recycled.key());
-        assert_eq!(a.key(), AgentIdentity { pty_id: 1, instance: "run-a".into(), cwd: "/elsewhere".into() }.key());
+        assert_eq!(
+            a.key(),
+            AgentIdentity {
+                pty_id: 1,
+                instance: "run-a".into(),
+                cwd: "/elsewhere".into()
+            }
+            .key()
+        );
     }
 
     /// The registry is what makes "who is calling" answerable, and what tells
@@ -3823,7 +3881,10 @@ mod tests {
 
     #[test]
     fn an_owner_display_string_yields_its_directory() {
-        assert_eq!(claim_owner_cwd("canopy (/w/canopy)").as_deref(), Some("/w/canopy"));
+        assert_eq!(
+            claim_owner_cwd("canopy (/w/canopy)").as_deref(),
+            Some("/w/canopy")
+        );
         assert_eq!(claim_owner_cwd("no directory here"), None);
     }
 
