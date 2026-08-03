@@ -42,6 +42,8 @@ export interface ClaimViewProps {
   onJumpToPty?: (ptyId: number) => void;
   onOpenFile?: (path: string) => void;
   onOpenClaim?: (claim: ipc.AgentClaim) => void;
+  /** Toasts for actions that can fail out of view (releasing the claim). */
+  onNotice?: (msg: string) => void;
 }
 
 const stamp = (ms: number) => new Date(ms).toLocaleString();
@@ -99,6 +101,7 @@ export function ClaimView({
   onJumpToPty,
   onOpenFile,
   onOpenClaim,
+  onNotice,
 }: ClaimViewProps) {
   const [history, setHistory] = useState<ipc.AgentClaim[] | null>(null);
 
@@ -109,11 +112,19 @@ export function ClaimView({
   useEffect(() => {
     if (!active) return;
     load();
+    // The flag covers the gap `un` alone leaves: if the tab flips away before
+    // listen() resolves, cleanup ran against `undefined` and the listener it
+    // was about to hand us would have survived forever.
+    let cancelled = false;
     let un: (() => void) | undefined;
     void ipc.onAgentClaims(load).then((u) => {
-      un = u;
+      if (cancelled) u();
+      else un = u;
     });
-    return () => un?.();
+    return () => {
+      cancelled = true;
+      un?.();
+    };
   }, [active, load]);
 
   const live = history?.find((c) => c.id === claimId) ?? null;
@@ -155,7 +166,15 @@ export function ClaimView({
             <Button
               size="sm"
               title="Drop this claim — for an agent that died holding it"
-              onClick={() => void ipc.contextReleaseClaim(claim.owner).catch(() => {})}
+              onClick={() =>
+                // A release that failed silently looks exactly like a claim
+                // that won't die.
+                void ipc
+                  .contextReleaseClaim(claim.owner_key)
+                  .catch((err) =>
+                    onNotice?.(`Couldn't release this claim: ${err}`),
+                  )
+              }
             >
               Release
             </Button>
@@ -233,7 +252,22 @@ export function ClaimView({
                 title={`${claimOwnerName(r.owner)} was turned away`}
               >
                 <p className="claim-event-note">
-                  <BlockedIcon size={12} /> wanted {r.paths.join(", ")}
+                  <BlockedIcon size={12} /> wanted{" "}
+                  {/* The same way out as the file list above: what the refused
+                      agent wanted is a set of files, and files are somewhere
+                      you can go. */}
+                  {r.paths.map((p, j) => (
+                    <span key={p}>
+                      {j > 0 && ", "}
+                      <button
+                        className="claim-refused-path"
+                        title={`Open ${p}`}
+                        onClick={() => onOpenFile?.(p)}
+                      >
+                        {basename(p)}
+                      </button>
+                    </span>
+                  ))}
                   {r.note ? ` — ${r.note}` : ""}
                 </p>
               </Event>

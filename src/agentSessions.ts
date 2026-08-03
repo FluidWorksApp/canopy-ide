@@ -75,6 +75,8 @@ export interface AgentSessions {
   shared: ipc.SessionDigest[];
   /** Files agents have claimed in this checkout (canopy_claim). */
   claims: ipc.AgentClaim[];
+  /** Agent-to-agent messages this app run, newest last. */
+  messages: ipc.MeshMessage[];
   /** Drop a restorable row and everything it stands for: tombstone, backend
    *  delete, and the local list. */
   forget: (rows: ipc.SessionDigest[]) => void;
@@ -143,11 +145,40 @@ export function useAgentSessions(opts: {
     if (!visible) return;
     const load = () => void ipc.contextClaims().then(setClaims).catch(() => {});
     load();
+    // The flag covers the gap `un` alone leaves: if this effect is torn down
+    // before listen() resolves, cleanup ran against `undefined` and the
+    // listener it was about to hand us would have survived forever.
+    let cancelled = false;
     let un: (() => void) | undefined;
     void ipc.onAgentClaims(load).then((u) => {
-      un = u;
+      if (cancelled) u();
+      else un = u;
     });
-    return () => un?.();
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, [visible]);
+
+  // Messages agents have typed into each other. Read the same way as claims,
+  // and for the same reason: a message arrives in its target's terminal looking
+  // exactly like the user typed it, so unless it is written down somewhere the
+  // fact that another agent reached in is not recoverable afterwards.
+  const [messages, setMessages] = useState<ipc.MeshMessage[]>([]);
+  useEffect(() => {
+    if (!visible) return;
+    const load = () => void ipc.contextMessages().then(setMessages).catch(() => {});
+    load();
+    let cancelled = false;
+    let un: (() => void) | undefined;
+    void ipc.onAgentMessage(load).then((u) => {
+      if (cancelled) u();
+      else un = u;
+    });
+    return () => {
+      cancelled = true;
+      un?.();
+    };
   }, [visible]);
 
   // What the hook would actually inject — mirrors peer_context in
@@ -169,9 +200,15 @@ export function useAgentSessions(opts: {
   // Sessions that exist on disk but have no live terminal — what you lost when
   // the IDE or the machine died. One definition of "restorable", so no two
   // surfaces can disagree about what is offered.
+  // The dependency the memo actually reads, hoisted so the array holds a value
+  // rather than an expression over one — same idiom as rootsKey above: callers
+  // rebuild the ids array every render, and keying on its identity would
+  // recompute (and re-render everything downstream) on every stats tick.
+  const liveKey = liveSessionIds.join(",");
   const restorable = useMemo(
     () => restorableFrom(digests, stats, liveSessionIds),
-    [digests, stats, liveSessionIds.join(",")],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [digests, stats, liveKey],
   );
 
   // Bumped when the hook stream teaches us a binary (see observeForLearning),
@@ -225,14 +262,22 @@ export function useAgentSessions(opts: {
     setDigests((prev) => prev.filter((x) => !ids.has(x.session_id)));
   };
 
+  // Memoized on `sessions`, not recut per render: AgentsPanel's
+  // auto-hibernation effect depends on `agentSessions`, and a fresh array
+  // every render meant that effect — and its over-the-cap toast — re-fired on
+  // every 2s stats tick whether or not anything about the sessions changed.
+  const agentSessions = useMemo(() => sessions.filter((x) => x.agent), [sessions]);
+  const termSessions = useMemo(() => sessions.filter((x) => !x.agent), [sessions]);
+
   return {
     digests,
     sessions,
-    agentSessions: sessions.filter((x) => x.agent),
-    termSessions: sessions.filter((x) => !x.agent),
+    agentSessions,
+    termSessions,
     restorable,
     shared,
     claims,
+    messages,
     forget,
     lifeOf,
   };

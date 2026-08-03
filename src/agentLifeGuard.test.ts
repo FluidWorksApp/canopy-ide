@@ -117,6 +117,17 @@ describe("nothing outside shared/agentLife decides a lifecycle", () => {
     expect(offendersAcrossLines(re)).toEqual([]);
   });
 
+  it("does not re-derive a lifecycle from the legacy idle boolean", () => {
+    // `SessionDigest.idle` predates `state`. Deriving from it fails in both
+    // directions at once: absent reads as "active" for a session that never
+    // reported, and a stale true reads as "idle" for one that died mid-turn —
+    // which is how the shared-context dialog described dead sessions as idle
+    // and silent ones as active. The receivers are the digest-shaped names the
+    // first test already polices; the ladder's `unknown` is the way through.
+    const re = /\b(digest|d|ws|dg)\??\.idle\b/;
+    expect(offendersAcrossLines(re)).toEqual([]);
+  });
+
   it("does not compare CPU against a threshold of its own", () => {
     // `resourceLoad` answers a different question — "is this runaway" — and
     // keeps its own numbers. Everything else asks "is anything running", which

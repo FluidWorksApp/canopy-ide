@@ -338,6 +338,17 @@ export interface AgentClaim {
   id: string;
   paths: string[];
   owner: string;
+  /** The holder's stable identity, derived server-side from (pty, instance)
+   *  rather than the cwd string. This — not `owner`, which is display text an
+   *  agent that cd'd has already drifted from — is what identifies a holder,
+   *  and what a release names. */
+  owner_key: string;
+  /** The terminal behind the claim, when there is one. Exact where the cwd in
+   *  `owner` is a guess; null for a claim taken outside a Canopy terminal. */
+  pty_id: number | null;
+  /** The app launch that owns `pty_id` — pty ids restart at 1 every run, so a
+   *  claim from another launch must not resolve against our terminals. */
+  instance: string | null;
   note: string | null;
   at_ms: number;
   /** Null while the claim is still held. */
@@ -351,10 +362,46 @@ export const contextClaims = () => invoke<AgentClaim[]>("context_claims");
 /** Held and ended together, newest first, for a claim's detail tab. */
 export const contextClaimHistory = () =>
   invoke<AgentClaim[]>("context_claim_history");
-export const contextReleaseClaim = (owner: string) =>
-  invoke<void>("context_release_claim", { owner });
+export const contextReleaseClaim = (ownerKey: string) =>
+  invoke<void>("context_release_claim", { ownerKey });
 export const onAgentClaims = (cb: () => void): Promise<UnlistenFn> =>
   listen("agent:claims", () => cb());
+
+/** One agent typed into another agent's session. */
+export interface AgentMessageDelivery {
+  id: string;
+  toPtyId: number;
+  /** False when the terminal died before the return that submits it — the
+   *  message is sitting unsent in a composer nobody will press enter on. */
+  submitted: boolean;
+}
+
+/** A message one agent sent another, once Canopy knows whether it landed.
+ *
+ *  This arrives in the target's terminal looking exactly like something the
+ *  user typed, so without this the user had no way to know another agent had
+ *  reached into a session they were watching. */
+export const onAgentMessage = (
+  cb: (m: AgentMessageDelivery) => void,
+): Promise<UnlistenFn> =>
+  listen<AgentMessageDelivery>("agent:message", (event) => cb(event.payload));
+
+/** One message an agent typed into another agent's session. */
+export interface MeshMessage {
+  id: string;
+  /** The terminal it came from; null for the companion. */
+  from_pty_id: number | null;
+  from_cwd: string | null;
+  to_pty_id: number;
+  /** What was delivered — after flattening and sanitising, not what was
+   *  passed. The record is of the delivery. */
+  text: string;
+  at_ms: number;
+  submitted: boolean;
+}
+
+/** Every agent-to-agent message this app run, newest last. */
+export const contextMessages = () => invoke<MeshMessage[]>("context_messages");
 
 /** PNG (base64) of a rectangle of the app's own webview, via the webview's own
  *  snapshot API — a picture of the preview under the proxy engine, where the
@@ -2596,6 +2643,15 @@ export interface SessionDigest {
    *  resuming a finished task re-runs it. Absent on digests written before the
    *  marker existed, and on any CLI read straight from disk. */
   micro?: boolean;
+  /** True for a row reconstructed from the CLI's own on-disk store rather than
+   *  our hook stream. Such a row records no lifecycle at all — the ladder
+   *  (shared/agentLife/ladder.ts) refuses to read a state off it, so any view
+   *  rebuilding a digest for the ladder must carry this through. */
+  store?: boolean;
+  /** The digest belongs to a different launch of the app, so its `surface`
+   *  cannot be resolved against our live terminals. Same contract as `store`:
+   *  drop it in transit and the ladder trusts a state it must not. */
+  foreign?: boolean;
 }
 
 /** Publish which projects share context between their agent sessions. The hook

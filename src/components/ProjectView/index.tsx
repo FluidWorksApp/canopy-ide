@@ -33,6 +33,7 @@ import {
   bucketFor,
   declaredQuiet,
   ringFor,
+  type Attention,
   type Life,
   type LifeState,
 } from "../../../shared/agentLife";
@@ -298,7 +299,7 @@ import { TeamPanel } from "../TeamPanel";
 import { McpToolsPanel } from "../McpToolsPanel";
 import { McpView } from "../McpView";
 import { ClaimView } from "../ClaimView";
-import { claimOwnerCwd } from "../../claims";
+import { claimOwnerPty } from "../../claims";
 import { ChatView } from "../ChatView";
 import { Coachmark } from "../Coachmark";
 import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
@@ -5795,6 +5796,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Re-read on every render: the memory is a ref, and `useAttentionMemory`
   // bumps a counter when it changes, so this is always current.
   const attention = attentionMemory.current;
+  // The same memory as a per-pty lookup for the agent surfaces (panel and
+  // page), which live too far down to read the ref themselves. Keyed on the
+  // version, not the map: the map is mutated in place, so its identity can
+  // never invalidate a consumer's memo — the version is what says an
+  // attention-only change happened.
+  const attentionFor = useCallback(
+    (ptyId: number): Attention => attentionMemory.current.get(ptyId) ?? NO_ATTENTION,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [attentionVersion],
+  );
   const lifeForPty = useCallback(
     (ptyId: number | null | undefined): Life => {
       const stats = ptyId != null ? statsByPty.get(ptyId) : undefined;
@@ -7424,6 +7435,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             }
             onOpenInstructions={openInstructions}
             onOpenClaim={openClaim}
+            onNotice={onNotice}
+            attentionFor={attentionFor}
           />
         );
       case "task-history":
@@ -7451,15 +7464,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
             claimId={tab.claimId}
             fallback={tab.claim}
             active={tab.id === activeTabId && visible}
-            // The claim names its owner by directory; this is that directory
-            // resolved to a live terminal, so the page only offers the jump
-            // when there is something to jump to.
-            ownerPtyId={
-              projectStats.find((s) => s.cwd === claimOwnerCwd(tab.claim.owner))?.id ?? null
-            }
+            // The claim's own pty when it names one (exact, and it survives
+            // an agent that cd'd into a subdirectory); the cwd parse only for
+            // claims recorded before the field existed. Either way the page
+            // only offers the jump when there is something to jump to.
+            ownerPtyId={claimOwnerPty(tab.claim, projectStats, thisInstance)}
             onJumpToPty={jumpToPty}
             onOpenFile={(path) => void openFile(path)}
             onOpenClaim={openClaim}
+            onNotice={onNotice}
           />
         );
       case "instructions":
@@ -8739,6 +8752,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onOpenAgentsPage={openAgentsPage}
           onOpenClaim={openClaim}
           installed={installed}
+          attentionFor={attentionFor}
         />
       ))}
       {sidePane("tools", () => (
