@@ -18,6 +18,7 @@ describe("getSettings / updateSettings", () => {
     expect(s.scrollback).toBe(10_000);
     expect(s.theme).toBe("gotham");
     expect(s.trackerKeys).toEqual({});
+    expect(s.tabSwitchMode).toBe("recent");
   });
 
   it("overlays stored values on top of defaults", () => {
@@ -28,10 +29,15 @@ describe("getSettings / updateSettings", () => {
   });
 
   it("round-trips a patch through localStorage", () => {
-    updateSettings({ theme: "gotham", customAccent: "#ff0000" });
+    updateSettings({
+      theme: "gotham",
+      customAccent: "#ff0000",
+      tabSwitchMode: "order",
+    });
     const s = getSettings();
     expect(s.theme).toBe("gotham");
     expect(s.customAccent).toBe("#ff0000");
+    expect(s.tabSwitchMode).toBe("order");
   });
 
   it("merges successive patches rather than replacing the whole object", () => {

@@ -29,6 +29,7 @@ import {
   type Hotkey,
   type LinkClickMode,
   type Settings,
+  type TabSwitchMode,
   type Theme,
 } from "../settings";
 import { skinDef } from "../skins/registry";
@@ -1540,6 +1541,20 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                       );
                     })}
                   </div>
+                </Item>
+                <Item
+                  name="Ctrl+Tab switching"
+                  desc="Choose whether the switcher follows what you used last or the tab strip's stable order."
+                >
+                  <Segmented<TabSwitchMode>
+                    aria-label="Ctrl+Tab switching order"
+                    options={[
+                      { id: "recent", label: "Recent activity" },
+                      { id: "order", label: "Tab order" },
+                    ]}
+                    value={s.tabSwitchMode}
+                    onChange={(tabSwitchMode) => patch({ tabSwitchMode })}
+                  />
                 </Item>
                 <Item
                   name="Stack tabs by status"
