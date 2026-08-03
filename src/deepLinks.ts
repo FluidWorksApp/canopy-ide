@@ -14,6 +14,7 @@
 //   canopy://chat?peer=ab12                           a teammate's conversation
 //   canopy://file?path=/Users/me/src/api/main.rs&line=40
 //   canopy://note?note=0007-tier-donations&id=p1      one scratchpad note
+//   canopy://pr?number=1341&path=/Users/me/src/api    a pull request's tab
 //   canopy://project?id=p1                            the project itself
 //   canopy://app                                      nothing in particular
 //
@@ -68,7 +69,12 @@ export type DeepLink =
   | ({ kind: "chat"; peer: string | null } & ProjectHint)
   | ({ kind: "file"; path: string; line?: number } & ProjectHint)
   /** A scratchpad note, by store id (`nnnn-slug`). */
-  | ({ kind: "note"; noteId: string } & ProjectHint);
+  | ({ kind: "note"; noteId: string } & ProjectHint)
+  /** A pull request's detail tab. `path` doubles as the repo checkout — the
+   *  same string `openPr` keys tabs on — and `url` is the escape hatch: a PR
+   *  that has merged or closed since the notification went out has no native
+   *  tab any more, and the browser is the only true answer left. */
+  | ({ kind: "pr"; number: number; url?: string } & ProjectHint);
 
 export const DEEP_LINK_SCHEME = "canopy:";
 
@@ -86,6 +92,10 @@ export function formatDeepLink(link: DeepLink): string {
   // link that spelled the note with it would be a link that can never carry
   // both. The Rust side composes the same string (notes.rs `note_link`).
   if (link.kind === "note") q.set("note", link.noteId);
+  if (link.kind === "pr") {
+    q.set("number", String(link.number));
+    if (link.url) q.set("url", link.url);
+  }
   const query = q.toString();
   return `canopy://${link.kind}${query ? `?${query}` : ""}`;
 }
@@ -137,6 +147,15 @@ export function parseDeepLink(raw: string): DeepLink | null {
       if (!noteId) return null;
       return { kind: "note", noteId, ...hint };
     }
+    case "pr": {
+      const raw = p.get("number");
+      const number = Number(raw);
+      // Same presence check as `pty`: `Number(null)` is 0, and PR #0 is not a
+      // thing anyone meant.
+      if (!raw || !Number.isInteger(number) || number <= 0) return null;
+      const url = p.get("url") ?? undefined;
+      return { kind: "pr", number, ...(url ? { url } : {}), ...hint };
+    }
     case "file": {
       if (!path) return null;
       const line = Number(p.get("line"));
@@ -164,6 +183,7 @@ export type DeepLinkAction =
   | { do: "chat"; peer: string | null; name: string }
   | { do: "file"; path: string; line?: number }
   | { do: "note"; noteId: string }
+  | { do: "pr"; repo: string; number: number; url?: string }
   | { do: "nothing" };
 
 /** The project's surfaces as they are right now — what the link is resolved
@@ -226,6 +246,13 @@ export function followLink(
     // was deleted, which is a truer answer than landing on the panel.
     case "note":
       return { do: "note", noteId: link.noteId };
+    // The handler re-resolves the PR against the live list (`openPrByNumber`):
+    // still open → its tab, gone → the URL in the browser. Without a repo to
+    // resolve against, the PRs panel is the nearest honest landing.
+    case "pr":
+      return link.path
+        ? { do: "pr", repo: link.path, number: link.number, url: link.url }
+        : { do: "panel", panel: "prs" };
     // The project is already open by the time this runs; that was the whole
     // instruction.
     case "app":

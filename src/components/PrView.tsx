@@ -289,7 +289,7 @@ function Elapsed({ startedAt }: { startedAt: number }) {
 export function PrView({
   repo,
   pr,
-  onNotice,
+  onNotice: onNoticeRaw,
   relay,
   agentTargets,
   installed,
@@ -301,6 +301,20 @@ export function PrView({
   liveSessions,
   onSendToRaiser,
 }: PrViewProps) {
+  // Every notice this tab raises is about this PR, so all of them say so:
+  // which repo it lives in, and a click that lands back on this tab — or on
+  // the PR's page in the browser once it has merged out from under the native
+  // list. "#1341: 1 new comment(s)" with no way to tell which of three open
+  // projects' #1341 it meant is the row this exists to end.
+  const onNotice = useCallback<Notify>(
+    (text, kind, opts) =>
+      onNoticeRaw(text, kind, {
+        path: repo,
+        where: { kind: "pr", number: pr.number, url: pr.url, path: repo },
+        ...opts,
+      }),
+    [onNoticeRaw, repo, pr.number, pr.url],
+  );
   const [patch, setPatch] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [split, setSplit] = useState(true);
@@ -595,7 +609,9 @@ export function PrView({
       stageFindings().then((n) => {
         if (n)
           onNotice(
-            `${n} finding(s) staged as draft comments — none posted yet.`,
+            `#${pr.number}: ${n} finding(s) staged as draft comments — none posted yet.`,
+            "info",
+            { body: pr.title },
           );
         return n;
       }),
@@ -614,7 +630,7 @@ export function PrView({
       timer = window.setTimeout(() => setSettling(false), 900);
     });
     return () => window.clearTimeout(timer);
-  }, [running, repo, pr.number, stageFindings, onNotice]);
+  }, [running, repo, pr.number, pr.title, stageFindings, onNotice]);
 
   /** Tasks we've just dispatched, before the launcher has written them to the
    *  run log. An isolated task builds a worktree first, which can take seconds —
@@ -696,11 +712,13 @@ export function PrView({
       // now panel would send you away from the thing that's actually showing.
       noticeRef.current(
         def.id === prReviewTask.id
-          ? `${def.label}: an agent is starting — its progress is on this page.`
-          : `${def.label}: an agent is starting — watch it under "Running now".`,
+          ? `${def.label} #${pr.number}: an agent is starting — its progress is on this page.`
+          : `${def.label} #${pr.number}: an agent is starting — watch it under "Running now".`,
+        "info",
+        { body: pr.title },
       );
     },
-    [onMicroTask],
+    [onMicroTask, pr.number, pr.title],
   );
 
   // Clear a pending marker once the run log shows it, or if it never appears
@@ -976,7 +994,9 @@ export function PrView({
           launch(addressPrCommentsTask, { repo, pr });
           persist(beginRound(loop, g.ids, c.head_sha));
           onNotice(
-            `Round ${loop.cycle + 1}: ${g.ids.length} new comment(s) came back — agent is on it.`,
+            `#${pr.number} round ${loop.cycle + 1}: ${g.ids.length} new comment(s) came back — agent is on it.`,
+            "info",
+            { body: pr.title },
           );
           return;
         }
@@ -985,7 +1005,9 @@ export function PrView({
         return;
       }
       if (fresh.length) {
-        onNotice(`#${pr.number}: ${fresh.length} new comment(s).`);
+        onNotice(`#${pr.number}: ${fresh.length} new comment(s).`, "info", {
+          body: pr.title,
+        });
       } else if (isLandable(c) && loop.status !== "ready") {
         persist(markReady(loop));
       }

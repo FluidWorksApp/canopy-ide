@@ -41,7 +41,28 @@ export type {
  *  border, so "Switched to origin" looked like a failure. */
 export type NoticeKind = "info" | "success" | "warn" | "error";
 
-export type Notify = (message: string, kind?: NoticeKind) => void;
+/** What a notice can say beyond a string and a tone. Every field is optional
+ *  and the bag itself is optional, so the hundreds of existing `Notify` call
+ *  sites stay valid — but a caller that knows which project it speaks for and
+ *  where a click should land no longer has to drop that on the floor. */
+export interface NoticeOpts {
+  /** Any path inside the project this notice is about — a repo checkout, an
+   *  agent's cwd. App resolves it to `projectId`/`projectName` the same way
+   *  agent actions are resolved. */
+  path?: string;
+  /** The project itself, when the caller holds it — beats `path`. */
+  projectId?: string;
+  /** Where clicking the notification lands. */
+  where?: import("./deepLinks").DeepLink;
+  /** A second line under the title — the PR's title, the run's name. */
+  body?: string;
+}
+
+export type Notify = (
+  message: string,
+  kind?: NoticeKind,
+  opts?: NoticeOpts,
+) => void;
 
 /** Everything a view needs to talk to the team relay. State lives in App —
  *  the relay is app-wide (one process, one socket) — and every ProjectView
