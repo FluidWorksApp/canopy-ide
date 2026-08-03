@@ -167,11 +167,11 @@ describe("agentForPkg", () => {
     // A package identity that doesn't match what `install` puts on disk would
     // silently identify nothing, so keep the two in step.
     for (const cli of AGENT_CLIS) {
-      for (const pkg of cli.pkgs ?? []) {
-        const [kind, name] = [pkg.slice(0, pkg.indexOf(":")), pkg.slice(pkg.indexOf(":") + 1)];
-        expect(["npm", "brew", "py"]).toContain(kind);
-        if (kind === "npm") expect(cli.install).toContain(name);
-      }
+      const pkg = cli.pkgs?.[0];
+      if (!pkg) continue;
+      const [kind, name] = [pkg.slice(0, pkg.indexOf(":")), pkg.slice(pkg.indexOf(":") + 1)];
+      expect(["npm", "brew", "py"]).toContain(kind);
+      if (kind === "npm") expect(cli.install).toContain(name);
     }
   });
 

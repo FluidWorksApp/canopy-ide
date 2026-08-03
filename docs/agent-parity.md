@@ -1,4 +1,4 @@
-# Agent parity: research and plan (July 2026)
+# Agent parity: connector audit (August 2026)
 
 Canopy's agent features were built against Claude Code first, and some focused
 paths remain. This document records the current capability surface and the
@@ -11,25 +11,23 @@ Hooks now have first-class installers for every launcher CLI. Codex uses its
 native hook contract; the plugin/hook adapters for the other CLIs normalize
 events through the same Canopy helper. MCP registration is available for the
 clients with a documented local-server configuration (Claude, Codex,
-Antigravity, and OpenCode).
+Antigravity, OpenCode, and Amp).
 
 | Feature | claude | codex | amp | aider | agy | opencode | omp |
 |---|---|---|---|---|---|---|---|
-| Hook auto-setup | full | full | plugin | notification | full | plugin | hook |
+| Hook auto-setup | full | full | plugin | notification | full | plugin | extension |
 | Event stream (stamped w/ pty) | yes | yes | yes | limited | yes | yes | yes |
-| MCP auto-setup | yes | yes | no native config adapter | no native MCP | yes | yes | no native MCP |
-| Session digests (powers restore + shared context) | yes | yes | yes | limited | yes | limited¹ | yes |
+| MCP auto-setup | yes | yes | yes | no native MCP | yes | yes | no native MCP |
+| Session digests (powers restore + shared context) | yes | yes | yes | limited | yes | yes | yes |
 | Resume command in registry | yes | yes | yes | – | yes | yes | yes |
-| Token/cost/model tray | yes | – | – | – | – | – | – |
-| Model switcher | yes | – | – | – | – | – | – |
-| Shared context (receive) | yes | – | – | – | – | – | – |
+| Token/cost/model tray | yes | model only | – | – | model only | model only | model only |
+| Model switcher | yes | yes | – | yes | yes | yes | yes |
+| Shared context (receive) | yes | yes | – | – | – | – | – |
 | Detection / tab promotion / launcher | yes | yes | yes | yes | yes | yes | yes |
 
-¹ OpenCode's bus has no event Canopy can map to `UserPromptSubmit`, so its
-plugin forwards `SessionStart`, `Stop`, `permission.asked` and tool use but
-never a `prompt`. Its digests exist and drive detection and state, but they are
-promptless — which is what "resume with history" labels rows from, so those read
-as untitled.
+OpenCode's `chat.message` plugin hook maps to `UserPromptSubmit`, including
+the text parts and active provider/model. Its bus events provide `SessionStart`,
+`Stop`, `permission.asked`, file edits and tool use.
 
 The load-bearing pieces every feature hangs off:
 
@@ -40,13 +38,14 @@ The load-bearing pieces every feature hangs off:
   `~/.canopy/agent-events.jsonl`, maintains per-session digests
   (`~/.canopy/sessions/<id>.json`), and prints context-injection JSON for the
   compatible Claude/Codex hook contract on SessionStart/UserPromptSubmit.
-- The minimum JSON contract to join: `session_id` (or `conversation-id`),
-  `cwd`, `hook_event_name` (or `type`). Extra value: `prompt` (digests),
+- The normalized JSON contract is `session_id`, `cwd`, and `hook_event_name`.
+  Adapters translate vendor fields before publishing. Extra value: `prompt` (digests),
   `tool_name` + `tool_input.file_path` (edited-file tracking),
   `transcript_path` (token tray), `message` (notification cards),
-  `last-assistant-message` (idle card text).
+  `last_assistant_message` or legacy `last-assistant-message` (idle card text),
+  and `model` (active-tab model label).
 
-## What each CLI offers (verified July 2026)
+## What each CLI offers (verified August 2026)
 
 ### Codex CLI (`codex`, v0.144.x)
 - **Full hooks system, stable since ~v0.124**: `SessionStart`,
@@ -61,12 +60,14 @@ The load-bearing pieces every feature hangs off:
   Headless resume `codex exec resume <id>`.
 - `/model` in TUI (picker confirmed; inline arg unverified). OSC 9 / BEL
   notifications for `approval-requested` via `tui.notifications`.
-- Legacy `notify` fires only `agent-turn-complete` — never approvals.
+- Legacy `notify` fires only `agent-turn-complete` — never approvals. It is
+  routed through `canopy-hook` so the same trust gate and pty stamp apply.
 
 ### Antigravity CLI (`agy`, v1.1.x)
-- **Agent Hooks**: `PreToolUse`, `PostToolUse`, `PreInvocation` (≈ prompt
-  submit), `PostInvocation` (≈ turn end), `Notification`. JSON on stdin with
-  `session_id`, `transcript_path`, `cwd`, `hook_event_name`. Config
+- **Agent Hooks**: `PostToolUse`, `PreInvocation`,
+  `PostInvocation`, and `Stop`. The invocation events bracket individual model
+  calls and prove progress; only `Stop` ends the full loop. JSON uses protojson
+  camelCase (`conversationId`, `workspacePaths`, `transcriptPath`, `modelName`). Config
   `~/.gemini/antigravity-cli/hooks.json` or project `.agents/hooks.json`.
   Absolute command paths; exit 0 required.
 - **OSC 9 notifications (off by default)** — fires when the CLI "requires your
@@ -98,9 +99,8 @@ The load-bearing pieces every feature hangs off:
   `session.start`, `agent.start`, `agent.end`, `tool.call` (can
   allow/reject/modify), `tool.result`; plugins can run shell commands — a
   Canopy plugin can forward everything to the bridge.
-- Permissions: rules with a **`delegate`** action — Amp executes an external
-  program with `AMP_THREAD_ID`, tool params on stdin; exit code decides
-  allow/ask/reject. Clean blocked-on-approval signal.
+- Permissions are configurable, but the current plugin bridge has no verified
+  permission-request event. It deliberately does not invent a blocked state.
 - Threads are **server-side** (ampcode.com); no local transcript store; no
   documented per-thread token/model API → token tray parity is weakest here.
   `--stream-json` carries usage in headless mode only.
@@ -123,8 +123,8 @@ The load-bearing pieces every feature hangs off:
   permissions, errors, completion).
 
 ### oh-my-pi (`omp`, v17.x)
-- **TS hooks/extensions** (`~/.omp/agent/hooks/`, `--hook file.ts`): session
-  lifecycle, `turn_start`/`turn_end`, `tool_call` (can block), `tool_result`,
+- **TS extensions** (`~/.omp/agent/extensions/`, `--extension file.ts`): session
+  lifecycle, `before_agent_start`/`agent_settled`, `tool_call`, `tool_result`,
   plus observability events `tool_approval_requested/resolved`.
 - Sessions: `~/.omp/agent/sessions/<dir>/<ts>_<id>.jsonl` — assistant entries
   carry `provider`, `model`, and `usage` **including computed cost** — the
@@ -144,10 +144,11 @@ The load-bearing pieces every feature hangs off:
    `~/.codex/hooks.json`, keeps legacy `notify` for old versions, and setup
    now also registers the Canopy MCP server in `~/.codex/config.toml`.
 2. **Antigravity → hooks + OSC.** Done: `setup_agy_hooks` writes
-   `~/.gemini/antigravity-cli/hooks.json` (PreToolUse/PostToolUse/
-   PreInvocation/PostInvocation/Notification → `canopy-hook`) and flips its
+   `~/.gemini/antigravity-cli/hooks.json` (PostToolUse/
+   PreInvocation/PostInvocation/Stop → `canopy-hook`) and flips its
    `notifications` setting so OSC 9 reaches the handlers Canopy already has;
-   `canopy-hook` maps PreInvocation≈UserPromptSubmit and PostInvocation≈Stop.
+   `canopy-hook` normalizes its camelCase payload, treats invocation hooks as
+   progress, and maps only `Stop` to a turn boundary.
    Setup also registers the MCP server in `~/.gemini/config/mcp_config.json`
    (the global registry named by Antigravity's own bundled
    `skills/agy-customizations/docs/mcp_servers.md`).
@@ -161,12 +162,12 @@ The load-bearing pieces every feature hangs off:
    `~/.config/opencode/plugin/`: forward `permission.asked`, `session.idle`,
    `tool.execute.after`, `file.edited` (+ session ids) to the bridge/helper.
    Later: token tray from its per-step usage/cost data.
-5. **oh-my-pi hook module.** Ship a hook file into `~/.omp/agent/hooks/`
-   forwarding turn/tool/approval events. Token tray: parse its session JSONL
+5. **oh-my-pi extension.** Ship an extension into `~/.omp/agent/extensions/`
+   forwarding agent/tool/approval/session events. Token tray: parse its session JSONL
    (model + usage + cost already computed).
-6. **Amp plugin + delegate rule.** Plugin forwards session/tool events;
-   a `delegate` permission rule provides the approval signal. Accept that
-   token/cost stays unavailable (server-side threads).
+6. **Amp plugin.** Plugin forwards current thread/session/tool payloads. Accept
+   that blocked state and token/cost stay unavailable until Amp exposes a
+   stable permission event and local usage source.
 
 **P2 — de-Claude the core**
 7. `derivePending`: read agent identity from the payload instead of

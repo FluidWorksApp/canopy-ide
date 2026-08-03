@@ -670,14 +670,16 @@ pub fn setup_agent_in(agent: &str, cfg: &str, home: &str) -> Result<SetupReport,
 /// The config file each agent's hooks live in — the same file its `setup_*`
 /// writes to, so ownership is read from where it was written rather than
 /// re-derived.
-fn hooks_config_path(agent: &str, home: &str) -> Option<String> {
+fn hooks_config_path(agent: &str, cfg: &str, home: &str) -> Option<String> {
     Some(match agent {
-        "claude" => format!("{home}/.claude/settings.json"),
-        "codex" => format!("{home}/.codex/config.toml"),
-        "aider" => format!("{home}/.aider.conf.yml"),
-        "agy" => format!("{home}/.gemini/antigravity-cli/hooks.json"),
-        "opencode" => format!("{home}/.config/opencode/plugin/canopy.ts"),
-        "omp" => format!("{home}/.omp/agent/hooks/canopy.ts"),
+        "claude" => format!("{cfg}/.claude/settings.json"),
+        "codex" => format!("{cfg}/.codex/hooks.json"),
+        "aider" => format!("{cfg}/.aider.conf.yml"),
+        "agy" => format!("{cfg}/.gemini/antigravity-cli/hooks.json"),
+        "opencode" => format!("{cfg}/.config/opencode/plugin/canopy.ts"),
+        "omp" => format!("{cfg}/.omp/agent/extensions/canopy.ts"),
+        // AMP_SETTINGS_FILE relocates settings, not plugin discovery. One
+        // global plugin observes every Amp profile.
         "amp" => format!("{home}/.config/amp/plugins/canopy.ts"),
         _ => return None,
     })
@@ -687,7 +689,9 @@ fn hooks_config_path(agent: &str, home: &str) -> Option<String> {
 /// The panel needs this to tell "hooks aren't installed" (offer to set them up)
 /// apart from "hooks are installed, but these agents predate them" (restart to
 /// stream) — two states a missing session digest alone can't distinguish. A
-/// config file that references any of our MARKERS is one we've hooked.
+/// Structured registries must contain the complete event set. A broad marker
+/// alone is not enough: Claude's status line and Codex's legacy notify both
+/// contain canopy-hook even when the lifecycle hooks themselves are missing.
 #[tauri::command]
 pub async fn agent_hooks_installed(agent: String) -> bool {
     let Ok(home) = std::env::var("HOME") else {
@@ -697,12 +701,103 @@ pub async fn agent_hooks_installed(agent: String) -> bool {
 }
 
 fn hooks_are_ours(agent: &str, home: &str) -> bool {
-    let Some(config) = hooks_config_path(agent, home) else {
+    hooks_are_ours_in(agent, home, home)
+}
+
+fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
+    let Some(config) = hooks_config_path(agent, cfg, home) else {
         return false;
     };
-    match std::fs::read_to_string(&config) {
-        Ok(raw) => MARKERS.iter().any(|m| raw.contains(m)),
-        Err(_) => false,
+    let Ok(raw) = std::fs::read_to_string(&config) else {
+        return false;
+    };
+    let has_marker = |value: &serde_json::Value| {
+        let text = value.to_string();
+        MARKERS.iter().any(|m| text.contains(m))
+    };
+    let complete = |hooks: &serde_json::Value, events: &[&str]| {
+        events.iter().all(|event| {
+            hooks
+                .get(*event)
+                .and_then(|v| v.as_array())
+                .is_some_and(|entries| entries.iter().any(|entry| has_marker(entry)))
+        })
+    };
+    match agent {
+        "claude" => serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("hooks").cloned())
+            .is_some_and(|hooks| {
+                complete(
+                    &hooks,
+                    &[
+                        "PostToolUse",
+                        "PostToolUseFailure",
+                        "Stop",
+                        "StopFailure",
+                        "Notification",
+                        "PermissionRequest",
+                        "UserPromptSubmit",
+                        "SessionStart",
+                        "SessionEnd",
+                    ],
+                )
+            }),
+        "codex" => serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("hooks").cloned())
+            .is_some_and(|hooks| {
+                complete(
+                    &hooks,
+                    &[
+                        "SessionStart",
+                        "UserPromptSubmit",
+                        "Stop",
+                        "SessionEnd",
+                        "PostToolUse",
+                        "PermissionRequest",
+                    ],
+                )
+            }),
+        "agy" => serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("canopy").cloned())
+            .is_some_and(|hooks| {
+                complete(
+                    &hooks,
+                    &["PostToolUse", "PreInvocation", "PostInvocation", "Stop"],
+                )
+            }),
+        "opencode" => [
+            "chat.message",
+            "canopy_signal: \"turn-start\"",
+            "canopy_signal: \"turn-progress\"",
+            "canopy_signal: \"turn-end\"",
+            "let pending = Promise.resolve()",
+        ]
+        .iter()
+        .all(|part| raw.contains(part)),
+        "omp" => [
+            "before_agent_start",
+            "agent_settled",
+            "session_shutdown",
+            "event?.toolName",
+            "let pending = Promise.resolve()",
+        ]
+        .iter()
+        .all(|part| raw.contains(part)),
+        "amp" => [
+            "event?.thread?.id",
+            "event?.message",
+            "canopy_signal: \"turn-progress\"",
+            "let pending = Promise.resolve()",
+        ]
+        .iter()
+        .all(|part| raw.contains(part)),
+        "aider" => raw.lines().any(|line| {
+            line.trim_start().starts_with("notifications-command:") && line.contains("canopy-hook")
+        }),
+        _ => MARKERS.iter().any(|m| raw.contains(m)),
     }
 }
 
@@ -715,10 +810,16 @@ fn setup_aider_hooks(cfg: &str, home: &str) -> Result<String, String> {
     let helper = require_helper(home, "hooks not installed")?;
     let path = std::path::PathBuf::from(cfg).join(".aider.conf.yml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing.contains("canopy-hook") {
+    if existing.lines().any(|line| {
+        line.trim_start().starts_with("notifications-command:") && line.contains("canopy-hook")
+    }) {
         return Ok("Aider notifications already set up".into());
     }
-    if existing.contains("notifications") {
+    if existing.lines().any(|line| {
+        let line = line.trim_start();
+        !line.starts_with('#')
+            && (line.starts_with("notifications:") || line.starts_with("notifications-command:"))
+    }) {
         return Err(
             "~/.aider.conf.yml already configures notifications — point \
              notifications-command at canopy-hook manually"
@@ -735,9 +836,13 @@ fn setup_aider_hooks(cfg: &str, home: &str) -> Result<String, String> {
     // The honest classification is that aider wants the keyboard and cannot say
     // which kind. `needs-human-ambiguous` records exactly that: waiting, at
     // `reported` confidence, never reclaimable.
+    let command = format!(
+        "{} --agent aider --signal needs-human-ambiguous",
+        sh_quote(&helper.to_string_lossy())
+    );
+    let command = serde_json::to_string(&command).map_err(|e| e.to_string())?;
     let block = format!(
-        "\n# canopy: surface \"needs you\" in the IDE\nnotifications: true\nnotifications-command: {} --agent aider --signal needs-human-ambiguous\n",
-        helper.to_string_lossy()
+        "\n# canopy: surface \"needs you\" in the IDE\nnotifications: true\nnotifications-command: {command}\n"
     );
     std::fs::write(&path, format!("{existing}{block}")).map_err(|e| e.to_string())?;
     Ok("Aider notifications hooked (~/.aider.conf.yml) — restart aider sessions".into())
@@ -775,15 +880,19 @@ fn setup_opencode_plugin(cfg: &str, home: &str) -> Result<String, String> {
 import { spawn } from "node:child_process"
 
 const HELPER = "__HELPER__"
+let pending = Promise.resolve()
 
 const send = (obj) => {
-  try {
-    if (process.env.CANOPY !== "1") return
-    const child = spawn(HELPER, ["--agent", "opencode"], { stdio: ["pipe", "ignore", "ignore"] })
-    child.on("error", () => {})
-    child.stdin.write(JSON.stringify(obj))
-    child.stdin.end()
-  } catch {}
+  if (process.env.CANOPY !== "1") return
+  pending = pending.then(() => new Promise((resolve) => {
+    try {
+      const child = spawn(HELPER, ["--agent", "opencode"], { stdio: ["pipe", "ignore", "ignore"] })
+      child.on("error", resolve)
+      child.on("close", resolve)
+      child.stdin.on("error", resolve)
+      child.stdin.end(JSON.stringify(obj))
+    } catch { resolve() }
+  })).catch(() => {})
 }
 
 export const CanopyBridge = async ({ directory }) => {
@@ -791,6 +900,25 @@ export const CanopyBridge = async ({ directory }) => {
     e?.properties?.sessionID ?? e?.properties?.info?.sessionID ?? e?.properties?.info?.id ?? ""
   const base = (e) => ({ session_id: sid(e), cwd: directory, agent: "opencode" })
   return {
+    "chat.message": async (input, output) => {
+      try {
+        const prompt = output?.parts
+          ?.filter((part) => part?.type === "text" && !part?.synthetic)
+          .map((part) => part.text)
+          .join("\n") ?? ""
+        send({
+          session_id: input?.sessionID ?? "",
+          cwd: directory,
+          agent: "opencode",
+          hook_event_name: "UserPromptSubmit",
+          canopy_signal: "turn-start",
+          prompt,
+          model: input?.model
+            ? `${input.model.providerID}/${input.model.modelID}`
+            : "",
+        })
+      } catch {}
+    },
     event: async ({ event }) => {
       try {
         switch (event?.type) {
@@ -798,7 +926,7 @@ export const CanopyBridge = async ({ directory }) => {
             send({ ...base(event), hook_event_name: "SessionStart" })
             break
           case "session.idle":
-            send({ ...base(event), hook_event_name: "Stop" })
+            send({ ...base(event), hook_event_name: "Stop", canopy_signal: "turn-end" })
             break
           case "permission.asked":
             // The signal, not a sentence. This used to re-encode a structural
@@ -816,6 +944,7 @@ export const CanopyBridge = async ({ directory }) => {
             send({
               ...base(event),
               hook_event_name: "PostToolUse",
+              canopy_signal: "turn-progress",
               tool_name: "Edit",
               tool_input: { file_path: event?.properties?.file ?? "" },
             })
@@ -862,6 +991,7 @@ export const CanopyBridge = async ({ directory }) => {
           cwd: directory,
           agent: "opencode",
           hook_event_name: "PostToolUse",
+          canopy_signal: "turn-progress",
           tool_name: input?.tool ?? "",
         })
       } catch {}
@@ -882,9 +1012,7 @@ export const CanopyBridge = async ({ directory }) => {
     )
 }
 
-/// oh-my-pi: TS hook modules auto-discovered from ~/.omp/agent/hooks/. Its
-/// hook API is in flux (hooks vs extensions), so registration is defensive —
-/// whatever events exist fire, the rest are ignored.
+/// oh-my-pi: TS extensions auto-discovered from ~/.omp/agent/extensions/.
 fn setup_omp_hook(cfg: &str, home: &str) -> Result<String, String> {
     let helper = require_helper(home, "hooks not installed")?;
     const TEMPLATE: &str = r#"// Canopy IDE bridge — generated by Canopy, edits will be overwritten.
@@ -894,51 +1022,85 @@ fn setup_omp_hook(cfg: &str, home: &str) -> Result<String, String> {
 import { spawn } from "node:child_process"
 
 const HELPER = "__HELPER__"
+let pending = Promise.resolve()
 
 const send = (obj) => {
-  try {
-    if (process.env.CANOPY !== "1") return
-    const child = spawn(HELPER, ["--agent", "omp"], { stdio: ["pipe", "ignore", "ignore"] })
-    child.on("error", () => {})
-    child.stdin.write(JSON.stringify(obj))
-    child.stdin.end()
-  } catch {}
+  if (process.env.CANOPY !== "1") return
+  pending = pending.then(() => new Promise((resolve) => {
+    try {
+      const child = spawn(HELPER, ["--agent", "omp"], { stdio: ["pipe", "ignore", "ignore"] })
+      child.on("error", resolve)
+      child.on("close", resolve)
+      child.stdin.on("error", resolve)
+      child.stdin.end(JSON.stringify(obj))
+    } catch { resolve() }
+  })).catch(() => {})
 }
 
 export default function canopyBridge(pi) {
-  const base = () => ({
-    cwd: process.cwd(),
+  const base = (ctx) => ({
+    cwd: ctx?.cwd ?? process.cwd(),
     agent: "omp",
     session_id:
-      pi?.session?.id ?? pi?.sessionId ?? `omp-pty${process.env.CANOPY_PTY ?? ""}`,
+      ctx?.sessionManager?.getSessionId?.() ?? `omp-pty${process.env.CANOPY_PTY ?? ""}`,
   })
   const on = (ev, fn) => {
     try {
       pi?.on?.(ev, fn)
     } catch {}
   }
-  on("session_start", () => send({ ...base(), hook_event_name: "SessionStart" }))
-  on("turn_start", (ctx) =>
+  on("session_start", (_event, ctx) =>
     send({
-      ...base(),
+      ...base(ctx),
+      hook_event_name: "SessionStart",
+      model: ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
+    }),
+  )
+  on("model_select", (event, ctx) =>
+    send({
+      ...base(ctx),
+      hook_event_name: "ModelChanged",
+      model: event?.model ? `${event.model.provider}/${event.model.id}` : "",
+    }),
+  )
+  on("before_agent_start", (event, ctx) =>
+    send({
+      ...base(ctx),
       hook_event_name: "UserPromptSubmit",
-      prompt: ctx?.prompt ?? ctx?.input ?? "",
+      canopy_signal: "turn-start",
+      prompt: event?.prompt ?? "",
     }),
   )
-  on("turn_end", () => send({ ...base(), hook_event_name: "Stop" }))
-  on("tool_result", (ctx) =>
+  on("agent_settled", (_event, ctx) =>
+    send({ ...base(ctx), hook_event_name: "Stop", canopy_signal: "turn-end" }),
+  )
+  on("session_shutdown", (_event, ctx) =>
+    send({ ...base(ctx), hook_event_name: "SessionEnd", canopy_signal: "session-end" }),
+  )
+  on("tool_result", (event, ctx) =>
     send({
-      ...base(),
+      ...base(ctx),
       hook_event_name: "PostToolUse",
-      tool_name: ctx?.tool?.name ?? ctx?.name ?? "",
+      canopy_signal: "turn-progress",
+      tool_name: event?.toolName ?? "",
     }),
   )
-  on("tool_approval_requested", (ctx) =>
+  on("tool_approval_requested", (event, ctx) =>
     send({
-      ...base(),
+      ...base(ctx),
+      session_id: event?.sessionId ?? base(ctx).session_id,
       hook_event_name: "Notification",
       canopy_signal: "needs-human-permission",
-      tool_name: ctx?.tool?.name ?? "a tool",
+      tool_name: event?.toolName ?? "a tool",
+    }),
+  )
+  on("tool_approval_resolved", (event, ctx) =>
+    send({
+      ...base(ctx),
+      session_id: event?.sessionId ?? base(ctx).session_id,
+      hook_event_name: "PostToolUse",
+      canopy_signal: "turn-progress",
+      tool_name: event?.toolName ?? "",
     }),
   )
 }
@@ -948,7 +1110,7 @@ export default function canopyBridge(pi) {
         std::path::PathBuf::from(cfg)
             .join(".omp")
             .join("agent")
-            .join("hooks")
+            .join("extensions")
             .join("canopy.ts"),
         &source,
         "oh-my-pi hook installed — restart omp sessions to load it",
@@ -966,23 +1128,27 @@ fn setup_amp_plugin(cfg: &str, home: &str) -> Result<String, String> {
 import { spawn } from "node:child_process"
 
 const HELPER = "__HELPER__"
+let pending = Promise.resolve()
 
 const send = (obj) => {
-  try {
-    if (process.env.CANOPY !== "1") return
-    const child = spawn(HELPER, ["--agent", "amp"], { stdio: ["pipe", "ignore", "ignore"] })
-    child.on("error", () => {})
-    child.stdin.write(JSON.stringify(obj))
-    child.stdin.end()
-  } catch {}
+  if (process.env.CANOPY !== "1") return
+  pending = pending.then(() => new Promise((resolve) => {
+    try {
+      const child = spawn(HELPER, ["--agent", "amp"], { stdio: ["pipe", "ignore", "ignore"] })
+      child.on("error", resolve)
+      child.on("close", resolve)
+      child.stdin.on("error", resolve)
+      child.stdin.end(JSON.stringify(obj))
+    } catch { resolve() }
+  })).catch(() => {})
 }
 
 export default function canopyBridge(amp) {
-  const base = (ctx) => ({
-    cwd: process.cwd(),
+  const base = (event) => ({
+    cwd: event?.thread?.workingDirectory ?? process.cwd(),
     agent: "amp",
     session_id:
-      ctx?.threadId ?? process.env.AMP_THREAD_ID ?? `amp-pty${process.env.CANOPY_PTY ?? ""}`,
+      event?.thread?.id ?? process.env.AMP_THREAD_ID ?? `amp-pty${process.env.CANOPY_PTY ?? ""}`,
   })
   const on = (ev, fn) => {
     try {
@@ -990,18 +1156,31 @@ export default function canopyBridge(amp) {
     } catch {}
   }
   on("session.start", (ctx) => send({ ...base(ctx), hook_event_name: "SessionStart" }))
-  on("agent.start", (ctx) =>
-    send({ ...base(ctx), hook_event_name: "UserPromptSubmit", prompt: ctx?.prompt ?? "" }),
+  on("agent.start", (event) =>
+    send({
+      ...base(event),
+      hook_event_name: "UserPromptSubmit",
+      canopy_signal: "turn-start",
+      prompt: event?.message ?? "",
+    }),
   )
-  on("agent.end", (ctx) => send({ ...base(ctx), hook_event_name: "Stop" }))
-  on("tool.result", (ctx) =>
-    send({ ...base(ctx), hook_event_name: "PostToolUse", tool_name: ctx?.tool ?? "" }),
+  on("agent.end", (event) =>
+    send({ ...base(event), hook_event_name: "Stop", canopy_signal: "turn-end" }),
+  )
+  on("tool.result", (event) =>
+    send({
+      ...base(event),
+      hook_event_name: "PostToolUse",
+      canopy_signal: "turn-progress",
+      tool_name: event?.tool ?? "",
+    }),
   )
 }
 "#;
     let source = TEMPLATE.replace("__HELPER__", &helper.to_string_lossy());
+    let _ = cfg;
     install_generated_file(
-        std::path::PathBuf::from(cfg)
+        std::path::PathBuf::from(home)
             .join(".config")
             .join("amp")
             .join("plugins")
@@ -1038,19 +1217,26 @@ fn setup_agy_hooks(cfg: &str, home: &str) -> Result<String, String> {
     };
     // `--agent agy` makes the helper normalize agy's event names and answer
     // PreToolUse with an allow verdict (its required stdout contract).
-    let command = format!("{} --agent agy", helper.to_string_lossy());
-    let entry = |_ev: &str| {
+    let command = format!("{} --agent agy", sh_quote(&helper.to_string_lossy()));
+    let tool_entry = || {
         serde_json::json!([{
             "matcher": "*",
             "hooks": [{ "type": "command", "command": command, "timeout": 10 }]
         }])
     };
+    // Antigravity 1.1.x uses grouped handlers only for tool events. Lifecycle
+    // events are a flat handler list; wrapping those in matcher/hooks objects
+    // is accepted as JSON but never invoked.
+    let lifecycle_entry = || {
+        serde_json::json!([{
+            "type": "command", "command": command, "timeout": 10
+        }])
+    };
     let group = serde_json::json!({
-        "PreToolUse": entry("PreToolUse"),
-        "PostToolUse": entry("PostToolUse"),
-        "PreInvocation": entry("PreInvocation"),
-        "PostInvocation": entry("PostInvocation"),
-        "Notification": entry("Notification"),
+        "PostToolUse": tool_entry(),
+        "PreInvocation": lifecycle_entry(),
+        "PostInvocation": lifecycle_entry(),
+        "Stop": lifecycle_entry(),
     });
     let obj = hooks.as_object_mut().ok_or("hooks.json is not an object")?;
     let already = obj.get("canopy") == Some(&group);
@@ -1152,14 +1338,24 @@ pub fn install_hook_helper() -> Result<(), String> {
     }
     let dst = helper_path()?;
     std::fs::create_dir_all(dst.parent().ok_or("no bin dir")?).map_err(|e| e.to_string())?;
-    // Replacing a running binary fails on some platforms; remove first.
-    let _ = std::fs::remove_file(&dst);
-    std::fs::copy(&src, &dst).map_err(|e| e.to_string())?;
+    // Prepare the complete executable beside the destination. On Unix the
+    // final rename replaces atomically, so a failed copy never destroys the
+    // helper every connector currently points at.
+    let tmp = dst.with_extension(format!("tmp-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::copy(&src, &tmp).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755));
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
     }
+    #[cfg(windows)]
+    let _ = std::fs::remove_file(&dst);
+    std::fs::rename(&tmp, &dst).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })?;
     Ok(())
 }
 
@@ -1493,7 +1689,9 @@ fn setup_claude_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Str
     let command = helper.to_string_lossy().to_string();
     let make_entry = |matcher: Option<&str>| {
         let mut entry = serde_json::json!({
-            "hooks": [ { "type": "command", "command": command } ]
+            // Empty args selects Claude's exec form, so paths with spaces are
+            // passed as one executable instead of reparsed by a shell.
+            "hooks": [ { "type": "command", "command": command, "args": [] } ]
         });
         if let Some(m) = matcher {
             entry["matcher"] = serde_json::json!(m);
@@ -1531,8 +1729,11 @@ fn setup_claude_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Str
     // research session the helper looks at one env var and exits.
     for (event, matcher) in [
         ("PostToolUse", None),
+        ("PostToolUseFailure", None),
         ("Stop", None),
+        ("StopFailure", None),
         ("Notification", None),
+        ("PermissionRequest", None),
         ("UserPromptSubmit", None),
         ("SessionStart", None),
         ("SessionEnd", None),
@@ -2071,6 +2272,7 @@ fn json_mcp_registry(
         "claude" => (claude_state_path(cfg, home), "mcpServers"),
         "agy" => (root.join(".gemini/config/mcp_config.json"), "mcpServers"),
         "opencode" => (root.join(".config/opencode/opencode.json"), "mcp"),
+        "amp" => (root.join(".config/amp/settings.json"), "amp.mcpServers"),
         _ => return None,
     })
 }
@@ -2147,7 +2349,7 @@ pub fn integration_health(
         .map(|(agent, bin)| IntegrationHealth {
             agent: (*agent).into(),
             cli_installed: installed.get(*bin).copied().unwrap_or(false),
-            hooks: if hooks_are_ours(agent, cfg) {
+            hooks: if hooks_are_ours_in(agent, cfg, home) {
                 "ours"
             } else {
                 "missing"
@@ -2378,9 +2580,9 @@ fn setup_codex_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Stri
     // events, digests, restore, permission cards, context. The legacy
     // `notify` stays for older versions; it only fires agent-turn-complete
     // and writes the bridge raw, which degrades gracefully to idle cards.
-    let notify = setup_codex_notify(cfg, bridge);
-
     let helper = require_helper(home, "hooks not installed")?;
+    let _ = bridge;
+    let notify = setup_codex_notify(cfg, &helper);
     let dir = std::path::PathBuf::from(cfg).join(".codex");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("hooks.json");
@@ -2391,7 +2593,7 @@ fn setup_codex_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Stri
     } else {
         serde_json::json!({})
     };
-    let command = format!("{} --agent codex", helper.to_string_lossy());
+    let command = format!("{} --agent codex", sh_quote(&helper.to_string_lossy()));
     let want = serde_json::json!({
         "hooks": [ { "type": "command", "command": command } ]
     });
@@ -2452,13 +2654,17 @@ fn setup_codex_hooks(cfg: &str, home: &str, bridge: &str) -> Result<String, Stri
 /// one the appended key gets absorbed into that table — codex then fails to
 /// load config at all ("invalid type: sequence, expected u32"). So we splice
 /// notify in before the first table header, and heal any copy we misplaced.
-fn setup_codex_notify(cfg: &str, bridge: &str) -> Result<String, String> {
+fn setup_codex_notify(cfg: &str, helper: &std::path::Path) -> Result<String, String> {
     let dir = std::path::PathBuf::from(cfg).join(".codex");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("config.toml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
 
-    let is_ours = |l: &str| l.trim_start().starts_with("notify") && l.contains(bridge);
+    let helper_marker = helper.to_string_lossy();
+    let is_ours = |l: &str| {
+        l.trim_start().starts_with("notify")
+            && (l.contains(helper_marker.as_ref()) || MARKERS.iter().any(|m| l.contains(m)))
+    };
     // A notify line that isn't ours is the user's own — leave the file alone.
     if existing
         .lines()
@@ -2467,9 +2673,10 @@ fn setup_codex_notify(cfg: &str, bridge: &str) -> Result<String, String> {
         return Err("custom notify present".into());
     }
 
-    // Codex passes the notification JSON as an argument, not stdin.
-    let notify =
-        format!("notify = [\"/bin/sh\", \"-c\", \"printf '%s\\\\n' \\\"$0\\\" >> {bridge}\"]");
+    // Codex appends its notification JSON as one argv item. Route it through
+    // the normal helper so trust gating, pty stamping and digests still apply.
+    let executable = serde_json::to_string(helper_marker.as_ref()).map_err(|e| e.to_string())?;
+    let notify = format!("notify = [{executable}, \"--agent\", \"codex\", \"--payload\"]");
 
     // Drop any copy we wrote before (which may have been absorbed into a
     // table), then reinsert before the first table header — the only place a
@@ -4167,6 +4374,64 @@ mod integration_tests {
     }
 
     #[test]
+    fn opencodes_plugin_reports_turn_start_and_model() {
+        let home = scratch_home("opencode-turn-start");
+        setup_agent("opencode", home.to_str().unwrap()).unwrap();
+        let src = std::fs::read_to_string(home.join(".config/opencode/plugin/canopy.ts")).unwrap();
+        assert!(src.contains("chat.message"));
+        assert!(src.contains("UserPromptSubmit"));
+        assert!(src.contains("input.model.providerID"));
+        assert!(src.contains("input.model.modelID"));
+        assert!(src.contains("canopy_signal: \"turn-start\""));
+        assert!(src.contains("canopy_signal: \"turn-progress\""));
+        assert!(src.contains("canopy_signal: \"turn-end\""));
+    }
+
+    #[test]
+    fn omp_installs_a_current_extension_with_user_turn_boundaries() {
+        let home = scratch_home("omp-extension");
+        setup_agent("omp", home.to_str().unwrap()).unwrap();
+        let path = home.join(".omp/agent/extensions/canopy.ts");
+        let src = std::fs::read_to_string(path).unwrap();
+        assert!(src.contains("before_agent_start"));
+        assert!(src.contains("agent_settled"));
+        assert!(src.contains("session_shutdown"));
+        assert!(src.contains("event?.toolName"));
+        assert!(src.contains("canopy_signal: \"turn-start\""));
+        assert!(src.contains("canopy_signal: \"turn-end\""));
+        assert!(!home.join(".omp/agent/hooks/canopy.ts").exists());
+    }
+
+    #[test]
+    fn amp_plugin_reads_current_event_fields_and_signals_progress() {
+        let home = scratch_home("amp-events");
+        setup_agent("amp", home.to_str().unwrap()).unwrap();
+        let src = std::fs::read_to_string(home.join(".config/amp/plugins/canopy.ts")).unwrap();
+        assert!(src.contains("event?.thread?.id"));
+        assert!(src.contains("event?.message"));
+        assert!(src.contains("canopy_signal: \"turn-start\""));
+        assert!(src.contains("canopy_signal: \"turn-progress\""));
+        assert!(src.contains("canopy_signal: \"turn-end\""));
+    }
+
+    #[test]
+    fn antigravity_uses_grouped_tool_hooks_and_flat_lifecycle_hooks() {
+        let home = scratch_home("agy-shapes");
+        setup_agent("agy", home.to_str().unwrap()).unwrap();
+        let raw = std::fs::read_to_string(home.join(".gemini/antigravity-cli/hooks.json")).unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let canopy = &cfg["canopy"];
+        assert!(
+            canopy.get("PreToolUse").is_none(),
+            "an observer must not grant tools"
+        );
+        assert!(canopy["PostToolUse"][0]["hooks"].is_array());
+        assert_eq!(canopy["PreInvocation"][0]["type"], "command");
+        assert!(canopy["PreInvocation"][0].get("hooks").is_none());
+        assert_eq!(canopy["Stop"][0]["type"], "command");
+    }
+
+    #[test]
     fn amp_gets_the_mcp_registration_it_never_had() {
         // mcp.rs has described ~/.config/amp/settings.json since before this,
         // but nothing wrote to it — so Amp could see Canopy's tools listed and
@@ -4255,6 +4520,45 @@ mod integration_tests {
         // thing from one that is missing.
         let aider = mixed.iter().find(|x| x.agent == "aider").unwrap();
         assert_eq!(aider.mcp, "unsupported");
+    }
+
+    #[test]
+    fn codex_notify_is_not_mistaken_for_native_hooks() {
+        let home = scratch_home("codex-hook-health");
+        let h = home.to_str().unwrap();
+        setup_agent("codex", h).unwrap();
+        assert!(hooks_are_ours("codex", h));
+        std::fs::remove_file(home.join(".codex/hooks.json")).unwrap();
+        assert!(home.join(".codex/config.toml").exists());
+        assert!(!hooks_are_ours("codex", h));
+    }
+
+    #[test]
+    fn claude_statusline_alone_does_not_prove_hooks_are_installed() {
+        let home = scratch_home("claude-hook-health");
+        let h = home.to_str().unwrap();
+        setup_agent("claude", h).unwrap();
+        let path = home.join(".claude/settings.json");
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        cfg.as_object_mut().unwrap().remove("hooks");
+        std::fs::write(&path, serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert!(cfg["statusLine"].to_string().contains("canopy-hook"));
+        assert!(!hooks_are_ours("claude", h));
+    }
+
+    #[test]
+    fn amp_mcp_health_matches_the_registry_setup_writes() {
+        let home = scratch_home("amp-health");
+        let h = home.to_str().unwrap();
+        assert_eq!(mcp_state("amp", h, h), "missing");
+        setup_amp_mcp(h, h).unwrap();
+        assert_eq!(mcp_state("amp", h, h), "ours");
+        write(
+            &home.join(".config/amp/settings.json"),
+            r#"{"amp.mcpServers":{"canopy":{"command":"/opt/not-canopy"}}}"#,
+        );
+        assert_eq!(mcp_state("amp", h, h), "foreign");
     }
 
     /// The PATH probe, as a launch would hand it over. Only agy, so a test's

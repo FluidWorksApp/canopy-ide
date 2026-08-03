@@ -415,6 +415,7 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     let mut synth_event: Option<String> = None;
     let mut synth_message: Option<String> = None;
     let mut signal: Option<String> = None;
+    let mut argv_payload: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--agent" => agent_override = args.next(),
@@ -426,6 +427,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
             // out: aider's whole lifecycle used to hinge on Canopy matching a
             // string Canopy itself wrote, and matching it to the wrong answer.
             "--signal" => signal = args.next(),
+            // Codex's legacy notify command appends one JSON argv item instead
+            // of writing stdin. Keeping it in this helper preserves the same
+            // CANOPY trust boundary and digest path as native hooks.
+            "--payload" => argv_payload = args.next(),
             _ => {}
         }
     }
@@ -438,7 +443,13 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     // A signal with no --event still synthesizes: the flag says everything the
     // event name would have.
     let synth_event = synth_event.or_else(|| signal.as_ref().map(|_| "Notification".to_string()));
-    let mut event: serde_json::Value = if let Some(name) = synth_event {
+    let mut event: serde_json::Value = if let Some(payload) = argv_payload {
+        raw = payload;
+        match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        }
+    } else if let Some(name) = synth_event {
         let agent = agent_override.clone().unwrap_or_else(|| "agent".into());
         let cwd = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
@@ -473,16 +484,14 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
         raw = serde_json::to_string(&event).unwrap_or_default();
     }
 
-    if let Some(agent) = agent_override.as_deref() {
-        normalize_event(&mut event, agent);
-    }
+    normalize_event(&mut event, agent_override.as_deref().unwrap_or("claude"));
 
     let session_id = event["session_id"].as_str().unwrap_or("").to_string();
     let cwd = event["cwd"].as_str().unwrap_or("").to_string();
     let hook_event = event["hook_event_name"].as_str().unwrap_or("").to_string();
 
     publish_to_bus(&raw, &event);
-    if !session_id.is_empty() {
+    if safe_session_id(&session_id) {
         let _ = update_digest(&session_id, &cwd, &event, &hook_event);
     }
 
@@ -500,9 +509,11 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     match agent_override.as_deref() {
-        // Antigravity requires PreToolUse hooks to answer with an allow/deny
-        // verdict on stdout; outside a research session we only observe, so
-        // always allow. Its other events ignore stdout. No peer-context
+        // Historical installs registered PreToolUse. Never answer "allow": in
+        // Antigravity that grants the tool and bypasses its normal permission
+        // flow. Current setup no longer registers this observer in the approval
+        // path; an old copy receives an empty decision unless the research gate
+        // explicitly denies the write. Its other events ignore stdout. No peer-context
         // printing: the hookSpecificOutput contract below is Claude's, and
         // feeding it to agy would at best be ignored and at worst confuse its
         // parser.
@@ -511,9 +522,9 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                 match research_denial_for(&event) {
                     Some(reason) => println!(
                         "{}",
-                        serde_json::json!({ "allow_tool": false, "reason": reason })
+                        serde_json::json!({ "decision": "deny", "reason": reason })
                     ),
-                    None => println!("{}", serde_json::json!({ "allow_tool": true })),
+                    None => println!("{}", serde_json::json!({})),
                 }
             }
         }
@@ -585,6 +596,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn safe_session_id(id: &str) -> bool {
+    !id.is_empty() && !id.contains('/') && !id.contains('\\') && id != "." && id != ".."
+}
+
 /// Rewrite a foreign CLI's event into the shape the rest of the pipeline
 /// (bus consumers, digests) already understands, and tag it with its agent so
 /// nothing downstream mislabels it as claude.
@@ -594,32 +609,101 @@ fn normalize_event(event: &mut serde_json::Value, agent: &str) {
     };
     map.insert("agent".into(), serde_json::json!(agent));
     if agent == "agy" {
-        // Antigravity's lifecycle names differ from Claude's; keep the
-        // original under agy_event (the PreToolUse allow-verdict check needs
-        // it) and translate: PreInvocation is its prompt-submit, PostInvocation
-        // its turn-end.
+        // Antigravity 1.1.x uses protojson camelCase, unlike the Claude-shaped
+        // contract every downstream consumer reads.
+        for (from, to) in [
+            ("conversationId", "session_id"),
+            ("transcriptPath", "transcript_path"),
+            ("modelName", "model"),
+        ] {
+            if let Some(value) = map.get(from).cloned() {
+                map.insert(to.into(), value);
+            }
+        }
+        if map.get("cwd").and_then(|v| v.as_str()).is_none() {
+            if let Some(cwd) = map
+                .get("workspacePaths")
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+            {
+                map.insert("cwd".into(), serde_json::json!(cwd));
+            }
+        }
+        if let Some(call) = map.get("toolCall").cloned() {
+            if let Some(name) = call.get("name").and_then(|v| v.as_str()) {
+                map.insert("tool_name".into(), serde_json::json!(name));
+            }
+            if let Some(input) = call.get("args") {
+                map.insert("tool_input".into(), input.clone());
+            }
+        }
         let name = map
             .get("hook_event_name")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
         map.insert("agy_event".into(), serde_json::json!(name));
-        let mapped = match name.as_str() {
-            "PreInvocation" => "UserPromptSubmit",
-            "PostInvocation" => "Stop",
-            other => other,
-        };
-        map.insert("hook_event_name".into(), serde_json::json!(mapped));
-        // Digests read the prompt from `prompt` (Claude's field). Antigravity's
-        // field name is unverified — take the likeliest candidates.
-        if map.get("prompt").and_then(|v| v.as_str()).is_none() {
-            for key in ["user_input", "input", "display"] {
-                if let Some(v) = map.get(key).and_then(|v| v.as_str()) {
-                    let v = v.to_string();
-                    map.insert("prompt".into(), serde_json::json!(v));
-                    break;
-                }
+        // Invocation hooks bracket individual model calls, not a human turn.
+        // They prove activity; only Stop proves that the whole loop is idle.
+        let sig = match name.as_str() {
+            "PreToolUse" | "PostToolUse" | "PreInvocation" | "PostInvocation" => {
+                Some("turn-progress")
             }
+            "Stop" => Some("turn-end"),
+            _ => None,
+        };
+        if let Some(sig) = sig {
+            map.insert("canopy_signal".into(), serde_json::json!(sig));
+        }
+    }
+
+    if agent == "codex" && map.get("hook_event_name").is_none() {
+        if map.get("type").and_then(|v| v.as_str()) == Some("agent-turn-complete") {
+            map.insert("hook_event_name".into(), serde_json::json!("Stop"));
+            if let Some(id) = map.get("thread-id").cloned() {
+                map.insert("session_id".into(), id);
+            }
+            if map.get("cwd").is_none() {
+                let cwd = std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                map.insert("cwd".into(), serde_json::json!(cwd));
+            }
+        }
+    }
+
+    let name = map
+        .get("hook_event_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if map.get("canopy_signal").is_none() {
+        let signal = match name.as_str() {
+            "UserPromptSubmit" => Some("turn-start"),
+            "PostToolUse" | "PostToolUseFailure" => Some("turn-progress"),
+            "Stop" | "StopFailure" => Some("turn-end"),
+            "SessionEnd" => Some("session-end"),
+            "PermissionRequest" => Some("needs-human-permission"),
+            _ => None,
+        };
+        if let Some(signal) = signal {
+            map.insert("canopy_signal".into(), serde_json::json!(signal));
+        }
+    }
+
+    // Claude notifications carry a stable structural type. Do not turn auth
+    // success or other informational notices into fake permission blocks.
+    if agent == "claude" && name == "Notification" && map.get("canopy_signal").is_none() {
+        let signal = match map.get("notification_type").and_then(|v| v.as_str()) {
+            Some("permission_prompt" | "elicitation_dialog" | "agent_needs_input") => {
+                Some("needs-human-permission")
+            }
+            Some("idle_prompt" | "agent_completed") => Some("turn-end"),
+            _ => None,
+        };
+        if let Some(signal) = signal {
+            map.insert("canopy_signal".into(), serde_json::json!(signal));
         }
     }
 }
@@ -5535,5 +5619,80 @@ mod tests {
         assert!(INSTRUCTIONS.contains("canopy_research search FIRST"));
         assert!(INSTRUCTIONS.contains("canopy_research_write start"));
         assert!(INSTRUCTIONS.contains("scratch markdown file"));
+    }
+
+    #[test]
+    fn antigravity_protojson_normalizes_without_inventing_a_user_turn() {
+        let mut event = serde_json::json!({
+            "conversationId": "agy-1",
+            "workspacePaths": ["/repo"],
+            "transcriptPath": "/repo/transcript.jsonl",
+            "modelName": "auto",
+            "hook_event_name": "PreInvocation"
+        });
+        normalize_event(&mut event, "agy");
+        assert_eq!(event["session_id"], "agy-1");
+        assert_eq!(event["cwd"], "/repo");
+        assert_eq!(event["transcript_path"], "/repo/transcript.jsonl");
+        assert_eq!(event["model"], "auto");
+        assert_eq!(event["hook_event_name"], "PreInvocation");
+        assert_eq!(event["canopy_signal"], "turn-progress");
+        assert_eq!(
+            declared_state("agy", "PreInvocation", &event),
+            Some(("working", "tool-activity", "proven"))
+        );
+    }
+
+    #[test]
+    fn antigravity_stop_is_the_real_turn_boundary() {
+        let mut event = serde_json::json!({
+            "conversationId": "agy-1",
+            "workspacePaths": ["/repo"],
+            "hook_event_name": "Stop"
+        });
+        normalize_event(&mut event, "agy");
+        assert_eq!(event["canopy_signal"], "turn-end");
+        assert_eq!(
+            declared_state("agy", "Stop", &event),
+            Some(("idle", "turn-boundary", "proven"))
+        );
+    }
+
+    #[test]
+    fn legacy_codex_notify_crosses_the_normal_helper_contract() {
+        let mut event = serde_json::json!({
+            "type": "agent-turn-complete",
+            "thread-id": "thr-1",
+            "last-assistant-message": "done"
+        });
+        normalize_event(&mut event, "codex");
+        assert_eq!(event["session_id"], "thr-1");
+        assert_eq!(event["hook_event_name"], "Stop");
+        assert_eq!(event["canopy_signal"], "turn-end");
+    }
+
+    #[test]
+    fn claude_notification_types_are_structural() {
+        let mut permission = serde_json::json!({
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt"
+        });
+        normalize_event(&mut permission, "claude");
+        assert_eq!(permission["canopy_signal"], "needs-human-permission");
+
+        let mut informational = serde_json::json!({
+            "hook_event_name": "Notification",
+            "notification_type": "auth_success"
+        });
+        normalize_event(&mut informational, "claude");
+        assert!(informational.get("canopy_signal").is_none());
+    }
+
+    #[test]
+    fn session_ids_cannot_escape_the_digest_directory() {
+        assert!(safe_session_id("thr_123"));
+        assert!(!safe_session_id("../outside"));
+        assert!(!safe_session_id("folder/session"));
+        assert!(!safe_session_id(r"folder\session"));
     }
 }

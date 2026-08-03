@@ -40,6 +40,7 @@ export interface AgentEventData {
   /** Empty when the hook carried no agent stamp (a bare claude). */
   agent: string;
   message?: string;
+  notificationType?: string;
   /** What the installer classified this moment as, when it could — the same
    *  vocabulary shared/agentLife/attention.ts reduces. Present only for the
    *  CLIs whose plugin fires an explicit signal; the rest are mapped from the
@@ -48,6 +49,8 @@ export interface AgentEventData {
   /** codex's turn-complete carries the agent's last words. */
   lastAssistantMessage?: string;
   transcriptPath?: string;
+  /** Provider-qualified model id when the CLI exposes it on the event. */
+  model?: string;
   /** AskUserQuestion payload, when this event is its PreToolUse. */
   questions?: PendingQuestion[];
 }
@@ -96,13 +99,17 @@ export function parseAgentEvent(raw: string): AgentEventData | null {
     agent: typeof parsed.agent === "string" ? parsed.agent : "",
   };
   if (parsed.message != null) data.message = String(parsed.message);
+  if (typeof parsed.notification_type === "string")
+    data.notificationType = parsed.notification_type;
   if (typeof parsed.canopy_signal === "string")
     data.signal = parsed.canopy_signal;
-  const last = parsed["last-assistant-message"];
+  const last = parsed.last_assistant_message ?? parsed["last-assistant-message"];
   if (typeof last === "string" && last.trim())
     data.lastAssistantMessage = last.trim();
   if (typeof parsed.transcript_path === "string")
     data.transcriptPath = parsed.transcript_path;
+  if (typeof parsed.model === "string" && parsed.model.trim())
+    data.model = parsed.model.trim();
   if (event === "PreToolUse" && tool === "AskUserQuestion") {
     const input = parsed.tool_input as { questions?: unknown[] } | undefined;
     data.questions = Array.isArray(input?.questions)
@@ -172,6 +179,20 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
         },
       ]);
     } else if (event === "Notification" || event === "PermissionRequest") {
+      const notificationMode = fidelityFor(agent).notification;
+      // An unsignalled notification from a CLI that cannot classify its own
+      // notices is not permission evidence. Likewise, current Claude attaches
+      // notification_type; normalize_event signals the actionable types, so an
+      // unsignalled typed notice is informational rather than a fake block.
+      if (
+        event === "Notification" &&
+        !d.signal &&
+        (notificationMode === "none" ||
+          notificationMode === "unmapped" ||
+          (agent === "claude" && !!d.notificationType))
+      ) {
+        continue;
+      }
       const message =
         d.message ??
         (event === "PermissionRequest"

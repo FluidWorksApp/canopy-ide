@@ -336,9 +336,11 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     name: "Amp",
     bin: "amp",
     icon: "⚡",
-    install: "npm install -g @sourcegraph/amp",
-    pkgs: ["npm:@sourcegraph/amp"],
-    latestUrl: "https://registry.npmjs.org/@sourcegraph/amp/latest",
+    install: "npm install -g @ampcode/cli",
+    // @sourcegraph/amp remains as the compatibility-package identity.
+    pkgs: ["npm:@ampcode/cli", "npm:@sourcegraph/amp"],
+    latestUrl: "https://registry.npmjs.org/@ampcode/cli/latest",
+    update: "amp update",
     // Verified: `amp threads continue <threadId>`; thread ids look like T-<uuid>.
     resume: (id, bin) => `${bin} threads continue ${id}`,
   },
@@ -393,8 +395,8 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     bin: "omp",
     icon: "π",
     install: "curl -fsSL https://omp.sh/install | sh",
-    // Also published as a Homebrew formula (can1357/tap).
-    pkgs: ["brew:omp"],
+    // Also published as a Homebrew formula (can1357/tap) and scoped npm CLI.
+    pkgs: ["brew:omp", "npm:@oh-my-pi/pi-coding-agent"],
     // Verified: `-r, --resume=<value>  Resume a session (by ID prefix, path...)`.
     resume: (id, bin) => `${bin} --resume ${id}`,
   },

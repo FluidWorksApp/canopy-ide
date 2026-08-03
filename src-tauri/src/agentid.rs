@@ -225,7 +225,9 @@ fn package_of(path: &Path) -> Option<String> {
     if let Some(pkg) = npm_package(path) {
         return Some(format!("npm:{pkg}"));
     }
-    python_dist(path).map(|dist| format!("pypi:{dist}"))
+    // `py:` names the import package visible in a generated console script;
+    // the PyPI distribution name (for example aider-chat) is not present there.
+    python_dist(path).map(|dist| format!("py:{dist}"))
 }
 
 /// Resolves executables to identities, remembering what it has already looked
@@ -360,6 +362,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(python_dist(&script).as_deref(), Some("aider"));
+        assert_eq!(package_of(&script).as_deref(), Some("py:aider"));
     }
 
     #[test]

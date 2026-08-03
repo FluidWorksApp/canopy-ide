@@ -84,9 +84,11 @@ export const MODEL_SWITCH: Record<string, ModelSwitch> = {
   // Verified in the shipped binary: it prompts "Please use the /model command
   // to select a valid model", and the TUI logs "Exited /model command".
   agy: { kind: "picker", command: "/model" },
+  // Verified against omp 17.x's extension/lifecycle docs and interactive
+  // command: `/model` opens the active account's model selector.
+  omp: { kind: "picker", command: "/model" },
   // Deliberately absent — nothing here could be verified:
   //   amp: its only "/model" string is a `provider/model` format error.
-  //   omp: its "/models" is an HTTP route in the API client, not a command.
 };
 
 /** The switch for an agent, or null when Canopy has no verified way to change
