@@ -1334,7 +1334,12 @@ async fn action(
             };
             let _ = app.emit(
                 "agent:action",
-                serde_json::json!({ "kind": "open_preview", "route": route, "url": url }),
+                serde_json::json!({
+                    "kind": "open_preview",
+                    "route": route,
+                    "url": url,
+                    "ptyId": act.pty_id,
+                }),
             );
             match act
                 .project
@@ -1629,6 +1634,10 @@ async fn action(
 struct BrowserOp {
     op: String,
     cwd: Option<String>,
+    /// The agent terminal issuing the operation. When navigation creates a
+    /// preview, this becomes the tab's default feedback destination.
+    #[serde(rename = "ptyId")]
+    pty_id: Option<u32>,
     /// Which project's preview to drive, by name — for an agent (the
     /// companion) whose cwd is inside none of them.
     #[serde(default)]
@@ -1915,6 +1924,7 @@ async fn browser(
             "id": id,
             "op": op.op,
             "route": route,
+            "ptyId": op.pty_id,
             "scope": op.scope,
             "url": op.url,
             "action": op.action,

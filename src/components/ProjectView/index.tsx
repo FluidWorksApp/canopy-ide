@@ -1244,9 +1244,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** Open an embedded-browser preview tab. With no URL the tab opens on the
    *  pick-a-server form; a URL (a run rail's detected server, a reopened tab)
    *  loads immediately. Returns the new tab's id (agent ops target it). */
-  const openPreview = useCallback((url = "") => {
+  const openPreview = useCallback((url = "", initiatorPtyId?: number | null) => {
     const id = tabId();
-    setTabs((prev) => [...prev, { id, type: "preview", url, annotations: [] }]);
+    setTabs((prev) => [
+      ...prev,
+      {
+        id,
+        type: "preview",
+        url,
+        annotations: [],
+        ...(initiatorPtyId != null ? { initiatorPtyId } : {}),
+      },
+    ]);
     setActiveTabId(id);
     // The panel that opened this is almost always still over the pane, and a
     // browser view cannot be drawn under it — so the page you just asked for
@@ -3711,7 +3720,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return;
       }
       if (a.kind === "open_preview" && a.url) {
-        openPreview(a.url);
+        openPreview(a.url, a.ptyId);
       } else if (a.kind === "start_server" && a.dir && a.command) {
         // `command` is the resolved command line, `name` its label — the same
         // pair the component-commands ▶ uses. Reuse a tab already on it.
@@ -3875,9 +3884,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // A URL navigation can take over an empty (server-picker) preview tab.
         (op.op === "navigate" && op.url ? previews[0] : undefined);
       if (tab) {
+        // An agent navigating an empty picker is creating the session just as
+        // surely as open_preview does. Never overwrite an existing preview's
+        // provenance merely because another agent later drives its page.
+        if (
+          op.op === "navigate" &&
+          op.url &&
+          !tab.url &&
+          tab.initiatorPtyId == null &&
+          op.ptyId != null
+        ) {
+          patchTabRaw(tab.id, { initiatorPtyId: op.ptyId } as Partial<SubTab>);
+        }
         dispatchBrowserOp(tab.id, op);
       } else if (op.op === "navigate" && op.url) {
-        dispatchBrowserOp(openPreview(op.url), op);
+        dispatchBrowserOp(openPreview(op.url, op.ptyId), op);
       } else {
         void ipc.browserResult(
           op.id,
@@ -3889,7 +3910,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     window.addEventListener("canopy:agent-browser", onBrowserOp);
     return () =>
       window.removeEventListener("canopy:agent-browser", onBrowserOp);
-  }, [project.id, openPreview]);
+  }, [project.id, openPreview, patchTabRaw]);
 
   // A link the user clicked, from anywhere in the app: main.tsx delegates every
   // anchor through links.ts, which asks here first when Settings → Browser says
@@ -7330,6 +7351,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             servers={previewServers}
             agentTargets={agentTargets}
+            initiatorTarget={agentTargets.find((a) => a.ptyId === tab.initiatorPtyId)}
             installed={installed}
             onSendToAgent={sendTicketToAgent}
             onStartNew={(agentId, text, cwd) => {

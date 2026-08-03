@@ -246,6 +246,9 @@ export interface PreviewSubTab {
   type: "preview";
   /** The previewed page's real URL ("" until the user picks a server). */
   url: string;
+  /** Agent that created this preview. Its PTY is the primary destination for
+   *  screenshots and annotations; absent for user-created/restored tabs. */
+  initiatorPtyId?: number;
   annotations: PreviewAnnotation[];
   /** Screenshots taken of this page, with the notes written on them. Absent on
    *  tabs restored from a session saved before the button existed. */

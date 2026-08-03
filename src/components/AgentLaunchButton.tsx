@@ -29,6 +29,9 @@ interface AgentLaunchButtonProps {
   onStart: (agentId: string) => void;
   /** Hand it to an already-running agent instead. */
   onSend: (target: AgentTarget) => void;
+  /** When this surface came from an agent, send back there on the primary click
+   *  instead of starting a new agent. The caret still offers every target. */
+  primaryTarget?: AgentTarget;
   /** "split" — the accent primary + caret used in a footer (ticket tab).
    *  "mini" — a single btn-mini dropdown that sits in a header row of small
    *  buttons (PR header), next to Merge ▾ / Request review ▾. */
@@ -48,6 +51,7 @@ export function AgentLaunchButton({
   primaryTitle,
   onStart,
   onSend,
+  primaryTarget,
   variant = "split",
   extras,
 }: AgentLaunchButtonProps) {
@@ -95,13 +99,23 @@ export function AgentLaunchButton({
           <Button variant="accent" className="split-btn-main"
             // The agent is named in the tooltip and the caret menu, not the
             // label: the button is the verb, not an endorsement of one CLI.
-            onClick={() => onStart(preferredCli.id)}
-            title={primaryTitle?.(preferredCli.name)}>
+            onClick={() => primaryTarget ? onSend(primaryTarget) : onStart(preferredCli.id)}
+            title={
+              primaryTarget
+                ? `Send this back to ${primaryTarget.title}`
+                : primaryTitle?.(preferredCli.name)
+            }>
             ▶ {label}
-            <span className="split-btn-agent">{preferredCli.name}</span>
+            <span className="split-btn-agent">
+              {primaryTarget?.title ?? preferredCli.name}
+            </span>
           </Button>
           <Button variant="accent" className="split-btn-caret"
-            title="Send to a running agent, or start a different one"
+            title={
+              primaryTarget
+                ? "Send to another agent, or start a new one"
+                : "Send to a running agent, or start a different one"
+            }
             onClick={openMenu}>
             ▾
           </Button>
