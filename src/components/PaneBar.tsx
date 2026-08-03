@@ -22,10 +22,9 @@ import { AGENT_CLIS } from "../projects";
 import type { TabDrag } from "../tabDrag";
 import {
   ANCHOR_ATTR,
+  contentLeft,
   GROUP_ATTR,
-  pinOffset,
-  useChipPins,
-  usePeelResistance,
+  useStickyLayout,
 } from "../tabSticky";
 import type {
   SubTab,
@@ -264,9 +263,7 @@ function PaneBarImpl({
     const el = (activeTabElRef as React.RefObject<HTMLDivElement>)?.current;
     const row = tabsRowRef.current;
     if (!el || !row) { setBlob((b) => (b === null ? b : null)); return; }
-    // offsetLeft is in the row's content coordinates (the row is the positioned
-    // offsetParent), so the absolutely-positioned blob scrolls with the tabs.
-    const next = { left: el.offsetLeft, width: el.offsetWidth };
+    const next = { left: contentLeft(row, el), width: el.offsetWidth };
     setBlob((prev) => {
       if (prev && prev.left === next.left && prev.width === next.width) return prev;
       // Arm the compositing-layer hint only when geometry actually changes.
@@ -345,26 +342,13 @@ function PaneBarImpl({
       .slice(0, 9)
       .forEach((t, i) => hints.set(t.id, i + 1));
 
-  // The queue: which chips the strip has scrolled past, and where each one
-  // pins. A run with nothing in it renders nothing at all, so a place in the
-  // queue is counted over what is actually on screen — otherwise closing the
-  // last PR would leave a gap where its chip used to pin.
-  const pins = useChipPins(stripRef);
-  usePeelResistance(stripRef);
+  // Sticky sections are counted only over runs actually drawn. Empty runs have
+  // no header or containing block, so the next section meets the previous one
+  // directly.
+  useStickyLayout(stripRef);
   const drawn = tabGroups.filter((g) => g.tabs.length > 0);
   const pinIndex = new Map<string, number>();
   for (const g of drawn) if (g.label) pinIndex.set(g.key, pinIndex.size);
-
-  /** Scroll a run back into view from its compact chip: park it one pixel past
-   *  its own pin, so it is the chip shown in full rather than the last one in
-   *  the queue — a run you asked to come back to must not arrive still queued
-   *  up on the left. */
-  const revealRun = (key: string, pin: number) => {
-    const root = stripRef.current;
-    const anchor = root?.querySelector<HTMLElement>(`[${ANCHOR_ATTR}="${key}"]`);
-    if (!root || !anchor) return;
-    root.scrollLeft = Math.max(0, anchor.offsetLeft - pinOffset(pin) + 1);
-  };
 
   return (
     <div className={`pane-bar pane-bar-focus-${activeSection}`}>
@@ -393,7 +377,6 @@ function PaneBarImpl({
           const open = group.label == null || openStacks[group.key] !== false;
           const folded = group.tabs.length - group.shown.length;
           const pin = pinIndex.get(group.key);
-          const queued = pins[group.key] === "compact";
           return (
             <div
               className={`tab-group tab-group-${group.key} ${
@@ -402,9 +385,7 @@ function PaneBarImpl({
               key={group.key}
               {...{ [GROUP_ATTR]: group.key }}
             >
-              {/* One line between runs. It was the run's own border until the
-                  runs became `display: contents` — a box that generates no box
-                  has no edge to draw on. */}
+              {/* One explicit line between adjacent runs. */}
               {run > 0 && <span className="tab-group-sep" aria-hidden />}
               {group.label && pin != null && (
                 <>
@@ -419,18 +400,8 @@ function PaneBarImpl({
                         : ""
                     }`}
                     data-stack-chip=""
-                    data-pin={pins[group.key]}
                     style={{
-                      // Its own place in the queue, and the order they overlap
-                      // in: a chip arriving passes *over* the one pinned in
-                      // front of it, covering it from the right. So the chip
-                      // coming in is readable the whole way, and the one going
-                      // out is worn down to about the width it is about to
-                      // settle at — by the time it goes compact the seam is
-                      // already where the eye expects it. The other way round
-                      // (arriving chip underneath) is what left a sliver of a
-                      // name sticking out from behind the chip in front.
-                      ["--pin-left" as string]: `${pinOffset(pin)}px`,
+                      ["--pin-left" as string]: "0px",
                       zIndex: pin + 2,
                     }}
                   >
@@ -439,16 +410,11 @@ function PaneBarImpl({
                       className="tab-stack-face"
                       aria-expanded={open}
                       title={
-                        queued
-                          ? `${group.tabs.length} ${group.label.toLowerCase()}, queued up behind you — click to go back to them`
-                          : open
+                        open
                             ? `${group.tabs.length} ${group.label.toLowerCase()} — click to fold`
                             : `${folded} ${group.label.toLowerCase()} folded — click to open`
                       }
-                      // A queued chip is a run you have scrolled past, so the
-                      // useful thing to do with it is go back — folding a run
-                      // you cannot see would only move the strip under you.
-                      onClick={() => (queued ? revealRun(group.key, pin) : onToggleStack(group.key))}
+                      onClick={() => onToggleStack(group.key)}
                     >
                       {group.icon ?? <span className="tab-stack-dot" aria-hidden />}
                       <span className="tab-stack-name">{group.label}</span>
@@ -559,16 +525,10 @@ function PaneBarImpl({
                   </span>
                 </div>
               ))}
+              {run === drawn.length - 1 && <span className="tab-strip-tail" aria-hidden />}
             </div>
           );
         })}
-        {/* Room for the last chip to reach its place in the queue. Without it
-            the strip simply runs out and the final run's chip stops short,
-            half-under the one in front. An element rather than padding on the
-            strip: trailing padding on a flex scroll container is the classic
-            case browsers disagree about. Its width is measured and set by
-            useChipPins, and is 0 on a strip that doesn't need it. */}
-        <span className="tab-strip-tail" aria-hidden />
       </div>
 
       <Rail
