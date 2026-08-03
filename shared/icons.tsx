@@ -175,6 +175,38 @@ export const IconResume = (p: IconProps) => (
 // deliberately close to the desktop rail's shapes so the two apps read as one
 // product rather than two that happen to share a backend.
 
+/** Agents: a bot head, distinct from every individual CLI brand. */
+export const AgentsIcon = (p: IconProps) => (
+  <Svg s={18} {...p}>
+    <path d="M4 12a3.5 3.5 0 0 1 3.5-3.5h9A3.5 3.5 0 0 1 20 12v4a3.5 3.5 0 0 1-3.5 3.5h-9A3.5 3.5 0 0 1 4 16z" />
+    <path d="M12 8.5V5" />
+    <circle cx="12" cy="3.6" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="9" cy="14" r="1.45" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="14" r="1.45" fill="currentColor" stroke="none" />
+  </Svg>
+)
+
+/** Servers: the desktop rail's two rack units plus its start action. */
+export const ServersIcon = (p: IconProps) => (
+  <Svg s={18} {...p}>
+    <path d="M2.5 4.5h11v5.5h-11zM2.5 14h11v5.5h-11z" />
+    <path d="M10.4 7.25h1.4M10.4 16.75h1.4" />
+    <circle cx="5.4" cy="7.3" r="1" fill="currentColor" stroke="none" />
+    <circle cx="5.4" cy="16.8" r="1" fill="currentColor" stroke="none" />
+    <path d="M16.4 14.2l5.4 3.3-5.4 3.3z" />
+  </Svg>
+)
+
+/** Research: a magnifier over the written finding it investigates. */
+export const ResearchIcon = (p: IconProps) => (
+  <Svg s={18} {...p}>
+    <path d="M13.5 20.5H6.5a1.5 1.5 0 0 1-1.5-1.5V5a1.5 1.5 0 0 1 1.5-1.5h7L19 9v3" />
+    <path d="M13 3.6V9.5h5.6" />
+    <circle cx="15.2" cy="16.2" r="3.1" />
+    <path d="M17.5 18.5L20 21" />
+  </Svg>
+)
+
 /** Changes: an added line over a removed line — the shape of a diff hunk. An
  *  earlier attempt combined a plus, a minus and a chevron and read as a shell
  *  prompt at 17px; two marks and two rules is all that survives. */

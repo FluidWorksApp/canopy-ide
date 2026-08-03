@@ -22,7 +22,10 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const CSS = readFileSync(join(process.cwd(), "src", "index.css"), "utf8");
+const CSS = [
+  readFileSync(join(process.cwd(), "shared", "chrome.css"), "utf8"),
+  readFileSync(join(process.cwd(), "src", "index.css"), "utf8"),
+].join("\n");
 
 /** The declarations of a top-level rule, by exact selector. */
 function ruleBody(selector: string): string {

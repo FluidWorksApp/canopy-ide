@@ -2102,38 +2102,6 @@ function Copyable({
 
 /** Canopy Remote — turn on the embedded control-panel server, show the PIN and
  *  the connect URL. Off by default; see src-tauri/src/portal.rs. */
-/** Canopy's theme CSS variables, read live from the DOM so the portal inherits
- *  the exact skin (including a custom accent). */
-const THEME_VARS = [
-  "bg",
-  "bg-alt",
-  "bg-raised",
-  "border",
-  "text",
-  "text-dim",
-  "accent",
-  "danger",
-  "ok",
-  "warn",
-  "on-accent",
-];
-function readThemeTokens(): Record<string, string> {
-  const cs = getComputedStyle(document.documentElement);
-  const out: Record<string, string> = {};
-  for (const v of THEME_VARS) {
-    // A skin whose surfaces are alpha (Vitrine's are — they composite over an
-    // ambient field this page paints and the portal's page does not) declares
-    // an opaque mirror per surface. Prefer it: sending `rgba(255,255,255,.03)`
-    // as the portal's background is a white page with near-white text on it.
-    const val = (
-      cs.getPropertyValue(`--${v}-opaque`).trim() ||
-      cs.getPropertyValue(`--${v}`).trim()
-    );
-    if (val) out[v] = val;
-  }
-  return out;
-}
-
 /** Public-link tunnel providers, with the per-OS install command (same model as
  *  the prerequisite installers) and whether they need an account token. */
 const TUNNELS: {
@@ -2233,11 +2201,6 @@ function RemoteSettings({
     const un = ipc.onTunnelState(setTunnel);
     return () => void un.then((f) => f());
   }, []);
-
-  // Push our theme to the portal whenever remote access is on.
-  useEffect(() => {
-    if (status?.enabled) void ipc.remoteSetTheme(readThemeTokens()).catch(() => {});
-  }, [status?.enabled]);
 
   const on = status?.enabled ?? false;
   const lanUrl = status?.urls?.[0] ?? null;

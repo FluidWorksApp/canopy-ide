@@ -114,7 +114,7 @@ export function AgentCard({
       onClick={onOpen}
       disabled={!clickable}
     >
-      <span className={`rail ${row.live ? row.state : 'ended'}`} />
+      <span className={`agent-card-rail ${row.live ? row.state : 'ended'}`} />
       <AgentBadge agent={row.agent} />
       <div className="agent-main">
         <div className="agent-top">

@@ -2,7 +2,7 @@
 // answer "what does this project know?" — the reading half of the IDE, which is
 // exactly the half that survives the trip to a phone intact.
 
-import { IconBook, IconFlask, IconIssue, IconPlug } from '@shared/icons'
+import { IconBook, IconIssue, IconPlug, ResearchIcon } from '@shared/icons'
 import { useAsync } from '../useAsync'
 import { AsyncBody, Pill, Row, SubHead } from './ui'
 import { repoOf, type PanelDef } from './types'
@@ -102,7 +102,7 @@ export const ticketsPanel: PanelDef = {
 export const researchPanel: PanelDef = {
   id: 'research',
   title: 'Research',
-  Icon: IconFlask,
+  Icon: ResearchIcon,
   scope: 'project',
   List({ ctx }) {
     // The research store is keyed by project id, not by path — it deliberately
@@ -123,7 +123,7 @@ export const researchPanel: PanelDef = {
               <Row
                 key={e.id}
                 on={ctx.openKey === `research:${projectId}:${e.id}`}
-                icon={<IconFlask s={15} />}
+                icon={<ResearchIcon s={15} />}
                 title={e.title}
                 sub={e.digest}
                 meta={
