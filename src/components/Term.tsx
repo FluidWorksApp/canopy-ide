@@ -12,6 +12,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { INSERT_TEXT_EVENT } from "../insertText";
 import { openLink } from "../links";
 import * as ipc from "../ipc";
 import { getSettings, THEME_CHANGE_EVENT, type Settings } from "../settings";
@@ -558,17 +559,17 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         else unlistenDrop = un;
       });
 
-    // Dictated text. Same contract as the drop handler above: the event is
-    // window-global, exactly one Term — the active one — may act, and the
-    // text goes through term.paste() so bracketed-paste applies.
-    const onDictationText = (e: Event) => {
+    // Text inserted by a global surface (dictation, clipboard history). Same
+    // contract as the drop handler above: exactly one active Term may act, and
+    // term.paste() keeps bracketed-paste semantics.
+    const onInsertText = (e: Event) => {
       if (!activeRef.current) return;
       const text = (e as CustomEvent).detail as string;
       if (!text) return;
       term.paste(text);
       term.focus();
     };
-    window.addEventListener("canopy:dictation-text", onDictationText);
+    window.addEventListener(INSERT_TEXT_EVENT, onInsertText);
 
     // Debounced resize: propose, let the pty apply it and SIGWINCH the child,
     // then match the grid to what it confirmed. A hidden tab proposes nothing
@@ -592,7 +593,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       observer.disconnect();
       window.removeEventListener(THEME_CHANGE_EVENT, onThemeChange);
       window.removeEventListener("focus", onFocus);
-      window.removeEventListener("canopy:dictation-text", onDictationText);
+      window.removeEventListener(INSERT_TEXT_EVENT, onInsertText);
       linkHint.dispose();
       dataSub.dispose();
       titleSub.dispose();
