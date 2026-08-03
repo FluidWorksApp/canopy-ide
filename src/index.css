@@ -13374,6 +13374,14 @@ textarea,
   flex: 0 0 auto;
 }
 
+.ticket-state-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
 .ticket-view-note {
   font-size: 11px;
   color: var(--text-dim);

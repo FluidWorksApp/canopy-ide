@@ -1,6 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { updateSettings } from "../settings";
 import { mockCommands } from "../test/setup";
 import { TicketView } from "./TicketView";
 
@@ -18,10 +19,13 @@ const ticket = {
 };
 
 const detail = {
+  internal_id: "",
   author: "octocat",
   created_at: "2026-08-01T10:00:00Z",
   updated_at: "2026-08-02T11:00:00Z",
   state: "open",
+  state_id: "",
+  states: [],
   comments: [{
     id: "c1",
     author: "reviewer",
@@ -48,6 +52,8 @@ const view = (commands: Record<string, unknown> = {}) => {
 };
 
 describe("TicketView", () => {
+  beforeEach(() => localStorage.clear());
+
   it("shows GitHub issue provenance and conversation", async () => {
     view();
     expect(await screen.findByText("opened by octocat")).toBeInTheDocument();
@@ -74,6 +80,57 @@ describe("TicketView", () => {
       repo: "/work/app",
       number: 42,
       body: "Looks good",
+    }));
+  });
+
+  it("loads Linear details and changes its workflow state", async () => {
+    updateSettings({ trackerKeys: { linear: "lin_test" } });
+    const linearDetail = {
+      ...detail,
+      internal_id: "issue-uuid",
+      author: "Alicia",
+      state: "In Progress",
+      state_id: "started-id",
+      states: [
+        { id: "todo-id", name: "Todo" },
+        { id: "started-id", name: "In Progress" },
+        { id: "done-id", name: "Done" },
+      ],
+    };
+    const setState = vi.fn();
+    const post = vi.fn();
+    mockCommands({
+      linear_issue_detail: linearDetail,
+      linear_issue_set_state: setState,
+      linear_issue_comment: post,
+    });
+    render(
+      <TicketView
+        ticket={{ ...ticket, id: "ENG-123", state: "In Progress", state_type: "started" }}
+        source="linear"
+        repo="/work/app"
+        worktree={undefined}
+        agentTargets={[]}
+        installed={{}}
+        onStartNew={vi.fn()}
+        onSendToAgent={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText("opened by Alicia")).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Issue status" }), "done-id");
+    await waitFor(() => expect(setState).toHaveBeenCalledWith({
+      apiKey: "lin_test",
+      issueId: "issue-uuid",
+      stateId: "done-id",
+    }));
+
+    await userEvent.type(screen.getByPlaceholderText("Add a comment"), "Linear reply");
+    await userEvent.click(screen.getByRole("button", { name: "Comment" }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith({
+      apiKey: "lin_test",
+      issueId: "issue-uuid",
+      body: "Linear reply",
     }));
   });
 });

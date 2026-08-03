@@ -8,12 +8,12 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import * as ipc from "../ipc";
 import { heldBadge } from "../branchSwitch";
 import { useBranchSwitch } from "../useBranchSwitch";
-import { TRACKERS } from "../trackers";
+import { TRACKERS, trackerKey } from "../trackers";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { Markdown } from "./Markdown";
 import { TrackerIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
-import { Button } from "./ui";
+import { Button, Select } from "./ui";
 
 interface TicketViewProps {
   ticket: ipc.TicketInfo;
@@ -47,17 +47,23 @@ export function TicketView({
   const trackerName = TRACKERS.find((t) => t.id === source)?.name ?? source;
   const { openThere } = useBranchSwitch();
   const number = Number(ticket.id.replace(/^#/, ""));
-  const canManage = source === "github" && !!repo && Number.isInteger(number);
-  const [detail, setDetail] = useState<ipc.GhIssueDetail | null>(null);
+  const github = source === "github" && !!repo && Number.isInteger(number);
+  const linearKey = source === "linear" ? trackerKey("linear") : "";
+  const canManage = github || !!linearKey;
+  const [detail, setDetail] = useState<ipc.IssueDetail | null>(null);
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   const loadDetail = async () => {
-    if (!canManage || !repo) return;
+    if (!canManage) return;
     setError("");
     try {
-      setDetail(await ipc.ghIssueDetail(repo, number));
+      setDetail(
+        github && repo
+          ? await ipc.ghIssueDetail(repo, number)
+          : await ipc.linearIssueDetail(linearKey, ticket.id),
+      );
     } catch (err) {
       setError(String(err));
     }
@@ -67,7 +73,7 @@ export function TicketView({
     void loadDetail();
     // Reload when a different issue is placed in this tab.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repo, source, number]);
+  }, [repo, source, number, ticket.id]);
 
   const setOpen = async (open: boolean) => {
     if (!repo || busy) return;
@@ -84,12 +90,29 @@ export function TicketView({
     }
   };
 
-  const submitComment = async () => {
-    if (!repo || busy || !comment.trim()) return;
+  const setLinearState = async (stateId: string) => {
+    if (!detail || busy) return;
+    const next = detail.states.find((state) => state.id === stateId);
     setBusy(true);
     setError("");
     try {
-      await ipc.ghIssueComment(repo, number, comment.trim());
+      await ipc.linearIssueSetState(linearKey, detail.internal_id, stateId);
+      setDetail({ ...detail, state_id: stateId, state: next?.name ?? detail.state });
+      window.dispatchEvent(new CustomEvent("canopy:trackers-changed"));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitComment = async () => {
+    if (!detail || busy || !comment.trim()) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (github && repo) await ipc.ghIssueComment(repo, number, comment.trim());
+      else await ipc.linearIssueComment(linearKey, detail.internal_id, comment.trim());
       setComment("");
       await loadDetail();
     } catch (err) {
@@ -204,9 +227,27 @@ export function TicketView({
 
       <div className="ticket-view-actions">
         {canManage && (
-          <Button disabled={busy || !detail} onClick={() => void setOpen(detail?.state === "closed")}>
-            {detail?.state === "closed" ? "Reopen issue" : "Close issue"}
-          </Button>
+          github ? (
+            <Button disabled={busy || !detail} onClick={() => void setOpen(detail?.state === "closed")}>
+              {detail?.state === "closed" ? "Reopen issue" : "Close issue"}
+            </Button>
+          ) : (
+            <label className="ticket-state-control">
+              <span>Status</span>
+              <Select
+                size="sm"
+                width="sm"
+                aria-label="Issue status"
+                disabled={busy || !detail}
+                value={detail?.state_id ?? ""}
+                onChange={(event) => void setLinearState(event.target.value)}
+              >
+                {detail?.states.map((state) => (
+                  <option key={state.id} value={state.id}>{state.name}</option>
+                ))}
+              </Select>
+            </label>
+          )
         )}
         {/* One control: the primary action is the obvious thing (your default
             agent, in this ticket's worktree); the caret is where every other
