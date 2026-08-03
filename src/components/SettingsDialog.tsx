@@ -1,9 +1,17 @@
 // The one settings surface, VS Code-style: section nav on the left; each
 // setting stacks name → description → control (side-by-side rows squeezed
 // long labels into slivers and pushed wide control groups out of the modal).
-// Skins render as preview cards — a palette is a thing you look at, not a
-// word you read.
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+// Skins render as rich choices — a palette is a thing you look at, not a word
+// you read.
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import {
   applyTheme,
   THEME_CHANGE_EVENT,
@@ -46,6 +54,7 @@ import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import {
   AgentIcon,
   CheckIcon,
+  ChevronIcon,
   CopyIcon,
   RestartIcon,
   TrackerIcon,
@@ -155,6 +164,121 @@ function skinPreview(id: Theme) {
   if (id === "auto") return NON_SKIN_PREVIEWS[id];
   const s = skinDef(id);
   return { ...s.preview, note: s.note };
+}
+
+function SkinChoice({ theme, accent }: { theme: Theme; accent: string }) {
+  const p = skinPreview(theme);
+  return (
+    <>
+      <span className="skin-preview" style={{ background: p.bg }} aria-hidden="true">
+        <span className="skin-chip" style={{ background: accent || p.accent }} />
+        <span className="skin-chip" style={{ background: p.raised }} />
+        <span className="skin-chip" style={{ background: p.text }} />
+      </span>
+      <span className="skin-copy">
+        <span className="skin-name">{THEMES.find((t) => t.id === theme)?.label}</span>
+        <span className="skin-note">{p.note}</span>
+      </span>
+    </>
+  );
+}
+
+function SkinPicker({
+  value,
+  accent,
+  open,
+  trigger,
+  onOpenChange,
+  onChange,
+}: {
+  value: Theme;
+  accent: string;
+  open: boolean;
+  trigger: RefObject<HTMLButtonElement | null>;
+  onOpenChange: (open: boolean) => void;
+  onChange: (theme: Theme) => void;
+}) {
+  const wrap = useRef<HTMLDivElement>(null);
+  const options = useRef<(HTMLButtonElement | null)[]>([]);
+  const selected = Math.max(0, THEMES.findIndex((t) => t.id === value));
+
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => {
+      if (!wrap.current?.contains(e.target as Node)) onOpenChange(false);
+    };
+    window.addEventListener("mousedown", away);
+    requestAnimationFrame(() => options.current[selected]?.focus());
+    return () => window.removeEventListener("mousedown", away);
+  }, [onOpenChange, open, selected]);
+
+  const move = (from: number, by: number) => {
+    const next = (from + by + THEMES.length) % THEMES.length;
+    options.current[next]?.focus();
+  };
+
+  return (
+    <div className="skin-select" ref={wrap}>
+      <button
+        ref={trigger}
+        type="button"
+        className={`skin-select-trigger${open ? " open" : ""}`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => onOpenChange(!open)}
+        onKeyDown={(e) => {
+          if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+          e.preventDefault();
+          onOpenChange(true);
+        }}
+      >
+        <SkinChoice theme={value} accent={accent} />
+        <ChevronIcon size={16} className="skin-select-chevron" />
+      </button>
+      {open && (
+        <div className="skin-select-menu" role="listbox" aria-label="Skin">
+          {THEMES.map((theme, i) => (
+            <button
+              key={theme.id}
+              ref={(node) => {
+                options.current[i] = node;
+              }}
+              type="button"
+              role="option"
+              aria-selected={theme.id === value}
+              className={`skin-select-option${theme.id === value ? " selected" : ""}`}
+              onClick={() => {
+                onChange(theme.id);
+                onOpenChange(false);
+                trigger.current?.focus();
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+                  e.preventDefault();
+                  move(i, 1);
+                } else if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+                  e.preventDefault();
+                  move(i, -1);
+                } else if (e.key === "Home" || e.key === "End") {
+                  e.preventDefault();
+                  options.current[e.key === "Home" ? 0 : THEMES.length - 1]?.focus();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  onOpenChange(false);
+                  trigger.current?.focus();
+                }
+              }}
+            >
+              <SkinChoice theme={theme.id} accent={accent} />
+              <span className="skin-select-check" aria-hidden="true">
+                {theme.id === value && <CheckIcon size={15} />}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -979,6 +1103,8 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   // section says so instead of offering a switch that does nothing.
   const [browserOk, setBrowserOk] = useState(false);
   const [clearing, setClearing] = useState<null | "busy" | "done" | string>(null);
+  const [skinPickerOpen, setSkinPickerOpen] = useState(false);
+  const skinPickerTrigger = useRef<HTMLButtonElement>(null);
   const fonts = availableMonoFonts();
 
   useEffect(() => {
@@ -1054,7 +1180,14 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
     onClose();
   };
   const [s, setS] = useState<Settings>(() => getSettings());
-  useEscape(onClose, true);
+  useEscape(() => {
+    if (skinPickerOpen) {
+      skinPickerTrigger.current?.focus();
+      setSkinPickerOpen(false);
+    } else {
+      onClose();
+    }
+  }, true);
 
   // Every write announces itself. Term and MonacoEditor apply font/cursor
   // changes live off this event, and only applyTheme was dispatching it — so
@@ -1173,29 +1306,14 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   tag="Applies immediately"
                   desc="Colours for the whole app."
                 >
-                  <div className="skin-grid">
-                    {THEMES.map((t) => {
-                      const p = skinPreview(t.id);
-                      // Preview the accent the skin would actually render
-                      // with — the user's override wins on every skin now.
-                      const accent = s.customAccent || p.accent;
-                      return (
-                        <button
-                          key={t.id}
-                          className={`skin-card ${s.theme === t.id ? "skin-card-active" : ""}`}
-                          onClick={() => pickTheme(t.id)}
-                        >
-                          <span className="skin-preview" style={{ background: p.bg }}>
-                            <span className="skin-chip" style={{ background: accent }} />
-                            <span className="skin-chip" style={{ background: p.raised }} />
-                            <span className="skin-chip" style={{ background: p.text }} />
-                          </span>
-                          <span className="skin-name">{t.label}</span>
-                          <span className="skin-note">{p.note}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
+                  <SkinPicker
+                    value={s.theme}
+                    accent={s.customAccent}
+                    open={skinPickerOpen}
+                    trigger={skinPickerTrigger}
+                    onOpenChange={setSkinPickerOpen}
+                    onChange={pickTheme}
+                  />
                 </Item>
                 <Item
                   name="Accent color"
