@@ -17594,6 +17594,38 @@ a.btn-sm {
 
 /* Account profiles. Each row is a login, not a setting, so it reads as a card
    with its directory underneath rather than as another labelled input. */
+/* The per-agent list in the account-switch reload dialog. */
+.reload-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.reload-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+
+.reload-row-skip {
+  opacity: 0.55;
+}
+
+.reload-agent {
+  flex: none;
+  font-weight: 600;
+}
+
+.reload-what {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .cli-accounts {
   display: flex;
   flex-direction: column;
