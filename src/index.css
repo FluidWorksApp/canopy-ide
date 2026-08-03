@@ -13252,9 +13252,13 @@ textarea,
   padding: 0 6px;
 }
 
-.ticket-view-body {
+.ticket-view-scroll {
   flex: 1;
   overflow-y: auto;
+  min-height: 0;
+}
+
+.ticket-view-body {
   padding: 16px 18px;
   font-size: 13px;
   line-height: 1.6;
@@ -13294,6 +13298,69 @@ textarea,
 .ticket-view-empty {
   color: var(--text-dim);
   font-style: italic;
+  padding: 0 18px;
+}
+
+.ticket-comments {
+  border-top: 1px solid var(--border);
+  padding: 14px 18px 18px;
+}
+
+.ticket-comments h2 {
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+
+.ticket-comments h2 span,
+.ticket-comment-meta {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.ticket-comment {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+
+.ticket-comment-meta {
+  display: flex;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+  font-size: 11px;
+}
+
+.ticket-comment-meta strong {
+  color: var(--text);
+}
+
+.ticket-comment-body {
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ticket-comment-input {
+  width: 100%;
+  resize: vertical;
+  box-sizing: border-box;
+  margin-top: 4px;
+}
+
+.ticket-comment-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.ticket-view-error {
+  margin: 0 18px 14px;
+  color: var(--danger);
+  font-size: 11px;
 }
 
 .ticket-view-actions {
@@ -13305,6 +13372,14 @@ textarea,
   border-top: 1px solid var(--border);
   background: var(--bg-alt);
   flex: 0 0 auto;
+}
+
+.ticket-state-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 11px;
 }
 
 .ticket-view-note {

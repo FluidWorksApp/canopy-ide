@@ -2927,8 +2927,44 @@ export const ghAuth = () => invoke<GhAuth>("gh_auth");
 
 export const ghIssueList = (repo: string) =>
   invoke<TicketInfo[]>("gh_issue_list", { repo });
+export interface IssueComment {
+  id: string;
+  author: string;
+  body: string;
+  created_at: string;
+  url: string;
+}
+
+export interface IssueStateOption {
+  id: string;
+  name: string;
+}
+
+export interface IssueDetail {
+  internal_id: string;
+  author: string;
+  created_at: string;
+  updated_at: string;
+  state: string;
+  state_id: string;
+  states: IssueStateOption[];
+  comments: IssueComment[];
+}
+
+export const ghIssueDetail = (repo: string, number: number) =>
+  invoke<IssueDetail>("gh_issue_detail", { repo, number });
+export const ghIssueSetState = (repo: string, number: number, open: boolean) =>
+  invoke<void>("gh_issue_set_state", { repo, number, open });
+export const ghIssueComment = (repo: string, number: number, body: string) =>
+  invoke<void>("gh_issue_comment", { repo, number, body });
 export const linearIssues = (apiKey: string) =>
   invoke<TicketInfo[]>("linear_issues", { apiKey });
+export const linearIssueDetail = (apiKey: string, identifier: string) =>
+  invoke<IssueDetail>("linear_issue_detail", { apiKey, identifier });
+export const linearIssueSetState = (apiKey: string, issueId: string, stateId: string) =>
+  invoke<void>("linear_issue_set_state", { apiKey, issueId, stateId });
+export const linearIssueComment = (apiKey: string, issueId: string, body: string) =>
+  invoke<void>("linear_issue_comment", { apiKey, issueId, body });
 
 // ---- voice dictation (local ASR: Parakeet / SenseVoice / Moonshine) ----
 

@@ -4812,6 +4812,252 @@ pub struct TicketInfo {
     pub priority: String,
 }
 
+#[derive(Serialize)]
+pub struct IssueComment {
+    pub id: String,
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+    pub url: String,
+}
+
+#[derive(Serialize)]
+pub struct IssueStateOption {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Serialize)]
+pub struct IssueDetail {
+    pub internal_id: String,
+    pub author: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub state: String,
+    pub state_id: String,
+    pub states: Vec<IssueStateOption>,
+    pub comments: Vec<IssueComment>,
+}
+
+#[tauri::command]
+pub async fn gh_issue_detail(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u64,
+) -> Result<IssueDetail, String> {
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args([
+        "issue",
+        "view",
+        &number.to_string(),
+        "--json",
+        "author,createdAt,updatedAt,state,comments",
+    ]);
+    let out = run_net(&mut cmd)?;
+    let v: serde_json::Value =
+        serde_json::from_str(&out).map_err(|e| format!("gh returned unexpected output: {e}"))?;
+    let comments = v["comments"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|c| IssueComment {
+                    id: c["id"].as_str().unwrap_or("").to_string(),
+                    author: c["author"]["login"].as_str().unwrap_or("ghost").to_string(),
+                    body: c["body"].as_str().unwrap_or("").to_string(),
+                    created_at: c["createdAt"].as_str().unwrap_or("").to_string(),
+                    url: c["url"].as_str().unwrap_or("").to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(IssueDetail {
+        internal_id: String::new(),
+        author: v["author"]["login"].as_str().unwrap_or("ghost").to_string(),
+        created_at: v["createdAt"].as_str().unwrap_or("").to_string(),
+        updated_at: v["updatedAt"].as_str().unwrap_or("").to_string(),
+        state: v["state"].as_str().unwrap_or("").to_lowercase(),
+        state_id: String::new(),
+        states: Vec::new(),
+        comments,
+    })
+}
+
+fn linear_graphql(
+    api_key: &str,
+    query: &str,
+    variables: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use std::io::Write;
+    if api_key.trim().is_empty() {
+        return Err("no Linear API key".into());
+    }
+    let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
+    let mut child = std::process::Command::new(tool_path("curl"))
+        .no_console_window()
+        .args([
+            "-sS",
+            "--max-time",
+            "15",
+            "-K",
+            "-", // read the auth header from stdin so the key never appears in argv
+            "-H",
+            "Content-Type: application/json",
+            "--data-binary",
+            &body,
+            "https://api.linear.app/graphql",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("curl not available: {e}"))?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or("curl stdin unavailable")?
+        .write_all(format!("header = \"Authorization: {}\"\n", api_key.trim()).as_bytes())
+        .map_err(|e| e.to_string())?;
+    let out = blocking::io(|| child.wait_with_output()).map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "Linear request failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
+        .map_err(|_| "Linear returned unexpected output".to_string())?;
+    if let Some(err) = value["errors"].as_array().and_then(|rows| rows.first()) {
+        return Err(format!(
+            "Linear: {}",
+            err["message"].as_str().unwrap_or("request rejected")
+        ));
+    }
+    Ok(value)
+}
+
+#[tauri::command]
+pub async fn linear_issue_detail(
+    api_key: String,
+    identifier: String,
+) -> Result<IssueDetail, String> {
+    let query = r#"query IssueDetail($id: String!) { issue(id: $id) { id creator { displayName } createdAt updatedAt state { id name } team { states { nodes { id name } } } comments(first: 100) { nodes { id body createdAt user { displayName } } } } }"#;
+    let value = linear_graphql(&api_key, query, serde_json::json!({ "id": identifier }))?;
+    let issue = &value["data"]["issue"];
+    if issue.is_null() {
+        return Err("Linear issue not found".into());
+    }
+    let comments = issue["comments"]["nodes"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|comment| IssueComment {
+                    id: comment["id"].as_str().unwrap_or("").to_string(),
+                    author: comment["user"]["displayName"]
+                        .as_str()
+                        .unwrap_or("Former member")
+                        .to_string(),
+                    body: comment["body"].as_str().unwrap_or("").to_string(),
+                    created_at: comment["createdAt"].as_str().unwrap_or("").to_string(),
+                    url: String::new(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let states = issue["team"]["states"]["nodes"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|state| IssueStateOption {
+                    id: state["id"].as_str().unwrap_or("").to_string(),
+                    name: state["name"].as_str().unwrap_or("").to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(IssueDetail {
+        internal_id: issue["id"].as_str().unwrap_or("").to_string(),
+        author: issue["creator"]["displayName"]
+            .as_str()
+            .unwrap_or("Former member")
+            .to_string(),
+        created_at: issue["createdAt"].as_str().unwrap_or("").to_string(),
+        updated_at: issue["updatedAt"].as_str().unwrap_or("").to_string(),
+        state: issue["state"]["name"].as_str().unwrap_or("").to_string(),
+        state_id: issue["state"]["id"].as_str().unwrap_or("").to_string(),
+        states,
+        comments,
+    })
+}
+
+#[tauri::command]
+pub async fn linear_issue_set_state(
+    api_key: String,
+    issue_id: String,
+    state_id: String,
+) -> Result<(), String> {
+    let query = r#"mutation SetIssueState($issueId: String!, $stateId: String!) { issueUpdate(id: $issueId, input: { stateId: $stateId }) { success } }"#;
+    linear_graphql(
+        &api_key,
+        query,
+        serde_json::json!({ "issueId": issue_id, "stateId": state_id }),
+    )?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn linear_issue_comment(
+    api_key: String,
+    issue_id: String,
+    body: String,
+) -> Result<(), String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("comment cannot be empty".into());
+    }
+    let query = r#"mutation CommentOnIssue($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success } }"#;
+    linear_graphql(
+        &api_key,
+        query,
+        serde_json::json!({ "issueId": issue_id, "body": body }),
+    )?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn gh_issue_set_state(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u64,
+    open: bool,
+) -> Result<(), String> {
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args([
+        "issue",
+        if open { "reopen" } else { "close" },
+        &number.to_string(),
+    ]);
+    run_net(&mut cmd).map(|_| ())
+}
+
+#[tauri::command]
+pub async fn gh_issue_comment(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u64,
+    body: String,
+) -> Result<(), String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("comment cannot be empty".into());
+    }
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args(["issue", "comment", &number.to_string(), "--body", body]);
+    run_net(&mut cmd).map(|_| ())
+}
+
 #[tauri::command]
 pub async fn gh_issue_list(
     state: State<'_, WorkspaceManager>,
@@ -4888,54 +5134,9 @@ pub async fn gh_issue_list(
 
 #[tauri::command]
 pub async fn linear_issues(api_key: String) -> Result<Vec<TicketInfo>, String> {
-    use std::io::Write;
-    if api_key.trim().is_empty() {
-        return Err("no Linear API key".into());
-    }
     // Active work only — completed/canceled would bury the list.
     let query = r#"{ viewer { id } issues(first: 100, orderBy: updatedAt, filter: { state: { type: { in: ["triage", "backlog", "unstarted", "started"] } } }) { nodes { identifier title url branchName description priorityLabel state { name type } assignee { id displayName } } } }"#;
-    let body = serde_json::json!({ "query": query }).to_string();
-    let mut child = std::process::Command::new(tool_path("curl"))
-        .no_console_window()
-        .args([
-            "-sS",
-            "--max-time",
-            "15",
-            "-K",
-            "-", // read config (the auth header) from stdin — keeps the key out of argv
-            "-H",
-            "Content-Type: application/json",
-            "--data-binary",
-            &body,
-            "https://api.linear.app/graphql",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("curl not available: {e}"))?;
-    child
-        .stdin
-        .as_mut()
-        .ok_or("curl stdin unavailable")?
-        .write_all(format!("header = \"Authorization: {}\"\n", api_key.trim()).as_bytes())
-        .map_err(|e| e.to_string())?;
-    // Up to 15s of Linear's API (--max-time), so off the worker it goes.
-    let out = blocking::io(|| child.wait_with_output()).map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!(
-            "Linear request failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
-        .map_err(|_| "Linear returned unexpected output".to_string())?;
-    if let Some(err) = v["errors"].as_array().and_then(|a| a.first()) {
-        return Err(format!(
-            "Linear: {}",
-            err["message"].as_str().unwrap_or("request rejected")
-        ));
-    }
+    let v = linear_graphql(&api_key, query, serde_json::json!({}))?;
     let viewer = v["data"]["viewer"]["id"].as_str().unwrap_or("").to_string();
     Ok(v["data"]["issues"]["nodes"]
         .as_array()

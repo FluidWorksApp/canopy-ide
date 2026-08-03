@@ -3,16 +3,17 @@
 // markdown description, with the start-work actions pinned to the bottom —
 // the two things you do with a ticket you're reading are understand it and
 // hand it to an agent.
+import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type * as ipc from "../ipc";
+import * as ipc from "../ipc";
 import { heldBadge } from "../branchSwitch";
 import { useBranchSwitch } from "../useBranchSwitch";
-import { TRACKERS } from "../trackers";
+import { TRACKERS, trackerKey } from "../trackers";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { Markdown } from "./Markdown";
 import { TrackerIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
-import { Button } from "./ui";
+import { Button, Select } from "./ui";
 
 interface TicketViewProps {
   ticket: ipc.TicketInfo;
@@ -45,7 +46,84 @@ export function TicketView({
 }: TicketViewProps) {
   const trackerName = TRACKERS.find((t) => t.id === source)?.name ?? source;
   const { openThere } = useBranchSwitch();
+  const number = Number(ticket.id.replace(/^#/, ""));
+  const github = source === "github" && !!repo && Number.isInteger(number);
+  const linearKey = source === "linear" ? trackerKey("linear") : "";
+  const canManage = github || !!linearKey;
+  const [detail, setDetail] = useState<ipc.IssueDetail | null>(null);
+  const [comment, setComment] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
 
+  const loadDetail = async () => {
+    if (!canManage) return;
+    setError("");
+    try {
+      setDetail(
+        github && repo
+          ? await ipc.ghIssueDetail(repo, number)
+          : await ipc.linearIssueDetail(linearKey, ticket.id),
+      );
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  useEffect(() => {
+    void loadDetail();
+    // Reload when a different issue is placed in this tab.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repo, source, number, ticket.id]);
+
+  const setOpen = async (open: boolean) => {
+    if (!repo || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      await ipc.ghIssueSetState(repo, number, open);
+      setDetail((prev) => prev && { ...prev, state: open ? "open" : "closed" });
+      window.dispatchEvent(new CustomEvent("canopy:trackers-changed"));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setLinearState = async (stateId: string) => {
+    if (!detail || busy) return;
+    const next = detail.states.find((state) => state.id === stateId);
+    setBusy(true);
+    setError("");
+    try {
+      await ipc.linearIssueSetState(linearKey, detail.internal_id, stateId);
+      setDetail({ ...detail, state_id: stateId, state: next?.name ?? detail.state });
+      window.dispatchEvent(new CustomEvent("canopy:trackers-changed"));
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitComment = async () => {
+    if (!detail || busy || !comment.trim()) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (github && repo) await ipc.ghIssueComment(repo, number, comment.trim());
+      else await ipc.linearIssueComment(linearKey, detail.internal_id, comment.trim());
+      setComment("");
+      await loadDetail();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const formatDate = (value: string) =>
+    value ? new Date(value).toLocaleString() : "Unknown date";
 
   // Link clicks are delegated globally (main.tsx), so every surface —
   // issue bodies, commit messages, PR text — behaves identically.
@@ -59,11 +137,22 @@ export function TicketView({
           <span>{ticket.title}</span>
         </div>
         <div className="ticket-view-meta">
-          <span className="ticket-view-state">{ticket.state}</span>
+          <span className="ticket-view-state">{detail?.state ?? ticket.state}</span>
           {ticket.priority && <span className="ticket-view-chip">{ticket.priority}</span>}
           <span className={ticket.mine ? "ticket-mine" : ""}>
             {ticket.mine ? "you" : (ticket.assignee ?? "Unassigned")}
           </span>
+          {detail && (
+            <>
+              <span>opened by {detail.author}</span>
+              <span title={formatDate(detail.created_at)}>
+                created {formatDate(detail.created_at)}
+              </span>
+              <span title={formatDate(detail.updated_at)}>
+                updated {formatDate(detail.updated_at)}
+              </span>
+            </>
+          )}
           {/* The workspace holding this ticket's work. Seeing which one has it
               and having no way to get there was the gap; the words are the
               shared badge's, so this reads the same as every other surface. */}
@@ -93,16 +182,73 @@ export function TicketView({
         </div>
       </div>
 
-      {/* `external` on purpose: an issue body is authored by anyone who can
-          file on the repo, so it renders identically to a note and navigates
-          nothing. */}
-      {ticket.body.trim() ? (
-        <Markdown className="ticket-view-body" text={ticket.body} />
-      ) : (
-        <p className="ticket-view-empty">No description.</p>
-      )}
+      <div className="ticket-view-scroll">
+        {/* `external` on purpose: an issue body is authored by anyone who can
+            file on the repo, so it renders identically to a note and navigates
+            nothing. */}
+        {ticket.body.trim() ? (
+          <Markdown className="ticket-view-body" text={ticket.body} />
+        ) : (
+          <p className="ticket-view-empty">No description.</p>
+        )}
+
+        {detail && (
+          <section className="ticket-comments" aria-label="Comments">
+            <h2>Comments <span>{detail.comments.length}</span></h2>
+            {detail.comments.length === 0 ? (
+              <p className="ticket-view-empty">No comments yet.</p>
+            ) : (
+              detail.comments.map((item) => (
+                <article className="ticket-comment" key={item.id || item.url}>
+                  <div className="ticket-comment-meta">
+                    <strong>{item.author}</strong>
+                    <span title={formatDate(item.created_at)}>{formatDate(item.created_at)}</span>
+                  </div>
+                  <Markdown className="ticket-comment-body" text={item.body} />
+                </article>
+              ))
+            )}
+            <textarea
+              className="ticket-comment-input"
+              rows={3}
+              placeholder="Add a comment"
+              value={comment}
+              onChange={(event) => setComment(event.target.value)}
+            />
+            <div className="ticket-comment-actions">
+              <Button disabled={busy || !comment.trim()} onClick={() => void submitComment()}>
+                {busy ? "Working…" : "Comment"}
+              </Button>
+            </div>
+          </section>
+        )}
+        {error && <p className="ticket-view-error">{error}</p>}
+      </div>
 
       <div className="ticket-view-actions">
+        {canManage && (
+          github ? (
+            <Button disabled={busy || !detail} onClick={() => void setOpen(detail?.state === "closed")}>
+              {detail?.state === "closed" ? "Reopen issue" : "Close issue"}
+            </Button>
+          ) : (
+            <label className="ticket-state-control">
+              <span>Status</span>
+              <Select
+                size="sm"
+                width="sm"
+                aria-label="Issue status"
+                disabled={busy || !detail}
+                value={detail?.state_id ?? ""}
+                onChange={(event) => void setLinearState(event.target.value)}
+              >
+                {detail?.states.map((state) => (
+                  <option key={state.id} value={state.id}>{state.name}</option>
+                ))}
+              </Select>
+            </label>
+          )
+        )}
         {/* One control: the primary action is the obvious thing (your default
             agent, in this ticket's worktree); the caret is where every other
             choice lives — running agents to hand it to, or a different CLI. */}
