@@ -11,7 +11,13 @@
 // prose.
 
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
-import type { CompanionProposal, CompanionState, CompanionTool } from "../companionSession";
+import type {
+  CompanionAttachment,
+  CompanionProposal,
+  CompanionState,
+  CompanionTool,
+} from "../companionSession";
+import * as ipc from "../ipc";
 import {
   companionSpotlight,
   spotlightHint,
@@ -40,7 +46,7 @@ interface Props {
    *  places the panel — this only draws the control that asks for it. */
   expanded: boolean;
   onToggleExpand: () => void;
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments: CompanionAttachment[]) => void;
   onClose: () => void;
 }
 
@@ -60,6 +66,10 @@ export function CompanionChat({
   onClose,
 }: Props) {
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<CompanionAttachment[]>([]);
+  const [attaching, setAttaching] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const attachingRef = useRef(false);
   const log = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
 
@@ -98,15 +108,47 @@ export function CompanionChat({
 
   const busy = state.status === "working";
   const dead = state.status === "failed" || state.status === "unavailable";
-  const canSend = draft.trim().length > 0 && !busy && !dead;
+  const canSend = (draft.trim().length > 0 || attachments.length > 0) && !busy && !dead && !attaching;
+
+  const attach = async (files: File[]) => {
+    if (files.length === 0 || attachingRef.current) return;
+    attachingRef.current = true;
+    setAttaching(true);
+    setAttachmentError(null);
+    const failed: string[] = [];
+    try {
+      for (const file of files) {
+        try {
+          const base64 = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(reader.error);
+            reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
+            reader.readAsDataURL(file);
+          });
+          if (!base64) throw new Error("the file was empty");
+          const path = await ipc.companionSaveAttachment(file.name, base64);
+          setAttachments((prev) => [...prev, { name: file.name, path, type: file.type }]);
+        } catch (err) {
+          failed.push(`${file.name}: ${String(err)}`);
+          void ipc.jsLog("warn", `companion: could not attach ${file.name}: ${String(err)}`);
+        }
+      }
+    } finally {
+      attachingRef.current = false;
+      setAttaching(false);
+      setAttachmentError(failed.length ? failed.join("; ") : null);
+      input.current?.focus();
+    }
+  };
 
   const submit = () => {
     if (!canSend) return;
     // Sending is an explicit "I want to see what comes back", so it re-arms
     // following even if they had scrolled up to re-read something.
     stick.current = true;
-    onSend(draft);
+    onSend(draft, attachments);
     setDraft("");
+    setAttachments([]);
   };
 
   return (
@@ -190,7 +232,16 @@ export function CompanionChat({
                   busy && <span className="companion-caret" aria-label="Thinking" />
                 )
               ) : (
-                <span className="companion-said">{m.text}</span>
+                <>
+                  <span className="companion-said">{m.text}</span>
+                  {(m.attachments ?? []).length > 0 && (
+                    <span className="companion-sent-files">
+                      {(m.attachments ?? []).map((a) => (
+                        <span key={a.path}>{a.name}</span>
+                      ))}
+                    </span>
+                  )}
+                </>
               )}
               {m.failed && <span className="companion-failed">{m.text}</span>}
             </div>
@@ -255,6 +306,47 @@ export function CompanionChat({
       )}
 
       <div className="companion-compose">
+        <input
+          id="companion-file-input"
+          className="companion-file-input"
+          type="file"
+          multiple
+          disabled={dead || busy || attaching}
+          onChange={(e) => {
+            void attach(Array.from(e.target.files ?? []));
+            e.currentTarget.value = "";
+          }}
+        />
+        <label
+          className="companion-attach"
+          htmlFor="companion-file-input"
+          aria-label="Attach files"
+          title="Attach images or files"
+        >
+          {attaching ? "…" : "+"}
+        </label>
+        <div className="companion-compose-body">
+          {attachmentError && (
+            <div className="companion-attachment-error" role="alert">
+              {attachmentError}
+            </div>
+          )}
+          {attachments.length > 0 && (
+            <div className="companion-files">
+              {attachments.map((a) => (
+                <span className="companion-file" key={a.path} title={a.path}>
+                  {a.name}
+                  <button
+                    type="button"
+                    aria-label={`Remove ${a.name}`}
+                    onClick={() => setAttachments((prev) => prev.filter((x) => x.path !== a.path))}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
         <textarea
           ref={input}
           className="companion-input"
@@ -270,6 +362,12 @@ export function CompanionChat({
           aria-label={`Message ${name}`}
           disabled={dead}
           onChange={(e) => setDraft(e.target.value)}
+          onPaste={(e) => {
+            const files = Array.from(e.clipboardData.files ?? []);
+            if (files.length === 0) return;
+            e.preventDefault();
+            void attach(files);
+          }}
           onKeyDown={(e) => {
             // Enter sends, Shift+Enter is a newline — the convention every
             // chat the user already types in follows.
@@ -279,6 +377,7 @@ export function CompanionChat({
             }
           }}
         />
+        </div>
         <button
           className="companion-send"
           onClick={submit}

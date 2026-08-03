@@ -260,6 +260,9 @@ export interface AgentUiOp {
     | "workspace_git"
     | "workspace_agents"
     | "workspace_search"
+    | "workspace_prs"
+    | "pr_details"
+    | "pr_action"
     | "open_project"
     | "confirm"
     | "recall"
@@ -294,6 +297,20 @@ export interface AgentUiOp {
   fact?: string | null;
   about?: string | null;
   forget?: boolean | null;
+  /** Companion PR tools. `repo` is an absolute checkout path returned by
+   *  canopy_workspace_prs, never an arbitrary remote name. */
+  repo?: string | null;
+  number?: number | null;
+  includeDiff?: boolean | null;
+  includeLogs?: boolean | null;
+  body?: string | null;
+  review?: "approve" | "comment" | "request-changes" | null;
+  reviewers?: string[];
+  threadId?: string | null;
+  resolved?: boolean | null;
+  method?: "squash" | "merge" | "rebase" | null;
+  enable?: boolean | null;
+  deleteBranch?: boolean | null;
 }
 export const onAgentUi = (cb: (op: AgentUiOp) => void): Promise<UnlistenFn> =>
   listen<AgentUiOp>("agent:ui", (event) => cb(event.payload));
@@ -3145,6 +3162,10 @@ export const companionWrite = (line: string) =>
   invoke<void>("companion_write", { line });
 
 export const companionKill = () => invoke<void>("companion_kill");
+
+/** Freeze one chat attachment under `~/.canopy/companion/attachments`. */
+export const companionSaveAttachment = (name: string, base64: string) =>
+  invoke<string>("companion_save_attachment", { name, base64 });
 
 /** The companion's own corner of `~/.canopy`. Scoped to one directory on the
  *  Rust side — deliberately not a general file read/write, which would hand the

@@ -410,6 +410,119 @@ export interface UiOpContext {
   preview: () => Promise<PreviewTarget | null>;
 }
 
+function companionRepos(ctx: UiOpContext, project?: string | null): { project: string; repo: string }[] {
+  const projects = needCompanion(ctx.workspace, "canopy_workspace_prs")();
+  const wanted = project?.trim().toLowerCase();
+  const scoped = wanted ? projects.filter((p) => p.name.toLowerCase() === wanted) : projects;
+  if (wanted && scoped.length === 0) {
+    throw new Error(`no project called "${project}" — the projects are: ${projects.map((p) => p.name).join(", ")}`);
+  }
+  const seen = new Set<string>();
+  return scoped.flatMap((p) =>
+    p.roots.flatMap((repo) => {
+      if (seen.has(repo)) return [];
+      seen.add(repo);
+      return [{ project: p.name, repo }];
+    }),
+  );
+}
+
+async function workspacePrs(ctx: UiOpContext, project?: string | null) {
+  const errors: { project: string; repo: string; error: string }[] = [];
+  const possiblyTruncatedRepos = new Set<string>();
+  const fetched = (
+    await Promise.all(
+      companionRepos(ctx, project).map(async ({ project: name, repo }) => {
+        try {
+          const prs = await ipc.ghPrList(repo);
+          if (prs.length === 50) possiblyTruncatedRepos.add(repo);
+          return prs.map((pr) => ({ project: name, repo, ...pr }));
+        } catch (err) {
+          errors.push({ project: name, repo, error: String(err) });
+          return [];
+        }
+      }),
+    )
+  ).flat();
+  // Several components may be directories inside the same repository. The
+  // backend accepts each path and resolves it to the same top-level checkout;
+  // fold those duplicate queries on GitHub's stable PR URL before returning.
+  const rows = [...new Map(fetched.map((pr) => [pr.url, pr])).values()];
+  rows.sort((a, b) => b.updated.localeCompare(a.updated));
+  return {
+    pullRequests: rows,
+    errors,
+    limitPerRepo: 50,
+    possiblyTruncatedRepos: [...possiblyTruncatedRepos],
+  };
+}
+
+function checkedCompanionRepo(ctx: UiOpContext, repo: string | null | undefined): string {
+  if (!repo) {
+    throw new Error("repo is required (use the path returned by canopy_workspace_prs)");
+  }
+  if (!companionRepos(ctx).some((r) => r.repo === repo)) {
+    throw new Error(`${repo} is not a repo in this Canopy workspace`);
+  }
+  return repo;
+}
+
+async function prDetails(op: ipc.AgentUiOp, ctx: UiOpContext) {
+  const repo = checkedCompanionRepo(ctx, op.repo);
+  if (!op.number) throw new Error("number is required");
+  const [body, conversation, reviewers, diff, failingLogs] = await Promise.all([
+    ipc.ghPrBody(repo, op.number),
+    ipc.ghPrConversation(repo, op.number),
+    ipc.ghPrReviewerCandidates(repo).catch(() => []),
+    op.includeDiff ? ipc.ghPrDiff(repo, op.number) : Promise.resolve(undefined),
+    op.includeLogs ? ipc.ghPrFailingLogs(repo, op.number) : Promise.resolve(undefined),
+  ]);
+  return { repo, number: op.number, body, conversation, reviewers, diff, failingLogs };
+}
+
+async function prAction(op: ipc.AgentUiOp, ctx: UiOpContext) {
+  const repo = checkedCompanionRepo(ctx, op.repo);
+  const number = op.number;
+  if (!number) throw new Error("number is required");
+  switch (op.action) {
+    case "review":
+      if (!op.review) {
+        throw new Error("review is required: approve, comment, or request-changes");
+      }
+      return { result: await ipc.ghPrReview(repo, number, op.review, op.body ?? undefined) };
+    case "request_review":
+      if (!op.reviewers?.length) throw new Error("reviewers is required");
+      return { result: await ipc.ghPrRequestReview(repo, number, op.reviewers) };
+    case "reply":
+      if (!op.threadId || !op.body?.trim()) throw new Error("threadId and body are required");
+      return { result: await ipc.ghPrThreadReply(repo, op.threadId, op.body) };
+    case "resolve":
+      if (!op.threadId || op.resolved == null) throw new Error("threadId and resolved are required");
+      return { result: await ipc.ghPrThreadResolved(repo, op.threadId, op.resolved) };
+    case "update_branch":
+      return { result: await ipc.ghPrUpdateBranch(repo, number) };
+    case "auto_merge":
+      return {
+        result: await ipc.ghPrAutoMerge(
+          repo,
+          number,
+          op.method ?? "squash",
+          op.enable ?? true,
+        ),
+      };
+    case "merge":
+      return { result: await ipc.ghPrMerge(repo, number, op.method ?? "squash") };
+    case "ready":
+      return { result: await ipc.ghPrReady(repo, number) };
+    case "close":
+      return { result: await ipc.ghPrClose(repo, number, op.deleteBranch ?? false) };
+    default:
+      throw new Error(
+        "action must be review, request_review, reply, resolve, update_branch, auto_merge, merge, ready, or close",
+      );
+  }
+}
+
 /** Just the companion's half of the context. App builds exactly this set when
  *  the companion is on, and nothing when it is off — which is what makes the
  *  workspace ops fail honestly for a coding session. */
@@ -478,6 +591,12 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
         op.query ?? "",
         Math.min(Math.max(op.limit ?? 20, 1), 100),
       );
+    case "workspace_prs":
+      return workspacePrs(ctx, op.project);
+    case "pr_details":
+      return prDetails(op, ctx);
+    case "pr_action":
+      return prAction(op, ctx);
     case "open_project": {
       const opened = await needCompanion(ctx.openProject, "canopy_open_project")(
         op.project ?? "",

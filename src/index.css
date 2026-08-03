@@ -21853,8 +21853,73 @@ a.btn-sm {
   border-top: 1px solid var(--border);
 }
 
-.companion-input {
+.companion-file-input {
+  display: none;
+}
+
+.companion-attach {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.companion-compose-body {
   flex: 1;
+  min-width: 0;
+}
+
+.companion-attachment-error {
+  margin-bottom: 5px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--danger);
+}
+
+.companion-files,
+.companion-sent-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 5px;
+}
+
+.companion-file,
+.companion-sent-files > span {
+  max-width: 180px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.companion-file button {
+  margin-left: 5px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.companion-sent-files {
+  margin-top: 5px;
+  margin-bottom: 0;
+}
+
+.companion-input {
+  width: 100%;
   min-width: 0;
   max-height: 96px;
   padding: 7px 10px;

@@ -48,6 +48,21 @@ export const COMPANION_TOOL_GROUPS: AgentToolGroup[] = [
         label: "Search everything",
         note: "Past conversations, scrollback, notes and research across projects",
       },
+      {
+        name: "canopy_workspace_prs",
+        label: "Pull requests",
+        note: "Open PRs across every repo, optionally narrowed to one project",
+      },
+      {
+        name: "canopy_pr_details",
+        label: "PR details",
+        note: "Conversation, review threads, reviewers, body and optional diff",
+      },
+      {
+        name: "canopy_pr_action",
+        label: "Act on a PR",
+        note: "Review, reply, resolve, request review, update, merge or close",
+      },
     ],
   },
   {
@@ -125,6 +140,7 @@ export const MUTATING_TOOLS: string[] = [
   "canopy_browser_type",
   "canopy_browser_eval",
   "canopy_browser_navigate",
+  "canopy_pr_action",
 ];
 
 /** Everything a companion session holds: the shared set plus its own.

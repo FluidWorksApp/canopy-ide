@@ -318,6 +318,60 @@ fn companion_store_path(name: &str) -> Result<std::path::PathBuf, String> {
     Ok(companion_home().join(name))
 }
 
+/// Freeze a chat attachment under the companion's own directory, where every
+/// CLI carrying it can read the same bytes. The webview may choose the file but
+/// not its destination; keeping that fixed avoids turning chat upload into an
+/// arbitrary-file-write primitive.
+#[tauri::command]
+pub fn companion_save_attachment(name: String, base64: String) -> Result<String, String> {
+    use base64::Engine;
+    const MAX_BYTES: usize = 25 * 1024 * 1024;
+
+    let leaf = std::path::Path::new(&name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("attachment");
+    let safe: String = leaf
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(120)
+        .collect();
+    let safe = if safe.is_empty() || safe == "." || safe == ".." {
+        "attachment".to_string()
+    } else {
+        safe
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64.trim())
+        .map_err(|e| format!("could not decode attachment: {e}"))?;
+    if bytes.len() > MAX_BYTES {
+        return Err("attachments are limited to 25 MB each".into());
+    }
+
+    let dir = companion_home().join("attachments");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let mut path = dir.join(format!("{stamp}-{safe}"));
+    for n in 2..1000 {
+        if !path.exists() {
+            break;
+        }
+        path = dir.join(format!("{stamp}-{n}-{safe}"));
+    }
+    std::fs::write(&path, bytes)
+        .map_err(|e| format!("{} could not be written: {e}", path.display()))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 pub fn companion_store_read(name: String) -> Result<Option<String>, String> {
     let path = companion_store_path(&name)?;

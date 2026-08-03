@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, waitFor } from "@testing-library/react";
 import { CompanionChat } from "./CompanionChat";
 import type { CompanionState, CompanionTool } from "../companionSession";
 
@@ -10,7 +10,20 @@ vi.mock("./Markdown", () => ({
   Markdown: ({ text }: { text: string }) => <p>{text}</p>,
 }));
 
+const { saveAttachment } = vi.hoisted(() => ({
+  saveAttachment: vi.fn(async (name: string, _base64: string) => `/tmp/${name}`),
+}));
+vi.mock("../ipc", () => ({
+  companionSaveAttachment: (name: string, base64: string) => saveAttachment(name, base64),
+  jsLog: vi.fn(),
+}));
+
 const noop = () => {};
+
+beforeEach(() => {
+  saveAttachment.mockReset();
+  saveAttachment.mockImplementation(async (name: string) => `/tmp/${name}`);
+});
 
 function state(tools: CompanionTool[], status: CompanionState["status"] = "working"): CompanionState {
   return {
@@ -129,5 +142,70 @@ describe("the expand control", () => {
     const panel = document.querySelector(".companion-panel") as HTMLElement;
     expect(panel.style.width).toBe("620px");
     expect(panel.getAttribute("role")).toBe("dialog");
+  });
+});
+
+describe("attachments", () => {
+  it("stages a selected file and sends its path with the message", async () => {
+    const onSend = vi.fn();
+    mount(state([], "ready"), { onSend });
+    const picker = document.querySelector(".companion-file-input") as HTMLInputElement;
+    fireEvent.change(picker, {
+      target: { files: [new File(["pixels"], "screen.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(document.querySelector(".companion-file")?.textContent).toContain("screen.png"));
+    fireEvent.click(document.querySelector(".companion-send") as HTMLElement);
+    expect(onSend).toHaveBeenCalledWith("", [
+      { name: "screen.png", path: "/tmp/screen.png", type: "image/png" },
+    ]);
+  });
+
+  it("allows a pasted attachment to stand on its own", async () => {
+    mount(state([], "ready"));
+    const input = document.querySelector(".companion-input") as HTMLTextAreaElement;
+    fireEvent.paste(input, {
+      clipboardData: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] },
+    });
+    await waitFor(() => expect(document.querySelector(".companion-send")?.hasAttribute("disabled")).toBe(false));
+  });
+
+  it("shows a rejected file and still stages the rest of the batch", async () => {
+    saveAttachment
+      .mockRejectedValueOnce(new Error("attachments are limited to 25 MB each"))
+      .mockResolvedValueOnce("/tmp/screen.png");
+    mount(state([], "ready"));
+    const picker = document.querySelector(".companion-file-input") as HTMLInputElement;
+    fireEvent.change(picker, {
+      target: {
+        files: [
+          new File(["movie"], "recording.mov", { type: "video/quicktime" }),
+          new File(["pixels"], "screen.png", { type: "image/png" }),
+        ],
+      },
+    });
+    await waitFor(() => {
+      expect(document.querySelector("[role=alert]")?.textContent).toContain("recording.mov");
+      expect(document.querySelector(".companion-file")?.textContent).toContain("screen.png");
+    });
+    expect(saveAttachment).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores another paste while an attachment batch is still staging", async () => {
+    let finish!: (path: string) => void;
+    saveAttachment.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { finish = resolve; }),
+    );
+    mount(state([], "ready"));
+    const input = document.querySelector(".companion-input") as HTMLTextAreaElement;
+    fireEvent.paste(input, {
+      clipboardData: { files: [new File(["a"], "a.png", { type: "image/png" })] },
+    });
+    fireEvent.paste(input, {
+      clipboardData: { files: [new File(["b"], "b.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(saveAttachment).toHaveBeenCalledTimes(1));
+    finish("/tmp/a.png");
+    await waitFor(() => expect(document.querySelector(".companion-file")?.textContent).toContain("a.png"));
+    expect(document.body.textContent).not.toContain("b.png");
   });
 });

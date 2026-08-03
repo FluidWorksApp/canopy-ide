@@ -518,6 +518,7 @@ pub fn run() {
             clipboard::clipboard_forget,
             clipboard::clipboard_clear,
             clipboard::clipboard_status,
+            companion::companion_save_attachment,
             spot::spot_ingest,
             spot::spot_search,
             spot::spot_index_stats,
