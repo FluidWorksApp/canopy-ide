@@ -19,6 +19,12 @@ import * as ipc from "../../ipc";
 import { format, matches, matchesModifierClick } from "../../shortcuts";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
 import {
+  recordTabUse,
+  resolveTabSwitch,
+  stepTabSwitch,
+  tabSwitchSnapshot,
+} from "../../tabSwitchOrder";
+import {
   DOC_STACKS,
   STATUS_LABEL,
   STATUS_ORDER,
@@ -665,12 +671,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [spotOpen, setSpotOpen] = useState(false);
   /** Holding the tab-jump modifier reveals the direct-jump numbers in the bar. */
   const tabHints = useHeldModifier("tabs", visible);
-  /** Ctrl+Tab held: the tab the release would land on, as an index into `tabs`.
-   *  Null when the switcher isn't up. Nothing switches while it is — the panel
-   *  is the preview, and walking six tabs costs one tab change, not six. */
-  const [switcherIdx, setSwitcherIdx] = useState<number | null>(null);
-  const switcherIdxRef = useRef<number | null>(null);
-  switcherIdxRef.current = switcherIdx;
+  /** Ctrl+Tab held: a frozen ID order and the tab release would land on. IDs,
+   *  rather than an index into the live array, keep a tab closing mid-gesture
+   *  from silently redirecting the selection to whichever tab shifted into
+   *  its slot. Nothing switches until release. */
+  const [switcher, setSwitcher] = useState<{
+    ids: string[];
+    selectedId: string;
+  } | null>(null);
+  const switcherRef = useRef(switcher);
+  switcherRef.current = switcher;
   // When set, the whole project's file surface (tree, quick-open, search, new
   // terminals) points at this worktree instead of the main checkout — so an
   // agent's worktree becomes the environment you actually work in.
@@ -796,6 +806,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const contentRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  /** Committed activity, newest first. This is session memory rather than a
+   *  workspace preference: after a restart there is no honest "previous tab"
+   *  until the user has moved between two of them. */
+  const recentTabsRef = useRef<string[]>([]);
+  useEffect(() => {
+    if (!activeTabId) return;
+    recentTabsRef.current = recordTabUse(
+      recentTabsRef.current,
+      activeTabId,
+      tabs.map((t) => t.id),
+    );
+  }, [activeTabId, tabs]);
   /** The tabs in the order the pane bar draws them — what ⌘1..9 counts, and
    *  filled in below once the groups are known. */
   const barTabsRef = useRef<SubTab[]>([]);
@@ -3330,15 +3352,26 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const stepSwitcher = (dir: 1 | -1) => {
       const list = tabsRef.current;
       if (list.length < 2) return;
-      const from =
-        switcherIdxRef.current ??
-        Math.max(
-          0,
-          list.findIndex((t) => t.id === activeTabIdRef.current),
+      const openIds = list.map((t) => t.id);
+      const current = switcherRef.current;
+      const ids =
+        current?.ids ??
+        tabSwitchSnapshot(
+          openIds,
+          activeTabIdRef.current,
+          recentTabsRef.current,
+          getSettings().tabSwitchMode,
         );
-      const next = (from + dir + list.length) % list.length;
-      switcherIdxRef.current = next;
-      setSwitcherIdx(next);
+      const selectedId = stepTabSwitch(
+        ids,
+        current?.selectedId ?? activeTabIdRef.current,
+        openIds,
+        dir,
+      );
+      if (!selectedId) return;
+      const next = { ids, selectedId };
+      switcherRef.current = next;
+      setSwitcher(next);
     };
     // The tab-cycle chord is a native menu accelerator, but when focus is in
     // the webview (Monaco/xterm) macOS never routes it to the menu — the
@@ -3468,21 +3501,56 @@ const ProjectViewBody = memo(function ProjectViewBody({
     };
   }, [visible, project.components, addTerminal, refreshInstalled, refreshUpdates]);
 
-  const switcherOpen = switcherIdx !== null;
+  const switcherOpen = switcher !== null;
+  const switcherTabs = useMemo(
+    () =>
+      switcher?.ids
+        .map((id) => tabs.find((tab) => tab.id === id))
+        .filter((tab): tab is SubTab => Boolean(tab)) ?? [],
+    [switcher, tabs],
+  );
   /** Letting go is the choice. One tab change, however far you walked. */
   const commitSwitcher = useCallback(() => {
-    const idx = switcherIdxRef.current;
-    switcherIdxRef.current = null;
-    setSwitcherIdx(null);
-    // A tab can close under the switcher (a chore reaping itself, an agent
-    // finishing) — an index that no longer names one simply lands nowhere.
-    const tab = idx === null ? undefined : tabsRef.current[idx];
-    if (tab) setActiveTabId(tab.id);
+    const current = switcherRef.current;
+    switcherRef.current = null;
+    setSwitcher(null);
+    if (!current) return;
+    const id = resolveTabSwitch(
+      current.ids,
+      current.selectedId,
+      tabsRef.current.map((tab) => tab.id),
+    );
+    if (id) setActiveTabId(id);
   }, []);
   const cancelSwitcher = useCallback(() => {
-    switcherIdxRef.current = null;
-    setSwitcherIdx(null);
+    switcherRef.current = null;
+    setSwitcher(null);
   }, []);
+  // Keep the preview and eventual commit honest if the selected tab closes
+  // while Control is still down. The frozen traversal order itself does not
+  // change; only the missing selection advances to its next surviving entry.
+  useEffect(() => {
+    const openIds = tabs.map((tab) => tab.id);
+    setSwitcher((current) => {
+      if (!current || openIds.includes(current.selectedId)) return current;
+      if (openIds.length < 2) {
+        switcherRef.current = null;
+        return null;
+      }
+      const selectedId = resolveTabSwitch(
+        current.ids,
+        current.selectedId,
+        openIds,
+      );
+      if (!selectedId) {
+        switcherRef.current = null;
+        return null;
+      }
+      const next = { ...current, selectedId };
+      switcherRef.current = next;
+      return next;
+    });
+  }, [tabs]);
   // A held panel ends the way a held key ends. Escape takes it back — you are
   // where you were — and so does the window losing focus: ⌘-tabbing away leaves
   // the modifier's keyup on the other side of the switch, so blur is the only
@@ -8920,10 +8988,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         />
       )}
       {/* Ctrl+Tab walks the switcher; releasing Ctrl commits the selection. */}
-      {switcherOpen && visible && tabs.length > 1 && (
+      {switcherOpen && visible && switcherTabs.length > 1 && switcher && (
         <TabSwitcher
-          tabs={tabs}
-          selectedId={tabs[switcherIdx]?.id ?? activeTabId ?? ""}
+          tabs={switcherTabs}
+          selectedId={switcher.selectedId}
           paneRef={contentRef}
           termText={termTailFor}
           onPick={(id) => {

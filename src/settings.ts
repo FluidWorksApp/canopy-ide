@@ -88,6 +88,14 @@ export type CursorStyle = "block" | "underline" | "bar";
  *  on a URL somebody else printed from navigating. See terminalLinks.ts. */
 export type LinkClickMode = "click" | "modifier";
 
+/** What the held Ctrl+Tab switcher walks.
+ *
+ * "recent" answers "where was I?" and makes a quick press return to the
+ * previous context. "order" answers "what is next to this?" and follows the
+ * user's stable tab arrangement. Direct Next/Previous Tab commands stay
+ * positional whichever mode is selected. */
+export type TabSwitchMode = "recent" | "order";
+
 /** A dictation hotkey as captured from a keydown: the modifier flags plus the
  *  physical `KeyboardEvent.code` (layout-independent, so it survives non-US
  *  keyboards). */
@@ -366,6 +374,8 @@ export interface Settings {
    *  restacks — only where it sits in the strip, and it is never the one folded
    *  away. */
   groupTabsByStatus: boolean;
+  /** Ordering used by the held Ctrl+Tab switcher. */
+  tabSwitchMode: TabSwitchMode;
   /** How long an agent has to stay quiet before its tab falls into the Idle
    *  stack. Promotions (a question, fresh work) are always immediate; only the
    *  fall is delayed, so an agent pausing between tool calls doesn't shuffle
@@ -562,6 +572,7 @@ export const DEFAULTS: Settings = {
   autoHibernate: false,
   maxLiveAgents: 8,
   groupTabsByStatus: true,
+  tabSwitchMode: "recent",
   idleGroupDelaySeconds: 60,
   customMicroTasks: [],
   disabledTools: [],
