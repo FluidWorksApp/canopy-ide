@@ -4,14 +4,14 @@
     {
       "id": "claude",
       "endsSession": ["SessionEnd"],
-      "endsTurn": ["Stop"],
+      "endsTurn": ["Stop", "StopFailure"],
       "startsTurn": ["UserPromptSubmit"],
-      "toolActivity": ["PostToolUse", "PreToolUse"],
-      "structuredBlock": ["PreToolUse:AskUserQuestion"],
+      "toolActivity": ["PostToolUse", "PostToolUseFailure", "PreToolUse"],
+      "structuredBlock": ["PreToolUse:AskUserQuestion", "PermissionRequest"],
       "notification": "mixed",
       "promptReadyText": "waiting for",
-      "verifiedAt": "2026-07-31",
-      "$note": "The only CLI whose own completion notice is distinguishable from a permission request by text it authors itself. promptReadyText is consulted only because notification is \"mixed\"."
+      "verifiedAt": "2026-08-03",
+      "$note": "Current Claude emits PermissionRequest plus structured notification_type values; canopy-hook classifies those before the mixed-notification prose fallback retained for older versions. Failure hooks are real turn/tool boundaries too."
     },
     {
       "id": "codex",
@@ -21,21 +21,20 @@
       "toolActivity": ["PostToolUse"],
       "structuredBlock": ["PermissionRequest"],
       "notification": "none",
-      "unstampedBus": true,
       "needsTrust": true,
-      "verifiedAt": "2026-07-31",
-      "$note": "PermissionRequest is its own event, so blocked is structural and no text is read. unstampedBus: the legacy notify line (agents.rs setup_codex_notify) appends to the bus with no canopy_pty stamp. needsTrust: hooks are written but inert until the user runs /hooks."
+      "verifiedAt": "2026-08-03",
+      "$note": "PermissionRequest is structural. Native hooks need one-time /hooks trust; the legacy notify fallback now routes through canopy-hook, so it is gated, normalized and pty-stamped rather than writing the bus directly."
     },
     {
       "id": "agy",
       "endsSession": [],
-      "endsTurn": ["PostInvocation"],
-      "startsTurn": ["PreInvocation"],
-      "toolActivity": ["PreToolUse", "PostToolUse"],
+      "endsTurn": ["Stop"],
+      "startsTurn": [],
+      "toolActivity": ["PostToolUse", "PreInvocation", "PostInvocation"],
       "structuredBlock": [],
       "notification": "unmapped",
-      "verifiedAt": "2026-07-31",
-      "$note": "agy's hook stdin carries no message field and the helper is registered without --message, so nothing in a Notification can be read. Declared unmapped rather than guessed: before this manifest every agy notification returned \"waiting\" and the session stayed pinned there until its next PostInvocation. Flip this to \"block\" the day agy's payload is verified."
+      "verifiedAt": "2026-08-03",
+      "$note": "Antigravity 1.1.x has no human-prompt hook: Pre/PostInvocation bracket model calls and only prove progress; Stop ends the full execution loop. canopy-hook converts its documented camelCase protojson payload to the canonical wire shape."
     },
     {
       "id": "aider",
@@ -51,35 +50,35 @@
     {
       "id": "opencode",
       "endsSession": [],
-      "endsTurn": ["session.idle"],
-      "startsTurn": [],
-      "toolActivity": ["tool.execute.after", "file.edited"],
-      "structuredBlock": ["permission.asked"],
+      "endsTurn": ["Stop"],
+      "startsTurn": ["UserPromptSubmit"],
+      "toolActivity": ["PostToolUse"],
+      "structuredBlock": ["Notification"],
       "notification": "block",
-      "verifiedAt": "2026-07-31",
-      "$note": "The permission signal arrives on its own bus event. It used to be re-encoded as prose and re-parsed, which let a tool-supplied title containing \"waiting for\" convert a block into \"finished\"."
+      "verifiedAt": "2026-08-03",
+      "$note": "These are the normalized names the plugin sends to canopy-hook, not OpenCode's native bus names. Explicit canopy_signal values classify turn start/progress/end and permission at the source so native event renames cannot silently freeze lifecycle state."
     },
     {
       "id": "omp",
-      "endsSession": [],
-      "endsTurn": ["turn_end"],
-      "startsTurn": ["turn_start"],
-      "toolActivity": ["tool_result"],
-      "structuredBlock": ["tool_approval_requested"],
+      "endsSession": ["SessionEnd"],
+      "endsTurn": ["Stop"],
+      "startsTurn": ["UserPromptSubmit"],
+      "toolActivity": ["PostToolUse"],
+      "structuredBlock": ["Notification"],
       "notification": "block",
-      "verifiedAt": "2026-07-31",
-      "$note": "Registered through try/catch against an API its own installer calls \"in flux\": a rename registers nothing and throws nothing. The guard test over these names is the only thing that would notice."
+      "verifiedAt": "2026-08-03",
+      "$note": "The extension maps before_agent_start/agent_end/session_shutdown and tool approval events onto Canopy's normalized wire names with explicit signals. Installed in omp's auto-discovered agent/extensions directory."
     },
     {
       "id": "amp",
       "endsSession": [],
-      "endsTurn": ["agent.end"],
-      "startsTurn": ["agent.start"],
-      "toolActivity": ["tool.result"],
+      "endsTurn": ["Stop"],
+      "startsTurn": ["UserPromptSubmit"],
+      "toolActivity": ["PostToolUse"],
       "structuredBlock": [],
       "notification": "none",
-      "verifiedAt": "2026-07-31",
-      "$note": "No notification event of any kind, so \"blocked on you\" is structurally unprovable for amp. An amp session parked on an approval prompt used to read \"working\" indefinitely; it now decays to unknown rather than being fabricated into waiting."
+      "verifiedAt": "2026-08-03",
+      "$note": "The plugin normalizes agent.start/end and tool.result with explicit lifecycle signals. No reliable permission event is installed, so blocked-on-user remains unprovable and decays to unknown rather than being fabricated."
     }
   ]
 }

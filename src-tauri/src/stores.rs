@@ -45,6 +45,7 @@ pub enum Layout {
 #[derive(Clone, Debug)]
 pub struct SourceFile {
     pub agent: &'static str,
+    pub profile: String,
     pub path: PathBuf,
     pub layout: Layout,
 }
@@ -53,6 +54,7 @@ pub struct SourceFile {
 #[derive(Clone, Debug, Default)]
 pub struct StoreSession {
     pub agent: String,
+    pub profile: String,
     pub session_id: String,
     /// Where the agent was working — what a resume has to run in, and what
     /// scopes a search to the project you have open.
@@ -126,9 +128,10 @@ fn has_ext(p: &Path, ext: &str) -> bool {
 pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<SourceFile> {
     let home = PathBuf::from(home());
     let mut out: Vec<SourceFile> = Vec::new();
-    let mut push = |agent: &'static str, path: PathBuf, layout: Layout| {
+    let mut push = |agent: &'static str, profile: &str, path: PathBuf, layout: Layout| {
         out.push(SourceFile {
             agent,
+            profile: profile.into(),
             path,
             layout,
         });
@@ -136,37 +139,34 @@ pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Sour
 
     // Both file transcripts inside the config dir the session ran under, so
     // every account is its own store.
-    let cfg_roots: Vec<PathBuf> = crate::profiles::roots(&home.to_string_lossy())
-        .into_iter()
-        .map(|(_, root)| root)
-        .collect();
+    let cfg_roots = crate::profiles::roots(&home.to_string_lossy());
     if wanted("claude") {
-        let mut files = Vec::new();
-        for root in &cfg_roots {
+        for (profile, root) in &cfg_roots {
+            let mut files = Vec::new();
             walk(
                 &root.join(".claude/projects"),
                 1,
                 &|p| has_ext(p, "jsonl"),
                 &mut files,
             );
-        }
-        for f in files {
-            push("claude", f, Layout::Append);
+            for f in files {
+                push("claude", profile, f, Layout::Append);
+            }
         }
     }
     if wanted("codex") {
         // Bucketed YYYY/MM/DD, so three levels below the root.
-        let mut files = Vec::new();
-        for root in &cfg_roots {
+        for (profile, root) in &cfg_roots {
+            let mut files = Vec::new();
             walk(
                 &root.join(".codex/sessions"),
                 3,
                 &|p| has_ext(p, "jsonl"),
                 &mut files,
             );
-        }
-        for f in files {
-            push("codex", f, Layout::Append);
+            for f in files {
+                push("codex", profile, f, Layout::Append);
+            }
         }
     }
     if wanted("omp") {
@@ -182,7 +182,7 @@ pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Sour
             &mut files,
         );
         for f in files {
-            push("omp", f, Layout::Append);
+            push("omp", "default", f, Layout::Append);
         }
     }
     if wanted("gemini") {
@@ -205,7 +205,7 @@ pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Sour
                 files.push(log);
             }
             for f in files {
-                push("gemini", f, Layout::Whole);
+                push("gemini", "default", f, Layout::Whole);
             }
         }
     }
@@ -218,13 +218,15 @@ pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Sour
             &mut files,
         );
         for f in files {
-            push("agy", f, Layout::Whole);
+            push("agy", "default", f, Layout::Whole);
         }
     }
     if wanted("opencode") {
-        let db = home.join(".local/share/opencode/opencode.db");
-        if db.exists() {
-            push("opencode", db, Layout::Whole);
+        for (profile, root) in &cfg_roots {
+            let db = root.join(".local/share/opencode/opencode.db");
+            if db.exists() {
+                push("opencode", profile, db, Layout::Whole);
+            }
         }
     }
     if wanted("aider") {
@@ -232,7 +234,7 @@ pub fn source_files(roots: &[String], wanted: &dyn Fn(&str) -> bool) -> Vec<Sour
         for root in roots {
             let p = PathBuf::from(root).join(".aider.chat.history.md");
             if p.exists() {
-                push("aider", p, Layout::Whole);
+                push("aider", "default", p, Layout::Whole);
             }
         }
     }
@@ -576,6 +578,7 @@ fn gemini_log_sessions(v: &Value, cwd: &str, updated: i64) -> Vec<StoreSession> 
             Some(s) => s.bodies.push(clip(t)),
             None => by_session.push(StoreSession {
                 agent: "gemini".into(),
+                profile: "default".into(),
                 session_id: id.to_string(),
                 cwd: cwd.to_string(),
                 title: t.chars().take(120).collect(),
@@ -620,6 +623,7 @@ fn opencode_sessions(path: &Path) -> Vec<StoreSession> {
     for (id, cwd, title, updated) in rows.flatten() {
         let mut s = StoreSession {
             agent: "opencode".into(),
+            profile: "default".into(),
             session_id: id.clone(),
             cwd,
             title,
@@ -857,6 +861,7 @@ pub fn digests(
                     } else {
                         vec![digest_json(&StoreSession {
                             agent: f.agent.into(),
+                            profile: f.profile.clone(),
                             session_id: id,
                             cwd,
                             title: first_prompt(f.agent, &f.path),
@@ -868,7 +873,8 @@ pub fn digests(
                 Layout::Whole => whole_sessions(f.agent, &f.path, roots)
                     .into_iter()
                     .filter(|s| !s.session_id.is_empty())
-                    .map(|s| {
+                    .map(|mut s| {
+                        s.profile = f.profile.clone();
                         digest_json(&StoreSession {
                             bodies: Vec::new(),
                             ..s
@@ -910,6 +916,7 @@ fn digest_json(s: &StoreSession) -> Value {
     serde_json::json!({
         "session_id": s.session_id,
         "agent": s.agent,
+        "profile": s.profile,
         "cwd": s.cwd,
         "launch_cwd": s.cwd,
         "resume_cwd": s.cwd,
@@ -925,6 +932,20 @@ fn digest_json(s: &StoreSession) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_digest_keeps_the_account_that_owns_the_store() {
+        let digest = digest_json(&StoreSession {
+            agent: "opencode".into(),
+            profile: "work".into(),
+            session_id: "ses-1".into(),
+            cwd: "/repo".into(),
+            title: "fix it".into(),
+            updated: 1,
+            bodies: Vec::new(),
+        });
+        assert_eq!(digest["profile"], "work");
+    }
 
     #[test]
     fn sha256_matches_geminis_bucket_names() {

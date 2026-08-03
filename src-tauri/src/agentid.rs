@@ -39,7 +39,7 @@ pub struct AgentHint {
     /// followed, because the name you invoked is the name you recognise.
     pub bin: String,
     /// Package that ships the resolved executable, when one can be determined:
-    /// `npm:@anthropic-ai/claude-code`, `brew:omp`, `pypi:aider-chat`. This is
+    /// `npm:@anthropic-ai/claude-code`, `brew:omp`, `py:aider`. This is
     /// what survives an enterprise wrapper renaming the binary.
     pub pkg: Option<String>,
     /// Canonical path of the resolved executable — stable across the shims that
@@ -225,7 +225,9 @@ fn package_of(path: &Path) -> Option<String> {
     if let Some(pkg) = npm_package(path) {
         return Some(format!("npm:{pkg}"));
     }
-    python_dist(path).map(|dist| format!("pypi:{dist}"))
+    // `py:` names the import package visible in a generated console script;
+    // the PyPI distribution name (for example aider-chat) is not present there.
+    python_dist(path).map(|dist| format!("py:{dist}"))
 }
 
 /// Resolves executables to identities, remembering what it has already looked
@@ -360,6 +362,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(python_dist(&script).as_deref(), Some("aider"));
+        assert_eq!(package_of(&script).as_deref(), Some("py:aider"));
     }
 
     #[test]

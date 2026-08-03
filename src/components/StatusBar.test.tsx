@@ -258,6 +258,33 @@ describe("the tray's model control", () => {
     expect(onSetModel).toHaveBeenCalledWith(undefined);
   });
 
+  it("shows the active OpenCode model reported by its turn-start hook", () => {
+    const event = {
+      ts: 1,
+      data: {
+        sessionId: "ses_1",
+        cwd: "/repo",
+        pty: 9,
+        event: "UserPromptSubmit",
+        tool: "",
+        agent: "opencode",
+        model: "azure/gpt-5.6-sol",
+      },
+    } satisfies AgentEventEntry;
+    render(
+      <StatusBar
+        {...base}
+        events={[event]}
+        activePtyId={9}
+        onSetModel={vi.fn()}
+        modelSwitch={modelSwitchFor("opencode")}
+        agentLabel="OpenCode"
+      />,
+    );
+    expect(screen.getByText("gpt-5.6-sol ▾")).toBeTruthy();
+    expect(screen.queryByText("model ▾")).toBeNull();
+  });
+
   it("offers nothing for a CLI whose model command is unverified", () => {
     render(
       <StatusBar

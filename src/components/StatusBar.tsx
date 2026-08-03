@@ -355,6 +355,21 @@ export const StatusBar = memo(function StatusBar({
     return activePtyId != null && anyStamped ? null : projectLatest;
   }, [events, roots, activePtyId]);
 
+  // OpenCode exposes the active provider/model on chat.message even though it
+  // has no transcript path Canopy can incrementally poll. Keep this per-tab for
+  // the same reason as transcript selection above: another agent in the project
+  // must never lend its model label to the terminal in front.
+  const eventModel = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const d = events[i].data;
+      if (!d?.model || (activePtyId != null && d.pty !== activePtyId)) continue;
+      if (d.cwd && roots.some((r) => d.cwd === r || d.cwd.startsWith(r + "/"))) {
+        return d.model;
+      }
+    }
+    return null;
+  }, [events, roots, activePtyId]);
+
   // Gated on `visible`: a backgrounded project's chip is not on screen, and
   // asking git about it costs a subprocess. Switching back re-runs the effect,
   // which refreshes immediately. (The transcript reader below is still a
@@ -551,6 +566,10 @@ export const StatusBar = memo(function StatusBar({
   }, [transcript, visible]);
 
   const cost = stats ? estimateCost(stats) : null;
+  const activeModel = stats?.model ?? eventModel;
+  const modelLabel = activeModel
+    ?.replace(/^claude-/, "")
+    .replace(/^.*\//, "");
 
   // The tray chip reddens on the whole app's own footprint, not on anything
   // inside the popup: the per-session numbers only stream while the popup is
@@ -1010,7 +1029,7 @@ export const StatusBar = memo(function StatusBar({
           )}
         </span>
       )}
-      {(stats?.model || (onSetModel && modelSwitch)) && (
+      {(activeModel || (onSetModel && modelSwitch)) && (
         <span className="status-item status-model-anchor">
           {onSetModel && modelSwitch ? (
             <button
@@ -1031,16 +1050,11 @@ export const StatusBar = memo(function StatusBar({
                 setModelMenu((v) => !v);
               }}
             >
-              {/* Only Claude's transcript tells us the model in play. For the
-                  rest the button names the action instead of pretending to
-                  know — the tab strip already says which CLI it is. */}
-              {stats?.model
-                ? `${stats.model.replace(/^claude-/, "")} ▾`
-                : "model ▾"}
+              {modelLabel ? `${modelLabel} ▾` : "model ▾"}
             </button>
           ) : (
-            <span title="model (from Claude session transcript)">
-              {stats?.model?.replace(/^claude-/, "")}
+            <span title="active session model">
+              {modelLabel}
             </span>
           )}
           {modelMenu && modelSwitch?.kind === "inline" && (

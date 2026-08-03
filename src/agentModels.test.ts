@@ -18,7 +18,6 @@ describe("modelSwitchFor", () => {
     // something else — an error message, an HTTP route. Whichever way that is
     // resolved later, it must not be by guessing here.
     expect(modelSwitchFor("amp")).toBeNull();
-    expect(modelSwitchFor("omp")).toBeNull();
   });
 
   it("names only agents the rest of the app can identify", () => {
@@ -44,6 +43,7 @@ describe("modelCommandLine", () => {
     const codex = modelSwitchFor("codex")!;
     expect(modelCommandLine(codex, "gpt-5")).toBe("/model");
     expect(modelCommandLine(modelSwitchFor("gemini")!)).toBe("/model manage");
+    expect(modelCommandLine(modelSwitchFor("omp")!)).toBe("/model");
   });
 
   it("falls back to the bare command when an inline switch names no model", () => {
