@@ -4812,6 +4812,99 @@ pub struct TicketInfo {
     pub priority: String,
 }
 
+#[derive(Serialize)]
+pub struct GhIssueComment {
+    pub id: String,
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+    pub url: String,
+}
+
+#[derive(Serialize)]
+pub struct GhIssueDetail {
+    pub author: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub state: String,
+    pub comments: Vec<GhIssueComment>,
+}
+
+#[tauri::command]
+pub async fn gh_issue_detail(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u64,
+) -> Result<GhIssueDetail, String> {
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args([
+        "issue",
+        "view",
+        &number.to_string(),
+        "--json",
+        "author,createdAt,updatedAt,state,comments",
+    ]);
+    let out = run_net(&mut cmd)?;
+    let v: serde_json::Value =
+        serde_json::from_str(&out).map_err(|e| format!("gh returned unexpected output: {e}"))?;
+    let comments = v["comments"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|c| GhIssueComment {
+                    id: c["id"].as_str().unwrap_or("").to_string(),
+                    author: c["author"]["login"].as_str().unwrap_or("ghost").to_string(),
+                    body: c["body"].as_str().unwrap_or("").to_string(),
+                    created_at: c["createdAt"].as_str().unwrap_or("").to_string(),
+                    url: c["url"].as_str().unwrap_or("").to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(GhIssueDetail {
+        author: v["author"]["login"].as_str().unwrap_or("ghost").to_string(),
+        created_at: v["createdAt"].as_str().unwrap_or("").to_string(),
+        updated_at: v["updatedAt"].as_str().unwrap_or("").to_string(),
+        state: v["state"].as_str().unwrap_or("").to_lowercase(),
+        comments,
+    })
+}
+
+#[tauri::command]
+pub async fn gh_issue_set_state(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u64,
+    open: bool,
+) -> Result<(), String> {
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args([
+        "issue",
+        if open { "reopen" } else { "close" },
+        &number.to_string(),
+    ]);
+    run_net(&mut cmd).map(|_| ())
+}
+
+#[tauri::command]
+pub async fn gh_issue_comment(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u64,
+    body: String,
+) -> Result<(), String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("comment cannot be empty".into());
+    }
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args(["issue", "comment", &number.to_string(), "--body", body]);
+    run_net(&mut cmd).map(|_| ())
+}
+
 #[tauri::command]
 pub async fn gh_issue_list(
     state: State<'_, WorkspaceManager>,

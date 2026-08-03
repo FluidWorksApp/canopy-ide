@@ -2927,6 +2927,28 @@ export const ghAuth = () => invoke<GhAuth>("gh_auth");
 
 export const ghIssueList = (repo: string) =>
   invoke<TicketInfo[]>("gh_issue_list", { repo });
+export interface GhIssueComment {
+  id: string;
+  author: string;
+  body: string;
+  created_at: string;
+  url: string;
+}
+
+export interface GhIssueDetail {
+  author: string;
+  created_at: string;
+  updated_at: string;
+  state: string;
+  comments: GhIssueComment[];
+}
+
+export const ghIssueDetail = (repo: string, number: number) =>
+  invoke<GhIssueDetail>("gh_issue_detail", { repo, number });
+export const ghIssueSetState = (repo: string, number: number, open: boolean) =>
+  invoke<void>("gh_issue_set_state", { repo, number, open });
+export const ghIssueComment = (repo: string, number: number, body: string) =>
+  invoke<void>("gh_issue_comment", { repo, number, body });
 export const linearIssues = (apiKey: string) =>
   invoke<TicketInfo[]>("linear_issues", { apiKey });
 
