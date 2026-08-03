@@ -14,6 +14,7 @@
 //   canopy://chat?peer=ab12                           a teammate's conversation
 //   canopy://file?path=/Users/me/src/api/main.rs&line=40
 //   canopy://note?note=0007-tier-donations&id=p1      one scratchpad note
+//   canopy://pr?number=1341&path=/Users/me/src/api    a pull request's tab
 //   canopy://project?id=p1                            the project itself
 //   canopy://app                                      nothing in particular
 //
