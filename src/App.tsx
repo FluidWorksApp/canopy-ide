@@ -21,7 +21,7 @@ import {
   type Project,
   type WorkspaceState,
 } from "./projects";
-import type { AgentEventEntry, NoticeKind, RelayHandle } from "./types";
+import type { AgentEventEntry, NoticeKind, Notify, RelayHandle } from "./types";
 import type { CustomMicroTask } from "./microTasks";
 import {
   derivePending,
@@ -212,16 +212,6 @@ export default function App() {
   // eight call sites that each decided for themselves whether to raise a
   // native banner and what to call it.
   const attention = useAttention();
-  // The old `Notify` signature, unchanged, because it is threaded through
-  // nearly every component and is the migration seam. A caller that knows more
-  // than a string and a tone — which project, where a click should land, and
-  // whether it is asking rather than announcing — calls `postAttention`
-  // directly instead.
-  const notify = useCallback(
-    (text: string, kind: NoticeKind = "info") =>
-      void postAttention({ kind: "fyi", tone: kind, title: text, source: "app" }),
-    [],
-  );
   /** Which project a path belongs to, as the `projectId` / `projectName` pair
    *  every posted item carries. The name is stamped in rather than looked up
    *  later, like TaskRun.projectName: the history outlives the project being
@@ -233,19 +223,28 @@ export default function App() {
     (path: string | undefined): { projectId?: string; projectName?: string } => {
       if (!path) return {};
       const norm = (p: string) => p.replace(/\/+$/, "");
-      const c = norm(path);
-      let best: Project | undefined;
-      let bestLen = -1;
-      for (const p of wsRef.current.projects) {
-        for (const comp of p.components) {
-          const r = norm(comp.path);
-          if (r && (c === r || c.startsWith(r + "/")) && r.length > bestLen) {
-            bestLen = r.length;
-            best = p;
+      const match = (c: string) => {
+        let best: Project | undefined;
+        let bestLen = -1;
+        for (const p of wsRef.current.projects) {
+          for (const comp of p.components) {
+            const r = norm(comp.path);
+            if (r && (c === r || c.startsWith(r + "/")) && r.length > bestLen) {
+              bestLen = r.length;
+              best = p;
+            }
           }
         }
-      }
-      return best ? { projectId: best.id, projectName: best.name } : {};
+        return best ? { projectId: best.id, projectName: best.name } : {};
+      };
+      const c = norm(path);
+      const direct = match(c);
+      if (direct.projectId) return direct;
+      // A worktree checkout lives beside its repo as `<repo>-wt-…` — outside
+      // every component root, but unmistakably that repo's work. This is why a
+      // review task's "Task done" arrived with no project on it.
+      const folded = c.replace(/-wt-[^/]*/, "");
+      return folded !== c ? match(folded) : {};
     },
     [],
   );
@@ -258,6 +257,32 @@ export default function App() {
     [],
   );
   useNoteReminders(projectNameFor);
+  // The `Notify` seam, threaded through nearly every component. The opts bag
+  // is how a plain notice stops being anonymous: a caller names the project it
+  // speaks for (by id or by any path inside it) and where a click should land,
+  // and the item posted here carries both — instead of every notice arriving
+  // as "Canopy said a thing, somewhere". A caller that is asking rather than
+  // announcing still calls `postAttention` directly.
+  const notify = useCallback<Notify>(
+    (text, kind = "info", opts) => {
+      const identity = opts?.projectId
+        ? {
+            projectId: opts.projectId,
+            projectName: projectNameFor(opts.projectId),
+          }
+        : projectIdentity(opts?.path);
+      void postAttention({
+        kind: "fyi",
+        tone: kind,
+        title: text,
+        source: "app",
+        ...identity,
+        ...(opts?.body ? { body: opts.body } : {}),
+        ...(opts?.where ? { where: opts.where } : {}),
+      });
+    },
+    [projectIdentity, projectNameFor],
+  );
   // A micro-task in flight when Canopy last quit has no terminal to come back
   // to — its tab is ephemeral and never restored — so it can never report.
   // Settle those before anything new is recorded, or they stay "running"

@@ -24,11 +24,11 @@ import { thumbnail } from "../pageCapture";
 import {
   attachmentLabel,
   briefWithAttachments,
-  composerRows,
   isPrompt,
   pastedImages,
   type SpotAttachment,
 } from "../spotCompose";
+import { composerRows, insertNewlineAtCaret, isNewlineChord } from "../composer";
 import {
   deferredRows,
   instantRows,
@@ -315,6 +315,11 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
     } else if (e.key === "End" && !query) {
       e.preventDefault();
       setSel(Math.max(0, selectable.length - 1));
+    } else if (isNewlineChord(e)) {
+      // Shift+Enter the textarea would do itself; Option+Enter it would not,
+      // and both have to mean the same thing here.
+      e.preventDefault();
+      setQuery(insertNewlineAtCaret(e.currentTarget as HTMLTextAreaElement));
     } else if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       commit(selectable[sel]);
@@ -493,6 +498,7 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
           <span className="spot-hints">
             <kbd className="spot-key">↑↓</kbd> navigate
             <kbd className="spot-key">↵</kbd> open
+            <kbd className="spot-key">⇧↵</kbd> new line
             <kbd className="spot-key">esc</kbd> close
           </span>
         </div>
