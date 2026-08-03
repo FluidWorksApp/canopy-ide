@@ -89,16 +89,7 @@ export function pastedImages(data: DataTransfer | null): File[] {
   return out;
 }
 
-/** How tall the composer should be, in rows, for `text`.
- *
- *  Capped: past this the field would eat the results it exists to filter, and
- *  a textarea that scrolls is a normal thing to type into. */
-export const COMPOSER_MAX_ROWS = 8;
-
-export function composerRows(text: string, cols = 60): number {
-  if (!text) return 1;
-  // Wrapped lines count too, or pasting one long unbroken paragraph leaves a
-  // one-line box with the text scrolled out of sight.
-  const lines = text.split("\n").reduce((n, line) => n + Math.max(1, Math.ceil(line.length / cols)), 0);
-  return Math.max(1, Math.min(COMPOSER_MAX_ROWS, lines));
-}
+/** How tall the composer should be, in rows — shared with the companion's
+ *  chat, so it lives in ./composer and is re-exported here for the callers
+ *  that already knew it by this module. */
+export { COMPOSER_MAX_ROWS, composerRows } from "./composer";

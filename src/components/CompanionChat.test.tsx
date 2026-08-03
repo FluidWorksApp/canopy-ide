@@ -145,6 +145,42 @@ describe("the expand control", () => {
   });
 });
 
+describe("the composer", () => {
+  function typeInto(input: HTMLTextAreaElement, text: string) {
+    fireEvent.change(input, { target: { value: input.value + text } });
+    input.selectionStart = input.selectionEnd = input.value.length;
+  }
+
+  for (const chord of [
+    { name: "Shift+Enter", init: { key: "Enter", shiftKey: true } },
+    { name: "Option+Enter", init: { key: "Enter", altKey: true } },
+  ]) {
+    it(`${chord.name} writes a newline instead of sending`, () => {
+      const onSend = vi.fn();
+      mount(state([], "ready"), { onSend });
+      const input = document.querySelector(".companion-input") as HTMLTextAreaElement;
+      typeInto(input, "first line");
+      fireEvent.keyDown(input, chord.init);
+      typeInto(input, "second line");
+      expect(onSend).not.toHaveBeenCalled();
+      expect(input.value).toBe("first line\nsecond line");
+    });
+  }
+
+  it("sends on a bare Enter and grows with what is typed", () => {
+    const onSend = vi.fn();
+    mount(state([], "ready"), { onSend });
+    const input = document.querySelector(".companion-input") as HTMLTextAreaElement;
+    typeInto(input, "one");
+    expect(input.rows).toBe(1);
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    typeInto(input, "two");
+    expect(input.rows).toBe(2);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith("one\ntwo", []);
+  });
+});
+
 describe("attachments", () => {
   it("stages a selected file and sends its path with the message", async () => {
     const onSend = vi.fn();

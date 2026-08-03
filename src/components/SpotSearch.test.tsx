@@ -281,6 +281,15 @@ describe("SpotSearch as a composer", () => {
     );
   });
 
+  it("Option+Enter writes a newline instead of sending", async () => {
+    const { onAction } = open();
+    await userEvent.keyboard("first line{Alt>}{Enter}{/Alt}second line");
+    expect(onAction).not.toHaveBeenCalled();
+    expect((screen.getByRole("combobox") as HTMLTextAreaElement).value).toBe(
+      "first line\nsecond line",
+    );
+  });
+
   it("grows with what is typed", async () => {
     open();
     const field = () => screen.getByRole("combobox") as HTMLTextAreaElement;

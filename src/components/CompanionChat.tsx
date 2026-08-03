@@ -24,6 +24,7 @@ import {
   subscribeSpotlight,
 } from "../companionContext";
 import { toolDetail, toolLabel } from "../companion";
+import { composerRows, insertNewlineAtCaret, isNewlineChord } from "../composer";
 import { Markdown } from "./Markdown";
 
 interface Props {
@@ -350,7 +351,7 @@ export function CompanionChat({
         <textarea
           ref={input}
           className="companion-input"
-          rows={1}
+          rows={composerRows(draft, 40)}
           value={draft}
           placeholder={
             state.status === "unavailable"
@@ -369,9 +370,12 @@ export function CompanionChat({
             void attach(files);
           }}
           onKeyDown={(e) => {
-            // Enter sends, Shift+Enter is a newline — the convention every
-            // chat the user already types in follows.
-            if (e.key === "Enter" && !e.shiftKey) {
+            // Enter sends; Shift+Enter and Option+Enter are a newline — the
+            // convention every chat the user already types in follows.
+            if (isNewlineChord(e)) {
+              e.preventDefault();
+              setDraft(insertNewlineAtCaret(e.currentTarget));
+            } else if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               submit();
             }

@@ -99,7 +99,7 @@ import {
   TeamIcon,
   TerminalIcon,
 } from "../icons";
-import type { AgentEventEntry, OpenFile } from "../../types";
+import type { AgentEventEntry, Notify, OpenFile } from "../../types";
 import {
   derivePending,
   eventsForProject,
@@ -506,7 +506,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   dismissedPending,
   onDismissPending,
   onEdit,
-  onNotice,
+  onNotice: onNoticeRaw,
   onShareContext,
   onSaveCustomTasks,
   relay,
@@ -515,6 +515,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
   onRestored,
   useWorktreeRef,
 }: ProjectViewProps & { useWorktreeRef: UseWorktreeRef }) {
+  // Every notice raised inside a project speaks for that project. Stamped here
+  // — once, at the seam the whole tree receives — rather than asking each of
+  // the dozens of call sites below to remember, which is how the notification
+  // list filled with rows that couldn't say which project they were about.
+  const onNotice = useCallback<Notify>(
+    (text, kind, opts) =>
+      onNoticeRaw(text, kind, { projectId: project.id, ...opts }),
+    [onNoticeRaw, project.id],
+  );
   // Which engine preview tabs run on — it decides how a backgrounded preview
   // has to be hidden, which is a layout question, so it belongs up here.
   const browserEngine = useBrowserEngine();
@@ -2532,7 +2541,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (start.typePrompt) setTimeout(() => seedPrompt(pty), 2500);
         // Said once per launch because the alternative is a click that appears
         // to do nothing: the work is real, it is just not in front of you.
-        onNotice(`“${runName}” is running — watch it in Tasks.`);
+        onNotice(`“${runName}” is running — watch it in Tasks.`, "info", {
+          where: { kind: "panel", panel: "tasks", projectId: project.id },
+        });
         return true;
       }
 
@@ -3733,6 +3744,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (act.note) onNotice(act.note);
       } else if (act.do === "chat") {
         openChat(act.peer, act.name);
+      } else if (act.do === "pr") {
+        // Re-resolved against the live list: still open → its native tab,
+        // merged or closed since → the URL in the browser.
+        void openPrByNumber(act.repo, act.number, act.url);
       } else if (act.do === "note") {
         // The note tab reads the store itself and says so if the note is gone,
         // so the title is only a label until it loads — no round trip here
@@ -3754,7 +3769,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
     };
     window.addEventListener("canopy:deep-link", onLink);
     return () => window.removeEventListener("canopy:deep-link", onLink);
-  }, [project.id, openChat, openNote, onNotice, relay.status.members]);
+  }, [
+    project.id,
+    openChat,
+    openNote,
+    openPrByNumber,
+    onNotice,
+    relay.status.members,
+  ]);
 
   // A browser-control op (canopy_browser_*): pick the preview tab it targets —
   // by origin when it names a URL, else the active/first preview tab, creating

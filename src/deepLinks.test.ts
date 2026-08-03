@@ -29,6 +29,13 @@ describe("round trip", () => {
     { kind: "file", path: "/src/api/main.rs" },
     { kind: "note", noteId: "0007-tier-donations", projectId: "p1" },
     { kind: "note", noteId: "0007-tier-donations", path: "/src/api" },
+    {
+      kind: "pr",
+      number: 1341,
+      url: "https://github.com/o/r/pull/1341",
+      path: "/src/api",
+    },
+    { kind: "pr", number: 7, projectId: "p1" },
   ];
   for (const link of cases) {
     it(`survives ${formatDeepLink(link)}`, () => {
@@ -113,6 +120,14 @@ describe("parseDeepLink", () => {
       kind: "file",
       path: "/a.rs",
     });
+  });
+
+  it("drops a PR link with no number worth the name", () => {
+    // Same trap as pty: `Number(null)` is 0, and PR #0 was never meant.
+    expect(parseDeepLink("canopy://pr?path=/src/api")).toBeNull();
+    expect(parseDeepLink("canopy://pr?number=")).toBeNull();
+    expect(parseDeepLink("canopy://pr?number=abc")).toBeNull();
+    expect(parseDeepLink("canopy://pr?number=0")).toBeNull();
   });
 
   it("reads a chat link with no peer as the team conversation", () => {
@@ -264,6 +279,32 @@ describe("followLink", () => {
     expect(
       followLink({ kind: "note", noteId: "0007-x", projectId: "p1" }, ctx()),
     ).toEqual({ do: "note", noteId: "0007-x" });
+  });
+
+  it("hands a PR link to the live-list resolver, repo and fallback URL intact", () => {
+    expect(
+      followLink(
+        {
+          kind: "pr",
+          number: 1341,
+          url: "https://github.com/o/r/pull/1341",
+          path: "/src/api",
+        },
+        ctx(),
+      ),
+    ).toEqual({
+      do: "pr",
+      repo: "/src/api",
+      number: 1341,
+      url: "https://github.com/o/r/pull/1341",
+    });
+  });
+
+  it("lands a repo-less PR link on the PRs panel rather than nowhere", () => {
+    expect(followLink({ kind: "pr", number: 7 }, ctx())).toEqual({
+      do: "panel",
+      panel: "prs",
+    });
   });
 
   it("does nothing more for a project link — it is already open", () => {
