@@ -8482,26 +8482,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
           </div>
         </Dialog>
       )}
-      {confirmResume && (
-        <Dialog
-          variant="danger"
-          title="Reopen every one of these?"
-          body="Each one starts its own agent process. A dozen at once will take the machine down with them."
-          meta={`${confirmResume.count} terminals`}
-          dismissLabel="Cancel"
-          onDismiss={() => setConfirmResume(null)}
-          actions={[
-            {
-              label: `Reopen all ${confirmResume.count}`,
-              primary: true,
-              onClick: () => {
-                confirmResume.go();
-                setConfirmResume(null);
-              },
-            },
-          ]}
-        />
-      )}
       {rootCreate && (
         <Dialog
           variant="accent"
@@ -9119,6 +9099,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
         agentProfile={activeAgent.profile}
         activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
       />
+      {/* This action starts in the editor's empty state, so its confirmation
+          must not live in sidePanel: overlay mode slides that whole subtree
+          off-screen when the sidebar is closed. */}
+      {confirmResume && (
+        <Dialog
+          variant="danger"
+          title="Reopen every one of these?"
+          body="Each one starts its own agent process. A dozen at once will take the machine down with them."
+          meta={`${confirmResume.count} terminals`}
+          dismissLabel="Cancel"
+          onDismiss={() => setConfirmResume(null)}
+          actions={[
+            {
+              label: `Reopen all ${confirmResume.count}`,
+              primary: true,
+              onClick: () => {
+                confirmResume.go();
+                setConfirmResume(null);
+              },
+            },
+          ]}
+        />
+      )}
       {launcherOpen && visible && (
         <LaunchPalette
           installed={installed}
