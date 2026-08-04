@@ -7824,7 +7824,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ];
       tabMenu.open(e, items);
     },
-    [startRename, closeTab, tabMenu.open, taskMenu, startMicroTask],
+    [startRename, closeTab, closeVisualTab, tabMenu.open, taskMenu, startMicroTask],
   );
   const onClearScrollback = useCallback(() => {
     if (activeTermTab)
@@ -8670,7 +8670,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         isTerminalTab={activeTermTab !== null}
         onSelectTab={onSelectTab}
         onTabContextMenu={onTabContextMenu}
-        onCloseTab={(id) => closeTab(id, "user")}
+        onCloseTab={closeVisualTab}
         onCommitRename={commitRename}
         onCancelRename={cancelRename}
         onRenameDraftChange={setRenameDraft}
