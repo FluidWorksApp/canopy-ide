@@ -356,6 +356,7 @@ import {
   type RailChip,
   type ProjectViewProps,
   sidebarPrefs,
+  pickBrowserTab,
 } from "./helpers";
 import { Button } from "../ui";
 export { tabDisplayLabel, previewLabel, deviceLabel };
@@ -543,8 +544,30 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // has to be hidden, which is a layout question, so it belongs up here.
   const browserEngine = useBrowserEngine();
   const [sideTab, setSideTab] = useState<SideTab>("files");
-  const [browserPip, setBrowserPip] = useState<{ tabId: string; ptyId: number } | null>(null);
+  // One pip per agent session, not one shared between them. Two agents driving
+  // browsers are driving two different pages, and a single pip would show
+  // whichever of them acted last while claiming — with its icon — to be the
+  // other. Keyed by tab because the tab IS the browser session; a session that
+  // moves to another tab takes its pip with it rather than leaving a second one
+  // streaming a page it no longer looks at.
+  const [browserPips, setBrowserPips] = useState<{ tabId: string; ptyId: number }[]>([]);
   const dismissedBrowserPips = useRef(new Set<string>());
+  /** Which preview tab each session is ON, which is not the same list as the
+   *  pips: closing a pip hides the view, it does not move the agent off the page
+   *  it was driving. Routing reads this and the pip is a view of it, so the two
+   *  can never name different pages — which is the whole point of recording it
+   *  rather than inferring "the newest tab it owns". A ref because the only
+   *  reader is an event handler. */
+  const sessionPreview = useRef(new Map<number, string>());
+  const showBrowserPip = useCallback((tabId: string, ptyId: number) => {
+    sessionPreview.current.set(ptyId, tabId);
+    if (dismissedBrowserPips.current.has(tabId)) return;
+    setBrowserPips((prev) =>
+      prev.some((p) => p.tabId === tabId && p.ptyId === ptyId)
+        ? prev
+        : [...prev.filter((p) => p.tabId !== tabId && p.ptyId !== ptyId), { tabId, ptyId }],
+    );
+  }, []);
   // The side panel is a hover overlay, not a docked column. `pinned` is the
   // click/Cmd+B latch that keeps it out; `peeking` is the transient hover state
   // that the debounce below retracts. Either one shows it.
@@ -602,6 +625,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, [sidePrefs.overlay, sideOpen]);
   const [tabs, setTabs] = useState<SubTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  /** Every pip whose tab still exists — what gets RENDERED, including the one
+   *  whose tab is in front. That one is rendered hidden rather than dropped:
+   *  where the user dragged it, how wide they made it and whether it is
+   *  minimized live inside the component, and unmounting it threw all three
+   *  away every time they looked at the full page. */
+  const livePips = useMemo(
+    () =>
+      browserPips.filter((p) =>
+        tabs.some((t) => t.id === p.tabId && t.type === "preview"),
+      ),
+    [browserPips, tabs],
+  );
+  /** The ones actually on screen, in a stable order — the layout deals each a
+   *  different corner offset from its place in this list, so a pip must not hop
+   *  a slot because an unrelated one closed, and a hidden one must not hold a
+   *  slot open.
+   *
+   *  A pip whose tab is in front is not among them: the full browser IS the live
+   *  view there, and the small duplicate would only cover its corner. */
+  const shownBrowserPips = useMemo(
+    () => livePips.filter((p) => p.tabId !== activeTabId),
+    [livePips, activeTabId],
+  );
   /** Briefly ringed after a jump — with several similar terminal tabs open,
    *  activating one is not enough to show WHICH one you landed on. */
   const [flashTabId, setFlashTabId] = useState<string | null>(null);
@@ -3917,7 +3963,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           a.ptyId,
           a.ptyId == null && getSettings().agentAskForAttention,
         );
-        if (a.ptyId != null) setBrowserPip({ tabId: id, ptyId: a.ptyId });
+        if (a.ptyId != null) showBrowserPip(id, a.ptyId);
       } else if (a.kind === "start_server" && a.dir && a.command) {
         // `command` is the resolved command line, `name` its label — the same
         // pair the component-commands ▶ uses. Reuse a tab already on it.
@@ -3977,6 +4023,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     beginSelfClose,
     updateMicroRuns,
     patchTabRaw,
+    showBrowserPip,
   ]);
 
   // The tail of a deep link (deepLinks.ts): App resolved the project and
@@ -4071,13 +4118,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // and the only pixels available are this window's, has to refuse — see
   // planAgentShot, which holds both halves of that rule.
   useEffect(() => {
-    const originOf = (u: string): string | null => {
-      try {
-        return new URL(u).origin;
-      } catch {
-        return null;
-      }
-    };
     const onBrowserOp = (e: Event) => {
       const d = (e as CustomEvent).detail as {
         projectId: string;
@@ -4088,13 +4128,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const previews = tabsRef.current.filter(
         (t): t is PreviewSubTab => t.type === "preview",
       );
-      const wantOrigin = op.url ? originOf(op.url) : null;
-      const tab =
-        (wantOrigin && previews.find((t) => originOf(t.url) === wantOrigin)) ||
-        previews.find((t) => t.id === activeTabIdRef.current && t.url) ||
-        previews.find((t) => !!t.url) ||
-        // A URL navigation can take over an empty (server-picker) preview tab.
-        (op.op === "navigate" && op.url ? previews[0] : undefined);
+      // Each session gets a page of its own, and stays on the one it is on —
+      // see pickBrowserTab for why both halves matter.
+      const tab = pickBrowserTab(
+        previews,
+        {
+          url: op.url,
+          ptyId: op.ptyId,
+          navigating: op.op === "navigate" && !!op.url,
+          currentTabId:
+            op.ptyId == null ? null : sessionPreview.current.get(op.ptyId) ?? null,
+        },
+        activeTabIdRef.current,
+      );
       if (tab) {
         // An agent navigating an empty picker is creating the session just as
         // surely as open_preview does. Never overwrite an existing preview's
@@ -4102,13 +4148,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (tab.initiatorPtyId == null && op.ptyId != null) {
           patchTabRaw(tab.id, { initiatorPtyId: op.ptyId } as Partial<SubTab>);
         }
-        if (op.ptyId != null && !dismissedBrowserPips.current.has(tab.id)) {
-          setBrowserPip({ tabId: tab.id, ptyId: op.ptyId });
-        }
+        if (op.ptyId != null) showBrowserPip(tab.id, op.ptyId);
         dispatchBrowserOp(tab.id, op);
       } else if (op.op === "navigate" && op.url) {
         const id = openPreview(op.url, op.ptyId, false);
-        if (op.ptyId != null) setBrowserPip({ tabId: id, ptyId: op.ptyId });
+        if (op.ptyId != null) showBrowserPip(id, op.ptyId);
         dispatchBrowserOp(id, op);
       } else {
         void ipc.browserResult(
@@ -4121,7 +4165,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     window.addEventListener("canopy:agent-browser", onBrowserOp);
     return () =>
       window.removeEventListener("canopy:agent-browser", onBrowserOp);
-  }, [project.id, openPreview, patchTabRaw]);
+  }, [project.id, openPreview, patchTabRaw, showBrowserPip]);
 
   // A link the user clicked, from anywhere in the app: main.tsx delegates every
   // anchor through links.ts, which asks here first when Settings → Browser says
@@ -7587,7 +7631,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             shots={tab.shots ?? []}
             dir={componentsRef.current[0]?.path ?? firstRoot}
             visible={tab.id === activeTabId && visible}
-            streaming={browserPip?.tabId === tab.id}
+            streaming={shownBrowserPips.some((p) => p.tabId === tab.id)}
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             servers={previewServers}
             agentTargets={agentTargets}
@@ -8438,14 +8482,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
             </div>
           </>
         )}
-        {browserPip && (() => {
+        {livePips.map(({ tabId, ptyId }) => {
           const tab = tabs.find(
-            (t): t is PreviewSubTab => t.type === "preview" && t.id === browserPip.tabId,
+            (t): t is PreviewSubTab => t.type === "preview" && t.id === tabId,
           );
-          // When the user deliberately opens the full browser, it is already the
-          // live view and the smaller duplicate would only cover its corner.
-          if (!tab?.url || tab.id === activeTabId) return null;
-          const agent = agentTargets.find((a) => a.ptyId === browserPip.ptyId);
+          if (!tab?.url) return null;
+          const agent = agentTargets.find((a) => a.ptyId === ptyId);
+          // -1 for a hidden pip, which needs no slot; it keeps whatever
+          // placement the user gave it and is only waiting to come back.
+          const slot = shownBrowserPips.findIndex((p) => p.tabId === tab.id);
           return (
             <AgentBrowserPip
               key={tab.id}
@@ -8454,13 +8499,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
               agentId={agent?.agentId ?? "agent"}
               agentTitle={agent?.title || "Agent browser"}
               supported={browserEngine === "webview"}
+              slot={Math.max(0, slot)}
+              hidden={slot < 0}
               onClose={() => {
                 dismissedBrowserPips.current.add(tab.id);
-                setBrowserPip(null);
+                setBrowserPips((prev) => prev.filter((p) => p.tabId !== tab.id));
               }}
             />
           );
-        })()}
+        })}
       </div>
     </div>
   );

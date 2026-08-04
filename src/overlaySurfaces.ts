@@ -352,6 +352,19 @@ export const OVERLAY_SURFACES: OverlaySurface[] = [
     why: "Only a destructive or outward-facing action opens it, and the test takes none.",
   },
   {
+    // One per agent driving a browser, and the only surface here that is itself
+    // a picture of a browser. It can only be over a DIFFERENT preview tab's
+    // view — a pip whose own tab is in front is dropped, because the full
+    // browser is already the live view there — and the user drags it, so where
+    // it ends up is not something this file can predict.
+    id: "agent-browser-pip",
+    label: "Agent browser picture in picture",
+    selector: ".agent-browser-pip",
+    kind: "persistent",
+    covers: "edge",
+    why: "Only an agent driving a page puts one up, and the selftest has no agent session to drive one with.",
+  },
+  {
     id: "modal-dialog",
     label: "Project / share dialogs",
     selector: ".modal-backdrop",
