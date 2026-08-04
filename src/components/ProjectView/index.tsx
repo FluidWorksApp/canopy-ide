@@ -320,7 +320,7 @@ import {
 import {
   forgetTerminals,
   rememberTerminals,
-  rememberedTerminals,
+  rememberedTerminalState,
   type RememberedTerminal,
 } from "../../terminalMemory";
 import { PrView } from "../PrView";
@@ -1944,20 +1944,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
         title: t.customTitle ?? t.title,
         icon: t.icon,
         run: t.run,
+        tabId: t.id,
+        paneGroup: t.paneGroup,
       }));
-    rememberTerminals(project.id, open);
-  }, [tabs, project.id]);
+    rememberTerminals(project.id, open, terminalGroups);
+  }, [tabs, terminalGroups, project.id]);
 
   const [remembered, setRemembered] = useState<RememberedTerminal[]>([]);
+  const [rememberedLayouts, setRememberedLayouts] = useState<
+    Record<string, TerminalGroup>
+  >({});
   useEffect(() => {
     if (tabs.length > 0 || !visible) return;
+    reopenedRememberedIds.current.clear();
+    const memory = rememberedTerminalState(project.id);
     // The command marker drops micro-tasks snapshotted before they were
     // excluded above — they'd otherwise sit in the list until overwritten.
     setRemembered(
-      rememberedTerminals(project.id).filter(
+      memory.terminals.filter(
         (t) => !(t.command ?? "").includes("CANOPY_MICRO_TASK="),
       ),
     );
+    setRememberedLayouts(memory.terminalGroups);
   }, [tabs.length, visible, project.id]);
 
   // A terminal running `claude` or `omp` is an agent, not a shell — listing it
@@ -1976,10 +1984,58 @@ const ProjectViewBody = memo(function ProjectViewBody({
     (t) => !restorable.some((r) => r.cwd === t.cwd),
   );
 
+  const reopenedRememberedIds = useRef(new Map<string, string>());
+  const registerRememberedPane = useCallback(
+    (terminal: RememberedTerminal, newTabId: string) => {
+      if (!terminal.tabId || !terminal.paneGroup) return;
+      reopenedRememberedIds.current.set(terminal.tabId, newTabId);
+      const rememberedGroup = rememberedLayouts[terminal.paneGroup];
+      if (!rememberedGroup) return;
+      const root = mapSplitTabIds(rememberedGroup.root, reopenedRememberedIds.current);
+      const leaves = root ? leafIds(root) : [];
+      if (!root || leaves.length < 2) return;
+      const group: TerminalGroup = {
+        ...rememberedGroup,
+        root,
+        activeTabId:
+          reopenedRememberedIds.current.get(rememberedGroup.activeTabId) ??
+          leaves[0],
+        zoomedTabId: rememberedGroup.zoomedTabId
+          ? reopenedRememberedIds.current.get(rememberedGroup.zoomedTabId)
+          : undefined,
+      };
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.type === "terminal" && leaves.includes(tab.id)
+            ? { ...tab, paneGroup: group.id }
+            : tab,
+        ),
+      );
+      setTerminalGroups((prev) => {
+        const next = { ...prev, [group.id]: group };
+        terminalGroupsRef.current = next;
+        return next;
+      });
+    },
+    [rememberedLayouts],
+  );
+
   const reopenTerminal = useCallback(
-    (t: RememberedTerminal) =>
-      addTerminal(t.cwd, t.command, t.title, t.icon, t.run),
-    [addTerminal],
+    (t: RememberedTerminal) => {
+      const id = addTerminal(
+        t.cwd,
+        t.command,
+        t.title,
+        t.icon,
+        t.run,
+        undefined,
+        undefined,
+        true,
+        t.paneGroup,
+      );
+      registerRememberedPane(t, id);
+    },
+    [addTerminal, registerRememberedPane],
   );
 
   const resumeSession = useCallback(
@@ -2011,7 +2067,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         r.profile && r.profile !== "default"
           ? await ipc.profileEnv(r.agentId, r.profile).catch(() => [])
           : [];
-      addTerminal(
+      const rememberedPane = remembered.find(
+        (t) =>
+          t.tabId != null &&
+          !reopenedRememberedIds.current.has(t.tabId) &&
+          t.cwd === r.cwd &&
+          agentIdForCommand(t.command) === r.agentId,
+      );
+      const id = addTerminal(
         r.cwd,
         r.command,
         r.digest.agent ?? "agent",
@@ -2019,9 +2082,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         false,
         env,
         env.length ? r.profile : undefined,
+        true,
+        rememberedPane?.paneGroup,
       );
+      if (rememberedPane) registerRememberedPane(rememberedPane, id);
     },
-    [addTerminal],
+    [addTerminal, remembered, registerRememberedPane],
   );
 
   /** Carry out an accepted reload: each eligible agent's terminal is replaced
