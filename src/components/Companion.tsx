@@ -62,6 +62,16 @@ const GAP = 14;
  *  than a click. Below this, a click with a shaky hand would move the companion
  *  instead of opening it. */
 const DRAG_SLOP = 4;
+const IDLE_ANTICS = ["hop", "look", "stretch"] as const;
+type IdleAntic = (typeof IDLE_ANTICS)[number];
+const ANTIC_DURATION = 1600;
+const ANTIC_DELAY_MIN = 14_000;
+const ANTIC_DELAY_RANGE = 20_000;
+
+function nextAntic(last: IdleAntic | null): IdleAntic {
+  const choices = last ? IDLE_ANTICS.filter((antic) => antic !== last) : IDLE_ANTICS;
+  return choices[Math.floor(Math.random() * choices.length)] ?? "look";
+}
 
 interface CompanionProps {
   /** What would otherwise have been a corner toast. Presented from wherever
@@ -162,6 +172,8 @@ export function Companion({
   // Live position while dragging: settings are only written on release, so a
   // drag does not put a localStorage write on every pointermove.
   const [dragSpot, setDragSpot] = useState<CompanionSpot | null>(null);
+  const [idleAntic, setIdleAntic] = useState<IdleAntic | null>(null);
+  const lastAntic = useRef<IdleAntic | null>(null);
   const drag = useRef<{ dx: number; dy: number; moved: boolean } | null>(null);
   // Read in the pointer handler, which is memoised on inputs that must not
   // include a proposal arriving mid-drag.
@@ -190,6 +202,49 @@ export function Companion({
   // work. The rest stay in the notification centre, which is where a queue
   // belongs.
   const notice = notices[notices.length - 1];
+
+  // A small, occasional bit of life rather than another continuous loop. It is
+  // strictly an idle behavior: work, conversation and attention all outrank
+  // entertainment, and a background or reduced-motion window stays still.
+  const canPlay =
+    (state.status === "ready" || state.status === "off") &&
+    !open &&
+    !dragSpot &&
+    !notice &&
+    !proposal &&
+    !browserInFront;
+  useEffect(() => {
+    if (!canPlay) {
+      setIdleAntic(null);
+      return;
+    }
+    let startTimer = 0;
+    let endTimer = 0;
+    const schedule = () => {
+      startTimer = window.setTimeout(play, ANTIC_DELAY_MIN + Math.random() * ANTIC_DELAY_RANGE);
+    };
+    const play = () => {
+      const reduceMotion =
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (document.hidden || reduceMotion) {
+        schedule();
+        return;
+      }
+      const next = nextAntic(lastAntic.current);
+      lastAntic.current = next;
+      setIdleAntic(next);
+      endTimer = window.setTimeout(() => {
+        setIdleAntic(null);
+        schedule();
+      }, ANTIC_DURATION);
+    };
+    schedule();
+    return () => {
+      window.clearTimeout(startTimer);
+      window.clearTimeout(endTimer);
+    };
+  }, [canPlay]);
 
   // The card is not the panel, and placing it with the panel's geometry meant
   // the panel's 380px bottom clamp: with the companion parked near the bottom
@@ -311,7 +366,7 @@ export function Companion({
   return (
     <>
       <div
-        className={`companion${dragging ? " companion-dragging" : ""}`}
+        className={`companion${dragging ? " companion-dragging" : ""}${idleAntic ? ` companion-antic-${idleAntic}` : ""}`}
         style={{ left: at.left, top: at.top, width: MASCOT, height: MASCOT }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}

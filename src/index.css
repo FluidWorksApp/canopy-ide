@@ -21538,6 +21538,96 @@ a.btn-sm {
   filter: drop-shadow(0 12px 24px rgba(6, 8, 18, 0.65));
 }
 
+/* Long rests get a brief piece of personality. These run once; Companion.tsx
+   chooses and schedules them only while Ash has genuinely nothing to do. */
+.companion-antic-hop {
+  animation: companion-antic-hop 1.6s cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+
+.companion-antic-look {
+  animation: companion-antic-look 1.6s ease-in-out both;
+}
+
+.companion-antic-look .ash-blink {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: companion-antic-look-eyes 1.6s ease-in-out both;
+}
+
+.companion-antic-stretch {
+  animation: companion-antic-stretch 1.6s cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+
+@keyframes companion-antic-hop {
+  0%,
+  18%,
+  72%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  30% {
+    transform: translateY(2px) scale(1.05, 0.94);
+  }
+  48% {
+    transform: translateY(-10px) scale(0.96, 1.05);
+  }
+  62% {
+    transform: translateY(1px) scale(1.04, 0.96);
+  }
+}
+
+@keyframes companion-antic-look {
+  0%,
+  16%,
+  84%,
+  100% {
+    transform: translateX(0) rotate(0deg);
+  }
+  30%,
+  46% {
+    transform: translateX(-3px) rotate(-5deg);
+  }
+  58%,
+  74% {
+    transform: translateX(3px) rotate(5deg);
+  }
+}
+
+@keyframes companion-antic-look-eyes {
+  0%,
+  16%,
+  84%,
+  100% {
+    transform: translateX(0);
+  }
+  30%,
+  46% {
+    transform: translateX(-1.8px);
+  }
+  58%,
+  74% {
+    transform: translateX(1.8px);
+  }
+}
+
+@keyframes companion-antic-stretch {
+  0%,
+  20%,
+  78%,
+  100% {
+    transform: scale(1);
+  }
+  38% {
+    transform: translateY(-2px) scale(0.92, 1.12);
+  }
+  55% {
+    transform: translateY(1px) scale(1.08, 0.94);
+  }
+  68% {
+    transform: scale(0.985, 1.015);
+  }
+}
+
 /* ---- the notice, delivered by the companion instead of the corner ---- */
 
 .companion-notice {
