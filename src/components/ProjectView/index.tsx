@@ -16,7 +16,7 @@ import {
 } from "react";
 import { Panel, PanelGroup } from "react-resizable-panels";
 import * as ipc from "../../ipc";
-import { format, matches, matchesModifierClick } from "../../shortcuts";
+import { format, formatChord, matches, matchesModifierClick } from "../../shortcuts";
 import {
   equalizeSplits,
   layoutSplit,
@@ -7295,14 +7295,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
         },
         {
           label: "Navigate between panes",
-          shortcut:
-            currentPlatform() === "macos" ? "⌥⌘ + arrow keys" : "Ctrl+Alt+Arrow keys",
+          shortcut: [
+            format("focus-pane-left"),
+            format("focus-pane-up"),
+            format("focus-pane-down"),
+            format("focus-pane-right"),
+          ].join(" · "),
         },
         {
           label: "Open a standalone agent tab",
-          shortcut: `${format("new-launcher")} then ${
-            currentPlatform() === "macos" ? "⌥↵" : "Alt+Enter"
-          }`,
+          shortcut: `${format("new-launcher")} then ${formatChord({
+            meta: false,
+            ctrl: false,
+            alt: true,
+            shift: false,
+            code: "Enter",
+          })}`,
         },
       ],
     },
