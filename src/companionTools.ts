@@ -140,6 +140,7 @@ export const MUTATING_TOOLS: string[] = [
   "canopy_browser_type",
   "canopy_browser_eval",
   "canopy_browser_navigate",
+  "canopy_browser_resize",
   "canopy_pr_action",
 ];
 

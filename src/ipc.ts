@@ -208,6 +208,7 @@ export interface AgentBrowserOp {
   id: number;
   op:
     | "navigate"
+    | "resize"
     | "snapshot"
     | "click"
     | "type"
@@ -222,6 +223,10 @@ export interface AgentBrowserOp {
   scope?: "browser" | "ide" | null;
   url?: string | null;
   action?: string | null;
+  /** resize: CSS viewport dimensions, or reset to fill the preview pane. */
+  width?: number | null;
+  height?: number | null;
+  reset?: boolean | null;
   ref?: number | null;
   selector?: string | null;
   text?: string | null;

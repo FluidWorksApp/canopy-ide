@@ -326,6 +326,7 @@ export function PreviewView({
   // the (new) document announces ready.
   const pendingOps = useRef(new Map<number, { op: ipc.AgentBrowserOp; timer: number }>());
   const navWaiters = useRef<{ id: number; timer: number }[]>([]);
+  const [viewport, setViewport] = useState<{ width: number; height: number } | null>(null);
   /** The in-flight "drag a region" ask, settled by the page's answer. */
   const regionWaiter = useRef<{
     resolve: (r: CaptureRect | null) => void;
@@ -672,6 +673,23 @@ export function PreviewView({
         });
       }, 10000);
       navWaiters.current.push({ id: op.id, timer });
+      return;
+    }
+    if (op.op === "resize") {
+      const next = op.reset ? null : { width: op.width!, height: op.height! };
+      setViewport(next);
+      // Let React commit the box and browserHost's ResizeObserver move the
+      // native view before reporting the viewport the page now has. A timer is
+      // deliberate: animation frames stop when the IDE window is occluded.
+      window.setTimeout(() => {
+        const el = nativeRef.current ? hostRef.current : iframeRef.current;
+        void ipc.browserResult(op.id, true, {
+          url: urlRef.current,
+          width: Math.round(el?.clientWidth ?? next?.width ?? 0),
+          height: Math.round(el?.clientHeight ?? next?.height ?? 0),
+          reset: next === null,
+        });
+      }, 80);
       return;
     }
     if (op.op === "screenshot") {
@@ -1088,8 +1106,25 @@ export function PreviewView({
           </span>
         )}
       </div>
-      <div className="preview-body">
-        <div className="preview-frame-wrap">{body}</div>
+      <div
+        className="preview-body"
+        style={viewport ? { overflow: "auto", alignItems: "flex-start" } : undefined}
+      >
+        <div
+          className="preview-frame-wrap"
+          style={
+            viewport
+              ? {
+                  width: viewport.width,
+                  height: viewport.height,
+                  flex: "0 0 auto",
+                  marginInline: "auto",
+                }
+              : undefined
+          }
+        >
+          {body}
+        </div>
         {(annotations.length > 0 || picking || shots.length > 0) && (
           <div className="preview-panel">
             {shots.length > 0 && (
