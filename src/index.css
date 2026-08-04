@@ -16609,9 +16609,58 @@ a.btn-sm {
 
 .onboarding-body {
   color: var(--text-dim);
-  max-width: 360px;
+  max-width: 390px;
   margin: 0;
   line-height: 1.5;
+}
+
+.onboarding-config {
+  width: min(100%, 360px);
+  min-height: 32px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: stretch;
+  gap: 5px;
+  text-align: left;
+}
+
+.onboarding-config:empty {
+  display: none;
+}
+
+.onboarding-config-label {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.onboarding-config .ctl-select-wrap {
+  width: 100%;
+}
+
+.onboarding-config .set-inline-check {
+  margin: 0;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.onboarding-config .set-inline-check input {
+  margin-top: 1px;
+}
+
+.onboarding-config .set-inline-check em {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  font-style: normal;
+  font-weight: 400;
+  line-height: 1.35;
 }
 
 .onboarding-dots {

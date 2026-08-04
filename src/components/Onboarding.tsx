@@ -8,9 +8,16 @@
 // prefers-reduced-motion stops the motion and shows the resting state.
 import { useState } from "react";
 import { useEscape } from "../useEscape";
-import { Button, Select } from "./ui";
-import { formatHotkey, getSettings, updateSettings } from "../settings";
-import { format, SHORTCUT_PROFILES, type ShortcutProfile } from "../shortcuts";
+import { Button, Checkbox, Select } from "./ui";
+import {
+  type DictationTriggerMode,
+  type Settings,
+  formatHotkey,
+  getSettings,
+  updateSettings,
+} from "../settings";
+import { format, SHORTCUT_PROFILES } from "../shortcuts";
+import { AGENT_CLIS } from "../projects";
 
 interface OnboardingProps {
   /** Called when the walkthrough is dismissed any way (Skip, Esc, Done). */
@@ -112,7 +119,7 @@ const SLIDES: Slide[] = [
   {
     icon: "♻️",
     title: "Sessions and projects",
-    body: "Every session and project, side by side.",
+    body: "Load projects with every frontend, backend, worker, and other component side by side.",
     mock: (
       <Scene vars={{ "--cx0": "60px", "--cy0": "22px", "--cx1": "168px", "--cy1": "12px" } as React.CSSProperties}>
         <div className="ob-ptabs">
@@ -252,13 +259,12 @@ const SLIDES: Slide[] = [
 
 export function Onboarding({ onClose, onCreateProject }: OnboardingProps) {
   const [step, setStep] = useState(0);
-  const [profile, setProfile] = useState<ShortcutProfile>(
-    () => getSettings().keymapProfile,
-  );
+  const [settings, setSettings] = useState(getSettings);
   useEscape(onClose, true);
 
   const last = step === SLIDES.length - 1;
   const slide = SLIDES[step];
+  const patch = (next: Partial<Settings>) => setSettings(updateSettings(next));
 
   return (
     <div className="confirm-backdrop" onMouseDown={onClose}>
@@ -278,24 +284,71 @@ export function Onboarding({ onClose, onCreateProject }: OnboardingProps) {
             <span aria-hidden>{slide.icon}</span> {slide.title}
           </div>
           <p className="onboarding-body">{slide.body}</p>
-          {step === 0 && (
-            <Select
-              width="lg"
-              aria-label="Keyboard shortcut profile"
-              value={profile}
-              onChange={(e) => {
-                const next = e.target.value as ShortcutProfile;
-                setProfile(next);
-                updateSettings({ keymapProfile: next });
-              }}
-            >
-              {SHORTCUT_PROFILES.map((option) => (
-                <option key={option.id} value={option.id}>
-                  {option.label} — {option.description}
-                </option>
-              ))}
-            </Select>
-          )}
+          <div className="onboarding-config">
+            {step === 0 && (
+              <>
+                <span className="onboarding-config-label">Choose your shortcut profile</span>
+                <Select
+                  width="lg"
+                  aria-label="Keyboard shortcut profile"
+                  value={settings.keymapProfile}
+                  onChange={(e) => patch({ keymapProfile: e.target.value as Settings["keymapProfile"] })}
+                >
+                  {SHORTCUT_PROFILES.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label} — {option.description}
+                    </option>
+                  ))}
+                </Select>
+              </>
+            )}
+            {step === 1 && (
+              <>
+                <span className="onboarding-config-label">Choose the agent Canopy starts by default</span>
+                <Select
+                  width="lg"
+                  aria-label="Default agent"
+                  value={settings.defaultAgent}
+                  onChange={(e) => patch({ defaultAgent: e.target.value })}
+                >
+                  {AGENT_CLIS.map((cli) => (
+                    <option key={cli.id} value={cli.id}>{cli.name}</option>
+                  ))}
+                </Select>
+              </>
+            )}
+            {step === 4 && (
+              <>
+                <span className="onboarding-config-label">Choose how dictation starts</span>
+                <Select
+                  width="lg"
+                  aria-label="Dictation trigger"
+                  value={settings.dictationTriggerMode}
+                  onChange={(e) => patch({ dictationTriggerMode: e.target.value as DictationTriggerMode })}
+                >
+                  <option value="hold">Hold a modifier — push to talk</option>
+                  <option value="doubleTap">Double-tap a modifier</option>
+                  <option value="combo">Key combo</option>
+                </Select>
+              </>
+            )}
+            {step === 6 && (
+              <Checkbox
+                checked={settings.spotSearchAllProjects}
+                onChange={(spotSearchAllProjects) => patch({ spotSearchAllProjects })}
+                label="Search across every project by default"
+                hint="Off keeps searches inside the project you are viewing."
+              />
+            )}
+            {step === 7 && (
+              <Checkbox
+                checked={settings.autoImportMarkdownResearch}
+                onChange={(autoImportMarkdownResearch) => patch({ autoImportMarkdownResearch })}
+                label="Automatically import project research"
+                hint="Canopy recognizes research-like Markdown and skips policies, instructions, and generated files."
+              />
+            )}
+          </div>
         </div>
 
         <div className="onboarding-dots" role="tablist" aria-label="Walkthrough progress">
