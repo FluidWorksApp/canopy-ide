@@ -52,14 +52,6 @@ describe("LaunchPalette", () => {
     expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0]);
   });
 
-  it("launches an agent standalone on Alt+Enter", async () => {
-    const { onLaunchCli } = open();
-    await userEvent.keyboard("{ArrowDown}{Alt>}{Enter}{/Alt}");
-    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], {
-      standalone: true,
-    });
-  });
-
   it("does not run off the end of the list", async () => {
     const { onShell } = open();
     // Up from the first row stays on the first row rather than wrapping to a

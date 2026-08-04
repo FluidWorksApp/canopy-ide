@@ -16,7 +16,7 @@ import {
 } from "react";
 import { Panel, PanelGroup } from "react-resizable-panels";
 import * as ipc from "../../ipc";
-import { format, formatChord, matches, matchesModifierClick } from "../../shortcuts";
+import { format, matches, matchesModifierClick } from "../../shortcuts";
 import {
   equalizeSplits,
   layoutSplit,
@@ -1267,7 +1267,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
       profile?: string,
       activate = true,
       paneGroup?: string,
-      autoMultiplex = true,
     ) => {
       const id = tabId();
       // Every terminal opened inside a workspace gets that workspace's port,
@@ -1287,55 +1286,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         (launchedCli && accountEnv.length ? launchProfile(launchedCli) : undefined) ??
         undefined;
       const env = [...portEnv(portForPath(cwd)), ...accountEnv];
-      let resolvedPaneGroup = paneGroup;
-      let multiplexSource: TermSubTab | undefined;
-      if (launchedCli && autoMultiplex && !paneGroup) {
-        const agents = tabsRef.current.filter(
-          (tab): tab is TermSubTab =>
-            tab.type === "terminal" &&
-            !tab.run &&
-            !tab.micro &&
-            Boolean(agentIdForCommand(tab.command)),
-        );
-        multiplexSource = agents.find((tab) => tab.id === activeTabIdRef.current);
-        if (multiplexSource) {
-          const current = multiplexSource.paneGroup
-            ? terminalGroupsRef.current[multiplexSource.paneGroup]
-            : undefined;
-          if (current) {
-            multiplexSource =
-              agents.find((tab) => tab.id === current.activeTabId) ?? multiplexSource;
-          }
-          resolvedPaneGroup = current?.id ?? splitId();
-          const root = current?.root ?? {
-            type: "leaf" as const,
-            tabId: multiplexSource.id,
-          };
-          const sourcePane = layoutSplit(root).panes.find(
-            (pane) => pane.tabId === multiplexSource!.id,
-          );
-          const axis: SplitAxis =
-            !sourcePane || sourcePane.width >= sourcePane.height
-              ? "horizontal"
-              : "vertical";
-          const group: TerminalGroup = {
-            id: resolvedPaneGroup,
-            root: splitLeaf(root, multiplexSource.id, id, axis),
-            activeTabId: id,
-          };
-          terminalGroupsRef.current = {
-            ...terminalGroupsRef.current,
-            [group.id]: group,
-          };
-          setTerminalGroups(terminalGroupsRef.current);
-        }
-      }
       setTabs((prev) => [
-        ...prev.map((tab) =>
-          multiplexSource && tab.id === multiplexSource.id
-            ? ({ ...tab, paneGroup: resolvedPaneGroup } as SubTab)
-            : tab,
-        ),
+        ...prev,
         {
           id,
           type: "terminal",
@@ -1348,7 +1300,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           profile: accountProfile,
           run: run !== false,
           chore: run === "chore" || undefined,
-          paneGroup: resolvedPaneGroup,
+          paneGroup,
         },
       ]);
       if (activate) setActiveTabId(id);
@@ -2099,7 +2051,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
         undefined,
         true,
         t.paneGroup,
-        false,
       );
       registerRememberedPane(t, id);
     },
@@ -2152,7 +2103,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
         env.length ? r.profile : undefined,
         true,
         rememberedPane?.paneGroup,
-        false,
       );
       if (rememberedPane) registerRememberedPane(rememberedPane, id);
     },
@@ -5542,7 +5492,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
             env.length ? t.profile : undefined,
             true,
             t.paneGroup,
-            false,
           );
         }
         case "file": {
@@ -6472,7 +6421,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  component header passes that component's path so it starts in the right
    *  directory rather than wherever the ＋ menu would have put it. */
   const launchCli = useCallback(
-    async (cli: AgentCli, at?: string, autoMultiplex = true) => {
+    async (cli: AgentCli, at?: string) => {
       const cwd = at ?? componentsRef.current[0]?.path;
       if (!cwd) return;
       if (installed[cli.bin]) {
@@ -6497,9 +6446,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
             false,
             terminal.env,
             terminal.profile,
-            true,
-            undefined,
-            autoMultiplex,
           );
       } else if (cli.rebound || !cli.install) {
         pendingSplitRef.current = null;
@@ -7282,12 +7228,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       body: "Each pane is still an independent agent. These shortcuts keep the group quick to use:",
       steps: [
         {
-          label: "Create a multiplex",
-          shortcut: `${format("split-pane-right")} / ${format("split-pane-down")}`,
+          label: "Split or add a pane to the right",
+          shortcut: format("split-pane-right"),
         },
         {
-          label: "Add another agent",
-          shortcut: `${format("new-launcher")} then ↵`,
+          label: "Split or add a pane below",
+          shortcut: format("split-pane-down"),
         },
         {
           label: "Focus another tab",
@@ -7303,14 +7249,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ].join(" · "),
         },
         {
-          label: "Open a standalone agent tab",
-          shortcut: `${format("new-launcher")} then ${formatChord({
-            meta: false,
-            ctrl: false,
-            alt: true,
-            shift: false,
-            code: "Enter",
-          })}`,
+          label: "Open a new standalone agent tab",
+          shortcut: `${format("new-launcher")} then ↵`,
         },
       ],
     },
@@ -10288,9 +10228,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           cliUpdates={cliUpdates}
           targetLabel={pendingSplit ? "new split pane" : components[0]?.label}
           onShell={onNewShell}
-          onLaunchCli={(cli, opts) =>
-            launchCli(cli, undefined, !opts?.standalone)
-          }
+          onLaunchCli={(cli) => launchCli(cli)}
           onClose={() => {
             setLauncherOpen(false);
             pendingSplitRef.current = null;
