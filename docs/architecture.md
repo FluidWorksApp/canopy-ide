@@ -19,6 +19,12 @@ For a module-by-module account of native ownership, managed services, process
 and thread lifecycles, persistence, and security enforcement, see
 [Core Rust System](./core-rust-system.md).
 
+To generate and publish these canonical pages to GitHub's separate Wiki
+repository, see [Publishing the GitHub Wiki](./wiki-publishing.md).
+
+For frontend, structural, Rust, fuzz, CI, and coverage expectations, see
+[Testing and Coverage](./testing-and-coverage.md).
+
 ## 1. System in one paragraph
 
 Canopy is a local-first desktop IDE for working with coding agents. The desktop

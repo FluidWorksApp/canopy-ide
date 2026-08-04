@@ -328,6 +328,8 @@ cargo build --manifest-path src-tauri/Cargo.toml
 | `docs/contributor-integrations.md` | messaging buses and contribution recipes |
 | `docs/contributions/` | step-by-step playbooks for each contribution type |
 | `docs/core-rust-system.md` | Rust core roles, services, boundaries, and lifecycle |
+| `docs/testing-and-coverage.md` | test architecture, CI gates, coverage scope, and contribution expectations |
+| `docs/wiki-publishing.md` | build and publish these pages to the separate GitHub Wiki repository |
 | `SPEC.md` | the full product spec |
 | `RELEASING.md` | how signed releases are cut |
 
@@ -347,6 +349,10 @@ surface without duplicating infrastructure, use the
 Each path also has a focused, diagrammed
 [contribution playbook](./docs/contributions/README.md). Native contributors
 should start with the [Core Rust System](./docs/core-rust-system.md).
+Testing expectations and the current measured coverage scope are documented in
+[Testing and Coverage](./docs/testing-and-coverage.md).
+Repository maintainers can publish the same canonical pages through the
+[GitHub Wiki workflow](./docs/wiki-publishing.md).
 
 ```
 ┌────────────────────────── Tauri (Rust core) ──────────────────────────┐

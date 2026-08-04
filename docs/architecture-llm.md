@@ -5,6 +5,8 @@
 > is [Canopy Architecture](./architecture.md). Contribution-specific routing
 > is in [Contributor Integration Guide](./contributor-integrations.md). Native
 > ownership is expanded in [Core Rust System](./core-rust-system.md).
+> Test-layer and coverage rules are in
+> [Testing and Coverage](./testing-and-coverage.md).
 
 ## System identity
 
