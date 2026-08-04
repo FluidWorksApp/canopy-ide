@@ -9,6 +9,15 @@ import { TeamIcon } from "./icons";
 import { offerFileTo } from "./TeamPanel";
 import { Button } from "./ui";
 import { basename } from "../paths";
+import { PullRequestIcon } from "./icons";
+
+const prRequest = (text: string) => {
+  const lines = text.split("\n");
+  if (lines[0] !== "PR review request") return null;
+  const url = lines.find((line) => line.startsWith("canopy://pr?"));
+  if (!url) return null;
+  return { url, label: lines.find((line) => /^#\d+ /.test(line)) ?? "Pull request" };
+};
 
 interface ChatViewProps {
   /** Member id for a DM; null for the everyone channel. */
@@ -156,6 +165,15 @@ export function ChatView({ peer, title, relay, onNotice }: ChatViewProps) {
                   {m.file.direction === "out" ? "sent" : "received"}
                 </span>
               </div>
+            ) : prRequest(m.text) ? (
+              <button
+                className="chat-pr-request"
+                onClick={() => window.dispatchEvent(new CustomEvent("canopy:follow-deep-link", { detail: { url: prRequest(m.text)!.url } }))}
+              >
+                <PullRequestIcon size={14} />
+                <span><strong>Review requested</strong>{prRequest(m.text)!.label}</span>
+                <span className="chat-pr-open">Open PR</span>
+              </button>
             ) : (
               <div className="chat-msg-text">{m.text}</div>
             )}

@@ -21,7 +21,7 @@ import { heldBadge } from "../branchSwitch";
 import { useBranchSwitch } from "../useBranchSwitch";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { PlayIcon, TrackerIcon } from "./icons";
-import { Button } from "./ui";
+import { Button, TextInput } from "./ui";
 
 export interface AgentTarget {
   tabId: string;
@@ -50,7 +50,11 @@ interface TicketsPanelProps {
   onOpenTicket: (ticket: ipc.TicketInfo, source: string) => void;
   /** Jump to Settings → Integrations (where sources get connected). */
   onOpenIntegrations: () => void;
+  page?: boolean;
+  onOpenAll?: () => void;
 }
+
+const PANEL_ROWS = 12;
 
 interface SourcedTicket extends ipc.TicketInfo {
   source: string;
@@ -74,6 +78,8 @@ export function TicketsPanel({
   onSendToAgent,
   onOpenTicket,
   onOpenIntegrations,
+  page = false,
+  onOpenAll,
 }: TicketsPanelProps) {
   const [repos, setRepos] = useState<ipc.RepoInfo[]>([]);
   const [repo, setRepo] = useState<string | null>(null);
@@ -87,6 +93,7 @@ export function TicketsPanel({
   const [offSources, setOffSources] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [starting, setStarting] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
   const menu = useContextMenu();
   const { openThere, version } = useBranchSwitch();
 
@@ -203,7 +210,11 @@ export function TicketsPanel({
     );
   };
 
-  const visible = tickets.filter((t) => !offSources.has(t.source));
+  const q = query.trim().toLowerCase();
+  const matching = tickets
+    .filter((t) => !offSources.has(t.source))
+    .filter((t) => !q || `${t.id} ${t.title} ${t.body} ${t.assignee ?? ""}`.toLowerCase().includes(q));
+  const visible = page ? matching : matching.slice(0, PANEL_ROWS);
   const groups = STATUS_ORDER.map((status) => ({
     status,
     tickets: visible.filter((t) => unifiedStatus(t) === status),
@@ -212,12 +223,14 @@ export function TicketsPanel({
   const sourceName = (id: string) => TRACKERS.find((p) => p.id === id)?.name ?? id;
 
   return (
-    <div className="side-panel">
+    <div className={page ? "collection-page" : "side-panel"}>
       {menu.menu && (
         <ContextMenu x={menu.menu.x} y={menu.menu.y} items={menu.menu.items} onClose={menu.close} />
       )}
-      <div className="side-panel-head">
-        <span>Issues</span>
+      <div className={page ? "collection-page-head" : "side-panel-head"}>
+        {page ? <div><h1>Issues</h1><p>{matching.length} from connected trackers</p></div> : <span>Issues</span>}
+        {page && <TextInput search width="lg" aria-label="Search issues" placeholder="Search issues…" value={query} onChange={(e) => setQuery(e.target.value)} />}
+        {!page && <Button size="sm" variant="ghost" onClick={onOpenAll}>View all</Button>}
         <button
           className={`btn-icon ${busy ? "ticket-refreshing" : ""}`}
           title={busy ? "Refreshing…" : "Refresh"}
@@ -272,6 +285,9 @@ export function TicketsPanel({
             </button>
           ))}
         </div>
+      )}
+      {!page && matching.length > PANEL_ROWS && (
+        <button className="research-more" onClick={onOpenAll}>View all {matching.length} issues</button>
       )}
 
       {errors.map((e) => (

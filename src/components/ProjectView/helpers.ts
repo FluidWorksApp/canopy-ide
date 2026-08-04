@@ -172,6 +172,28 @@ export interface AgentsPageSubTab {
   type: "agents";
 }
 
+/** Full-page indexes. The side panels stay a recent glance; these tabs are the
+ * searchable, uncapped lists that lead to the existing detail tabs. */
+export interface ResearchListSubTab {
+  id: string;
+  type: "research-list";
+}
+
+export interface NotesListSubTab {
+  id: string;
+  type: "notes-list";
+}
+
+export interface PrsListSubTab {
+  id: string;
+  type: "prs-list";
+}
+
+export interface IssuesListSubTab {
+  id: string;
+  type: "issues-list";
+}
+
 /** Every micro-task that has finished, with what it reported and the tail of
  *  its terminal. One per project — opening it twice just focuses the first. */
 export interface TaskHistorySubTab {
@@ -295,6 +317,10 @@ export type SubTab =
   | ReviewSubTab
   | AgentSubTab
   | AgentsPageSubTab
+  | ResearchListSubTab
+  | NotesListSubTab
+  | PrsListSubTab
+  | IssuesListSubTab
   | TaskHistorySubTab
   | InstructionsSubTab
   | McpSubTab
@@ -425,6 +451,14 @@ export function describeTab(tab: SubTab | undefined) {
       return { kind: "agent", label: tab.agent, cwd: tab.cwd, ptyId: tab.ptyId ?? null };
     case "agents":
       return { kind: "agents", label: "Agents" };
+    case "research-list":
+      return { kind: "research-list", label: "All research" };
+    case "notes-list":
+      return { kind: "notes-list", label: "Scratchpad" };
+    case "prs-list":
+      return { kind: "prs-list", label: "Pull requests" };
+    case "issues-list":
+      return { kind: "issues-list", label: "Issues" };
     case "task-history":
       return { kind: "task-history", label: "Completed tasks" };
     case "instructions":
@@ -491,6 +525,14 @@ export function tabDisplayLabel(t: SubTab): string {
       return t.review.title;
     case "agents":
       return "Agents";
+    case "research-list":
+      return "All research";
+    case "notes-list":
+      return "Scratchpad";
+    case "prs-list":
+      return "Pull requests";
+    case "issues-list":
+      return "Issues";
     case "task-history":
       return "Completed tasks";
     case "instructions":

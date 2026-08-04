@@ -70,6 +70,10 @@ export type SnapshotTab =
       digest?: ipc.SessionDigest;
     }
   | { kind: "agents" }
+  | { kind: "research-list" }
+  | { kind: "notes-list" }
+  | { kind: "prs-list" }
+  | { kind: "issues-list" }
   | { kind: "task-history" }
   | { kind: "instructions"; focus?: string }
   | { kind: "mcp"; server: ipc.McpServer }
@@ -185,6 +189,18 @@ export function snapshotTabs(
         break;
       case "agents":
         out.push({ kind: "agents" });
+        break;
+      case "research-list":
+        out.push({ kind: "research-list" });
+        break;
+      case "notes-list":
+        out.push({ kind: "notes-list" });
+        break;
+      case "prs-list":
+        out.push({ kind: "prs-list" });
+        break;
+      case "issues-list":
+        out.push({ kind: "issues-list" });
         break;
       case "task-history":
         out.push({ kind: "task-history" });
@@ -306,6 +322,14 @@ export function stepLabel(t: SnapshotTab): string {
       return `Reopening ${t.agent}'s workspace`;
     case "agents":
       return "Reopening the agents page";
+    case "research-list":
+      return "Reopening all research";
+    case "notes-list":
+      return "Reopening the scratchpad";
+    case "prs-list":
+      return "Reopening pull requests";
+    case "issues-list":
+      return "Reopening issues";
     case "task-history":
       return "Reopening completed tasks";
     case "instructions":

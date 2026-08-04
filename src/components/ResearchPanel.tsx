@@ -35,17 +35,26 @@ interface ResearchPanelProps {
   onStart: (question: string) => void;
   /** Whether an agent CLI is available to run one. */
   canStart: boolean;
+  /** Full-page mode is uncapped and searchable. The default side-panel mode is
+   *  deliberately only a recent glance. */
+  page?: boolean;
+  onOpenAll?: () => void;
 }
+
+const PANEL_ROWS = 12;
 
 export function ResearchPanel({
   projectId,
   onOpen,
   onStart,
   canStart,
+  page = false,
+  onOpenAll,
 }: ResearchPanelProps) {
   const [rows, setRows] = useState<ipc.ResearchSummary[]>(() => cached(projectId));
   const [question, setQuestion] = useState("");
-  const [showClosed, setShowClosed] = useState(false);
+  const [showClosed, setShowClosed] = useState(page);
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     const sync = () => setRows(cached(projectId));
@@ -73,9 +82,18 @@ export function ResearchPanel({
   }, [showClosed, projectId, rows]);
 
   const all = showClosed ? [...rows, ...closed] : rows;
+  const q = query.trim().toLowerCase();
+  const matching = q
+    ? all.filter((e) =>
+        [e.id, e.title, e.digest, e.status].some((v) =>
+          String(v ?? "").toLowerCase().includes(q),
+        ),
+      )
+    : all;
+  const visible = page ? matching : matching.slice(0, PANEL_ROWS);
   const groups = STATUS_ORDER.map((status) => ({
     status,
-    entries: all.filter((r) => r.status === status),
+    entries: visible.filter((r) => r.status === status),
   })).filter((g) => g.entries.length > 0);
 
   const submit = () => {
@@ -86,7 +104,31 @@ export function ResearchPanel({
   };
 
   return (
-    <div className="side-panel research-panel">
+    <div className={`${page ? "collection-page" : "side-panel"} research-panel`}>
+      <div className={page ? "collection-page-head" : "side-panel-head"}>
+        {page ? (
+          <>
+            <div>
+              <h1>Research</h1>
+              <p>{all.length} entries in {projectId}</p>
+            </div>
+            <TextInput
+              search
+              width="lg"
+              aria-label="Search research"
+              placeholder="Search titles and findings…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </>
+        ) : (
+          <>
+            <span>Research</span>
+            <span className="status-spacer" />
+            <Button size="sm" variant="ghost" onClick={onOpenAll}>View all</Button>
+          </>
+        )}
+      </div>
       <div className="research-new">
         <TextInput
           className="research-input"
@@ -112,7 +154,7 @@ export function ResearchPanel({
         </Button>
       </div>
 
-      {all.length === 0 && (
+      {matching.length === 0 && (
         <p className="tree-empty">
           No research yet. Ask a question above, or type one into ⌘K and pick
           “Research”. Anything an agent finds out lands here instead of in a
@@ -170,6 +212,11 @@ export function ResearchPanel({
       <button className="research-more" onClick={() => setShowClosed((v) => !v)}>
         {showClosed ? "Hide archived & superseded" : "Show archived & superseded"}
       </button>
+      {!page && matching.length > PANEL_ROWS ? (
+        <button className="research-more" onClick={onOpenAll}>
+          View all {matching.length} research entries
+        </button>
+      ) : null}
     </div>
   );
 }

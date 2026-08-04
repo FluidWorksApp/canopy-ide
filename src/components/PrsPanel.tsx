@@ -12,8 +12,11 @@ import { LANE_LABEL, lanes, rowState, since, toPrInfo, type Lane } from "../prIn
 import { refresh } from "../prWatchStore";
 import { usePrWatch } from "../usePrWatch";
 import { PullRequestIcon } from "./icons";
-import { Button } from "./ui";
+import { Button, TextInput } from "./ui";
 import { basename } from "../paths";
+import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
+import type { RelayHandle } from "../types";
+import { formatDeepLink } from "../deepLinks";
 
 interface PrsPanelProps {
   /** This project's repos. The panel shows these and nothing else — a PR queue
@@ -22,7 +25,15 @@ interface PrsPanelProps {
   onOpen: (repo: string, pr: ipc.PrInfo) => void;
   /** Repo path → the label to show on the row's second line. */
   projectFor: (repo: string) => string | undefined;
+  page?: boolean;
+  onOpenAll?: () => void;
+  onAgentTask?: (repo: string, pr: ipc.PrInfo) => void;
+  relay?: RelayHandle;
+  onNotice?: (message: string, kind?: "info" | "success" | "warn" | "error") => void;
+  onOpenChat?: (peer: string, name: string) => void;
 }
+
+const PANEL_ROWS = 12;
 
 const LANE_TONE: Record<Lane, string> = {
   "needs-you": "is-urgent",
@@ -32,10 +43,12 @@ const LANE_TONE: Record<Lane, string> = {
   draft: "is-dim",
 };
 
-export function PrsPanel({ localRepos, onOpen, projectFor }: PrsPanelProps) {
+export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenAll, onAgentTask, relay, onNotice, onOpenChat }: PrsPanelProps) {
   const { rows, fetchedMs, errors, remaining, nextIn, busy, viewer } = usePrWatch();
   const [mineOnly, setMineOnly] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<Lane>>(new Set());
+  const [query, setQuery] = useState("");
+  const menu = useContextMenu();
 
   // This project's, always. There is no cross-project view and no toggle for
   // one: the panel answers "what needs me here", and a list that answers it for
@@ -44,20 +57,60 @@ export function PrsPanel({ localRepos, onOpen, projectFor }: PrsPanelProps) {
     () => rows.filter((r) => localRepos.includes(r.repo)),
     [rows, localRepos],
   );
-  const shown = useMemo(
-    () => (mineOnly ? scoped.filter((r) => r.mine) : scoped),
-    [scoped, mineOnly],
-  );
+  const shown = useMemo(() => {
+    const mine = mineOnly ? scoped.filter((r) => r.mine) : scoped;
+    const q = query.trim().toLowerCase();
+    const matching = q
+      ? mine.filter((r) => `${r.number} ${r.title} ${r.author} ${r.nwo}`.toLowerCase().includes(q))
+      : mine;
+    return page ? matching : matching.slice(0, PANEL_ROWS);
+  }, [scoped, mineOnly, query, page]);
   const groups = useMemo(() => lanes(shown), [shown]);
   const errorList = Object.entries(errors);
 
   const open = (row: ipc.PrRow) => onOpen(row.repo, toPrInfo(row));
 
+  const openMenu = (e: React.MouseEvent, row: ipc.PrRow) => {
+    const pr = toPrInfo(row);
+    const peers = relay?.status.role === "off"
+      ? []
+      : (relay?.status.members ?? []).filter((m) => m.id !== relay?.status.self_id);
+    const send = async (id: string, name: string) => {
+      try {
+        const remote = await import("../ipc").then((m) => m.gitRemoteUrl(row.repo));
+        if (!remote) throw new Error("This repo has no shareable origin URL.");
+        await relay?.sendCommand(id, "open-pr", { repo: remote, pr });
+        const link = formatDeepLink({ kind: "pr", number: pr.number, url: pr.url, repo: remote });
+        await relay?.sendChat(id, `PR review request\n${link}\n#${pr.number} ${pr.title}`);
+        onOpenChat?.(id, name);
+        onNotice?.(`Asked ${name} to review #${pr.number}.`, "success");
+      } catch (err) {
+        onNotice?.(String(err), "error");
+      }
+    };
+    const items: MenuItem[] = [
+      { label: "Open pull request", onClick: () => open(row) },
+      { label: "Agent task", hint: "review this PR", disabled: !onAgentTask, onClick: () => onAgentTask?.(row.repo, pr) },
+      peers.length > 0
+        ? {
+            label: "Send to",
+            submenu: peers.map((m) => ({ label: m.name, onClick: () => void send(m.id, m.name) })),
+          }
+        : { label: "Send to", disabled: true, hint: "no Relay peers online" },
+    ];
+    menu.open(e, items);
+  };
+
   return (
-    <div className="prs-panel">
-      <div className="side-panel-head">
-        <span>Pull requests</span>
+    <div className={`${page ? "collection-page" : ""} prs-panel`}>
+      {menu.menu && <ContextMenu {...menu.menu} onClose={menu.close} />}
+      <div className={page ? "collection-page-head" : "side-panel-head"}>
+        {page ? <div><h1>Pull requests</h1><p>{scoped.length} open across this project</p></div> : <span>Pull requests</span>}
+        {page && (
+          <TextInput search width="lg" aria-label="Search pull requests" placeholder="Search pull requests…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        )}
         <span className="prs-head-actions">
+          {!page && <Button size="sm" variant="ghost" onClick={onOpenAll}>View all</Button>}
           <Button
             size="sm"
             variant={mineOnly ? "accent" : "default"}
@@ -133,6 +186,7 @@ export function PrsPanel({ localRepos, onOpen, projectFor }: PrsPanelProps) {
                     key={`${row.repo}#${row.number}`}
                     className="prs-row"
                     onClick={() => open(row)}
+                    onContextMenu={(e) => openMenu(e, row)}
                     title={`${row.nwo} #${row.number} — ${row.title}`}
                   >
                     <PullRequestIcon size={12} />
@@ -157,6 +211,10 @@ export function PrsPanel({ localRepos, onOpen, projectFor }: PrsPanelProps) {
           </div>
         );
       })}
+
+      {!page && scoped.length > PANEL_ROWS && (
+        <button className="research-more" onClick={onOpenAll}>View all {scoped.length} pull requests</button>
+      )}
 
     </div>
   );

@@ -29,10 +29,14 @@ describe("round trip", () => {
     { kind: "file", path: "/src/api/main.rs" },
     { kind: "note", noteId: "0007-tier-donations", projectId: "p1" },
     { kind: "note", noteId: "0007-tier-donations", path: "/src/api" },
+    { kind: "research", researchId: "0008-index-staleness", projectId: "p1" },
+    { kind: "task", runId: "run-123", projectId: "p1" },
+    { kind: "issue", issueId: "#42", source: "github", path: "/src/api" },
     {
       kind: "pr",
       number: 1341,
       url: "https://github.com/o/r/pull/1341",
+      repo: "https://github.com/o/r.git",
       path: "/src/api",
     },
     { kind: "pr", number: 7, projectId: "p1" },
@@ -279,6 +283,23 @@ describe("followLink", () => {
     expect(
       followLink({ kind: "note", noteId: "0007-x", projectId: "p1" }, ctx()),
     ).toEqual({ do: "note", noteId: "0007-x" });
+  });
+
+  it("opens exact research and task records", () => {
+    expect(followLink({ kind: "research", researchId: "0008-x" }, ctx())).toEqual({
+      do: "research",
+      researchId: "0008-x",
+    });
+    expect(followLink({ kind: "task", runId: "run-123" }, ctx())).toEqual({
+      do: "task",
+      runId: "run-123",
+    });
+    expect(followLink({ kind: "issue", issueId: "#42", source: "github", path: "/repo" }, ctx())).toEqual({
+      do: "issue",
+      issueId: "#42",
+      source: "github",
+      repo: "/repo",
+    });
   });
 
   it("hands a PR link to the live-list resolver, repo and fallback URL intact", () => {

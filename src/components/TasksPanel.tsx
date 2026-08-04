@@ -278,6 +278,10 @@ export function TasksPanel({
           heading was a third way through the same door. */}
       <div className="side-panel-head">
         <span>Tasks</span>
+        <span className="status-spacer" />
+        <Button size="sm" variant="ghost" onClick={() => onOpenHistory()}>
+          View all
+        </Button>
       </div>
 
       {running.length > 0 && (
