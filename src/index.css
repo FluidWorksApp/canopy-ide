@@ -17805,6 +17805,14 @@ a.btn-sm {
   border-bottom: 1px solid var(--border);
   font-weight: 600;
 }
+.preview-panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.preview-panel-hide {
+  flex: none;
+}
 .preview-panel-hint {
   padding: 10px;
   color: var(--text-dim);
@@ -17827,6 +17835,15 @@ a.btn-sm {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.preview-note-sent {
+  opacity: 0.62;
+}
+.preview-note-status {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 .preview-note-head {
   display: flex;
