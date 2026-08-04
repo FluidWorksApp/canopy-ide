@@ -10221,9 +10221,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
           installed={installed}
           cliUpdates={cliUpdates}
           targetLabel={pendingSplit ? "new split pane" : components[0]?.label}
-          onShell={onNewShell}
-          onLaunchCli={(cli) => launchCli(cli)}
-          onClose={() => {
+          onShell={() => {
+            onNewShell();
+            setLauncherOpen(false);
+          }}
+          onLaunchCli={(cli) => {
+            void launchCli(cli).finally(() => {
+              setLauncherOpen(false);
+              // A successful split consumes this itself. Clear only a launch
+              // that failed before it reached completePendingSplit.
+              if (pendingSplitRef.current) {
+                pendingSplitRef.current = null;
+                setPendingSplit(null);
+              }
+            });
+          }}
+          onCancel={() => {
             setLauncherOpen(false);
             pendingSplitRef.current = null;
             setPendingSplit(null);

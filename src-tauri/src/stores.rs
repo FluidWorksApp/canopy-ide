@@ -713,9 +713,23 @@ fn agy_sessions(path: &Path) -> Vec<StoreSession> {
 /// Protobuf payloads carry conversation/request identifiers before the human
 /// text. They are metadata, not useful resume labels or searchable bodies.
 fn is_session_metadata(text: &str) -> bool {
-    let text = text.trim();
-    let candidate = text.strip_prefix("b$").unwrap_or(text);
-    candidate.len() >= 32 && candidate.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    let mut saw_id = false;
+    for raw in text.split_whitespace() {
+        if raw
+            .split(|c: char| !c.is_ascii_hexdigit() && c != '-')
+            .any(|part| part.len() >= 32 && part.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+        {
+            saw_id = true;
+            continue;
+        }
+        let candidate = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
+        // Protobuf field decorations around adjacent ids are short. Any real
+        // word means this run contains human content and must be retained.
+        if candidate.len() > 2 {
+            return false;
+        }
+    }
+    saw_id
 }
 
 /// The first `file:///…` path in a blob, as a plain path.
@@ -1032,7 +1046,13 @@ mod tests {
         assert!(is_session_metadata(
             "b$6efcb96f-17e0-4c5d-917c-0195bf64cbe1"
         ));
+        assert!(is_session_metadata(
+            "L $401170b1-1446-4b43-be5a-0e4181976197 \"$80e0efb0-6fd0-4a20-a604-e82e791bdd43"
+        ));
         assert!(!is_session_metadata("Fix the mascot on the dashboard page"));
+        assert!(!is_session_metadata(
+            "Investigate 401170b1-1446-4b43-be5a-0e4181976197 in the logs"
+        ));
     }
 
     #[test]
