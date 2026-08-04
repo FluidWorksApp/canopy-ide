@@ -1297,8 +1297,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             !tab.micro &&
             Boolean(agentIdForCommand(tab.command)),
         );
-        multiplexSource =
-          agents.find((tab) => tab.id === activeTabIdRef.current) ?? agents.at(-1);
+        multiplexSource = agents.find((tab) => tab.id === activeTabIdRef.current);
         if (multiplexSource) {
           const current = multiplexSource.paneGroup
             ? terminalGroupsRef.current[multiplexSource.paneGroup]
@@ -6473,7 +6472,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  component header passes that component's path so it starts in the right
    *  directory rather than wherever the ＋ menu would have put it. */
   const launchCli = useCallback(
-    async (cli: AgentCli, at?: string) => {
+    async (cli: AgentCli, at?: string, autoMultiplex = true) => {
       const cwd = at ?? componentsRef.current[0]?.path;
       if (!cwd) return;
       if (installed[cli.bin]) {
@@ -6498,6 +6497,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
             false,
             terminal.env,
             terminal.profile,
+            true,
+            undefined,
+            autoMultiplex,
           );
       } else if (cli.rebound || !cli.install) {
         pendingSplitRef.current = null;
@@ -10239,7 +10241,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           cliUpdates={cliUpdates}
           targetLabel={pendingSplit ? "new split pane" : components[0]?.label}
           onShell={onNewShell}
-          onLaunchCli={(cli) => launchCli(cli)}
+          onLaunchCli={(cli, opts) =>
+            launchCli(cli, undefined, !opts?.standalone)
+          }
           onClose={() => {
             setLauncherOpen(false);
             pendingSplitRef.current = null;
