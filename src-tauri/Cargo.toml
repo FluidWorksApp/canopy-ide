@@ -186,7 +186,9 @@ webview2-com = "0.38"
 windows-core = "0.61"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
+# `exception` lets clipboard.rs contain an NSPasteboard exception at the FFI
+# boundary instead of letting a recoverable service failure abort the process.
+objc2 = { version = "0.6", features = ["exception"] }
 block2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSValue", "NSGeometry", "NSDictionary", "NSString", "NSError", "NSData"] }
 # NSPasteboard is clipboard.rs's whole native surface — a changeCount poll and
