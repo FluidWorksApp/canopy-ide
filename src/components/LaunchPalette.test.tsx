@@ -10,7 +10,7 @@ const open = (over: Partial<Parameters<typeof LaunchPalette>[0]> = {}) => {
     cliUpdates: {},
     onShell: vi.fn(),
     onLaunchCli: vi.fn(),
-    onClose: vi.fn(),
+    onCancel: vi.fn(),
     ...over,
   };
   render(<LaunchPalette {...props} />);
@@ -29,11 +29,11 @@ describe("LaunchPalette", () => {
     }
   });
 
-  it("opens the highlighted row on Enter — the whole point of the keyboard route", async () => {
-    const { onShell, onClose } = open();
+  it("commits the highlighted row without invoking the cancellation path", async () => {
+    const { onShell, onCancel } = open();
     await userEvent.keyboard("{Enter}");
     expect(onShell).toHaveBeenCalledOnce();
-    expect(onClose).toHaveBeenCalledOnce();
+    expect(onCancel).not.toHaveBeenCalled();
   });
 
   it("filters as you type, and Enter launches what's left", async () => {
@@ -67,9 +67,9 @@ describe("LaunchPalette", () => {
   });
 
   it("closes on Escape without launching anything", async () => {
-    const { onClose, onShell } = open();
+    const { onCancel, onShell } = open();
     await userEvent.keyboard("{Escape}");
-    expect(onClose).toHaveBeenCalledOnce();
+    expect(onCancel).toHaveBeenCalledOnce();
     expect(onShell).not.toHaveBeenCalled();
   });
 
