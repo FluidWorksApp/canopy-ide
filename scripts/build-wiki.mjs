@@ -19,6 +19,8 @@ const pages = [
   ["docs/contributor-integrations.md", "Contributor-Integration-Guide.md"],
   ["docs/core-rust-system.md", "Core-Rust-System.md"],
   ["docs/testing-and-coverage.md", "Testing-and-Coverage.md"],
+  ["docs/pull-request-etiquette.md", "Pull-Request-Etiquette.md"],
+  ["docs/release-process.md", "Release-Process.md"],
   ["docs/wiki-publishing.md", "Publishing-the-GitHub-Wiki.md"],
   ["docs/contributions/README.md", "Contribution-Playbooks.md"],
   ["docs/contributions/theme.md", "Contributing-a-Theme.md"],
@@ -84,6 +86,8 @@ without creating parallel stores, sockets, event buses, or components.
 - [Contribution Playbooks](Contribution-Playbooks) - one implementation recipe per contribution type
 - [Architecture: LLM Context](Architecture-LLM-Context) - compact context for coding agents
 - [Testing and Coverage](Testing-and-Coverage) - test layers, CI, and measured coverage scope
+- [Pull Request Etiquette](Pull-Request-Etiquette) - proposing, reviewing, and merging changes
+- [Release Process](Release-Process) - version PR, tag, native builds, QA, and publication
 - [Publishing the GitHub Wiki](Publishing-the-GitHub-Wiki) - build and synchronization workflow
 
 ## Contribution playbooks
@@ -109,6 +113,8 @@ const sidebar = `**Canopy Architecture**
 - [Integration Guide](Contributor-Integration-Guide)
 - [Contribution Playbooks](Contribution-Playbooks)
 - [Testing and Coverage](Testing-and-Coverage)
+- [Pull Request Etiquette](Pull-Request-Etiquette)
+- [Release Process](Release-Process)
 - [Publish the Wiki](Publishing-the-GitHub-Wiki)
 
 **Playbooks**

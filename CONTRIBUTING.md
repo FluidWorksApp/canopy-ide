@@ -89,6 +89,14 @@ For a focused start-to-finish recipe, choose a
 also read [Core Rust System](./docs/core-rust-system.md).
 The complete test-layer, CI, and coverage model is in
 [Testing and Coverage](./docs/testing-and-coverage.md).
+Before opening or reviewing a change, read
+[Pull Request Etiquette](./docs/pull-request-etiquette.md).
+
+Branches are short-lived and cut from current `main`: `feat/<name>`,
+`fix/<name>`, `docs/<name>`, `test/<name>`, `perf/<name>`,
+`refactor/<name>`, or `chore/<name>`. Pull request titles state the outcome in
+imperative sentence case. Release cuts are the exception:
+`release/vX.Y.Z` with title `Release vX.Y.Z`.
 
 ## Hook into existing infrastructure
 

@@ -1,12 +1,13 @@
 <h1 align="center">Canopy</h1>
 
 <p align="center">
-  <b>A local-first, memory-light desktop IDE for driving code with agents.</b><br>
-  Run Claude Code, Codex, Aider and friends in a first-class terminal — and see
-  <i>what changed</i> and <i>what's running</i>, in one native window.
+  <b>A local-first desktop workspace for running coding agents and reviewing their work.</b><br>
+  Real agent CLIs, terminals, diffs, previews, tasks, tickets, and project context
+  in one native window.
 </p>
 
 <p align="center">
+  <a href="https://github.com/FluidWorksApp/canopy-ide/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/FluidWorksApp/canopy-ide/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/FluidWorksApp/canopy-ide/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/FluidWorksApp/canopy-ide?sort=semver&label=download"></a>
   <a href="./LICENSE.md"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey">
@@ -14,421 +15,373 @@
 </p>
 
 <p align="center">
-  <a href="https://canopyide.dev/"><b>canopyide.dev</b></a> ·
-  <a href="https://github.com/FluidWorksApp/canopy-ide/releases/latest">Download</a>
+  <a href="https://canopyide.dev/"><b>Website</b></a> ·
+  <a href="https://github.com/FluidWorksApp/canopy-ide/releases/latest">Download</a> ·
+  <a href="./docs/architecture.md">Documentation</a> ·
+  <a href="https://github.com/FluidWorksApp/canopy-ide/discussions">Discussions</a> ·
+  <a href="https://github.com/FluidWorksApp/canopy-ide/issues/new/choose">Issues</a>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/launcher.png" alt="Canopy on open — the launcher (a plain shell and every agent CLI one click away) above a “pick up where you left off” list that resumes agent sessions with their history and reopens terminals running their command" width="900">
+  <img src="docs/screenshots/launcher.png" alt="Canopy launcher with shells, coding-agent CLIs, and resumable sessions" width="900">
 </p>
+
+> [!NOTE]
+> Canopy is under active pre-1.0 development. This README follows `main`, which
+> may contain features newer than the latest downloadable release. Interfaces
+> and platform behavior may change between releases.
 
 ## What is Canopy?
 
-Canopy is a desktop IDE built around a simple bet: the best interface for coding
-with AI is the **agent's own CLI**, in a real terminal — not a chat box bolted
-onto an editor. So Canopy makes the terminal first-class, then wraps it with the
-two things a terminal can't show you on its own: **what changed** (live diffs
-against git) and **what's running** (every agent session, its branch, its task,
-its footprint).
+Canopy is built around a simple idea: the best interface for a coding agent is
+often the agent's own CLI in a real terminal, not another chat box embedded in
+an editor. Canopy keeps that terminal first-class and adds the context a terminal
+cannot provide by itself: what changed, what is running, what needs your
+attention, and how the work relates to branches, tickets, previews, and other
+agents.
 
-It's **local-first and offline**: there's no server, no account, no telemetry.
-Every native thing — terminals, language servers, file watchers — runs as a
-child process of the app. And it's **light**: no Electron, no VS Code fork, no
-extension host. The whole app, with several agents running, sits in a fraction
-of the memory a browser tab would.
+Canopy is **local-first and offline-capable**. Projects, workspace state, notes,
+research, session context, and search indexes stay on your machine. There is no
+required Canopy account and no telemetry. Agent CLIs and optional integrations
+such as GitHub, Linear, public Remote links, and Internet team sessions may use
+their own network services. Remote access is off by default.
 
-Built for people who let agents do the typing and want to stay in control of the
-result.
+It is a native Tauri application, not an Electron app, VS Code fork, or extension
+host. Rust owns PTYs, language servers, filesystem watchers, local services, and
+process teardown; React owns the project workspace and presentation.
+
+## The workflow
+
+1. **Launch or resume an agent.** Start a shell or installed coding CLI in the
+   current checkout, an isolated worktree, and the CLI account profile you want.
+2. **See what needs you.** Agent lifecycle, questions, completed tasks,
+   reminders, and team messages flow into project-aware attention surfaces.
+3. **Review the work.** Inspect files, commits, diffs, branches, pull requests,
+   usage, and process resources from the agent's workspace.
+4. **Run and preview it.** Start configured services, open detected URLs, annotate
+   page elements, capture scoped screenshots, and send feedback to an agent.
+5. **Keep the next step.** Search everything with SpotSearch, save a thought,
+   research a question, or run a focused background task without losing context.
 
 ## Highlights
 
-- **Agent-native terminal.** Full TUI support — `claude`, `vim`, `htop`, `tmux`
-  all just work. A launcher starts any agent CLI (Claude Code, Codex, Amp, Aider,
-  Gemini, OpenCode, oh-my-pi) and offers an install command for the ones you don't have.
-- **Diff-first.** When an agent edits a file under you, you get a side-by-side
-  diff — never a silent reload. A git-backed Changes panel groups everything
-  touched, by component.
-- **Multi-project, multi-component.** Open several projects at once; each project
-  spans as many labeled directories (frontend, backend, …) as you like, with
-  search, terminals and git scoped per project.
-- **Session awareness.** See every agent session across the project — its branch,
-  the last thing you asked it, CPU/memory, and the port it's listening on.
-- **A real editor.** Monaco with TypeScript diagnostics, plus native viewers for
-  Markdown (incl. Mermaid), HTML, PDF, spreadsheets, Jupyter notebooks and images.
-- **Dictate anywhere.** A configurable hotkey (`⌘D`, `Alt+D` off macOS) transcribes speech straight
-  to the cursor — a terminal, the editor, or an agent prompt. Fully on-device
-  (Parakeet / SenseVoice / Moonshine): no cloud, no upload, no formatting pass.
+- **Real agent terminals.** Full PTY and TUI support for shells, `vim`, `htop`,
+  `tmux`, Claude Code, Codex CLI, Amp, Aider, Antigravity, OpenCode, oh-my-pi,
+  and custom CLIs. Canopy reports the integration and resume capabilities each
+  CLI actually supports instead of assuming parity.
+- **Parallel work without checkout collisions.** Work in the current checkout or
+  isolated Git worktrees. Canopy tracks which branch lives where, allocates
+  workspace ports, prepares ignored configuration, and surfaces loose ends for
+  explicit cleanup.
+- **Agent Workspace and diff-first review.** Join session evidence with Git to
+  see edited files, uncommitted changes, commits, branch state, pull requests,
+  checks, and side-by-side diffs. External edits never silently replace an open
+  buffer.
+- **One Companion across projects.** Ask for workspace-wide status, summaries,
+  code orientation, past work, and navigation. Authority is explicit: Answer
+  only, Ask first, or Act automatically. The Companion does not silently become
+  another code-editing agent.
+- **SpotSearch and durable follow-up.** Search actions, tabs, files, symbols,
+  content, branches, servers, tickets, PRs, notes, research, task history,
+  terminal output, and past agent conversations. A typed request or pasted
+  image can become a one-shot task, research run, or scratchpad note.
+- **Capture, investigate, then act.** Notes hold ideas, screenshots, attachments,
+  reminders, and links. Research jobs preserve findings and sources without
+  changing code. Background tasks report progress and leave searchable history;
+  code-changing custom tasks hand work off through an isolated draft PR.
+- **Preview what agents build.** Open detected dev servers, inspect console and
+  network activity, annotate elements, and capture viewport, full-page, or
+  region screenshots. Agents can drive previews through scoped browser tools.
+  On macOS, the persistent native browser keeps site logins; other platforms use
+  the loopback preview engine. Agent browser activity can stay visible in a
+  read-only picture-in-picture view where the native browser is available.
+- **Git, PRs, and issues in the IDE.** Manage branches, worktrees, staged and
+  unstaged changes, reviews, and pull requests. Read GitHub Issues and Linear
+  tickets with their conversation, comment or change supported states, and
+  start work with a new or already-running agent.
+- **Canopy Remote.** Enable a PIN-protected phone/browser interface when you need
+  it. Attach to terminals, launch or resume agents, inspect changes, tickets,
+  PRs, research, servers, instructions, tools, and usage over your LAN or an
+  optional Cloudflare, ngrok, or Tailscale tunnel.
+- **Encrypted team collaboration.** One Canopy hosts and teammates join by code.
+  Chat, exchange files and review requests, share a project, or co-edit a file.
+  LAN sessions connect to the host directly; Internet sessions can use the same
+  optional tunnel as Remote. Team payloads remain end-to-end encrypted, and the
+  owner of a shared file remains its only disk writer.
+- **Profiles, MCP, and controlled credentials.** Isolate supported CLI accounts
+  without Canopy reading their tokens. Register Canopy tools with coding agents,
+  discover and inspect MCP servers across CLI configurations, and use a local
+  browser vault that can fill a login without revealing its password to an
+  agent. Plaintext agent reads are opt-in.
+- **A real editor and native viewers.** Monaco diagnostics and code intelligence
+  sit beside offline rendering for Markdown with Mermaid, HTML, JSON/JSONC,
+  spreadsheets and CSV, `.docx`, PDF, images, and Jupyter notebooks.
+- **On-device dictation.** Use a configurable hotkey or push-to-talk gesture to
+  insert speech into terminals, the editor, commit messages, or agent prompts.
+  Models and transcription stay on the machine. Intel macOS builds do not
+  include dictation.
+- **Resource-aware by design.** See CPU, memory, ports, working time, and usage
+  where a CLI exposes it. Token accounting currently supports Claude Code,
+  Codex, and oh-my-pi. Hibernation preserves resumability; manual cleanup scans
+  dependency installs, build output, and caches without deleting automatically.
 
 ## A closer look
 
-The screenshots below follow the same arc as the app itself: **run a team of
-agents → review what each one produced → keep the whole stack in view → and never
-leave the window for git, tickets, dictation, teammates, or files.** Every shot
-is rendered straight from the real components, so the README can't drift from the
-app.
+### Run several agents and know what each one is doing
 
-**Run a team of agents — and let them share context.** Every agent CLI gets a
-native tab. The agents rail shows each session's lifecycle at a glance (working /
-waiting / idle), its component and branch, the last thing you asked it, and
-what it needs from you. Flip *Shared context* on and each session sees a short
-summary of what the others touched, injected into its next prompt.
+The Agents rail combines live PTY evidence, process stats, session history, and
+CLI integration signals. It shows lifecycle, project, component, branch, last
+prompt, resource use, and whether the session needs you.
 
-<img src="docs/screenshots/agents.png" alt="The agents rail — three sessions running (Claude on canopy and the api, Codex on the worker), each with a lifecycle dot, component and branch, one flagged needs-you, with the shared-context toggle on" width="360">
+<p align="center">
+  <img src="docs/screenshots/agents.png" alt="Agents rail with several sessions, lifecycle indicators, branches, and shared context" width="380">
+</p>
 
-**Review what an agent produced.** Open a session as a tab and everything it did
-is in one place: the branch and worktree it works in, its uncommitted diff and
-the commits it added, the files it reported editing, and the pull request raised
-from that branch — the whole review, joined against git.
+### Review one agent as a complete unit of work
 
-<img src="docs/screenshots/agent-workspace.png" alt="An agent opened as a tab — Claude on feat/dictation-pill in an isolated worktree, uncommitted and ahead of base, an open PR with passing checks, the files it edited, its commits, and a live split diff" width="900">
+Agent Workspace joins the session to its checkout, files, commits, diff, branch,
+and pull request so review happens in context rather than across terminal tabs.
 
-**See what's running — and what it costs.** Dev servers launch as native child
-processes, not stray shells, and every agent session's tokens and cost roll up
-per CLI, per model, and per session — so the bill never surprises you.
+<p align="center">
+  <img src="docs/screenshots/agent-workspace.png" alt="Agent Workspace showing branch state, pull request, commits, edited files, and a live diff" width="900">
+</p>
 
-<img src="docs/screenshots/usage.png" alt="Usage & cost across every session — totals plus a breakdown by CLI (Claude Code, Codex, oh-my-pi) and by model, with per-session tokens sent, received and cost" width="760">
+### Keep Git and issue work beside the code
 
-**Review every change.** A built-in Git panel — branches, worktrees, PRs, and
-staged/unstaged changes with side-by-side diffs — and a *Loose ends* view that
-measures every branch against the base and surfaces what's uncommitted,
-unpushed, or safe to clean up, so nothing an agent wrote quietly disappears.
+The Git surface handles changes, branches, worktrees, diffs, and loose ends.
+GitHub Issues and Linear tickets can be read and acted on without leaving the
+workspace, then handed to a new or running agent.
 
-<img src="docs/screenshots/git-diff.png" alt="A side-by-side git diff of the working tree against HEAD, syntax-highlighted, with Stage, Discard and Open-file actions" width="820">
+<p align="center">
+  <img src="docs/screenshots/git-diff.png" alt="Side-by-side Git diff with stage, discard, and open-file actions" width="820">
+</p>
 
-**Your tickets, in the IDE.** Pull **Linear** and **GitHub Issues** into a rail
-beside the code, grouped by state. Open a ticket to read the whole thing inline,
-then *Start work* — Canopy spins up a worktree on its branch and launches the
-agent CLI of your choice with the ticket as its opening context. No auto-commit,
-no auto-PR; that stays yours.
+<p align="center">
+  <img src="docs/screenshots/issue.png" alt="Issue detail in Canopy with status, conversation, worktree, and agent handoff" width="820">
+</p>
 
-<img src="docs/screenshots/issue.png" alt="A GitHub issue opened in Canopy — the full markdown body rendered inline with a worktree branch chip and a Start-work · Claude Code button" width="820">
+### Work with a team without a central Canopy service
 
-**Dictate anywhere.** Press `⌘D` (`Alt+D` off macOS) and talk — the transcript lands wherever your
-cursor is: a terminal, the editor, a commit message, an agent prompt. Speech
-recognition runs entirely on your machine; nothing is uploaded.
+The host's Canopy is the encrypted relay. Teammates can chat, transfer files,
+request reviews, and collaborate on shared code while the file owner retains
+authority over disk writes.
 
-<img src="docs/screenshots/dictation.png" alt="Dictating into an agent prompt — the words land at the cursor while Canopy's floating Listening pill shows the on-device voice model transcribing" width="820">
+<p align="center">
+  <img src="docs/screenshots/team-relay.png" alt="Team panel with relay status, members, transfers, and review requests" width="380">
+</p>
 
-**Build with your team, peer-to-peer.** One person hosts — their Canopy *is* the
-relay — and teammates join with a code. Chat, request reviews, share a whole
-project, and co-edit files live, all end-to-end encrypted (SPAKE2 join code,
-ChaCha20-Poly1305 on every message and file) with no server in the middle.
+## Privacy and security boundaries
 
-<img src="docs/screenshots/team-relay.png" alt="The Team panel — hosting a relay with a join code and LAN address, members with trust ticks, live file transfers, and a for-you inbox of PR and review requests" width="360">
-
-**Open anything, install nothing.** Markdown (with Mermaid), CSVs, spreadsheets,
-Word docs, PDFs, images, and Jupyter notebooks all render natively in the
-workspace — no extensions, no marketplace, no config.
-
-<img src="docs/screenshots/notebook.png" alt="A Jupyter notebook rendered natively in Canopy — a markdown heading, code cells, and a pandas DataFrame shown as a real HTML table output" width="820">
+- No required Canopy account and no telemetry.
+- Workspace and Canopy-owned knowledge stay local under the opened projects and
+  `~/.canopy`.
+- Agent CLIs remain separate tools and may use their own accounts and networks.
+- Remote is off by default. Anyone with the current PIN can drive its permitted
+  surface, so stop or rotate it when finished.
+- Public Remote and Internet team traffic may traverse the tunnel provider you
+  select; team payloads are end-to-end encrypted.
+- Filesystem commands are scoped to registered workspace roots.
+- Browser-vault fill avoids exposing a password to an agent. Plaintext reads
+  require an entry to be explicitly marked readable and still pass approval.
+- Security vulnerabilities must be reported privately through the
+  [Security Policy](./SECURITY.md), not a public issue.
 
 ## Install
 
-Download from [**canopyide.dev**](https://canopyide.dev/) — or on macOS:
+Download from [**canopyide.dev**](https://canopyide.dev/) or install on macOS:
 
 ```sh
 brew install --cask fluidworksapp/tap/canopy
 ```
 
-Or grab your platform directly — these links always point at the newest release:
+Direct links always point to the newest release:
 
-| Platform | Download | Updates |
+| Platform | Download | Notes and updates |
 |---|---|---|
-| macOS — Apple Silicon | [`Canopy-macos-arm64.dmg`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-macos-arm64.dmg) | in-app auto-update |
-| macOS — Intel | [`Canopy-macos-intel.dmg`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-macos-intel.dmg) — no voice dictation | in-app auto-update |
-| Linux — AppImage | [`Canopy-linux-x86_64.AppImage`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.AppImage) | in-app auto-update |
-| Linux — Debian/Ubuntu | [`Canopy-linux-x86_64.deb`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.deb) | via your package manager |
-| Linux — Fedora/RHEL | [`Canopy-linux-x86_64.rpm`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.rpm) | via your package manager |
-| Windows — x86_64 | [`Canopy-windows-x86_64-setup.exe`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-windows-x86_64-setup.exe) | in-app auto-update |
+| macOS - Apple Silicon | [`Canopy-macos-arm64.dmg`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-macos-arm64.dmg) | signed, notarized, in-app updates |
+| macOS - Intel | [`Canopy-macos-intel.dmg`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-macos-intel.dmg) | signed, notarized, no dictation, in-app updates |
+| Linux - AppImage x86_64 | [`Canopy-linux-x86_64.AppImage`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.AppImage) | in-app updates |
+| Linux - Debian/Ubuntu x86_64 | [`Canopy-linux-x86_64.deb`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.deb) | update through your package manager |
+| Linux - Fedora/RHEL x86_64 | [`Canopy-linux-x86_64.rpm`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-linux-x86_64.rpm) | update through your package manager |
+| Windows - x86_64 | [`Canopy-windows-x86_64-setup.exe`](https://github.com/FluidWorksApp/canopy-ide/releases/latest/download/Canopy-windows-x86_64-setup.exe) | installer is currently unsigned and may trigger SmartScreen; in-app updates |
 
-All versions and release notes are on the
-[releases page](https://github.com/FluidWorksApp/canopy-ide/releases). The
-macOS build is signed and notarized. Prefer to build it yourself? See below.
+See [GitHub Releases](https://github.com/FluidWorksApp/canopy-ide/releases)
+for the canonical release notes and version history.
 
-## Prerequisites
+## Quick start
 
-Canopy runs out of the box, but the **agent CLIs it launches** and its **git
-features** rely on two common tools. Install these once and every launcher entry
-works — without them you'll hit errors like `'npm' is not recognized`.
+1. Open Canopy and create a project.
+2. Add the directory or directories that make up the project, such as frontend,
+   API, worker, or mobile app.
+3. Open the launcher and start a shell or an installed coding-agent CLI.
+4. Use Agents to inspect the session or reopen past work.
+5. Review edits from Changes or Agent Workspace.
+6. Add run commands for development servers and open them in Preview.
+7. Press SpotSearch to find work or start a task, research entry, or note.
+8. Optionally enable Remote or Team only when you need them.
 
-- **Git** — Canopy is built around git (branches, worktrees, diffs, PRs).
-- **Node.js 18+ (with npm)** — most agent CLIs install and run through npm
-  (Claude Code, Codex, Amp, OpenCode).
+## Runtime prerequisites
+
+Canopy itself runs after installation, but its Git and agent workflows rely on
+tools installed on your machine:
+
+- **Git** for branches, worktrees, diffs, and pull-request workflows.
+- **Node.js 18+ with npm** for agent CLIs distributed through npm.
+- Provider-specific tools where applicable, such as Python/pip for Aider or the
+  Antigravity installer. The launcher shows the exact install command for a
+  missing built-in CLI.
 
 **macOS**
+
 ```sh
-xcode-select --install     # Git   (or: brew install git)
-brew install node          # Node.js + npm
+xcode-select --install     # Git, or use: brew install git
+brew install node          # Node.js and npm
 ```
 
-**Windows** — winget is built into Windows 10/11. **Open a new terminal
-afterward** so `PATH` picks them up:
+**Windows**
+
 ```powershell
 winget install Git.Git
 winget install OpenJS.NodeJS.LTS
 ```
 
-**Linux (Debian/Ubuntu)**
+Open a new terminal afterward so `PATH` includes the new tools.
+
+**Linux - Debian/Ubuntu**
+
 ```sh
 sudo apt update && sudo apt install -y git nodejs npm
 ```
-For a newer Node than your distro ships, use
+
+For a newer Node release, use
 [NodeSource](https://github.com/nodesource/distributions).
 
-Some CLIs bring their own runtime — **Aider** needs Python/pip, **Antigravity**
-its own installer — and Canopy's launcher shows the exact install command for
-each CLI you don't have yet. The tools above are what those commands depend on.
+## Keyboard shortcuts
+
+Canopy asks you to choose a shortcut profile during onboarding: **Canopy**,
+**VS Code**, **JetBrains**, or **Sublime Text**. The in-app Help dialog always
+shows the active profile for the current platform.
+
+The compact table below shows high-frequency commands in the default Canopy
+profile:
+
+| Action | macOS | Windows / Linux |
+|---|---|---|
+| New tab or launcher | `⌘N` | `Ctrl+N` |
+| SpotSearch | `⌘K` | `Ctrl+Shift+K` |
+| Quick Open | `⌘P` | `Ctrl+Shift+P` |
+| Find in Files | `⇧⌘F` | `Ctrl+Shift+F` |
+| New terminal | `⌘T` | `Ctrl+T` |
+| Close tab | `⌘W` | `Ctrl+Shift+W` |
+| Jump to tab | `⌘1…9` | `Ctrl+1…9` |
+| Jump to project | `⌥1…9` | `Alt+1…9` |
+| Previous / next tab | `⌃⌘←` / `⌃⌘→` | `Ctrl+PgUp` / `Ctrl+PgDn` |
+| Toggle sidebar | `⌘B` | `Ctrl+Shift+B` |
+| Focus mode | `⇧⌘Enter` | `Ctrl+Shift+Enter` |
+| Dictation | `⌘D` | `Alt+D` |
+
+Every chord is defined once in
+[`shared/shortcuts.json`](./shared/shortcuts.json) and resolved for profile,
+platform, application surface, and terminal collisions.
+
+## Documentation
+
+| Guide | Purpose |
+|---|---|
+| [Contributing](./CONTRIBUTING.md) | development setup, house style, tests, and pull requests |
+| [Architecture](./docs/architecture.md) | system structure, runtime flows, boundaries, and state authority |
+| [Core Rust System](./docs/core-rust-system.md) | native services, processes, security, persistence, and shutdown |
+| [Contributor Integration Guide](./docs/contributor-integrations.md) | choose the existing bus, registry, or adapter |
+| [Contribution Playbooks](./docs/contributions/README.md) | step-by-step recipes for each contribution type |
+| [Testing and Coverage](./docs/testing-and-coverage.md) | frontend, Rust, structural, fuzz, CI, and coverage expectations |
+| [Pull Request Etiquette](./docs/pull-request-etiquette.md) | proposing, testing, reviewing, and merging focused changes |
+| [Agent Integration Parity](./docs/agent-parity.md) | verified capabilities and limitations by coding CLI |
+| [Security Policy](./SECURITY.md) | private vulnerability reporting and supported versions |
+| [Release Process](./docs/release-process.md) | version PR, tag, native builds, draft QA, and publication |
+| [GitHub Releases](https://github.com/FluidWorksApp/canopy-ide/releases) | canonical release notes and version history |
+
+The same architecture documentation can be generated for the GitHub Wiki with
+`npm run wiki:build`; see [Publishing the GitHub Wiki](./docs/wiki-publishing.md).
 
 ## Build from source
 
-Prerequisites: **Rust** (stable) and **Node 20+**. For TypeScript language
-features, either `npm i -g typescript-language-server typescript` or have them in
-the opened project's `node_modules`.
+Developer prerequisites are **Rust stable** and **Node.js 20+**.
 
 ```sh
 npm install
-npm run tauri dev      # development, with hot reload (or: npx tauri dev)
-npm run tauri build    # production bundle (.app / installer)
+npm run tauri dev      # development build with hot reload
+npm run tauri build    # production bundle or installer
 ```
 
-The first `tauri dev` compiles the Rust core and takes a few minutes; subsequent
-runs are fast and the frontend hot-reloads.
-
-## Using Canopy
-
-- **Projects are the entry point.** Create one (＋), name it, and add one or more
-  labeled component directories. Projects persist in `~/.canopy/projects.json`.
-  Open several at once — top tabs switch projects, and the side panel, terminals
-  and file sub-tabs are all scoped per project. The File menu also offers explicit
-  *Open Project…*, *Save Project As…*, and *Open / Save Workspace* for moving a
-  setup between machines or committing it to a repo.
-- **The terminal is the hero.** Opening a project opens the launcher rather than a
-  bare shell. Pick a shell or an agent; the terminal starts `cd`'d into the
-  project. ⌫ clears scrollback; ↺ hard-resets. Scrollback is capped (10k lines,
-  configurable in `localStorage` `canopy.settings`).
-- **Run commands** (per component, in project settings) launch into the **RUNS
-  rail** — kept apart from shells because they're services, not sessions. Each
-  reports real state: a pulsing dot while live, a green check when a one-shot
-  finishes, or a red exit code when it fails.
-- **Quick Open (`⌘P` / `Ctrl+P`) and Find in Files (`⇧⌘F` / `Ctrl+Shift+F`)** search every
-  component of the project by default; chips scope to a single component.
-- **Diff-first.** A file changed on disk gives you a side-by-side diff — Accept
-  disk version / Keep mine — never a silent reload. The Changes tab lists
-  everything git sees as changed, grouped by component.
-- **Agents tab.** Agent CLIs detected inside your terminals, with CPU/memory
-  (runaway guard) and kill buttons, plus a file-based hook bridge: any CLI hook
-  system can append JSON lines to `~/.canopy/agent-events.jsonl` and they show up
-  live. Claude Code hooks install automatically at boot, and only fire for
-  terminals Canopy spawned.
-
-### Keyboard shortcuts
-
-VS Code-standard where an equivalent exists. All scoped to the active window and
-visible project — Close Tab closes a tab, never the app.
-
-Every chord is defined once in [`shared/shortcuts.json`](shared/shortcuts.json),
-read by both the webview and the native menu, and resolved per platform: `Mod`
-is Command on macOS and Control on Windows/Linux, and a chord that cannot mean
-the same thing on both carries an explicit override. The Help dialog renders
-this table for the platform you are actually on.
-
-| Action | macOS | Windows / Linux |
-| --- | --- | --- |
-| New tab (shell, preview or agent) | `⌘N` | `Ctrl+N` |
-| SpotSearch — search everything | `⌘K` | `Ctrl+Shift+K` |
-| Quick Open file (fuzzy) | `⌘P` | `Ctrl+Shift+P` |
-| Find in Files | `⇧⌘F` | `Ctrl+Shift+F` |
-| New project / Open project folder | `⇧⌘N` / `⌘O` | `Ctrl+Shift+N` / `Ctrl+O` |
-| Open / Save workspace file | `⇧⌘O` / `⇧⌘S` | `Ctrl+Shift+O` / `Ctrl+Shift+S` |
-| New terminal | `⌘T` | `Ctrl+T` |
-| Close tab | `⌘W` | `Ctrl+Shift+W` |
-| Jump to a tab (hold to see the numbers) | `⌘1…9` | `Ctrl+1…9` |
-| Jump to a project | `⌥1…9` | `Alt+1…9` |
-| Previous / next tab | `⌃⌘←` / `⌃⌘→` | `Ctrl+PgUp` / `Ctrl+PgDn` |
-| Previous / next tab (browser chord) | `⌃⇧⇥` / `⌃⇥` | `Ctrl+Shift+Tab` / `Ctrl+Tab` |
-| Previous / next project | `⌥⌘←` / `⌥⌘→` | `Ctrl+Alt+PgUp` / `Ctrl+Alt+PgDn` |
-| Close project | `⇧⌘W` | `Ctrl+Alt+W` |
-| Toggle sidebar | `⌘B` | `Ctrl+Shift+B` |
-| Focus mode (`Esc` exits) | `⇧⌘Enter` | `Ctrl+Shift+Enter` |
-| Voice dictation | `⌘D` | `Alt+D` |
-| Quit | `⌘Q` | `Alt+F4` |
-
-Chords move off macOS for two reasons, both recorded as notes in the manifest.
-
-**The desktop already owns it.** `Ctrl+←` is word-jump in every text field, so
-the tab chords take PageUp/PageDown; `Ctrl+Alt+←` is workspace switching on
-Linux and screen rotation on some Windows graphics drivers, so the project
-chords do too.
-
-**The shell needs it.** Off macOS `Mod` is Ctrl — the same key readline and the
-terminal driver use for line editing — and a menu accelerator is consumed
-before the shell ever sees it. Canopy is terminal-first, so a chord that would
-eat a key people press constantly takes Shift instead: Quick Open, SpotSearch,
-Close Tab and Toggle Sidebar become `Ctrl+Shift+P/K/W/B`, leaving
-`Ctrl+P` (previous-history), `Ctrl+K` (kill-line), `Ctrl+W` (werase) and
-`Ctrl+B` (backward-char, and the tmux prefix) to the shell. Ctrl+Shift is the
-namespace terminal emulators already reserve for app commands. Close Project
-then moves to `Ctrl+Alt+W`, keeping the rule that tabs are Ctrl+Shift and
-projects are Ctrl+Alt. Dictation avoids `Ctrl+D` for the same reason — it is
-shell EOF, and would close the terminal you were dictating into.
-
-`src/shortcuts.test.ts` enforces this: no chord may take a bare `Ctrl+<letter>`
-that readline binds, apart from four explicitly accepted exceptions.
-
-**Not every chord can be a menu item.** `Ctrl+Tab` is literal Ctrl on all three
-platforms — it is one chord worldwide, and `⌘⇥` belongs to the macOS app
-switcher — but it cannot be an accelerator: muda hands macOS the glyph `⇥`
-(U+21E5) as Tab's key equivalent rather than the character the key produces, so
-such a menu item renders perfectly and never fires. The manifest marks it
-`"surface": "app"` and the webview's capture-phase handler answers it, which is
-where it has to work anyway: focus is almost always inside xterm or Monaco, and
-macOS never routes an accelerator to the menu from there. The Tabs menu keeps
-`⌃⌘←/→`, the pair that does survive native focus; both move the same strip.
-
-**Windows only:** release builds switch off WebView2's own browser accelerator
-keys, so the registry really is the whole answer to "what does this key do".
-Left on, Edge's shortcuts sit underneath the app — `Ctrl+R`/`F5` reload it and
-take unsaved editor buffers with them, `Ctrl+F` opens a find bar Canopy never
-drew, and `Ctrl+Plus/Minus` zooms the webview on top of Canopy's own zoom. Dev
-builds keep them, because reload and `F12` are how you work on the thing.
-
-The three Cmd-based terminal chords (start/end of line, delete line) are
-unbound off macOS, where Home/End already do the job.
+Tauri builds the `canopy-hook` sidecar and Canopy Remote before starting or
+packaging the desktop application. The first Rust build takes a few minutes;
+subsequent frontend changes hot-reload quickly.
 
 ## Contributing
 
-Contributions are welcome — issues, ideas, and pull requests. Canopy is a small,
-readable codebase and a good project to hack on.
+Issues, ideas, documentation, themes, integrations, tests, and pull requests are
+welcome. Start with [CONTRIBUTING.md](./CONTRIBUTING.md), then choose the
+[contribution playbook](./docs/contributions/README.md) closest to your change.
+Read [Pull Request Etiquette](./docs/pull-request-etiquette.md) before requesting
+review.
 
-**Get set up:** follow [Build from source](#build-from-source) above, then run
-`npm run tauri dev`.
-
-**Before you open a PR,** these should all pass:
+Canopy follows test-first development. Before opening a pull request, run:
 
 ```sh
-npm run typecheck    # tsc -b (the root tsconfig is solution-style; this is the real check)
-npm run lint         # oxlint
-npm run build        # tsc -b && vite build
-cargo build --manifest-path src-tauri/Cargo.toml
+npm run typecheck
+npm run lint
+npm run test
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml --no-default-features
 ```
 
-**Where things live:**
+The main code boundaries are:
 
-| Path | What |
-|---|---|
-| `src/` | React + Vite frontend (components, IPC wrappers, editor) |
-| `src-tauri/src/` | Rust core — `pty.rs`, `lsp.rs`, `fsx.rs`, `git.rs`, `agents.rs` |
-| `src-tauri/src/bin/canopy_hook.rs` | the agent-hook helper (a second binary) |
-| `shared/` | browser-safe models, policy, and UI shared by desktop and Remote |
-| `portal/` | the embedded Canopy Remote React application |
-| `packages/ui/` | independently buildable UI package (`@canopy/ui`) |
-| `scripts/` | sidecar build + release tooling |
-| `docs/architecture.md` | contributor architecture guide and system map |
-| `docs/architecture-llm.md` | compact architecture context for coding agents |
-| `docs/contributor-integrations.md` | messaging buses and contribution recipes |
-| `docs/contributions/` | step-by-step playbooks for each contribution type |
-| `docs/core-rust-system.md` | Rust core roles, services, boundaries, and lifecycle |
-| `docs/testing-and-coverage.md` | test architecture, CI gates, coverage scope, and contribution expectations |
-| `docs/wiki-publishing.md` | build and publish these pages to the separate GitHub Wiki repository |
-| `SPEC.md` | the full product spec |
-| `RELEASING.md` | how signed releases are cut |
-
-**House style:** match the surrounding code. Comments explain *constraints and
-why*, not *what* — the codebase leans on this heavily, and it's part of what
-keeps it approachable. Keep native process ownership in Rust; the frontend never
-spawns anything itself.
-
-## Architecture
-
-For the full contributor-oriented system map, runtime flows, trust boundaries,
-and extension guide, see [docs/architecture.md](./docs/architecture.md). Coding
-agents can use the compact [LLM context](./docs/architecture-llm.md).
-To add a theme, component, feature, agent tool, search source, tracker, or Remote
-surface without duplicating infrastructure, use the
-[contributor integration guide](./docs/contributor-integrations.md).
-Each path also has a focused, diagrammed
-[contribution playbook](./docs/contributions/README.md). Native contributors
-should start with the [Core Rust System](./docs/core-rust-system.md).
-Testing expectations and the current measured coverage scope are documented in
-[Testing and Coverage](./docs/testing-and-coverage.md).
-Repository maintainers can publish the same canonical pages through the
-[GitHub Wiki workflow](./docs/wiki-publishing.md).
-
-```
-┌────────────────────────── Tauri (Rust core) ──────────────────────────┐
-│  pty.rs     portable-pty sessions; reader+flusher threads per PTY;    │
-│             batched raw-byte streaming over ipc::Channel; ack-based   │
-│             backpressure; process-group kill on teardown              │
-│  lsp.rs     LSP subprocesses over stdio; Content-Length framing       │
-│             parsed in Rust; JSON messages over a Channel              │
-│  fsx.rs     workspace registry (multi-root scope allowlist), fs       │
-│             commands, notify watchers → fs:change events              │
-│  agents.rs  sysinfo process-tree monitor → pty:stats; hook bridge     │
-│             tail → agent:event                                        │
-└──────────────────────────────┬────────────────────────────────────────┘
-                        commands + channels/events
-┌──────────────────────────────┴───────────────────────── WebView ─────┐
-│  React + Vite. xterm.js fed directly from the channel — no output    │
-│  buffered in JS. Monaco via @codingame/monaco-vscode-editor-api so   │
-│  monaco-languageclient shares the same API instance; LSP transport   │
-│  is a custom MessageReader/Writer over Tauri IPC.                    │
-└───────────────────────────────────────────────────────────────────────┘
+```text
+src/                         desktop React application
+src-tauri/src/               Rust native core
+src-tauri/src/bin/           canopy-hook sidecar
+shared/                      browser-safe desktop/Remote models and UI
+portal/                      embedded Canopy Remote application
+packages/ui/                 independently buildable UI package
+scripts/                     build, release, license, and Wiki tooling
+docs/                        architecture, testing, and contribution guides
 ```
 
-Design rules:
+Rust owns native processes and privileged resources. Shared code must remain
+browser-safe. Comments explain constraints and why, not what the next line does.
 
-- **Rust owns all native processes** (PTYs, LSP servers, watchers). JS never spawns.
-- **Raw bytes end-to-end** on the PTY path; no filtering or normalization.
-- **Bounded memory**: xterm scrollback capped; the PTY reader pauses when the
-  WebView is behind (ack window, default 2 MB) so the kernel backpressures the
-  child instead of ballooning heap.
-- **Clean teardown**: closing a tab kills the whole process group and reaps the
-  child; app exit kills everything.
+## Support and community
 
-## Dependency justification
+- Ask usage questions, share workflows, and discuss ideas in
+  [GitHub Discussions](https://github.com/FluidWorksApp/canopy-ide/discussions).
+- Report reproducible bugs or request features through the
+  [issue forms](https://github.com/FluidWorksApp/canopy-ide/issues/new/choose).
+- Read and follow the [Code of Conduct](./CODE_OF_CONDUCT.md).
+- Help fund continued development through
+  [Sponsor Canopy](https://canopyide.dev/support).
 
-| Dependency | Why |
-|---|---|
-| `portable-pty` | cross-platform PTY (the terminal core) |
-| `notify` | fs watching for the diff-first workflow |
-| `sysinfo` | process-tree stats for the runaway guard / agent detection |
-| `libc` (unix) | process-group SIGKILL on teardown |
-| `@xterm/*` | terminal renderer + required addons |
-| `monaco-editor` → `@codingame/monaco-vscode-editor-api` | monaco build compatible with monaco-languageclient 10.x |
-| `monaco-languageclient` + `@codingame/monaco-vscode-standalone-languages` | LSP client + monarch grammars |
-| `react-resizable-panels` | the three resizable panes |
-| `marked` | markdown rendering (small, sync) |
-| `mermaid` | diagram blocks in markdown (lazy-loaded) |
-| `xlsx` (SheetJS, cdn dist) | spreadsheet parsing (lazy-loaded) |
-| `@tauri-apps/plugin-dialog` | native folder picker |
-| `@tauri-apps/plugin-opener` | system-browser link from the update toast for installs that can't self-update (`.deb`/`.rpm`) |
-| `sha2` | key derivation (HKDF) + file-transfer integrity hash for the team relay |
-| `spake2` | turns the low-entropy join code into a strong mutually-authenticated session key (PAKE), so the relay resists eavesdropping and offline brute-force |
-| `hkdf` | splits the session key into per-direction encryption keys |
-| `chacha20poly1305` | AEAD sealing every relay frame and file chunk (the transport itself stays std::net — no async/TLS stack) |
-| `getrandom` | OS CSPRNG for per-file-transfer key-derivation salts + identity-key seeds |
-| `ed25519-dalek` | long-term identity keys for trust-on-first-use (a reused join code can't silently impersonate a teammate) |
-| `hex` | encoding identity keys/signatures on the wire and in the pin store |
-| `tauri-plugin-notification` (+ npm counterpart) | native notifications for team-relay chat/commands/transfers landing while the app is unfocused |
+There is no separate public roadmap today. Planning and proposals happen in
+Issues and Discussions; shipped changes are recorded in GitHub Releases.
 
-Deliberately *not* a dependency: the fuzzy matcher behind ⌘K, quick-open and
-the palettes. `shared/fuzzy.ts` is a hand port of [fzf](https://github.com/junegunn/fzf)'s
-scoring — its constants, its four bonus classes (word boundary, camelCase, path
-delimiter, first character), its FuzzyMatchV2 alignment, and its query syntax
-(space-separated AND terms, `'exact`, `^prefix`, `suffix$`, `!negate`). One
-file with no install beat both `fzf-for-js` and shelling out to the `fzf`
-binary, which core principle 1 rules out anyway. fzf is MIT; see
-[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md).
+## Security
 
-## License
+Do not report vulnerabilities in public issues. Follow
+[SECURITY.md](./SECURITY.md) to use GitHub private vulnerability reporting or the
+security contact listed there.
 
-Canopy is open source under the [MIT License](./LICENSE.md) — free to use,
-modify, and distribute, including commercially.
+## Author
 
-Third-party components keep their own licenses — see
-[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md), which is generated from the
-resolved dependency trees (`npm run licenses`) and ships inside the app bundle.
-Notably, Canopy bundles jschardet (LGPL-2.1-or-later) as a separately
-replaceable chunk, and Microsoft's ONNX Runtime (MIT) as a prebuilt library.
+Canopy was created by
+[Shoaib Ameer](https://www.linkedin.com/in/shoaib-ameer-169a649/).
+
+## License and acknowledgements
+
+Canopy is open source under the [MIT License](./LICENSE.md). You may use, modify,
+and distribute it, including commercially, under those terms.
+
+Third-party components retain their own licenses. See
+[THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md), generated from the resolved
+Rust and npm dependency trees and shipped inside the application bundle.
 
 Copyright 2026 Cause Connect Pte Ltd.
