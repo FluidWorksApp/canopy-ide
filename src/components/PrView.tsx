@@ -1115,9 +1115,16 @@ export function PrView({
   const merge = async (method: MergeMethod) => {
     setBusy(true);
     try {
-      const msg = await ipc.ghPrMerge(repo, pr.number, method);
-      setDone(msg);
-      onNotice(msg, "success");
+      const result = await ipc.ghPrMerge(repo, pr.number, method);
+      setDone(result.message);
+      onNotice(result.message, result.pending ? "info" : "success");
+      // The asynchronous REST endpoint accepts a stack before it lands. The PR
+      // watcher will refresh this tab when GitHub finishes; until then, calling
+      // it merged would hide a failure that has not happened yet.
+      if (result.pending) {
+        void refreshConv();
+        return;
+      }
       // The whole header turns over with the toast: it landed, so Merge, the
       // next move, the agent tasks and the review box all stop offering things
       // you can no longer do. The refresh behind it is confirmation, not the

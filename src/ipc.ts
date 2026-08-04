@@ -2372,11 +2372,16 @@ export const ghPrReview = (
  *  working tree aside and puts it back, as the local-changes answer does. */
 export const ghPrCheckout = (repo: string, number: number, carry = false) =>
   invoke<CheckoutOutcome>("gh_pr_checkout", { repo, number, carry });
+export interface PrMergeResult {
+  message: string;
+  /** GitHub accepted a stacked PR for background merging. */
+  pending: boolean;
+}
 export const ghPrMerge = (
   repo: string,
   number: number,
   method: "squash" | "merge" | "rebase",
-) => invoke<string>("gh_pr_merge", { repo, number, method });
+) => invoke<PrMergeResult>("gh_pr_merge", { repo, number, method });
 /** Close a PR without merging. `deleteBranch` also throws away its branch (local
  *  + remote) via `gh pr close --delete-branch` — the "close it and discard it". */
 export const ghPrClose = (repo: string, number: number, deleteBranch = false) =>
