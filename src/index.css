@@ -179,6 +179,7 @@
 :root[data-theme="pixel"] .notice,
 :root[data-theme="pixel"] .update-toast,
 :root[data-theme="pixel"] .palette,
+:root[data-theme="pixel"] .coach-pop,
 :root[data-theme="pixel"] .companion-panel,
 :root[data-theme="pixel"] .companion-notice,
 :root[data-theme="pixel"] .btn,
@@ -17633,12 +17634,17 @@ a.btn-sm {
 }
 .coach-pop {
   position: fixed;
-  background: var(--bg-raised);
+  /* A coachmark sits over arbitrary editor/terminal content. Overlay-grade ink
+     is required here: raised surfaces are translucent in the glass skin, which
+     leaves two readable text layers on top of each other. */
+  background: var(--bg-raised-opaque, var(--bg-overlay));
   border: 1px solid var(--accent);
   border-radius: var(--r-md);
   corner-shape: squircle;
   padding: 14px 15px 12px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-3);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   white-space: normal;
   animation: coach-pop-in 0.18s ease-out;
 }
@@ -17684,7 +17690,7 @@ a.btn-sm {
   gap: 12px;
   min-height: 26px;
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--text-dim);
 }
 .coach-step kbd {
   max-width: 210px;
@@ -17700,6 +17706,19 @@ a.btn-sm {
 .coach-actions {
   display: flex;
   justify-content: flex-end;
+  position: sticky;
+  bottom: 0;
+  padding-top: 4px;
+  background: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .coach-pop {
+    animation: none;
+  }
+  .coach-hole {
+    transition: none;
+  }
 }
 
 /* ---------- preview tab (embedded browser + annotate) ---------- */
