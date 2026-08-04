@@ -1820,6 +1820,8 @@ results stay inspectable:
 - Open or look at a page -> canopy_browser_navigate, then canopy_browser_snapshot \
   (not `open`/`xdg-open`, and never an external browser; the embedded preview is \
   what the user annotates and what you can drive)
+- Test responsive layouts -> canopy_browser_resize, then reset it when finished \
+  (do not open Playwright just to change the viewport)
 - Interact with a page -> canopy_browser_click / _type / _eval; diagnose with \
   canopy_browser_console / _network
 - Stop or restart a server -> canopy_stop_server / canopy_restart_server (not \
@@ -2399,6 +2401,7 @@ const COMPANION_MUTATING_TOOLS: &[&str] = &[
     "canopy_browser_type",
     "canopy_browser_eval",
     "canopy_browser_navigate",
+    "canopy_browser_resize",
     "canopy_pr_action",
 ];
 
@@ -2943,6 +2946,17 @@ fn tool_defs() -> serde_json::Value {
             }, "additionalProperties": false }
         },
         {
+            "name": "canopy_browser_resize",
+            "description": "Set the selected preview tab's real CSS viewport size for responsive testing, or restore it to the available pane size. The page is reflowed at this size; screenshots preserve it.",
+            "inputSchema": { "type": "object", "properties": {
+                "width": { "type": "integer", "minimum": 200, "maximum": 7680, "description": "Viewport width in CSS pixels" },
+                "height": { "type": "integer", "minimum": 200, "maximum": 7680, "description": "Viewport height in CSS pixels" },
+                "reset": { "type": "boolean", "description": "Restore the preview to fill its pane instead of setting a size" },
+                "url": { "type": "string", "description": "Which preview tab (by origin); defaults to the active one" },
+                "project": { "type": "string", "description": "Which project's preview to drive, by name. Only needed when you are not running inside one — the companion always is not" }
+            }, "additionalProperties": false }
+        },
+        {
             "name": "canopy_browser_snapshot",
             "description": "The previewed page as it stands: url, title, visible text, and each interactive element with a numbered ref, label, CSS selector, and React component. Refs address click/type and stay valid until the page re-renders. Use instead of a screenshot.",
             "inputSchema": { "type": "object", "properties": {
@@ -3316,6 +3330,13 @@ fn describe_action(name: &str, args: &serde_json::Value) -> (String, Option<Stri
         "canopy_vault_fill" => ("Sign in to a page".into(), arg("entryId")),
         "canopy_vault_read" => ("Read a stored password".into(), arg("entryId")),
         "canopy_browser_navigate" => ("Navigate the preview".into(), arg("url")),
+        "canopy_browser_resize" => (
+            "Resize the preview".into(),
+            match (args.get("width").and_then(|v| v.as_u64()), args.get("height").and_then(|v| v.as_u64())) {
+                (Some(w), Some(h)) => Some(format!("{w}x{h}")),
+                _ => Some("reset".into()),
+            },
+        ),
         "canopy_browser_click" => ("Click in the preview".into(), arg("ref")),
         "canopy_browser_type" => ("Type into the preview".into(), arg("text")),
         "canopy_browser_eval" => (
@@ -3985,6 +4006,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             }
             text(browser_op("navigate", args))
         }
+        "canopy_browser_resize" => text(browser_op("resize", args)),
         "canopy_browser_snapshot" => text(browser_op("snapshot", args)),
         "canopy_browser_click" => text(browser_op("click", args)),
         "canopy_browser_type" => text(browser_op("type", args)),
@@ -4993,6 +5015,23 @@ mod tests {
         let props = &tool["inputSchema"]["properties"];
         assert!(props.get("pr").is_some());
         assert!(props.get("ptyId").is_some());
+    }
+
+    #[test]
+    fn browser_resize_exposes_dimensions_and_reset() {
+        let def = tool_defs();
+        let tool = def
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "canopy_browser_resize")
+            .expect("canopy_browser_resize is registered");
+        let props = &tool["inputSchema"]["properties"];
+        assert_eq!(props["width"]["minimum"], 200);
+        assert_eq!(props["height"]["maximum"], 7680);
+        assert_eq!(props["reset"]["type"], "boolean");
+        assert!(props.get("url").is_some());
+        assert!(props.get("project").is_some());
     }
 
     /// One whole turn, event by event, as the wire delivers it. The numbers that

@@ -65,6 +65,7 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
     tools: [
       { name: "canopy_open_preview", label: "Open preview", note: "Show a local URL" },
       { name: "canopy_browser_navigate", label: "Navigate", note: "Load a page, back, forward" },
+      { name: "canopy_browser_resize", label: "Resize", note: "Set or reset the CSS viewport" },
       { name: "canopy_browser_snapshot", label: "Snapshot", note: "The page's elements and text" },
       { name: "canopy_browser_click", label: "Click", note: "Click an element" },
       { name: "canopy_browser_type", label: "Type", note: "Fill an input" },

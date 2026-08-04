@@ -2212,6 +2212,10 @@ struct BrowserOp {
     url: Option<String>,
     /// navigate: back | forward | reload (when no url is given).
     action: Option<String>,
+    /// resize: CSS viewport dimensions, or reset to fill the preview pane.
+    width: Option<u32>,
+    height: Option<u32>,
+    reset: Option<bool>,
     /// click / type: element address — a snapshot ref or a CSS selector.
     r#ref: Option<u64>,
     selector: Option<String>,
@@ -2233,6 +2237,26 @@ struct BrowserOp {
 /// How long the app + page get to answer a browser op. Covers a preview tab
 /// mounting and its page loading; the sidecar's own read timeout is longer.
 const BROWSER_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+fn validate_browser_resize(
+    width: Option<u32>,
+    height: Option<u32>,
+    reset: bool,
+) -> Result<(), &'static str> {
+    if reset {
+        return if width.is_none() && height.is_none() {
+            Ok(())
+        } else {
+            Err("resize takes either reset = true or width and height, not both")
+        };
+    }
+    let valid = |n: Option<u32>| n.is_some_and(|n| (200..=7680).contains(&n));
+    if valid(width) && valid(height) {
+        Ok(())
+    } else {
+        Err("resize needs width and height between 200 and 7680 CSS pixels, or reset = true")
+    }
+}
 
 /// An Android device op (canopy_device_* tools).
 ///
@@ -2439,6 +2463,13 @@ async fn browser(
                 return (StatusCode::BAD_REQUEST, "type needs text".into());
             }
         }
+        "resize" => {
+            if let Err(message) =
+                validate_browser_resize(op.width, op.height, op.reset.unwrap_or(false))
+            {
+                return (StatusCode::BAD_REQUEST, message.into());
+            }
+        }
         "eval" => {
             if op.code.as_deref().map_or(true, |c| c.trim().is_empty()) {
                 return (StatusCode::BAD_REQUEST, "eval needs code".into());
@@ -2493,6 +2524,9 @@ async fn browser(
             "scope": op.scope,
             "url": op.url,
             "action": op.action,
+            "width": op.width,
+            "height": op.height,
+            "reset": op.reset,
             "ref": op.r#ref,
             "selector": op.selector,
             "text": op.text,
@@ -3352,6 +3386,15 @@ mod tests {
     #[test]
     fn strip_ansi_passes_utf8_through() {
         assert_eq!(strip_ansi("héllo → wörld".as_bytes()), "héllo → wörld");
+    }
+
+    #[test]
+    fn browser_resize_requires_a_complete_size_or_reset() {
+        assert!(validate_browser_resize(Some(390), Some(844), false).is_ok());
+        assert!(validate_browser_resize(None, None, true).is_ok());
+        assert!(validate_browser_resize(Some(390), None, false).is_err());
+        assert!(validate_browser_resize(Some(199), Some(844), false).is_err());
+        assert!(validate_browser_resize(Some(390), Some(844), true).is_err());
     }
 
     #[test]
