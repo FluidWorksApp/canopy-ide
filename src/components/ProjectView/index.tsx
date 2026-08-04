@@ -7237,7 +7237,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         },
         {
           label: "Focus another tab",
-          shortcut: format("cycle-tab-next"),
+          // This is literal Ctrl on every platform. The macOS glyph form `⌃⇥`
+          // is too cryptic in a small coachmark keycap.
+          shortcut: "Ctrl+Tab",
         },
         {
           label: "Navigate between panes",
