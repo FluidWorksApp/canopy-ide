@@ -3729,6 +3729,11 @@ pub struct CliVersions {
 #[derive(serde::Deserialize)]
 pub struct CliVersionQuery {
     pub bin: String,
+    /// Canonical npm package for manager-specific upgrades. A resolved binary
+    /// can belong to npm or pnpm even when the CLI's self-updater chooses the
+    /// other store, leaving the PATH winner unchanged.
+    #[serde(rename = "npmPackage")]
+    pub npm_package: Option<String>,
     /// Registry JSON endpoint carrying the newest version (npm `/latest` doc
     /// or PyPI `/json`). None skips the network fetch — the frontend passes
     /// None both for registry-less CLIs and when its latest-cache is fresh.
@@ -3784,6 +3789,32 @@ fn brew_pkg(path: &str) -> Option<(String, bool)> {
     Some((pkg.to_string(), is_cask))
 }
 
+fn node_package_manager(path: &str) -> Option<&'static str> {
+    let path = path.replace('\\', "/");
+    if path.contains("/.pnpm/") || path.contains("/pnpm/global/") {
+        Some("pnpm")
+    } else if path.contains("/node_modules/") {
+        Some("npm")
+    } else {
+        None
+    }
+}
+
+fn node_update_command(manager: &str, package: &str) -> Option<String> {
+    if package.is_empty()
+        || !package
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "@/._-".contains(c))
+    {
+        return None;
+    }
+    match manager {
+        "npm" => Some(format!("npm install -g {package}")),
+        "pnpm" => Some(format!("pnpm add -g {package}")),
+        _ => None,
+    }
+}
+
 /// Installed vs latest versions for the agent CLIs. Installed comes from
 /// `<bin> --version` on the login-shell PATH (GUI apps don't inherit it);
 /// latest from the CLI's registry via curl — the app deliberately has no HTTP
@@ -3823,10 +3854,10 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                         let out = String::from_utf8_lossy(&o.stdout);
                         let (ver, path) = out.split_once("@@P@@").unwrap_or((out.as_ref(), ""));
                         v.installed = first_version_token(ver);
-                        if let Some((pkg, is_cask)) = std::fs::canonicalize(path.trim())
+                        let canonical = std::fs::canonicalize(path.trim())
                             .ok()
-                            .and_then(|c| brew_pkg(&c.to_string_lossy()))
-                        {
+                            .map(|c| c.to_string_lossy().to_string());
+                        if let Some((pkg, is_cask)) = canonical.as_deref().and_then(brew_pkg) {
                             v.managed_by = Some("homebrew".into());
                             v.update = Some(if is_cask {
                                 format!("brew upgrade --cask {pkg}")
@@ -3862,13 +3893,20 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                                     }
                                 }
                             }
+                        } else if let Some(manager) =
+                            canonical.as_deref().and_then(node_package_manager)
+                        {
+                            v.managed_by = Some(manager.into());
+                            v.update = q
+                                .npm_package
+                                .as_deref()
+                                .and_then(|pkg| node_update_command(manager, pkg));
                         }
                     }
                 }
-                // Registry latest only when the install source isn't a package
-                // manager we route ourselves — an npm/PyPI number is meaningless
-                // for (and would falsely flag) a brew-managed binary.
-                if v.managed_by.is_none() {
+                // npm/pnpm installs still compare against npm's registry. Only
+                // Homebrew has its own version stream, populated above.
+                if v.managed_by.as_deref() != Some("homebrew") {
                     if let Some(url) = q.latest_url.filter(|u| u.starts_with("https://")) {
                         let fetch = tokio::process::Command::new("curl")
                             .args(["-fsSL", "-m", "8", url.as_str()])
@@ -4941,6 +4979,8 @@ mod tests {
     }
     use super::claude_bucket;
     use super::first_version_token;
+    use super::node_package_manager;
+    use super::node_update_command;
     use super::probe_target;
     use super::sh_quote;
 
@@ -5252,6 +5292,31 @@ mod tests {
         assert_eq!(first_version_token(""), None);
         // A lone integer (an exit code, a count) must not read as a version.
         assert_eq!(first_version_token("exit 1"), None);
+    }
+
+    #[test]
+    fn node_install_source_updates_the_path_winner() {
+        assert_eq!(
+            node_package_manager(
+                "/opt/homebrew/lib/node_modules/@sourcegraph/amp/node_modules/@ampcode/cli/bin/amp.exe"
+            ),
+            Some("npm")
+        );
+        assert_eq!(
+            node_package_manager(
+                "/Users/dev/Library/pnpm/global/5/.pnpm/@ampcode+cli@1/node_modules/@ampcode/cli/bin/amp"
+            ),
+            Some("pnpm")
+        );
+        assert_eq!(
+            node_update_command("npm", "@ampcode/cli").as_deref(),
+            Some("npm install -g @ampcode/cli")
+        );
+        assert_eq!(
+            node_update_command("pnpm", "@ampcode/cli").as_deref(),
+            Some("pnpm add -g @ampcode/cli")
+        );
+        assert_eq!(node_update_command("npm", "bad; rm -rf /"), None);
     }
 
     /// Mirrors the encoding claude applies to bucket directories under

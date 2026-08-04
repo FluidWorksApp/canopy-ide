@@ -825,6 +825,12 @@ export async function checkCliUpdates(): Promise<Record<string, CliUpdate>> {
     >("cli_versions", {
       queries: AGENT_CLIS.map((c) => ({
         bin: c.bin,
+        // Lets the backend update the executable that actually wins PATH with
+        // its owning node package manager instead of trusting a self-updater
+        // that may write a second copy elsewhere.
+        npmPackage: c.pkgs
+          ?.find((pkg) => pkg.startsWith("npm:"))
+          ?.slice("npm:".length) ?? null,
         // A rebound binary is compared against nothing: `latestUrl` is the
         // vendor's public registry, and an enterprise build's version numbering
         // is its own. Probing it anyway would badge a sanctioned install as out
