@@ -2,7 +2,8 @@
 
 > This page describes Canopy's current test architecture and the expectations
 > for new contributions. The contributor gate is also summarized in
-> [CONTRIBUTING.md](../CONTRIBUTING.md).
+> [CONTRIBUTING.md](../CONTRIBUTING.md). Test disclosure and review expectations
+> are in [Pull Request Etiquette](./pull-request-etiquette.md).
 
 ## 1. Testing principles
 

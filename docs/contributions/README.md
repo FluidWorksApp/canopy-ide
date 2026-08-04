@@ -5,6 +5,8 @@ Start with the narrowest playbook that matches the change. For system context,
 read [Canopy Architecture](../architecture.md). For bus selection and shared
 integration rules, read the
 [Contributor Integration Guide](../contributor-integrations.md).
+For branch, review, test disclosure, and merge expectations, read
+[Pull Request Etiquette](../pull-request-etiquette.md).
 
 ## Playbook index
 

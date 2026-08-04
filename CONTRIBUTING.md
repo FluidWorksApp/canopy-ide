@@ -89,6 +89,8 @@ For a focused start-to-finish recipe, choose a
 also read [Core Rust System](./docs/core-rust-system.md).
 The complete test-layer, CI, and coverage model is in
 [Testing and Coverage](./docs/testing-and-coverage.md).
+Before opening or reviewing a change, read
+[Pull Request Etiquette](./docs/pull-request-etiquette.md).
 
 ## Hook into existing infrastructure
 

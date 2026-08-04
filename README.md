@@ -133,14 +133,18 @@ The Agents rail combines live PTY evidence, process stats, session history, and
 CLI integration signals. It shows lifecycle, project, component, branch, last
 prompt, resource use, and whether the session needs you.
 
-<img src="docs/screenshots/agents.png" alt="Agents rail with several sessions, lifecycle indicators, branches, and shared context" width="380">
+<p align="center">
+  <img src="docs/screenshots/agents.png" alt="Agents rail with several sessions, lifecycle indicators, branches, and shared context" width="380">
+</p>
 
 ### Review one agent as a complete unit of work
 
 Agent Workspace joins the session to its checkout, files, commits, diff, branch,
 and pull request so review happens in context rather than across terminal tabs.
 
-<img src="docs/screenshots/agent-workspace.png" alt="Agent Workspace showing branch state, pull request, commits, edited files, and a live diff" width="900">
+<p align="center">
+  <img src="docs/screenshots/agent-workspace.png" alt="Agent Workspace showing branch state, pull request, commits, edited files, and a live diff" width="900">
+</p>
 
 ### Keep Git and issue work beside the code
 
@@ -148,9 +152,13 @@ The Git surface handles changes, branches, worktrees, diffs, and loose ends.
 GitHub Issues and Linear tickets can be read and acted on without leaving the
 workspace, then handed to a new or running agent.
 
-<img src="docs/screenshots/git-diff.png" alt="Side-by-side Git diff with stage, discard, and open-file actions" width="820">
+<p align="center">
+  <img src="docs/screenshots/git-diff.png" alt="Side-by-side Git diff with stage, discard, and open-file actions" width="820">
+</p>
 
-<img src="docs/screenshots/issue.png" alt="Issue detail in Canopy with status, conversation, worktree, and agent handoff" width="820">
+<p align="center">
+  <img src="docs/screenshots/issue.png" alt="Issue detail in Canopy with status, conversation, worktree, and agent handoff" width="820">
+</p>
 
 ### Work with a team without a central Canopy service
 
@@ -158,7 +166,9 @@ The host's Canopy is the encrypted relay. Teammates can chat, transfer files,
 request reviews, and collaborate on shared code while the file owner retains
 authority over disk writes.
 
-<img src="docs/screenshots/team-relay.png" alt="Team panel with relay status, members, transfers, and review requests" width="380">
+<p align="center">
+  <img src="docs/screenshots/team-relay.png" alt="Team panel with relay status, members, transfers, and review requests" width="380">
+</p>
 
 ## Privacy and security boundaries
 
@@ -284,9 +294,10 @@ platform, application surface, and terminal collisions.
 | [Contributor Integration Guide](./docs/contributor-integrations.md) | choose the existing bus, registry, or adapter |
 | [Contribution Playbooks](./docs/contributions/README.md) | step-by-step recipes for each contribution type |
 | [Testing and Coverage](./docs/testing-and-coverage.md) | frontend, Rust, structural, fuzz, CI, and coverage expectations |
+| [Pull Request Etiquette](./docs/pull-request-etiquette.md) | proposing, testing, reviewing, and merging focused changes |
 | [Agent Integration Parity](./docs/agent-parity.md) | verified capabilities and limitations by coding CLI |
 | [Security Policy](./SECURITY.md) | private vulnerability reporting and supported versions |
-| [Release Process](./RELEASING.md) | versioning, signing, packaging, and publication |
+| [Release Process](./docs/release-process.md) | version PR, tag, native builds, draft QA, and publication |
 | [GitHub Releases](https://github.com/FluidWorksApp/canopy-ide/releases) | canonical release notes and version history |
 
 The same architecture documentation can be generated for the GitHub Wiki with
@@ -311,6 +322,8 @@ subsequent frontend changes hot-reload quickly.
 Issues, ideas, documentation, themes, integrations, tests, and pull requests are
 welcome. Start with [CONTRIBUTING.md](./CONTRIBUTING.md), then choose the
 [contribution playbook](./docs/contributions/README.md) closest to your change.
+Read [Pull Request Etiquette](./docs/pull-request-etiquette.md) before requesting
+review.
 
 Canopy follows test-first development. Before opening a pull request, run:
 

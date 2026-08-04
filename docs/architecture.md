@@ -25,6 +25,10 @@ repository, see [Publishing the GitHub Wiki](./wiki-publishing.md).
 For frontend, structural, Rust, fuzz, CI, and coverage expectations, see
 [Testing and Coverage](./testing-and-coverage.md).
 
+For change proposals and maintainership workflows, see
+[Pull Request Etiquette](./pull-request-etiquette.md) and
+[Release Process](./release-process.md).
+
 ## 1. System in one paragraph
 
 Canopy is a local-first desktop IDE for working with coding agents. The desktop
