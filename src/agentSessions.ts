@@ -19,6 +19,7 @@ import { ptyEvidenceFor, useFirstSeen } from "./agentLifeStore";
 import { DIGEST_FALLBACK_MS, subscribeSessionDigests } from "./sessionDigests";
 import { forgetSessions, restorableFrom } from "./restorable";
 import { getSettings, subscribeSettings } from "./settings";
+import { claimConcernsRoots } from "./claims";
 
 /** Last thing the *human* typed. Hooks also record injected payloads
     (`<task-notification>…`, shared-context blocks) as prompts; an XML-ish
@@ -141,10 +142,10 @@ export function useAgentSessions(opts: {
   }, [rootsKey, visible]);
 
   // Claims other agents hold in this checkout, refreshed when one changes.
-  const [claims, setClaims] = useState<ipc.AgentClaim[]>([]);
+  const [allClaims, setAllClaims] = useState<ipc.AgentClaim[]>([]);
   useEffect(() => {
     if (!visible) return;
-    const load = () => void ipc.contextClaims().then(setClaims).catch(() => {});
+    const load = () => void ipc.contextClaims().then(setAllClaims).catch(() => {});
     load();
     // The flag covers the gap `un` alone leaves: if this effect is torn down
     // before listen() resolves, cleanup ran against `undefined` and the
@@ -160,6 +161,12 @@ export function useAgentSessions(opts: {
       un?.();
     };
   }, [visible]);
+  const claims = useMemo(
+    () => allClaims.filter((claim) => claimConcernsRoots(claim, roots)),
+    // Callers rebuild roots on render, but the set of roots only changes with this key.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allClaims, rootsKey],
+  );
 
   // Messages agents have typed into each other. Read the same way as claims,
   // and for the same reason: a message arrives in its target's terminal looking

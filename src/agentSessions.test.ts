@@ -7,12 +7,13 @@ import { useAgentSessions } from "./agentSessions";
 // Mutable seam so single tests can delay the claims-listener handshake.
 const seams = vi.hoisted(() => ({
   onAgentClaims: undefined as (() => Promise<() => void>) | undefined,
+  claims: [] as ipcTypes.AgentClaim[],
 }));
 
 vi.mock("./ipc", () => ({
   instanceId: () => Promise.resolve("inst-1"),
   sessionDigests: () => Promise.resolve([]),
-  contextClaims: () => Promise.resolve([]),
+  contextClaims: () => Promise.resolve(seams.claims),
   onAgentClaims: () => seams.onAgentClaims?.() ?? Promise.resolve(() => {}),
   contextMessages: () => Promise.resolve([]),
   onAgentMessage: () => Promise.resolve(() => {}),
@@ -22,6 +23,7 @@ vi.mock("./ipc", () => ({
 
 beforeEach(() => {
   seams.onAgentClaims = undefined;
+  seams.claims = [];
 });
 
 const session = (over: Partial<ipcTypes.SessionStats> = {}): ipcTypes.SessionStats => ({
@@ -36,6 +38,21 @@ const session = (over: Partial<ipcTypes.SessionStats> = {}): ipcTypes.SessionSta
   procs: [],
   ports: [],
   agent_hint: { bin: "claude", pkg: null, path: null, interactive: true },
+  ...over,
+});
+
+const claim = (over: Partial<ipcTypes.AgentClaim> = {}): ipcTypes.AgentClaim => ({
+  id: "c1",
+  paths: ["/repo/src/auth.ts"],
+  owner: "repo (/repo)",
+  owner_key: "pty:7@inst-1",
+  pty_id: 7,
+  instance: "inst-1",
+  note: null,
+  at_ms: 1_000,
+  released_at_ms: null,
+  released_by: null,
+  refusals: [],
   ...over,
 });
 
@@ -109,6 +126,28 @@ describe("useAgentSessions identities", () => {
 });
 
 describe("the claims listener", () => {
+  it("only exposes claims that concern the active project's roots", async () => {
+    seams.claims = [
+      claim(),
+      claim({
+        id: "foreign",
+        paths: ["/other/src/recording.rs"],
+        owner: "other (/other)",
+        owner_key: "pty:9@inst-1",
+        pty_id: 9,
+      }),
+    ];
+    const { result } = renderHook(() =>
+      useAgentSessions({
+        visible: true,
+        roots: ["/repo"],
+        stats: [session()],
+        liveSessionIds: [],
+      }),
+    );
+    await waitFor(() => expect(result.current.claims.map((item) => item.id)).toEqual(["c1"]));
+  });
+
   it("unsubscribes even when listen() resolves after cleanup ran", async () => {
     // The race: the effect tore down before listen() resolved, so cleanup saw
     // `un === undefined` and the listener leaked for the rest of the run.

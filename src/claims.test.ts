@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type * as ipcTypes from "./ipc";
 import {
   claimLabel,
+  claimConcernsRoots,
   claimOwnerCwd,
   claimOwnerName,
   claimOwnerPty,
@@ -47,6 +48,31 @@ describe("the owner string", () => {
     expect(claimOwnerName("canopy-wt-auth (/repo-wt-auth)")).toBe("canopy-wt-auth");
     expect(claimOwnerCwd("canopy-wt-auth (/repo-wt-auth)")).toBe("/repo-wt-auth");
     expect(claimOwnerCwd("bare-name")).toBeNull();
+  });
+});
+
+describe("claim project scope", () => {
+  it("includes claims whose holder or paths overlap one of the project's roots", () => {
+    expect(claimConcernsRoots(claim(), ["/repo"])).toBe(true);
+    expect(
+      claimConcernsRoots(claim({ paths: ["/elsewhere/file"], owner: "canopy (/repo/tools)" }), [
+        "/repo",
+      ]),
+    ).toBe(true);
+    expect(
+      claimConcernsRoots(claim({ paths: ["/repo"], owner: "canopy (/elsewhere)" }), [
+        "/repo/packages/app",
+      ]),
+    ).toBe(true);
+  });
+
+  it("excludes a claim from a different project", () => {
+    expect(
+      claimConcernsRoots(
+        claim({ paths: ["/other/file"], owner: "other (/other)" }),
+        ["/repo"],
+      ),
+    ).toBe(false);
   });
 });
 
