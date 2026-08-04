@@ -27,7 +27,6 @@ import {
   type DictationTriggerMode,
   type DictationWaveStyle,
   type Hotkey,
-  type LinkClickMode,
   type Settings,
   type TabSwitchMode,
   type Theme,
@@ -46,7 +45,6 @@ import { MODEL_SWITCH } from "../agentModels";
 import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Radio, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
 import { drawWave } from "../waveStyles";
-import { LINK_CHORD } from "../terminalLinks";
 import { useEscape } from "../useEscape";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
@@ -1732,21 +1730,6 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   )}
                 </Item>
                 <Item
-                  name="Link click"
-                  desc="How to follow a URL an agent printed."
-                >
-                  <Select
-                    width="lg"
-                    value={s.terminalLinkClick}
-                    onChange={(e) =>
-                      patch({ terminalLinkClick: e.target.value as LinkClickMode })
-                    }
-                  >
-                    <option value="click">Click opens the link</option>
-                    <option value="modifier">{`${LINK_CHORD} opens the link`}</option>
-                  </Select>
-                </Item>
-                <Item
                   name="Scrollback"
                   desc="Lines of history each terminal keeps; applies to new terminals."
                 >
@@ -1802,16 +1785,6 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
 
             {tab === "browser" && (
               <>
-                <Item
-                  name="Links"
-                  desc="Where a link opens: a preview tab here, or your OS browser."
-                >
-                  <Checkbox
-                    checked={s.openLinksInApp}
-                    onChange={(v) => patch({ openLinksInApp: v })}
-                    label="Open links in Canopy"
-                  />
-                </Item>
                 <Item
                   name="Engine"
                   desc="How preview tabs show a page. The trade is logins against layering."

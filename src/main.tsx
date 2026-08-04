@@ -18,6 +18,7 @@ import "./index.css";
 import { monacoReady } from "./monaco-setup";
 import { applyTheme, getSettings, watchSystemTheme } from "./settings";
 import { openLink } from "./links";
+import { matchesModifierClick } from "./shortcuts";
 import App from "./App.tsx";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
@@ -61,6 +62,13 @@ window.addEventListener("click", (e) => {
   // issue body or a converted document is then a free script execution or a
   // local read. openLink refuses everything but http(s).
   e.preventDefault();
+  // The opposite platform's command key is not a link gesture. In particular,
+  // Ctrl-click on macOS is the system's right-click.
+  if (e.metaKey || e.ctrlKey) {
+    if (!matchesModifierClick(e, "open-external")) return;
+    openLink(href, true);
+    return;
+  }
   openLink(href);
 });
 

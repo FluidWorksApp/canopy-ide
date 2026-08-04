@@ -6,7 +6,6 @@ const openUrl = vi.fn();
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
 
 import { OPEN_URL_EVENT, openLink } from "./links";
-import { updateSettings } from "./settings";
 
 /** Stand in for a project view that is in front and takes the URL. */
 function claimUrls(): { urls: string[]; stop: () => void } {
@@ -24,7 +23,6 @@ const settled = () => new Promise((r) => setTimeout(r, 0));
 
 beforeEach(() => {
   openUrl.mockClear();
-  updateSettings({ openLinksInApp: true });
 });
 
 describe("openLink", () => {
@@ -45,10 +43,9 @@ describe("openLink", () => {
     expect(openUrl).toHaveBeenCalledWith("https://example.com/docs");
   });
 
-  it("goes straight out when the setting is off, without asking any view", async () => {
-    updateSettings({ openLinksInApp: false });
+  it("goes straight out on a command-click, without asking any view", async () => {
     const claimed = claimUrls();
-    openLink("https://example.com/docs");
+    openLink("https://example.com/docs", true);
     await settled();
     expect(claimed.urls).toEqual([]);
     expect(openUrl).toHaveBeenCalledWith("https://example.com/docs");

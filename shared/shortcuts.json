@@ -673,17 +673,6 @@
       "note": "Modifier-click, not a key chord. Strictly Cmd on macOS and Ctrl elsewhere: accepting either meant Ctrl-click on a Mac — which is the OS's right-click — silently opened the system browser."
     },
     {
-      "id": "link-follow",
-      "label": "Follow a link in the terminal (when Settings asks for the modifier)",
-      "surface": "app",
-      "chord": {
-        "mods": [
-          "Mod"
-        ],
-        "key": null
-      }
-    },
-    {
       "id": "settings-section",
       "label": "Jump between Settings sections while Settings is open",
       "surface": "app",
