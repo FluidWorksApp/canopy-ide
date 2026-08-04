@@ -158,7 +158,7 @@
     {
       "id": "prev-project",
       "label": "Previous project",
-      "surface": "menu",
+      "surface": "app",
       "chord": {
         "mods": [
           "Mod",
@@ -166,28 +166,14 @@
         ],
         "key": "ArrowLeft"
       },
-      "platform": {
-        "windows": {
-          "mods": [
-            "Mod",
-            "Alt"
-          ],
-          "key": "PageUp"
-        },
-        "linux": {
-          "mods": [
-            "Mod",
-            "Alt"
-          ],
-          "key": "PageUp"
-        }
-      },
-      "note": "Ctrl+Alt+Arrow is screen rotation on Intel drivers (Windows) and workspace switching (GNOME/KDE), so the non-Mac binding moves to PageUp/PageDown — the same pair the tab chords use one level down."
+      "platform": { "macos": null, "windows": null, "linux": null },
+      "help": false,
+      "note": "Unbound: projects use Option+1…9 and the title-bar pills; Option+Command+Arrow belongs to pane focus."
     },
     {
       "id": "next-project",
       "label": "Next project",
-      "surface": "menu",
+      "surface": "app",
       "chord": {
         "mods": [
           "Mod",
@@ -195,22 +181,8 @@
         ],
         "key": "ArrowRight"
       },
-      "platform": {
-        "windows": {
-          "mods": [
-            "Mod",
-            "Alt"
-          ],
-          "key": "PageDown"
-        },
-        "linux": {
-          "mods": [
-            "Mod",
-            "Alt"
-          ],
-          "key": "PageDown"
-        }
-      }
+      "platform": { "macos": null, "windows": null, "linux": null },
+      "help": false
     },
     {
       "id": "close-project",
@@ -219,6 +191,7 @@
       "chord": {
         "mods": [
           "Mod",
+          "Ctrl",
           "Shift"
         ],
         "key": "KeyW"
@@ -640,9 +613,14 @@
       "chord": {
         "mods": [
           "Mod",
+          "Ctrl",
           "Shift"
         ],
         "key": "Enter"
+      },
+      "platform": {
+        "windows": { "mods": ["Mod", "Alt", "Shift"], "key": "Enter" },
+        "linux": { "mods": ["Mod", "Alt", "Shift"], "key": "Enter" }
       }
     },
     {
@@ -675,7 +653,8 @@
       "surface": "app",
       "chord": {
         "mods": [
-          "Mod"
+          "Mod",
+          "Ctrl"
         ],
         "key": "KeyD"
       },
