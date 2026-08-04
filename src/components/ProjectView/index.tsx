@@ -1212,6 +1212,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const reapTimers = useRef(new Map<string, number>());
   // Restores still waiting to see whether the CLI accepts them, by tab id.
   const restoreWatches = useRef(new Map<string, () => void>());
+  // CLIs without a prompt argument (OpenCode, Amp, Aider, etc.) must receive
+  // their opening brief through the TUI. Queue it by tab until Term reports the
+  // actual PTY: timing this from addTerminal raced terminal mounting and could
+  // silently leave a freshly opened agent with no context at all.
+  const pendingTerminalPrompts = useRef(new Map<string, string>());
   useEffect(
     () => () => {
       for (const t of reapTimers.current.values()) window.clearTimeout(t);
@@ -2254,18 +2259,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
         onNotice(`Unknown agent "${agent}".`);
         return;
       }
-      // A CLI with no verified prompt syntax launches bare and gets the
-      // ticket typed in once its TUI is up — the same two-write pattern the
-      // model switcher uses, so nothing is silently dropped.
-      const seed = (id: string) => {
-        if (!start.typePrompt) return;
-        const pty = tabsRef.current.find(
-          (t): t is TermSubTab => t.id === id && t.type === "terminal",
-        )?.ptyId;
-        if (pty == null) return;
-        void ipc.ptyWrite(pty, ticketContext(ticket));
-        setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
-      };
       const worktrees = await ipc
         .gitWorktrees(repo)
         .catch(() => [] as ipc.WorktreeInfo[]);
@@ -2274,7 +2267,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (existing) {
         const id = addTerminal(existing.path, start.command, title, cli.icon);
         setTicketWorktrees(worktrees);
-        if (id) setTimeout(() => seed(id), 2500);
+        if (id && start.typePrompt)
+          pendingTerminalPrompts.current.set(id, ticketContext(ticket));
         return;
       }
       // The funnel owns where a workspace goes and what to do when git won't
@@ -2298,7 +2292,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (r.kind !== "settled") return; // already asked and answered on screen
       setTicketWorktrees(await ipc.gitWorktrees(repo).catch(() => worktrees));
       const id = addTerminal(r.path, start.command, title, cli.icon);
-      if (id) setTimeout(() => seed(id), 2500);
+      if (id && start.typePrompt)
+        pendingTerminalPrompts.current.set(id, ticketContext(ticket));
     },
     [ticketRepo, addTerminal, onNotice, getInstalled, switchTo],
   );
@@ -2355,16 +2350,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       const title = `PR #${pr.number} · ${cli.name}`;
       const id = addTerminal(r.path, start.command, title, cli.icon);
-      if (id && start.typePrompt) {
-        setTimeout(() => {
-          const pty = tabsRef.current.find(
-            (t): t is TermSubTab => t.id === id && t.type === "terminal",
-          )?.ptyId;
-          if (pty == null) return;
-          void ipc.ptyWrite(pty, context);
-          setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
-        }, 2500);
-      }
+      if (id && start.typePrompt)
+        pendingTerminalPrompts.current.set(id, context);
     },
     [addTerminal, onNotice, getInstalled, switchTo],
   );
@@ -2704,16 +2691,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         `${title} · ${cli.name}`,
         cli.icon,
       );
-      if (id && start.typePrompt) {
-        setTimeout(() => {
-          const pty = tabsRef.current.find(
-            (t): t is TermSubTab => t.id === id && t.type === "terminal",
-          )?.ptyId;
-          if (pty == null) return;
-          void ipc.ptyWrite(pty, seed);
-          setTimeout(() => void ipc.ptyWrite(pty, "\r"), 250);
-        }, 2500);
-      }
+      if (id && start.typePrompt)
+        pendingTerminalPrompts.current.set(id, seed);
     },
     [addTerminal, onNotice, getInstalled],
   );
@@ -2943,14 +2922,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       patchTabRaw(id, {
         micro: { taskId: def.id, runId: record() },
       } as Partial<SubTab>);
-      if (start.typePrompt) {
-        setTimeout(() => {
-          const pty = tabsRef.current.find(
-            (t): t is TermSubTab => t.id === id && t.type === "terminal",
-          )?.ptyId;
-          if (pty != null) seedPrompt(pty);
-        }, 2500);
-      }
+      if (start.typePrompt)
+        pendingTerminalPrompts.current.set(id, seed);
       return true;
     },
     [
@@ -9013,7 +8986,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     : undefined
                 }
                 env={tab.env}
-                onSpawned={(ptyId) =>
+                onSpawned={(ptyId) => {
                   // A freshly spawned pty is alive by definition, so clear any
                   // stale exited/failed state. Restart kills the old pty and
                   // remounts a beat later; that kill's late pty:exit can land in
@@ -9023,8 +8996,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     ptyId,
                     exited: false,
                     exitCode: undefined,
-                  })
-                }
+                  });
+                  const prompt = pendingTerminalPrompts.current.get(tab.id);
+                  if (prompt == null) return;
+                  pendingTerminalPrompts.current.delete(tab.id);
+                  // The shell has only just started the CLI. Give its TUI time
+                  // to enter raw mode, then type and submit as separate writes
+                  // so autocomplete cannot swallow the Enter.
+                  setTimeout(() => {
+                    void ipc.ptyWrite(ptyId, prompt);
+                    setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 250);
+                  }, 2500);
+                }}
                 onExited={(code) => {
                   // Shell tabs close on exit; run tabs stay so the output and
                   // exit status remain readable.
