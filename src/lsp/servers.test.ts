@@ -131,6 +131,7 @@ describe("resolveTypescriptLaunch", () => {
   const ts = SERVERS.find((s) => s.id === "typescript")!;
   const tsserver = "/proj/node_modules/typescript/lib/tsserver.js";
   const native = "/proj/node_modules/@typescript/typescript-darwin-arm64/lib/tsc";
+  const launcher = "/proj/node_modules/typescript/bin/tsc";
   const launch = (present: string[]) =>
     resolveTypescriptLaunch(ts, "/proj", "/proj/node_modules/.bin/tsls", statter(present));
 
@@ -156,6 +157,13 @@ describe("resolveTypescriptLaunch", () => {
     const l = await launch([native]);
     expect(l.command).toBe(native);
     expect(l.args).toEqual(["--lsp", "--stdio"]);
+    expect(l.initializationOptions).toBeUndefined();
+  });
+
+  it("uses TypeScript's launcher when pnpm keeps the native package nested", async () => {
+    const l = await launch([launcher]);
+    expect(l.command).toBe("node");
+    expect(l.args).toEqual([launcher, "--lsp", "--stdio"]);
     expect(l.initializationOptions).toBeUndefined();
   });
 

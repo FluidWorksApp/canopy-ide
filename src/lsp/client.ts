@@ -87,13 +87,36 @@ interface RunningServer {
   request?: (method: string, params: unknown) => Promise<unknown>;
 }
 
+interface DesiredServer {
+  spec: ServerSpec;
+  serverRoot: string;
+}
+
+type StartResult = "ready" | "transient-failure" | "permanent-failure" | "timeout";
+
 // (spec.id, serverRoot) -> running client
 const running = new Map<string, RunningServer>();
+// A key is either starting or running, never both. Sharing the promise is what
+// makes every concurrent editor/tool caller observe the same completed startup
+// instead of mistaking a reserved slot for a ready client.
+const starting = new Map<string, Promise<void>>();
+// Once requested, a server is Canopy's responsibility until its workspace
+// closes. `desired` drives bounded recovery independently of editor/tool calls.
+const desired = new Map<string, DesiredServer>();
+const restartAttempts = new Map<string, number>();
+const restartTimers = new Map<string, number>();
 /** Why the server for (spec.id, serverRoot) isn't there, in words an agent can
  *  act on. Kept after the failure so a later tool call can say "rust-analyzer
  *  not found" instead of "no language server covers this file". */
 const failures = new Map<string, string>();
 let unlistenExit: Promise<() => void> | null = null;
+const readers = new Map<number, IpcMessageReader>();
+const exitedBeforeRegistration = new Set<number>();
+const stopping = new Set<number>();
+
+const STARTUP_TIMEOUT_MS = 15_000;
+const INLINE_RETRY_DELAY_MS = 250;
+const RESTART_DELAYS_MS = [500, 1_500, 5_000] as const;
 
 const keyFor = (specId: string, serverRoot: string) => `${specId}\0${serverRoot}`;
 
@@ -165,35 +188,112 @@ function observeProgress(state: ProgressState, raw: string) {
   }
 }
 
-export async function ensureLanguageServer(path: string, root: string): Promise<void> {
-  const spec = specForPath(path);
-  if (!spec) return;
-  const serverRoot = await serverRootFor(spec, path, root);
-  const key = keyFor(spec.id, serverRoot);
-  if (running.has(key)) return;
+function startWithTimeout(start: Promise<void>, spec: ServerSpec): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(
+      () => reject(new Error(`${spec.command} did not initialize within ${STARTUP_TIMEOUT_MS}ms`)),
+      STARTUP_TIMEOUT_MS,
+    );
+    start.then(
+      () => {
+        window.clearTimeout(timer);
+        resolve();
+      },
+      (err) => {
+        window.clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+function failureKind(err: unknown): Exclude<StartResult, "ready"> {
+  const text = err instanceof Error ? err.message : String(err);
+  if (text.includes(`did not initialize within ${STARTUP_TIMEOUT_MS}ms`)) return "timeout";
+  // Retrying cannot repair an absent executable or an incompatible local
+  // toolchain. Keep the actionable failure without creating a crash loop.
+  if (
+    /failed to spawn|no such file|not found|enoent|cannot find|could not find a valid typescript installation/i.test(
+      text,
+    )
+  ) {
+    return "permanent-failure";
+  }
+  return "transient-failure";
+}
+
+function clearRestartTimer(key: string) {
+  const timer = restartTimers.get(key);
+  if (timer != null) window.clearTimeout(timer);
+  restartTimers.delete(key);
+}
+
+function scheduleRestart(key: string) {
+  if (!desired.has(key) || running.has(key) || restartTimers.has(key)) return;
+  const attempt = (restartAttempts.get(key) ?? 0) + 1;
+  if (attempt > RESTART_DELAYS_MS.length) return;
+  restartAttempts.set(key, attempt);
+  const timer = window.setTimeout(() => {
+    restartTimers.delete(key);
+    const target = desired.get(key);
+    if (target) void ensureManagedServer(key, target);
+  }, RESTART_DELAYS_MS[attempt - 1]);
+  restartTimers.set(key, timer);
+}
+
+async function ensureExitListener(): Promise<void> {
+  if (!unlistenExit) {
+    unlistenExit = ipc.onLspExit((id) => {
+      const expected = stopping.has(id);
+      const reader = readers.get(id);
+      if (reader) {
+        readers.delete(id);
+        reader.notifyClosed();
+      } else if (!stopping.has(id)) {
+        // A tiny process can exit before lspStart's invoke resolves. Preserve
+        // that fact so startup cannot proceed with an already-dead process.
+        exitedBeforeRegistration.add(id);
+      }
+      let exitedKey: string | null = null;
+      for (const [key, server] of running) {
+        if (server.serverId !== id) continue;
+        running.delete(key);
+        exitedKey = key;
+        if (!expected) {
+          failures.set(key, `${key.split("\0")[0]} language server exited unexpectedly`);
+        }
+      }
+      stopping.delete(id);
+      if (exitedKey && !expected) scheduleRestart(exitedKey);
+    });
+  }
+  await unlistenExit;
+}
+
+async function startLanguageServer(
+  spec: ServerSpec,
+  serverRoot: string,
+  key: string,
+): Promise<StartResult> {
   const progress: ProgressState = { active: new Set(), lastEnd: 0 };
-  // Reserve the slot immediately so concurrent opens don't double-spawn.
-  running.set(key, { serverId: -1, serverRoot, progress, stop: async () => {} });
+  const reader = new IpcMessageReader();
+  let serverId: number | null = null;
 
   try {
-    const reader = new IpcMessageReader();
-    let serverId: number | null = null;
-
+    await ensureExitListener();
     const launch = await launchFor(spec, serverRoot);
     serverId = await ipc.lspStart(launch.command, launch.args, serverRoot, (msg) => {
       observeProgress(progress, msg);
       reader.push(msg);
     });
-
-    if (!unlistenExit) {
-      unlistenExit = ipc.onLspExit(() => reader.notifyClosed());
+    readers.set(serverId, reader);
+    if (exitedBeforeRegistration.delete(serverId)) {
+      readers.delete(serverId);
+      throw new Error(`${spec.command} exited during startup`);
     }
 
     const { MonacoLanguageClient } = await import("monaco-languageclient");
     const writer = new IpcMessageWriter(() => serverId);
-
-    const initializationOptions = launch.initializationOptions;
-
     const client = new MonacoLanguageClient({
       name: `${spec.id} language client`,
       clientOptions: {
@@ -203,11 +303,13 @@ export async function ensureLanguageServer(path: string, root: string): Promise<
           name: basename(serverRoot) || serverRoot,
           index: 0,
         },
-        initializationOptions,
+        initializationOptions: launch.initializationOptions,
       },
       messageTransports: { reader, writer },
     });
-    await client.start();
+    await startWithTimeout(client.start(), spec);
+    clearRestartTimer(key);
+    restartAttempts.delete(key);
     failures.delete(key);
     console.info(`LSP started: ${spec.id} for ${serverRoot} (server #${serverId})`);
     const { invoke } = await import("@tauri-apps/api/core");
@@ -216,23 +318,30 @@ export async function ensureLanguageServer(path: string, root: string): Promise<
       message: `LSP started: ${spec.id} for ${serverRoot}`,
     }).catch(() => {});
 
+    const readyServerId = serverId;
     running.set(key, {
-      serverId,
+      serverId: readyServerId,
       serverRoot,
       progress,
-      request: (method, params) =>
-        client.sendRequest(method, params as never) as Promise<unknown>,
+      request: (method, params) => client.sendRequest(method, params as never) as Promise<unknown>,
       stop: async () => {
+        stopping.add(readyServerId);
+        readers.delete(readyServerId);
         try {
           await client.stop(1000);
         } catch {
           // server may already be gone
         }
-        if (serverId != null) await ipc.lspStop(serverId);
+        await ipc.lspStop(readyServerId);
       },
     });
+    return "ready";
   } catch (err) {
-    running.delete(key);
+    if (serverId != null) {
+      readers.delete(serverId);
+      stopping.add(serverId);
+      await ipc.lspStop(serverId).catch(() => {});
+    }
     const reason = serverUnavailableMessage(spec, err);
     failures.set(key, reason);
     console.warn(`LSP unavailable for ${spec.id} (${serverRoot}):`, err);
@@ -241,7 +350,55 @@ export async function ensureLanguageServer(path: string, root: string): Promise<
       level: "warn",
       message: `LSP unavailable for ${spec.id} (${serverRoot}): ${reason}`,
     }).catch(() => {});
+    return failureKind(err);
   }
+}
+
+async function runManagedStartup(key: string, target: DesiredServer): Promise<void> {
+  let result = await startLanguageServer(target.spec, target.serverRoot, key);
+  if (result === "transient-failure" && desired.has(key)) {
+    await sleep(INLINE_RETRY_DELAY_MS);
+    if (desired.has(key)) result = await startLanguageServer(target.spec, target.serverRoot, key);
+  }
+
+  // The workspace may have closed while initialization was in flight. Never
+  // resurrect a server after its owner stopped asking Canopy to keep it ready.
+  if (result === "ready" && !desired.has(key)) {
+    const server = running.get(key);
+    running.delete(key);
+    if (server) await server.stop();
+    return;
+  }
+  if (result !== "ready" && result !== "permanent-failure" && desired.has(key)) {
+    scheduleRestart(key);
+  }
+}
+
+async function ensureManagedServer(key: string, target: DesiredServer): Promise<void> {
+  if (running.has(key)) return;
+  const inFlight = starting.get(key);
+  if (inFlight) return inFlight;
+  const startup = runManagedStartup(key, target);
+  starting.set(key, startup);
+  try {
+    await startup;
+  } finally {
+    if (starting.get(key) === startup) starting.delete(key);
+  }
+}
+
+export async function ensureLanguageServer(path: string, root: string): Promise<void> {
+  const spec = specForPath(path);
+  if (!spec) return;
+  const serverRoot = await serverRootFor(spec, path, root);
+  const key = keyFor(spec.id, serverRoot);
+  if (running.has(key)) return;
+  const target = { spec, serverRoot };
+  desired.set(key, target);
+  // A direct demand after the bounded supervisor gave up starts a fresh
+  // recovery window; ordinary calls during recovery share its in-flight work.
+  if (!starting.has(key) && !restartTimers.has(key)) restartAttempts.delete(key);
+  await ensureManagedServer(key, target);
 }
 
 async function serverFor(path: string, root: string): Promise<RunningServer | null> {
@@ -313,7 +470,12 @@ export async function describeMissingServer(path: string, root: string): Promise
     return `No language server covers ${path} — Canopy runs one for ${SUPPORTED_LANGUAGES}.`;
   }
   const serverRoot = await serverRootFor(spec, path, root);
-  const failure = failures.get(keyFor(spec.id, serverRoot));
+  const key = keyFor(spec.id, serverRoot);
+  const failure = failures.get(key);
+  if (failure && restartTimers.has(key)) {
+    const attempt = restartAttempts.get(key) ?? 1;
+    return `No ${spec.id} answers for ${path}: ${failure}. Canopy is restarting it (attempt ${attempt}/${RESTART_DELAYS_MS.length}).`;
+  }
   if (failure) return `No ${spec.id} answers for ${path}: ${failure}`;
   return `The ${spec.id} language server for ${serverRoot} isn't ready yet — try again in a moment.`;
 }
@@ -366,6 +528,13 @@ export async function whenQuiet(
 }
 
 export async function stopWorkspaceServers(root: string): Promise<void> {
+  for (const [key, target] of [...desired.entries()]) {
+    if (!under(target.serverRoot, root)) continue;
+    desired.delete(key);
+    clearRestartTimer(key);
+    restartAttempts.delete(key);
+    failures.delete(key);
+  }
   for (const [key, server] of [...running.entries()]) {
     if (under(server.serverRoot, root)) {
       running.delete(key);

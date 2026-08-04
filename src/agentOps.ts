@@ -60,6 +60,9 @@ async function prime(path: string, roots: string[]): Promise<{ root: string; tex
   const text = existing ? existing.getValue() : await ipc.fsReadText(path);
   modelFor(path, text);
   await ensureLanguageServer(path, root);
+  if (!(await hasServerFor(path, root))) {
+    throw new Error(await describeMissingServer(path, root));
+  }
   return { root, text };
 }
 
