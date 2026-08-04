@@ -2,7 +2,7 @@
 // live element (found by selector, re-measured as layout settles), and floats a
 // small callout beside it. No portal — mounts inline like the other overlays and
 // layers by z-index. Dismiss via the button, Esc, or clicking the dimmed area.
-import { useCallback, useLayoutEffect, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { useEscape } from "../useEscape";
 import { Mascot } from "./Mascot";
 import { Button } from "./ui";
@@ -19,6 +19,8 @@ interface CoachmarkProps {
 
 export function Coachmark({ targetSelector, title, body, steps, onDismiss }: CoachmarkProps) {
   const [rect, setRect] = useState<DOMRect | null>(null);
+  const [popHeight, setPopHeight] = useState(steps?.length ? 300 : 132);
+  const popRef = useRef<HTMLDivElement>(null);
   useEscape(onDismiss, true);
 
   const measure = useCallback(() => {
@@ -52,6 +54,11 @@ export function Coachmark({ targetSelector, title, body, steps, onDismiss }: Coa
     };
   }, [measure]);
 
+  useLayoutEffect(() => {
+    const height = popRef.current?.getBoundingClientRect().height;
+    if (height) setPopHeight(height);
+  }, [rect, steps]);
+
   // Target gone (rail emptied, tab closed) — nothing to point at, so bow out.
   if (!rect || rect.width === 0) return null;
 
@@ -63,26 +70,35 @@ export function Coachmark({ targetSelector, title, body, steps, onDismiss }: Coa
     height: rect.height + pad * 2,
   };
 
-  // Prefer below the target; flip above if it would run off the bottom.
+  // Prefer the side with room for the whole dialog. Clamp the measured box to
+  // the viewport when neither side has enough room (small windows / UI zoom).
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   const popWidth = Math.min(steps?.length ? 380 : 264, vw - 20);
-  const popHeight = steps?.length ? 300 : 132;
-  const below = rect.bottom + 12 + popHeight < vh;
+  const margin = 10;
+  const gap = 12;
+  const spaceBelow = vh - rect.bottom - gap - margin;
+  const spaceAbove = rect.top - gap - margin;
+  const below = spaceBelow >= popHeight || spaceBelow >= spaceAbove;
+  const visibleHeight = Math.min(popHeight, vh - margin * 2);
+  const preferredTop = below ? rect.bottom + gap : rect.top - gap - visibleHeight;
+  const top = Math.min(Math.max(preferredTop, margin), vh - visibleHeight - margin);
   const popStyle: React.CSSProperties = {
-    top: below ? rect.bottom + 12 : undefined,
-    bottom: below ? undefined : vh - rect.top + 12,
+    top,
     left: Math.min(Math.max(rect.left + rect.width / 2 - popWidth / 2, 10), vw - popWidth - 10),
     width: popWidth,
+    maxHeight: vh - margin * 2,
   };
 
   return (
     <div className="coach-layer" onMouseDown={onDismiss}>
       <div className="coach-hole" style={holeStyle} aria-hidden />
       <div
+        ref={popRef}
         className={`coach-pop ${below ? "coach-pop-below" : "coach-pop-above"}`}
         style={popStyle}
         role="dialog"
+        aria-modal="true"
         aria-label={title}
         onMouseDown={(e) => e.stopPropagation()}
       >
