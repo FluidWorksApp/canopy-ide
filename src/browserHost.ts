@@ -42,6 +42,7 @@ import {
   type RectLike,
 } from "./browserBounds";
 import {
+  decodedFrame,
   frameSrc,
   shouldCapture,
   type PaneState,
@@ -95,6 +96,15 @@ interface Entry {
    *  view, rather than by the walk having seen it (suppressBrowserViewsOver).
    *  A count, because two surfaces may claim the same view. */
   forced: number;
+  /** The pane may present the live page: the last show landed and the page
+   *  reported a paint (or the probe gave up asking). False from the moment a
+   *  hide is issued — the freeze-frame holds through the whole round trip of
+   *  a show, because the native view is composited above the DOM and covers
+   *  it the instant it is really there. See settle(). */
+  settled: boolean;
+  /** The visibility change this view most recently issued, so a settle probe
+   *  that outlives a flip can tell it is answering an old question. */
+  visSeq: number;
   /** Observation only, for the watchdog and the selftest — never read by any
    *  decision here. When a frame last arrived, when the page last moved, and
    *  whether it is still arriving.
@@ -342,6 +352,7 @@ function apply() {
     if (visible !== e.shown) {
       e.shown = visible;
       const seq = ++visibilitySeq;
+      e.visSeq = seq;
       const at = Date.now();
       emitBrowserSignal({
         t: "visibility",
@@ -351,8 +362,20 @@ function apply() {
         visible,
         by: over && over.length > 0 ? describe(over[0]) : over ? null : "offscreen",
       });
+      if (!visible) {
+        e.settled = false;
+        // The view just came off screen for an overlay, and the frame in hand
+        // is up to CAPTURE_INTERVAL_MS old. A hidden WKWebView still answers a
+        // snapshot — the web process paints it fresh, on or off screen (see
+        // snapshot.rs) — so photograph the page as the overlay found it, and
+        // the freeze-frame catches up while the overlay is still opening.
+        if (e.wanted && !e.capturing) {
+          e.dirty = true;
+          capture(tabId, e);
+        }
+      }
       void ipc.browserSetVisible(tabId, visible).then(
-        () =>
+        () => {
           emitBrowserSignal({
             t: "visibility-ack",
             at: Date.now(),
@@ -360,8 +383,10 @@ function apply() {
             seq,
             visible,
             ok: true,
-          }),
-        (err) =>
+          });
+          if (visible) settle(tabId, e, seq);
+        },
+        (err) => {
           emitBrowserSignal({
             t: "visibility-ack",
             at: Date.now(),
@@ -370,12 +395,16 @@ function apply() {
             visible,
             ok: false,
             error: String(err),
-          }),
+          });
+          // The show was issued even if the ack was lost; holding the frozen
+          // frame on a failed ack would freeze the pane on a guess.
+          if (visible) settle(tabId, e, seq);
+        },
       );
     }
-    // Take the picture while the view is still up. A hidden WKWebView
-    // snapshots to nothing, so the instant the frame is needed is the instant
-    // it can no longer be taken — it has to already be in hand.
+    // Keep a picture in hand while the view is up. The shown gate is economy,
+    // not necessity — a background tab has no overlay to feed — and the hide
+    // transition above takes one more while the view is already off screen.
     if (
       shouldCapture({
         native: true,
@@ -409,11 +438,17 @@ function capture(tabId: string, e: Entry) {
         emitBrowserSignal({ t: "capture", at: now, tabId, result: "empty", ms: now - at });
         return;
       }
-      e.dirty = false;
-      e.frame = frameSrc(base64);
-      e.lastCaptureOkAt = now;
-      emitBrowserSignal({ t: "capture", at: now, tabId, result: "ok", ms: now - at });
-      publish(tabId, e);
+      // Decoded before it is adopted: the frame is swapped in at the moment
+      // the native view disappears, and an <img> still decoding paints the
+      // pane's background instead of the page.
+      const src = frameSrc(base64);
+      void decodedFrame(src).then(() => {
+        e.dirty = false;
+        e.frame = src;
+        e.lastCaptureOkAt = now;
+        emitBrowserSignal({ t: "capture", at: now, tabId, result: "ok", ms: now - at });
+        publish(tabId, e);
+      });
     },
     (err) => {
       // A view mid-navigation or already gone has no frame to give. Keeping
@@ -434,6 +469,38 @@ function capture(tabId: string, e: Entry) {
   );
 }
 
+/** How often a freshly shown page is asked whether it has painted, and how
+ *  long it is asked before the pane goes live regardless. The cap tracks
+ *  PAINT_GRACE + NUDGE_GRACE in browser.rs: past that, the rescue there has
+ *  taken over and a held frame would only mask it. */
+const SETTLE_PROBE_MS = 120;
+const SETTLE_MAX_MS = 700;
+
+/** A show was issued. The native view is composited above the whole DOM, so
+ *  the freeze-frame underneath costs nothing once the page really paints —
+ *  it is simply covered — and until then it is the difference between the
+ *  page pausing and the pane blanking. This holds the pane frozen from the
+ *  show to the page's own first frame (browser_painted): the ack alone says
+ *  the compositor was told, not that a document that loaded off screen has
+ *  anything on it yet. A probe that errors settles at once, because showing
+ *  the view beats holding a stale picture on a guess. */
+function settle(tabId: string, e: Entry, seq: number) {
+  const began = Date.now();
+  const done = () => {
+    if (views.get(tabId) !== e || e.visSeq !== seq || e.shown !== true) return;
+    e.settled = true;
+    publish(tabId, e);
+  };
+  const probe = () => {
+    if (views.get(tabId) !== e || e.visSeq !== seq || e.shown !== true) return;
+    void ipc.browserPainted(tabId).then((painted) => {
+      if (painted || Date.now() - began >= SETTLE_MAX_MS) done();
+      else window.setTimeout(probe, SETTLE_PROBE_MS);
+    }, done);
+  };
+  probe();
+}
+
 /** Kept beside `views` rather than inside an Entry: the pane hook subscribes on
  *  the render that creates the placeholder, which is before the effect that
  *  registers the view has run. */
@@ -444,15 +511,24 @@ function publish(tabId: string, e: Entry) {
     state: paneState({
       native: true,
       wanted: e.wanted,
-      shown: e.shown === true,
+      // Not `shown` alone: the pane holds its freeze-frame until the show has
+      // landed and the page has painted, because the live state renders
+      // nothing at all and reaching it early is a blink of bare background.
+      shown: e.shown === true && e.settled,
       frame: e.frame,
     }),
     frame: e.frame,
   };
-  if (e.told && e.told.state === next.state && e.told.frame === next.frame) return;
   const was = e.told?.state;
+  const stateChanged = !e.told || was !== next.state;
+  const frameChanged = !e.told || e.told.frame !== next.frame;
   e.told = next;
-  if (was !== next.state) {
+  // A fresh frame only matters to a pane that is showing frames. While the
+  // page is live the captures keep arriving every CAPTURE_INTERVAL_MS, and
+  // forwarding each one re-rendered the whole preview for a picture nobody
+  // was looking at.
+  if (!stateChanged && (!frameChanged || next.state !== "frozen")) return;
+  if (stateChanged) {
     emitBrowserSignal({
       t: "pane",
       at: Date.now(),
@@ -608,6 +684,8 @@ export function registerBrowserView(tabId: string, host: () => Element | null) {
     dirty: true,
     told: null,
     forced: 0,
+    settled: false,
+    visSeq: 0,
     lastCaptureOkAt: 0,
     lastNavAt: Date.now(),
     loading: false,

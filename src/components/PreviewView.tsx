@@ -743,12 +743,13 @@ export function PreviewView({
                   image,
                   width: plan.rect.width,
                   height: plan.rect.height,
+                  mimeType: "image/png",
                 }));
         void shot
-          .then(({ image, width, height }) =>
+          .then(({ image, width, height, mimeType }) =>
             ipc.browserResult(op.id, true, {
               image,
-              mimeType: "image/png",
+              mimeType,
               url: urlRef.current,
               width: Math.round(width),
               height: Math.round(height),

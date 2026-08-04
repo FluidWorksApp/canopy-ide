@@ -62,7 +62,9 @@ describe("AgentBrowserPip", () => {
     );
 
     const image = await screen.findByAltText("Live read-only view of localhost:5173");
-    expect(image).toHaveAttribute("src", "data:image/png;base64,cG5n");
+    // JPEG is what the pip asks for; the mock omits mimeType and the fallback
+    // matches the request.
+    expect(image).toHaveAttribute("src", "data:image/jpeg;base64,cG5n");
     expect(image.parentElement).toHaveStyle({ aspectRatio: "1.5" });
 
     fireEvent.click(screen.getByLabelText("Minimize browser picture in picture"));
@@ -121,7 +123,7 @@ describe("AgentBrowserPip", () => {
       expect(snapshots).toBe(1);
       expect(screen.getByAltText("Live read-only view of localhost:5173")).toHaveAttribute(
         "src",
-        "data:image/png;base64,cG5n",
+        "data:image/jpeg;base64,cG5n",
       );
     } finally {
       vi.useRealTimers();

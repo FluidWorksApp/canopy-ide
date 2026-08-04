@@ -54,6 +54,15 @@ pub enum Encoding {
     Jpeg,
 }
 
+impl Encoding {
+    fn mime(self) -> &'static str {
+        match self {
+            Encoding::Png => "image/png",
+            Encoding::Jpeg => "image/jpeg",
+        }
+    }
+}
+
 /// PNG bytes of `rect` (CSS pixels, webview coordinates), base64-encoded.
 /// `width` caps the output so a retina window doesn't ship a 4000px image no
 /// model needs.
@@ -90,17 +99,25 @@ pub struct Shot {
     pub image: String,
     pub width: f64,
     pub height: f64,
+    pub mime_type: &'static str,
 }
 
-/// PNG of one embedded-browser view, whole. A rect would be meaningless here:
-/// the view's own origin is its top-left corner, and nothing of the app is
-/// inside it.
+/// One embedded-browser view, whole. A rect would be meaningless here: the
+/// view's own origin is its top-left corner, and nothing of the app is inside
+/// it. PNG unless the caller asks for `format: "jpeg"` — an agent's screenshot
+/// is evidence, but the PiP polls this four times a second and lossless pixels
+/// there are only encode time and IPC weight.
 #[tauri::command]
 pub async fn browser_snapshot(
     app: tauri::AppHandle,
     tab_id: String,
     max_width: Option<f64>,
+    format: Option<String>,
 ) -> Result<Shot, String> {
+    let encoding = match format.as_deref() {
+        Some("jpeg") => Encoding::Jpeg,
+        _ => Encoding::Png,
+    };
     let view = crate::browser::webview(&app, &tab_id)?;
     let size = view
         .size()
@@ -118,13 +135,14 @@ pub async fn browser_snapshot(
         width,
         height,
         max_width.unwrap_or(1200.0),
-        Encoding::Png,
+        encoding,
     )
     .await?;
     Ok(Shot {
         image,
         width,
         height,
+        mime_type: encoding.mime(),
     })
 }
 
@@ -170,9 +188,8 @@ async fn capture(
     encoding: Encoding,
 ) -> Result<String, String> {
     use base64::Engine;
-    use objc2::rc::Retained;
-    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage};
-    use objc2_foundation::{NSDictionary, NSNumber, NSRect, NSString};
+    use objc2_app_kit::NSImage;
+    use objc2_foundation::NSRect;
     use objc2_web_kit::{WKSnapshotConfiguration, WKWebView};
 
     if width <= 0.0 || height <= 0.0 {
@@ -215,30 +232,13 @@ async fn capture(
                     let _ = tx.send(Err("the webview returned no image".into()));
                     return;
                 };
-                let encoded = unsafe {
-                    let tiff = image.TIFFRepresentation();
-                    tiff.and_then(|data| NSBitmapImageRep::imageRepWithData(&data))
-                        .and_then(|rep: Retained<NSBitmapImageRep>| match encoding {
-                            Encoding::Png => rep.representationUsingType_properties(
-                                NSBitmapImageFileType::PNG,
-                                &NSDictionary::new(),
-                            ),
-                            Encoding::Jpeg => {
-                                let key: Retained<NSString> =
-                                    NSString::from_str("NSImageCompressionFactor");
-                                let props = NSDictionary::from_slices(
-                                    &[&*key],
-                                    &[NSNumber::new_f64(0.72).as_ref()],
-                                );
-                                rep.representationUsingType_properties(
-                                    NSBitmapImageFileType::JPEG,
-                                    &props,
-                                )
-                            }
-                        })
-                        .map(|data| data.to_vec())
-                };
-                let _ = tx.send(encoded.ok_or_else(|| "could not encode the snapshot".to_string()));
+                // This block runs on the main thread — the same thread every
+                // show, hide and set_bounds the coordination depends on queues
+                // through. Only the bitmap copy happens here; the PNG/JPEG
+                // encode is the expensive part and runs on the blocking thread
+                // that is already parked waiting for these bytes.
+                let tiff = unsafe { image.TIFFRepresentation() }.map(|data| data.to_vec());
+                let _ = tx.send(tiff.ok_or_else(|| "the webview returned no bitmap".to_string()));
             },
         );
         unsafe { view.takeSnapshotWithConfiguration_completionHandler(Some(&config), &handler) };
@@ -246,12 +246,40 @@ async fn capture(
     .map_err(|e| format!("cannot reach the webview: {e}"))?;
 
     let bytes = tokio::task::spawn_blocking(move || {
-        rx.recv_timeout(std::time::Duration::from_secs(10))
-            .unwrap_or_else(|_| Err("the webview didn't answer in time".into()))
+        let tiff = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| Err("the webview didn't answer in time".into()))?;
+        encode(&tiff, encoding)
     })
     .await
     .map_err(|e| e.to_string())??;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// TIFF bytes to PNG or JPEG, off the main thread. NSBitmapImageRep is safe
+/// here: it is not a view, and encoding an image rep touches nothing that
+/// belongs to AppKit's UI state.
+#[cfg(target_os = "macos")]
+fn encode(tiff: &[u8], encoding: Encoding) -> Result<Vec<u8>, String> {
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
+    use objc2_foundation::{NSData, NSDictionary, NSNumber, NSString};
+
+    let data = NSData::with_bytes(tiff);
+    NSBitmapImageRep::imageRepWithData(&data)
+        .and_then(|rep: Retained<NSBitmapImageRep>| match encoding {
+            Encoding::Png => unsafe {
+                rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+            },
+            Encoding::Jpeg => unsafe {
+                let key: Retained<NSString> = NSString::from_str("NSImageCompressionFactor");
+                let props =
+                    NSDictionary::from_slices(&[&*key], &[NSNumber::new_f64(0.72).as_ref()]);
+                rep.representationUsingType_properties(NSBitmapImageFileType::JPEG, &props)
+            },
+        })
+        .map(|data| data.to_vec())
+        .ok_or_else(|| "could not encode the snapshot".to_string())
 }
 
 // Windows' CoreWebView2 (CapturePreview) and WebKitGTK (snapshot) both offer an

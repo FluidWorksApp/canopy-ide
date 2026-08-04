@@ -456,10 +456,11 @@ export const selftestConfig = () =>
 export const selftestFinish = (report: unknown) =>
   invoke<void>("selftest_finish", { report }).catch(() => {});
 
-/** PNG (base64) of one browser view — the whole child webview, no cropping,
- *  because it is its own view — with the size in logical points it was taken
- *  at. The size comes back from the view because a background tab's placeholder
- *  is `display: none` and has no rect to ask.
+/** One browser view (base64) — the whole child webview, no cropping, because
+ *  it is its own view — with the size in logical points it was taken at. The
+ *  size comes back from the view because a background tab's placeholder is
+ *  `display: none` and has no rect to ask. PNG unless `format` asks for jpeg;
+ *  `mimeType` says which came back.
  *
  *  The page paints this itself (WKWebView's own snapshot API), so it does not
  *  need the view on screen: a preview behind another tab still answers with its
@@ -468,10 +469,14 @@ export interface BrowserShot {
   image: string;
   width: number;
   height: number;
+  mimeType: string;
 }
 
-export const browserSnapshot = (tabId: string, maxWidth?: number) =>
-  invoke<BrowserShot>("browser_snapshot", { tabId, maxWidth });
+export const browserSnapshot = (
+  tabId: string,
+  maxWidth?: number,
+  format?: "png" | "jpeg",
+) => invoke<BrowserShot>("browser_snapshot", { tabId, maxWidth, format });
 
 /** JPEG (base64) of a browser view, for the freeze-frame the pane shows while
  *  the view is hidden behind an overlay. Lossy and half-size on purpose: it is

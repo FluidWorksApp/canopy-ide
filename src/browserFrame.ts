@@ -50,8 +50,11 @@ export const CAPTURE_INTERVAL_MS = 900;
 
 export interface CaptureInput {
   native: boolean;
-  /** Only a view that is actually painting can be captured; a hidden WKWebView
-   *  snapshots to nothing. */
+  /** Economy, not necessity: a hidden WKWebView still answers a snapshot (the
+   *  web process paints it fresh, see snapshot.rs), but a view off screen has
+   *  no overlay to feed, so the periodic refresh only runs while it is up.
+   *  The hide transition itself takes one more picture — browserHost calls
+   *  capture directly for it, past this gate. */
   shown: boolean;
   lastCaptureAt: number;
   now: number;
@@ -79,4 +82,22 @@ export function shouldCapture(c: CaptureInput): boolean {
 /** A captured JPEG as something an <img> can show. */
 export function frameSrc(base64: string): string {
   return `data:image/jpeg;base64,${base64}`;
+}
+
+/** The frame decoded ahead of the swap. An <img> whose src just changed paints
+ *  when the new bytes finish decoding, and a swap mid-decode shows the box's
+ *  background for a frame — which, under a freeze-frame, is the blink the
+ *  freeze-frame exists to prevent. Best effort: an environment without a real
+ *  Image (tests) or a frame that refuses to decode still resolves, because an
+ *  undecoded frame beats no frame. */
+export function decodedFrame(src: string): Promise<void> {
+  if (typeof Image === "undefined") return Promise.resolve();
+  const img = new Image();
+  img.src = src;
+  return typeof img.decode === "function"
+    ? img.decode().then(
+        () => undefined,
+        () => undefined,
+      )
+    : Promise.resolve();
 }
