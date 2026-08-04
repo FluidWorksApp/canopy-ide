@@ -97,6 +97,18 @@ export function pathsOverlap(a: string, b: string): boolean {
   return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
 }
 
+/** Whether a claim belongs on a project's surfaces. This mirrors the bridge's
+ * agent-facing scope: either the holder works in this tree, or the claimed
+ * paths could collide with it. */
+export function claimConcernsRoots(claim: ipc.AgentClaim, roots: string[]): boolean {
+  const ownerCwd = claimOwnerCwd(claim.owner);
+  return roots.some(
+    (root) =>
+      (!!ownerCwd && pathsOverlap(ownerCwd, root)) ||
+      claim.paths.some((path) => pathsOverlap(path, root)),
+  );
+}
+
 /** Every other claim that has touched these files, newest first — the history
  *  of a contested path, which is the question a claim raises and could not
  *  previously answer. */
