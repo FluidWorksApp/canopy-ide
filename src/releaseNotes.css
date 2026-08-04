@@ -1,0 +1,122 @@
+.update-summary {
+  margin: 0 0 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.update-release-link {
+  margin: 0 0 12px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.release-notes-toast {
+  position: fixed;
+  right: 18px;
+  bottom: 42px;
+  z-index: 449;
+  width: min(390px, calc(100vw - 36px));
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  corner-shape: squircle;
+  background:
+    radial-gradient(circle at 92% 8%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 42%),
+    var(--bg-overlay);
+  box-shadow: var(--shadow-2), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.release-notes-kicker {
+  margin-bottom: 7px;
+  color: var(--accent);
+  font: 700 9px/1 var(--font-mono);
+  letter-spacing: 0.16em;
+}
+
+.release-notes-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.release-notes-title strong,
+.release-notes-title span {
+  display: block;
+}
+
+.release-notes-title strong {
+  font-size: 17px;
+  letter-spacing: -0.02em;
+}
+
+.release-notes-title span {
+  margin-top: 3px;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.release-notes-close {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.release-notes-close:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.release-notes-list {
+  display: grid;
+  gap: 7px;
+  margin: 14px 0;
+  padding: 12px 12px 12px 28px;
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--bg-raised) 72%, transparent);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.release-notes-list li::marker {
+  color: var(--accent);
+}
+
+.release-notes-fallback {
+  margin: 14px 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.release-notes-open {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 44%, var(--border));
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  font: 600 11px/1 var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+}
+
+.release-notes-open:hover {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
