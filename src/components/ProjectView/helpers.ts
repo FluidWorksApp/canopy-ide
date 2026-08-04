@@ -508,6 +508,55 @@ export function deviceLabel(serial: string): string {
   return serial.startsWith("emulator-") ? `Emulator ${serial.slice(9)}` : serial;
 }
 
+/** Which preview tab an agent's browser op acts on.
+ *
+ *  The rule that matters is the pool, not the ordering: a session may reuse a
+ *  tab it already owns, or one nobody has claimed — never another session's.
+ *  Picking purely by origin put two agents on ONE native webview, where each
+ *  navigation moved the page out from under the other and only one picture in
+ *  picture existed to show for it. A tab IS a browser session, so two agents
+ *  need two.
+ *
+ *  Own tabs come first and, when there are any, are the whole pool: an agent
+ *  that already has a page keeps it rather than taking over the user's. With no
+ *  ptyId — a call with no session behind it — there is nothing to keep apart and
+ *  every preview is a candidate.
+ *
+ *  Returning undefined is a real answer: it means this session has no page of
+ *  its own and none is free, and the caller opens one (or, for an op that isn't
+ *  a navigation, says so rather than acting on someone else's page). */
+export function pickBrowserTab<
+  T extends { id: string; url: string; initiatorPtyId?: number | null },
+>(
+  previews: T[],
+  op: { url?: string | null; ptyId?: number | null; navigating: boolean },
+  activeTabId: string | null,
+): T | undefined {
+  const origin = (u: string): string | null => {
+    try {
+      return new URL(u).origin;
+    } catch {
+      return null;
+    }
+  };
+  const mine =
+    op.ptyId == null ? [] : previews.filter((t) => t.initiatorPtyId === op.ptyId);
+  const pool =
+    op.ptyId == null
+      ? previews
+      : mine.length
+        ? mine
+        : previews.filter((t) => t.initiatorPtyId == null);
+  const wantOrigin = op.url ? origin(op.url) : null;
+  return (
+    (wantOrigin ? pool.find((t) => origin(t.url) === wantOrigin) : undefined) ??
+    pool.find((t) => t.id === activeTabId && t.url) ??
+    pool.find((t) => !!t.url) ??
+    // A URL navigation can take over an empty (server-picker) preview tab.
+    (op.navigating ? pool[0] : undefined)
+  );
+}
+
 /** host[/path] for the tab strip; the scheme is noise at that width. */
 export function previewLabel(url: string): string {
   if (!url) return "Preview";
