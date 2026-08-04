@@ -174,6 +174,16 @@ describe("previewShotContext", () => {
     expect(brief).toContain("a region of the page");
   });
 
+  it("only includes screenshots not already sent", () => {
+    const brief = previewShotContext("http://localhost:5173/", [
+      shot({ n: 1, path: "/w/.canopy/already-sent.png", sent: true }),
+      shot({ n: 2, path: "/w/.canopy/new.png" }),
+    ]);
+    expect(brief).toContain("/w/.canopy/new.png");
+    expect(brief).not.toContain("/w/.canopy/already-sent.png");
+    expect(brief).toContain("a screenshot");
+  });
+
   // The whole brief is typed into a PTY, where a newline submits early.
   it("stays on one line even when a note has line breaks in it", () => {
     const brief = previewShotContext("http://localhost:5173/", [

@@ -35,6 +35,28 @@ export function serverForUrl(url: string, servers: PreviewServer[]): PreviewServ
   }
 }
 
+/** Pick the best live recipient for a preview. An explicit choice is sticky,
+ *  then the agent that opened the tab wins; for a user-opened preview, the
+ *  serving component's agent is the best ownership signal available. */
+export function previewAgentTarget<T extends { ptyId: number; cwd: string }>(
+  targets: T[],
+  recipientPtyId: number | undefined,
+  initiatorPtyId: number | undefined,
+  server: PreviewServer | null,
+): T | undefined {
+  return (
+    targets.find((target) => target.ptyId === recipientPtyId) ??
+    targets.find((target) => target.ptyId === initiatorPtyId) ??
+    (server
+      ? targets.find(
+          (target) =>
+            target.cwd === server.componentPath ||
+            target.cwd.startsWith(`${server.componentPath}/`),
+        )
+      : undefined)
+  );
+}
+
 export interface PreviewAnnotation {
   n: number;
   selector: string;
@@ -49,6 +71,9 @@ export interface PreviewAnnotation {
   pageUrl: string;
   pageTitle: string;
   comment: string;
+  /** Retained in the panel after dispatch, but excluded from later sends until
+   *  the user edits it again. Absent means pending for older/restored tabs. */
+  sent?: boolean;
 }
 
 /** A screenshot the user took of the previewed page, kept on the tab beside
@@ -67,6 +92,8 @@ export interface PreviewShot {
   pageUrl: string;
   /** What the user wants done about it. */
   note: string;
+  /** Retained in the panel after dispatch; see PreviewAnnotation.sent. */
+  sent?: boolean;
 }
 
 /** The brief for handing screenshots over. Paths rather than pixels: every
@@ -77,7 +104,8 @@ export function previewShotContext(
   shots: PreviewShot[],
   server?: PreviewServer | null,
 ): string {
-  const parts = shots
+  const pending = shots.filter((s) => !s.sent);
+  const parts = pending
     .map((s) => {
       const note = s.note.trim() ? ` — ${flat(s.note.trim(), 500)}` : "";
       const what = s.region ? "a region of the page" : "the page";
@@ -92,7 +120,7 @@ export function previewShotContext(
       }\`${server.componentPath}\` — that is the codebase to change. `
     : "";
   return (
-    `I took ${shots.length === 1 ? "a screenshot" : `${shots.length} screenshots`} of this ` +
+    `I took ${pending.length === 1 ? "a screenshot" : `${pending.length} screenshots`} of this ` +
     `project's running page at ${url}. ` +
     source +
     `Read the image file(s) — they are PNGs on disk, open them with your file tools — ` +
@@ -127,7 +155,8 @@ export function previewFeedbackContext(
   annotations: PreviewAnnotation[],
   server?: PreviewServer | null,
 ): string {
-  const parts = annotations.map(annotationLine).join(" ");
+  const pending = annotations.filter((a) => !a.sent);
+  const parts = pending.map(annotationLine).join(" ");
   // Name the serving codebase when we know it, so the agent doesn't guess
   // which component (or sibling repo) produced the page.
   const source = server
@@ -139,7 +168,7 @@ export function previewFeedbackContext(
     : "";
   return (
     `I was previewing this project's running page at ${url} and marked ` +
-    `${annotations.length === 1 ? "an element" : `${annotations.length} elements`} with feedback. ` +
+    `${pending.length === 1 ? "an element" : `${pending.length} elements`} with feedback. ` +
     source +
     `For each item, find where that element is produced in the source (the component ` +
     `names and CSS selectors are hints from the live DOM) and make the requested change: ${parts} ` +
