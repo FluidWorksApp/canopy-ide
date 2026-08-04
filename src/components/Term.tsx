@@ -207,6 +207,24 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         { hover: (event) => linkHint.show(event), leave: () => linkHint.hide() },
       ),
     );
+    // The addon only covers URLs typed out in the text. OSC 8 hyperlinks — the
+    // explicit kind agent TUIs emit, where the visible text is a label and the
+    // URL travels in the escape sequence — are claimed by xterm's own OSC link
+    // provider before the addon's matcher runs, and activate via this option
+    // instead. Unset, xterm falls back to confirm() + window.open(), both
+    // no-ops in WKWebView, so those links underline on hover but swallow every
+    // click. Same rule and same route as the addon handler above. Non-http(s)
+    // URIs never reach activate: allowNonHttpProtocols stays off, so xterm
+    // drops them at the provider.
+    term.options.linkHandler = {
+      activate: (event, uri) => {
+        if (!opensLink(event, term.hasSelection())) return;
+        linkHint.hide();
+        openLink(uri, matchesModifierClick(event, "open-external"));
+      },
+      hover: (event) => linkHint.show(event),
+      leave: () => linkHint.hide(),
+    };
     term.open(el);
 
     // No WebGL renderer. @xterm/addon-webgl 0.19.0 corrupts rendering on
