@@ -946,6 +946,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const contentRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  const activeTabIdRef = useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
   /** Committed activity, newest first. This is session memory rather than a
    *  workspace preference: after a restart there is no honest "previous tab"
    *  until the user has moved between two of them. */
@@ -1265,6 +1267,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       profile?: string,
       activate = true,
       paneGroup?: string,
+      autoMultiplex = true,
     ) => {
       const id = tabId();
       // Every terminal opened inside a workspace gets that workspace's port,
@@ -1284,8 +1287,56 @@ const ProjectViewBody = memo(function ProjectViewBody({
         (launchedCli && accountEnv.length ? launchProfile(launchedCli) : undefined) ??
         undefined;
       const env = [...portEnv(portForPath(cwd)), ...accountEnv];
+      let resolvedPaneGroup = paneGroup;
+      let multiplexSource: TermSubTab | undefined;
+      if (launchedCli && autoMultiplex && !paneGroup) {
+        const agents = tabsRef.current.filter(
+          (tab): tab is TermSubTab =>
+            tab.type === "terminal" &&
+            !tab.run &&
+            !tab.micro &&
+            Boolean(agentIdForCommand(tab.command)),
+        );
+        multiplexSource =
+          agents.find((tab) => tab.id === activeTabIdRef.current) ?? agents.at(-1);
+        if (multiplexSource) {
+          const current = multiplexSource.paneGroup
+            ? terminalGroupsRef.current[multiplexSource.paneGroup]
+            : undefined;
+          if (current) {
+            multiplexSource =
+              agents.find((tab) => tab.id === current.activeTabId) ?? multiplexSource;
+          }
+          resolvedPaneGroup = current?.id ?? splitId();
+          const root = current?.root ?? {
+            type: "leaf" as const,
+            tabId: multiplexSource.id,
+          };
+          const sourcePane = layoutSplit(root).panes.find(
+            (pane) => pane.tabId === multiplexSource!.id,
+          );
+          const axis: SplitAxis =
+            !sourcePane || sourcePane.width >= sourcePane.height
+              ? "horizontal"
+              : "vertical";
+          const group: TerminalGroup = {
+            id: resolvedPaneGroup,
+            root: splitLeaf(root, multiplexSource.id, id, axis),
+            activeTabId: id,
+          };
+          terminalGroupsRef.current = {
+            ...terminalGroupsRef.current,
+            [group.id]: group,
+          };
+          setTerminalGroups(terminalGroupsRef.current);
+        }
+      }
       setTabs((prev) => [
-        ...prev,
+        ...prev.map((tab) =>
+          multiplexSource && tab.id === multiplexSource.id
+            ? ({ ...tab, paneGroup: resolvedPaneGroup } as SubTab)
+            : tab,
+        ),
         {
           id,
           type: "terminal",
@@ -1298,7 +1349,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           profile: accountProfile,
           run: run !== false,
           chore: run === "chore" || undefined,
-          paneGroup,
+          paneGroup: resolvedPaneGroup,
         },
       ]);
       if (activate) setActiveTabId(id);
@@ -2049,6 +2100,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         undefined,
         true,
         t.paneGroup,
+        false,
       );
       registerRememberedPane(t, id);
     },
@@ -2101,6 +2153,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         env.length ? r.profile : undefined,
         true,
         rememberedPane?.paneGroup,
+        false,
       );
       if (rememberedPane) registerRememberedPane(rememberedPane, id);
     },
@@ -3619,8 +3672,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, [activeTabId, tabs]);
 
   // Menu shortcuts — only the visible project reacts.
-  const activeTabIdRef = useRef(activeTabId);
-  activeTabIdRef.current = activeTabId;
   // Keep the active tab in view when it changes (cycling, jumping, closing) —
   // a strip that scrolls but doesn't follow leaves you looking at the wrong
   // tabs. The following itself is revealActiveTab, further down: it needs the
@@ -5492,6 +5543,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             env.length ? t.profile : undefined,
             true,
             t.paneGroup,
+            false,
           );
         }
         case "file": {
