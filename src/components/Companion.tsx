@@ -62,6 +62,37 @@ const GAP = 14;
  *  than a click. Below this, a click with a shaky hand would move the companion
  *  instead of opening it. */
 const DRAG_SLOP = 4;
+const ANTICS = {
+  idle: ["hop", "look", "stretch", "twirl", "sway"],
+  working: ["scan", "ponder", "nod"],
+  sleeping: ["snore", "dream", "stir"],
+  blocked: ["sigh", "recoil"],
+} as const;
+type AnticMood = keyof typeof ANTICS;
+type CompanionAntic = (typeof ANTICS)[AnticMood][number];
+const ANTIC_DURATION = 1600;
+const ANTIC_DELAY_MIN = 14_000;
+const ANTIC_DELAY_RANGE = 20_000;
+
+function nextAntic(mood: AnticMood, last: CompanionAntic | null): CompanionAntic {
+  const repertoire: readonly CompanionAntic[] = ANTICS[mood];
+  const choices = last ? repertoire.filter((antic) => antic !== last) : repertoire;
+  return choices[Math.floor(Math.random() * choices.length)] ?? "look";
+}
+
+function anticMood(status: CompanionState["status"]): AnticMood {
+  switch (status) {
+    case "working":
+      return "working";
+    case "starting":
+    case "unavailable":
+      return "sleeping";
+    case "failed":
+      return "blocked";
+    default:
+      return "idle";
+  }
+}
 
 interface CompanionProps {
   /** What would otherwise have been a corner toast. Presented from wherever
@@ -162,6 +193,8 @@ export function Companion({
   // Live position while dragging: settings are only written on release, so a
   // drag does not put a localStorage write on every pointermove.
   const [dragSpot, setDragSpot] = useState<CompanionSpot | null>(null);
+  const [antic, setAntic] = useState<CompanionAntic | null>(null);
+  const lastAntic = useRef<CompanionAntic | null>(null);
   const drag = useRef<{ dx: number; dy: number; moved: boolean } | null>(null);
   // Read in the pointer handler, which is memoised on inputs that must not
   // include a proposal arriving mid-drag.
@@ -190,6 +223,51 @@ export function Companion({
   // work. The rest stay in the notification centre, which is where a queue
   // belongs.
   const notice = notices[notices.length - 1];
+
+  // A small, occasional bit of life rather than another continuous loop. Each
+  // lifecycle gets its own repertoire, while conversation and attention still
+  // outrank decoration and a background or reduced-motion window stays still.
+  const mood = anticMood(state.status);
+  const canPlay =
+    !open &&
+    !dragSpot &&
+    !notice &&
+    !proposal &&
+    !browserInFront;
+  useEffect(() => {
+    // A lifecycle change must remove the old repertoire immediately. Its end
+    // timer belongs to the previous effect and is cancelled during cleanup.
+    setAntic(null);
+    if (!canPlay) {
+      return;
+    }
+    let startTimer = 0;
+    let endTimer = 0;
+    const schedule = () => {
+      startTimer = window.setTimeout(play, ANTIC_DELAY_MIN + Math.random() * ANTIC_DELAY_RANGE);
+    };
+    const play = () => {
+      const reduceMotion =
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (document.hidden || reduceMotion) {
+        schedule();
+        return;
+      }
+      const next = nextAntic(mood, lastAntic.current);
+      lastAntic.current = next;
+      setAntic(next);
+      endTimer = window.setTimeout(() => {
+        setAntic(null);
+        schedule();
+      }, ANTIC_DURATION);
+    };
+    schedule();
+    return () => {
+      window.clearTimeout(startTimer);
+      window.clearTimeout(endTimer);
+    };
+  }, [canPlay, mood]);
 
   // The card is not the panel, and placing it with the panel's geometry meant
   // the panel's 380px bottom clamp: with the companion parked near the bottom
@@ -311,7 +389,7 @@ export function Companion({
   return (
     <>
       <div
-        className={`companion${dragging ? " companion-dragging" : ""}`}
+        className={`companion${dragging ? " companion-dragging" : ""}${antic ? ` companion-antic-${antic}` : ""}`}
         style={{ left: at.left, top: at.top, width: MASCOT, height: MASCOT }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}

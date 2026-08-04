@@ -168,6 +168,41 @@ describe("dragging the companion", () => {
   });
 });
 
+describe("companion antics", () => {
+  it("occasionally plays a one-shot animation and then rests again", () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    mount();
+
+    expect(mascot().className).not.toContain("companion-antic-");
+    act(() => void vi.advanceTimersByTime(14_000));
+    expect(mascot().className).toContain("companion-antic-hop");
+    act(() => void vi.advanceTimersByTime(1_600));
+    expect(mascot().className).not.toContain("companion-antic-");
+
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("does not perform while its chat is open", () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    mount();
+    const el = mascot();
+    stubCapture(el);
+    act(() => {
+      pointer(el, "Down", 0, 0);
+      pointer(el, "Up", 0, 0);
+      vi.advanceTimersByTime(40_000);
+    });
+    expect(screen.getByTestId("chat")).toBeTruthy();
+    expect(mascot().className).not.toContain("companion-antic-");
+
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+});
+
 describe("with no agent CLI installed", () => {
   it("stays on screen instead of vanishing", async () => {
     // Going invisible was the wrong answer: the user is then left with a
@@ -178,6 +213,21 @@ describe("with no agent CLI installed", () => {
     mount();
     expect(mascot()).toBeTruthy();
     expect(mascot().querySelector("svg")?.getAttribute("data-face")).toBe("sleeping");
+  });
+
+  it("uses the sleeping repertoire rather than playful idle motions", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { startCompanion } = await import("../companionSession");
+    await startCompanion({ projects: [], installed: () => false, tools: [] });
+    mount();
+
+    act(() => void vi.advanceTimersByTime(14_000));
+    expect(mascot().className).toContain("companion-antic-snore");
+    expect(mascot().className).not.toContain("companion-antic-hop");
+
+    vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 });
 
