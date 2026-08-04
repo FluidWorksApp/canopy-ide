@@ -40,7 +40,7 @@ export type { SubTab, RailChip };
 
 function tabTitle(tab: SubTab): string {
   switch (tab.type) {
-    case "terminal": return `${tab.notice ? `${tab.notice}\n` : ""}${tab.command ?? ""} — ${tab.cwd}${tab.profile ? `\naccount: ${tab.profile}` : ""}`;
+    case "terminal": return `${tab.multiplexCount ? `${tab.multiplexCount} independent panes\n` : ""}${tab.notice ? `${tab.notice}\n` : ""}${tab.command ?? ""} — ${tab.cwd}${tab.profile ? `\naccount: ${tab.profile}` : ""}`;
     case "pr": return `${tab.pr.title} — ${tab.pr.url}`;
     case "ticket": return `${tab.ticket.id} — ${tab.ticket.title}\n${tab.ticket.url}`;
     case "research": return `Research ${tab.researchId} — ${tab.title}`;
@@ -65,7 +65,7 @@ function tabTitle(tab: SubTab): string {
 
 function tabText(tab: SubTab): string {
   switch (tab.type) {
-    case "terminal": return tab.customTitle ?? tab.title;
+    case "terminal": return tab.multiplexTitle ?? tab.customTitle ?? tab.title;
     case "pr": return `#${tab.pr.number} ${tab.pr.title}`;
     case "ticket": return `${tab.ticket.id} ${tab.ticket.title}`;
     case "research": return tabDisplayLabel(tab);
@@ -440,12 +440,17 @@ function PaneBarImpl({
                   title={tabTitle(tab)}
                 >
                   {tab.type === "terminal" ? (
-                    <span
-                      className={`tab-status tab-status-${tabState(tab)} ${
-                        (tabRing?.(tab) ?? tab.unread) ? "tab-status-unread" : ""
-                      }`}
-                      aria-hidden
-                    />
+                    <>
+                      {Boolean(tab.multiplexCount && tab.multiplexCount > 1) && (
+                        <span className="tab-multiplex-icon" aria-hidden>▦</span>
+                      )}
+                      <span
+                        className={`tab-status tab-status-${tabState(tab)} ${
+                          (tabRing?.(tab) ?? tab.unread) ? "tab-status-unread" : ""
+                        }`}
+                        aria-hidden
+                      />
+                    </>
                   ) : tab.type === "pr" ? (
                     <PullRequestIcon size={12} className="tab-pr-icon" />
                   ) : tab.type === "ticket" ? (
@@ -511,6 +516,11 @@ function PaneBarImpl({
                       title={`Running under the "${profileLabels?.[tab.profile] ?? tab.profile}" account`}
                     >
                       {profileLabels?.[tab.profile] ?? tab.profile}
+                    </span>
+                  )}
+                  {tab.type === "terminal" && Boolean(tab.multiplexCount && tab.multiplexCount > 1) && (
+                    <span className="tab-multiplex-count" title={`${tab.multiplexCount} panes`}>
+                      {tab.multiplexCount}
                     </span>
                   )}
                   {hints.has(tab.id) && (

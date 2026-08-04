@@ -17,6 +17,22 @@ import {
 import { Panel, PanelGroup } from "react-resizable-panels";
 import * as ipc from "../../ipc";
 import { format, matches, matchesModifierClick } from "../../shortcuts";
+import {
+  equalizeSplits,
+  layoutSplit,
+  leafIds,
+  mapSplitTabIds,
+  neighborPane,
+  removeLeaf,
+  splitLeaf,
+  splitId,
+  swapLeaves,
+  updateSplitRatio,
+  type PaneDirection,
+  type SplitDivider,
+  type SplitAxis,
+  type TerminalGroup,
+} from "../../terminalGroups";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
 import {
   recordTabUse,
@@ -304,7 +320,7 @@ import {
 import {
   forgetTerminals,
   rememberTerminals,
-  rememberedTerminals,
+  rememberedTerminalState,
   type RememberedTerminal,
 } from "../../terminalMemory";
 import { PrView } from "../PrView";
@@ -648,6 +664,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     () => livePips.filter((p) => p.tabId !== activeTabId),
     [livePips, activeTabId],
   );
+  const [terminalGroups, setTerminalGroups] = useState<Record<string, TerminalGroup>>({});
+  const terminalGroupsRef = useRef(terminalGroups);
+  terminalGroupsRef.current = terminalGroups;
   /** Briefly ringed after a jump — with several similar terminal tabs open,
    *  activating one is not enough to show WHICH one you landed on. */
   const [flashTabId, setFlashTabId] = useState<string | null>(null);
@@ -782,6 +801,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   /** The ⌘N launcher — the ＋ menu as a type-and-Enter list. */
   const [launcherOpen, setLauncherOpen] = useState(false);
+  const [pendingSplit, setPendingSplit] = useState<{
+    sourceTabId: string;
+    axis: SplitAxis;
+  } | null>(null);
+  const pendingSplitRef = useRef(pendingSplit);
+  pendingSplitRef.current = pendingSplit;
   /** SpotSearch (⌘K) — the omnibox over everything this project knows. */
   const [spotOpen, setSpotOpen] = useState(false);
   /** Holding the tab-jump modifier reveals the direct-jump numbers in the bar. */
@@ -940,6 +965,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
     id: string,
     origin?: "automatic" | "user",
   ) => void>(() => {});
+  const splitActiveRef = useRef<(axis: SplitAxis) => void>(() => {});
+  const focusPaneRef = useRef<(direction: PaneDirection) => void>(() => {});
+  const movePaneRef = useRef<(direction: PaneDirection) => void>(() => {});
+  const togglePaneZoomRef = useRef<() => void>(() => {});
+  const equalizePanesRef = useRef<() => void>(() => {});
+  const closeActivePaneRef = useRef<() => void>(() => {});
+  const closeActiveGroupRef = useRef<() => void>(() => {});
   /** Set from stopMicroRun below, for the teardown paths that run before it is
    *  in scope (hibernation, unmount) — a detached task must never outlive the
    *  project it was launched from. */
@@ -1232,6 +1264,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       extraEnv?: [string, string][],
       profile?: string,
       activate = true,
+      paneGroup?: string,
     ) => {
       const id = tabId();
       // Every terminal opened inside a workspace gets that workspace's port,
@@ -1265,6 +1298,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           profile: accountProfile,
           run: run !== false,
           chore: run === "chore" || undefined,
+          paneGroup,
         },
       ]);
       if (activate) setActiveTabId(id);
@@ -1910,20 +1944,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
         title: t.customTitle ?? t.title,
         icon: t.icon,
         run: t.run,
+        tabId: t.id,
+        paneGroup: t.paneGroup,
       }));
-    rememberTerminals(project.id, open);
-  }, [tabs, project.id]);
+    rememberTerminals(project.id, open, terminalGroups);
+  }, [tabs, terminalGroups, project.id]);
 
   const [remembered, setRemembered] = useState<RememberedTerminal[]>([]);
+  const [rememberedLayouts, setRememberedLayouts] = useState<
+    Record<string, TerminalGroup>
+  >({});
   useEffect(() => {
     if (tabs.length > 0 || !visible) return;
+    reopenedRememberedIds.current.clear();
+    const memory = rememberedTerminalState(project.id);
     // The command marker drops micro-tasks snapshotted before they were
     // excluded above — they'd otherwise sit in the list until overwritten.
     setRemembered(
-      rememberedTerminals(project.id).filter(
+      memory.terminals.filter(
         (t) => !(t.command ?? "").includes("CANOPY_MICRO_TASK="),
       ),
     );
+    setRememberedLayouts(memory.terminalGroups);
   }, [tabs.length, visible, project.id]);
 
   // A terminal running `claude` or `omp` is an agent, not a shell — listing it
@@ -1942,10 +1984,58 @@ const ProjectViewBody = memo(function ProjectViewBody({
     (t) => !restorable.some((r) => r.cwd === t.cwd),
   );
 
+  const reopenedRememberedIds = useRef(new Map<string, string>());
+  const registerRememberedPane = useCallback(
+    (terminal: RememberedTerminal, newTabId: string) => {
+      if (!terminal.tabId || !terminal.paneGroup) return;
+      reopenedRememberedIds.current.set(terminal.tabId, newTabId);
+      const rememberedGroup = rememberedLayouts[terminal.paneGroup];
+      if (!rememberedGroup) return;
+      const root = mapSplitTabIds(rememberedGroup.root, reopenedRememberedIds.current);
+      const leaves = root ? leafIds(root) : [];
+      if (!root || leaves.length < 2) return;
+      const group: TerminalGroup = {
+        ...rememberedGroup,
+        root,
+        activeTabId:
+          reopenedRememberedIds.current.get(rememberedGroup.activeTabId) ??
+          leaves[0],
+        zoomedTabId: rememberedGroup.zoomedTabId
+          ? reopenedRememberedIds.current.get(rememberedGroup.zoomedTabId)
+          : undefined,
+      };
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.type === "terminal" && leaves.includes(tab.id)
+            ? { ...tab, paneGroup: group.id }
+            : tab,
+        ),
+      );
+      setTerminalGroups((prev) => {
+        const next = { ...prev, [group.id]: group };
+        terminalGroupsRef.current = next;
+        return next;
+      });
+    },
+    [rememberedLayouts],
+  );
+
   const reopenTerminal = useCallback(
-    (t: RememberedTerminal) =>
-      addTerminal(t.cwd, t.command, t.title, t.icon, t.run),
-    [addTerminal],
+    (t: RememberedTerminal) => {
+      const id = addTerminal(
+        t.cwd,
+        t.command,
+        t.title,
+        t.icon,
+        t.run,
+        undefined,
+        undefined,
+        true,
+        t.paneGroup,
+      );
+      registerRememberedPane(t, id);
+    },
+    [addTerminal, registerRememberedPane],
   );
 
   const resumeSession = useCallback(
@@ -1977,7 +2067,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         r.profile && r.profile !== "default"
           ? await ipc.profileEnv(r.agentId, r.profile).catch(() => [])
           : [];
-      addTerminal(
+      const rememberedPane = remembered.find(
+        (t) =>
+          t.tabId != null &&
+          !reopenedRememberedIds.current.has(t.tabId) &&
+          t.cwd === r.cwd &&
+          agentIdForCommand(t.command) === r.agentId,
+      );
+      const id = addTerminal(
         r.cwd,
         r.command,
         r.digest.agent ?? "agent",
@@ -1985,9 +2082,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         false,
         env,
         env.length ? r.profile : undefined,
+        true,
+        rememberedPane?.paneGroup,
       );
+      if (rememberedPane) registerRememberedPane(rememberedPane, id);
     },
-    [addTerminal],
+    [addTerminal, remembered, registerRememberedPane],
   );
 
   /** Carry out an accepted reload: each eligible agent's terminal is replaced
@@ -3471,6 +3571,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
     }
   }, [activeTabId, visible, tabs]);
 
+  useEffect(() => {
+    const tab = tabs.find(
+      (t): t is TermSubTab => t.type === "terminal" && t.id === activeTabId,
+    );
+    if (!tab?.paneGroup) return;
+    setTerminalGroups((prev) => {
+      const group = prev[tab.paneGroup!];
+      if (!group || group.activeTabId === tab.id) return prev;
+      const next = {
+        ...prev,
+        [group.id]: { ...group, activeTabId: tab.id },
+      };
+      terminalGroupsRef.current = next;
+      return next;
+    });
+  }, [activeTabId, tabs]);
+
   // Menu shortcuts — only the visible project reacts.
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
@@ -3504,31 +3621,59 @@ const ProjectViewBody = memo(function ProjectViewBody({
       refreshUpdates();
       setLauncherOpen(true);
     };
+    const activateVisualTab = (id: string) => {
+      const tab = tabsRef.current.find((t) => t.id === id);
+      const group =
+        tab?.type === "terminal" && tab.paneGroup
+          ? terminalGroupsRef.current[tab.paneGroup]
+          : undefined;
+      setActiveTabId(group?.activeTabId ?? id);
+    };
+    const visualTabs = () => {
+      const seen = new Set<string>();
+      return tabsRef.current.filter((tab) => {
+        if (tab.type !== "terminal" || !tab.paneGroup) return true;
+        if (seen.has(tab.paneGroup)) return false;
+        seen.add(tab.paneGroup);
+        return true;
+      });
+    };
     const cycleTabs = (dir: 1 | -1) => {
-      const list = tabsRef.current;
+      const list = visualTabs();
       if (list.length < 2) return;
-      const i = list.findIndex((t) => t.id === activeTabIdRef.current);
-      setActiveTabId(list[(i + dir + list.length) % list.length].id);
+      const active = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+      const activeGroup = active?.type === "terminal" ? active.paneGroup : undefined;
+      const i = list.findIndex(
+        (t) => t.id === activeTabIdRef.current || (activeGroup && t.type === "terminal" && t.paneGroup === activeGroup),
+      );
+      activateVisualTab(list[(i + dir + list.length) % list.length].id);
     };
     // Ctrl+Tab's half of that: move the switcher's selection rather than the
     // tab. The panel it opens is what makes the difference visible — you pick
     // the tab you can see, and the switch happens once, when Ctrl comes up.
     const stepSwitcher = (dir: 1 | -1) => {
-      const list = tabsRef.current;
+      const list = visualTabs();
       if (list.length < 2) return;
       const openIds = list.map((t) => t.id);
+      const active = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+      const currentVisualId =
+        active?.type === "terminal" && active.paneGroup
+          ? list.find(
+              (t) => t.type === "terminal" && t.paneGroup === active.paneGroup,
+            )?.id ?? activeTabIdRef.current
+          : activeTabIdRef.current;
       const current = switcherRef.current;
       const ids =
         current?.ids ??
         tabSwitchSnapshot(
           openIds,
-          activeTabIdRef.current,
+          currentVisualId,
           recentTabsRef.current,
           getSettings().tabSwitchMode,
         );
       const selectedId = stepTabSwitch(
         ids,
-        current?.selectedId ?? activeTabIdRef.current,
+        current?.selectedId ?? currentVisualId,
         openIds,
         dir,
       );
@@ -3559,7 +3704,60 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // that, ⌘7 is still the terminal's to handle.
         if (!tab) return;
         e.preventDefault();
-        setActiveTabId(tab.id);
+        activateVisualTab(tab.id);
+        return;
+      }
+      const paneDirection: PaneDirection | null = matches(e, "focus-pane-left")
+        ? "left"
+        : matches(e, "focus-pane-right")
+          ? "right"
+          : matches(e, "focus-pane-up")
+            ? "up"
+            : matches(e, "focus-pane-down")
+              ? "down"
+              : null;
+      if (paneDirection) {
+        e.preventDefault();
+        focusPaneRef.current(paneDirection);
+        return;
+      }
+      const moveDirection: PaneDirection | null = matches(e, "move-pane-left")
+        ? "left"
+        : matches(e, "move-pane-right")
+          ? "right"
+          : matches(e, "move-pane-up")
+            ? "up"
+            : matches(e, "move-pane-down")
+              ? "down"
+              : null;
+      if (moveDirection) {
+        e.preventDefault();
+        movePaneRef.current(moveDirection);
+        return;
+      }
+      if (matches(e, "split-pane-right")) {
+        e.preventDefault();
+        splitActiveRef.current("horizontal");
+        return;
+      }
+      if (matches(e, "split-pane-down")) {
+        e.preventDefault();
+        splitActiveRef.current("vertical");
+        return;
+      }
+      if (matches(e, "toggle-pane-zoom")) {
+        e.preventDefault();
+        togglePaneZoomRef.current();
+        return;
+      }
+      if (matches(e, "equalize-panes")) {
+        e.preventDefault();
+        equalizePanesRef.current();
+        return;
+      }
+      if (matches(e, "close-pane-group")) {
+        e.preventDefault();
+        closeActiveGroupRef.current();
         return;
       }
       // SpotSearch — the menu accelerator never fires while focus is in
@@ -3666,12 +3864,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, [visible, project.components, addTerminal, refreshInstalled, refreshUpdates]);
 
   const switcherOpen = switcher !== null;
+  const visualOpenTabs = useMemo(() => {
+    const groups = new Set<string>();
+    return tabs.filter((tab) => {
+      if (tab.type !== "terminal" || !tab.paneGroup) return true;
+      if (groups.has(tab.paneGroup)) return false;
+      groups.add(tab.paneGroup);
+      return true;
+    });
+  }, [tabs]);
   const switcherTabs = useMemo(
     () =>
       switcher?.ids
-        .map((id) => tabs.find((tab) => tab.id === id))
+        .map((id) => visualOpenTabs.find((tab) => tab.id === id))
         .filter((tab): tab is SubTab => Boolean(tab)) ?? [],
-    [switcher, tabs],
+    [switcher, visualOpenTabs],
   );
   /** Letting go is the choice. One tab change, however far you walked. */
   const commitSwitcher = useCallback(() => {
@@ -3682,10 +3889,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const id = resolveTabSwitch(
       current.ids,
       current.selectedId,
-      tabsRef.current.map((tab) => tab.id),
+      visualOpenTabs.map((tab) => tab.id),
     );
-    if (id) setActiveTabId(id);
-  }, []);
+    if (id) {
+      const tab = tabsRef.current.find((item) => item.id === id);
+      const group =
+        tab?.type === "terminal" && tab.paneGroup
+          ? terminalGroupsRef.current[tab.paneGroup]
+          : undefined;
+      setActiveTabId(group?.activeTabId ?? id);
+    }
+  }, [visualOpenTabs]);
   const cancelSwitcher = useCallback(() => {
     switcherRef.current = null;
     setSwitcher(null);
@@ -3694,7 +3908,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // while Control is still down. The frozen traversal order itself does not
   // change; only the missing selection advances to its next surviving entry.
   useEffect(() => {
-    const openIds = tabs.map((tab) => tab.id);
+    const openIds = visualOpenTabs.map((tab) => tab.id);
     setSwitcher((current) => {
       if (!current || openIds.includes(current.selectedId)) return current;
       if (openIds.length < 2) {
@@ -3714,7 +3928,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       switcherRef.current = next;
       return next;
     });
-  }, [tabs]);
+  }, [visualOpenTabs]);
   // A held panel ends the way a held key ends. Escape takes it back — you are
   // where you were — and so does the window losing focus: ⌘-tabbing away leaves
   // the modifier's keyup on the other side of the switch, so blur is the only
@@ -4243,6 +4457,38 @@ const ProjectViewBody = memo(function ProjectViewBody({
       endAbandonedRun(runId, output);
     }
     termHandles.current.delete(id);
+    const closingGroup =
+      closingTab?.type === "terminal" && closingTab.paneGroup
+        ? terminalGroupsRef.current[closingTab.paneGroup]
+        : undefined;
+    const nextGroupRoot = closingGroup
+      ? removeLeaf(closingGroup.root, id)
+      : null;
+    const nextGroupIds = nextGroupRoot ? leafIds(nextGroupRoot) : [];
+    const nextGroupActive = closingGroup
+      ? closingGroup.activeTabId === id
+        ? nextGroupIds[0] ?? null
+        : closingGroup.activeTabId
+      : null;
+    if (closingGroup) {
+      setTerminalGroups((prev) => {
+        const next = { ...prev };
+        if (!nextGroupRoot || nextGroupIds.length < 2) delete next[closingGroup.id];
+        else {
+          next[closingGroup.id] = {
+            ...closingGroup,
+            root: nextGroupRoot,
+            activeTabId: nextGroupActive ?? nextGroupIds[0],
+            zoomedTabId:
+              closingGroup.zoomedTabId === id
+                ? undefined
+                : closingGroup.zoomedTabId,
+          };
+        }
+        terminalGroupsRef.current = next;
+        return next;
+      });
+    }
     setTabs((prev) => {
       const closing = prev.find((t) => t.id === id);
       if (
@@ -4285,9 +4531,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
         collabRef.current.leaveProject(closing.doc);
       }
       const closingIndex = prev.findIndex((t) => t.id === id);
-      const next = prev.filter((t) => t.id !== id);
+      const next = prev
+        .filter((t) => t.id !== id)
+        .map((t) =>
+          closingGroup && nextGroupIds.length === 1 && t.id === nextGroupIds[0]
+            ? ({ ...t, paneGroup: undefined } as SubTab)
+            : t,
+        );
       setActiveTabId((active) => {
         if (active !== id) return active;
+        if (nextGroupActive && next.some((t) => t.id === nextGroupActive))
+          return nextGroupActive;
         if (next.length === 0) return null;
         // Land on the neighbour that took the closed tab's place (the tab to
         // its right), or the new last one when the last tab was closed — so
@@ -4298,6 +4552,234 @@ const ProjectViewBody = memo(function ProjectViewBody({
     });
   }, []);
   closeTabRef.current = closeTab;
+
+  const splitActiveTerminal = useCallback(
+    (axis: SplitAxis) => {
+      const active = tabsRef.current.find(
+        (t): t is TermSubTab => t.id === activeTabIdRef.current && t.type === "terminal",
+      );
+      if (!active || active.run) return;
+      const pending = { sourceTabId: active.id, axis };
+      pendingSplitRef.current = pending;
+      setPendingSplit(pending);
+      setLauncherOpen(true);
+    },
+    [],
+  );
+  splitActiveRef.current = splitActiveTerminal;
+
+  const completePendingSplit = useCallback(
+    (terminal: {
+      command?: string;
+      title?: string;
+      icon?: string;
+      env?: [string, string][];
+      profile?: string;
+    }) => {
+      const pending = pendingSplitRef.current;
+      if (!pending) return null;
+      const source = tabsRef.current.find(
+        (t): t is TermSubTab =>
+          t.id === pending.sourceTabId && t.type === "terminal",
+      );
+      if (!source) {
+        pendingSplitRef.current = null;
+        setPendingSplit(null);
+        return null;
+      }
+      const current = source.paneGroup
+        ? terminalGroupsRef.current[source.paneGroup]
+        : undefined;
+      const groupId = current?.id ?? splitId();
+      const nextId = addTerminal(
+        source.cwd,
+        terminal.command,
+        terminal.title,
+        terminal.icon,
+        false,
+        terminal.env,
+        terminal.profile,
+        true,
+        groupId,
+      );
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === source.id ? ({ ...t, paneGroup: groupId } as SubTab) : t,
+        ),
+      );
+      const root = current?.root ?? { type: "leaf" as const, tabId: source.id };
+      const next: TerminalGroup = {
+        id: groupId,
+        root: splitLeaf(root, source.id, nextId, pending.axis),
+        activeTabId: nextId,
+      };
+      terminalGroupsRef.current = {
+        ...terminalGroupsRef.current,
+        [groupId]: next,
+      };
+      setTerminalGroups(terminalGroupsRef.current);
+      setActiveTabId(nextId);
+      pendingSplitRef.current = null;
+      setPendingSplit(null);
+      return nextId;
+    },
+    [addTerminal],
+  );
+
+  const focusPane = useCallback((direction: PaneDirection) => {
+    const active = tabsRef.current.find(
+      (t): t is TermSubTab => t.id === activeTabIdRef.current && t.type === "terminal",
+    );
+    if (!active?.paneGroup) return;
+    const group = terminalGroupsRef.current[active.paneGroup];
+    if (!group) return;
+    const target = neighborPane(group.root, active.id, direction);
+    if (!target) return;
+    const next = { ...group, activeTabId: target };
+    terminalGroupsRef.current = {
+      ...terminalGroupsRef.current,
+      [group.id]: next,
+    };
+    setTerminalGroups(terminalGroupsRef.current);
+    setActiveTabId(target);
+    setTimeout(() => termHandles.current.get(target)?.focus(), 50);
+  }, []);
+  focusPaneRef.current = focusPane;
+
+  const movePane = useCallback((direction: PaneDirection) => {
+    const active = tabsRef.current.find(
+      (t): t is TermSubTab =>
+        t.id === activeTabIdRef.current && t.type === "terminal",
+    );
+    if (!active?.paneGroup) return;
+    const group = terminalGroupsRef.current[active.paneGroup];
+    if (!group) return;
+    const target = neighborPane(group.root, active.id, direction);
+    if (!target) return;
+    const next = {
+      ...group,
+      root: swapLeaves(group.root, active.id, target),
+      activeTabId: active.id,
+    };
+    terminalGroupsRef.current = {
+      ...terminalGroupsRef.current,
+      [group.id]: next,
+    };
+    setTerminalGroups(terminalGroupsRef.current);
+  }, []);
+  movePaneRef.current = movePane;
+
+  const togglePaneZoom = useCallback(() => {
+    const active = tabsRef.current.find(
+      (t): t is TermSubTab => t.id === activeTabIdRef.current && t.type === "terminal",
+    );
+    if (!active?.paneGroup) return;
+    const group = terminalGroupsRef.current[active.paneGroup];
+    if (!group) return;
+    const next = {
+      ...group,
+      zoomedTabId: group.zoomedTabId === active.id ? undefined : active.id,
+    };
+    terminalGroupsRef.current = {
+      ...terminalGroupsRef.current,
+      [group.id]: next,
+    };
+    setTerminalGroups(terminalGroupsRef.current);
+  }, []);
+  togglePaneZoomRef.current = togglePaneZoom;
+
+  const equalizePanes = useCallback(() => {
+    const active = tabsRef.current.find(
+      (t): t is TermSubTab => t.id === activeTabIdRef.current && t.type === "terminal",
+    );
+    if (!active?.paneGroup) return;
+    const group = terminalGroupsRef.current[active.paneGroup];
+    if (!group) return;
+    const next = { ...group, root: equalizeSplits(group.root) };
+    terminalGroupsRef.current = {
+      ...terminalGroupsRef.current,
+      [group.id]: next,
+    };
+    setTerminalGroups(terminalGroupsRef.current);
+  }, []);
+  equalizePanesRef.current = equalizePanes;
+
+  const closeTerminalGroup = useCallback(
+    (groupId: string) => {
+      const group = terminalGroupsRef.current[groupId];
+      if (!group) return;
+      const ids = leafIds(group.root);
+      const live = ids.filter((id) => {
+        const tab = tabsRef.current.find(
+          (t): t is TermSubTab => t.id === id && t.type === "terminal",
+        );
+        return tab?.ptyId != null && !tab.exited;
+      }).length;
+      if (
+        live > 1 &&
+        !window.confirm(`Close this multiplexed tab and stop ${live} live agents?`)
+      ) {
+        return;
+      }
+      for (const id of ids) closeTabRef.current(id, "user");
+      setTerminalGroups((prev) => {
+        const next = { ...prev };
+        delete next[groupId];
+        terminalGroupsRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
+
+  const closeActivePane = useCallback(() => {
+    const active = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+    if (!active) return;
+    closeTabRef.current(active.id, "user");
+  }, []);
+  closeActivePaneRef.current = closeActivePane;
+
+  const breakPaneOut = useCallback((tabId: string) => {
+    const tab = tabsRef.current.find(
+      (t): t is TermSubTab => t.id === tabId && t.type === "terminal",
+    );
+    if (!tab?.paneGroup) return;
+    const group = terminalGroupsRef.current[tab.paneGroup];
+    if (!group) return;
+    const root = removeLeaf(group.root, tabId);
+    const remaining = root ? leafIds(root) : [];
+    setTabs((prev) =>
+      prev.map((item) =>
+        item.type === "terminal" &&
+        (item.id === tabId || (remaining.length === 1 && item.id === remaining[0]))
+          ? { ...item, paneGroup: undefined }
+          : item,
+      ),
+    );
+    setTerminalGroups((prev) => {
+      const next = { ...prev };
+      if (!root || remaining.length < 2) delete next[group.id];
+      else {
+        next[group.id] = {
+          ...group,
+          root,
+          activeTabId: remaining[0],
+          zoomedTabId: undefined,
+        };
+      }
+      terminalGroupsRef.current = next;
+      return next;
+    });
+    setActiveTabId(tabId);
+  }, []);
+
+  const closeActiveGroup = useCallback(() => {
+    const active = tabsRef.current.find((t) => t.id === activeTabIdRef.current);
+    if (active?.type === "terminal" && active.paneGroup)
+      closeTerminalGroup(active.paneGroup);
+    else if (active) closeTabRef.current(active.id, "user");
+  }, [closeTerminalGroup]);
+  closeActiveGroupRef.current = closeActiveGroup;
 
   // The owner stopped sharing (or we left from elsewhere): close any shared
   // -project tab whose project is no longer joined.
@@ -4864,6 +5346,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         sidePinned: sideOut,
         worktree: wt,
         sessionFor: (pty) => liveSessionByPtyRef.current.get(pty),
+        terminalGroups: terminalGroupsRef.current,
       });
       // App waits for this before closing the project: a snapshot that could
       // not be stored must leave the project open, because closing it would
@@ -4931,6 +5414,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               ptyId: t.attachId,
               attachId: t.attachId,
               icon: t.icon ?? "📱",
+              paneGroup: t.paneGroup,
             });
           }
           const { command } = terminalLaunch(t);
@@ -4948,6 +5432,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             t.run,
             env,
             env.length ? t.profile : undefined,
+            true,
+            t.paneGroup,
           );
         }
         case "file": {
@@ -5053,6 +5539,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       setSideTab(restore.sideTab);
       setPinned(restore.sidePinned);
       const ids: (string | null)[] = [];
+      const restoredTerminalIds = new Map<string, string>();
       for (const [i, step] of steps.entries()) {
         if (cancelled) return;
         let id: string | null = null;
@@ -5064,6 +5551,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           console.warn("restore failed", step.label, err);
         }
         ids.push(id);
+        if (id && step.tab.kind === "terminal" && step.tab.tabId)
+          restoredTerminalIds.set(step.tab.tabId, id);
         // A terminal has a PTY to spawn; a document tab is a render. Pace them
         // differently so a workspace of files doesn't crawl.
         await wait(step.tab.kind === "terminal" ? 260 : 90);
@@ -5073,6 +5562,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
           steps.length,
           steps[i + 1]?.label ?? "Ready",
         );
+      }
+      if (restore.terminalGroups) {
+        const restoredGroups: Record<string, TerminalGroup> = {};
+        for (const [groupId, group] of Object.entries(restore.terminalGroups)) {
+          const root = mapSplitTabIds(group.root, restoredTerminalIds);
+          const leaves = root ? leafIds(root) : [];
+          if (!root || leaves.length < 2) continue;
+          restoredGroups[groupId] = {
+            ...group,
+            root,
+            activeTabId:
+              restoredTerminalIds.get(group.activeTabId) ?? leaves[0],
+            zoomedTabId: group.zoomedTabId
+              ? restoredTerminalIds.get(group.zoomedTabId)
+              : undefined,
+          };
+        }
+        terminalGroupsRef.current = restoredGroups;
+        setTerminalGroups(restoredGroups);
       }
       const front =
         restore.activeIndex != null ? ids[restore.activeIndex] : null;
@@ -5855,16 +6363,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // startup, so exporting it afterwards is too late.
         const profile = activeProfile();
         const env = await launchEnv(cli.id);
-        addTerminal(
-          cwd,
-          shellBin(cli.bin),
-          cli.name,
-          cli.icon,
-          false,
+        const terminal = {
+          command: shellBin(cli.bin),
+          title: cli.name,
+          icon: cli.icon,
           env,
-          env.length ? profile : undefined,
-        );
+          profile: env.length ? profile : undefined,
+        };
+        if (pendingSplitRef.current) completePendingSplit(terminal);
+        else
+          addTerminal(
+            cwd,
+            terminal.command,
+            terminal.title,
+            terminal.icon,
+            false,
+            terminal.env,
+            terminal.profile,
+          );
       } else if (cli.rebound || !cli.install) {
+        pendingSplitRef.current = null;
+        setPendingSplit(null);
         // Two cases, one answer: an override points somewhere the vendor's
         // installer can never satisfy, and a custom entry has no installer at all
         // — so an "install" offer would repeat forever, which is the loop these
@@ -5873,12 +6392,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
           `${cli.name} is set to \`${cli.bin}\`, which isn't on this machine — check Settings → Agents.`,
         );
       } else {
+        pendingSplitRef.current = null;
+        setPendingSplit(null);
         // A run tab, so the installer exits when done — and that exit is the
         // signal to re-probe (see onExited below). No timers, no staleness.
         addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇", "chore");
       }
     },
-    [installed, addTerminal, onNotice],
+    [installed, addTerminal, completePendingSplit, onNotice],
   );
 
   /** Run `cli`'s updater in a run tab. Its exit re-probes versions (see
@@ -6047,9 +6568,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const isAgentTab = useCallback(
     (t: SubTab): t is TermSubTab =>
       t.type === "terminal" &&
-      (!!agentIdForCommand(t.command) ||
-        (t.ptyId != null && agentPtyIds.has(t.ptyId))),
-    [agentPtyIds],
+      tabs.some(
+        (member) =>
+          member.type === "terminal" &&
+          (member.id === t.id ||
+            (Boolean(t.paneGroup) && member.paneGroup === t.paneGroup)) &&
+          (!!agentIdForCommand(member.command) ||
+            (member.ptyId != null && agentPtyIds.has(member.ptyId))),
+      ),
+    [agentPtyIds, tabs],
   );
   // The one verdict for a terminal, from every channel at once: what the CLI's
   // hooks proved, whether its process is still there, whether it is painting,
@@ -6099,8 +6626,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [statsByPty, liveSessionByPty, wsDigests, firstSeen, lifeClock],
   );
   const tabLife = useCallback(
-    (t: TermSubTab): Life => lifeForPty(t.ptyId),
-    [lifeForPty],
+    (t: TermSubTab): Life => {
+      const members = t.paneGroup
+        ? tabs.filter(
+            (member): member is TermSubTab =>
+              member.type === "terminal" && member.paneGroup === t.paneGroup,
+          )
+        : [t];
+      const lives = members.map((member) => lifeForPty(member.ptyId));
+      const order: LifeState[] = [
+        "waiting",
+        "working",
+        "starting",
+        "idle",
+        "unknown",
+        "ended",
+      ];
+      return (
+        order
+          .map((state) => lives.find((life) => life.state === state))
+          .find((life): life is Life => Boolean(life)) ?? lifeForPty(t.ptyId)
+      );
+    },
+    [lifeForPty, tabs],
   );
   const tabState = useCallback(
     (t: TermSubTab): LifeState => tabLife(t).state,
@@ -6153,10 +6701,46 @@ const ProjectViewBody = memo(function ProjectViewBody({
       microClock,
     ],
   );
-  const stripTabs = useMemo(
-    () => tabs.filter((t) => t.type !== "terminal" || !t.run),
-    [tabs],
-  );
+  const stripTabs = useMemo(() => {
+    const seen = new Set<string>();
+    const out: SubTab[] = [];
+    for (const tab of tabs) {
+      if (tab.type === "terminal" && tab.run) continue;
+      if (tab.type !== "terminal" || !tab.paneGroup) {
+        out.push(tab);
+        continue;
+      }
+      if (seen.has(tab.paneGroup)) continue;
+      seen.add(tab.paneGroup);
+      const group = terminalGroups[tab.paneGroup];
+      if (!group) {
+        out.push(tab);
+        continue;
+      }
+      const ids = leafIds(group.root);
+      const focused =
+        tabs.find(
+          (member): member is TermSubTab =>
+            member.type === "terminal" && member.id === group.activeTabId,
+        ) ?? tab;
+      out.push({
+        ...tab,
+        multiplexCount: ids.length,
+        multiplexTitle: tab.customTitle
+          ? `${tab.customTitle} · ${ids.length}`
+          : `${focused.customTitle ?? focused.title} +${ids.length - 1}`,
+      });
+    }
+    return out;
+  }, [tabs, terminalGroups]);
+  const activeVisualTabId = useMemo(() => {
+    if (activeTab?.type !== "terminal" || !activeTab.paneGroup) return activeTabId;
+    return (
+      stripTabs.find(
+        (tab) => tab.type === "terminal" && tab.paneGroup === activeTab.paneGroup,
+      )?.id ?? activeTabId
+    );
+  }, [activeTab, activeTabId, stripTabs]);
   const shellTabs = useMemo(
     () =>
       stripTabs.filter(
@@ -6206,13 +6790,35 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // unable to leave Working while its own dot said idle — see declaredQuiet.
     const provenIds = new Set<string>();
     for (const t of agentTabs) {
-      const life = tabLife(t);
-      const bucket = bucketFor(
-        life,
-        (t.ptyId != null ? attention.get(t.ptyId) : undefined) ?? NO_ATTENTION,
-      );
+      const members = t.paneGroup
+        ? tabs.filter(
+            (member): member is TermSubTab =>
+              member.type === "terminal" && member.paneGroup === t.paneGroup,
+          )
+        : [t];
+      const verdicts = members.map((member) => {
+        const life = lifeForPty(member.ptyId);
+        return {
+          life,
+          bucket: bucketFor(
+            life,
+            (member.ptyId != null ? attention.get(member.ptyId) : undefined) ??
+              NO_ATTENTION,
+          ),
+        };
+      });
+      const bucket: TabStatus = verdicts.some((v) => v.bucket === "attention")
+        ? "attention"
+        : verdicts.some((v) => v.bucket === "active")
+          ? "active"
+          : "quiet";
       targets.set(t.id, bucket);
-      if (bucket === "quiet" && declaredQuiet(life)) provenIds.add(t.id);
+      if (
+        bucket === "quiet" &&
+        verdicts.length > 0 &&
+        verdicts.every((v) => declaredQuiet(v.life))
+      )
+        provenIds.add(t.id);
     }
     return { statusTargets: targets, provenQuiet: provenIds };
     // `attentionVersion`, not `attention`: the memory is mutated in place, so
@@ -6230,7 +6836,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [pointerInStrip, setPointerInStrip] = useState(false);
   const settledStatus = useSettledGroups(statusTargets, tabPrefs.idleDelayMs, {
     frozen: pointerInStrip || tabHints,
-    hold: activeTabId,
+    hold: activeVisualTabId,
     proven: provenQuiet,
     provenDelayMs: POLICY.provenIdleDelayMs,
   });
@@ -6351,7 +6957,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // same view, mid-scroll and all. It does move in the strip, though, so follow
   // it there; a tab that slid out of sight would be the same disappearing act
   // this grouping exists to prevent.
-  const activeGroupKey = activeTabId ? groupOf(activeTabId) : null;
+  const activeGroupKey = activeVisualTabId ? groupOf(activeVisualTabId) : null;
   // …and slide it there rather than cutting, so the move is something you can
   // follow with your eyes instead of a tab teleporting mid-glance.
   const stripRef = useRef<HTMLDivElement | null>(null);
@@ -6425,15 +7031,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
     () =>
       shellTabs.map((tab) => ({
         id: tab.id,
-        active: tab.id === activeTabId,
+        active: tab.id === activeVisualTabId,
         dot: <TerminalIcon size={11} className="run-chip-shell-dot" />,
-        title: tab.customTitle ?? tab.title,
+        title: tab.multiplexTitle ?? tab.customTitle ?? tab.title,
         tooltip: `${tab.command ?? "shell"} — ${tab.cwd}`,
-        onSelect: () => setActiveTabId(tab.id),
-        onClose: () => closeTab(tab.id, "user"),
+        onSelect: () => {
+          const group = tab.paneGroup
+            ? terminalGroupsRef.current[tab.paneGroup]
+            : undefined;
+          setActiveTabId(group?.activeTabId ?? tab.id);
+        },
+        onClose: () =>
+          tab.paneGroup
+            ? closeTerminalGroup(tab.paneGroup)
+            : closeTab(tab.id, "user"),
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [shellTabs, activeTabId, closeTab],
+    [shellTabs, activeVisualTabId, closeTab, closeTerminalGroup],
   );
   const runChips: RailChip[] = useMemo(
     () =>
@@ -7073,9 +7687,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
     (id: string, clickCount?: number) => {
       const tab = tabsRef.current.find((t) => t.id === id);
       if (tab?.type === "terminal" && clickCount === 2) startRename(tab);
-      else setActiveTabId(id);
+      else {
+        const group =
+          tab?.type === "terminal" && tab.paneGroup
+            ? terminalGroupsRef.current[tab.paneGroup]
+            : undefined;
+        setActiveTabId(group?.activeTabId ?? id);
+      }
     },
     [startRename],
+  );
+  const closeVisualTab = useCallback(
+    (id: string) => {
+      const tab = tabsRef.current.find((t) => t.id === id);
+      if (tab?.type === "terminal" && tab.paneGroup)
+        closeTerminalGroup(tab.paneGroup);
+      else closeTab(id, "user");
+    },
+    [closeTab, closeTerminalGroup],
   );
   const onTabContextMenu = useCallback(
     (e: React.MouseEvent, tab: SubTab) => {
@@ -7159,7 +7788,35 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   if (tab.type === "terminal") startRename(tab);
                 },
               },
-              { label: "Close", danger: true, onClick: () => closeTab(tab.id, "user") },
+              ...(tab.run
+                ? []
+                : [
+                    {
+                      label: "Split right",
+                      onClick: () => {
+                        setActiveTabId(tab.id);
+                        window.setTimeout(
+                          () => splitActiveRef.current("horizontal"),
+                          0,
+                        );
+                      },
+                    },
+                    {
+                      label: "Split down",
+                      onClick: () => {
+                        setActiveTabId(tab.id);
+                        window.setTimeout(
+                          () => splitActiveRef.current("vertical"),
+                          0,
+                        );
+                      },
+                    },
+                  ]),
+              {
+                label: tab.paneGroup ? "Close multiplexed tab" : "Close",
+                danger: true,
+                onClick: () => closeVisualTab(tab.id),
+              },
             ]
           : [
               ...taskItem,
@@ -7197,9 +7854,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [shareProjectLive],
   );
   const onNewShell = useCallback(() => {
+    if (pendingSplitRef.current) {
+      completePendingSplit({ title: "shell" });
+      return;
+    }
     const cwd = componentsRef.current[0]?.path;
     if (cwd) addTerminal(cwd);
-  }, [addTerminal]);
+  }, [addTerminal, completePendingSplit]);
   const onLaunchCli = useCallback(
     (cli: AgentCli) => launchCli(cli),
     [launchCli],
@@ -7213,12 +7874,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
       tabMenu.open(
         e,
         stripTabs.map((t) => ({
-          label: `${t.id === activeTabId ? "› " : ""}${tabDisplayLabel(t)}`,
-          onClick: () => setActiveTabId(t.id),
+          label: `${t.id === activeVisualTabId ? "› " : ""}${tabDisplayLabel(t)}`,
+          onClick: () => {
+            const group =
+              t.type === "terminal" && t.paneGroup
+                ? terminalGroupsRef.current[t.paneGroup]
+                : undefined;
+            setActiveTabId(group?.activeTabId ?? t.id);
+          },
         })),
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tabMenu.open, stripTabs, activeTabId],
+    [tabMenu.open, stripTabs, activeVisualTabId],
   );
 
   /** Everything Enter can do in SpotSearch, routed to the same handlers the
@@ -7863,6 +8530,67 @@ const ProjectViewBody = memo(function ProjectViewBody({
     }
   }
 
+  const activeTerminalGroup =
+    activeTermTab?.paneGroup != null
+      ? terminalGroups[activeTermTab.paneGroup]
+      : undefined;
+  const activeTerminalLayout = activeTerminalGroup
+    ? layoutSplit(activeTerminalGroup.root, activeTerminalGroup.zoomedTabId)
+    : null;
+  const activePaneRects = new Map(
+    activeTerminalLayout?.panes.map((pane) => [pane.tabId, pane]) ?? [],
+  );
+
+  const startPaneResize = useCallback(
+    (divider: SplitDivider, event: React.PointerEvent<HTMLDivElement>) => {
+      if (!activeTerminalGroup || !contentRef.current) return;
+      event.preventDefault();
+      const groupId = activeTerminalGroup.id;
+      const content = contentRef.current.getBoundingClientRect();
+      const grip = event.currentTarget;
+      grip.setPointerCapture?.(event.pointerId);
+      let frame = 0;
+      let pendingRatio = 0.5;
+      const move = (e: PointerEvent) => {
+        const x = (e.clientX - content.left) / content.width;
+        const y = (e.clientY - content.top) / content.height;
+        pendingRatio =
+          divider.axis === "horizontal"
+            ? (x - divider.parentLeft) / divider.parentWidth
+            : (y - divider.parentTop) / divider.parentHeight;
+        if (frame) return;
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          setTerminalGroups((prev) => {
+            const group = prev[groupId];
+            if (!group) return prev;
+            const next = {
+              ...prev,
+              [groupId]: {
+                ...group,
+                root: updateSplitRatio(group.root, divider.nodeId, pendingRatio),
+              },
+            };
+            terminalGroupsRef.current = next;
+            return next;
+          });
+        });
+      };
+      const up = () => {
+        if (frame) cancelAnimationFrame(frame);
+        if (grip.hasPointerCapture?.(event.pointerId))
+          grip.releasePointerCapture(event.pointerId);
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", up);
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
+    },
+    [activeTerminalGroup],
+  );
+
   const mainArea = (
     <div className="project-main">
       {tabMenu.menu && (
@@ -7888,14 +8616,33 @@ const ProjectViewBody = memo(function ProjectViewBody({
         openStacks={openStacks}
         onToggleStack={toggleStack}
         stripTabs={stripTabs}
-        activeTabId={activeTabId}
-        flashTabId={flashTabId}
+        activeTabId={activeVisualTabId}
+        flashTabId={
+          tabs.find((t) => t.id === flashTabId)?.type === "terminal" &&
+          (tabs.find((t) => t.id === flashTabId) as TermSubTab | undefined)?.paneGroup
+            ? stripTabs.find(
+                (t) =>
+                  t.type === "terminal" &&
+                  t.paneGroup ===
+                    (tabs.find((x) => x.id === flashTabId) as TermSubTab).paneGroup,
+              )?.id ?? flashTabId
+            : flashTabId
+        }
         renamingTabId={renamingTabId}
         renameDraft={renameDraft}
         collabPaths={collabPaths}
         isAgentTab={isAgentTab}
         tabState={tabState}
-        tabRing={(t) => (t.ptyId != null ? ringFor(attention.get(t.ptyId) ?? NO_ATTENTION) : false)}
+        tabRing={(t) =>
+          tabs.some(
+            (member) =>
+              member.type === "terminal" &&
+              (member.id === t.id ||
+                (Boolean(t.paneGroup) && member.paneGroup === t.paneGroup)) &&
+              member.ptyId != null &&
+              ringFor(attention.get(member.ptyId) ?? NO_ATTENTION),
+          )
+        }
         account={accountBanner}
         profileLabels={profileLabels}
         shellChips={shellChips}
@@ -7945,16 +8692,49 @@ const ProjectViewBody = memo(function ProjectViewBody({
       <div className="project-content" ref={contentRef}>
         {tabs
           .filter((t): t is TermSubTab => t.type === "terminal")
-          .map((tab) => (
+          .map((tab) => {
+            const group = tab.paneGroup
+              ? terminalGroups[tab.paneGroup]
+              : undefined;
+            const pane = group?.id === activeTerminalGroup?.id
+              ? activePaneRects.get(tab.id)
+              : undefined;
+            const grouped = Boolean(group && leafIds(group.root).length > 1);
+            const paneAgent =
+              tab.ptyId != null
+                ? identifyAgent(statsByPty.get(tab.ptyId)?.agent_hint)
+                : null;
+            const shown =
+              visible &&
+              (pane != null || (!grouped && tab.id === activeTabId));
+            const paneStyle: CSSProperties = pane
+              ? {
+                  display: "block",
+                  position: "absolute",
+                  left: `${pane.left * 100}%`,
+                  top: `${pane.top * 100}%`,
+                  width: `${pane.width * 100}%`,
+                  height: `${pane.height * 100}%`,
+                }
+              : { display: shown ? "block" : "none" };
+            return (
             <div
               key={tab.id}
               // Which tab's pane this is, for the switcher's thumbnails: they
               // are clones of the live host, and a hidden host has to be
               // findable without the pane knowing anything about them.
               data-tab-id={tab.id}
-              className="fill term-host"
-              style={{
-                display: tab.id === activeTabId && visible ? "block" : "none",
+              className={`fill term-host ${grouped ? "term-host-multiplexed" : ""} ${tab.id === activeTabId ? "term-host-focused" : ""}`}
+              style={paneStyle}
+              onPointerDown={() => {
+                if (!group || group.activeTabId === tab.id) return;
+                const next = { ...group, activeTabId: tab.id };
+                terminalGroupsRef.current = {
+                  ...terminalGroupsRef.current,
+                  [group.id]: next,
+                };
+                setTerminalGroups(terminalGroupsRef.current);
+                setActiveTabId(tab.id);
               }}
               // Selected text is a task waiting to be written down — an error,
               // a TODO the shell just printed, a command worth automating.
@@ -7969,6 +8749,66 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 termMenu.open(e, [taskMenu(sel)]);
               }}
             >
+              {grouped && (
+                <div className="multiplex-pane-head">
+                  {paneAgent?.id ? (
+                    <AgentIcon id={paneAgent.id} size={12} />
+                  ) : (
+                    <TerminalIcon size={12} />
+                  )}
+                  <span
+                    className={`tab-status tab-status-${lifeForPty(tab.ptyId).state} ${
+                      tab.ptyId != null &&
+                      ringFor(attention.get(tab.ptyId) ?? NO_ATTENTION)
+                        ? "tab-status-unread"
+                        : ""
+                    }`}
+                    aria-hidden
+                  />
+                  <span className="multiplex-pane-title">
+                    {tab.customTitle ?? tab.title}
+                  </span>
+                  <span className="multiplex-pane-path" title={tab.cwd}>
+                    {basename(tab.cwd)}
+                  </span>
+                  <button
+                    type="button"
+                    className="multiplex-pane-action"
+                    title="Split right"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const pending = { sourceTabId: tab.id, axis: "horizontal" as const };
+                      pendingSplitRef.current = pending;
+                      setPendingSplit(pending);
+                      setLauncherOpen(true);
+                    }}
+                  >
+                    ◫
+                  </button>
+                  <button
+                    type="button"
+                    className="multiplex-pane-action"
+                    title="Move pane to its own tab"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      breakPaneOut(tab.id);
+                    }}
+                  >
+                    ↗
+                  </button>
+                  <button
+                    type="button"
+                    className="multiplex-pane-action"
+                    title="Close pane"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closeTab(tab.id, "user");
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
               <TermPorts
                 ptyId={tab.ptyId}
                 stats={stats}
@@ -8085,6 +8925,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 }}
               />
             </div>
+            );
+          })}
+        {activeTerminalGroup &&
+          activeTerminalLayout?.dividers.map((divider) => (
+            <div
+              key={divider.nodeId}
+              className={`multiplex-divider multiplex-divider-${divider.axis}`}
+              style={{
+                left: `${divider.left * 100}%`,
+                top: `${divider.top * 100}%`,
+                width: `${divider.width * 100}%`,
+                height: `${divider.height * 100}%`,
+              }}
+              onPointerDown={(event) => startPaneResize(divider, event)}
+              onDoubleClick={equalizePanes}
+              role="separator"
+              aria-orientation={
+                divider.axis === "horizontal" ? "vertical" : "horizontal"
+              }
+              title="Drag to resize · double-click to equalize"
+            />
           ))}
         {/* Doc tabs, mounted for as long as they're open and shown by display
             like the terminals above — see docTabView. Each pane carries its own
@@ -9234,10 +10095,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         <LaunchPalette
           installed={installed}
           cliUpdates={cliUpdates}
-          targetLabel={components[0]?.label}
+          targetLabel={pendingSplit ? "new split pane" : components[0]?.label}
           onShell={onNewShell}
           onLaunchCli={(cli) => launchCli(cli)}
-          onClose={() => setLauncherOpen(false)}
+          onClose={() => {
+            setLauncherOpen(false);
+            pendingSplitRef.current = null;
+            setPendingSplit(null);
+          }}
         />
       )}
       {palette && visible && (
@@ -9264,7 +10129,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
           termText={termTailFor}
           onPick={(id) => {
             cancelSwitcher();
-            setActiveTabId(id);
+            const tab = tabsRef.current.find((item) => item.id === id);
+            const group =
+              tab?.type === "terminal" && tab.paneGroup
+                ? terminalGroupsRef.current[tab.paneGroup]
+                : undefined;
+            setActiveTabId(group?.activeTabId ?? id);
           }}
         />
       )}

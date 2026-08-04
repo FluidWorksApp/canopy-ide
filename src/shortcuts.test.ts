@@ -267,21 +267,22 @@ describe("the shell keeps its own keys", () => {
     }
   });
 
-  it("keeps the Mac chords exactly as they were", () => {
-    // None of this applies on macOS: Mod is Command, which no shell uses. The
-    // moves are per-platform overrides, so muscle memory here is untouched.
+  it("keeps established Mac chords while reserving cmux pane keys", () => {
     expect(format("quick-open", "macos")).toBe("⌘P");
     expect(format("spot-search", "macos")).toBe("⌘K");
     expect(format("close-tab", "macos")).toBe("⌘W");
     expect(format("toggle-sidebar", "macos")).toBe("⌘B");
-    expect(format("close-project", "macos")).toBe("⇧⌘W");
+    expect(format("split-pane-right", "macos")).toBe("⌘D");
+    expect(format("split-pane-down", "macos")).toBe("⇧⌘D");
+    expect(format("focus-pane-right", "macos")).toBe("⌥⌘→");
+    expect(format("close-pane-group", "macos")).toBe("⇧⌘W");
+    expect(format("close-project", "macos")).toBe("⌃⇧⌘W");
   });
 
   it("gives close-project its own key once close-tab takes Ctrl+Shift+W", () => {
     expect(format("close-tab", "windows")).toBe("Ctrl+Shift+W");
-    // Ctrl+Alt is the project level off macOS, matching prev/next-project.
     expect(format("close-project", "windows")).toBe("Ctrl+Alt+W");
-    expect(format("next-project", "windows")).toBe("Ctrl+Alt+PgDn");
+    expect(format("next-project", "windows")).toBe("");
   });
 });
 
@@ -412,8 +413,10 @@ describe("Rust parity", () => {
     expect(accelerator("find-in-files", "windows")).toBe("CmdOrCtrl+Shift+F");
     expect(accelerator("next-tab", "macos")).toBe("Control+CmdOrCtrl+Right");
     expect(accelerator("next-tab", "windows")).toBe("CmdOrCtrl+PageDown");
-    expect(accelerator("prev-project", "linux")).toBe("CmdOrCtrl+Alt+PageUp");
-    expect(accelerator("toggle-zen", "macos")).toBe("CmdOrCtrl+Shift+Enter");
+    expect(accelerator("prev-project", "linux")).toBeNull();
+    expect(accelerator("toggle-zen", "macos")).toBe(
+      "Control+CmdOrCtrl+Shift+Enter",
+    );
   });
 
   it("covers every id the Rust menu binds", () => {

@@ -7,6 +7,7 @@
 // Kept in localStorage rather than the workspace file: it is a convenience
 // record, not part of the project's definition, and a corrupt one should cost
 // nothing.
+import type { TerminalGroup } from "./terminalGroups";
 
 export interface RememberedTerminal {
   cwd: string;
@@ -15,11 +16,20 @@ export interface RememberedTerminal {
   icon?: string;
   /** It lived in the RUNS rail rather than the terminal strip. */
   run?: boolean;
+  /** Runtime identity used to reconnect this terminal to a remembered split. */
+  tabId?: string;
+  paneGroup?: string;
+}
+
+export interface RememberedTerminalState {
+  terminals: RememberedTerminal[];
+  terminalGroups: Record<string, TerminalGroup>;
 }
 
 const KEY = "canopy.terminals";
 
-type Store = Record<string, RememberedTerminal[]>;
+type StoredProject = RememberedTerminal[] | RememberedTerminalState;
+type Store = Record<string, StoredProject>;
 
 function read(): Store {
   try {
@@ -29,13 +39,20 @@ function read(): Store {
   }
 }
 
-export function rememberTerminals(projectId: string, terminals: RememberedTerminal[]) {
+export function rememberTerminals(
+  projectId: string,
+  terminals: RememberedTerminal[],
+  terminalGroups: Record<string, TerminalGroup> = {},
+) {
   // Never record an empty set. Closing the last tab is exactly when this
   // memory becomes valuable — overwriting it at that moment would erase the
   // thing the user wants back.
   if (terminals.length === 0) return;
   const store = read();
-  store[projectId] = terminals.slice(0, 12);
+  store[projectId] = {
+    terminals: terminals.slice(0, 12),
+    terminalGroups,
+  };
   try {
     localStorage.setItem(KEY, JSON.stringify(store));
   } catch {
@@ -45,7 +62,13 @@ export function rememberTerminals(projectId: string, terminals: RememberedTermin
 }
 
 export function rememberedTerminals(projectId: string): RememberedTerminal[] {
-  return read()[projectId] ?? [];
+  return rememberedTerminalState(projectId).terminals;
+}
+
+export function rememberedTerminalState(projectId: string): RememberedTerminalState {
+  const stored = read()[projectId];
+  if (Array.isArray(stored)) return { terminals: stored, terminalGroups: {} };
+  return stored ?? { terminals: [], terminalGroups: {} };
 }
 
 export function forgetTerminals(projectId: string) {

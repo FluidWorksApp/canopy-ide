@@ -25,6 +25,7 @@ import type { ReviewPayload } from "./components/ReviewView";
 import { AGENT_CLIS, restoreCommand, resumeSessionId } from "./projects";
 import { agentIdForCommand } from "./agentIdentity";
 import { claimLabel } from "./claims";
+import type { TerminalGroup } from "./terminalGroups";
 
 /** A terminal as it will be brought back: a directory, a command line, and —
  *  when it was hosting an agent — the conversation to resume rather than a
@@ -46,6 +47,9 @@ export interface TerminalSnapshot {
   /** A headless PTY from the remote portal. It outlives hibernation (we never
    *  spawned it, so we never kill it) — reattached on wake if still alive. */
   attachId?: number;
+  /** Runtime tab identity used only to reconnect split-tree leaves on wake. */
+  tabId?: string;
+  paneGroup?: string;
 }
 
 export type SnapshotTab =
@@ -85,6 +89,8 @@ export interface ProjectSnapshot {
   sidePinned: boolean;
   /** The worktree the project's file surface was pointed at, if any. */
   worktree: { repo: string; path: string; branch: string } | null;
+  /** Optional for compatibility with snapshots written before multiplexing. */
+  terminalGroups?: Record<string, TerminalGroup>;
 }
 
 const VERSION = 1;
@@ -136,6 +142,7 @@ export function snapshotTabs(
           sessionId: agentId ? sessionId : undefined,
           profile: t.profile,
           attachId: t.attachId,
+          ...(t.paneGroup ? { tabId: t.id, paneGroup: t.paneGroup } : {}),
         });
         break;
       }
@@ -219,6 +226,7 @@ export function buildSnapshot(opts: {
   worktree: { repo: string; path: string; branch: string } | null;
   sessionFor?: (ptyId: number) => string | undefined;
   now?: number;
+  terminalGroups?: Record<string, TerminalGroup>;
 }): ProjectSnapshot {
   const kept = opts.tabs.filter((t) => snapshotTabs([t], opts.sessionFor).length > 0);
   const activeIndex = kept.findIndex((t) => t.id === opts.activeTabId);
@@ -230,6 +238,7 @@ export function buildSnapshot(opts: {
     sideTab: opts.sideTab,
     sidePinned: opts.sidePinned,
     worktree: opts.worktree,
+    terminalGroups: opts.terminalGroups,
   };
 }
 

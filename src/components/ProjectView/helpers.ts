@@ -71,6 +71,13 @@ export interface TermSubTab {
    *  `runId` keys this run's entry in the task history — the record outlives
    *  the tab, which is the point. */
   micro?: { taskId: string; runId?: string };
+  /** Visual-only grouping. Every member remains a normal terminal tab with its
+   * own PTY; ProjectView lays members of the same group into one split surface. */
+  paneGroup?: string;
+  /** Derived on the representative passed to PaneBar; never persisted. */
+  multiplexCount?: number;
+  /** Derived title of the currently focused member plus the sibling count. */
+  multiplexTitle?: string;
 }
 
 export interface FileSubTab {
@@ -454,7 +461,7 @@ export const tabId = () =>
 export function tabDisplayLabel(t: SubTab): string {
   switch (t.type) {
     case "terminal":
-      return t.customTitle ?? t.title;
+      return t.multiplexTitle ?? t.customTitle ?? t.title;
     case "file":
       return t.file.name;
     case "pr":

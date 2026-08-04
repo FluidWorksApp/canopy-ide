@@ -158,7 +158,7 @@
     {
       "id": "prev-project",
       "label": "Previous project",
-      "surface": "menu",
+      "surface": "app",
       "chord": {
         "mods": [
           "Mod",
@@ -166,28 +166,14 @@
         ],
         "key": "ArrowLeft"
       },
-      "platform": {
-        "windows": {
-          "mods": [
-            "Mod",
-            "Alt"
-          ],
-          "key": "PageUp"
-        },
-        "linux": {
-          "mods": [
-            "Mod",
-            "Alt"
-          ],
-          "key": "PageUp"
-        }
-      },
-      "note": "Ctrl+Alt+Arrow is screen rotation on Intel drivers (Windows) and workspace switching (GNOME/KDE), so the non-Mac binding moves to PageUp/PageDown — the same pair the tab chords use one level down."
+      "platform": { "macos": null, "windows": null, "linux": null },
+      "help": false,
+      "note": "Unbound: projects use Option+1…9 and the title-bar pills; Option+Command+Arrow belongs to pane focus."
     },
     {
       "id": "next-project",
       "label": "Next project",
-      "surface": "menu",
+      "surface": "app",
       "chord": {
         "mods": [
           "Mod",
@@ -195,22 +181,8 @@
         ],
         "key": "ArrowRight"
       },
-      "platform": {
-        "windows": {
-          "mods": [
-            "Mod",
-            "Alt"
-          ],
-          "key": "PageDown"
-        },
-        "linux": {
-          "mods": [
-            "Mod",
-            "Alt"
-          ],
-          "key": "PageDown"
-        }
-      }
+      "platform": { "macos": null, "windows": null, "linux": null },
+      "help": false
     },
     {
       "id": "close-project",
@@ -219,6 +191,7 @@
       "chord": {
         "mods": [
           "Mod",
+          "Ctrl",
           "Shift"
         ],
         "key": "KeyW"
@@ -239,7 +212,7 @@
           "key": "KeyW"
         }
       },
-      "note": "Off macOS this vacates Ctrl+Shift+W for close-tab. Ctrl+Alt is already the project level there (prev/next-project are Ctrl+Alt+PgUp/PgDn), so tabs are Ctrl+Shift and projects are Ctrl+Alt — one rule, not two exceptions."
+      "note": "The former Shift+Mod+W now closes a whole multiplexed tab; project close remains available from its title-bar pill."
     },
     {
       "id": "open-workspace",
@@ -301,6 +274,104 @@
           "Mod"
         ],
         "key": "KeyT"
+      }
+    },
+    {
+      "id": "split-pane-right",
+      "label": "Split pane right and choose an agent",
+      "surface": "app",
+      "chord": { "mods": ["Mod"], "key": "KeyD" },
+      "platform": {
+        "windows": { "mods": ["Mod", "Alt"], "key": "KeyD" },
+        "linux": { "mods": ["Mod", "Alt"], "key": "KeyD" }
+      }
+    },
+    {
+      "id": "split-pane-down",
+      "label": "Split pane down and choose an agent",
+      "surface": "app",
+      "chord": { "mods": ["Mod", "Shift"], "key": "KeyD" },
+      "platform": {
+        "windows": { "mods": ["Mod", "Alt", "Shift"], "key": "KeyD" },
+        "linux": { "mods": ["Mod", "Alt", "Shift"], "key": "KeyD" }
+      }
+    },
+    {
+      "id": "focus-pane-left",
+      "label": "Focus pane left",
+      "surface": "app",
+      "chord": { "mods": ["Mod", "Alt"], "key": "ArrowLeft" }
+    },
+    {
+      "id": "focus-pane-right",
+      "label": "Focus pane right",
+      "surface": "app",
+      "chord": { "mods": ["Mod", "Alt"], "key": "ArrowRight" }
+    },
+    {
+      "id": "focus-pane-up",
+      "label": "Focus pane above",
+      "surface": "app",
+      "chord": { "mods": ["Mod", "Alt"], "key": "ArrowUp" }
+    },
+    {
+      "id": "focus-pane-down",
+      "label": "Focus pane below",
+      "surface": "app",
+      "chord": { "mods": ["Mod", "Alt"], "key": "ArrowDown" }
+    },
+    {
+      "id": "move-pane-left",
+      "label": "Move focused agent left",
+      "surface": "app",
+      "chord": { "mods": ["Mod", "Alt", "Shift"], "key": "ArrowLeft" }
+    },
+    {
+      "id": "move-pane-right",
+      "label": "Move focused agent right",
+      "surface": "app",
+      "chord": { "mods": ["Mod", "Alt", "Shift"], "key": "ArrowRight" }
+    },
+    {
+      "id": "move-pane-up",
+      "label": "Move focused agent up",
+      "surface": "app",
+      "chord": { "mods": ["Mod", "Alt", "Shift"], "key": "ArrowUp" }
+    },
+    {
+      "id": "move-pane-down",
+      "label": "Move focused agent down",
+      "surface": "app",
+      "chord": { "mods": ["Mod", "Alt", "Shift"], "key": "ArrowDown" }
+    },
+    {
+      "id": "toggle-pane-zoom",
+      "label": "Zoom or restore focused pane",
+      "surface": "app",
+      "chord": { "mods": ["Mod", "Shift"], "key": "Enter" },
+      "platform": {
+        "windows": { "mods": ["Mod", "Alt"], "key": "Enter" },
+        "linux": { "mods": ["Mod", "Alt"], "key": "Enter" }
+      }
+    },
+    {
+      "id": "equalize-panes",
+      "label": "Equalize pane sizes",
+      "surface": "app",
+      "chord": { "mods": ["Ctrl", "Mod", "Shift"], "key": "Equal" },
+      "platform": {
+        "windows": { "mods": ["Mod", "Alt", "Shift"], "key": "Equal" },
+        "linux": { "mods": ["Mod", "Alt", "Shift"], "key": "Equal" }
+      }
+    },
+    {
+      "id": "close-pane-group",
+      "label": "Close multiplexed tab",
+      "surface": "app",
+      "chord": { "mods": ["Mod", "Shift"], "key": "KeyW" },
+      "platform": {
+        "windows": { "mods": ["Mod", "Alt", "Shift"], "key": "KeyW" },
+        "linux": { "mods": ["Mod", "Alt", "Shift"], "key": "KeyW" }
       }
     },
     {
@@ -542,9 +613,14 @@
       "chord": {
         "mods": [
           "Mod",
+          "Ctrl",
           "Shift"
         ],
         "key": "Enter"
+      },
+      "platform": {
+        "windows": { "mods": ["Mod", "Alt", "Shift"], "key": "Enter" },
+        "linux": { "mods": ["Mod", "Alt", "Shift"], "key": "Enter" }
       }
     },
     {
@@ -577,7 +653,8 @@
       "surface": "app",
       "chord": {
         "mods": [
-          "Mod"
+          "Mod",
+          "Ctrl"
         ],
         "key": "KeyD"
       },
