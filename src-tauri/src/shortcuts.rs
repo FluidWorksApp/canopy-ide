@@ -182,10 +182,7 @@ mod tests {
             accelerator_for("prev-tab", "linux", "canopy").as_deref(),
             Some("CmdOrCtrl+PageUp")
         );
-        assert_eq!(
-            accelerator_for("next-project", "windows", "canopy"),
-            None
-        );
+        assert_eq!(accelerator_for("next-project", "windows", "canopy"), None);
     }
 
     #[test]
