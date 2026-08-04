@@ -57,7 +57,7 @@ export type SnapshotTab =
   | { kind: "file"; path: string; view: "preview" | "source" | "diff" }
   | { kind: "preview"; url: string }
   | { kind: "pr"; repo: string; pr: ipc.PrInfo }
-  | { kind: "ticket"; ticket: ipc.TicketInfo; source: string }
+  | { kind: "ticket"; ticket: ipc.TicketInfo; source: string; repo?: string }
   | { kind: "commit"; repo: string; hash: string; short: string; subject: string }
   | { kind: "branch"; repo: string; branch: ipc.BranchWork }
   | { kind: "review"; review: ReviewPayload }
@@ -160,7 +160,7 @@ export function snapshotTabs(
         out.push({ kind: "pr", repo: t.repo, pr: t.pr });
         break;
       case "ticket":
-        out.push({ kind: "ticket", ticket: t.ticket, source: t.source });
+        out.push({ kind: "ticket", ticket: t.ticket, source: t.source, repo: t.repo });
         break;
       case "commit":
         out.push({

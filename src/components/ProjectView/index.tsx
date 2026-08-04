@@ -2233,8 +2233,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** Create or reuse the ticket's worktree and start an agent in it. The one
    *  implementation both the Issues panel and the ticket tab call. */
   const startTicketWork = useCallback(
-    async (ticket: ipc.TicketInfo, agentId?: string) => {
-      const repo = await ticketRepo();
+    async (ticket: ipc.TicketInfo, requestedRepo: string, agentId?: string) => {
+      const repo = requestedRepo || await ticketRepo();
       if (!repo) {
         onNotice("No git repository in this project.");
         return;
@@ -2582,29 +2582,40 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   /** Open an issue as its own tab, reusing one already open for it. */
   const openTicket = useCallback(
-    (ticket: ipc.TicketInfo, source: string) => {
+    (ticket: ipc.TicketInfo, source: string, requestedRepo?: string) => {
       const existing = tabsRef.current.find(
         (t): t is TicketSubTab =>
           t.type === "ticket" &&
           t.source === source &&
-          t.ticket.id === ticket.id,
+          t.ticket.id === ticket.id &&
+          (!requestedRepo || !t.repo || t.repo === requestedRepo),
       );
       if (existing) {
         // Refresh the payload: the panel's copy is newer than the tab's.
-        patchTabRaw(existing.id, { ticket } as Partial<SubTab>);
+        patchTabRaw(existing.id, {
+          ticket,
+          repo: requestedRepo ?? existing.repo,
+        } as Partial<SubTab>);
         setActiveTabId(existing.id);
         return;
       }
       const id = tabId();
-      setTabs((prev) => [...prev, { id, type: "ticket", ticket, source }]);
+      setTabs((prev) => [
+        ...prev,
+        { id, type: "ticket", ticket, source, repo: requestedRepo },
+      ]);
       setActiveTabId(id);
-      void ticketRepo().then((repo) => {
-        if (repo)
-          void ipc
-            .gitWorktrees(repo)
-            .then(setTicketWorktrees)
-            .catch(() => {});
-      });
+      void (requestedRepo ? Promise.resolve(requestedRepo) : ticketRepo()).then(
+        (repo) => {
+          if (repo && !requestedRepo)
+            patchTabRaw(id, { repo } as Partial<SubTab>);
+          if (repo)
+            void ipc
+              .gitWorktrees(repo)
+              .then(setTicketWorktrees)
+              .catch(() => {});
+        },
+      );
     },
     [patchTabRaw, ticketRepo],
   );
@@ -3179,6 +3190,57 @@ const ProjectViewBody = memo(function ProjectViewBody({
       void startMicroTask(adhocTaskDef(brief, label), { dir }, "");
     },
     [startMicroTask],
+  );
+
+  /** Ticket work is a Task by default: prepare the same durable worktree a
+   *  normal agent would receive, then let the one-shot lifecycle run there.
+   *  The worktree is deliberately retained because the task reports back
+   *  without committing or opening a PR. */
+  const startTicketTask = useCallback(
+    async (ticket: ipc.TicketInfo, requestedRepo?: string) => {
+      const repo = requestedRepo || await ticketRepo();
+      if (!repo) {
+        onNotice("No git repository in this project.");
+        return;
+      }
+      try {
+        const worktrees = await ipc
+          .gitWorktrees(repo)
+          .catch(() => [] as ipc.WorktreeInfo[]);
+        const existing = ticketWorktree(ticket, worktrees);
+        let dir = existing?.path;
+        if (!dir) {
+          const branch = ticketBranch(ticket);
+          const branches = await ipc
+            .gitBranches(repo)
+            .catch(() => [] as ipc.BranchInfo[]);
+          const result = await switchTo(
+            repo,
+            {
+              kind: "workspace",
+              branch,
+              create: !branches.some((item) => item.name === branch),
+            },
+            { because: `the ticket ${ticket.id}` },
+          );
+          if (result.kind !== "settled") return;
+          dir = result.path;
+        }
+        setTicketWorktrees(await ipc.gitWorktrees(repo).catch(() => worktrees));
+        const brief =
+          `${ticketContext(ticket)} Implement it end-to-end and verify the changes. ` +
+          `Leave the completed work in this worktree; do not commit or open a pull request ` +
+          `unless the ticket explicitly asks for it.`;
+        await startMicroTask(
+          adhocTaskDef(brief, `Ticket ${ticket.id}`),
+          { dir },
+          "",
+        );
+      } catch (err) {
+        onNotice(`Couldn't start task: ${String(err)}`, "error");
+      }
+    },
+    [onNotice, startMicroTask, switchTo, ticketRepo],
   );
 
   /** Carry a finished task's conversation on as an ordinary agent session.
@@ -5526,6 +5588,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             type: "ticket",
             ticket: t.ticket,
             source: t.source,
+            // Older snapshots predate repository identity on ticket tabs.
+            repo: t.repo ?? await ticketRepo(),
           });
         case "commit":
           return push({
@@ -5582,7 +5646,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           });
       }
     },
-    [addTerminal, patchFile],
+    [addTerminal, patchFile, ticketRepo],
   );
 
   // Wake: rebuild the workspace step by step while the frost (rendered by App,
@@ -8300,10 +8364,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <TicketView
             ticket={tab.ticket}
             source={tab.source}
+            repo={tab.repo}
             worktree={ticketWorktree(tab.ticket, ticketWorktrees)}
             agentTargets={agentTargets}
             installed={installed}
-            onStartNew={(agentId) => void startTicketWork(tab.ticket, agentId)}
+            onStartNew={(agentId) =>
+              void startTicketWork(tab.ticket, tab.repo ?? "", agentId)
+            }
+            onStartTask={() => void startTicketTask(tab.ticket, tab.repo)}
             onSendToAgent={(target) =>
               sendTicketToAgent(target, ticketContext(tab.ticket))
             }

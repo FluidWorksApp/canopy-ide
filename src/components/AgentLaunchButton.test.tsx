@@ -49,6 +49,26 @@ describe("AgentLaunchButton", () => {
     expect(p.onSend).not.toHaveBeenCalled();
   });
 
+  it("runs a task as the primary action while keeping agents in the caret", () => {
+    const p = props();
+    const run = vi.fn();
+    render(
+      <AgentLaunchButton
+        {...p}
+        primaryTask={{ title: "Run this as a task", onRun: run }}
+      />,
+    );
+
+    fireEvent.click(screen.getByTitle("Run this as a task"));
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(p.onStart).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByTitle("Send to a running agent, or start a new one instead"),
+    );
+    expect(screen.getByText("Origin agent")).toBeInTheDocument();
+  });
+
   it("keeps other running agents in the caret menu", () => {
     const p = { ...props(), agentTargets: [origin, other] };
     render(<AgentLaunchButton {...p} primaryTarget={origin} />);

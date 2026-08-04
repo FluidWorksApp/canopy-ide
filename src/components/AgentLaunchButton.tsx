@@ -1,16 +1,13 @@
 // The one "hand this to an agent" control, shared by every surface that starts
 // one: the ticket tab's "▶ Start work" split-button and the PR header's
-// "Review ▾" dropdown. It owns the two things those surfaces used to each
-// re-implement — resolving which CLI the primary action starts, and opening the
-// agent menu (running agents to send to, or a fresh CLI in a worktree) — so a
-// new caller is a `<AgentLaunchButton>` with a label and two handlers, nothing
-// more.
+// "Review ▾" dropdown. It owns the agent menu (running agents to send to, or a
+// fresh CLI in a worktree) and either an agent or task primary action.
 import { useState } from "react";
 import { AGENT_CLIS } from "../projects";
 import { getSettings } from "../settings";
 import { agentMenuItems } from "../agentMenu";
 import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
-import { AgentsIcon } from "./icons";
+import { AgentsIcon, TasksIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 import { Button } from "./ui";
 
@@ -32,6 +29,9 @@ interface AgentLaunchButtonProps {
   /** When this surface came from an agent, send back there on the primary click
    *  instead of starting a new agent. The caret still offers every target. */
   primaryTarget?: AgentTarget;
+  /** A non-session primary action. Ticket work defaults to a one-shot Task;
+   *  the caret still contains every running/new-agent destination. */
+  primaryTask?: { title: string; onRun: () => void };
   /** "split" — the accent primary + caret used in a footer (ticket tab).
    *  "mini" — a single btn-mini dropdown that sits in a header row of small
    *  buttons (PR header), next to Merge ▾ / Request review ▾. */
@@ -52,6 +52,7 @@ export function AgentLaunchButton({
   onStart,
   onSend,
   primaryTarget,
+  primaryTask,
   variant = "split",
   extras,
 }: AgentLaunchButtonProps) {
@@ -99,20 +100,36 @@ export function AgentLaunchButton({
           <Button variant="accent" className="split-btn-main"
             // The agent is named in the tooltip and the caret menu, not the
             // label: the button is the verb, not an endorsement of one CLI.
-            onClick={() => primaryTarget ? onSend(primaryTarget) : onStart(preferredCli.id)}
+            onClick={() =>
+              primaryTask
+                ? primaryTask.onRun()
+                : primaryTarget
+                  ? onSend(primaryTarget)
+                  : onStart(preferredCli.id)
+            }
             title={
-              primaryTarget
+              primaryTask
+                ? primaryTask.title
+                : primaryTarget
                 ? `Send this back to ${primaryTarget.title}`
                 : primaryTitle?.(preferredCli.name)
             }>
             ▶ {label}
             <span className="split-btn-agent">
-              {primaryTarget?.title ?? preferredCli.name}
+              {primaryTask ? (
+                <>
+                  <TasksIcon size={11} /> Task
+                </>
+              ) : (
+                primaryTarget?.title ?? preferredCli.name
+              )}
             </span>
           </Button>
           <Button variant="accent" className="split-btn-caret"
             title={
-              primaryTarget
+              primaryTask
+                ? "Send to a running agent, or start a new one instead"
+                : primaryTarget
                 ? "Send to another agent, or start a new one"
                 : "Send to a running agent, or start a different one"
             }

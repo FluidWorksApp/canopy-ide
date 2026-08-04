@@ -46,6 +46,7 @@ const view = (commands: Record<string, unknown> = {}) => {
       agentTargets={[]}
       installed={{}}
       onStartNew={vi.fn()}
+      onStartTask={vi.fn()}
       onSendToAgent={vi.fn()}
     />,
   );
@@ -113,6 +114,7 @@ describe("TicketView", () => {
         agentTargets={[]}
         installed={{}}
         onStartNew={vi.fn()}
+        onStartTask={vi.fn()}
         onSendToAgent={vi.fn()}
       />,
     );
