@@ -48,6 +48,7 @@ async function loadClient() {
 
 describe("language server startup", () => {
   beforeEach(() => {
+    vi.useRealTimers();
     vi.resetModules();
     mocks.exit = undefined;
     mocks.fsStat.mockReset().mockImplementation(async (path: string) => {
@@ -77,18 +78,35 @@ describe("language server startup", () => {
   });
 
   it("records a concrete initialization failure instead of staying unready", async () => {
-    mocks.start.mockRejectedValue(new Error("initialize rejected"));
+    mocks.start.mockRejectedValue(new Error("Could not find a valid TypeScript installation"));
     const client = await loadClient();
 
     await client.ensureLanguageServer(file, root);
 
     expect(await client.hasServerFor(file, root)).toBe(false);
-    expect(await client.describeMissingServer(file, root)).toContain("initialize rejected");
+    expect(await client.describeMissingServer(file, root)).toContain(
+      "Could not find a valid TypeScript installation",
+    );
     expect(await client.describeMissingServer(file, root)).not.toContain("isn't ready yet");
     expect(mocks.lspStop).toHaveBeenCalledWith(7);
+    expect(mocks.start).toHaveBeenCalledOnce();
   });
 
-  it("removes a ready server when its subprocess exits", async () => {
+  it("retries a transient initialization failure before answering", async () => {
+    mocks.lspStart.mockResolvedValueOnce(7).mockResolvedValueOnce(8);
+    mocks.start.mockRejectedValueOnce(new Error("transport closed")).mockResolvedValueOnce(undefined);
+    const client = await loadClient();
+
+    await client.ensureLanguageServer(file, root);
+
+    expect(mocks.start).toHaveBeenCalledTimes(2);
+    expect(mocks.lspStop).toHaveBeenCalledWith(7);
+    expect(await client.hasServerFor(file, root)).toBe(true);
+  });
+
+  it("automatically restarts a desired server when its subprocess exits", async () => {
+    vi.useFakeTimers();
+    mocks.lspStart.mockResolvedValueOnce(7).mockResolvedValueOnce(8);
     const client = await loadClient();
     await client.ensureLanguageServer(file, root);
     expect(await client.hasServerFor(file, root)).toBe(true);
@@ -97,5 +115,24 @@ describe("language server startup", () => {
 
     expect(await client.hasServerFor(file, root)).toBe(false);
     expect(await client.describeMissingServer(file, root)).toContain("exited unexpectedly");
+    expect(await client.describeMissingServer(file, root)).toContain("restarting it (attempt 1/3)");
+
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(mocks.lspStart).toHaveBeenCalledTimes(2);
+    expect(await client.hasServerFor(file, root)).toBe(true);
+  });
+
+  it("cancels supervised restarts when the workspace closes", async () => {
+    vi.useFakeTimers();
+    const client = await loadClient();
+    await client.ensureLanguageServer(file, root);
+    mocks.exit?.(7);
+
+    await client.stopWorkspaceServers(root);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(mocks.lspStart).toHaveBeenCalledOnce();
+    expect(await client.hasServerFor(file, root)).toBe(false);
   });
 });
