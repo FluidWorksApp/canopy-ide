@@ -12,13 +12,12 @@ interface CoachmarkProps {
   targetSelector: string;
   title: string;
   body: string;
+  steps?: { label: string; shortcut: string }[];
   /** Called on any dismissal (button, Esc, backdrop). */
   onDismiss: () => void;
 }
 
-const POP_WIDTH = 264;
-
-export function Coachmark({ targetSelector, title, body, onDismiss }: CoachmarkProps) {
+export function Coachmark({ targetSelector, title, body, steps, onDismiss }: CoachmarkProps) {
   const [rect, setRect] = useState<DOMRect | null>(null);
   useEscape(onDismiss, true);
 
@@ -67,12 +66,14 @@ export function Coachmark({ targetSelector, title, body, onDismiss }: CoachmarkP
   // Prefer below the target; flip above if it would run off the bottom.
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  const below = rect.bottom + 12 + 132 < vh;
+  const popWidth = Math.min(steps?.length ? 380 : 264, vw - 20);
+  const popHeight = steps?.length ? 300 : 132;
+  const below = rect.bottom + 12 + popHeight < vh;
   const popStyle: React.CSSProperties = {
     top: below ? rect.bottom + 12 : undefined,
     bottom: below ? undefined : vh - rect.top + 12,
-    left: Math.min(Math.max(rect.left + rect.width / 2 - POP_WIDTH / 2, 10), vw - POP_WIDTH - 10),
-    width: POP_WIDTH,
+    left: Math.min(Math.max(rect.left + rect.width / 2 - popWidth / 2, 10), vw - popWidth - 10),
+    width: popWidth,
   };
 
   return (
@@ -90,6 +91,16 @@ export function Coachmark({ targetSelector, title, body, onDismiss }: CoachmarkP
           {title}
         </div>
         <p className="coach-body">{body}</p>
+        {steps && (
+          <div className="coach-steps">
+            {steps.map((step) => (
+              <div className="coach-step" key={step.label}>
+                <span>{step.label}</span>
+                <kbd>{step.shortcut}</kbd>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="coach-actions">
           <Button variant="accent" onClick={onDismiss} autoFocus>
             Got it

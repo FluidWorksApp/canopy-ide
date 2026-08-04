@@ -11,7 +11,8 @@ export type CoachTip =
   | "rail-review"
   | "rail-agents"
   /** In-context, fired the first time the thing they point at exists. */
-  | "agent";
+  | "agent"
+  | "multiplex";
 
 const key = (tip: CoachTip) => `canopy.coachmark.${tip}.v1`;
 

@@ -440,8 +440,10 @@ function PaneBarImpl({
                   className={`tab ${isNewTab(tab.id) ? "tab-new" : ""} ${tab.id === activeTabId ? "tab-active" : ""} ${
                     tab.type === "chat" && tab.unread ? "tab-unread" : ""
                   } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""} ${
-                    tab.id === flashTabId ? "tab-flash" : ""
-                  } ${tab.id === stripDrag.dragId ? "tab-dragging" : ""}`}
+                    tab.type === "terminal" && (tab.multiplexCount ?? 0) > 1 ? "tab-multiplexed" : ""
+                  } ${tab.id === flashTabId ? "tab-flash" : ""} ${
+                    tab.id === stripDrag.dragId ? "tab-dragging" : ""
+                  }`}
                   {...stripDrag.itemProps(tab.id)}
                   onClick={(e) => onSelectTab(tab.id, e.detail)}
                   onContextMenu={(e) => onTabContextMenu(e, tab)}

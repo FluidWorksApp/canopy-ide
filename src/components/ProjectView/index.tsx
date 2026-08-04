@@ -7228,16 +7228,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // effect re-picks the next eligible tip after one is dismissed.
   const [coachTip, setCoachTip] = useState<CoachTip | null>(null);
   const agentTabOpen = activeTab?.type === "agent";
+  const multiplexOpen =
+    activeTab?.type === "terminal" &&
+    activeTab.paneGroup != null &&
+    Boolean(terminalGroups[activeTab.paneGroup]);
   useEffect(() => {
     if (!visible || coachTip) return;
-    // The rail tour first, in rail order — what the three groups are, before
-    // any of the surfaces they open. The workspace tip stays in-context: it
-    // teaches a tab that may not exist yet.
-    if (shouldShowTip("rail-project")) setCoachTip("rail-project");
+    // A newly-created multiplex is taught immediately; otherwise walk the rail
+    // in order before teaching the surfaces it opens.
+    if (multiplexOpen && shouldShowTip("multiplex")) setCoachTip("multiplex");
+    else if (shouldShowTip("rail-project")) setCoachTip("rail-project");
     else if (shouldShowTip("rail-review")) setCoachTip("rail-review");
     else if (shouldShowTip("rail-agents")) setCoachTip("rail-agents");
     else if (agentTabOpen && shouldShowTip("agent")) setCoachTip("agent");
-  }, [visible, coachTip, agentTabOpen]);
+  }, [visible, coachTip, agentTabOpen, multiplexOpen]);
 
   const dismissCoach = () => {
     if (coachTip) markTipSeen(coachTip);
@@ -7245,7 +7249,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
   };
   const COACH_TIPS: Record<
     CoachTip,
-    { selector: string; title: string; body: string }
+    {
+      selector: string;
+      title: string;
+      body: string;
+      steps?: { label: string; shortcut: string }[];
+    }
   > = {
     "rail-project": {
       selector: '[data-rail-group="project"]',
@@ -7266,6 +7275,36 @@ const ProjectViewBody = memo(function ProjectViewBody({
       selector: ".tab.tab-active",
       title: "Your agent workspace lives here",
       body: "This tab is the agent's workspace — its terminal, diffs and activity. Reopen it any time from the tab strip.",
+    },
+    multiplex: {
+      selector: ".pane-bar .tab.tab-active.tab-multiplexed",
+      title: "This tab now holds multiple agents",
+      body: "Each pane is still an independent agent. These shortcuts keep the group quick to use:",
+      steps: [
+        {
+          label: "Create a multiplex",
+          shortcut: `${format("split-pane-right")} / ${format("split-pane-down")}`,
+        },
+        {
+          label: "Add another agent",
+          shortcut: `${format("new-launcher")} then ↵`,
+        },
+        {
+          label: "Focus another tab",
+          shortcut: format("cycle-tab-next"),
+        },
+        {
+          label: "Navigate between panes",
+          shortcut:
+            currentPlatform() === "macos" ? "⌥⌘ + arrow keys" : "Ctrl+Alt+Arrow keys",
+        },
+        {
+          label: "Open a standalone agent tab",
+          shortcut: `${format("new-launcher")} then ${
+            currentPlatform() === "macos" ? "⌥↵" : "Alt+Enter"
+          }`,
+        },
+      ],
     },
   };
 
@@ -10289,6 +10328,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           targetSelector={COACH_TIPS[coachTip].selector}
           title={COACH_TIPS[coachTip].title}
           body={COACH_TIPS[coachTip].body}
+          steps={COACH_TIPS[coachTip].steps}
           onDismiss={dismissCoach}
         />
       )}
