@@ -15,6 +15,23 @@
 - Stable installer aliases must not change because the website and README use
   permanent `releases/latest/download/...` URLs.
 
+### Version notation
+
+Canopy deliberately uses both forms. Pass the numeric semantic version without
+`v`; Git references and release coordination add `v`:
+
+| Location | Form | Example |
+|---|---|---|
+| `bump-version.sh` argument | `X.Y.Z` | `./scripts/bump-version.sh 0.4.0` |
+| `package.json`, Cargo, Tauri config | `X.Y.Z` | `0.4.0` |
+| Release branch | `release/vX.Y.Z` | `release/v0.4.0` |
+| Release commit and PR title | `Release vX.Y.Z` | `Release v0.4.0` |
+| Git tag and workflow trigger | `vX.Y.Z` | `v0.4.0` |
+| GitHub release display name | `Canopy X.Y.Z` | `Canopy 0.4.0` |
+
+Do not pass `v0.4.0` to the script or write `v0.4.0` into version files. The
+script validates a numeric `X.Y.Z`, then constructs the branch and tag names.
+
 ## 2. End-to-end flow
 
 ```mermaid

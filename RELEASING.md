@@ -8,6 +8,9 @@ failure policy are documented in
 
 Canopy uses a protected two-phase release:
 
+Use `X.Y.Z` without a `v` for script arguments and version files. The script
+adds `v` for the `release/vX.Y.Z` branch, `Release vX.Y.Z` PR, and `vX.Y.Z` tag.
+
 ```sh
 # Phase 1: from a clean checkout, create the version-bump branch and PR.
 ./scripts/bump-version.sh X.Y.Z
