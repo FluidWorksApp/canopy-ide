@@ -16,7 +16,7 @@ import {
 } from "react";
 import { Panel, PanelGroup } from "react-resizable-panels";
 import * as ipc from "../../ipc";
-import { format, matches, matchesModifierClick } from "../../shortcuts";
+import { format, formatChord, matches, matchesModifierClick } from "../../shortcuts";
 import {
   equalizeSplits,
   layoutSplit,
@@ -946,6 +946,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const contentRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  const activeTabIdRef = useRef(activeTabId);
+  activeTabIdRef.current = activeTabId;
   /** Committed activity, newest first. This is session memory rather than a
    *  workspace preference: after a restart there is no honest "previous tab"
    *  until the user has moved between two of them. */
@@ -1265,6 +1267,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       profile?: string,
       activate = true,
       paneGroup?: string,
+      autoMultiplex = true,
     ) => {
       const id = tabId();
       // Every terminal opened inside a workspace gets that workspace's port,
@@ -1284,8 +1287,55 @@ const ProjectViewBody = memo(function ProjectViewBody({
         (launchedCli && accountEnv.length ? launchProfile(launchedCli) : undefined) ??
         undefined;
       const env = [...portEnv(portForPath(cwd)), ...accountEnv];
+      let resolvedPaneGroup = paneGroup;
+      let multiplexSource: TermSubTab | undefined;
+      if (launchedCli && autoMultiplex && !paneGroup) {
+        const agents = tabsRef.current.filter(
+          (tab): tab is TermSubTab =>
+            tab.type === "terminal" &&
+            !tab.run &&
+            !tab.micro &&
+            Boolean(agentIdForCommand(tab.command)),
+        );
+        multiplexSource = agents.find((tab) => tab.id === activeTabIdRef.current);
+        if (multiplexSource) {
+          const current = multiplexSource.paneGroup
+            ? terminalGroupsRef.current[multiplexSource.paneGroup]
+            : undefined;
+          if (current) {
+            multiplexSource =
+              agents.find((tab) => tab.id === current.activeTabId) ?? multiplexSource;
+          }
+          resolvedPaneGroup = current?.id ?? splitId();
+          const root = current?.root ?? {
+            type: "leaf" as const,
+            tabId: multiplexSource.id,
+          };
+          const sourcePane = layoutSplit(root).panes.find(
+            (pane) => pane.tabId === multiplexSource!.id,
+          );
+          const axis: SplitAxis =
+            !sourcePane || sourcePane.width >= sourcePane.height
+              ? "horizontal"
+              : "vertical";
+          const group: TerminalGroup = {
+            id: resolvedPaneGroup,
+            root: splitLeaf(root, multiplexSource.id, id, axis),
+            activeTabId: id,
+          };
+          terminalGroupsRef.current = {
+            ...terminalGroupsRef.current,
+            [group.id]: group,
+          };
+          setTerminalGroups(terminalGroupsRef.current);
+        }
+      }
       setTabs((prev) => [
-        ...prev,
+        ...prev.map((tab) =>
+          multiplexSource && tab.id === multiplexSource.id
+            ? ({ ...tab, paneGroup: resolvedPaneGroup } as SubTab)
+            : tab,
+        ),
         {
           id,
           type: "terminal",
@@ -1298,7 +1348,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           profile: accountProfile,
           run: run !== false,
           chore: run === "chore" || undefined,
-          paneGroup,
+          paneGroup: resolvedPaneGroup,
         },
       ]);
       if (activate) setActiveTabId(id);
@@ -2049,6 +2099,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         undefined,
         true,
         t.paneGroup,
+        false,
       );
       registerRememberedPane(t, id);
     },
@@ -2101,6 +2152,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         env.length ? r.profile : undefined,
         true,
         rememberedPane?.paneGroup,
+        false,
       );
       if (rememberedPane) registerRememberedPane(rememberedPane, id);
     },
@@ -3619,8 +3671,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, [activeTabId, tabs]);
 
   // Menu shortcuts — only the visible project reacts.
-  const activeTabIdRef = useRef(activeTabId);
-  activeTabIdRef.current = activeTabId;
   // Keep the active tab in view when it changes (cycling, jumping, closing) —
   // a strip that scrolls but doesn't follow leaves you looking at the wrong
   // tabs. The following itself is revealActiveTab, further down: it needs the
@@ -5492,6 +5542,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             env.length ? t.profile : undefined,
             true,
             t.paneGroup,
+            false,
           );
         }
         case "file": {
@@ -6421,7 +6472,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  component header passes that component's path so it starts in the right
    *  directory rather than wherever the ＋ menu would have put it. */
   const launchCli = useCallback(
-    async (cli: AgentCli, at?: string) => {
+    async (cli: AgentCli, at?: string, autoMultiplex = true) => {
       const cwd = at ?? componentsRef.current[0]?.path;
       if (!cwd) return;
       if (installed[cli.bin]) {
@@ -6446,6 +6497,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
             false,
             terminal.env,
             terminal.profile,
+            true,
+            undefined,
+            autoMultiplex,
           );
       } else if (cli.rebound || !cli.install) {
         pendingSplitRef.current = null;
@@ -7174,16 +7228,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // effect re-picks the next eligible tip after one is dismissed.
   const [coachTip, setCoachTip] = useState<CoachTip | null>(null);
   const agentTabOpen = activeTab?.type === "agent";
+  const multiplexOpen =
+    activeTab?.type === "terminal" &&
+    activeTab.paneGroup != null &&
+    Boolean(terminalGroups[activeTab.paneGroup]);
   useEffect(() => {
     if (!visible || coachTip) return;
-    // The rail tour first, in rail order — what the three groups are, before
-    // any of the surfaces they open. The workspace tip stays in-context: it
-    // teaches a tab that may not exist yet.
-    if (shouldShowTip("rail-project")) setCoachTip("rail-project");
+    // A newly-created multiplex is taught immediately; otherwise walk the rail
+    // in order before teaching the surfaces it opens.
+    if (multiplexOpen && shouldShowTip("multiplex")) setCoachTip("multiplex");
+    else if (shouldShowTip("rail-project")) setCoachTip("rail-project");
     else if (shouldShowTip("rail-review")) setCoachTip("rail-review");
     else if (shouldShowTip("rail-agents")) setCoachTip("rail-agents");
     else if (agentTabOpen && shouldShowTip("agent")) setCoachTip("agent");
-  }, [visible, coachTip, agentTabOpen]);
+  }, [visible, coachTip, agentTabOpen, multiplexOpen]);
 
   const dismissCoach = () => {
     if (coachTip) markTipSeen(coachTip);
@@ -7191,7 +7249,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
   };
   const COACH_TIPS: Record<
     CoachTip,
-    { selector: string; title: string; body: string }
+    {
+      selector: string;
+      title: string;
+      body: string;
+      steps?: { label: string; shortcut: string }[];
+    }
   > = {
     "rail-project": {
       selector: '[data-rail-group="project"]',
@@ -7212,6 +7275,44 @@ const ProjectViewBody = memo(function ProjectViewBody({
       selector: ".tab.tab-active",
       title: "Your agent workspace lives here",
       body: "This tab is the agent's workspace — its terminal, diffs and activity. Reopen it any time from the tab strip.",
+    },
+    multiplex: {
+      selector: ".pane-bar .tab.tab-active.tab-multiplexed",
+      title: "This tab now holds multiple agents",
+      body: "Each pane is still an independent agent. These shortcuts keep the group quick to use:",
+      steps: [
+        {
+          label: "Create a multiplex",
+          shortcut: `${format("split-pane-right")} / ${format("split-pane-down")}`,
+        },
+        {
+          label: "Add another agent",
+          shortcut: `${format("new-launcher")} then ↵`,
+        },
+        {
+          label: "Focus another tab",
+          shortcut: format("cycle-tab-next"),
+        },
+        {
+          label: "Navigate between panes",
+          shortcut: [
+            format("focus-pane-left"),
+            format("focus-pane-up"),
+            format("focus-pane-down"),
+            format("focus-pane-right"),
+          ].join(" · "),
+        },
+        {
+          label: "Open a standalone agent tab",
+          shortcut: `${format("new-launcher")} then ${formatChord({
+            meta: false,
+            ctrl: false,
+            alt: true,
+            shift: false,
+            code: "Enter",
+          })}`,
+        },
+      ],
     },
   };
 
@@ -10187,7 +10288,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           cliUpdates={cliUpdates}
           targetLabel={pendingSplit ? "new split pane" : components[0]?.label}
           onShell={onNewShell}
-          onLaunchCli={(cli) => launchCli(cli)}
+          onLaunchCli={(cli, opts) =>
+            launchCli(cli, undefined, !opts?.standalone)
+          }
           onClose={() => {
             setLauncherOpen(false);
             pendingSplitRef.current = null;
@@ -10233,6 +10336,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           targetSelector={COACH_TIPS[coachTip].selector}
           title={COACH_TIPS[coachTip].title}
           body={COACH_TIPS[coachTip].body}
+          steps={COACH_TIPS[coachTip].steps}
           onDismiss={dismissCoach}
         />
       )}

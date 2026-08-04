@@ -17636,6 +17636,31 @@ a.btn-sm {
   color: var(--text);
   margin: 0 0 12px;
 }
+.coach-steps {
+  display: grid;
+  gap: 6px;
+  margin: -2px 0 13px;
+}
+.coach-step {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 26px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.coach-step kbd {
+  max-width: 210px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--bg);
+  color: var(--text);
+  font: 10px/1.2 var(--font-mono);
+  text-align: right;
+  white-space: normal;
+}
 .coach-actions {
   display: flex;
   justify-content: flex-end;

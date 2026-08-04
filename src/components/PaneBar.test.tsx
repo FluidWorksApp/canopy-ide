@@ -171,6 +171,7 @@ describe("multiplexed terminal tab", () => {
     expect(screen.getByText("Fix auth +2")).toHaveClass("tab-title");
     expect(screen.getByTitle("3 panes")).toHaveTextContent("3");
     expect(document.querySelector(".tab-multiplex-icon")).not.toBeNull();
+    expect(document.querySelector(".tab")).toHaveClass("tab-multiplexed");
   });
 });
 

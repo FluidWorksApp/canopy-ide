@@ -22,7 +22,7 @@ interface LaunchPaletteProps {
   /** Where the launch lands — shown in the footer so it isn't a guess. */
   targetLabel?: string;
   onShell: () => void;
-  onLaunchCli: (cli: AgentCli) => void;
+  onLaunchCli: (cli: AgentCli, opts?: { standalone: boolean }) => void;
   onClose: () => void;
 }
 
@@ -68,10 +68,11 @@ export function LaunchPalette({
       ?.scrollIntoView({ block: "nearest" });
   }, [sel]);
 
-  const commit = (row: Row | undefined) => {
+  const commit = (row: Row | undefined, standalone = false) => {
     if (!row) return;
     onClose();
     if (row.kind === "shell") onShell();
+    else if (standalone) onLaunchCli(row.cli, { standalone: true });
     else onLaunchCli(row.cli);
   };
 
@@ -96,7 +97,7 @@ export function LaunchPalette({
               setSel((i) => Math.max(i - 1, 0));
             } else if (e.key === "Enter") {
               e.preventDefault();
-              commit(rows[sel]);
+              commit(rows[sel], e.altKey);
             }
           }}
         />
@@ -110,7 +111,7 @@ export function LaunchPalette({
                 key={rowKey(r)}
                 className={`palette-row launch-row ${i === sel ? "palette-row-active" : ""}`}
                 onMouseEnter={() => setSel(i)}
-                onClick={() => commit(r)}
+                onClick={(e) => commit(r, e.altKey)}
               >
                 <span className="launch-icon">
                   {r.kind === "shell" ? (
@@ -132,7 +133,7 @@ export function LaunchPalette({
         </div>
         <div className="palette-foot">
           <span>New{targetLabel ? ` · ${targetLabel}` : ""}</span>
-          <span>↑↓ navigate · ↵ open · esc close</span>
+          <span>↑↓ navigate · ↵ open · ⌥↵ standalone · esc close</span>
         </div>
       </div>
     </div>
