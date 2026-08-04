@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   formatHotkey,
   getSettings,
+  DEFAULT_DICTATION_HOTKEY,
   type Hotkey,
   keyLabel,
   matchesHotkey,
@@ -21,6 +22,8 @@ describe("getSettings / updateSettings", () => {
     expect(s.tabSwitchMode).toBe("recent");
     expect(s.restoreUserClosedSessions).toBe(false);
     expect(s.agentAskForAttention).toBe(false);
+    expect(s.dictationTriggerMode).toBe("hold");
+    expect(s.dictationModKey).toBe("ShiftLeft");
   });
 
   it("overlays stored values on top of defaults", () => {
@@ -57,6 +60,51 @@ describe("getSettings / updateSettings", () => {
   it("falls back to defaults on corrupt stored JSON", () => {
     localStorage.setItem("canopy.settings", "{not json");
     expect(getSettings().scrollback).toBe(10_000);
+  });
+
+  it("migrates the former default combo and reserved Command trigger", () => {
+    localStorage.setItem(
+      "canopy.settings",
+      JSON.stringify({
+        dictationTriggerMode: "combo",
+        dictationHotkey: DEFAULT_DICTATION_HOTKEY,
+        dictationModKey: "MetaRight",
+      }),
+    );
+    const s = getSettings();
+    expect(s.dictationTriggerMode).toBe("hold");
+    expect(s.dictationModKey).toBe("ShiftLeft");
+  });
+
+  it("preserves a customized combo during trigger migration", () => {
+    const custom = { ...DEFAULT_DICTATION_HOTKEY, code: "KeyQ" };
+    localStorage.setItem(
+      "canopy.settings",
+      JSON.stringify({
+        dictationTriggerMode: "combo",
+        dictationHotkey: custom,
+      }),
+    );
+    const s = getSettings();
+    expect(s.dictationTriggerMode).toBe("combo");
+    expect(s.dictationHotkey).toEqual(custom);
+  });
+
+  it("migrates the earlier macOS Command-D default", () => {
+    localStorage.setItem(
+      "canopy.settings",
+      JSON.stringify({
+        dictationTriggerMode: "combo",
+        dictationHotkey: {
+          meta: true,
+          ctrl: false,
+          alt: false,
+          shift: false,
+          code: "KeyD",
+        },
+      }),
+    );
+    expect(getSettings().dictationTriggerMode).toBe("hold");
   });
 });
 

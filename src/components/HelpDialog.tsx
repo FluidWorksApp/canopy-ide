@@ -2,6 +2,8 @@
 // Static on purpose — this must render instantly and work offline.
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { format, helpRows } from "../shortcuts";
+import { describeTrigger } from "../dictationTrigger";
+import { formatHotkey, getSettings, modKeyLabel } from "../settings";
 import { useEscape } from "../useEscape";
 import { Button } from "./ui";
 
@@ -13,6 +15,20 @@ interface HelpDialogProps {
 
 export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
   useEscape(onClose, true);
+  const settings = getSettings();
+  const rows = helpRows().map((row) =>
+    row.id === "dictation"
+      ? {
+          ...row,
+          keys: describeTrigger(
+            settings.dictationTriggerMode,
+            modKeyLabel(settings.dictationModKey),
+            formatHotkey(settings.dictationHotkey),
+          ),
+          label: "Voice dictation (Esc cancels)",
+        }
+      : row,
+  );
   const link = (url: string, label: string) => (
     <a
       href="#"
@@ -76,7 +92,7 @@ export function HelpDialog({ onClose, onReplayIntro }: HelpDialogProps) {
           <div className="set-head">Keyboard shortcuts</div>
           <table className="help-keys">
             <tbody>
-              {helpRows().map((row) => (
+              {rows.map((row) => (
                 <tr key={row.id}>
                   <td>
                     <code>{row.keys}</code>

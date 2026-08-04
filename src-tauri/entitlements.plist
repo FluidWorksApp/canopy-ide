@@ -40,7 +40,7 @@
 	<true/>
 
 	<!--
-	  Voice dictation records from the microphone (⌘D). The hardened runtime
+	  Voice dictation records from the microphone. The hardened runtime
 	  denies audio input outright without this; the user still gets the normal
 	  macOS permission prompt on first use.
 	-->

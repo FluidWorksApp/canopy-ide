@@ -649,7 +649,7 @@
     },
     {
       "id": "dictation",
-      "label": "Voice dictation — speak, press again to insert (Esc cancels)",
+      "label": "Voice dictation combo (optional; Esc cancels)",
       "surface": "app",
       "chord": {
         "mods": [

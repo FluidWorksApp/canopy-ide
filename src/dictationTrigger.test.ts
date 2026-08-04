@@ -66,7 +66,7 @@ describe("matchesModKey", () => {
 
   it("does not let a sided binding match the other side", () => {
     expect(matchesModKey("ShiftLeft", "ShiftRight")).toBe(false);
-    expect(matchesModKey("MetaLeft", "MetaRight")).toBe(false);
+    expect(matchesModKey("ControlLeft", "ControlRight")).toBe(false);
   });
 
   it("matches CapsLock, which has no sides", () => {
@@ -223,11 +223,11 @@ describe("doubleTap mode", () => {
 
 describe("sided bindings", () => {
   it("ignores the other side of the same key", () => {
-    const { t, calls } = makeTrigger({ key: "MetaRight" });
-    t.handleKeyDown(ev("MetaLeft", ["Meta"]));
+    const { t, calls } = makeTrigger({ key: "ControlRight" });
+    t.handleKeyDown(ev("ControlLeft", ["Control"]));
     vi.advanceTimersByTime(2000);
     expect(calls).toEqual([]);
-    t.handleKeyDown(ev("MetaRight", ["Meta"]));
+    t.handleKeyDown(ev("ControlRight", ["Control"]));
     vi.advanceTimersByTime(DEFAULT_TIMINGS.holdMs + 10);
     expect(calls).toEqual(["start:hold"]);
   });
@@ -236,8 +236,7 @@ describe("sided bindings", () => {
 describe("combo mode", () => {
   it("toggles on the configured chord and reports the event consumed", () => {
     const { t, calls } = makeTrigger({ mode: "combo" });
-    // Built from the default itself, which differs by platform (⌘D on macOS,
-    // Alt+D elsewhere) — hardcoding one of them fails on the other.
+    // Built from the optional combo default, which differs by platform.
     const h = DEFAULT_DICTATION_HOTKEY;
     const combo = {
       ...ev(h.code),
