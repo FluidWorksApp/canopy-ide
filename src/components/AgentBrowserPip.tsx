@@ -103,11 +103,19 @@ export function AgentBrowserPip({
 
     const tick = async () => {
       try {
-        const shot = await ipc.browserSnapshot(tabId, 720);
+        // A newly-created background webview can answer a snapshot before its
+        // document has installed the browser bridge. WebKit calls that capture
+        // successful, but the image is only the empty under-page background.
+        // Do not replace the connecting state with that false first frame.
+        const page = await ipc.browserHere(tabId);
         if (stopped) return;
-        setFrame(`data:image/png;base64,${shot.image}`);
-        if (shot.width > 0 && shot.height > 0) setRatio(shot.width / shot.height);
-        setFailed(false);
+        if (page) {
+          const shot = await ipc.browserSnapshot(tabId, 720);
+          if (stopped) return;
+          setFrame(`data:image/png;base64,${shot.image}`);
+          if (shot.width > 0 && shot.height > 0) setRatio(shot.width / shot.height);
+          setFailed(false);
+        }
       } catch {
         if (!stopped) setFailed(true);
       }
