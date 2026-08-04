@@ -281,6 +281,11 @@ export interface PreviewSubTab {
   /** Agent that created this preview. Its PTY is the primary destination for
    *  screenshots and annotations; absent for user-created/restored tabs. */
   initiatorPtyId?: number;
+  /** Last running agent explicitly chosen from this preview's send menu. Kept
+   *  for this window session so later incremental feedback goes there too. */
+  recipientPtyId?: number;
+  /** The user hid the feedback rail without clearing its retained items. */
+  feedbackPanelHidden?: boolean;
   annotations: PreviewAnnotation[];
   /** Screenshots taken of this page, with the notes written on them. Absent on
    *  tabs restored from a session saved before the button existed. */

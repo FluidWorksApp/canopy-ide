@@ -1,0 +1,11 @@
+# Triaged baseline for findings that predate the Gitleaks CI gate.
+# These are intentional secret-shaped test fixtures or false positives, not
+# credentials. New findings are not added here without review.
+86805675ad1932ea78ae1c0dd97f9fb88cbe7640:src-tauri/src/clipboard.rs:github-pat:974
+86805675ad1932ea78ae1c0dd97f9fb88cbe7640:src/secretScan.test.ts:github-pat:21
+86805675ad1932ea78ae1c0dd97f9fb88cbe7640:src/secretScan.test.ts:gcp-api-key:20
+25813e594d711bac3c842c004ab19c6df0ddbcaf:src-tauri/src/clipboard.rs:github-pat:974
+25813e594d711bac3c842c004ab19c6df0ddbcaf:src-tauri/src/clipboard.rs:generic-api-key:980
+25813e594d711bac3c842c004ab19c6df0ddbcaf:src-tauri/src/clipboard.rs:generic-api-key:982
+17529adc30f8fcadc59d52250c7f5fea2fedd0bb:src-tauri/src/mcp.rs:gcp-api-key:866
+49c420961ce29187e73abaed4f15f75ccf43c443:src/hibernation.ts:generic-api-key:309

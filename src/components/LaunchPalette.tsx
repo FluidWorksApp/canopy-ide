@@ -23,7 +23,8 @@ interface LaunchPaletteProps {
   targetLabel?: string;
   onShell: () => void;
   onLaunchCli: (cli: AgentCli) => void;
-  onClose: () => void;
+  /** Escape/backdrop cancellation only. A committed row uses its own callback. */
+  onCancel: () => void;
 }
 
 const rowKey = (r: Row) => (r.kind === "cli" ? `cli:${r.cli.id}` : r.kind);
@@ -36,7 +37,7 @@ export function LaunchPalette({
   targetLabel,
   onShell,
   onLaunchCli,
-  onClose,
+  onCancel,
 }: LaunchPaletteProps) {
   // Escape is the palette's own, all the way down to the panel behind it.
   useEscapeLayer();
@@ -70,13 +71,12 @@ export function LaunchPalette({
 
   const commit = (row: Row | undefined) => {
     if (!row) return;
-    onClose();
     if (row.kind === "shell") onShell();
     else onLaunchCli(row.cli);
   };
 
   return (
-    <div className="palette-backdrop" onMouseDown={onClose}>
+    <div className="palette-backdrop" onMouseDown={onCancel}>
       <div className="palette" onMouseDown={(e) => e.stopPropagation()}>
         <input
           ref={inputRef}
@@ -87,7 +87,7 @@ export function LaunchPalette({
           onKeyDown={(e) => {
             if (e.key === "Escape") {
               e.preventDefault();
-              onClose();
+              onCancel();
             } else if (e.key === "ArrowDown") {
               e.preventDefault();
               setSel((i) => Math.min(i + 1, rows.length - 1));

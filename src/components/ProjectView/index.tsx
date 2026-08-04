@@ -292,7 +292,7 @@ import type { PreviewServer } from "../../preview";
 import { dispatchBrowserOp } from "../../previewAgent";
 import { suppressBrowserViewsOver, useBrowserEngine } from "../../browserHost";
 import { OPEN_URL_EVENT, type OpenUrlDetail } from "../../links";
-import { serverForUrl } from "../../preview";
+import { previewAgentTarget, serverForUrl } from "../../preview";
 import { TRACKERS, ticketBranch, ticketContext, ticketWorktree } from "../../trackers";
 import { prConflictContext, prReviewContext } from "../../prs";
 import {
@@ -7599,18 +7599,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
             .filter((t): t is PreviewSubTab => t.type === "preview")
             .flatMap((t) => {
               const server = serverForUrl(t.url, previewServers);
-              return t.annotations.map((a) => ({
-                surface: "preview",
-                n: a.n,
-                selector: a.selector,
-                component: a.components[0] ?? null,
-                tag: a.tag,
-                text: a.text,
-                comment: a.comment,
-                pageUrl: a.pageUrl || t.url,
-                servingComponent: server?.componentLabel ?? null,
-                servingComponentPath: server?.componentPath ?? null,
-              }));
+              return t.annotations
+                .filter((a) => !a.sent)
+                .map((a) => ({
+                  surface: "preview",
+                  n: a.n,
+                  selector: a.selector,
+                  component: a.components[0] ?? null,
+                  tag: a.tag,
+                  text: a.text,
+                  comment: a.comment,
+                  pageUrl: a.pageUrl || t.url,
+                  servingComponent: server?.componentLabel ?? null,
+                  servingComponentPath: server?.componentPath ?? null,
+                }));
             }),
           ...tabs
             .filter((t): t is DeviceSubTab => t.type === "device")
@@ -7637,7 +7639,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           .filter((t): t is PreviewSubTab => t.type === "preview")
           .map((t) => ({
             url: t.url || null,
-            annotations: t.annotations.length,
+            annotations: t.annotations.filter((a) => !a.sent).length,
           })),
         // What the user is looking at (canopy_editor_state) — the tab in front of
         // them, the caret, the selection. Deixis: "fix this" has a referent, and
@@ -8442,13 +8444,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
             url={tab.url}
             annotations={tab.annotations}
             shots={tab.shots ?? []}
+            feedbackPanelHidden={tab.feedbackPanelHidden}
             dir={componentsRef.current[0]?.path ?? firstRoot}
             visible={tab.id === activeTabId && visible}
             streaming={shownBrowserPips.some((p) => p.tabId === tab.id)}
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             servers={previewServers}
             agentTargets={agentTargets}
-            initiatorTarget={agentTargets.find((a) => a.ptyId === tab.initiatorPtyId)}
+            primaryTarget={previewAgentTarget(
+              agentTargets,
+              tab.recipientPtyId,
+              tab.initiatorPtyId,
+              serverForUrl(tab.url, previewServers),
+            )}
             installed={installed}
             onSendToAgent={sendTicketToAgent}
             onStartNew={(agentId, text, cwd) => {
@@ -10221,9 +10229,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
           installed={installed}
           cliUpdates={cliUpdates}
           targetLabel={pendingSplit ? "new split pane" : components[0]?.label}
-          onShell={onNewShell}
-          onLaunchCli={(cli) => launchCli(cli)}
-          onClose={() => {
+          onShell={() => {
+            onNewShell();
+            setLauncherOpen(false);
+          }}
+          onLaunchCli={(cli) => {
+            void launchCli(cli).finally(() => {
+              setLauncherOpen(false);
+              // A successful split consumes this itself. Clear only a launch
+              // that failed before it reached completePendingSplit.
+              if (pendingSplitRef.current) {
+                pendingSplitRef.current = null;
+                setPendingSplit(null);
+              }
+            });
+          }}
+          onCancel={() => {
             setLauncherOpen(false);
             pendingSplitRef.current = null;
             setPendingSplit(null);

@@ -75,6 +75,8 @@ interface PreviewViewProps {
   annotations: PreviewAnnotation[];
   /** Screenshots taken of this page, awaiting a note and a destination. */
   shots: PreviewShot[];
+  /** Hidden without clearing; owned by the tab so it survives switching away. */
+  feedbackPanelHidden?: boolean;
   /** Where captured PNGs are written — the serving component's directory when
    *  the page is linked to one, else the project root. An agent reads them back
    *  by path, so they have to land somewhere it can reach. */
@@ -93,13 +95,16 @@ interface PreviewViewProps {
     url?: string;
     annotations?: PreviewAnnotation[];
     shots?: PreviewShot[];
+    recipientPtyId?: number;
+    feedbackPanelHidden?: boolean;
   }) => void;
   /** Servers detected listening in this project's terminals, each tied to its
    *  component — what the empty tab offers, and what links a URL to a codebase. */
   servers: PreviewServer[];
   agentTargets: AgentTarget[];
-  /** The live agent that opened this preview, if it is still available. */
-  initiatorTarget?: AgentTarget;
+  /** Best live recipient: explicit sticky choice, preview initiator, or the
+   *  agent working in the component that serves this page. */
+  primaryTarget?: AgentTarget;
   installed: Record<string, boolean>;
   onSendToAgent: (target: AgentTarget, text: string) => void;
   /** `cwd` is the serving component's directory when the URL is linked to one. */
@@ -142,13 +147,14 @@ export function PreviewView({
   url,
   annotations,
   shots,
+  feedbackPanelHidden = false,
   dir,
   visible,
   streaming = false,
   onPatch,
   servers,
   agentTargets,
-  initiatorTarget,
+  primaryTarget,
   installed,
   onSendToAgent,
   onStartNew,
@@ -573,7 +579,10 @@ export function PreviewView({
           n: annotationsRef.current.length + 1,
           comment: "",
         };
-        onPatch({ annotations: [...annotationsRef.current, next] });
+        onPatch({
+          annotations: [...annotationsRef.current, next],
+          feedbackPanelHidden: false,
+        });
       }
     },
     [answer, navigate, onNotice, onPatch, post, postAgentOp, restoreFocus, unproxied],
@@ -767,12 +776,23 @@ export function PreviewView({
   const togglePicking = () => {
     const on = !picking;
     setPicking(on);
+    if (on) onPatch({ feedbackPanelHidden: false });
     post({ canopy: "mode", on });
+  };
+
+  const hideFeedbackPanel = () => {
+    if (pickingRef.current) {
+      setPicking(false);
+      post({ canopy: "mode", on: false });
+    }
+    onPatch({ feedbackPanelHidden: true });
   };
 
   const setComment = (n: number, comment: string) => {
     onPatch({
-      annotations: annotationsRef.current.map((a) => (a.n === n ? { ...a, comment } : a)),
+      annotations: annotationsRef.current.map((a) =>
+        a.n === n ? { ...a, comment, sent: false } : a,
+      ),
     });
   };
 
@@ -857,6 +877,7 @@ export function PreviewView({
           thumbnail(image.png),
         ]);
         onPatchRef.current({
+          feedbackPanelHidden: false,
           shots: [
             ...shotsRef.current,
             {
@@ -902,7 +923,9 @@ export function PreviewView({
     );
 
   const setShotNote = (n: number, note: string) => {
-    onPatch({ shots: shotsRef.current.map((s) => (s.n === n ? { ...s, note } : s)) });
+    onPatch({
+      shots: shotsRef.current.map((s) => (s.n === n ? { ...s, note, sent: false } : s)),
+    });
   };
 
   const removeShot = (n: number) => {
@@ -914,6 +937,8 @@ export function PreviewView({
   /** The codebase behind whatever page is currently shown — re-derived on
    *  every navigation, so crossing to another server's port relinks. */
   const linked = serverForUrl(url, servers);
+  const pendingAnnotations = annotations.filter((a) => !a.sent);
+  const pendingShots = shots.filter((s) => !s.sent);
 
   const feedback = () =>
     previewFeedbackContext(
@@ -924,6 +949,41 @@ export function PreviewView({
 
   const shotBrief = () =>
     previewShotContext(urlRef.current, shotsRef.current, serverForUrl(urlRef.current, servers));
+
+  const markAnnotationsSent = () =>
+    onPatch({
+      annotations: annotationsRef.current.map((a) => (a.sent ? a : { ...a, sent: true })),
+    });
+
+  const markShotsSent = () =>
+    onPatch({ shots: shotsRef.current.map((s) => (s.sent ? s : { ...s, sent: true })) });
+
+  const sendFeedback = (target: AgentTarget) => {
+    onSendToAgent(target, feedback());
+    onPatch({ recipientPtyId: target.ptyId });
+    markAnnotationsSent();
+  };
+
+  const startFeedback = (agentId: string) => {
+    onStartNew(agentId, feedback(), linked?.componentPath ?? null);
+    markAnnotationsSent();
+  };
+
+  const sendShots = (target: AgentTarget) => {
+    onSendToAgent(target, shotBrief());
+    onPatch({ recipientPtyId: target.ptyId });
+    markShotsSent();
+  };
+
+  const startShots = (agentId: string) => {
+    onStartNew(agentId, shotBrief(), linked?.componentPath ?? null);
+    markShotsSent();
+  };
+
+  const runShotsOneOff = () => {
+    onRunOneOff(shotBrief(), linked?.componentPath ?? dir);
+    markShotsSent();
+  };
 
   const go = (delta: -1 | 0 | 1) => {
     if (transport) {
@@ -1085,6 +1145,15 @@ export function PreviewView({
         >
           ◎ Annotate{annotations.length > 0 ? ` (${annotations.length})` : ""}
         </Button>
+        {feedbackPanelHidden && (annotations.length > 0 || shots.length > 0) && (
+          <Button
+            size="sm"
+            title="Show retained annotations and screenshots"
+            onClick={() => onPatch({ feedbackPanelHidden: false })}
+          >
+            Feedback ({annotations.length + shots.length})
+          </Button>
+        )}
         {/* One click takes the shot the way you took the last one; the caret is
             for changing your mind. Same split shape as the agent launcher.
             Absent off macOS rather than present and always failing: webview
@@ -1125,24 +1194,38 @@ export function PreviewView({
         >
           {body}
         </div>
-        {(annotations.length > 0 || picking || shots.length > 0) && (
+        {!feedbackPanelHidden && (annotations.length > 0 || picking || shots.length > 0) && (
           <div className="preview-panel">
             {shots.length > 0 && (
               <>
                 <div className="preview-panel-head">
                   <span>Screenshots</span>
-                  <Button size="sm" onClick={() => onPatch({ shots: [] })}>
-                    Clear all
-                  </Button>
+                  <span className="preview-panel-head-actions">
+                    <Button size="sm" onClick={() => onPatch({ shots: [] })}>
+                      Clear all
+                    </Button>
+                    <Button
+                      icon
+                      className="preview-panel-hide"
+                      title="Hide feedback panel"
+                      onClick={hideFeedbackPanel}
+                    >
+                      ✕
+                    </Button>
+                  </span>
                 </div>
                 <div className="preview-panel-list">
                   {shots.map((s) => (
-                    <div className="preview-note preview-shot" key={s.n}>
+                    <div
+                      className={`preview-note preview-shot${s.sent ? " preview-note-sent" : ""}`}
+                      key={s.n}
+                    >
                       <div className="preview-note-head">
                         <span className="preview-note-badge">{s.n}</span>
                         <span className="preview-note-what" title={s.path}>
                           {s.region ? "region" : "page"} · {s.width}×{s.height}
                         </span>
+                        {s.sent && <span className="preview-note-status">Sent</span>}
                         <Button icon className="preview-note-remove"
                           title="Remove"
                           onClick={() => removeShot(s.n)}>
@@ -1159,46 +1242,60 @@ export function PreviewView({
                     </div>
                   ))}
                 </div>
-                <div className="preview-panel-foot">
-                  <AgentLaunchButton
-                    label="Send screenshot"
-                    agentTargets={agentTargets}
-                    primaryTarget={initiatorTarget}
-                    installed={installed}
-                    newAgentLabel={
-                      linked?.componentLabel
-                        ? `New agent in ${linked.componentLabel}`
-                        : "New agent on this screenshot"
-                    }
-                    primaryTitle={(cli) =>
-                      `Start ${cli} on these screenshots${
-                        linked?.componentLabel ? ` in the ${linked.componentLabel} component` : ""
-                      }`
-                    }
-                    onStart={(agentId) =>
-                      onStartNew(agentId, shotBrief(), linked?.componentPath ?? null)
-                    }
-                    onSend={(target) => onSendToAgent(target, shotBrief())}
-                    extras={[
-                      {
-                        label: "⚡ One-off task",
-                        hint: linked?.componentLabel ?? undefined,
-                        onClick: () => onRunOneOff(shotBrief(), linked?.componentPath ?? dir),
-                      },
-                    ]}
-                  />
-                </div>
+                {pendingShots.length > 0 && (
+                  <div className="preview-panel-foot">
+                    <AgentLaunchButton
+                      label="Send screenshot"
+                      agentTargets={agentTargets}
+                      primaryTarget={primaryTarget}
+                      installed={installed}
+                      newAgentLabel={
+                        linked?.componentLabel
+                          ? `New agent in ${linked.componentLabel}`
+                          : "New agent on this screenshot"
+                      }
+                      primaryTitle={(cli) =>
+                        `Start ${cli} on these screenshots${
+                          linked?.componentLabel
+                            ? ` in the ${linked.componentLabel} component`
+                            : ""
+                        }`
+                      }
+                      onStart={startShots}
+                      onSend={sendShots}
+                      extras={[
+                        {
+                          label: "⚡ One-off task",
+                          hint: linked?.componentLabel ?? undefined,
+                          onClick: runShotsOneOff,
+                        },
+                      ]}
+                    />
+                  </div>
+                )}
               </>
             )}
             {(annotations.length > 0 || picking) && (
               <>
               <div className="preview-panel-head">
                 <span>Feedback</span>
-                {annotations.length > 0 && (
-                  <Button size="sm" onClick={clearAnnotations}>
-                    Clear all
-                  </Button>
-                )}
+                <span className="preview-panel-head-actions">
+                  {annotations.length > 0 && (
+                    <Button size="sm" onClick={clearAnnotations}>
+                      Clear all
+                    </Button>
+                  )}
+                  {shots.length === 0 && (
+                    <Button
+                      icon
+                      className="preview-panel-hide"
+                      title="Hide feedback panel"
+                      onClick={hideFeedbackPanel}
+                    >
+                      ✕
+                    </Button>
+                  )}
+                </span>
               </div>
               {annotations.length === 0 && (
                 <p className="preview-panel-hint">
@@ -1207,13 +1304,14 @@ export function PreviewView({
               )}
               <div className="preview-panel-list">
                 {annotations.map((a) => (
-                  <div className="preview-note" key={a.n}>
+                  <div className={`preview-note${a.sent ? " preview-note-sent" : ""}`} key={a.n}>
                     <div className="preview-note-head">
                       <span className="preview-note-badge">{a.n}</span>
                       <span className="preview-note-what" title={a.selector}>
                         {a.components[0] ? `⟨${a.components[0]}⟩ ` : ""}
                         {`<${a.tag}${a.id ? `#${a.id}` : ""}>`}
                       </span>
+                      {a.sent && <span className="preview-note-status">Sent</span>}
                       <Button icon className="preview-note-remove"
                         title="Remove"
                         onClick={() => removeAnnotation(a.n)}>
@@ -1230,12 +1328,12 @@ export function PreviewView({
                   </div>
                 ))}
               </div>
-              {annotations.length > 0 && (
+              {pendingAnnotations.length > 0 && (
                 <div className="preview-panel-foot">
                   <AgentLaunchButton
                     label="Send feedback"
                     agentTargets={agentTargets}
-                    primaryTarget={initiatorTarget}
+                    primaryTarget={primaryTarget}
                     installed={installed}
                     newAgentLabel={
                       linked?.componentLabel
@@ -1247,10 +1345,8 @@ export function PreviewView({
                         linked?.componentLabel ? ` in the ${linked.componentLabel} component` : ""
                       }`
                     }
-                    onStart={(agentId) =>
-                      onStartNew(agentId, feedback(), linked?.componentPath ?? null)
-                    }
-                    onSend={(target) => onSendToAgent(target, feedback())}
+                    onStart={startFeedback}
+                    onSend={sendFeedback}
                   />
                 </div>
               )}
