@@ -217,7 +217,7 @@ import { ensureLanguageServer } from "../../lsp/client";
 import { Term, type TermHandle } from "../Term";
 import { ContextMenu, useContextMenu, type MenuItem } from "../ContextMenu";
 import { FileTree } from "../FileTree";
-import { FileView } from "../FileView";
+import { FileView, hasDiffToolbar } from "../FileView";
 import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { Dialog } from "../Dialog";
 import { BranchSwitchProvider, useBranchSwitch } from "../../useBranchSwitch";
@@ -7747,26 +7747,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onOpen={(relPath) => relay.collab.openProjectFile(tab.doc, relPath)}
           />
         );
-      case "file":
+      case "file": {
+        // Only markdown, and only a file that is not already an entry: loose
+        // notes in the repo are research that predates the store, and this is
+        // how one gets adopted without anybody retyping it.
+        const cta = /\.(md|markdown)$/i.test(tab.file.path) ? (
+          <ResearchImportCta
+            projectId={project.id}
+            projectName={project.name}
+            roots={roots}
+            path={tab.file.path}
+            onOpen={(id) => openResearch(id, tab.file.name)}
+            onNotice={onNotice}
+          />
+        ) : null;
+        // It floats over whichever view FileView picks, but the diff views own
+        // that corner already — there it rides in their toolbar instead, so it
+        // stops landing on top of Split/Unified and Edit file.
+        const inToolbar = hasDiffToolbar(tab.file);
         return (
-          // Wrapped so the import CTA can float over whichever view FileView
-          // picks — rendered markdown, Monaco, a diff — rather than each of
-          // them having to carry it.
           <div className="file-tab-wrap">
-            {/* Only markdown, and only a file that is not already an entry:
-                loose notes in the repo are research that predates the store,
-                and this is how one gets adopted without anybody retyping it. */}
-            {/\.(md|markdown)$/i.test(tab.file.path) && (
-              <ResearchImportCta
-                projectId={project.id}
-                projectName={project.name}
-                roots={roots}
-                path={tab.file.path}
-                onOpen={(id) => openResearch(id, tab.file.name)}
-                onNotice={onNotice}
-              />
-            )}
+            {!inToolbar && cta}
             <FileView
+            toolbarExtra={inToolbar ? cta : undefined}
             file={tab.file}
             onCursor={
               // Only a shared file broadcasts a caret; every other tab passes
@@ -7812,6 +7815,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             />
           </div>
         );
+      }
     }
   }
 

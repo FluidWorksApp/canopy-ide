@@ -35,7 +35,23 @@ interface FileViewProps {
   diffAgentBar?: ReactNode;
   /** Load a file that was refused for its size anyway. */
   onOpenAnyway?: () => void;
+  /** Tab-level control (the research CTA) that normally floats top-right over
+   *  the content. The diff views have their own toolbar in that corner, so it
+   *  goes into the toolbar instead — see `hasDiffToolbar`. */
+  toolbarExtra?: ReactNode;
 }
+
+/** The two views that render a `DiffView`, and so put a button row across the
+ *  top-right of the tab. Exported as predicates rather than duplicated as
+ *  conditions, so what the tab believes and what `FileView` renders cannot
+ *  drift apart and start stacking controls on each other. */
+const isExternalDiff = (f: OpenFile) =>
+  !f.blocked && f.external != null && (f.kind === "code" || f.view === "source");
+
+const isGitDiff = (f: OpenFile) =>
+  !f.blocked && f.view === "diff" && f.diffOriginal != null;
+
+export const hasDiffToolbar = (f: OpenFile) => isExternalDiff(f) || isGitDiff(f);
 
 export function FileView(props: FileViewProps) {
   const { file } = props;
@@ -80,7 +96,7 @@ export function FileView(props: FileViewProps) {
   }
 
   // Pending external change on a text file → review before it clobbers you.
-  if (file.external != null && (file.kind === "code" || file.view === "source")) {
+  if (isExternalDiff(file)) {
     const model = modelFor(file.path, "");
     return (
       <DiffView
@@ -92,21 +108,23 @@ export function FileView(props: FileViewProps) {
           { label: "Accept disk version", accent: true, onClick: props.onAcceptExternal },
           { label: "Keep my version", onClick: props.onKeepMine },
         ]}
+        toolbarExtra={props.toolbarExtra}
       />
     );
   }
 
   // Git diff: HEAD vs current working copy.
-  if (file.view === "diff" && file.diffOriginal != null) {
+  if (isGitDiff(file)) {
     const current = modelFor(file.path, text).getValue();
     return (
       <DiffView
         path={file.path}
         title={`${file.name} — HEAD → working tree`}
-        original={file.diffOriginal}
+        original={file.diffOriginal!}
         modified={current}
         actions={[{ label: "Edit file", accent: true, onClick: props.onCloseDiff }]}
         agentBar={props.diffAgentBar}
+        toolbarExtra={props.toolbarExtra}
       />
     );
   }

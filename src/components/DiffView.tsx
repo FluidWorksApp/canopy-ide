@@ -29,9 +29,20 @@ interface DiffViewProps {
   actions: DiffAction[];
   /** "Ask an agent about this diff" control, rendered under the toolbar. */
   agentBar?: ReactNode;
+  /** Controls the file tab floats over its content — they have to come into
+   *  this bar instead, or they land on top of the buttons below. */
+  toolbarExtra?: ReactNode;
 }
 
-export function DiffView({ path, title, original, modified, actions, agentBar }: DiffViewProps) {
+export function DiffView({
+  path,
+  title,
+  original,
+  modified,
+  actions,
+  agentBar,
+  toolbarExtra,
+}: DiffViewProps) {
   const [split, setSplit] = useState(true);
   const name = basename(path) || path;
 
@@ -46,6 +57,7 @@ export function DiffView({ path, title, original, modified, actions, agentBar }:
     <div className="diff-view">
       <div className="diff-bar">
         <span className="diff-label">{title}</span>
+        {toolbarExtra}
         <Button size="sm" onClick={() => setSplit((v) => !v)}>
           {split ? "Unified" : "Split"}
         </Button>
