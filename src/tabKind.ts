@@ -85,10 +85,18 @@ export function tabKind(tab: SubTab): TabKind {
       return { label: "note", tone: "doc", detail: "" };
     case "research":
       return { label: "research", tone: "doc", detail: "" };
+    case "research-list":
+      return { label: "research", tone: "doc", detail: "all" };
+    case "notes-list":
+      return { label: "scratchpad", tone: "doc", detail: "all" };
     case "instructions":
       return { label: "instructions", tone: "doc", detail: "" };
     case "pr":
       return { label: "pull request", tone: "review", detail: basename(tab.repo) };
+    case "prs-list":
+      return { label: "pull requests", tone: "review", detail: "all" };
+    case "issues-list":
+      return { label: "issues", tone: "review", detail: "all" };
     case "review":
       return { label: "review", tone: "review", detail: tab.review.from };
     case "commit":

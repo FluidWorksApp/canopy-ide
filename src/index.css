@@ -16014,6 +16014,57 @@ a.btn-sm {
   letter-spacing: 0.04em;
 }
 
+.chat-pr-request {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: min(480px, 100%);
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-raised));
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-pr-request span:nth-child(2) { display: grid; gap: 2px; min-width: 0; }
+.chat-pr-request span:nth-child(2):not(strong) { overflow: hidden; text-overflow: ellipsis; }
+.chat-pr-open { color: var(--accent); font-size: 11px; white-space: nowrap; }
+
+.collection-page {
+  height: 100%;
+  overflow: auto;
+  padding: 28px clamp(24px, 6vw, 72px) 64px;
+}
+
+.collection-page-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  max-width: 1080px;
+  margin: 0 auto 22px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.collection-page-head > :first-child { margin-right: auto; }
+.collection-page-head h1 { margin: 0; font-size: 22px; }
+.collection-page-head p { margin: 4px 0 0; color: var(--text-dim); }
+.collection-page > .research-new,
+.collection-page > .notes-new,
+.collection-page > .research-group,
+.collection-page > .notes-group,
+.collection-page > .ticket-pills,
+.collection-page > .git-repos,
+.collection-page > .ticket-state-head,
+.collection-page > .ticket-row,
+.collection-page > .prs-meta,
+.collection-page > .prs-lane,
+.collection-page > .research-more,
+.collection-page > .notes-more { max-width: 1080px; margin-left: auto; margin-right: auto; }
+
 /* The Request-review control anchors its member dropdown. */
 .review-send {
   position: relative;

@@ -276,7 +276,7 @@ import { dispatchBrowserOp } from "../../previewAgent";
 import { suppressBrowserViewsOver, useBrowserEngine } from "../../browserHost";
 import { OPEN_URL_EVENT, type OpenUrlDetail } from "../../links";
 import { serverForUrl } from "../../preview";
-import { ticketBranch, ticketContext, ticketWorktree } from "../../trackers";
+import { TRACKERS, ticketBranch, ticketContext, ticketWorktree } from "../../trackers";
 import { prConflictContext, prReviewContext } from "../../prs";
 import {
   fileDiffContext,
@@ -1360,12 +1360,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  and a link that does nothing is worse than one that leaves the app. */
   const openPrByNumber = useCallback(
     async (repo: string, number: number, url?: string) => {
+      // Relay deep links carry the origin URL, not the receiver's local path.
+      // Resolve it against this project's repos before asking gh for the PR.
+      const paths = componentsRef.current.map((component) => component.path);
+      const localRepo = paths.includes(repo)
+        ? repo
+        : await Promise.all(
+            paths.map(async (path) => ({
+              path,
+              remote: await ipc.gitRemoteUrl(path).catch(() => ""),
+            })),
+          ).then((repos) =>
+            repos.find((r) => r.remote.toLowerCase() === repo.toLowerCase())?.path,
+          );
+      if (!localRepo) {
+        if (url) void import("@tauri-apps/plugin-opener").then(({ openUrl }) => openUrl(url));
+        return;
+      }
       const pr = await ipc
-        .ghPrList(repo)
+        .ghPrList(localRepo)
         .then((list) => list.find((p) => p.number === number))
         .catch(() => undefined);
       if (pr) {
-        openPr(repo, pr);
+        openPr(localRepo, pr);
         return;
       }
       if (url)
@@ -2417,6 +2434,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setActiveTabId(id);
   }, []);
 
+  const openCollectionPage = useCallback((type: "research-list" | "notes-list" | "prs-list" | "issues-list") => {
+    const existing = tabsRef.current.find((t) => t.type === type);
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    const id = tabId();
+    setTabs((prev) => [...prev, { id, type }]);
+    setActiveTabId(id);
+  }, []);
+
   /** Open one MCP server as its own tab, reusing the one already open for it.
    *  Identity is the server key — the same server reached through two CLIs is
    *  one server, and opening it from either row should land on one tab. */
@@ -2769,10 +2797,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onNotice(`Couldn't start "${def.label}": ${String(err)}`, "error");
           return false;
         }
+        const runId = record();
+        updateTaskRun(runId, { ptyId: pty, researchId });
         updateMicroRuns((runs) =>
           withRun(runs, {
             ptyId: pty,
-            runId: record(),
+            runId,
             taskId: def.id,
             label: runName,
             icon: def.icon,
@@ -4071,6 +4101,30 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // so the title is only a label until it loads — no round trip here
         // just to open a tab.
         openNote(act.noteId, "");
+      } else if (act.do === "research") {
+        openResearch(act.researchId, "");
+      } else if (act.do === "task") {
+        openTaskHistory(act.runId);
+      } else if (act.do === "issue") {
+        const provider = TRACKERS.find((tracker) => tracker.id === act.source);
+        const repo = act.repo ?? repoPaths[0];
+        if (!provider || !repo) {
+          setSideTab("trackers");
+          setPinned(true);
+        } else {
+          void provider.fetch(repo).then((tickets) => {
+            const ticket = tickets.find((item) => item.id === act.issueId);
+            if (ticket) openTicket(ticket, act.source);
+            else {
+              setSideTab("trackers");
+              setPinned(true);
+              onNotice(`Issue ${act.issueId} is no longer in the active list.`);
+            }
+          }).catch(() => {
+            setSideTab("trackers");
+            setPinned(true);
+          });
+        }
       } else if (act.do === "file") {
         const { path, line } = act;
         void openFileRef.current(path).then(() => {
@@ -4091,8 +4145,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
     project.id,
     openChat,
     openNote,
+    openResearch,
+    openTaskHistory,
+    openTicket,
     openPrByNumber,
     onNotice,
+    repoPaths,
     relay.status.members,
   ]);
 
@@ -5008,6 +5066,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
           });
         case "agents":
           return push({ id: tabId(), type: "agents" });
+        case "research-list":
+          return push({ id: tabId(), type: "research-list" });
+        case "notes-list":
+          return push({ id: tabId(), type: "notes-list" });
+        case "prs-list":
+          return push({ id: tabId(), type: "prs-list" });
+        case "issues-list":
+          return push({ id: tabId(), type: "issues-list" });
         case "task-history":
           return push({ id: tabId(), type: "task-history" });
         case "instructions":
@@ -7712,6 +7778,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
             attentionFor={attentionFor}
           />
         );
+      case "research-list":
+        return (
+          <ResearchPanel page projectId={project.id} onOpen={(e) => openResearch(e.id, e.title)} onStart={(q) => void startResearch(q)} canStart={AGENT_CLIS.some((c) => getInstalled()[c.bin])} />
+        );
+      case "notes-list":
+        return (
+          <NotesPanel page projectId={project.id} projectName={project.name} roots={roots} onOpen={(n) => openNote(n.id, n.title)} />
+        );
+      case "prs-list":
+        return (
+          <PrsPanel page localRepos={repoPaths} projectFor={(repo) => repoPaths.includes(repo) ? project.name : undefined} onOpen={(repo, pr) => openPr(repo, pr)} onAgentTask={(repo, pr) => void startMicroTask(reviewPrTask, { repo, pr }, "")} relay={relay} onNotice={onNotice} onOpenChat={openChat} />
+        );
+      case "issues-list":
+        return (
+          <TicketsPanel page components={project.components.map((c) => ({ label: c.label, path: c.path }))} agentTargets={agentTargets} installed={installed} onStartWork={startTicketWork} onSendToAgent={sendTicketToAgent} onOpenTicket={openTicket} onOpenIntegrations={() => window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "integrations" } }))} />
+        );
       case "task-history":
         return (
           <TaskHistoryView
@@ -8962,6 +9044,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
             repoPaths.includes(repo) ? project.name : undefined
           }
           onOpen={(repo, pr) => openPr(repo, pr)}
+          onOpenAll={() => openCollectionPage("prs-list")}
+          onAgentTask={(repo, pr) => void startMicroTask(reviewPrTask, { repo, pr }, "")}
+          relay={relay}
+          onNotice={onNotice}
+          onOpenChat={openChat}
         />
       ))}
       {sidePane("trackers", () => (
@@ -8982,6 +9069,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               }),
             );
           }}
+          onOpenAll={() => openCollectionPage("issues-list")}
         />
       ))}
       {sidePane("team", () => (
@@ -9023,6 +9111,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           projectName={project.name}
           roots={roots}
           onOpen={(n) => openNote(n.id, n.title)}
+          onOpenAll={() => openCollectionPage("notes-list")}
         />
       ))}
       {sidePane("research", () => (
@@ -9031,6 +9120,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onOpen={(e) => openResearch(e.id, e.title)}
           onStart={(q) => void startResearch(q)}
           canStart={AGENT_CLIS.some((c) => getInstalled()[c.bin])}
+          onOpenAll={() => openCollectionPage("research-list")}
         />
       ))}
       {sidePane("agents", () => (

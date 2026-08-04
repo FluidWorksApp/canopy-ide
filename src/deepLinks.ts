@@ -14,6 +14,8 @@
 //   canopy://chat?peer=ab12                           a teammate's conversation
 //   canopy://file?path=/Users/me/src/api/main.rs&line=40
 //   canopy://note?note=0007-tier-donations&id=p1      one scratchpad note
+//   canopy://research?research=0008-index-staleness&id=p1
+//   canopy://task?run=8b2d…&id=p1                      one completed task
 //   canopy://pr?number=1341&path=/Users/me/src/api    a pull request's tab
 //   canopy://project?id=p1                            the project itself
 //   canopy://app                                      nothing in particular
@@ -70,11 +72,17 @@ export type DeepLink =
   | ({ kind: "file"; path: string; line?: number } & ProjectHint)
   /** A scratchpad note, by store id (`nnnn-slug`). */
   | ({ kind: "note"; noteId: string } & ProjectHint)
+  /** A research entry, by store id (`nnnn-slug`). */
+  | ({ kind: "research"; researchId: string } & ProjectHint)
+  /** A completed micro-task, by its stable history id. */
+  | ({ kind: "task"; runId: string } & ProjectHint)
+  /** A tracker issue. `path` is its local repository for provider lookup. */
+  | ({ kind: "issue"; issueId: string; source: string } & ProjectHint)
   /** A pull request's detail tab. `path` doubles as the repo checkout — the
    *  same string `openPr` keys tabs on — and `url` is the escape hatch: a PR
    *  that has merged or closed since the notification went out has no native
    *  tab any more, and the browser is the only true answer left. */
-  | ({ kind: "pr"; number: number; url?: string } & ProjectHint);
+  | ({ kind: "pr"; number: number; url?: string; repo?: string } & ProjectHint);
 
 export const DEEP_LINK_SCHEME = "canopy:";
 
@@ -92,9 +100,16 @@ export function formatDeepLink(link: DeepLink): string {
   // link that spelled the note with it would be a link that can never carry
   // both. The Rust side composes the same string (notes.rs `note_link`).
   if (link.kind === "note") q.set("note", link.noteId);
+  if (link.kind === "research") q.set("research", link.researchId);
+  if (link.kind === "task") q.set("run", link.runId);
+  if (link.kind === "issue") {
+    q.set("issue", link.issueId);
+    q.set("source", link.source);
+  }
   if (link.kind === "pr") {
     q.set("number", String(link.number));
     if (link.url) q.set("url", link.url);
+    if (link.repo) q.set("repo", link.repo);
   }
   const query = q.toString();
   return `canopy://${link.kind}${query ? `?${query}` : ""}`;
@@ -147,6 +162,22 @@ export function parseDeepLink(raw: string): DeepLink | null {
       if (!noteId) return null;
       return { kind: "note", noteId, ...hint };
     }
+    case "research": {
+      const researchId = p.get("research");
+      if (!researchId) return null;
+      return { kind: "research", researchId, ...hint };
+    }
+    case "task": {
+      const runId = p.get("run");
+      if (!runId) return null;
+      return { kind: "task", runId, ...hint };
+    }
+    case "issue": {
+      const issueId = p.get("issue");
+      const source = p.get("source");
+      if (!issueId || !source) return null;
+      return { kind: "issue", issueId, source, ...hint };
+    }
     case "pr": {
       const raw = p.get("number");
       const number = Number(raw);
@@ -154,7 +185,8 @@ export function parseDeepLink(raw: string): DeepLink | null {
       // thing anyone meant.
       if (!raw || !Number.isInteger(number) || number <= 0) return null;
       const url = p.get("url") ?? undefined;
-      return { kind: "pr", number, ...(url ? { url } : {}), ...hint };
+      const repo = p.get("repo") ?? undefined;
+      return { kind: "pr", number, ...(url ? { url } : {}), ...(repo ? { repo } : {}), ...hint };
     }
     case "file": {
       if (!path) return null;
@@ -183,6 +215,9 @@ export type DeepLinkAction =
   | { do: "chat"; peer: string | null; name: string }
   | { do: "file"; path: string; line?: number }
   | { do: "note"; noteId: string }
+  | { do: "research"; researchId: string }
+  | { do: "task"; runId: string }
+  | { do: "issue"; issueId: string; source: string; repo?: string }
   | { do: "pr"; repo: string; number: number; url?: string }
   | { do: "nothing" };
 
@@ -246,12 +281,18 @@ export function followLink(
     // was deleted, which is a truer answer than landing on the panel.
     case "note":
       return { do: "note", noteId: link.noteId };
+    case "research":
+      return { do: "research", researchId: link.researchId };
+    case "task":
+      return { do: "task", runId: link.runId };
+    case "issue":
+      return { do: "issue", issueId: link.issueId, source: link.source, repo: link.path };
     // The handler re-resolves the PR against the live list (`openPrByNumber`):
     // still open → its tab, gone → the URL in the browser. Without a repo to
     // resolve against, the PRs panel is the nearest honest landing.
     case "pr":
-      return link.path
-        ? { do: "pr", repo: link.path, number: link.number, url: link.url }
+      return link.path || link.repo
+        ? { do: "pr", repo: link.path ?? link.repo!, number: link.number, url: link.url }
         : { do: "panel", panel: "prs" };
     // The project is already open by the time this runs; that was the whole
     // instruction.

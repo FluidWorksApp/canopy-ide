@@ -34,6 +34,11 @@ export interface TaskRun {
   /** Recorded, not looked up: the history outlives a project being closed or
    *  renamed, and an id alone tells the reader nothing. */
   projectName?: string;
+  /** PTY identity retained so the completion event can resolve its notification
+   *  to this stable run id before the terminal is torn down. */
+  ptyId?: number;
+  /** Research run target, when this task is advancing one stored entry. */
+  researchId?: string;
   /** The brief it was launched with, minus the completion protocol. */
   brief: string;
   startedAt: number;

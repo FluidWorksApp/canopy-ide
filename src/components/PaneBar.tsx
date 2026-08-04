@@ -52,6 +52,10 @@ function tabTitle(tab: SubTab): string {
     case "collab": return `${tab.name} — live, owned by ${tab.ownerName}`;
     case "review": return `Review from ${tab.review.from}: ${tab.review.title}`;
     case "agents": return "Every agent session in this project — running, past, and how each CLI is wired in";
+    case "research-list": return "Every research entry in this project";
+    case "notes-list": return "Every note in this project's scratchpad";
+    case "prs-list": return "Every open pull request in this project";
+    case "issues-list": return "Every issue from this project's connected trackers";
     case "task-history": return "Every one-shot task that has finished, and what it reported";
     case "instructions": return "CLAUDE.md, AGENTS.md, skills and subagents — what every agent reads first";
     case "mcp": return `${tab.server.name} — the tools this MCP server exposes, and who can reach it`;
@@ -77,6 +81,10 @@ function tabText(tab: SubTab): string {
     case "collab": return `${tab.name} ⇄`;
     case "review": return tab.review.title;
     case "agents": return "Agents";
+    case "research-list": return "All research";
+    case "notes-list": return "Scratchpad";
+    case "prs-list": return "Pull requests";
+    case "issues-list": return "Issues";
     case "task-history": return "Completed tasks";
     case "instructions": return "Agent instructions";
     case "mcp": return tab.server.name;

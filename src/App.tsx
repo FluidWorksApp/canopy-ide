@@ -108,7 +108,7 @@ import { startSpotIndexJob } from "./spotIndexJob";
 import { useNoteReminders } from "./useNoteReminders";
 import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
 import { stopWorkspaceServers } from "./lsp/client";
-import { sweepStaleRuns } from "./taskHistory";
+import { sweepStaleRuns, taskRuns } from "./taskHistory";
 import {
   digitFromEvent,
   hintModifierOnly,
@@ -1670,6 +1670,17 @@ export default function App() {
     return () => un?.();
   }, [loaded, followDeepLink]);
 
+  // In-app deep links (currently native cards in Relay chat) take the same
+  // route as an OS banner instead of growing a second navigation path.
+  useEffect(() => {
+    const follow = (event: Event) => {
+      const raw = (event as CustomEvent<{ url?: string }>).detail?.url;
+      if (raw) void followDeepLink(parseDeepLink(raw));
+    };
+    window.addEventListener("canopy:follow-deep-link", follow);
+    return () => window.removeEventListener("canopy:follow-deep-link", follow);
+  }, [followDeepLink]);
+
   // The same link, delivered by a cold start. A reminder's banner is posted by
   // launchd while Canopy is closed (src-tauri/src/remind.rs), so clicking it
   // launches the app with `canopy://note?…` in argv — there was no process to
@@ -1739,6 +1750,9 @@ export default function App() {
           const ok = a.status === "done";
           const summary = a.summary ?? "A micro-task finished.";
           const taskKey = a.ptyId != null ? `task:${a.ptyId}` : undefined;
+          const run = a.ptyId == null
+            ? undefined
+            : taskRuns().find((candidate) => candidate.ptyId === a.ptyId);
           // A blocked task is a *question*, not an FYI, and this is the split
           // the channel exists to close: a task that stops to ask and an agent
           // that stops to ask are the same event to the user, and used to have
@@ -1766,7 +1780,11 @@ export default function App() {
             where:
               !ok && a.ptyId != null
                 ? { kind: "terminal", ptyId: a.ptyId, path: a.route }
-                : { kind: "panel", panel: "tasks", path: a.route },
+                : run?.researchId
+                  ? { kind: "research", researchId: run.researchId, path: a.route }
+                  : run
+                    ? { kind: "task", runId: run.id, path: a.route }
+                  : { kind: "panel", panel: "tasks", path: a.route },
             ...(ok ? {} : { dedupeKey: taskKey }),
           });
           window.dispatchEvent(

@@ -34,19 +34,26 @@ interface NotesPanelProps {
   roots: string[];
   /** Open a note as a tab — every row leads somewhere native. */
   onOpen: (note: ipc.NoteSummary) => void;
+  page?: boolean;
+  onOpenAll?: () => void;
 }
+
+const PANEL_ROWS = 12;
 
 export function NotesPanel({
   projectId,
   projectName,
   roots,
   onOpen,
+  page = false,
+  onOpenAll,
 }: NotesPanelProps) {
   const [rows, setRows] = useState<ipc.NoteSummary[]>(() => cached(projectId));
   const [text, setText] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showArchived, setShowArchived] = useState(false);
+  const [showArchived, setShowArchived] = useState(page);
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     const sync = () => setRows(cached(projectId));
@@ -71,6 +78,15 @@ export function NotesPanel({
   }, [showArchived, projectId, rows]);
 
   const all = showArchived ? [...rows, ...archived] : rows;
+  const q = query.trim().toLowerCase();
+  const matching = q
+    ? all.filter((n) =>
+        [n.id, n.title, n.preview, n.status].some((v) =>
+          String(v ?? "").toLowerCase().includes(q),
+        ),
+      )
+    : all;
+  const visible = page ? matching : matching.slice(0, PANEL_ROWS);
   // Reminders reorder *within* a group rather than making one of their own.
   // The grouping is this panel's whole idea — which of these did I decide were
   // worth doing — and a "Due" section above it would answer a different
@@ -86,7 +102,7 @@ export function NotesPanel({
   };
   const groups = STATUS_ORDER.map((status) => ({
     status,
-    notes: all.filter((r) => r.status === status).sort(byUrgency),
+    notes: visible.filter((r) => r.status === status).sort(byUrgency),
   })).filter((g) => g.notes.length > 0);
 
   const submit = () => {
@@ -114,7 +130,31 @@ export function NotesPanel({
   };
 
   return (
-    <div className="side-panel notes-panel">
+    <div className={`${page ? "collection-page" : "side-panel"} notes-panel`}>
+      <div className={page ? "collection-page-head" : "side-panel-head"}>
+        {page ? (
+          <>
+            <div>
+              <h1>Scratchpad</h1>
+              <p>{all.length} notes in {projectName}</p>
+            </div>
+            <TextInput
+              search
+              width="lg"
+              aria-label="Search scratchpad"
+              placeholder="Search notes…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </>
+        ) : (
+          <>
+            <span>Scratchpad</span>
+            <span className="status-spacer" />
+            <Button size="sm" variant="ghost" onClick={onOpenAll}>View all</Button>
+          </>
+        )}
+      </div>
       <div className="notes-new">
         <TextInput
           className="notes-input"
@@ -137,7 +177,7 @@ export function NotesPanel({
       </div>
       {error && <p className="tree-empty notes-error">{error}</p>}
 
-      {all.length === 0 && (
+      {matching.length === 0 && (
         <p className="tree-empty">
           Nothing here yet. Write a thought above, or type one into ⌘K and pick
           “Save for later”. Paste a screenshot into ⌘K and it comes along with
@@ -219,6 +259,11 @@ export function NotesPanel({
       {(all.length > 0 || showArchived) && (
         <button className="notes-more" onClick={() => setShowArchived((v) => !v)}>
           {showArchived ? "Hide archived" : "Show archived"}
+        </button>
+      )}
+      {!page && matching.length > PANEL_ROWS && (
+        <button className="notes-more" onClick={onOpenAll}>
+          View all {matching.length} notes
         </button>
       )}
     </div>
