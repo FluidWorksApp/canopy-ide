@@ -84,12 +84,6 @@ export const THEMES: { id: Theme; label: string }[] = [
  *  engine actually wants. */
 export type CursorStyle = "block" | "underline" | "bar";
 
-/** What it takes to follow a link in the terminal. "click" — a bare left click
- *  opens it, the way a link behaves everywhere else. "modifier" — ⌘ (Ctrl off
- *  macOS) must be held, the chord VS Code and iTerm2 use, which keeps a click
- *  on a URL somebody else printed from navigating. See terminalLinks.ts. */
-export type LinkClickMode = "click" | "modifier";
-
 /** What the held Ctrl+Tab switcher walks.
  *
  * "recent" answers "where was I?" and makes a quick press return to the
@@ -318,11 +312,6 @@ export interface Settings {
   terminalFontFamily: string;
   terminalCursorStyle: CursorStyle;
   terminalCursorBlink: boolean;
-  /** Whether following a terminal link takes the modifier. Defaults to "click":
-   *  a hovered, underlined link that ignores a click reads as a broken one, and
-   *  it is a new key, so the default reaches existing installs too. Read live at
-   *  click time — no terminal remount. */
-  terminalLinkClick: LinkClickMode;
   editorFontFamily: string;
   editorFontSize: number;
   editorCursorStyle: CursorStyle;
@@ -531,21 +520,6 @@ export interface Settings {
    *  re-answer every time is a mode chooser nobody uses. */
   previewCaptureMode: CaptureMode;
 
-  /** Where an ordinary link goes when you click it: a preview tab in the
-   *  project you are in, or the OS browser.
-   *
-   *  On by default. Canopy has a real browser in it — one that holds logins
-   *  across restarts — and a link that leaves the app takes you out of the thing
-   *  you were doing to a window you then have to find your way back from. This
-   *  covers links, not buttons: a control whose label says it goes somewhere
-   *  else (Support, Open on GitHub, a file-an-issue flow) still goes there,
-   *  because that is what it promised.
-   *
-   *  Falls back to the OS browser whenever nothing internal can take the URL —
-   *  no project open, no view in front — since a click that does nothing at all
-   *  is the one outcome worse than either destination. */
-  openLinksInApp: boolean;
-
   // ---- Workspaces ----
   /** The number the repo's own checkout serves on. Workspaces lease offsets
    *  from it, so a second checkout of the same repo can run its dev server
@@ -619,7 +593,6 @@ export const DEFAULTS: Settings = {
   terminalFontFamily: TERMINAL_FONT_DEFAULT,
   terminalCursorStyle: "block",
   terminalCursorBlink: true,
-  terminalLinkClick: "click",
   editorFontFamily: EDITOR_FONT_DEFAULT,
   editorFontSize: 13,
   editorCursorStyle: "bar",
@@ -648,7 +621,6 @@ export const DEFAULTS: Settings = {
   remoteTunnelProvider: "cloudflare",
   browserEngine: "webview",
   previewCaptureMode: "visible",
-  openLinksInApp: true,
   workspaceBasePort: 5173,
   workspacePorts: {},
   workspaceBootstrap: true,

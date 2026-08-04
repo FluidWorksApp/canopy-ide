@@ -5,10 +5,9 @@
 // of behaving differently from the ones somebody did. A link in a commit message
 // is a link in an issue body is a link in a terminal.
 //
-// Two destinations. A preview tab in the project you are in — Canopy has a real
-// browser in it, and staying inside the app is almost always what you meant — or
-// the OS browser, when you have said you prefer that (Settings → Browser) or
-// when nothing internal can take it. That last case matters more than it looks:
+// Two destinations. A plain click opens a preview tab in the project you are in;
+// a command-click opens the OS browser. When nothing internal can take a plain
+// click, it falls back to the OS browser. That last case matters more than it looks:
 // a link that silently does nothing is worse than a link that opens in the wrong
 // place, so the fallback is unconditional.
 //
@@ -16,8 +15,6 @@
 // `javascript:` or `file:` href in an issue body or a converted document is a
 // free script execution or a local read, and neither destination should be asked
 // to decide that.
-
-import { getSettings } from "./settings";
 
 /** Asked of whichever project view is in front. Cancelling it means "I have
  *  taken this URL"; nobody cancelling means there was no view to take it. */
@@ -33,9 +30,9 @@ function toOsBrowser(url: string) {
 
 /** Follow a link the user clicked. Safe to call with anything — a non-http
  *  scheme is dropped, not forwarded. */
-export function openLink(href: string) {
+export function openLink(href: string, external = false) {
   if (!/^https?:\/\//i.test(href)) return;
-  if (getSettings().openLinksInApp) {
+  if (!external) {
     const claimed = !window.dispatchEvent(
       new CustomEvent<OpenUrlDetail>(OPEN_URL_EVENT, {
         detail: { url: href },

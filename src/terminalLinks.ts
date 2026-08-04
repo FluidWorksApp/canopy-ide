@@ -1,45 +1,31 @@
-// Following a link in the terminal takes a bare click by default, and ⌘ (Ctrl
-// off macOS) when Settings → Terminal → Link click says so.
-//
-// The chord is what every text surface that linkifies settles on (VS Code,
-// JetBrains, iTerm2), and it exists because a bare click is also how you focus
-// a pane and where a selection starts — terminal output is mostly URLs somebody
-// else printed, so a bare click that navigates can land on a URL nobody chose.
-// But an underlined link that ignores a click reads as a broken link, so the
-// plain gesture is the default and the chord is the opt-in.
+// Terminal links follow the same fixed rule as every other URL in Canopy: a
+// plain click opens internally and a command-click opens the OS browser.
 import { IS_MAC } from "./platform";
 import { commandHeld, format } from "./shortcuts";
-import type { LinkClickMode } from "./settings";
 
 /** The chord, spelled the way this platform spells it. */
-export const LINK_CHORD = `${format("link-follow")}${IS_MAC ? " " : "+"}click`;
+export const LINK_CHORD = `${format("open-external")}${IS_MAC ? " " : "+"}click`;
 
 /** True when this mouse event is a request to follow the link under it.
  *
- *  Left button only, in both modes. xterm's Linkifier activates on *any*
+ *  Left button only. xterm's Linkifier activates on *any*
  *  mouseup over a link, so without this a right-click — the gesture that opens
  *  the terminal's own context menu — opened the URL as well.
  *
  *  The other platform modifier must be off: on macOS Ctrl+click is a
  *  right-click, and ⌃⌘-click belongs to whatever the OS makes of it.
  *
- *  `hasSelection` is the terminal's own selection state at mouseup. In "click"
- *  mode the gesture that follows a link and the gesture that selects text are
- *  the same button, and the drag ends over the link it started on — so a
- *  release that leaves text selected is a selection, not a navigation. The
- *  chord has no such collision, so it ignores this. */
-export function opensLink(
-  e: MouseEvent,
-  mode: LinkClickMode = "modifier",
-  hasSelection = false,
-): boolean {
+ *  `hasSelection` is the terminal's own selection state at mouseup. The gesture
+ *  that follows a link and the gesture that selects text are the same button,
+ *  and the drag ends over the link it started on — so a bare release that
+ *  leaves text selected is a selection, not a navigation. A command-click is
+ *  unambiguous and still opens externally when old text remains selected. */
+export function opensLink(e: MouseEvent, hasSelection = false): boolean {
   if (e.button !== 0) return false;
-  // The *other* platform's modifier is never a follow, in either mode: on
+  // The *other* platform's modifier is never a follow: on
   // macOS Ctrl+click is a right-click, and ⌃⌘-click belongs to the OS.
   if (IS_MAC ? e.ctrlKey : e.metaKey) return false;
-  if (mode === "click") return !hasSelection;
-  // Shift and Alt may ride along — only the command modifier decides.
-  return commandHeld(e);
+  return !hasSelection || commandHeld(e);
 }
 
 /** The bubble that appears while the pointer rests on a link. xterm underlines
@@ -63,14 +49,9 @@ const MARGIN = 4;
 
 /** Plain DOM rather than the React `<Tooltip>`: xterm hands hover and leave to
  *  us as imperative callbacks on a surface React does not render into. `host`
- *  must be a positioned element — the terminal's own container. `mode` is read
- *  per hover, not captured, so changing the setting reaches open terminals. */
-export function createLinkHint(
-  host: HTMLElement,
-  mode: () => LinkClickMode = () => "modifier",
-): LinkHint {
+ *  must be a positioned element — the terminal's own container. */
+export function createLinkHint(host: HTMLElement): LinkHint {
   let el: HTMLDivElement | null = null;
-  let chip: HTMLSpanElement | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   const hide = () => {
@@ -78,7 +59,6 @@ export function createLinkHint(
     timer = undefined;
     el?.remove();
     el = null;
-    chip = null;
   };
 
   const place = (node: HTMLDivElement, e: MouseEvent) => {
@@ -108,19 +88,13 @@ export function createLinkHint(
           el.className = "term-link-hint";
           const label = host.ownerDocument.createElement("span");
           label.className = "term-link-hint-label";
-          label.textContent = "Open link";
-          chip = host.ownerDocument.createElement("span");
+          label.textContent = "Open in Canopy";
+          const chip = host.ownerDocument.createElement("span");
           chip.className = "term-link-hint-chord";
-          chip.textContent = LINK_CHORD;
+          chip.textContent = `${LINK_CHORD} for browser`;
           el.append(label);
+          el.append(chip);
           host.append(el);
-        }
-        // The bubble outlives a settings change; re-decide each hover. Detached
-        // rather than hidden — the chip is a flex child, so `[hidden]` loses to
-        // its own display rule.
-        if (chip) {
-          if (mode() === "modifier") el.append(chip);
-          else chip.remove();
         }
         place(el, at);
       }, SHOW_DELAY_MS);
