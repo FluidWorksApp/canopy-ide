@@ -2174,16 +2174,52 @@ pub async fn gh_pr_checkout(
     }
 }
 
-/// Merge a PR through `gh pr merge`. This is outward-facing and lands commits on
-/// the base branch, so the UI always confirms before calling it. `method` picks
-/// how history is written — one of the three GitHub offers.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct PrMergeResult {
+    pub message: String,
+    /// Stacked PRs are accepted for asynchronous merging rather than landing
+    /// before this command returns.
+    pub pending: bool,
+}
+
+fn stacked_merge_required(error: &str) -> bool {
+    error.contains("part of a stack") && error.contains("asynchronous merge REST API")
+}
+
+fn parse_async_merge(out: &str, number: u32, verb: &str) -> Result<PrMergeResult, String> {
+    let value: Value = serde_json::from_str(out)
+        .map_err(|e| format!("GitHub returned an unexpected merge response: {e}"))?;
+    let message = value["details"]["message"]
+        .as_str()
+        .unwrap_or("GitHub did not explain the merge result");
+    match value["status"].as_str().unwrap_or("") {
+        "merged" => Ok(PrMergeResult {
+            message: format!("{verb} #{number}"),
+            pending: false,
+        }),
+        "pending" | "enqueued" => Ok(PrMergeResult {
+            message: format!("Merge started for #{number} — GitHub is processing its PR stack"),
+            pending: true,
+        }),
+        "failed" => Err(message.to_string()),
+        status => Err(format!(
+            "GitHub returned an unknown asynchronous merge status {status:?}: {message}"
+        )),
+    }
+}
+
+/// Merge a PR through `gh pr merge`. GitHub's CLI uses the GraphQL mutation,
+/// which stacked PRs reject, so that one explicit error falls back to the REST
+/// asynchronous merge endpoint required for stacks. This is outward-facing and
+/// lands commits on the base branch, so the UI always confirms before calling
+/// it. `method` picks how history is written — one of the three GitHub offers.
 #[tauri::command]
 pub async fn gh_pr_merge(
     state: State<'_, WorkspaceManager>,
     repo: String,
     number: u32,
     method: String,
-) -> Result<String, String> {
+) -> Result<PrMergeResult, String> {
     let top = repo_path(&state, &repo)?;
     let (flag, verb) = match method.as_str() {
         "squash" => ("--squash", "Squashed and merged"),
@@ -2193,8 +2229,30 @@ pub async fn gh_pr_merge(
     };
     let mut cmd = gh_in(&top);
     cmd.args(["pr", "merge", &number.to_string(), flag]);
-    run_net(&mut cmd)?;
-    Ok(format!("{verb} #{number}"))
+    match run_net(&mut cmd) {
+        Ok(_) => Ok(PrMergeResult {
+            message: format!("{verb} #{number}"),
+            pending: false,
+        }),
+        Err(error) if stacked_merge_required(&error) => {
+            let (owner, name) = gh_nwo(&top)?;
+            let endpoint = format!("repos/{owner}/{name}/pulls/{number}/merge-async");
+            let merge_method = format!("merge_method={method}");
+            let mut async_cmd = gh_in(&top);
+            async_cmd.args([
+                "api",
+                "--method",
+                "PUT",
+                &endpoint,
+                "-f",
+                &merge_method,
+                "-f",
+                "merge_action=default",
+            ]);
+            parse_async_merge(&run_net(&mut async_cmd)?, number, verb)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Close a PR without merging. Outward-facing (others see it close), so the UI
@@ -5170,6 +5228,54 @@ pub async fn linear_issues(api_key: String) -> Result<Vec<TicketInfo>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stacked_merge_error_is_the_only_cli_failure_that_falls_back() {
+        assert!(stacked_merge_required(
+            "GraphQL: This pull request is part of a stack and must be merged using the asynchronous merge REST API. (mergePullRequest)"
+        ));
+        assert!(!stacked_merge_required(
+            "GraphQL: Pull Request is not mergeable"
+        ));
+        assert!(!stacked_merge_required("authentication failed"));
+    }
+
+    #[test]
+    fn async_merge_response_distinguishes_accepted_from_landed() {
+        let pending = parse_async_merge(
+            r#"{"status":"pending","details":{"message":"Merge request accepted","uuid":"abc"}}"#,
+            42,
+            "Squashed and merged",
+        )
+        .unwrap();
+        assert!(pending.pending);
+        assert!(pending.message.contains("processing its PR stack"));
+
+        let merged = parse_async_merge(
+            r#"{"status":"merged","details":{"message":"Pull request merged","sha":"abc"}}"#,
+            42,
+            "Squashed and merged",
+        )
+        .unwrap();
+        assert_eq!(
+            merged,
+            PrMergeResult {
+                message: "Squashed and merged #42".into(),
+                pending: false,
+            }
+        );
+    }
+
+    #[test]
+    fn async_merge_response_surfaces_github_failure() {
+        let error = parse_async_merge(
+            r#"{"status":"failed","details":{"message":"Required check failed"}}"#,
+            42,
+            "Merged",
+        )
+        .unwrap_err();
+        assert_eq!(error, "Required check failed");
+    }
     use serde_json::json;
 
     #[test]
