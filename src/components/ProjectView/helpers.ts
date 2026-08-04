@@ -94,6 +94,8 @@ export interface TicketSubTab {
   type: "ticket";
   ticket: ipc.TicketInfo;
   source: string;
+  /** Local checkout whose remote owns this issue. */
+  repo?: string;
 }
 
 /** One research entry, open. Holds only the id: the entry changes while it is

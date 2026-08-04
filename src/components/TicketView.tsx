@@ -31,6 +31,8 @@ interface TicketViewProps {
   installed: Record<string, boolean>;
   /** Start a fresh agent on this ticket in its worktree. */
   onStartNew: (agentId: string) => void;
+  /** Run the ticket as a one-shot task in its worktree. */
+  onStartTask: () => void;
   onSendToAgent: (target: AgentTarget) => void;
 }
 
@@ -42,6 +44,7 @@ export function TicketView({
   agentTargets,
   installed,
   onStartNew,
+  onStartTask,
   onSendToAgent,
 }: TicketViewProps) {
   const trackerName = TRACKERS.find((t) => t.id === source)?.name ?? source;
@@ -264,10 +267,14 @@ export function TicketView({
           }
           onStart={onStartNew}
           onSend={onSendToAgent}
+          primaryTask={{
+            title: "Start this ticket as a one-shot task",
+            onRun: onStartTask,
+          }}
         />
         <span className="ticket-view-note">
-          Starts in a terminal you can watch. No commit, no PR — that stays
-          yours to do.
+          Runs in the background and reports back in Tasks. No commit, no PR —
+          that stays yours to do.
         </span>
       </div>
     </div>

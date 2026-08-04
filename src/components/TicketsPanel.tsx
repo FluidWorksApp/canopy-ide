@@ -41,13 +41,13 @@ interface TicketsPanelProps {
   agentTargets: AgentTarget[];
   /** Create/reuse the ticket's worktree and start an agent there. Owned by
    *  ProjectView so the ticket tab and this panel do the identical thing. */
-  onStartWork: (ticket: ipc.TicketInfo, agentId?: string) => Promise<void>;
+  onStartWork: (ticket: ipc.TicketInfo, repo: string, agentId?: string) => Promise<void>;
   /** Which agent CLIs are on PATH — the list offered for a new agent. */
   installed: Record<string, boolean>;
   /** Type `text` into an already-running agent terminal and focus it. */
   onSendToAgent: (target: AgentTarget, text: string) => void;
   /** Open the ticket as a tab in the main area. */
-  onOpenTicket: (ticket: ipc.TicketInfo, source: string) => void;
+  onOpenTicket: (ticket: ipc.TicketInfo, source: string, repo: string) => void;
   /** Jump to Settings → Integrations (where sources get connected). */
   onOpenIntegrations: () => void;
   page?: boolean;
@@ -188,7 +188,8 @@ export function TicketsPanel({
     if (starting) return;
     setStarting(ticket.id);
     try {
-      await onStartWork(ticket, agentId);
+      if (!repo) return;
+      await onStartWork(ticket, repo, agentId);
       if (repo) void ipc.gitWorktrees(repo).then(setWorktrees).catch(() => {});
     } finally {
       setStarting(null);
@@ -327,7 +328,7 @@ export function TicketsPanel({
                   title={`${t.id} — ${t.title}\n${sourceName(t.source)} · ${t.state}\n${t.url}${
                     wt ? `\nworkspace: ${wt.path}` : ""
                   }`}
-                  onClick={() => onOpenTicket(t, t.source)}
+                  onClick={() => repo && onOpenTicket(t, t.source, repo)}
                 >
                   <div className="ticket-main">
                     <TrackerIcon
