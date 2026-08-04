@@ -195,6 +195,7 @@ export function PendingCard({
         {onDismiss && (
           <Button
             icon
+            size="sm"
             className="pending-dismiss"
             title="Dismiss"
             onClick={(e) => {

@@ -63,6 +63,12 @@ describe("sticky stack chips", () => {
     expect(group).not.toContain("display: contents");
   });
 
+  it("keeps folded groups at the full harbor-row height", () => {
+    // With no visible tab, a folded group otherwise collapses to the 21px chip
+    // and flex-end alignment leaves that chip stuck to the row's bottom edge.
+    expect(ruleBody(".tab-group")).toContain("align-self: stretch");
+  });
+
   it("leaves momentum to native scroll snapping", () => {
     expect(ruleBody(".tabs-harbor")).toContain("scroll-snap-type: x proximity");
     expect(ruleBody(".tab-group")).toContain("scroll-snap-stop: always");
