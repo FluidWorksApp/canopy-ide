@@ -4958,6 +4958,7 @@ body.dragging-tab * {
    wrapped at the wrong column. */
 .term-host {
   position: relative;
+  overflow: hidden;
 }
 
 .term-host-multiplexed {
@@ -14473,6 +14474,26 @@ textarea,
   border-top: 1px solid var(--border);
   font-size: 10px;
   color: var(--text-dim);
+}
+.resume-group {
+  margin: 8px 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+.resume-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 8px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-raised));
+}
+.resume-group-head .btn-sm {
+  margin-left: auto;
+}
+.resume-group .resume-child {
+  padding-left: 24px;
 }
 
 .resume-row code {

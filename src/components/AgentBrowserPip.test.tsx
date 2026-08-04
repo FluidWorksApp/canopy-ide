@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { mockCommands } from "../test/setup";
-import { AgentBrowserPip, clampPip } from "./AgentBrowserPip";
+import { AgentBrowserPip, clampPip, pipOwnerVisible } from "./AgentBrowserPip";
 
 interface Box {
   left: number;
@@ -311,5 +311,24 @@ describe("clampPip", () => {
       x: 0,
       y: 0,
     });
+  });
+});
+
+describe("pipOwnerVisible", () => {
+  const terminals = [
+    { id: "agent-a", ptyId: 10, paneGroup: "group-1" },
+    { id: "agent-b", ptyId: 11, paneGroup: "group-1" },
+    { id: "agent-c", ptyId: 12 },
+  ];
+
+  it("shows a pip only in its owning terminal or multiplex", () => {
+    expect(pipOwnerVisible(10, terminals, "agent-a")).toBe(true);
+    expect(pipOwnerVisible(10, terminals, "agent-b")).toBe(true);
+    expect(pipOwnerVisible(10, terminals, "agent-c")).toBe(false);
+    expect(pipOwnerVisible(10, terminals, "preview-tab")).toBe(false);
+  });
+
+  it("hides a pip after its owner is gone", () => {
+    expect(pipOwnerVisible(99, terminals, "agent-a")).toBe(false);
   });
 });

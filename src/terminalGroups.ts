@@ -131,6 +131,29 @@ export function mapSplitTabIds(
   return { ...node, first, second };
 }
 
+/** Remap persisted runtime tab ids after a wake/restore. Missing leaves collapse
+ * through mapSplitTabIds; fewer than two survivors no longer form a group. */
+export function remapTerminalGroups(
+  groups: Record<string, TerminalGroup>,
+  ids: ReadonlyMap<string, string>,
+): Record<string, TerminalGroup> {
+  const restored: Record<string, TerminalGroup> = {};
+  for (const [groupId, group] of Object.entries(groups)) {
+    const root = mapSplitTabIds(group.root, ids);
+    const leaves = root ? leafIds(root) : [];
+    if (!root || leaves.length < 2) continue;
+    restored[groupId] = {
+      ...group,
+      root,
+      activeTabId: ids.get(group.activeTabId) ?? leaves[0],
+      zoomedTabId: group.zoomedTabId
+        ? ids.get(group.zoomedTabId)
+        : undefined,
+    };
+  }
+  return restored;
+}
+
 export function swapLeaves(
   node: TerminalSplitNode,
   firstTabId: string,
