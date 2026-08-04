@@ -62,15 +62,36 @@ const GAP = 14;
  *  than a click. Below this, a click with a shaky hand would move the companion
  *  instead of opening it. */
 const DRAG_SLOP = 4;
-const IDLE_ANTICS = ["hop", "look", "stretch"] as const;
-type IdleAntic = (typeof IDLE_ANTICS)[number];
+const ANTICS = {
+  idle: ["hop", "look", "stretch", "twirl", "sway"],
+  working: ["scan", "ponder", "nod"],
+  sleeping: ["snore", "dream", "stir"],
+  blocked: ["sigh", "recoil"],
+} as const;
+type AnticMood = keyof typeof ANTICS;
+type CompanionAntic = (typeof ANTICS)[AnticMood][number];
 const ANTIC_DURATION = 1600;
 const ANTIC_DELAY_MIN = 14_000;
 const ANTIC_DELAY_RANGE = 20_000;
 
-function nextAntic(last: IdleAntic | null): IdleAntic {
-  const choices = last ? IDLE_ANTICS.filter((antic) => antic !== last) : IDLE_ANTICS;
+function nextAntic(mood: AnticMood, last: CompanionAntic | null): CompanionAntic {
+  const repertoire: readonly CompanionAntic[] = ANTICS[mood];
+  const choices = last ? repertoire.filter((antic) => antic !== last) : repertoire;
   return choices[Math.floor(Math.random() * choices.length)] ?? "look";
+}
+
+function anticMood(status: CompanionState["status"]): AnticMood {
+  switch (status) {
+    case "working":
+      return "working";
+    case "starting":
+    case "unavailable":
+      return "sleeping";
+    case "failed":
+      return "blocked";
+    default:
+      return "idle";
+  }
 }
 
 interface CompanionProps {
@@ -172,8 +193,8 @@ export function Companion({
   // Live position while dragging: settings are only written on release, so a
   // drag does not put a localStorage write on every pointermove.
   const [dragSpot, setDragSpot] = useState<CompanionSpot | null>(null);
-  const [idleAntic, setIdleAntic] = useState<IdleAntic | null>(null);
-  const lastAntic = useRef<IdleAntic | null>(null);
+  const [antic, setAntic] = useState<CompanionAntic | null>(null);
+  const lastAntic = useRef<CompanionAntic | null>(null);
   const drag = useRef<{ dx: number; dy: number; moved: boolean } | null>(null);
   // Read in the pointer handler, which is memoised on inputs that must not
   // include a proposal arriving mid-drag.
@@ -203,19 +224,21 @@ export function Companion({
   // belongs.
   const notice = notices[notices.length - 1];
 
-  // A small, occasional bit of life rather than another continuous loop. It is
-  // strictly an idle behavior: work, conversation and attention all outrank
-  // entertainment, and a background or reduced-motion window stays still.
+  // A small, occasional bit of life rather than another continuous loop. Each
+  // lifecycle gets its own repertoire, while conversation and attention still
+  // outrank decoration and a background or reduced-motion window stays still.
+  const mood = anticMood(state.status);
   const canPlay =
-    (state.status === "ready" || state.status === "off") &&
     !open &&
     !dragSpot &&
     !notice &&
     !proposal &&
     !browserInFront;
   useEffect(() => {
+    // A lifecycle change must remove the old repertoire immediately. Its end
+    // timer belongs to the previous effect and is cancelled during cleanup.
+    setAntic(null);
     if (!canPlay) {
-      setIdleAntic(null);
       return;
     }
     let startTimer = 0;
@@ -231,11 +254,11 @@ export function Companion({
         schedule();
         return;
       }
-      const next = nextAntic(lastAntic.current);
+      const next = nextAntic(mood, lastAntic.current);
       lastAntic.current = next;
-      setIdleAntic(next);
+      setAntic(next);
       endTimer = window.setTimeout(() => {
-        setIdleAntic(null);
+        setAntic(null);
         schedule();
       }, ANTIC_DURATION);
     };
@@ -244,7 +267,7 @@ export function Companion({
       window.clearTimeout(startTimer);
       window.clearTimeout(endTimer);
     };
-  }, [canPlay]);
+  }, [canPlay, mood]);
 
   // The card is not the panel, and placing it with the panel's geometry meant
   // the panel's 380px bottom clamp: with the companion parked near the bottom
@@ -366,7 +389,7 @@ export function Companion({
   return (
     <>
       <div
-        className={`companion${dragging ? " companion-dragging" : ""}${idleAntic ? ` companion-antic-${idleAntic}` : ""}`}
+        className={`companion${dragging ? " companion-dragging" : ""}${antic ? ` companion-antic-${antic}` : ""}`}
         style={{ left: at.left, top: at.top, width: MASCOT, height: MASCOT }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}

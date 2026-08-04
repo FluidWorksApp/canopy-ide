@@ -21538,8 +21538,8 @@ a.btn-sm {
   filter: drop-shadow(0 12px 24px rgba(6, 8, 18, 0.65));
 }
 
-/* Long rests get a brief piece of personality. These run once; Companion.tsx
-   chooses and schedules them only while Ash has genuinely nothing to do. */
+/* Long stretches in one lifecycle get a brief piece of personality. These run
+   once; Companion.tsx chooses a repertoire that agrees with Ash's current job. */
 .companion-antic-hop {
   animation: companion-antic-hop 1.6s cubic-bezier(0.2, 0.9, 0.2, 1) both;
 }
@@ -21556,6 +21556,46 @@ a.btn-sm {
 
 .companion-antic-stretch {
   animation: companion-antic-stretch 1.6s cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+
+.companion-antic-twirl {
+  animation: companion-antic-twirl 1.6s cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+
+.companion-antic-sway {
+  animation: companion-antic-sway 1.6s ease-in-out both;
+}
+
+.companion-antic-scan {
+  animation: companion-antic-scan 1.6s ease-in-out both;
+}
+
+.companion-antic-ponder {
+  animation: companion-antic-ponder 1.6s ease-in-out both;
+}
+
+.companion-antic-nod {
+  animation: companion-antic-nod 1.6s cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+
+.companion-antic-snore {
+  animation: companion-antic-snore 1.6s ease-in-out both;
+}
+
+.companion-antic-dream {
+  animation: companion-antic-dream 1.6s ease-in-out both;
+}
+
+.companion-antic-stir {
+  animation: companion-antic-stir 1.6s cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+
+.companion-antic-sigh {
+  animation: companion-antic-sigh 1.6s ease-in-out both;
+}
+
+.companion-antic-recoil {
+  animation: companion-antic-recoil 1.6s cubic-bezier(0.2, 0.9, 0.2, 1) both;
 }
 
 @keyframes companion-antic-hop {
@@ -21625,6 +21665,159 @@ a.btn-sm {
   }
   68% {
     transform: scale(0.985, 1.015);
+  }
+}
+
+@keyframes companion-antic-twirl {
+  0%,
+  20%,
+  84%,
+  100% {
+    transform: rotate(0deg) scale(1);
+  }
+  48% {
+    transform: rotate(360deg) scale(1.06);
+  }
+}
+
+@keyframes companion-antic-sway {
+  0%,
+  16%,
+  84%,
+  100% {
+    transform: translateX(0) rotate(0deg);
+  }
+  34% {
+    transform: translateX(-5px) rotate(-8deg);
+  }
+  60% {
+    transform: translateX(5px) rotate(8deg);
+  }
+}
+
+@keyframes companion-antic-scan {
+  0%,
+  16%,
+  84%,
+  100% {
+    transform: translateX(0);
+  }
+  32%,
+  44% {
+    transform: translateX(-5px);
+  }
+  60%,
+  72% {
+    transform: translateX(5px);
+  }
+}
+
+@keyframes companion-antic-ponder {
+  0%,
+  18%,
+  82%,
+  100% {
+    transform: rotate(0deg) translateY(0);
+  }
+  38%,
+  62% {
+    transform: rotate(-9deg) translateY(-2px);
+  }
+}
+
+@keyframes companion-antic-nod {
+  0%,
+  20%,
+  78%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  38% {
+    transform: translateY(4px) scale(1.03, 0.96);
+  }
+  54% {
+    transform: translateY(-2px) scale(0.99, 1.02);
+  }
+  66% {
+    transform: translateY(2px);
+  }
+}
+
+@keyframes companion-antic-snore {
+  0%,
+  16%,
+  84%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  42% {
+    transform: translateY(2px) scale(1.06, 0.94);
+  }
+  68% {
+    transform: translateY(-1px) scale(0.98, 1.03);
+  }
+}
+
+@keyframes companion-antic-dream {
+  0%,
+  18%,
+  82%,
+  100% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+  40% {
+    transform: translate(-3px, -4px) rotate(-4deg);
+  }
+  62% {
+    transform: translate(3px, -2px) rotate(4deg);
+  }
+}
+
+@keyframes companion-antic-stir {
+  0%,
+  24%,
+  76%,
+  100% {
+    transform: rotate(0deg);
+  }
+  36% {
+    transform: rotate(-7deg);
+  }
+  50% {
+    transform: rotate(6deg);
+  }
+  64% {
+    transform: rotate(-3deg);
+  }
+}
+
+@keyframes companion-antic-sigh {
+  0%,
+  18%,
+  82%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  54% {
+    transform: translateY(4px) scale(1.04, 0.94);
+  }
+}
+
+@keyframes companion-antic-recoil {
+  0%,
+  22%,
+  78%,
+  100% {
+    transform: translateX(0) scale(1);
+  }
+  38% {
+    transform: translateX(-4px) scale(0.96);
+  }
+  52% {
+    transform: translateX(3px) scale(1.02);
+  }
+  64% {
+    transform: translateX(-1px);
   }
 }
 
