@@ -201,60 +201,91 @@ mod pb {
     use objc2::runtime::NSObjectProtocol;
     use objc2::sel;
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
+    use std::panic::AssertUnwindSafe;
 
     pub const SUPPORTED: bool = true;
 
     /// A counter, not contents. Reading it raises no alert.
-    pub fn change_count() -> i64 {
-        NSPasteboard::generalPasteboard().changeCount() as i64
+    pub fn change_count() -> Option<i64> {
+        guarded("changeCount", || {
+            NSPasteboard::generalPasteboard().changeCount() as i64
+        })
     }
 
-    /// Run one pasteboard call inside its own autorelease pool.
-    ///
-    /// The watcher runs on a bare `std::thread`, which -- unlike a Cocoa run
-    /// loop thread -- never drains the pool AppKit returns objects into. Every
-    /// `generalPasteboard()` handed back a retained object that nothing
-    /// released, forever.
-    pub fn autoreleased<T>(f: impl FnOnce() -> T) -> T {
-        objc2::rc::autoreleasepool(|_| f())
+    /// Contain AppKit exceptions at the Objective-C boundary. Without this, an
+    /// unavailable pasteboard unwinds into Rust, which aborts the process.
+    fn guarded<T>(operation: &str, f: impl FnOnce() -> T) -> Option<T> {
+        match objc2::exception::catch(AssertUnwindSafe(|| {
+            // The poller is a bare thread, so it has no Cocoa pool of its own.
+            objc2::rc::autoreleasepool(|_| f())
+        })) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                // Formatting the exception sends more Objective-C messages
+                // while recovering from an Objective-C failure.
+                log::error!("NSPasteboard {operation} raised an Objective-C exception");
+                None
+            }
+        }
     }
 
     /// The UTIs currently declared on the pasteboard. Type metadata, not data —
     /// this is how a clip can be recognised as concealed without reading it.
-    pub fn types() -> Vec<String> {
-        match NSPasteboard::generalPasteboard().types() {
-            Some(list) => list.iter().map(|t| t.to_string()).collect(),
-            None => Vec::new(),
-        }
+    pub fn types() -> Option<Vec<String>> {
+        guarded("types", || {
+            match NSPasteboard::generalPasteboard().types() {
+                Some(list) => list.iter().map(|t| t.to_string()).collect(),
+                None => Vec::new(),
+            }
+        })
     }
 
     /// The one call that reads contents, and thus the one that the OS may ask
     /// the user about. Only ever reached when `change_count` moved.
-    pub fn read_string() -> Option<String> {
-        // The type constant is an extern static, hence the unsafe — the call
-        // itself is safe.
-        let ty = unsafe { NSPasteboardTypeString };
-        NSPasteboard::generalPasteboard()
-            .stringForType(ty)
-            .map(|s| s.to_string())
+    pub fn read_string() -> Option<Option<String>> {
+        guarded("stringForType:", || {
+            // The type constant is an extern static, hence the unsafe — the
+            // call itself is safe.
+            let ty = unsafe { NSPasteboardTypeString };
+            NSPasteboard::generalPasteboard()
+                .stringForType(ty)
+                .map(|s| s.to_string())
+        })
     }
 
     /// macOS 15+. Guarded by `respondsToSelector` rather than a version check:
     /// Canopy's minimum is 10.15, and an unrecognised selector is a crash, not
     /// a None.
-    pub fn access_behavior() -> String {
-        let pb = NSPasteboard::generalPasteboard();
-        if !pb.respondsToSelector(sel!(accessBehavior)) {
-            return String::new();
+    pub fn access_behavior() -> Option<String> {
+        guarded("accessBehavior", || {
+            let pb = NSPasteboard::generalPasteboard();
+            if !pb.respondsToSelector(sel!(accessBehavior)) {
+                return String::new();
+            }
+            match pb.accessBehavior().0 {
+                0 => "default",
+                1 => "ask",
+                2 => "allow",
+                3 => "deny",
+                _ => "",
+            }
+            .to_string()
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::guarded;
+        use objc2::exception::{throw, Exception};
+        use objc2::rc::Retained;
+        use objc2::runtime::NSObject;
+
+        #[test]
+        fn objective_c_exceptions_stop_at_the_pasteboard_boundary() {
+            let object: Retained<Exception> = unsafe { Retained::cast_unchecked(NSObject::new()) };
+            let result: Option<()> = guarded("test", || throw(object));
+            assert!(result.is_none());
         }
-        match pb.accessBehavior().0 {
-            0 => "default",
-            1 => "ask",
-            2 => "allow",
-            3 => "deny",
-            _ => "",
-        }
-        .to_string()
     }
 }
 
@@ -264,21 +295,17 @@ mod pb {
 #[cfg(not(target_os = "macos"))]
 mod pb {
     pub const SUPPORTED: bool = false;
-    pub fn autoreleased<T>(f: impl FnOnce() -> T) -> T {
-        f()
+    pub fn change_count() -> Option<i64> {
+        Some(0)
     }
-
-    pub fn change_count() -> i64 {
-        0
+    pub fn types() -> Option<Vec<String>> {
+        Some(Vec::new())
     }
-    pub fn types() -> Vec<String> {
-        Vec::new()
+    pub fn read_string() -> Option<Option<String>> {
+        Some(None)
     }
-    pub fn read_string() -> Option<String> {
-        None
-    }
-    pub fn access_behavior() -> String {
-        String::new()
+    pub fn access_behavior() -> Option<String> {
+        Some(String::new())
     }
 }
 
@@ -746,10 +773,17 @@ fn spawn_poller(app: AppHandle, state: &Clipboard) {
     // a place for it to block.
     std::thread::spawn(move || {
         let alive = || running.load(Ordering::SeqCst) && generation.load(Ordering::SeqCst) == mine;
+        let stop_after_native_failure = || {
+            running.store(false, Ordering::SeqCst);
+            generation.fetch_add(1, Ordering::SeqCst);
+        };
         // The count as it is *now*, recorded without reading anything. This is
         // what keeps enabling the feature from capturing whatever the last app
         // put there — very often a password.
-        let mut last = pb::autoreleased(pb::change_count);
+        let Some(mut last) = pb::change_count() else {
+            stop_after_native_failure();
+            return;
+        };
         while alive() {
             std::thread::sleep(POLL);
             if !alive() {
@@ -759,7 +793,10 @@ fn spawn_poller(app: AppHandle, state: &Clipboard) {
             // std::thread has no pool to drain them into — so they accumulated
             // for the life of the process, roughly a hundred thousand a day at
             // this interval. Invisible in a CPU profile; not invisible in RSS.
-            let count = pb::autoreleased(pb::change_count);
+            let Some(count) = pb::change_count() else {
+                stop_after_native_failure();
+                break;
+            };
             if count == last {
                 continue;
             }
@@ -768,7 +805,11 @@ fn spawn_poller(app: AppHandle, state: &Clipboard) {
             // The user told the OS never to let this app read the pasteboard.
             // Believe it, and stop asking rather than generating a denial per
             // copy for the rest of the session.
-            if pb::access_behavior() == "deny" {
+            let Some(access) = pb::access_behavior() else {
+                stop_after_native_failure();
+                break;
+            };
+            if access == "deny" {
                 running.store(false, Ordering::SeqCst);
                 let _ = app.emit("clipboard:blocked", ());
                 break;
@@ -776,7 +817,11 @@ fn spawn_poller(app: AppHandle, state: &Clipboard) {
 
             // Type metadata, not data: a concealed clip is recognised without
             // ever being read.
-            if concealed(&pb::types()) {
+            let Some(types) = pb::types() else {
+                stop_after_native_failure();
+                break;
+            };
+            if concealed(&types) {
                 counters.concealed.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
@@ -797,6 +842,10 @@ fn spawn_poller(app: AppHandle, state: &Clipboard) {
 
             // The one read of contents, at most once per copy.
             let Some(raw) = pb::read_string() else {
+                stop_after_native_failure();
+                break;
+            };
+            let Some(raw) = raw else {
                 continue;
             };
             let text = raw.trim_end_matches(['\n', '\r']);
@@ -966,7 +1015,7 @@ pub async fn clipboard_status(state: State<'_, Clipboard>) -> Result<ClipboardSt
         supported: pb::SUPPORTED,
         watching,
         persisted,
-        access: pb::access_behavior(),
+        access: pb::access_behavior().unwrap_or_default(),
         clips,
         bytes,
         skipped_secrets: state.counters.secrets.load(Ordering::Relaxed),
