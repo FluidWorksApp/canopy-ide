@@ -4,14 +4,35 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { mockCommands } from "../test/setup";
 import { AgentBrowserPip, clampPip } from "./AgentBrowserPip";
 
-/** jsdom measures everything as zero, and this component positions itself from
- *  what it measures — so the two rectangles a drag reads are stated here. */
-function stubRects(el: HTMLElement, box: { left: number; top: number; width: number; height: number }) {
-  const rect = (r: { left: number; top: number; width: number; height: number }) =>
-    ({ ...r, right: r.left + r.width, bottom: r.top + r.height, x: r.left, y: r.top, toJSON: () => "" }) as DOMRect;
-  el.getBoundingClientRect = () => rect(box);
-  document.body.getBoundingClientRect = () => rect({ left: 0, top: 0, width: 1200, height: 800 });
+interface Box {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
+
+/** jsdom measures everything as zero, and this component positions itself from
+ *  what it measures — so the two rectangles it reads are stated here. Mutable,
+ *  because the point of the re-clamp is what happens when they CHANGE: the pip
+ *  grows back out of its minimized height, a taller frame arrives, a panel takes
+ *  half the pane. */
+function stubRects(el: HTMLElement, box: Box, area: Box = { left: 0, top: 0, width: 1200, height: 800 }) {
+  const rect = (r: Box) =>
+    ({ ...r, right: r.left + r.width, bottom: r.top + r.height, x: r.left, y: r.top, toJSON: () => "" }) as DOMRect;
+  const state = { box, area };
+  el.getBoundingClientRect = () => rect(state.box);
+  document.body.getBoundingClientRect = () => rect(state.area);
+  return {
+    resizePip: (patch: Partial<Box>) => {
+      state.box = { ...state.box, ...patch };
+    },
+    resizePane: (patch: Partial<Box>) => {
+      state.area = { ...state.area, ...patch };
+    },
+  };
+}
+
+const at = (pip: HTMLElement) => ({ left: pip.style.left, top: pip.style.top });
 
 function pointer(el: HTMLElement | Window, type: "Down" | "Move" | "Up", x: number, y: number) {
   fireEvent[`pointer${type}` as "pointerDown"](el as HTMLElement, {
@@ -135,6 +156,145 @@ describe("AgentBrowserPip", () => {
     const pip = screen.getByLabelText("Second agent browser picture in picture");
     expect(pip.style.right).toBe("44px");
     expect(pip.style.bottom).toBe("44px");
+  });
+});
+
+describe("AgentBrowserPip staying inside the pane", () => {
+  const pip = () => screen.getByLabelText("Fix the form browser picture in picture");
+
+  function mount(props: Partial<React.ComponentProps<typeof AgentBrowserPip>> = {}) {
+    return render(
+      <AgentBrowserPip
+        tabId="preview-1"
+        url="http://localhost:5173/form"
+        agentId="opencode"
+        agentTitle="Fix the form"
+        supported={false}
+        onClose={() => {}}
+        {...props}
+      />,
+    );
+  }
+
+  it("pulls a minimized pip back inside when it is restored", () => {
+    mount();
+    const rects = stubRects(pip(), { left: 0, top: 0, width: 400, height: 260 });
+
+    act(() => void fireEvent.click(screen.getByLabelText("Minimize browser picture in picture")));
+    rects.resizePip({ height: 34 });
+
+    // Dragged to the very bottom while it is only a title bar tall.
+    act(() => {
+      pointer(pip().querySelector(".agent-browser-pip-head") as HTMLElement, "Down", 0, 0);
+      pointer(window, "Move", 0, 766);
+      pointer(window, "Up", 0, 766);
+    });
+    expect(pip().style.top).toBe("766px");
+
+    // Restoring makes it 260 tall again: at y=766 all but its header would be
+    // below the pane, and the header is the only way to drag it back.
+    rects.resizePip({ height: 260 });
+    act(() => void fireEvent.click(screen.getByLabelText("Restore browser picture in picture")));
+    expect(pip().style.top).toBe("540px");
+  });
+
+  it("pulls a pip back in when the pane gets smaller", () => {
+    mount();
+    const rects = stubRects(pip(), { left: 0, top: 0, width: 400, height: 260 });
+    act(() => {
+      pointer(pip().querySelector(".agent-browser-pip-head") as HTMLElement, "Down", 0, 0);
+      pointer(window, "Move", 800, 540);
+      pointer(window, "Up", 800, 540);
+    });
+    expect(at(pip())).toEqual({ left: "800px", top: "540px" });
+
+    // A panel opens and the pane loses a third of its width and some height.
+    rects.resizePane({ width: 900, height: 600 });
+    act(() => void fireEvent(window, new Event("resize")));
+    expect(at(pip())).toEqual({ left: "500px", top: "340px" });
+  });
+
+  it("pulls a pip back in when a taller frame arrives", async () => {
+    mockCommands({ browser_snapshot: { image: "cG5n", width: 400, height: 1200 } });
+    mount({ supported: true });
+    const rects = stubRects(pip(), { left: 0, top: 0, width: 400, height: 260 });
+    act(() => {
+      pointer(pip().querySelector(".agent-browser-pip-head") as HTMLElement, "Down", 0, 0);
+      pointer(window, "Move", 0, 540);
+      pointer(window, "Up", 0, 540);
+    });
+    expect(pip().style.top).toBe("540px");
+
+    // The first frame is 1:3, so the pip becomes three times as tall as it is
+    // wide — 1200 in a pane only 800 high.
+    rects.resizePip({ height: 1200 });
+    await screen.findByAltText("Live read-only view of localhost:5173");
+    expect(pip().style.top).toBe("0px");
+  });
+
+  it("keeps where it was put when its own tab comes to the front and goes away again", () => {
+    const { rerender } = mount();
+    const rects = stubRects(pip(), { left: 0, top: 0, width: 400, height: 260 });
+    act(() => {
+      pointer(pip().querySelector(".agent-browser-pip-head") as HTMLElement, "Down", 0, 0);
+      pointer(window, "Move", 120, 90);
+      pointer(window, "Up", 120, 90);
+    });
+    act(() => {
+      pointer(pip().querySelector(".agent-browser-pip-resize") as HTMLElement, "Down", 0, 0);
+      pointer(window, "Move", -160, 0);
+      pointer(window, "Up", -160, 0);
+    });
+    act(() => void fireEvent.click(screen.getByLabelText("Minimize browser picture in picture")));
+    const placed = { ...at(pip()), width: pip().style.width };
+    expect(placed.width).toBe("560px");
+
+    const props = {
+      tabId: "preview-1",
+      url: "http://localhost:5173/form",
+      agentId: "opencode",
+      agentTitle: "Fix the form",
+      supported: false,
+      onClose: () => {},
+    };
+    // The user opens the full preview: the pip is suppressed, not thrown away.
+    rerender(<AgentBrowserPip {...props} hidden />);
+    expect(pip().style.display).toBe("none");
+    rects.resizePip({ height: 34 });
+    rerender(<AgentBrowserPip {...props} />);
+
+    expect({ ...at(pip()), width: pip().style.width }).toEqual(placed);
+    expect(screen.getByLabelText("Restore browser picture in picture")).toBeInTheDocument();
+  });
+
+  it("does not stream while hidden", async () => {
+    let shots = 0;
+    mockCommands({
+      browser_snapshot: () => {
+        shots++;
+        return { image: "cG5n", width: 1200, height: 800 };
+      },
+    });
+    const { rerender } = mount({ supported: true, hidden: true });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(shots).toBe(0);
+
+    // The counter has to be able to move, or this proves nothing: showing it
+    // again starts the frames.
+    rerender(
+      <AgentBrowserPip
+        tabId="preview-1"
+        url="http://localhost:5173/form"
+        agentId="opencode"
+        agentTitle="Fix the form"
+        supported
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByAltText("Live read-only view of localhost:5173");
+    expect(shots).toBeGreaterThan(0);
   });
 });
 

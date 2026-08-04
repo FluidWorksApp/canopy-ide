@@ -510,26 +510,48 @@ export function deviceLabel(serial: string): string {
 
 /** Which preview tab an agent's browser op acts on.
  *
- *  The rule that matters is the pool, not the ordering: a session may reuse a
- *  tab it already owns, or one nobody has claimed — never another session's.
- *  Picking purely by origin put two agents on ONE native webview, where each
- *  navigation moved the page out from under the other and only one picture in
- *  picture existed to show for it. A tab IS a browser session, so two agents
- *  need two.
+ *  Two rules, and the pool is the one that matters. A session may reuse a tab it
+ *  already owns, or one nobody has claimed — never another session's. Picking
+ *  purely by origin put two agents on ONE native webview, where each navigation
+ *  moved the page out from under the other and only one picture in picture
+ *  existed to show for it. A tab IS a browser session, so two agents need two.
  *
- *  Own tabs come first and, when there are any, are the whole pool: an agent
- *  that already has a page keeps it rather than taking over the user's. With no
- *  ptyId — a call with no session behind it — there is nothing to keep apart and
- *  every preview is a candidate.
+ *  The second rule is which of a session's OWN tabs. An agent that calls
+ *  open_preview twice owns two, and "the first one that has a URL" is the wrong
+ *  answer: its pip follows the page it just opened, so a later snapshot or click
+ *  would act on the tab it had left while the user watched the other one.
  *
- *  Returning undefined is a real answer: it means this session has no page of
- *  its own and none is free, and the caller opens one (or, for an op that isn't
- *  a navigation, says so rather than acting on someone else's page). */
+ *  So the session's CURRENT tab wins — `currentTabId`, which is the tab its pip
+ *  is pointed at, because the caller sets both from this function's own answer.
+ *  That is what keeps the two from ever naming different pages, and it is not
+ *  the same as newest: an agent that navigates back to the first page it opened
+ *  is on that page afterwards, and creation order would still say the second.
+ *  Recency is only the fallback, for a session whose current tab was closed or
+ *  which has not driven one yet. An explicit origin still redirects a
+ *  navigation to a page the session already has open, unless the current tab is
+ *  already on that origin — two tabs on one dev server are told apart by which
+ *  one the session is on, since the origin cannot tell them apart at all.
+ *
+ *  Owned tabs are the whole pool when there are any: an agent that has a page
+ *  keeps it rather than taking over the user's. With no ptyId — a call with no
+ *  session behind it — there is nothing to keep apart, every preview is a
+ *  candidate, and the tab in front is the sensible default.
+ *
+ *  Returning undefined is a real answer: this session has no page of its own and
+ *  none is free, so the caller opens one (or, for an op that isn't a navigation,
+ *  says so rather than acting on someone else's page). */
 export function pickBrowserTab<
   T extends { id: string; url: string; initiatorPtyId?: number | null },
 >(
   previews: T[],
-  op: { url?: string | null; ptyId?: number | null; navigating: boolean },
+  op: {
+    url?: string | null;
+    ptyId?: number | null;
+    navigating: boolean;
+    /** The tab this session is on — where its pip points. Ignored when it names
+     *  a tab that is gone or was never this session's. */
+    currentTabId?: string | null;
+  },
   activeTabId: string | null,
 ): T | undefined {
   const origin = (u: string): string | null => {
@@ -539,20 +561,34 @@ export function pickBrowserTab<
       return null;
     }
   };
-  const mine =
-    op.ptyId == null ? [] : previews.filter((t) => t.initiatorPtyId === op.ptyId);
-  const pool =
-    op.ptyId == null
-      ? previews
-      : mine.length
-        ? mine
-        : previews.filter((t) => t.initiatorPtyId == null);
   const wantOrigin = op.url ? origin(op.url) : null;
+  const byOrigin = (pool: T[]) =>
+    wantOrigin ? pool.find((t) => origin(t.url) === wantOrigin) : undefined;
+
+  // Newest first, so the fallbacks below prefer the last tab the session opened.
+  const mine =
+    op.ptyId == null
+      ? []
+      : previews.filter((t) => t.initiatorPtyId === op.ptyId).reverse();
+  if (mine.length) {
+    const current = mine.find((t) => t.id === op.currentTabId);
+    // The page it is on already satisfies the request — nothing to redirect.
+    if (current && (!wantOrigin || origin(current.url) === wantOrigin)) return current;
+    return (
+      byOrigin(mine) ??
+      current ??
+      mine.find((t) => !!t.url) ??
+      // A URL navigation can take over an empty (server-picker) preview tab.
+      (op.navigating ? mine[0] : undefined)
+    );
+  }
+
+  const pool =
+    op.ptyId == null ? previews : previews.filter((t) => t.initiatorPtyId == null);
   return (
-    (wantOrigin ? pool.find((t) => origin(t.url) === wantOrigin) : undefined) ??
+    byOrigin(pool) ??
     pool.find((t) => t.id === activeTabId && t.url) ??
     pool.find((t) => !!t.url) ??
-    // A URL navigation can take over an empty (server-picker) preview tab.
     (op.navigating ? pool[0] : undefined)
   );
 }

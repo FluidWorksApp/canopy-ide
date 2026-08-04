@@ -5,7 +5,7 @@
 // One of these per agent, never one shared between them: the tab is the agent's
 // browser session, and a second agent's page is a different page. See the pip
 // routing in ProjectView for how a session gets a tab of its own.
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { AgentIcon, CloseIcon, GlobeIcon } from "./icons";
 
@@ -31,6 +31,16 @@ interface AgentBrowserPipProps {
   /** Which pip this is among the ones on screen, for the dealt-out default
    *  position. Ignored once the user has dragged it somewhere. */
   slot?: number;
+  /** Its own tab is in front, so the full browser is already the live view and
+   *  this would only cover the corner of it.
+   *
+   *  Hidden rather than unmounted, and that is the whole point of the prop:
+   *  where the user dragged it, how wide they made it and whether they
+   *  minimized it live in here, so an unmount threw all three away and the pip
+   *  came back dealt to the default corner every time its tab was looked at.
+   *  Nothing streams while hidden — the cost of staying mounted is one idle
+   *  component, not a snapshot loop. */
+  hidden?: boolean;
   onClose: () => void;
 }
 
@@ -56,6 +66,7 @@ export function AgentBrowserPip({
   agentTitle,
   supported,
   slot = 0,
+  hidden = false,
   onClose,
 }: AgentBrowserPipProps) {
   const [frame, setFrame] = useState<string | null>(null);
@@ -72,7 +83,7 @@ export function AgentBrowserPip({
   widthRef.current = width;
 
   useEffect(() => {
-    if (!supported || minimized) return;
+    if (!supported || minimized || hidden) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -93,7 +104,7 @@ export function AgentBrowserPip({
       stopped = true;
       if (timer) clearTimeout(timer);
     };
-  }, [minimized, supported, tabId]);
+  }, [minimized, supported, tabId, hidden]);
 
   /** One pointer gesture on the window, so the pip keeps following the cursor
    *  after it leaves the small element the drag started on. */
@@ -125,12 +136,64 @@ export function AgentBrowserPip({
   /** Where the pip sits inside its pane right now, whether it is still on the
    *  dealt corner or has already been dragged. Measured rather than tracked,
    *  because the pane itself moves when a panel opens. */
-  const rects = () => {
+  const rects = useCallback(() => {
     const node = el.current;
     const box = node?.getBoundingClientRect();
     const area = (node?.offsetParent ?? document.body).getBoundingClientRect();
     return box ? { box, area } : null;
-  };
+  }, []);
+
+  /** Pull a dragged pip back inside the pane.
+   *
+   *  Clamping only while the pointer moves was not enough, because the pip
+   *  changes size without anyone dragging it: restoring it from minimized makes
+   *  it tall again, a frame with a new aspect ratio makes it taller, the resize
+   *  grip makes it wider, and opening a panel makes the pane itself narrower.
+   *  Each of those can push a pip that was against an edge out past it, where
+   *  the header — the only thing that can drag it back — is unreachable.
+   *
+   *  A no-op while it still sits on its dealt corner: `pos` is null then, and
+   *  the corner offsets keep it inside by construction. Returns the same object
+   *  when nothing moved, so an observer firing on every frame of a transition
+   *  doesn't re-render. */
+  const reclamp = useCallback(() => {
+    setPos((p) => {
+      if (!p) return p;
+      const at = rects();
+      if (!at) return p;
+      const next = clampPip(
+        p,
+        { width: at.box.width, height: at.box.height },
+        { width: at.area.width, height: at.area.height },
+      );
+      return next.x === p.x && next.y === p.y ? p : next;
+    });
+  }, [rects]);
+
+  // Its own size first — this runs after the DOM has the new box and before it
+  // is painted, so a restore never shows a frame of the pip hanging off the
+  // edge. `ratio` is in here because the frame drives the height.
+  useLayoutEffect(reclamp, [reclamp, width, minimized, ratio, hidden]);
+
+  // Then the pane's. ResizeObserver catches a panel opening or the window
+  // changing shape; the resize listener is the same answer for environments
+  // without one, and costs nothing when the pip has not been dragged.
+  useEffect(() => {
+    if (!pos) return;
+    window.addEventListener("resize", reclamp);
+    const node = el.current;
+    const parent = node?.offsetParent ?? null;
+    const ro =
+      typeof ResizeObserver !== "undefined" ? new ResizeObserver(reclamp) : null;
+    if (ro && node) ro.observe(node);
+    if (ro && parent) ro.observe(parent);
+    return () => {
+      window.removeEventListener("resize", reclamp);
+      ro?.disconnect();
+    };
+    // Only whether it is anchored matters — re-subscribing on every drag frame
+    // would tear down and rebuild the observer sixty times a second.
+  }, [pos !== null, reclamp]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const startDrag = (e: React.PointerEvent<HTMLElement>) => {
     // The header carries the close and minimize buttons; a click on one of them
@@ -181,7 +244,10 @@ export function AgentBrowserPip({
     <aside
       ref={el}
       className={`agent-browser-pip${minimized ? " minimized" : ""}`}
-      style={{ width, ...placement }}
+      style={{ width, ...placement, ...(hidden ? { display: "none" } : null) }}
+      // display:none takes it out of the accessibility tree and out of the
+      // browser-occlusion walk (browserHost measures rectangles, and it no
+      // longer has one) — which is what a pip over its own live view should do.
       aria-label={`${agentTitle} browser picture in picture`}
     >
       <header

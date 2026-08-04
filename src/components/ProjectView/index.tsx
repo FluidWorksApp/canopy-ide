@@ -552,7 +552,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // streaming a page it no longer looks at.
   const [browserPips, setBrowserPips] = useState<{ tabId: string; ptyId: number }[]>([]);
   const dismissedBrowserPips = useRef(new Set<string>());
+  /** Which preview tab each session is ON, which is not the same list as the
+   *  pips: closing a pip hides the view, it does not move the agent off the page
+   *  it was driving. Routing reads this and the pip is a view of it, so the two
+   *  can never name different pages — which is the whole point of recording it
+   *  rather than inferring "the newest tab it owns". A ref because the only
+   *  reader is an event handler. */
+  const sessionPreview = useRef(new Map<number, string>());
   const showBrowserPip = useCallback((tabId: string, ptyId: number) => {
+    sessionPreview.current.set(ptyId, tabId);
     if (dismissedBrowserPips.current.has(tabId)) return;
     setBrowserPips((prev) =>
       prev.some((p) => p.tabId === tabId && p.ptyId === ptyId)
@@ -617,20 +625,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, [sidePrefs.overlay, sideOpen]);
   const [tabs, setTabs] = useState<SubTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
-  /** The pips actually on screen, in a stable order — the layout deals each one
-   *  a different corner offset from its place in this list, so a pip must not
-   *  hop a slot because an unrelated one closed.
-   *
-   *  A pip whose tab is the one in front is dropped: the full browser IS the
-   *  live view there, and the small duplicate would only cover its corner. */
-  const shownBrowserPips = useMemo(
+  /** Every pip whose tab still exists — what gets RENDERED, including the one
+   *  whose tab is in front. That one is rendered hidden rather than dropped:
+   *  where the user dragged it, how wide they made it and whether it is
+   *  minimized live inside the component, and unmounting it threw all three
+   *  away every time they looked at the full page. */
+  const livePips = useMemo(
     () =>
-      browserPips.filter(
-        (p) =>
-          p.tabId !== activeTabId &&
-          tabs.some((t) => t.id === p.tabId && t.type === "preview"),
+      browserPips.filter((p) =>
+        tabs.some((t) => t.id === p.tabId && t.type === "preview"),
       ),
-    [browserPips, activeTabId, tabs],
+    [browserPips, tabs],
+  );
+  /** The ones actually on screen, in a stable order — the layout deals each a
+   *  different corner offset from its place in this list, so a pip must not hop
+   *  a slot because an unrelated one closed, and a hidden one must not hold a
+   *  slot open.
+   *
+   *  A pip whose tab is in front is not among them: the full browser IS the live
+   *  view there, and the small duplicate would only cover its corner. */
+  const shownBrowserPips = useMemo(
+    () => livePips.filter((p) => p.tabId !== activeTabId),
+    [livePips, activeTabId],
   );
   /** Briefly ringed after a jump — with several similar terminal tabs open,
    *  activating one is not enough to show WHICH one you landed on. */
@@ -4112,13 +4128,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const previews = tabsRef.current.filter(
         (t): t is PreviewSubTab => t.type === "preview",
       );
-      // Each session gets a page of its own — see pickBrowserTab for why.
+      // Each session gets a page of its own, and stays on the one it is on —
+      // see pickBrowserTab for why both halves matter.
       const tab = pickBrowserTab(
         previews,
         {
           url: op.url,
           ptyId: op.ptyId,
           navigating: op.op === "navigate" && !!op.url,
+          currentTabId:
+            op.ptyId == null ? null : sessionPreview.current.get(op.ptyId) ?? null,
         },
         activeTabIdRef.current,
       );
@@ -8463,12 +8482,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
             </div>
           </>
         )}
-        {shownBrowserPips.map(({ tabId, ptyId }, slot) => {
+        {livePips.map(({ tabId, ptyId }) => {
           const tab = tabs.find(
             (t): t is PreviewSubTab => t.type === "preview" && t.id === tabId,
           );
           if (!tab?.url) return null;
           const agent = agentTargets.find((a) => a.ptyId === ptyId);
+          // -1 for a hidden pip, which needs no slot; it keeps whatever
+          // placement the user gave it and is only waiting to come back.
+          const slot = shownBrowserPips.findIndex((p) => p.tabId === tab.id);
           return (
             <AgentBrowserPip
               key={tab.id}
@@ -8477,7 +8499,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
               agentId={agent?.agentId ?? "agent"}
               agentTitle={agent?.title || "Agent browser"}
               supported={browserEngine === "webview"}
-              slot={slot}
+              slot={Math.max(0, slot)}
+              hidden={slot < 0}
               onClose={() => {
                 dismissedBrowserPips.current.add(tab.id);
                 setBrowserPips((prev) => prev.filter((p) => p.tabId !== tab.id));
