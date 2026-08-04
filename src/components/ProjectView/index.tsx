@@ -158,6 +158,7 @@ import {
   adhocTaskDef,
   customTaskDef,
   implementResearchTask,
+  raiseResearchPrTask,
   microTaskProtocol,
   oneLine,
   progressBrief,
@@ -3175,6 +3176,36 @@ const ProjectViewBody = memo(function ProjectViewBody({
         await researchLinkEntry({ projectId: project.id, id: entry.id, branch });
       } catch (err) {
         onNotice(`Couldn't start implementation: ${String(err)}`, "error");
+      }
+    },
+    [roots, startMicroTask, project.id, onNotice],
+  );
+
+  const raiseResearchPr = useCallback(
+    async (entry: ipc.ResearchDetail) => {
+      const repo = roots[0];
+      if (!repo) return;
+      try {
+        const ok = await startMicroTask(
+          raiseResearchPrTask,
+          {
+            dir: repo,
+            repo,
+            entryId: entry.id,
+            title: entry.title,
+          },
+          "",
+        );
+        if (!ok) return;
+        await researchSetStatus(
+          project.id,
+          entry.id,
+          "implementing",
+          "you",
+          "raising a pull request for the recorded local implementation",
+        );
+      } catch (err) {
+        onNotice(`Couldn't raise pull request: ${String(err)}`, "error");
       }
     },
     [roots, startMicroTask, project.id, onNotice],
@@ -8390,6 +8421,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onSendImplement={(target, entry) =>
               sendTicketToAgent(target, implementContext(entry))
             }
+            onRaisePr={(entry) => void raiseResearchPr(entry)}
             // Continuing works on the same entry rather than opening a new
             // one — the point is to go further on this question, not to ask it
             // again — so the steer is passed through as the run's user context.

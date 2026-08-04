@@ -20309,6 +20309,10 @@ a.btn-sm {
   text-decoration: underline;
 }
 
+.research-raise-pr {
+  margin-left: 8px;
+}
+
 .research-source-meta {
   margin-left: 8px;
   font-size: 11px;

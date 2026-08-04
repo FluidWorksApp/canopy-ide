@@ -18,6 +18,7 @@ import {
   prReviewTask,
   progressBrief,
   raisePrTask,
+  raiseResearchPrTask,
   resolveConflictsTask,
   reviewPrTask,
   runItReviewTask,
@@ -95,6 +96,25 @@ describe("raisePrTask.buildContext", () => {
     expect(raisePrTask.cwd(payload({ worktree: "/repo-wt-x" }))).toBe(
       "/repo-wt-x",
     );
+  });
+});
+
+describe("raiseResearchPrTask.buildContext", () => {
+  const research = {
+    dir: "/repo",
+    repo: "/repo",
+    entryId: "0007-elevenlabs",
+    title: "ElevenLabs voice workflow",
+  };
+
+  it("recovers the local commit without editing and links the resulting PR", () => {
+    const ctx = raiseResearchPrTask.buildContext(research, "");
+    expect(ctx).toContain('canopy_research with action "get"');
+    expect(ctx).toContain("local commit");
+    expect(ctx).toContain("Do not edit files");
+    expect(ctx).toContain("do not invent verification");
+    expect(ctx).toContain('canopy_research_write with action "link"');
+    expect(ctx).toContain("canopy_job_done");
   });
 });
 
@@ -233,6 +253,7 @@ describe("MICRO_TASKS", () => {
       "note",
       "research",
       "implement-research",
+      "raise-research-pr",
       "raise-pr",
       "review-pr",
       "address-pr-comments",
@@ -263,11 +284,11 @@ describe("MICRO_TASKS", () => {
   });
 
   it("does not call a task that pushes a task that only reads", () => {
-    // The grouping is a promise about consequence; these are the three that
-    // change the branch, and the isolation flag is the independent evidence.
+    // The grouping is a promise about consequence: these tasks push a branch.
     const pushes = MICRO_TASKS.filter((t) => t.effect === "pushes").map((t) => t.id);
     expect(pushes).toEqual([
       "implement-research",
+      "raise-research-pr",
       "address-pr-comments",
       "pr-resolve-conflicts",
       "pr-fix-ci",
@@ -276,7 +297,12 @@ describe("MICRO_TASKS", () => {
     // what there is to start from — a PR's head for work that already has one,
     // a fresh branch for work that does not (implementing research) — but
     // "edits code in the shared checkout" is not on the menu either way.
-    for (const t of MICRO_TASKS.filter((x) => x.effect === "pushes"))
+    // The research PR task only publishes an existing commit and explicitly
+    // forbids edits and checkout changes, so it can safely inspect the shared
+    // checkout. Every task that edits gets an isolated worktree.
+    for (const t of MICRO_TASKS.filter(
+      (x) => x.effect === "pushes" && x.id !== "raise-research-pr",
+    ))
       expect(
         t.isolation?.kind,
         `${t.id} edits code, so it needs its own worktree`,
