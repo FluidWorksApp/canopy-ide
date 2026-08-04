@@ -160,6 +160,20 @@ describe("PaneBar tab rename", () => {
   });
 });
 
+describe("multiplexed terminal tab", () => {
+  it("shows one group title, split glyph, and pane count", () => {
+    const tab = {
+      ...term("t1", "claude"),
+      multiplexTitle: "Fix auth +2",
+      multiplexCount: 3,
+    };
+    render(paneBar({ tabGroups: [run("all", [tab])] }));
+    expect(screen.getByText("Fix auth +2")).toHaveClass("tab-title");
+    expect(screen.getByTitle("3 panes")).toHaveTextContent("3");
+    expect(document.querySelector(".tab-multiplex-icon")).not.toBeNull();
+  });
+});
+
 // The strip's runs live here but their state lives in ProjectView; these are
 // about the wiring between the two, which is what the ProjectView/ split moved.
 const stack = (over: Partial<StripGroup>): StripGroup => ({

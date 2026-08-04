@@ -142,6 +142,39 @@ describe("buildSnapshot", () => {
     expect(snap.activeIndex).toBeNull();
     expect(snap.worktree).toEqual({ repo: "/repo", path: "/repo-wt-fix", branch: "fix" });
   });
+
+  it("keeps pane membership and split layout for wake", () => {
+    const terminalGroups = {
+      g1: {
+        id: "g1",
+        activeTabId: "b",
+        root: {
+          type: "split" as const,
+          id: "s1",
+          axis: "horizontal" as const,
+          ratio: 0.4,
+          first: { type: "leaf" as const, tabId: "a" },
+          second: { type: "leaf" as const, tabId: "b" },
+        },
+      },
+    };
+    const snap = buildSnapshot({
+      tabs: [
+        term({ id: "a", paneGroup: "g1" }),
+        term({ id: "b", paneGroup: "g1" }),
+      ],
+      activeTabId: "b",
+      sideTab: "agents",
+      sidePinned: false,
+      worktree: null,
+      terminalGroups,
+    });
+    expect(snap.tabs).toMatchObject([
+      { kind: "terminal", tabId: "a", paneGroup: "g1" },
+      { kind: "terminal", tabId: "b", paneGroup: "g1" },
+    ]);
+    expect(snap.terminalGroups).toEqual(terminalGroups);
+  });
 });
 
 describe("terminalLaunch", () => {

@@ -173,7 +173,7 @@ mod tests {
     /// The bug this module exists to prevent: off a Mac, `Control+CmdOrCtrl`
     /// collapses to plain Ctrl, which is word-jump in every text field.
     #[test]
-    fn tab_and_project_navigation_differ_off_mac() {
+    fn tabs_keep_their_keys_and_project_arrows_are_unbound() {
         assert_eq!(
             accelerator_for("next-tab", "windows", "canopy").as_deref(),
             Some("CmdOrCtrl+PageDown")
@@ -183,8 +183,8 @@ mod tests {
             Some("CmdOrCtrl+PageUp")
         );
         assert_eq!(
-            accelerator_for("next-project", "windows", "canopy").as_deref(),
-            Some("CmdOrCtrl+Alt+PageDown")
+            accelerator_for("next-project", "windows", "canopy"),
+            None
         );
     }
 
@@ -204,10 +204,14 @@ mod tests {
         for profile in manifest().profiles.keys() {
             for id in crate::MENU_SHORTCUT_IDS {
                 for platform in ["macos", "windows", "linux"] {
-                    assert!(
-                        accelerator_for(id, platform, profile).is_some(),
-                        "{id} has no accelerator on {platform} in {profile}"
-                    );
+                    if matches!(*id, "next-project" | "prev-project") {
+                        assert!(accelerator_for(id, platform, profile).is_none());
+                    } else {
+                        assert!(
+                            accelerator_for(id, platform, profile).is_some(),
+                            "{id} has no accelerator on {platform} in {profile}"
+                        );
+                    }
                 }
             }
         }
