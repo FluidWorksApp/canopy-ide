@@ -52,6 +52,13 @@ export function revealScroll(
   return null;
 }
 
+/** Realign a sticky section before opening its hidden tabs. Once a chip is
+ * pinned, its painted position no longer says where the section starts; tabs
+ * restored at that natural start would otherwise appear underneath the chip. */
+export function expandedStackScroll(scrollLeft: number, groupLeft: number): number | null {
+  return scrollLeft > groupLeft ? groupLeft : null;
+}
+
 /** Attribute a run element carries so the strip can be measured by run. */
 export const GROUP_ATTR = "data-group-key";
 /** Zero-width marker at a section's natural start. */

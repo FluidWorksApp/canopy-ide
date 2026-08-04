@@ -68,7 +68,7 @@ import { DIGEST_FALLBACK_MS, subscribeSessionDigests } from "../../sessionDigest
  *  different questions ("is anything running" and "is this runaway") that had
  *  drifted into sharing a threshold. */
 const QUIET_CPU = POLICY.quietCpuPercent;
-import { contentLeft, revealScroll } from "../../tabSticky";
+import { contentLeft, expandedStackScroll, GROUP_ATTR, revealScroll } from "../../tabSticky";
 import { clearActiveTab, setActiveTab } from "../../activeView";
 import { useFlipStrip } from "../../tabFlip";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
@@ -7004,12 +7004,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Absent means open: only the fold you have actually asked for is stored, so
   // a stack that appears for the first time (a kind of document you just
   // opened) arrives open rather than guessing.
+  const stripRef = useRef<HTMLDivElement | null>(null);
   const [openStacks, setOpenStacks] = useState<Record<string, boolean>>({
     quiet: false,
   });
   const toggleStack = useCallback(
-    (key: string) => setOpenStacks((p) => ({ ...p, [key]: p[key] === false })),
-    [],
+    (key: string) => {
+      const opening = openStacks[key] === false;
+      setOpenStacks((p) => ({ ...p, [key]: p[key] === false }));
+      if (!opening) return;
+
+      // A sticky chip can be painted at the left edge while its section's real
+      // start is already behind the scrollport. Opening it restores the tabs at
+      // that real position, underneath the chip. Put the section back at its
+      // start once React has laid the tabs out so the first one opens beside the
+      // chip instead of behind it.
+      requestAnimationFrame(() => {
+        const root = stripRef.current;
+        const group = root?.querySelector<HTMLElement>(`[${GROUP_ATTR}="${key}"]`);
+        if (!root || !group) return;
+        const left = contentLeft(root, group);
+        const next = expandedStackScroll(root.scrollLeft, left);
+        if (next != null) root.scrollLeft = next;
+      });
+    },
+    [openStacks],
   );
   // A tab that starts wanting you is never left folded away: arriving in Needs
   // you pops that stack open, whatever state you last left it in. Fold it again
@@ -7100,7 +7119,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const activeGroupKey = activeVisualTabId ? groupOf(activeVisualTabId) : null;
   // …and slide it there rather than cutting, so the move is something you can
   // follow with your eyes instead of a tab teleporting mid-glance.
-  const stripRef = useRef<HTMLDivElement | null>(null);
   useFlipStrip(stripRef);
   // Whether the pointer is in the strip — one of the two holds on regrouping
   // (see the settler above). Listeners on the element rather than props on the
