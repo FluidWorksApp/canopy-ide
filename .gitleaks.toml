@@ -1,0 +1,22 @@
+title = "Canopy Gitleaks Config"
+
+# Keep the upstream ruleset so newly supported credential formats are picked up
+# when the pinned Gitleaks version is updated.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated and local-only paths"
+paths = [
+    '''^\.canopy/''',
+    '''^\.design-sync/''',
+    '''^\.ds-sync/''',
+    '''^\.wiki-dist/''',
+    '''^coverage/''',
+    '''^dist/''',
+    '''^ds-bundle/''',
+    '''^node_modules/''',
+    '''^portal/dist/''',
+    '''^src-tauri/binaries/''',
+    '''^src-tauri/target/''',
+]
