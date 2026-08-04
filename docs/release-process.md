@@ -49,6 +49,37 @@ Before starting:
 6. Ensure the main worktree is clean.
 7. Prepare user-facing release notes for the draft review.
 
+### Feature freeze and release cut
+
+A release cut is not a feature branch. By the time `release/vX.Y.Z` is created,
+all intended feature and fix PRs should already be merged into `main`. The
+release branch contains only synchronized version and lockfile changes.
+
+```mermaid
+flowchart TD
+  Features[Feature and fix PRs]
+  Main[Green main]
+  Freeze[Choose release contents]
+  Cut[Cut release/vX.Y.Z]
+  Bump[Version-only PR]
+  Blocker{Late blocker found?}
+  Fix[Land focused fix PR into main]
+  Refresh[Update or recreate release bump from current main]
+  Merge[Merge release PR]
+
+  Features --> Main --> Freeze --> Cut --> Bump --> Blocker
+  Blocker -- no --> Merge
+  Blocker -- yes --> Fix --> Refresh --> Bump
+```
+
+- New features discovered after the cut wait for the next release.
+- A release-blocking fix lands through its own normal `fix/...` PR to `main`.
+- After a late fix merges, update the release branch from `main` while preserving
+  a version-only diff, or close and recreate the release branch if that is
+  clearer. Never hide a product fix inside the version-bump commit.
+- Do not tag until the release PR includes the intended final `main` state and
+  has merged.
+
 Canopy is pre-1.0, but release numbers still communicate scope:
 
 - patch: fixes and compatible refinements;

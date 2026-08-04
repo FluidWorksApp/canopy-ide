@@ -92,6 +92,12 @@ The complete test-layer, CI, and coverage model is in
 Before opening or reviewing a change, read
 [Pull Request Etiquette](./docs/pull-request-etiquette.md).
 
+Branches are short-lived and cut from current `main`: `feat/<name>`,
+`fix/<name>`, `docs/<name>`, `test/<name>`, `perf/<name>`,
+`refactor/<name>`, or `chore/<name>`. Pull request titles state the outcome in
+imperative sentence case. Release cuts are the exception:
+`release/vX.Y.Z` with title `Release vX.Y.Z`.
+
 ## Hook into existing infrastructure
 
 Canopy has explicit integration points rather than a general plugin host. Before

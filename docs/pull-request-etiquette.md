@@ -48,6 +48,29 @@ chore/update-notices
 release/v0.4.0
 ```
 
+### Naming convention
+
+| Change | Branch | Pull request title |
+|---|---|---|
+| User-facing capability | `feat/<short-kebab-name>` | Imperative outcome, for example `Add project-scoped search filters` |
+| Bug fix | `fix/<short-kebab-name>` | Name the corrected behavior, for example `Keep claims inside the active project` |
+| Documentation | `docs/<short-kebab-name>` | Name the documentation outcome, for example `Document the Remote trust boundary` |
+| Tests only | `test/<short-kebab-name>` | Name the protected behavior, for example `Cover relay reconnect replay` |
+| Performance | `perf/<short-kebab-name>` | Name the measurable improvement, for example `Stop polling inactive project stats` |
+| Refactor | `refactor/<short-kebab-name>` | Name the boundary being simplified without claiming new behavior |
+| Maintenance | `chore/<short-kebab-name>` | Name the repository maintenance outcome |
+| Release cut | `release/vX.Y.Z` | Exactly `Release vX.Y.Z` |
+
+Branch names are lowercase kebab-case, concise, and free of contributor names or
+machine-specific terms. Add an issue number only when it improves recognition,
+for example `fix/412-preview-resize`.
+
+Pull request titles are sentence case, imperative, and describe the result a
+reviewer will evaluate. Do not use only an issue number, branch name, agent task
+name, “WIP,” or “misc fixes.” A Conventional Commit prefix is optional; clarity
+is required. Release PR naming is fixed because automation and maintainers need
+to recognize the cut immediately.
+
 A pull request should represent one reviewable outcome. It may cross React,
 Rust, shared contracts, tests, and docs when one behavior requires all of them;
 “focused” does not mean “one file.” It means every changed file serves the same
@@ -61,6 +84,39 @@ Avoid:
 - copied implementations beside an existing registry, adapter, or bus;
 - secrets, personal tokens, local paths, or private data;
 - changes from another contributor's worktree or agent session.
+
+### Feature cut lifecycle
+
+Canopy uses short-lived branches from `main`; there is no long-lived `develop`
+branch.
+
+```mermaid
+flowchart LR
+  Main[Pull current origin/main]
+  Cut[Create feat/fix/docs branch]
+  Work[Test-first implementation]
+  Draft[Push and open draft PR when useful]
+  Ready[Mark ready with description and evidence]
+  Review[CI and review]
+  Merge[Merge to main]
+  Delete[Branch deleted automatically]
+
+  Main --> Cut --> Work --> Draft --> Ready --> Review --> Merge --> Delete
+```
+
+Rules:
+
+1. Cut every feature, fix, or documentation branch from current `origin/main`.
+2. Do not stack unrelated work on another feature branch.
+3. If one change truly depends on an unmerged PR, state the dependency and base
+   the temporary PR correctly; rebase or retarget it to `main` after the
+   dependency merges.
+4. Pull current `main` before final review and resolve conflicts without dropping
+   upstream work.
+5. Merge through GitHub after CI and review; do not push directly to protected
+   `main`.
+6. Let GitHub delete the merged branch. Cut follow-up work from `main`, not from
+   the deleted branch.
 
 ## 3. Build test-first
 
