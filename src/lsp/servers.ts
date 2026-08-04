@@ -157,6 +157,14 @@ export async function resolveTypescriptLaunch(
   }
   const native = await resolveNativeTsc(root, exists);
   if (native) return { command: native, args: ["--lsp", "--stdio"] };
+  // pnpm keeps the platform package beside `typescript` in its virtual store,
+  // so it is intentionally not visible at root/node_modules/@typescript. The
+  // package's portable launcher resolves that nested binary correctly. Run it
+  // through Node rather than relying on shebang handling on every platform.
+  const launcher = `${root}/node_modules/typescript/bin/tsc`;
+  if (await exists(launcher)) {
+    return { command: "node", args: [launcher, "--lsp", "--stdio"] };
+  }
   return {
     command: wrapperCommand,
     args: spec.args,
