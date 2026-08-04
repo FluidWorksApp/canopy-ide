@@ -22,6 +22,20 @@ export interface PipPos {
   y: number;
 }
 
+export function pipOwnerVisible(
+  ptyId: number,
+  terminals: { id: string; ptyId: number | null; paneGroup?: string }[],
+  activeTabId: string | null,
+): boolean {
+  const owner = terminals.find((tab) => tab.ptyId === ptyId);
+  const active = terminals.find((tab) => tab.id === activeTabId);
+  if (!owner || !active) return false;
+  return (
+    owner.id === active.id ||
+    (owner.paneGroup != null && owner.paneGroup === active.paneGroup)
+  );
+}
+
 interface AgentBrowserPipProps {
   tabId: string;
   url: string;

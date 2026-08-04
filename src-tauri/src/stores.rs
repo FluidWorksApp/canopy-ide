@@ -693,7 +693,7 @@ fn agy_sessions(path: &Path) -> Vec<StoreSession> {
         if let Ok(rows) = stmt.query_map([], |r| r.get::<_, Option<Vec<u8>>>(0)) {
             for blob in rows.flatten().flatten() {
                 for run in printable_runs(&blob, 24) {
-                    if is_injected(&run) {
+                    if is_injected(&run) || is_session_metadata(&run) {
                         continue;
                     }
                     if s.title.is_empty() {
@@ -708,6 +708,14 @@ fn agy_sessions(path: &Path) -> Vec<StoreSession> {
         return Vec::new();
     }
     vec![s]
+}
+
+/// Protobuf payloads carry conversation/request identifiers before the human
+/// text. They are metadata, not useful resume labels or searchable bodies.
+fn is_session_metadata(text: &str) -> bool {
+    let text = text.trim();
+    let candidate = text.strip_prefix("b$").unwrap_or(text);
+    candidate.len() >= 32 && candidate.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
 /// The first `file:///…` path in a blob, as a plain path.
@@ -1003,6 +1011,28 @@ mod tests {
         blob.extend_from_slice(b"short");
         let runs = printable_runs(&blob, 24);
         assert_eq!(runs, vec!["Fix the mascot on the dashboard page"]);
+    }
+
+    #[test]
+    fn antigravity_skips_session_ids_before_the_human_prompt() {
+        let mut blob = vec![0x0a, 0x0c, 0x08, 0x01];
+        blob.extend_from_slice(b"b$6efcb96f-17e0-4c5d-917c-0195bf64cbe1");
+        blob.extend_from_slice(&[0x12, 0x02]);
+        blob.extend_from_slice(b"Run the website and browse all pages");
+        let runs: Vec<_> = printable_runs(&blob, 24)
+            .into_iter()
+            .filter(|run| !is_session_metadata(run))
+            .collect();
+        assert_eq!(runs, vec!["Run the website and browse all pages"]);
+    }
+
+    #[test]
+    fn antigravity_metadata_filter_keeps_human_content() {
+        assert!(is_session_metadata("06a16320-640a-4fa2-affc-8cb30dcd8300"));
+        assert!(is_session_metadata(
+            "b$6efcb96f-17e0-4c5d-917c-0195bf64cbe1"
+        ));
+        assert!(!is_session_metadata("Fix the mascot on the dashboard page"));
     }
 
     #[test]

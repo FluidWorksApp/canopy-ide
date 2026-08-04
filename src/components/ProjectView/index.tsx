@@ -22,6 +22,7 @@ import {
   layoutSplit,
   leafIds,
   mapSplitTabIds,
+  remapTerminalGroups,
   neighborPane,
   removeLeaf,
   splitLeaf,
@@ -284,7 +285,7 @@ import { CommitView } from "../CommitView";
 import { ReviewView, type ReviewPayload } from "../ReviewView";
 import { BranchView } from "../BranchView";
 import { AgentWorkspaceView } from "../AgentWorkspaceView";
-import { AgentBrowserPip } from "../AgentBrowserPip";
+import { AgentBrowserPip, pipOwnerVisible } from "../AgentBrowserPip";
 import { BROWSER_INPUT_EVENT, PreviewView } from "../PreviewView";
 import DeviceView from "../DeviceView";
 import type { PreviewServer } from "../../preview";
@@ -321,7 +322,10 @@ import {
   forgetTerminals,
   rememberTerminals,
   rememberedTerminalState,
+  terminalResumeCards,
   type RememberedTerminal,
+  type TerminalResumeCard,
+  type TerminalResumeLeaf,
 } from "../../terminalMemory";
 import { PrView } from "../PrView";
 import { ErrorBoundary } from "../ErrorBoundary";
@@ -661,8 +665,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  A pip whose tab is in front is not among them: the full browser IS the live
    *  view there, and the small duplicate would only cover its corner. */
   const shownBrowserPips = useMemo(
-    () => livePips.filter((p) => p.tabId !== activeTabId),
-    [livePips, activeTabId],
+    () => {
+      const terminals = tabs.filter(
+        (tab): tab is TermSubTab => tab.type === "terminal",
+      );
+      return livePips.filter(
+        (pip) =>
+          pip.tabId !== activeTabId &&
+          pipOwnerVisible(pip.ptyId, terminals, activeTabId),
+      );
+    },
+    [livePips, activeTabId, tabs],
   );
   const [terminalGroups, setTerminalGroups] = useState<Record<string, TerminalGroup>>({});
   const terminalGroupsRef = useRef(terminalGroups);
@@ -1329,6 +1342,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       title: string,
       icon = "📱",
       activate = true,
+      killOnClose = false,
     ): string => {
       const existing = tabsRef.current.find(
         (t): t is TermSubTab => t.type === "terminal" && t.attachId === ptyId,
@@ -1347,6 +1361,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           title: title || "agent",
           ptyId,
           attachId: ptyId,
+          killAttachedOnClose: killOnClose || undefined,
           icon,
         },
       ]);
@@ -1965,9 +1980,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         run: t.run,
         tabId: t.id,
         paneGroup: t.paneGroup,
+        sessionId:
+          (t.ptyId != null ? liveSessionByPtyRef.current.get(t.ptyId) : undefined) ??
+          resumeSessionId(t.command) ??
+          undefined,
+        profile: t.profile,
       }));
     rememberTerminals(project.id, open, terminalGroups);
-  }, [tabs, terminalGroups, project.id]);
+  }, [tabs, terminalGroups, project.id, events]);
 
   const [remembered, setRemembered] = useState<RememberedTerminal[]>([]);
   const [rememberedLayouts, setRememberedLayouts] = useState<
@@ -1975,7 +1995,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
   >({});
   useEffect(() => {
     if (tabs.length > 0 || !visible) return;
-    reopenedRememberedIds.current.clear();
     const memory = rememberedTerminalState(project.id);
     // The command marker drops micro-tasks snapshotted before they were
     // excluded above — they'd otherwise sit in the list until overwritten.
@@ -1987,60 +2006,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setRememberedLayouts(memory.terminalGroups);
   }, [tabs.length, visible, project.id]);
 
-  // A terminal running `claude` or `omp` is an agent, not a shell — listing it
-  // under "Terminals" was accurate about the mechanism and wrong about the
-  // thing. Split by what the command actually starts.
-  const rememberedAgents = remembered.filter((t) =>
-    agentIdForCommand(t.command),
-  );
-  const rememberedShells = remembered.filter(
-    (t) => !agentIdForCommand(t.command),
-  );
-  // An agent terminal whose directory already has a restorable session is
-  // redundant — that row restores the same work WITH its history, so offering
-  // "start it fresh" beside it is just a worse duplicate.
-  const freshAgents = rememberedAgents.filter(
-    (t) => !restorable.some((r) => r.cwd === t.cwd),
-  );
-
-  const reopenedRememberedIds = useRef(new Map<string, string>());
-  const registerRememberedPane = useCallback(
-    (terminal: RememberedTerminal, newTabId: string) => {
-      if (!terminal.tabId || !terminal.paneGroup) return;
-      reopenedRememberedIds.current.set(terminal.tabId, newTabId);
-      const rememberedGroup = rememberedLayouts[terminal.paneGroup];
-      if (!rememberedGroup) return;
-      const root = mapSplitTabIds(rememberedGroup.root, reopenedRememberedIds.current);
-      const leaves = root ? leafIds(root) : [];
-      if (!root || leaves.length < 2) return;
-      const group: TerminalGroup = {
-        ...rememberedGroup,
-        root,
-        activeTabId:
-          reopenedRememberedIds.current.get(rememberedGroup.activeTabId) ??
-          leaves[0],
-        zoomedTabId: rememberedGroup.zoomedTabId
-          ? reopenedRememberedIds.current.get(rememberedGroup.zoomedTabId)
-          : undefined,
-      };
-      setTabs((prev) =>
-        prev.map((tab) =>
-          tab.type === "terminal" && leaves.includes(tab.id)
-            ? { ...tab, paneGroup: group.id }
-            : tab,
-        ),
-      );
-      setTerminalGroups((prev) => {
-        const next = { ...prev, [group.id]: group };
-        terminalGroupsRef.current = next;
-        return next;
-      });
-    },
-    [rememberedLayouts],
+  const resumeCards = useMemo(
+    () => terminalResumeCards(remembered, rememberedLayouts, restorable),
+    [remembered, rememberedLayouts, restorable],
   );
 
   const reopenTerminal = useCallback(
-    (t: RememberedTerminal) => {
+    (t: RememberedTerminal, activate = true) => {
       const id = addTerminal(
         t.cwd,
         t.command,
@@ -2049,17 +2021,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
         t.run,
         undefined,
         undefined,
-        true,
-        t.paneGroup,
+        activate,
       );
-      registerRememberedPane(t, id);
+      return id;
     },
-    [addTerminal, registerRememberedPane],
+    [addTerminal],
   );
 
   const resumeSession = useCallback(
-    async (r: Restorable) => {
-      if (!r.command || !r.cwd) return;
+    async (r: Restorable, activate = true): Promise<string | null> => {
+      if (!r.command || !r.cwd) return null;
       // Already open — focus that tab instead of spawning a second identical
       // resume. The resume command carries the session id, so command+cwd
       // uniquely identifies the terminal running this exact session; without
@@ -2067,11 +2038,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // duplicate tabs of the same conversation.
       const open = tabsRef.current.find(
         (t): t is TermSubTab =>
-          t.type === "terminal" && t.command === r.command && t.cwd === r.cwd,
+          t.type === "terminal" &&
+          ((t.ptyId != null &&
+            liveSessionByPtyRef.current.get(t.ptyId) === r.digest.session_id) ||
+            resumeSessionId(t.command) === r.digest.session_id),
       );
       if (open) {
-        setActiveTabId(open.id);
-        return;
+        if (activate) setActiveTabId(open.id);
+        return open.id;
       }
       // Hide it immediately rather than waiting for the next poll; the mark
       // is a bridge until the agent shows up in the process list, after which
@@ -2086,13 +2060,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
         r.profile && r.profile !== "default"
           ? await ipc.profileEnv(r.agentId, r.profile).catch(() => [])
           : [];
-      const rememberedPane = remembered.find(
-        (t) =>
-          t.tabId != null &&
-          !reopenedRememberedIds.current.has(t.tabId) &&
-          t.cwd === r.cwd &&
-          agentIdForCommand(t.command) === r.agentId,
-      );
       const id = addTerminal(
         r.cwd,
         r.command,
@@ -2101,12 +2068,56 @@ const ProjectViewBody = memo(function ProjectViewBody({
         false,
         env,
         env.length ? r.profile : undefined,
-        true,
-        rememberedPane?.paneGroup,
+        activate,
       );
-      if (rememberedPane) registerRememberedPane(rememberedPane, id);
+      return id;
     },
-    [addTerminal, remembered, registerRememberedPane],
+    [addTerminal],
+  );
+
+  const restoreResumeCard = useCallback(
+    async (card: TerminalResumeCard, only?: TerminalResumeLeaf) => {
+      const leaves = only ? [only] : card.leaves;
+      const ids = new Map<string, string>();
+      for (const leaf of leaves) {
+        const id = leaf.restorable
+          ? await resumeSession(leaf.restorable, false)
+          : leaf.remembered
+            ? reopenTerminal(leaf.remembered, false)
+            : null;
+        if (id && leaf.remembered?.tabId) ids.set(leaf.remembered.tabId, id);
+      }
+
+      const root = card.group && !only ? mapSplitTabIds(card.group.root, ids) : null;
+      const memberIds = root ? leafIds(root) : [];
+      if (card.group && root && memberIds.length >= 2) {
+        const group: TerminalGroup = {
+          ...card.group,
+          root,
+          activeTabId: ids.get(card.group.activeTabId) ?? memberIds[0],
+          zoomedTabId: card.group.zoomedTabId
+            ? ids.get(card.group.zoomedTabId)
+            : undefined,
+        };
+        setTabs((prev) =>
+          prev.map((tab) =>
+            tab.type === "terminal" && memberIds.includes(tab.id)
+              ? { ...tab, paneGroup: group.id }
+              : tab,
+          ),
+        );
+        terminalGroupsRef.current = {
+          ...terminalGroupsRef.current,
+          [group.id]: group,
+        };
+        setTerminalGroups(terminalGroupsRef.current);
+        setActiveTabId(group.activeTabId);
+      } else {
+        const first = [...ids.values()][0];
+        if (first) setActiveTabId(first);
+      }
+    },
+    [reopenTerminal, resumeSession],
   );
 
   /** Carry out an accepted reload: each eligible agent's terminal is replaced
@@ -2141,21 +2152,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // the order the block renders them, each with the thunk that opens it — so
   // the button, the checkboxes and the confirmation all count the same things.
   const resumeItems = useMemo(
-    () => [
-      ...restorable.map((r) => ({
-        key: `s-${r.digest.session_id}`,
-        open: () => resumeSession(r),
+    () =>
+      resumeCards.map((card) => ({
+        key: card.key,
+        count: card.leaves.length,
+        open: () => restoreResumeCard(card),
       })),
-      ...freshAgents.map((t, i) => ({
-        key: `a-${t.cwd}-${i}`,
-        open: () => reopenTerminal(t),
-      })),
-      ...rememberedShells.map((t, i) => ({
-        key: `t-${t.cwd}-${t.command ?? ""}-${i}`,
-        open: () => reopenTerminal(t),
-      })),
-    ],
-    [restorable, freshAgents, rememberedShells, resumeSession, reopenTerminal],
+    [resumeCards, restoreResumeCard],
   );
 
   // Past a handful, "reopen everything" stops being a convenience and becomes a
@@ -2166,7 +2169,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // A machine can take a few agents starting at once; ten is where it stops
   // being a choice you can take back, so that one gets confirmed.
   const RESUME_CONFIRM_OVER = 10;
-  const pickable = resumeItems.length > RESUME_PICK_FROM;
+  const resumeTerminalCount = resumeItems.reduce((sum, item) => sum + item.count, 0);
+  const pickable = resumeTerminalCount > RESUME_PICK_FROM;
   const [picked, setPicked] = useState<string[]>([]);
   // Rows come and go as sessions are restored or forgotten; a key left behind
   // would keep "Restore selected (3)" claiming a row nobody can see.
@@ -2196,15 +2200,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
     ) : null;
 
   const runResume = useCallback(
-    (items: { open: () => void }[]) => {
+    (items: { count: number; open: () => void | Promise<void> }[]) => {
       if (items.length === 0) return;
-      const go = () => {
-        items.forEach((i) => i.open());
+      const count = items.reduce((sum, item) => sum + item.count, 0);
+      const go = async () => {
+        for (const item of items) await item.open();
         setPicked([]);
       };
-      if (items.length > RESUME_CONFIRM_OVER)
-        setConfirmResume({ count: items.length, go });
-      else go();
+      if (count > RESUME_CONFIRM_OVER) setConfirmResume({ count, go });
+      else void go();
     },
     [],
   );
@@ -4493,7 +4497,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       origin === "user" &&
       closingTab?.type === "terminal" &&
       closingTab.ptyId != null &&
-      closingTab.attachId == null
+      (closingTab.attachId == null || closingTab.killAttachedOnClose)
     ) {
       // Hook events are the authoritative bond. Store-only agents have no
       // events, so fall back to the current-launch digest for this surface.
@@ -4762,22 +4766,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, []);
   equalizePanesRef.current = equalizePanes;
 
-  const closeTerminalGroup = useCallback(
+  const [confirmCloseGroup, setConfirmCloseGroup] = useState<{
+    groupId: string;
+    live: number;
+  } | null>(null);
+
+  const closeTerminalGroupNow = useCallback(
     (groupId: string) => {
       const group = terminalGroupsRef.current[groupId];
       if (!group) return;
       const ids = leafIds(group.root);
-      const live = ids.filter((id) => {
+      for (const id of ids) {
         const tab = tabsRef.current.find(
           (t): t is TermSubTab => t.id === id && t.type === "terminal",
         );
-        return tab?.ptyId != null && !tab.exited;
-      }).length;
-      if (
-        live > 1 &&
-        !window.confirm(`Close this multiplexed tab and stop ${live} live agents?`)
-      ) {
-        return;
+        if (
+          tab?.ptyId != null &&
+          (tab.attachId == null || tab.killAttachedOnClose) &&
+          !tab.exited
+        ) {
+          void ipc.ptyKill(tab.ptyId).catch(() => {});
+        }
       }
       for (const id of ids) closeTabRef.current(id, "user");
       setTerminalGroups((prev) => {
@@ -4788,6 +4797,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
       });
     },
     [],
+  );
+
+  const closeTerminalGroup = useCallback(
+    (groupId: string) => {
+      const group = terminalGroupsRef.current[groupId];
+      if (!group) return;
+      const live = leafIds(group.root).filter((id) => {
+        const tab = tabsRef.current.find(
+          (t): t is TermSubTab => t.id === id && t.type === "terminal",
+        );
+        return (
+          tab?.ptyId != null &&
+          (tab.attachId == null || tab.killAttachedOnClose) &&
+          !tab.exited
+        );
+      }).length;
+      if (live > 0) {
+        setConfirmCloseGroup({ groupId, live });
+        return;
+      }
+      closeTerminalGroupNow(groupId);
+    },
+    [closeTerminalGroupNow],
   );
 
   const closeActivePane = useCallback(() => {
@@ -5630,21 +5662,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       }
       if (restore.terminalGroups) {
-        const restoredGroups: Record<string, TerminalGroup> = {};
-        for (const [groupId, group] of Object.entries(restore.terminalGroups)) {
-          const root = mapSplitTabIds(group.root, restoredTerminalIds);
-          const leaves = root ? leafIds(root) : [];
-          if (!root || leaves.length < 2) continue;
-          restoredGroups[groupId] = {
-            ...group,
-            root,
-            activeTabId:
-              restoredTerminalIds.get(group.activeTabId) ?? leaves[0],
-            zoomedTabId: group.zoomedTabId
-              ? restoredTerminalIds.get(group.zoomedTabId)
-              : undefined,
-          };
-        }
+        const restoredGroups = remapTerminalGroups(
+          restore.terminalGroups,
+          restoredTerminalIds,
+        );
         terminalGroupsRef.current = restoredGroups;
         setTerminalGroups(restoredGroups);
       }
@@ -6142,6 +6163,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // row in the Agents panel is never a click that does nothing.
       if (!target) {
         if (findRun(microRunsRef.current, ptyId)) showMicroRun(ptyId);
+        else {
+          const running = statsRef.current.find((stat) => stat.id === ptyId);
+          if (running) {
+            const agent = identifyAgent(running.agent_hint);
+            const icon = AGENT_CLIS.find((cli) => cli.id === agent?.id)?.icon;
+            const id = attachTerminal(
+              ptyId,
+              running.cwd,
+              running.title || agent?.label || "agent",
+              icon ?? "📱",
+              true,
+              true,
+            );
+            if (agent?.id) patchTabRaw(id, { command: shellBin(agent.id) });
+          }
+        }
         return;
       }
       setActiveTabId(target.id);
@@ -6152,7 +6189,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
       setTimeout(() => termHandles.current.get(target.id)?.focus(), 50);
     },
-    [showMicroRun],
+    [showMicroRun, attachTerminal, patchTabRaw],
   );
 
   /** The terminal a pending card came from, as a pty and (when there is one) the
@@ -8948,6 +8985,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 cwd={tab.cwd}
                 active={tab.id === activeTabId && visible}
                 attachId={tab.attachId}
+                killAttachedOnClose={tab.killAttachedOnClose}
                 // A run tab hands its command to the shell to run-and-exit
                 // (runCommand) so the pty's exit code is the command's own —
                 // one-shot runs (build, install) report truthfully instead of
@@ -9049,6 +9087,37 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   }
                 }}
               />
+              {livePips
+                .filter((pip) => pip.ptyId === tab.ptyId)
+                .map(({ tabId, ptyId }) => {
+                  const preview = tabs.find(
+                    (item): item is PreviewSubTab =>
+                      item.type === "preview" && item.id === tabId,
+                  );
+                  if (!preview?.url) return null;
+                  const agent = agentTargets.find((item) => item.ptyId === ptyId);
+                  const slot = shownBrowserPips.findIndex(
+                    (pip) => pip.tabId === tabId,
+                  );
+                  return (
+                    <AgentBrowserPip
+                      key={tabId}
+                      tabId={tabId}
+                      url={preview.url}
+                      agentId={agent?.agentId ?? "agent"}
+                      agentTitle={agent?.title || "Agent browser"}
+                      supported={browserEngine === "webview"}
+                      slot={Math.max(0, slot)}
+                      hidden={slot < 0}
+                      onClose={() => {
+                        dismissedBrowserPips.current.add(tabId);
+                        setBrowserPips((prev) =>
+                          prev.filter((pip) => pip.tabId !== tabId),
+                        );
+                      }}
+                    />
+                  );
+                })}
             </div>
             );
           })}
@@ -9175,24 +9244,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 </button>
               ))}
             </div>
-            {(restorable.length > 0 ||
-              freshAgents.length > 0 ||
-              rememberedShells.length > 0) && (
+            {resumeCards.length > 0 && (
               <div className="resume-block">
                 <div className="resume-head">
                   <span>
                     Pick up where you left off
-                    <span className="badge">
-                      {restorable.length +
-                        freshAgents.length +
-                        rememberedShells.length}
-                    </span>
+                    <span className="badge">{resumeTerminalCount} terminals</span>
                   </span>
                   <span className="resume-head-actions">
                     <Button
                       title={
                         chosen.length > 0
-                          ? `Reopen the ${chosen.length} selected`
+                          ? `Reopen ${resumeItems
+                              .filter((item) => chosen.includes(item.key))
+                              .reduce((sum, item) => sum + item.count, 0)} selected terminals`
                           : "Reopen everything below — agent sessions with their history, terminals with their command"
                       }
                       onClick={() =>
@@ -9203,7 +9268,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         )
                       }>
                       {chosen.length > 0
-                        ? `Restore selected (${chosen.length})`
+                        ? `Restore selected (${resumeItems
+                            .filter((item) => chosen.includes(item.key))
+                            .reduce((sum, item) => sum + item.count, 0)})`
                         : "Restore all"}
                     </Button>
                     <Button icon
@@ -9223,137 +9290,66 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     </Button>
                   </span>
                 </div>
-                {restorable.length > 0 &&
-                  (freshAgents.length > 0 || rememberedShells.length > 0) && (
-                    <div className="resume-subhead">
-                      Agent sessions — resume with history
-                    </div>
-                  )}
-                {restorable.map((r) => (
+                {resumeCards.map((card) => (
                   <div
-                    key={r.digest.session_id}
-                    className="resume-row resume-row-click"
-                    title={`${r.agentId} · ${r.cwd}`}
-                    onClick={() => resumeSession(r)}
+                    key={card.key}
+                    className={card.group ? "resume-group" : "resume-standalone"}
                   >
-                    {pickBox(`s-${r.digest.session_id}`)}
-                    <AgentIcon id={r.agentId} size={14} />
-                    <span className="resume-prompt">
-                      {r.prompt || <em>(no prompt captured)</em>}
-                    </span>
-                    <span className="resume-dir">
-                      {basename(r.cwd)}
-                    </span>
-                    {r.digest.branch && (
-                      <span className="resume-branch">⑂ {r.digest.branch}</span>
+                    {card.group && (
+                      <div className="resume-group-head">
+                        {pickBox(card.key)}
+                        <span className="tab-multiplex-icon" aria-hidden>▦</span>
+                        <strong>Multiplexed agents</strong>
+                        <span className="resume-branch">{card.leaves.length} panes</span>
+                        <Button
+                          size="sm"
+                          variant="accent"
+                          onClick={() => void restoreResumeCard(card)}
+                        >
+                          Resume group
+                        </Button>
+                      </div>
                     )}
-                    <span className="resume-age">{ago(r.digest.updated)}</span>
-                    <Button size="sm" variant="accent"
-                      title={r.command}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        resumeSession(r);
-                      }}>
-                      Resume
-                    </Button>
-                    <Button icon className="resume-forget"
-                      title={
-                        r.superseded.length > 0
-                          ? `Forget this directory's ${r.superseded.length + 1} sessions — stops them resurfacing unless one is used again`
-                          : "Forget this session — stops it resurfacing unless it's used again"
-                      }
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        // The row stands for its directory, so dismissing it
-                        // has to take the sessions behind it too — otherwise
-                        // the next-oldest simply takes its place.
-                        forgetSessions([r.digest, ...r.superseded]);
-                        setRestorable((prev) =>
-                          prev.filter(
-                            (x) => x.digest.session_id !== r.digest.session_id,
-                          ),
-                        );
-                      }}>
-                      ✕
-                    </Button>
-                  </div>
-                ))}
-
-                {freshAgents.length > 0 && (
-                  <>
-                    <div className="resume-subhead">
-                      Agents — started fresh, no history to resume
-                    </div>
-                    {freshAgents.map((t, i) => {
-                      const cli = AGENT_CLIS.find(
-                        (c) => c.id === agentIdForCommand(t.command),
-                      );
+                    {card.leaves.map((leaf) => {
+                      const r = leaf.restorable;
+                      const t = leaf.remembered;
+                      const agentId = r?.agentId ?? agentIdForCommand(t?.command);
+                      const title = r?.prompt || t?.title || t?.command || "shell";
+                      const cwd = r?.cwd ?? t?.cwd ?? "";
                       return (
                         <div
-                          key={`a-${t.cwd}-${i}`}
-                          className="resume-row resume-row-click"
-                          title={`${t.command ?? ""} — ${t.cwd}`}
-                          onClick={() => reopenTerminal(t)}
+                          key={leaf.key}
+                          className="resume-row resume-row-click resume-child"
+                          title={`${agentId ?? t?.command ?? "shell"} · ${cwd}`}
+                          onClick={() => void restoreResumeCard(card, leaf)}
                         >
-                          {pickBox(`a-${t.cwd}-${i}`)}
-                          <AgentIcon id={cli?.id ?? "agent"} size={14} />
-                          <span className="resume-prompt">
-                            {cli?.name ?? t.title}
-                          </span>
-                          <span className="resume-dir">
-                            {basename(t.cwd)}
-                          </span>
-                          <Button size="sm"
+                          {!card.group && pickBox(card.key)}
+                          {agentId ? (
+                            <AgentIcon id={agentId} size={14} />
+                          ) : (
+                            <TerminalIcon size={13} />
+                          )}
+                          <span className="resume-prompt">{title}</span>
+                          <span className="resume-dir">{basename(cwd)}</span>
+                          {r?.digest.branch && (
+                            <span className="resume-branch">⑂ {r.digest.branch}</span>
+                          )}
+                          {r && <span className="resume-age">{ago(r.digest.updated)}</span>}
+                          <Button
+                            size="sm"
+                            variant={!card.group && r ? "accent" : "default"}
                             onClick={(e) => {
                               e.stopPropagation();
-                              reopenTerminal(t);
-                            }}>
-                            Start
+                              void restoreResumeCard(card, leaf);
+                            }}
+                          >
+                            {card.group ? "Resume separately" : r ? "Resume" : "Reopen"}
                           </Button>
                         </div>
                       );
                     })}
-                  </>
-                )}
-
-                {rememberedShells.length > 0 && (
-                  <>
-                    {(restorable.length > 0 || freshAgents.length > 0) && (
-                      <div className="resume-subhead">
-                        Terminals — reopened running their command again
-                      </div>
-                    )}
-                    {rememberedShells.map((t, i) => (
-                      <div
-                        key={`t-${t.cwd}-${t.command ?? ""}-${i}`}
-                        className="resume-row resume-row-click"
-                        title={`${t.command ?? "shell"} — ${t.cwd}`}
-                        onClick={() => reopenTerminal(t)}
-                      >
-                        {pickBox(`t-${t.cwd}-${t.command ?? ""}-${i}`)}
-                        <TerminalIcon size={13} />
-                        <span className="resume-prompt">
-                          {t.command ? (
-                            <code>{t.command}</code>
-                          ) : (
-                            <em>shell</em>
-                          )}
-                        </span>
-                        <span className="resume-dir">
-                          {basename(t.cwd)}
-                        </span>
-                        {t.run && <span className="resume-branch">run</span>}
-                        <Button size="sm"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            reopenTerminal(t);
-                          }}>
-                          Reopen
-                        </Button>
-                      </div>
-                    ))}
-                  </>
-                )}
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -9468,32 +9464,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
             </div>
           </>
         )}
-        {livePips.map(({ tabId, ptyId }) => {
-          const tab = tabs.find(
-            (t): t is PreviewSubTab => t.type === "preview" && t.id === tabId,
-          );
-          if (!tab?.url) return null;
-          const agent = agentTargets.find((a) => a.ptyId === ptyId);
-          // -1 for a hidden pip, which needs no slot; it keeps whatever
-          // placement the user gave it and is only waiting to come back.
-          const slot = shownBrowserPips.findIndex((p) => p.tabId === tab.id);
-          return (
-            <AgentBrowserPip
-              key={tab.id}
-              tabId={tab.id}
-              url={tab.url}
-              agentId={agent?.agentId ?? "agent"}
-              agentTitle={agent?.title || "Agent browser"}
-              supported={browserEngine === "webview"}
-              slot={Math.max(0, slot)}
-              hidden={slot < 0}
-              onClose={() => {
-                dismissedBrowserPips.current.add(tab.id);
-                setBrowserPips((prev) => prev.filter((p) => p.tabId !== tab.id));
-              }}
-            />
-          );
-        })}
       </div>
     </div>
   );
@@ -10219,6 +10189,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
               onClick: () => {
                 confirmResume.go();
                 setConfirmResume(null);
+              },
+            },
+          ]}
+        />
+      )}
+      {confirmCloseGroup && (
+        <Dialog
+          variant="danger"
+          title="Close this multiplexed tab?"
+          body={`This will stop ${confirmCloseGroup.live} live terminal${
+            confirmCloseGroup.live === 1 ? "" : "s"
+          } and close every pane in the tab.`}
+          meta={`${confirmCloseGroup.live} running`}
+          dismissLabel="Keep open"
+          onDismiss={() => setConfirmCloseGroup(null)}
+          actions={[
+            {
+              label: "Stop and close",
+              primary: true,
+              onClick: () => {
+                closeTerminalGroupNow(confirmCloseGroup.groupId);
+                setConfirmCloseGroup(null);
               },
             },
           ]}

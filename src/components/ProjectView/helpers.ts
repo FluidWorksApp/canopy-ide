@@ -37,6 +37,9 @@ export interface TermSubTab {
    *  from the remote portal) instead of spawning its own. Closing it detaches;
    *  the agent keeps running for the phone. */
   attachId?: number;
+  /** This tab reattached an app-owned PTY after its original tab was lost. It
+   * attaches like a remote PTY, but closing it must still stop the process. */
+  killAttachedOnClose?: boolean;
   command?: string;
   icon?: string;
   /** Stamped onto the shell at spawn. Carries the port lease of the workspace

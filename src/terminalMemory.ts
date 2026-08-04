@@ -8,6 +8,9 @@
 // record, not part of the project's definition, and a corrupt one should cost
 // nothing.
 import type { TerminalGroup } from "./terminalGroups";
+import type { Restorable } from "./restorable";
+import { resumeSessionId } from "./projects";
+import { agentIdForCommand } from "./agentIdentity";
 
 export interface RememberedTerminal {
   cwd: string;
@@ -19,6 +22,22 @@ export interface RememberedTerminal {
   /** Runtime identity used to reconnect this terminal to a remembered split. */
   tabId?: string;
   paneGroup?: string;
+  /** Exact conversation identity. Optional so pre-session memory remains valid. */
+  sessionId?: string;
+  /** Account that owns the session store. */
+  profile?: string;
+}
+
+export interface TerminalResumeLeaf {
+  key: string;
+  remembered?: RememberedTerminal;
+  restorable?: Restorable;
+}
+
+export interface TerminalResumeCard {
+  key: string;
+  group?: TerminalGroup;
+  leaves: TerminalResumeLeaf[];
 }
 
 export interface RememberedTerminalState {
@@ -79,4 +98,66 @@ export function forgetTerminals(projectId: string) {
   } catch {
     // ignore
   }
+}
+
+/** One empty-state choice per multiplex, with exact session-to-pane matching.
+ * Old memory remains readable: resume commands already carry their session id;
+ * bare legacy agent commands reopen fresh rather than guessing by cwd + agent. */
+export function terminalResumeCards(
+  terminals: RememberedTerminal[],
+  groups: Record<string, TerminalGroup>,
+  restorables: Restorable[],
+): TerminalResumeCard[] {
+  const available = new Map(restorables.map((r) => [r.digest.session_id, r]));
+  const leaves: TerminalResumeLeaf[] = [];
+
+  for (const terminal of terminals) {
+    const agentId = agentIdForCommand(terminal.command);
+    const sessionId = terminal.sessionId ?? resumeSessionId(terminal.command) ?? undefined;
+    const restorable = sessionId ? available.get(sessionId) : undefined;
+    if (restorable) available.delete(sessionId!);
+
+    // A remembered, identified conversation that is absent from Restorable may
+    // be live, user-closed, or unresumable. Never replay it as a fresh agent.
+    if (agentId && sessionId && !restorable) continue;
+    leaves.push({
+      key: terminal.tabId ? `terminal:${terminal.tabId}` : `terminal:${leaves.length}`,
+      remembered: terminal,
+      restorable,
+    });
+  }
+
+  for (const restorable of available.values()) {
+    leaves.push({
+      key: `session:${restorable.digest.session_id}`,
+      restorable,
+    });
+  }
+
+  const byOldId = new Map(
+    leaves
+      .filter((leaf) => leaf.remembered?.tabId)
+      .map((leaf) => [leaf.remembered!.tabId!, leaf]),
+  );
+  const claimed = new Set<TerminalResumeLeaf>();
+  const cards: TerminalResumeCard[] = [];
+  for (const group of Object.values(groups)) {
+    const members = leafIdsSafe(group.root)
+      .map((id) => byOldId.get(id))
+      .filter((leaf): leaf is TerminalResumeLeaf => Boolean(leaf))
+      .filter((leaf) => leaf.remembered?.paneGroup === group.id);
+    if (members.length < 2) continue;
+    members.forEach((leaf) => claimed.add(leaf));
+    cards.push({ key: `group:${group.id}`, group, leaves: members });
+  }
+  for (const leaf of leaves) {
+    if (!claimed.has(leaf)) cards.push({ key: leaf.key, leaves: [leaf] });
+  }
+  return cards;
+}
+
+function leafIdsSafe(node: TerminalGroup["root"]): string[] {
+  return node.type === "leaf"
+    ? [node.tabId]
+    : [...leafIdsSafe(node.first), ...leafIdsSafe(node.second)];
 }

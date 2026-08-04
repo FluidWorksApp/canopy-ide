@@ -4,6 +4,7 @@ import {
   layoutSplit,
   leafIds,
   mapSplitTabIds,
+  remapTerminalGroups,
   neighborPane,
   removeLeaf,
   splitLeaf,
@@ -70,6 +71,36 @@ describe("terminal split trees", () => {
     const tree = splitLeaf(leaf("old-a"), "old-a", "old-b", "horizontal");
     const restored = mapSplitTabIds(tree, new Map([["old-b", "new-b"]]));
     expect(restored).toEqual({ type: "leaf", tabId: "new-b" });
+  });
+
+  it("preserves layout details while collapsing a missing wake leaf", () => {
+    const root = splitLeaf(
+      splitLeaf(leaf("a"), "a", "b", "horizontal"),
+      "b",
+      "c",
+      "vertical",
+    );
+    const groups = remapTerminalGroups(
+      { g1: { id: "g1", root, activeTabId: "c", zoomedTabId: "c" } },
+      new Map([
+        ["a", "new-a"],
+        ["c", "new-c"],
+      ]),
+    );
+    expect(leafIds(groups.g1.root)).toEqual(["new-a", "new-c"]);
+    expect(groups.g1.activeTabId).toBe("new-c");
+    expect(groups.g1.zoomedTabId).toBe("new-c");
+    expect(groups.g1.root).toMatchObject({ axis: "horizontal", ratio: 0.5 });
+  });
+
+  it("drops a persisted group when only one wake leaf survives", () => {
+    const root = splitLeaf(leaf("a"), "a", "b", "horizontal");
+    expect(
+      remapTerminalGroups(
+        { g1: { id: "g1", root, activeTabId: "b", zoomedTabId: "b" } },
+        new Map([["a", "new-a"]]),
+      ),
+    ).toEqual({});
   });
 
   it("swaps pane contents without changing the layout", () => {

@@ -145,7 +145,7 @@ export function snapshotTabs(
           agentId,
           sessionId: agentId ? sessionId : undefined,
           profile: t.profile,
-          attachId: t.attachId,
+          attachId: t.killAttachedOnClose ? undefined : t.attachId,
           ...(t.paneGroup ? { tabId: t.id, paneGroup: t.paneGroup } : {}),
         });
         break;

@@ -71,6 +71,7 @@ interface TermProps {
    *  output and drives its input; closing the tab detaches, it does not kill the
    *  agent (it stays controllable from the phone). */
   attachId?: number;
+  killAttachedOnClose?: boolean;
   onSpawned: (ptyId: number) => void;
   onExited: (exitCode: number | null) => void;
   onTitle?: (title: string) => void;
@@ -79,12 +80,13 @@ interface TermProps {
 }
 
 export const Term = forwardRef<TermHandle, TermProps>(function Term(
-  { cwd, active, initialCommand, runCommand, env, attachId, onSpawned, onExited, onTitle, onNotify },
+  { cwd, active, initialCommand, runCommand, env, attachId, killAttachedOnClose, onSpawned, onExited, onTitle, onNotify },
   ref,
 ) {
   // Frozen once: a Term never switches between spawn and attach mid-life, and
   // the mount-once effect closes over it.
   const attachIdRef = useRef(attachId);
+  const killAttachedOnCloseRef = useRef(killAttachedOnClose);
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const ptyIdRef = useRef<number | null>(null);
@@ -598,7 +600,10 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       unlistenExit?.();
       // Attached tabs detach on close — the agent was spawned from the phone and
       // stays alive and controllable there. Only a tab that OWNS its pty kills it.
-      if (attachIdRef.current == null && ptyIdRef.current != null) {
+      if (
+        (attachIdRef.current == null || killAttachedOnCloseRef.current) &&
+        ptyIdRef.current != null
+      ) {
         void ipc.ptyKill(ptyIdRef.current);
       }
       syncNowRef.current = null;
