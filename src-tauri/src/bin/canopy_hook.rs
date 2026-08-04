@@ -4028,6 +4028,9 @@ fn ui_op(op: &str, args: &serde_json::Value, timeout_secs: u64) -> Result<String
     }
     body["op"] = serde_json::json!(op);
     body["cwd"] = serde_json::json!(cwd());
+    body["ptyId"] = serde_json::json!(std::env::var("CANOPY_PTY")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok()));
     ctx_request_with_timeout(
         "POST",
         "/ctx/ui",

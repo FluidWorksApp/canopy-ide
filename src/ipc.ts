@@ -282,6 +282,8 @@ export interface AgentUiOp {
     | "recall"
     | "remember";
   route: string;
+  /** Agent terminal that initiated the operation, when there is one. */
+  ptyId?: number | null;
   path?: string | null;
   line?: number | null;
   column?: number | null;
@@ -383,6 +385,9 @@ export const onAgentClaims = (cb: () => void): Promise<UnlistenFn> =>
 export interface AgentMessageDelivery {
   id: string;
   toPtyId: number;
+  /** Working directory of the destination terminal, used to select its project
+   *  before following the PTY deep link. */
+  toCwd: string;
   /** False when the terminal died before the return that submits it — the
    *  message is sitting unsent in a composer nobody will press enter on. */
   submitted: boolean;

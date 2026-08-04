@@ -2084,12 +2084,13 @@ async fn action(
             // sequential integers, so a message aimed at a plain shell tab was
             // a line of text followed by a return — a command, run as the user.
             let manager = app.state::<crate::pty::PtyManager>();
-            if manager.get(id).is_none() {
+            let Some(target) = manager.get(id) else {
                 return (
                     StatusCode::NOT_FOUND,
                     format!("No running Canopy terminal with id {id} (see canopy_agents)"),
                 );
-            }
+            };
+            let target_cwd = target.cwd.clone();
             if let Err(e) = may_message_terminal(id, terminal_role(&app, id)) {
                 return (StatusCode::FORBIDDEN, e);
             }
@@ -2176,6 +2177,7 @@ async fn action(
                     serde_json::json!({
                         "id": sent_id,
                         "toPtyId": id,
+                        "toCwd": target_cwd,
                         "submitted": submitted,
                     }),
                 );
@@ -2575,6 +2577,10 @@ async fn browser(
 struct UiOp {
     op: String,
     cwd: Option<String>,
+    /// The agent terminal issuing the operation. A question uses this to take
+    /// the user back to the exact session waiting for the answer.
+    #[serde(rename = "ptyId")]
+    pty_id: Option<u32>,
     /// diagnostics / references / definition / hover / symbols: where to look.
     path: Option<String>,
     line: Option<u32>,
@@ -2742,6 +2748,7 @@ async fn ui_op(
             "id": id,
             "op": op.op,
             "route": op.cwd.clone().unwrap_or_default(),
+            "ptyId": op.pty_id,
             "path": op.path,
             "line": op.line,
             "column": op.column,
