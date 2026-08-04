@@ -1983,22 +1983,16 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
  *  that everything runs locally. Lives here so setup is discoverable before
  *  the first shortcut press (which would otherwise trigger the download). */
 
-/** Modifiers offered as a bare trigger, ordered by how safe each is to bind.
- *  The right-hand keys come first because a touch typist reaches for them
- *  least, so the pollution rule has the least work to do; the "either side"
- *  entries are last because they are the most likely to be pressed by
- *  accident. */
+/** Command is deliberately absent: both sides are reserved for application and
+ *  system shortcuts. Left Shift leads because it is the default. */
 const MOD_KEY_CHOICES: DictationModKey[] = [
-  "MetaRight",
+  "ShiftLeft",
   "AltRight",
   "ControlRight",
   "ShiftRight",
   "CapsLock",
-  "MetaLeft",
   "AltLeft",
   "ControlLeft",
-  "ShiftLeft",
-  "Meta",
   "Alt",
   "Control",
   "Shift",

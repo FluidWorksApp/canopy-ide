@@ -116,8 +116,9 @@ process teardown; React owns the project workspace and presentation.
 - **A real editor and native viewers.** Monaco diagnostics and code intelligence
   sit beside offline rendering for Markdown with Mermaid, HTML, JSON/JSONC,
   spreadsheets and CSV, `.docx`, PDF, images, and Jupyter notebooks.
-- **On-device dictation.** Use a configurable hotkey or push-to-talk gesture to
-  insert speech into terminals, the editor, commit messages, or agent prompts.
+- **On-device dictation.** Hold Left Shift to talk and release to insert speech
+  into terminals, the editor, commit messages, or agent prompts. A configurable
+  combo and double-tap gesture are also available.
   Models and transcription stay on the machine. Intel macOS builds do not
   include dictation.
 - **Resource-aware by design.** See CPU, memory, ports, working time, and usage
@@ -278,7 +279,7 @@ profile:
 | Previous / next tab | `⌃⌘←` / `⌃⌘→` | `Ctrl+PgUp` / `Ctrl+PgDn` |
 | Toggle sidebar | `⌘B` | `Ctrl+Shift+B` |
 | Focus mode | `⇧⌘Enter` | `Ctrl+Shift+Enter` |
-| Dictation | `⌘D` | `Alt+D` |
+| Dictation | Hold `Left Shift` | Hold `Left Shift` |
 
 Every chord is defined once in
 [`shared/shortcuts.json`](./shared/shortcuts.json) and resolved for profile,

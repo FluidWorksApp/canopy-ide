@@ -103,8 +103,7 @@ export interface Hotkey {
   code: string;
 }
 
-/** Default dictation hotkey — ⌘D on Mac, Alt+D elsewhere, per the manifest
- *  (plain Ctrl+D is shell EOF, so it's deliberately avoided off Mac). */
+/** Fallback chord for people who explicitly choose combo mode. */
 export const DEFAULT_DICTATION_HOTKEY: Hotkey = requireKeyChord("dictation");
 
 /** Default hotkey for the recent-dictation picker: ⌃⌘V on Mac (SuprFlow's
@@ -116,9 +115,7 @@ export const DEFAULT_DICTATION_HISTORY_HOTKEY: Hotkey = IS_MAC
 
 /** How dictation is triggered.
  *
- *  "combo" — the original two-key chord (⌘D), pressed to start and again to
- *  insert. Still the default: it is what every existing install has bound, and
- *  it is the only mode that cannot possibly collide with ordinary typing.
+ *  "combo" — a configurable chord, pressed to start and again to insert.
  *
  *  "hold" — push-to-talk on ONE bare modifier: hold it, speak, release and the
  *  text lands. Double-tapping the same key instead latches recording on so you
@@ -149,17 +146,24 @@ export type DictationModKey =
   | "Alt"
   | "AltLeft"
   | "AltRight"
-  | "Meta"
-  | "MetaLeft"
-  | "MetaRight"
   | "CapsLock";
 
-/** Right ⌘ on macOS, right Ctrl elsewhere — the modifier a touch typist is
- *  least likely to press on its own, so the pollution guard has the least work
- *  to do. Only consulted once someone leaves "combo" mode. */
-export const DEFAULT_DICTATION_MOD_KEY: DictationModKey = IS_MAC
-  ? "MetaRight"
-  : "ControlRight";
+/** Left Shift is easy to reach and remains safe for ordinary typing because a
+ *  press is discarded as soon as another key is used with it. */
+export const DEFAULT_DICTATION_MOD_KEY: DictationModKey = "ShiftLeft";
+const DICTATION_TRIGGER_REVISION = 2;
+
+function isFormerDefaultDictationHotkey(h: Hotkey | undefined): boolean {
+  if (!h || h.code !== "KeyD" || h.shift) return false;
+  const current = DEFAULT_DICTATION_HOTKEY;
+  if (
+    h.meta === current.meta &&
+    h.ctrl === current.ctrl &&
+    h.alt === current.alt
+  ) return true;
+  // Before pane splitting took ⌘D, this was the shipped macOS default.
+  return h.meta && !h.ctrl && !h.alt;
+}
 
 /** Display label for a bare-modifier trigger key. */
 export function modKeyLabel(k: DictationModKey): string {
@@ -445,11 +449,12 @@ export interface Settings {
   // ---- Voice dictation ----
   /** Hotkey that toggles dictation (start/insert). Used by "combo" mode. */
   dictationHotkey: Hotkey;
-  /** How the mic is armed — see DictationTriggerMode. Defaults to "combo" so
-   *  an upgrade never silently rebinds a modifier someone types with. */
+  /** How the mic is armed — see DictationTriggerMode. */
   dictationTriggerMode: DictationTriggerMode;
   /** Which bare modifier carries the trigger in "hold"/"doubleTap" mode. */
   dictationModKey: DictationModKey;
+  /** Internal revision for one-time trigger-default migrations. */
+  dictationTriggerRevision: number;
   /** Hotkey that opens the recent-dictation picker. Hold its modifiers and tap
    *  its key to walk back through what you said; release to paste. */
   dictationHistoryHotkey: Hotkey;
@@ -609,8 +614,9 @@ export const DEFAULTS: Settings = {
   clipboardRetentionDays: 0,
   clipboardSkipSecrets: true,
   dictationHotkey: DEFAULT_DICTATION_HOTKEY,
-  dictationTriggerMode: "combo",
+  dictationTriggerMode: "hold",
   dictationModKey: DEFAULT_DICTATION_MOD_KEY,
+  dictationTriggerRevision: DICTATION_TRIGGER_REVISION,
   dictationHistoryHotkey: DEFAULT_DICTATION_HISTORY_HOTKEY,
   dictationModel: "",
   dictationLanguage: "",
@@ -641,7 +647,25 @@ export function getSettings(): Settings {
   if (settingsCache && settingsCache.raw === raw) return settingsCache.value;
   let value: Settings;
   try {
-    value = { ...DEFAULTS, ...(JSON.parse(raw ?? "{}") as Partial<Settings>) };
+    const stored = JSON.parse(raw ?? "{}") as Partial<Settings>;
+    value = { ...DEFAULTS, ...stored };
+    if (stored.dictationTriggerRevision !== DICTATION_TRIGGER_REVISION) {
+      // Full settings snapshots made the old combo look user-selected on every
+      // existing install. Move only its unchanged default to the new gesture;
+      // a customized combo remains customized.
+      if (
+        stored.dictationTriggerMode === "combo" &&
+        isFormerDefaultDictationHotkey(stored.dictationHotkey)
+      ) {
+        value.dictationTriggerMode = "hold";
+      }
+      // Command is reserved for application and system shortcuts, so retired
+      // bare-Command selections fall back to the new safe default.
+      if (String(stored.dictationModKey ?? "").startsWith("Meta")) {
+        value.dictationModKey = DEFAULT_DICTATION_MOD_KEY;
+      }
+      value.dictationTriggerRevision = DICTATION_TRIGGER_REVISION;
+    }
     // The one stored value that can name something that no longer exists.
     value.theme = migrateTheme(value.theme);
     if (!isShortcutProfile(value.keymapProfile)) value.keymapProfile = "canopy";
