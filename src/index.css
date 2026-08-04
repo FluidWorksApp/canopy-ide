@@ -21261,6 +21261,14 @@ a.btn-sm {
   opacity: 0.4;
 }
 
+/* Inside a diff toolbar it is not floating over anything — it is one of the
+   buttons, sitting in the row rather than on top of it. */
+.diff-bar .research-import {
+  position: static;
+  flex: 0 0 auto;
+  opacity: 1;
+}
+
 /* Already adopted: the same spot becomes the way back to the entry. */
 .research-import.is-open {
   color: var(--accent);
