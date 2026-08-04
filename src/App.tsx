@@ -702,7 +702,8 @@ export default function App() {
             ? "It arrived as if typed there, and that session answers in its own tab."
             : "The terminal went away before it could be submitted; it may be sitting unsent.",
           source: "agent",
-          where: { kind: "terminal", ptyId: m.toPtyId },
+          ...projectIdentity(m.toCwd),
+          where: { kind: "terminal", ptyId: m.toPtyId, path: m.toCwd },
         });
       }),
       ipc.onRelayCommand((m) => {
@@ -2008,7 +2009,10 @@ export default function App() {
                   body: "An agent is asking",
                   source: "agent",
                   ...projectIdentity(op.route),
-                  where: { kind: "project", path: op.route },
+                  where:
+                    op.ptyId != null
+                      ? { kind: "terminal", ptyId: op.ptyId, path: op.route }
+                      : { kind: "project", path: op.route },
                 });
                 setAsk({ id: op.id, attentionId, question, options, resolve });
               }),
