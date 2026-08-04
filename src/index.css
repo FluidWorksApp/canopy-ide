@@ -4415,6 +4415,10 @@ body.dragging-tab * {
 .tab-group {
   display: inline-flex;
   align-items: stretch;
+  /* A folded group has no 34px tab to establish its cross-size. Stretch the
+     section to the harbor row so its chip stays vertically centered instead
+     of collapsing to the pill height and sitting on the bottom edge. */
+  align-self: stretch;
   flex: 0 0 auto;
   scroll-snap-align: none start;
   scroll-snap-stop: always;
@@ -8184,11 +8188,22 @@ body.dragging-tab * {
 
 /* A finished agent is news, not an alarm — plain border, dimmer text. */
 .pending-card-idle {
+  margin-block: 4px;
+  padding: 7px 10px;
   border-color: var(--border);
 }
 
 .pending-card-idle .pending-q-text {
   color: var(--text-dim);
+  line-height: 1.25;
+  margin-bottom: 0;
+}
+
+.pending-card-idle .pending-footer {
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  margin-top: 2px;
 }
 
 .pending-dismiss {
