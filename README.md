@@ -319,8 +319,17 @@ cargo build --manifest-path src-tauri/Cargo.toml
 | `src/` | React + Vite frontend (components, IPC wrappers, editor) |
 | `src-tauri/src/` | Rust core — `pty.rs`, `lsp.rs`, `fsx.rs`, `git.rs`, `agents.rs` |
 | `src-tauri/src/bin/canopy_hook.rs` | the agent-hook helper (a second binary) |
-| `packages/ui/` | shared UI primitives (`@canopy/ui`) |
+| `shared/` | browser-safe models, policy, and UI shared by desktop and Remote |
+| `portal/` | the embedded Canopy Remote React application |
+| `packages/ui/` | independently buildable UI package (`@canopy/ui`) |
 | `scripts/` | sidecar build + release tooling |
+| `docs/architecture.md` | contributor architecture guide and system map |
+| `docs/architecture-llm.md` | compact architecture context for coding agents |
+| `docs/contributor-integrations.md` | messaging buses and contribution recipes |
+| `docs/contributions/` | step-by-step playbooks for each contribution type |
+| `docs/core-rust-system.md` | Rust core roles, services, boundaries, and lifecycle |
+| `docs/testing-and-coverage.md` | test architecture, CI gates, coverage scope, and contribution expectations |
+| `docs/wiki-publishing.md` | build and publish these pages to the separate GitHub Wiki repository |
 | `SPEC.md` | the full product spec |
 | `RELEASING.md` | how signed releases are cut |
 
@@ -330,6 +339,20 @@ keeps it approachable. Keep native process ownership in Rust; the frontend never
 spawns anything itself.
 
 ## Architecture
+
+For the full contributor-oriented system map, runtime flows, trust boundaries,
+and extension guide, see [docs/architecture.md](./docs/architecture.md). Coding
+agents can use the compact [LLM context](./docs/architecture-llm.md).
+To add a theme, component, feature, agent tool, search source, tracker, or Remote
+surface without duplicating infrastructure, use the
+[contributor integration guide](./docs/contributor-integrations.md).
+Each path also has a focused, diagrammed
+[contribution playbook](./docs/contributions/README.md). Native contributors
+should start with the [Core Rust System](./docs/core-rust-system.md).
+Testing expectations and the current measured coverage scope are documented in
+[Testing and Coverage](./docs/testing-and-coverage.md).
+Repository maintainers can publish the same canonical pages through the
+[GitHub Wiki workflow](./docs/wiki-publishing.md).
 
 ```
 ┌────────────────────────── Tauri (Rust core) ──────────────────────────┐

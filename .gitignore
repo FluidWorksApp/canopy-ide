@@ -14,6 +14,7 @@ dist-ssr
 
 # Vitest coverage output (npm run test:coverage)
 coverage
+.wiki-dist/
 
 # The Canopy Remote portal SPA is a build artifact (npm run build:portal, run by
 # tauri's beforeBuildCommand), but keep a committed placeholder index so the
