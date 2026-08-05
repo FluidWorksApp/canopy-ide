@@ -269,7 +269,10 @@ fn encode(tiff: &[u8], encoding: Encoding) -> Result<Vec<u8>, String> {
     NSBitmapImageRep::imageRepWithData(&data)
         .and_then(|rep: Retained<NSBitmapImageRep>| match encoding {
             Encoding::Png => unsafe {
-                rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+                rep.representationUsingType_properties(
+                    NSBitmapImageFileType::PNG,
+                    &NSDictionary::new(),
+                )
             },
             Encoding::Jpeg => unsafe {
                 let key: Retained<NSString> = NSString::from_str("NSImageCompressionFactor");
