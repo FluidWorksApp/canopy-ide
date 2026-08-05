@@ -1721,6 +1721,7 @@ struct Action {
     /// fits a row) is a display concern, and it is enforced once, in
     /// taskIdentity.ts, rather than twice in two languages.
     title: Option<String>,
+    description: Option<String>,
     icon: Option<String>,
     tags: Option<Vec<String>>,
     /// job_done / close_session: the launching app instance (env
@@ -1894,10 +1895,15 @@ async fn action(
             // A name is not an outcome: nothing is settled, nothing closes, and
             // an empty call is a no-op rather than an error — an agent that
             // sends only a title has still said something useful.
-            if act.title.is_none() && act.icon.is_none() && act.tags.is_none() {
+            if act.title.is_none()
+                && act.description.is_none()
+                && act.icon.is_none()
+                && act.tags.is_none()
+            {
                 return (
                     StatusCode::BAD_REQUEST,
-                    "canopy_name_task needs at least one of title, icon or tags".into(),
+                    "canopy_name_task needs at least one of title, description, icon or tags"
+                        .into(),
                 );
             }
             let stale = act
@@ -1913,12 +1919,13 @@ async fn action(
                         "ptyId": act.pty_id,
                         "cwd": act.cwd,
                         "title": act.title,
+                        "description": act.description,
                         "icon": act.icon,
                         "tags": act.tags,
                     }),
                 );
             }
-            "Noted — the user's Tasks list now shows this run by that name. Carry on with the job."
+            "Noted — the run name and live description are updated. Carry on with the job."
                 .to_string()
         }
         "close_session" => {

@@ -113,6 +113,12 @@ export function taskTitle(raw: unknown): string | undefined {
   return clamp(flatten(raw), MAX_TITLE) || undefined;
 }
 
+/** The live focus line has room for one short sentence in the hover card. */
+export function taskDescription(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  return clamp(flatten(raw), 160) || undefined;
+}
+
 /** Everything an agent may say about its own run, cleaned. */
 export function taskIdentity(raw: {
   title?: unknown;

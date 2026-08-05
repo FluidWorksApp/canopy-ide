@@ -214,6 +214,7 @@ import {
   askedLine,
   hasIdentity,
   identityPatch,
+  taskDescription,
   taskIdentity,
 } from "../../taskIdentity";
 import {
@@ -4112,17 +4113,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // never having been renamed.
       if (a.kind === "task_named") {
         const named = taskIdentity(a);
-        if (!hasIdentity(named)) return;
+        const description = taskDescription(a.description);
+        if (!hasIdentity(named) && !description) return;
         const tab = tabsRef.current.find(
           (t): t is TermSubTab =>
             t.type === "terminal" &&
             a.ptyId != null &&
-            t.ptyId === a.ptyId &&
-            Boolean(t.micro),
+            t.ptyId === a.ptyId,
         );
         const detached = findRun(microRunsRef.current, a.ptyId);
         const ptyId = tab?.ptyId ?? detached?.ptyId;
         if (ptyId == null) return;
+        if (tab && description) patchTabRaw(tab.id, { description });
+
+        // Ordinary agent sessions publish only the hover line. Task identity
+        // belongs to micro-task history and must not rename a normal terminal.
+        if (!tab?.micro && !detached) return;
+        if (!hasIdentity(named)) return;
         const runId = tab?.micro?.runId ?? detached?.runId;
         if (runId) updateTaskRun(runId, identityPatch(a));
         if (detached)
@@ -8881,6 +8888,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         tabGroups={tabGroups}
         stripDrag={stripDrag}
         stripRef={stripRef}
+        paneRef={contentRef}
+        termText={termTailFor}
         openStacks={openStacks}
         onToggleStack={toggleStack}
         stripTabs={stripTabs}

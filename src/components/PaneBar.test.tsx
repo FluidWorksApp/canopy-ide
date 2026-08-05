@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { createRef } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { PaneBar } from "./PaneBar";
 import { ANCHOR_ATTR } from "../tabSticky";
 import type { StripGroup, SubTab, TermSubTab } from "./ProjectView/helpers";
@@ -61,6 +61,8 @@ function paneBar(over: Partial<React.ComponentProps<typeof PaneBar>> = {}) {
       tabState={() => "idle"}
       stripDrag={drag}
       stripRef={createRef<HTMLDivElement>()}
+      paneRef={createRef<HTMLDivElement>()}
+      termText={() => null}
       openStacks={{}}
       onToggleStack={noop}
       showHints={false}
@@ -172,6 +174,36 @@ describe("multiplexed terminal tab", () => {
     expect(screen.getByTitle("3 panes")).toHaveTextContent("3");
     expect(document.querySelector(".tab-multiplex-icon")).not.toBeNull();
     expect(document.querySelector(".tab")).toHaveClass("tab-multiplexed");
+  });
+});
+
+describe("tab hover preview", () => {
+  it("waits for hover intent, then shows the agent's live description", () => {
+    vi.useFakeTimers();
+    const tab = {
+      ...term("t1", "claude"),
+      description: "Checking the preview render path",
+    };
+    render(
+      paneBar({
+        tabGroups: [run("all", [tab])],
+        tabState: () => "working",
+        termText: () => "running tests",
+      }),
+    );
+
+    fireEvent.mouseEnter(document.querySelector(".tab")!);
+    act(() => vi.advanceTimersByTime(449));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Current activity");
+    expect(screen.getByRole("tooltip")).toHaveTextContent(
+      "Checking the preview render path",
+    );
+    fireEvent.mouseLeave(document.querySelector(".tab")!);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    vi.useRealTimers();
   });
 });
 

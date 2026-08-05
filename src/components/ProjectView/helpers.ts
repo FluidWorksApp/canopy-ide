@@ -29,6 +29,9 @@ export interface TermSubTab {
   cwd: string;
   /** Auto title, tracked from the shell/OSC. Shown unless the user renamed. */
   title: string;
+  /** Agent-published one-line description, updated through canopy_name_task
+   *  whenever the work changes. */
+  description?: string;
   /** User-set name (double-click the tab). Wins over `title` for display and
    *  survives the shell repainting its own title; cleared by renaming to empty. */
   customTitle?: string;

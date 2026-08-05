@@ -35,8 +35,84 @@ import type {
 import { tabDisplayLabel, previewLabel, deviceLabel } from "./ProjectView";
 import { claimOwnerName } from "../claims";
 import { Button } from "./ui";
+import { nextTickMs, PREVIEW_TICK_MS } from "../tabPreview";
+import {
+  TabPreviewShot,
+  tabPreviewIcon,
+} from "./TabPreviewShot";
 
 export type { SubTab, RailChip };
+
+const HOVER_PREVIEW_DELAY_MS = 450;
+const HOVER_PREVIEW_W = 320;
+const HOVER_PREVIEW_H = 200;
+const HOVER_PREVIEW_MARGIN = 8;
+const HOVER_PREVIEW_OUTER_W = HOVER_PREVIEW_W + 14;
+
+function HoverPreview({
+  tab,
+  left,
+  top,
+  paneRef,
+  termText,
+  state,
+}: {
+  tab: SubTab;
+  left: number;
+  top: number;
+  paneRef: React.RefObject<HTMLDivElement | null>;
+  termText: (id: string) => string | null;
+  state?: LifeState;
+}) {
+  const [tick, setTick] = useState(0);
+  const everyRef = useRef(PREVIEW_TICK_MS);
+
+  useEffect(() => {
+    const started = performance.now();
+    let timer = 0;
+    const frame = requestAnimationFrame(() => {
+      everyRef.current = nextTickMs(performance.now() - started, everyRef.current);
+      timer = window.setTimeout(() => setTick((value) => value + 1), everyRef.current);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+  }, [tick]);
+
+  return (
+    <div
+      className="tab-hover-preview"
+      style={{ left, top, width: HOVER_PREVIEW_W }}
+      role="tooltip"
+    >
+      <div className="tab-hover-preview-head">
+        <span className="tab-hover-preview-icon">{tabPreviewIcon(tab)}</span>
+        <span className="tab-hover-preview-title">{tabText(tab)}</span>
+      </div>
+      {tab.type === "terminal" && tab.description && (
+        <div className="tab-hover-preview-activity">
+          <span>{state === "working" || state === "starting" ? "Current activity" : "Last activity"}</span>
+          <strong>{tab.description}</strong>
+        </div>
+      )}
+      <div
+        className="tsw-shot tab-hover-preview-shot"
+        style={{ width: HOVER_PREVIEW_W, height: HOVER_PREVIEW_H }}
+      >
+        <TabPreviewShot
+          tab={tab}
+          icon={tabPreviewIcon(tab, 38)}
+          paneRef={paneRef}
+          termText={termText}
+          tick={tick}
+          width={HOVER_PREVIEW_W}
+          height={HOVER_PREVIEW_H}
+        />
+      </div>
+    </div>
+  );
+}
 
 function tabTitle(tab: SubTab): string {
   switch (tab.type) {
@@ -177,6 +253,9 @@ export interface PaneBarProps {
    *  and where the active tab has to be scrolled to are both questions about
    *  this element, and both are answered where the strip's state lives. */
   stripRef: React.RefObject<HTMLDivElement | null>;
+  /** Mounted pane hosts and terminal buffers used by the lazy hover preview. */
+  paneRef: React.RefObject<HTMLDivElement | null>;
+  termText: (id: string) => string | null;
   /** Folded stacks, by run key. Absent means open — only a fold the user
    *  actually asked for is stored. */
   openStacks: Record<string, boolean>;
@@ -242,7 +321,7 @@ export interface PaneBarProps {
 // ── PaneBar ───────────────────────────────────────────────────────────────────
 
 function PaneBarImpl({
-  tabGroups, stripDrag, stripRef, openStacks, onToggleStack,
+  tabGroups, stripDrag, stripRef, paneRef, termText, openStacks, onToggleStack,
   stripTabs, activeTabId, flashTabId, renamingTabId, renameDraft,
   collabPaths, isAgentTab, tabState, tabRing, showHints,
   shellChips, runChips, runSummary, shellMenuOpen, setShellMenuOpen,
@@ -266,6 +345,36 @@ function PaneBarImpl({
   const tabsRowRef = useRef<HTMLDivElement | null>(null);
   const blobElRef = useRef<HTMLSpanElement>(null);
   const [blob, setBlob] = useState<{ left: number; width: number } | null>(null);
+  const hoverTimerRef = useRef(0);
+  const [hoverPreview, setHoverPreview] = useState<{
+    tabId: string;
+    left: number;
+    top: number;
+  } | null>(null);
+
+  const cancelHoverPreview = () => {
+    window.clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = 0;
+    setHoverPreview(null);
+  };
+
+  const armHoverPreview = (tab: SubTab, el: HTMLDivElement) => {
+    window.clearTimeout(hoverTimerRef.current);
+    setHoverPreview(null);
+    const rect = el.getBoundingClientRect();
+    hoverTimerRef.current = window.setTimeout(() => {
+      const left = Math.max(
+        HOVER_PREVIEW_MARGIN,
+        Math.min(
+          window.innerWidth - HOVER_PREVIEW_OUTER_W - HOVER_PREVIEW_MARGIN,
+          rect.left + rect.width / 2 - HOVER_PREVIEW_OUTER_W / 2,
+        ),
+      );
+      setHoverPreview({ tabId: tab.id, left, top: rect.bottom + HOVER_PREVIEW_MARGIN });
+    }, HOVER_PREVIEW_DELAY_MS);
+  };
+
+  useEffect(() => () => window.clearTimeout(hoverTimerRef.current), []);
 
   const measureBlob = () => {
     const el = (activeTabElRef as React.RefObject<HTMLDivElement>)?.current;
@@ -355,6 +464,9 @@ function PaneBarImpl({
   // directly.
   useStickyLayout(stripRef);
   const drawn = tabGroups.filter((g) => g.tabs.length > 0);
+  const hoverTab = hoverPreview
+    ? stripTabs.find((tab) => tab.id === hoverPreview.tabId)
+    : undefined;
   const pinIndex = new Map<string, number>();
   for (const g of drawn) if (g.label) pinIndex.set(g.key, pinIndex.size);
 
@@ -445,9 +557,15 @@ function PaneBarImpl({
                     tab.id === stripDrag.dragId ? "tab-dragging" : ""
                   }`}
                   {...stripDrag.itemProps(tab.id)}
-                  onClick={(e) => onSelectTab(tab.id, e.detail)}
+                  onMouseEnter={(e) => armHoverPreview(tab, e.currentTarget)}
+                  onMouseLeave={cancelHoverPreview}
+                  onMouseDown={cancelHoverPreview}
+                  onClick={(e) => {
+                    cancelHoverPreview();
+                    onSelectTab(tab.id, e.detail);
+                  }}
                   onContextMenu={(e) => onTabContextMenu(e, tab)}
-                  title={tabTitle(tab)}
+                  aria-label={tabTitle(tab)}
                 >
                   {tab.type === "terminal" ? (
                     <>
@@ -550,6 +668,17 @@ function PaneBarImpl({
           );
         })}
       </div>
+
+      {hoverPreview && hoverTab && (
+        <HoverPreview
+          tab={hoverTab}
+          left={hoverPreview.left}
+          top={hoverPreview.top}
+          paneRef={paneRef}
+          termText={termText}
+          state={hoverTab.type === "terminal" ? tabState(hoverTab) : undefined}
+        />
+      )}
 
       <Rail
         label="SHELLS"

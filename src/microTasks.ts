@@ -117,10 +117,12 @@ export function microTaskProtocol(): string {
   return (
     `This is a one-shot micro-task: do exactly this job and nothing else — no follow-up work, ` +
     `no servers, no unrelated fixes. As soon as you know what the job actually is — after your ` +
-    `first look at it, not at the end — call \`canopy_name_task\` once with: a \`title\` of a few ` +
+    `first look at it, not at the end — call \`canopy_name_task\` with: a \`title\` of a few ` +
     `words naming this specific run, an \`icon\` that is a single Unicode symbol (◎ ⚒ ⇈ ◍ ◇ ⌕ ▶ — ` +
     `not a letter, a word, or a \`:shortcode:\`), and up to four one-word \`tags\` for the area and ` +
-    `kind of work ("review", "rust", "flaky-test"). That is what the user sees in their Tasks ` +
+    `kind of work ("review", "rust", "flaky-test"), plus a one-line \`description\` saying what ` +
+    `you are working on now. Call it again with a new description when your focus materially changes. ` +
+    `That is what the user sees in their Tasks ` +
     `list instead of the first line of this brief. When finished, call the \`canopy_job_done\` ` +
     `tool with status "done", a one-sentence summary of what happened, \`asked\`: one line saying ` +
     `what you understood the ask to be, and the url if the job produced one — plus title, icon ` +

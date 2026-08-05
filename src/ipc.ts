@@ -174,6 +174,9 @@ export interface AgentAction {
    *  model and clamped where it is read (taskIdentity.ts) — nothing here has
    *  been checked for length, for being one glyph, or for being a string. */
   title?: string;
+  /** task_named: the agent's current one-line description. Unlike title, it may
+   *  be updated throughout an ordinary or micro-task session. */
+  description?: string;
   icon?: string;
   tags?: unknown;
 }

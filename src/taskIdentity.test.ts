@@ -5,10 +5,20 @@ import {
   identityPatch,
   MAX_TAGS,
   taskGlyph,
+  taskDescription,
   taskIdentity,
   taskTags,
   taskTitle,
 } from "./taskIdentity";
+
+describe("taskDescription", () => {
+  it("keeps a model update to one bounded line", () => {
+    expect(taskDescription("Tracing the tab strip\n  and preview timer")).toBe(
+      "Tracing the tab strip and preview timer",
+    );
+    expect((taskDescription("word ".repeat(100)) as string).length).toBeLessThanOrEqual(161);
+  });
+});
 
 describe("taskTitle", () => {
   it("flattens a title an agent wrapped across lines", () => {
