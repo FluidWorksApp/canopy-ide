@@ -260,6 +260,19 @@ describe("combo mode", () => {
 });
 
 describe("focus loss", () => {
+  it("keeps hands-free dictation running after switching to another app", () => {
+    const { t, calls } = makeTrigger({ mode: "doubleTap" });
+    tap(t, "ShiftLeft");
+    vi.advanceTimersByTime(100);
+    tap(t, "ShiftLeft");
+
+    t.handleBlur();
+    expect(calls).toEqual(["start:latched"]);
+
+    tap(t, "ShiftLeft");
+    expect(calls).toEqual(["start:latched", "stop"]);
+  });
+
   it("abandons a held recording, since its keyup will never arrive", () => {
     const { t, calls } = makeTrigger();
     t.handleKeyDown(ev("ShiftLeft", ["Shift"]));

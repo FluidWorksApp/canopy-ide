@@ -299,10 +299,18 @@ export class DictationTrigger {
 
   /** Canopy lost focus. Held keys go stale the moment the window is not
    *  receiving events — the keyup for whatever is down will never arrive — so
-   *  any gesture-owned recording is abandoned rather than left running with no
-   *  way to stop it. The text would have nowhere useful to land anyway: the
-   *  field it was aimed at no longer has focus. */
+   *  a push-to-talk recording must be abandoned. A latched recording has no
+   *  held key to lose and deliberately survives focus changes: this lets the
+   *  user navigate elsewhere in the app while continuing to dictate. */
   handleBlur() {
+    if (this.phase === "latched") {
+      this.clearTimers();
+      this.down = false;
+      this.polluted = false;
+      this.swallowNextUp = false;
+      this.lastTapAt = 0;
+      return;
+    }
     const wasRecording = this.engaged;
     this.reset();
     if (wasRecording) this.act.cancel();
