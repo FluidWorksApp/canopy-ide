@@ -23,11 +23,25 @@ Antigravity, OpenCode, and Amp).
 | Token/cost/model tray | yes | model only | – | – | model only | model only | model only |
 | Model switcher | yes | yes | – | yes | yes | yes | yes |
 | Shared context (receive) | yes | yes | – | – | – | – | – |
+| Shared-checkout file attribution | full | full | no | no | tool-dependent | built-in edit/write | no |
 | Detection / tab promotion / launcher | yes | yes | yes | yes | yes | yes | yes |
 
 OpenCode's `chat.message` plugin hook maps to `UserPromptSubmit`, including
 the text parts and active provider/model. Its bus events provide `SessionStart`,
-`Stop`, `permission.asked`, file edits and tool use.
+`Stop`, `permission.asked`, file edits and tool use. Edit attribution comes from
+`tool.execute.after`, not the sessionless `file.edited` broadcast: the former
+carries the session id and original tool arguments together, which lets Canopy
+normalize `filePath`/`oldString`/`newString` and retain Claude-equivalent edit
+journal entries for OpenCode's built-in `edit` and `write` tools.
+
+The shared-checkout row is intentionally stricter than the global Changes view.
+An isolated worktree belongs to one agent, but a shared checkout is filtered to
+paths reported by that session. Provider adapters that only report tool activity
+without a path cannot safely populate that row; showing the whole working tree
+would misattribute another agent's changes. Current limitations are deliberate:
+Aider has no per-session edit hook, while Amp and oh-my-pi still need verified
+tool-argument shapes before their path reporting can be upgraded. Antigravity
+reports paths but does not yet provide Claude-style before/after edit content.
 
 The load-bearing pieces every feature hangs off:
 
@@ -160,7 +174,8 @@ The load-bearing pieces every feature hangs off:
 **P1 — plugin-based integrations**
 4. **OpenCode plugin.** Ship `canopy.ts` into
    `~/.config/opencode/plugin/`: forward `permission.asked`, `session.idle`,
-   `tool.execute.after`, `file.edited` (+ session ids) to the bridge/helper.
+   `tool.execute.after` (session id + normalized edit args) and `file.edited`
+   (path-only activity) to the bridge/helper.
    Later: token tray from its per-step usage/cost data.
 5. **oh-my-pi extension.** Ship an extension into `~/.omp/agent/extensions/`
    forwarding agent/tool/approval/session events. Token tray: parse its session JSONL

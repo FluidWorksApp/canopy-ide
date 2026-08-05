@@ -88,7 +88,8 @@ import { AskDialog } from "./components/AskDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { Dictation } from "./components/Dictation";
 import { Companion } from "./components/Companion";
-import { startCompanion, stopCompanion } from "./companionSession";
+import { startCompanion, stopCompanion, subscribeCompanion } from "./companionSession";
+import { remoteCompanionSnapshot } from "./remoteCompanion";
 import { companionToolNames } from "./companionTools";
 import {
   AGENT_CLIS_CHANGED_EVENT,
@@ -1073,6 +1074,25 @@ export default function App() {
     publish();
     window.addEventListener(THEME_CHANGE_EVENT, publish);
     return () => window.removeEventListener(THEME_CHANGE_EVENT, publish);
+  }, []);
+
+  // The companion rides the same push channel as the theme: its transcript
+  // exists only in this frontend, so the portal shows whatever was last
+  // pushed. Debounced — a streaming reply mutates state per chunk, and the
+  // portal needs the settled tail, not every keystroke of it.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const publish = () =>
+      void ipc.remoteSetCompanion(remoteCompanionSnapshot()).catch(() => {});
+    publish();
+    const unsub = subscribeCompanion(() => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(publish, 250);
+    });
+    return () => {
+      if (timer) clearTimeout(timer);
+      unsub();
+    };
   }, []);
 
   // Remote launches from the same resolved registry as desktop: custom CLIs,

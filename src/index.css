@@ -23628,6 +23628,48 @@ a.btn-sm {
   display: none;
 }
 
+/* The grouped panel (recent mode): one labeled strip per kind, rows in
+   most-recent-first order. Arrow keys walk the grid; Ctrl+Tab still walks
+   the flat recency order underneath, jumping between rows. */
+.tsw-panel-rows {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: min(680px, 76vh);
+}
+
+.tsw-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.tsw-row-label {
+  padding: 0 2px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.tsw-row-strip {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.tsw-row-strip::-webkit-scrollbar {
+  display: none;
+}
+
 /* One width for every card, and it is the picture's.
    Without it the card is as wide as its widest child, and the head's
    max-content — icon plus the WHOLE title plus the digit — is what that turns
@@ -23689,6 +23731,38 @@ a.btn-sm {
    glyph you see before you read, once as the word that says what it means. */
 .tsw-icon {
   color: var(--tsw-tone, var(--text-dim));
+}
+
+/* Why you'd go there: the same state vocabulary the strip's dots speak,
+   right-aligned on the kind line. Marks only — state never reorders cards. */
+.tsw-status {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.tsw-status-dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.tsw-status-attention {
+  color: var(--warn);
+}
+
+.tsw-status-active {
+  color: var(--ok);
 }
 
 /* Six tones over fifteen tab types, grouped by what a tab is FOR. Eleven

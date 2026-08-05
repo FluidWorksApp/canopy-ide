@@ -29,6 +29,24 @@ import {
   TAB_PREVIEW_H,
   TAB_PREVIEW_W,
 } from "./TabPreviewShot";
+import { DOC_STACKS } from "../tabGroups";
+import type { TabSwitchRow } from "../tabSwitchOrder";
+import type { CardStatus } from "../tabCardStatus";
+
+/** The two row keys the doc stacks don't know: terminals, split by contents. */
+const TERM_ROW_LABELS: Record<string, string> = {
+  agents: "Agents",
+  shells: "Shells",
+};
+
+function rowLabel(row: TabSwitchRow): string {
+  return (
+    row.label ??
+    TERM_ROW_LABELS[row.key] ??
+    DOC_STACKS.find((s) => s.key === row.key)?.label ??
+    row.key
+  );
+}
 
 /** The card's picture box, in CSS pixels — kept here rather than read back from
  *  the DOM because the scale factor has to be known before the first paint, and
@@ -37,6 +55,9 @@ import {
 export interface TabSwitcherProps {
   /** In the order the switcher walks them — the same order Ctrl+Tab cycles. */
   tabs: SubTab[];
+  /** Grouped strips (recent mode): ids per row, frozen with the snapshot so
+   *  nothing reshuffles mid-gesture. Absent, the panel is one flat strip. */
+  rows?: TabSwitchRow[];
   /** The card the release would land on. */
   selectedId: string;
   /** Number the cards 1…9. The ⌘-held layer's cards are reached by their digit,
@@ -47,15 +68,19 @@ export interface TabSwitcherProps {
   termText: (id: string) => string | null;
   /** Clicking a card is the mouse's version of releasing on it. */
   onPick: (id: string) => void;
+  /** Why you'd go there: the agent bucket mark and one line of state. */
+  status?: (tab: SubTab) => CardStatus;
 }
 
 export function TabSwitcher({
   tabs,
+  rows,
   selectedId,
   digits,
   paneRef,
   termText,
   onPick,
+  status,
 }: TabSwitcherProps) {
   const [tick, setTick] = useState(0);
   const everyRef = useRef(PREVIEW_TICK_MS);
@@ -86,6 +111,77 @@ export function TabSwitcher({
   const at = Math.max(0, tabs.findIndex((t) => t.id === selectedId));
   const selected = tabs[at];
 
+  const byId = new Map(tabs.map((tab) => [tab.id, tab]));
+  const indexById = new Map(tabs.map((tab, i) => [tab.id, i]));
+  const grouped = rows
+    ?.map((row) => ({
+      key: row.key,
+      label: rowLabel(row),
+      tabs: row.ids
+        .map((id) => byId.get(id))
+        .filter((tab): tab is SubTab => Boolean(tab)),
+    }))
+    .filter((row) => row.tabs.length > 0);
+
+  const card = (tab: SubTab) => {
+    const kind = tabKind(tab);
+    const brand = tabToneColor(kind);
+    const i = indexById.get(tab.id) ?? 0;
+    const st = status?.(tab);
+    return (
+      <div
+        key={tab.id}
+        ref={tab.id === selectedId ? selRef : undefined}
+        className={`tsw-card tsw-tone-${kind.tone} ${tab.id === selectedId ? "tsw-card-sel" : ""}`}
+        // The CLI's own colour where there is one; the class's tone
+        // otherwise. Inline because the value is data, not a skin token —
+        // see tabToneColor.
+        style={brand ? ({ "--tsw-tone": brand } as React.CSSProperties) : undefined}
+        role="option"
+        aria-selected={tab.id === selectedId}
+        onClick={() => onPick(tab.id)}
+      >
+        <div className="tsw-head">
+          <span className="tsw-icon">{tabPreviewIcon(tab)}</span>
+          <span className="tsw-title">{tabDisplayLabel(tab)}</span>
+          {digits && i < 9 && <span className="tsw-digit">{i + 1}</span>}
+        </div>
+        {/* What the title cannot say on its own: a card reading "canopy"
+            is a terminal, a project and a repo, and six Claude sessions
+            are six identical words. The kind carries the colour. */}
+        <div className="tsw-kind">
+          <span className="tsw-kind-label">{kind.label}</span>
+          {kind.detail && (
+            <>
+              <span className="tsw-kind-sep" aria-hidden>
+                ·
+              </span>
+              <span className="tsw-kind-detail">{kind.detail}</span>
+            </>
+          )}
+          {st && (st.bucket || st.line) && (
+            <span
+              className={`tsw-status${st.bucket ? ` tsw-status-${st.bucket}` : ""}`}
+              title={st.line}
+            >
+              {st.bucket && <span className="tsw-status-dot" aria-hidden />}
+              {st.line}
+            </span>
+          )}
+        </div>
+        <div className="tsw-shot" style={{ width: TAB_PREVIEW_W, height: TAB_PREVIEW_H }}>
+          <TabPreviewShot
+            tab={tab}
+            icon={tabPreviewIcon(tab, 34)}
+            paneRef={paneRef}
+            termText={termText}
+            tick={tick}
+          />
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="tsw-layer" role="presentation">
       <div className="tsw-frame">
@@ -103,55 +199,30 @@ export function TabSwitcher({
             <span className="tsw-bar-of"> / {tabs.length}</span>
           </span>
         </div>
-      <div className="tsw-panel" role="listbox" aria-label="Open tabs">
-        {tabs.map((tab, i) => {
-          const kind = tabKind(tab);
-          const brand = tabToneColor(kind);
-          return (
-          <div
-            key={tab.id}
-            ref={tab.id === selectedId ? selRef : undefined}
-            className={`tsw-card tsw-tone-${kind.tone} ${tab.id === selectedId ? "tsw-card-sel" : ""}`}
-            // The CLI's own colour where there is one; the class's tone
-            // otherwise. Inline because the value is data, not a skin token —
-            // see tabToneColor.
-            style={brand ? ({ "--tsw-tone": brand } as React.CSSProperties) : undefined}
-            role="option"
-            aria-selected={tab.id === selectedId}
-            onClick={() => onPick(tab.id)}
-          >
-            <div className="tsw-head">
-              <span className="tsw-icon">{tabPreviewIcon(tab)}</span>
-              <span className="tsw-title">{tabDisplayLabel(tab)}</span>
-              {digits && i < 9 && <span className="tsw-digit">{i + 1}</span>}
+      {grouped ? (
+        <div
+          className="tsw-panel tsw-panel-rows"
+          role="listbox"
+          aria-label="Open tabs"
+        >
+          {grouped.map((row) => (
+            <div key={row.key} className="tsw-row">
+              <div className="tsw-row-label">{row.label}</div>
+              <div
+                className="tsw-row-strip"
+                role="group"
+                aria-label={row.label}
+              >
+                {row.tabs.map(card)}
+              </div>
             </div>
-            {/* What the title cannot say on its own: a card reading "canopy"
-                is a terminal, a project and a repo, and six Claude sessions
-                are six identical words. The kind carries the colour. */}
-            <div className="tsw-kind">
-              <span className="tsw-kind-label">{kind.label}</span>
-              {kind.detail && (
-                <>
-                  <span className="tsw-kind-sep" aria-hidden>
-                    ·
-                  </span>
-                  <span className="tsw-kind-detail">{kind.detail}</span>
-                </>
-              )}
-            </div>
-            <div className="tsw-shot" style={{ width: TAB_PREVIEW_W, height: TAB_PREVIEW_H }}>
-              <TabPreviewShot
-                tab={tab}
-                icon={tabPreviewIcon(tab, 34)}
-                paneRef={paneRef}
-                termText={termText}
-                tick={tick}
-              />
-            </div>
-          </div>
-          );
-        })}
-      </div>
+          ))}
+        </div>
+      ) : (
+        <div className="tsw-panel" role="listbox" aria-label="Open tabs">
+          {tabs.map(card)}
+        </div>
+      )}
       </div>
     </div>
   );

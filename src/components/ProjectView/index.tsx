@@ -36,11 +36,26 @@ import {
 } from "../../terminalGroups";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
 import {
+  TAB_USE_DWELL_MS,
+  groupTabSwitch,
+  pruneTabUses,
   recordTabUse,
   resolveTabSwitch,
   stepTabSwitch,
+  stepTabSwitchAcrossRows,
+  stepTabSwitchInRow,
   tabSwitchSnapshot,
+  type TabSwitchRow,
 } from "../../tabSwitchOrder";
+import {
+  clusterWorkItems,
+  stepWorkItem,
+  workItemSnapshot,
+  type WorkItemJoins,
+} from "../../workItems";
+import { applyHints, buildWorkItemDigest } from "../../workItemHints";
+import { brainHints, noteWorkItems } from "../../workItemBrain";
+import { cardStatus } from "../../tabCardStatus";
 import {
   DOC_STACKS,
   STATUS_LABEL,
@@ -208,7 +223,7 @@ import {
 } from "../../taskHistory";
 import { record as recordProvenance } from "../../provenance";
 import { resolveAgentForPr, type PrAgent } from "../../agentForPr";
-import { parsePrUrl } from "../../provenance";
+import { cached as provenanceCached, parsePrUrl } from "../../provenance";
 import { toPrInfo } from "../../prInbox";
 import {
   askedLine,
@@ -341,6 +356,22 @@ import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
 import { ActivityRail } from "../ActivityRail";
 import { PaneBar } from "../PaneBar";
 import { TabSwitcher } from "../TabSwitcher";
+import { switchRowKey, tabKind } from "../../tabKind";
+
+/** Work items join PRs through the provenance cache — synchronous on purpose,
+ *  like every read the gesture path makes. A PR tab loads its edges on open,
+ *  so by switch time the cache answer is the store's. */
+const workItemJoins: WorkItemJoins = {
+  prEdge: (repo, number) => {
+    const edge = provenanceCached(repo, number)?.[0];
+    return edge ? { sessionId: edge.session_id, cwd: edge.cwd } : undefined;
+  },
+};
+
+/** Model hints may home only reference tabs; sessions and workspaces found
+ *  items, and a plain shell is ambiguous by nature. */
+const hintMovable = (tab: { type: string } | undefined) =>
+  !!tab && tab.type !== "terminal" && tab.type !== "agent";
 import { useCliLauncher } from "./hooks/useCliLauncher";
 
 import {
@@ -832,6 +863,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  its slot. Nothing switches until release. */
   const [switcher, setSwitcher] = useState<{
     ids: string[];
+    /** Grouped strips for recent mode, frozen with the snapshot; null keeps
+     *  the flat strip (order mode). */
+    rows: TabSwitchRow[] | null;
     selectedId: string;
   } | null>(null);
   const switcherRef = useRef(switcher);
@@ -967,14 +1001,39 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  workspace preference: after a restart there is no honest "previous tab"
    *  until the user has moved between two of them. */
   const recentTabsRef = useRef<string[]>([]);
+  // Dwell gate: a tab passed through on the way somewhere else never enters
+  // the recency list. Depends on activeTabId alone — a tabs-array change must
+  // not restart the timer and fake a dwell; pruning closed tabs is the
+  // separate effect below.
   useEffect(() => {
     if (!activeTabId) return;
-    recentTabsRef.current = recordTabUse(
+    const timer = window.setTimeout(() => {
+      recentTabsRef.current = recordTabUse(
+        recentTabsRef.current,
+        activeTabId,
+        tabsRef.current.map((t) => t.id),
+      );
+    }, TAB_USE_DWELL_MS);
+    return () => window.clearTimeout(timer);
+  }, [activeTabId]);
+  useEffect(() => {
+    recentTabsRef.current = pruneTabUses(
       recentTabsRef.current,
-      activeTabId,
       tabs.map((t) => t.id),
     );
-  }, [activeTabId, tabs]);
+  }, [tabs]);
+  // Feed the switcher brain in Work items mode: a compact digest of the
+  // deterministic grouping, off the gesture path. The brain debounces and
+  // floors the CLI turns itself; identical digests never leave this effect.
+  useEffect(() => {
+    if (getSettings().tabSwitchMode !== "items") return;
+    const byId = new Map(tabs.map((t) => [t.id, t]));
+    const digest = buildWorkItemDigest(clusterWorkItems(tabs, workItemJoins), (id) => {
+      const tab = byId.get(id);
+      return tab ? `${tabKind(tab).label} ${tabDisplayLabel(tab)}` : id;
+    });
+    noteWorkItems(digest);
+  }, [tabs]);
   /** The tabs in the order the pane bar draws them — what ⌘1..9 counts, and
    *  filled in below once the groups are known. */
   const barTabsRef = useRef<SubTab[]>([]);
@@ -3764,24 +3823,75 @@ const ProjectViewBody = memo(function ProjectViewBody({
             )?.id ?? activeTabIdRef.current
           : activeTabIdRef.current;
       const current = switcherRef.current;
-      const ids =
-        current?.ids ??
-        tabSwitchSnapshot(
+      const mode = getSettings().tabSwitchMode;
+      let ids: string[];
+      let rows: TabSwitchRow[] | null;
+      if (current) {
+        ({ ids, rows } = current);
+      } else if (mode === "items") {
+        // One row per work item, labeled by the brain where it has spoken and
+        // by the founding tab otherwise. Frozen here like every snapshot.
+        const items = applyHints(
+          clusterWorkItems(list, workItemJoins),
+          brainHints(),
+          (id) => hintMovable(list.find((t) => t.id === id)),
+        );
+        const labels = brainHints().labels;
+        rows = workItemSnapshot(
+          items,
           openIds,
           currentVisualId,
           recentTabsRef.current,
-          getSettings().tabSwitchMode,
-        );
-      const selectedId = stepTabSwitch(
-        ids,
-        current?.selectedId ?? currentVisualId,
-        openIds,
-        dir,
-      );
+        ).map((item) => {
+          const founder = list.find((t) => t.id === item.key);
+          return {
+            key: item.key,
+            ids: item.ids,
+            label: labels[item.key] ?? (founder ? tabDisplayLabel(founder) : item.key),
+          };
+        });
+        ids = rows.flatMap((row) => row.ids);
+      } else {
+        ids = tabSwitchSnapshot(openIds, currentVisualId, recentTabsRef.current, mode);
+        rows =
+          mode === "recent"
+            ? groupTabSwitch(ids, (id) => {
+                const tab = tabsRef.current.find((t) => t.id === id);
+                return tab ? switchRowKey(tab) : "files";
+              })
+            : null;
+      }
+      const selectedId =
+        mode === "items" && rows
+          ? stepWorkItem(rows, current?.selectedId ?? currentVisualId, openIds, dir)
+          : stepTabSwitch(ids, current?.selectedId ?? currentVisualId, openIds, dir);
       if (!selectedId) return;
-      const next = { ids, selectedId };
+      const next = { ids, rows, selectedId };
       switcherRef.current = next;
       setSwitcher(next);
+    };
+    // Arrow keys are panel-internal, and only the grouped (recent-mode) panel
+    // has the second axis; with the panel closed they belong to whatever has
+    // focus.
+    const stepSwitcherArrow = (e: KeyboardEvent): boolean => {
+      const current = switcherRef.current;
+      if (!current?.rows) return false;
+      const horiz =
+        e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+      const vert = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
+      if (!horiz && !vert) return false;
+      e.preventDefault();
+      e.stopPropagation();
+      const openIds = visualTabs().map((t) => t.id);
+      const selectedId = horiz
+        ? stepTabSwitchInRow(current.rows, current.selectedId, openIds, horiz as 1 | -1)
+        : stepTabSwitchAcrossRows(current.rows, current.selectedId, openIds, vert as 1 | -1);
+      if (selectedId && selectedId !== current.selectedId) {
+        const next = { ...current, selectedId };
+        switcherRef.current = next;
+        setSwitcher(next);
+      }
+      return true;
     };
     // The tab-cycle chord is a native menu accelerator, but when focus is in
     // the webview (Monaco/xterm) macOS never routes it to the menu — the
@@ -3794,6 +3904,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const recentKeydown = () => Date.now() - lastKeydownNav.t < 150;
     const onKeydown = (e: KeyboardEvent) => {
       if (!visibleRef.current) return;
+      if (stepSwitcherArrow(e)) return;
       // ⌘1..9 (Ctrl off macOS) — the digits the tabs show while the modifier is
       // held. Handled here rather than as a menu accelerator: nine menu rows for
       // this would be absurd, and the key must land even when focus is inside
@@ -10387,7 +10498,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       {switcherOpen && visible && switcherTabs.length > 1 && switcher && (
         <TabSwitcher
           tabs={switcherTabs}
+          rows={switcher.rows ?? undefined}
           selectedId={switcher.selectedId}
+          status={(tab) =>
+            cardStatus(
+              tab,
+              statusTargets.has(tab.id) ? groupOf(tab.id) : undefined,
+            )
+          }
           paneRef={contentRef}
           termText={termTailFor}
           onPick={(id) => {
