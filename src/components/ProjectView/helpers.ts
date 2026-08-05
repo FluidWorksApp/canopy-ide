@@ -652,6 +652,26 @@ export function pickBrowserTab<
   );
 }
 
+/**
+ * The tab a restore leaves in front, given the ids it managed to reopen in
+ * strip order and the index of the one that was in front when the work was put
+ * away (null when the caller has no preference).
+ *
+ * Falls back to the first tab that did come back, because the tab that was in
+ * front is the one most likely to be missing: a file deleted while the project
+ * slept, a portal PTY that died, an agent session the CLI refused to resume.
+ * Focusing nothing there is the worst outcome available — the strip comes back
+ * full, every tab loads, and the workspace renders blank until the user clicks
+ * one, which reads as the restore having failed.
+ */
+export function restoredFront(
+  ids: readonly (string | null)[],
+  wanted: number | null,
+): string | null {
+  const front = wanted != null ? ids[wanted] : null;
+  return front ?? ids.find((id): id is string => Boolean(id)) ?? null;
+}
+
 /** host[/path] for the tab strip; the scheme is noise at that width. */
 export function previewLabel(url: string): string {
   if (!url) return "Preview";
