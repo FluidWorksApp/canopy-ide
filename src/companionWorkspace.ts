@@ -111,7 +111,24 @@ export interface AgentReport {
   title: string | null;
   state: string | null;
   updated: number | null;
+  /** The terminal it is running in, when that terminal is still live in this
+   *  launch of the app — which is the only case in which it can be reached.
+   *
+   *  Carried because without it this list is unactionable: `canopy_message_agent`
+   *  addresses a session by `ptyId`, so a companion that could see a session's
+   *  state, branch and last prompt still had no way to hand it anything. Null
+   *  for a session whose terminal has gone (or belongs to an earlier launch,
+   *  where the id means something else entirely — see `foreign` on the digest). */
+  ptyId: number | null;
 }
+
+/** How many sessions one call may return.
+ *
+ *  A digest is written per conversation and never expires, so a project worked
+ *  in for months answers with hundreds — which overran the tool-output cap on a
+ *  single project and cost the companion the whole answer rather than part of
+ *  it. Newest first, so what is cut is the long-cold tail. */
+const MAX_AGENTS = 40;
 
 /** Attribute a session to a project by the directory it is working in.
  *
@@ -156,6 +173,76 @@ export async function workspaceGit(
   return summarise(reports);
 }
 
+/** The sessions in scope, as the companion is handed them.
+ *
+ *  Pure, and exported for its test: the shaping is the part with decisions in
+ *  it — which sessions belong to the caller's projects, which of them can
+ *  actually be reached, and how many will fit in an answer. */
+export function agentReports(
+  scope: WorkspaceProject[],
+  digests: ipc.SessionDigest[],
+  stats: ipc.SessionStats[],
+  now: number,
+): { agents: AgentReport[]; note?: string } {
+  const byPty = new Map(stats.map((s) => [String(s.id), s]));
+  const agents = digests
+    .filter((d) => d.agent)
+    .map((d) => {
+      // Resolved once: the live terminal is both what the ladder reads a state
+      // off and the address the companion needs to reach this session.
+      const live = d.surface ? byPty.get(d.surface) : undefined;
+      return {
+        project: projectOf(scope, d.cwd),
+        agent: d.agent ?? null,
+        cwd: d.cwd ?? null,
+        branch: d.branch ?? null,
+        // The last thing the user asked it, which is what actually says what a
+        // session is for — a title would be the launcher's guess.
+        title: d.prompts?.[d.prompts.length - 1]?.slice(0, 200) ?? null,
+        state: agentLife({
+          digest: d as never,
+          pty: live
+            ? {
+                kind: "live" as const,
+                hint: live.agent_hint,
+                cpu: live.total_cpu,
+                quietForMs: live.quiet_ms ?? undefined,
+                sinceInputMs: live.since_input_ms ?? undefined,
+              }
+            : undefined,
+          now,
+        }).state,
+        updated: d.updated ?? null,
+        // A pty id from an earlier launch of the app names whichever terminal
+        // holds that number now, so it is not an address — the ladder refuses
+        // to read a state off such a digest for the same reason.
+        ptyId: live && !d.foreign ? live.id : null,
+      };
+    })
+    // Sessions in a directory belonging to none of the scoped projects are
+    // somebody else's; reporting them would answer a question that was not
+    // asked.
+    .filter((a) => a.project !== "unknown")
+    .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
+  const shown = agents.slice(0, MAX_AGENTS);
+  const dropped = agents.length - shown.length;
+  return {
+    agents: shown,
+    note: agents.length
+      ? "Your own session is deliberately absent from this list." +
+        // Said rather than left to be inferred: a truncated list that does not
+        // admit it reads as "these are all the sessions there are", and the
+        // companion's next move is usually to conclude nobody is on something.
+        (dropped
+          ? ` Showing the ${shown.length} most recently active of ${agents.length}; ${dropped} older ones are not listed — narrow with \`project\` to see a project's own.`
+          : "")
+      // Hedged, because this is asserted from digests: a CLI whose hooks are
+      // not installed writes none at all, and the flat claim was false for
+      // exactly the people most likely to ask.
+      : "No coding sessions reported in these projects — note that a CLI without Canopy's hooks installed reports nothing at all.",
+  };
+}
+
 export async function workspaceAgents(
   projects: WorkspaceProject[],
   project?: string | null,
@@ -167,52 +254,10 @@ export async function workspaceAgents(
   // session that is working from one that died mid-turn last Tuesday — and Ash
   // saying "claude is working in canopy" about a dead session is worse than
   // saying nothing. Both fields the ladder needs were already in the digest;
-  // the CPU and quiet time come from here.
+  // the CPU and quiet time come from here. It is also the only place a
+  // reachable terminal id can come from.
   const stats = await ipc.ptyStats().catch(() => []);
-  const byPty = new Map(stats.map((s) => [String(s.id), s]));
-  const now = Date.now() / 1000;
-  const agents = digests
-    .filter((d) => d.agent)
-    .map((d) => ({
-      project: projectOf(scope, d.cwd),
-      agent: d.agent ?? null,
-      cwd: d.cwd ?? null,
-      branch: d.branch ?? null,
-      // The last thing the user asked it, which is what actually says what a
-      // session is for — a title would be the launcher's guess.
-      title: d.prompts?.[d.prompts.length - 1]?.slice(0, 200) ?? null,
-      state: agentLife({
-        digest: d as never,
-        pty: (() => {
-          const s = d.surface ? byPty.get(d.surface) : undefined;
-          return s
-            ? {
-                kind: "live" as const,
-                hint: s.agent_hint,
-                cpu: s.total_cpu,
-                quietForMs: s.quiet_ms ?? undefined,
-                sinceInputMs: s.since_input_ms ?? undefined,
-              }
-            : undefined;
-        })(),
-        now,
-      }).state,
-      updated: d.updated ?? null,
-    }))
-    // Sessions in a directory belonging to none of the scoped projects are
-    // somebody else's; reporting them would answer a question that was not
-    // asked.
-    .filter((a) => a.project !== "unknown")
-    .sort((a, b) => (b.updated ?? 0) - (a.updated ?? 0));
-  return {
-    agents,
-    note: agents.length
-      ? "Your own session is deliberately absent from this list."
-      // Hedged, because this is asserted from digests: a CLI whose hooks are
-      // not installed writes none at all, and the flat claim was false for
-      // exactly the people most likely to ask.
-      : "No coding sessions reported in these projects — note that a CLI without Canopy's hooks installed reports nothing at all.",
-  };
+  return agentReports(scope, digests, stats, Date.now() / 1000);
 }
 
 export async function workspaceSearch(

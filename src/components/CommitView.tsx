@@ -1,10 +1,8 @@
 // A commit opened as a tab: message, metadata, and the patch it introduced.
 // Same renderer as the PR view — a commit's patch is the same shape as a
 // PR's, so it gets the same treatment rather than a second diff widget.
-import { useDiffData } from "../diffData";
-import { useEffect, useState } from "react";
-import { DiffView, DiffModeEnum } from "@git-diff-view/react";
-import "@git-diff-view/react/styles/diff-view.css";
+import { useEffect, useMemo, useState } from "react";
+import { PatchFileList } from "./PatchFileList";
 import * as ipc from "../ipc";
 import type { Notify } from "../types";
 import { useBranchSwitch } from "../useBranchSwitch";
@@ -35,8 +33,6 @@ function linkify(text: string) {
 }
 
 export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
-  // Stable diff `data` identities; see diffData.ts.
-  const dataFor = useDiffData();
   const [detail, setDetail] = useState<ipc.CommitDetail | null>(null);
   const [remote, setRemote] = useState("");
   const [patch, setPatch] = useState<ipc.CommitPatch | null>(null);
@@ -69,10 +65,16 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
     };
   }, [repo, hash]);
 
+  // Above the early returns because it is a hook, and split once per patch
+  // rather than once per render either way.
+  const files = useMemo(
+    () => (patch?.patch ? splitPatch(patch.patch) : []),
+    [patch],
+  );
+
   if (error) return <div className="tree-empty">{error}</div>;
   if (!detail) return <div className="tree-empty">Loading commit…</div>;
 
-  const files = patch?.patch ? splitPatch(patch.patch) : [];
   const isMerge = detail.parents.length > 1;
 
   return (
@@ -151,20 +153,7 @@ export function CommitView({ repo, hash, onNotice }: CommitViewProps) {
               : "No file changes in this commit."}
           </div>
         ) : (
-          files.map((f) => (
-            <div key={f.path} className="pr-file">
-              <div className="pr-file-name">{f.path}</div>
-              <DiffView
-                data={dataFor(f)}
-                diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
-                diffViewHighlight
-                diffViewTheme="dark"
-                diffViewWrap
-                diffViewAddWidget={false}
-                diffViewFontSize={12}
-              />
-            </div>
-          ))
+          <PatchFileList files={files} split={split} />
         )}
         {patch?.truncated && (
           <div className="tree-empty">

@@ -170,6 +170,10 @@ export interface AgentAction {
    *  form here rather than answering it — only the frontend holds the
    *  pty→session binding and can reopen an ended conversation. */
   pr?: string;
+  /** message_agent (`pr` form): the ticket the caller is parked on. Answer it
+   *  with `browserResult` — delivered or not, exactly once, on every path.
+   *  Without one the agent is told the outcome by a toast it cannot read. */
+  opId?: number;
   /** job_done / task_named: what the agent calls this run. Straight from the
    *  model and clamped where it is read (taskIdentity.ts) — nothing here has
    *  been checked for length, for being one glyph, or for being a string. */
@@ -283,6 +287,7 @@ export interface AgentUiOp {
     | "workspace_prs"
     | "pr_details"
     | "pr_action"
+    | "start_session"
     | "open_project"
     | "confirm"
     | "recall"
@@ -314,6 +319,12 @@ export interface AgentUiOp {
   timeoutMs?: number | null;
   /** open_project: why the user's window just moved. */
   why?: string | null;
+  /** start_session: the component to work in, the brief to hand the agent, what
+   *  to call the run, and which CLI to run it on. */
+  dir?: string | null;
+  prompt?: string | null;
+  label?: string | null;
+  agent?: string | null;
   limit?: number | null;
   /** remember: the fact, what it concerns, and whether this retracts one. */
   fact?: string | null;

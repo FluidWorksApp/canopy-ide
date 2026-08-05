@@ -5,6 +5,54 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Canopy</title>
+    <!-- Two things that have to happen before the bundle does, because both
+         decide what the window looks like on the first frame.
+
+         The style block is the floor: in dev the stylesheet arrives through
+         the module graph, so until it does the document has no styling at all
+         and the window is a sheet of white. Written as --bg (matching the base
+         token block in shared/tokens.css) rather than a literal background, so
+         when the real stylesheet lands — later in the document, therefore
+         winning the tie — the skin's own value takes over with nothing to
+         undo. The light guess is scoped to :not([data-theme]) so it applies
+         only while nobody has said which skin this is; once one is stamped,
+         guessing from the OS would be guessing against an answer we have. -->
+    <style>
+      :root {
+        --bg: #0d0f12;
+        background: var(--bg);
+      }
+      @media (prefers-color-scheme: light) {
+        :root:not([data-theme]) {
+          --bg: #f7f8fa;
+          color-scheme: light;
+        }
+      }
+    </style>
+    <script>
+      // And the skin, stamped from the persisted settings. The stylesheet is
+      // render-blocking in a packaged build, so without this the first frame
+      // is always the base (dark) palette — a user on Daylight or Parchment
+      // watched the app open dark and turn light once applyTheme() ran.
+      // applyTheme() in main.tsx remains the authority and re-stamps this with
+      // the parsed settings; anything unknown here just resolves to the base
+      // palette, which is what skinDef() would have done with it anyway.
+      // Deliberately inline and dependency-free: an import would put the
+      // module graph back in front of the first paint, which is the whole
+      // thing this is trying to get out of the way.
+      try {
+        var stored = JSON.parse(localStorage.getItem("canopy.settings") || "{}");
+        var theme = stored.theme;
+        if (!theme || theme === "auto") {
+          theme = window.matchMedia("(prefers-color-scheme: dark)").matches
+            ? "gotham"
+            : "daylight";
+        }
+        document.documentElement.dataset.theme = theme;
+      } catch (e) {
+        /* No settings yet, or storage refused it: the block above covers us. */
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

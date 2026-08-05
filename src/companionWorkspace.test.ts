@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { projectOf, repoReport, scopeTo, summarise } from "./companionWorkspace";
+import {
+  agentReports,
+  projectOf,
+  repoReport,
+  scopeTo,
+  summarise,
+} from "./companionWorkspace";
 import type { RepoReport } from "./companionWorkspace";
 import type { WorkspaceProject } from "./agentOps";
 
@@ -139,5 +145,77 @@ describe("attributing a session to a project", () => {
   it("says unknown rather than guessing", () => {
     expect(projectOf(PROJECTS, "/somewhere/else")).toBe("unknown");
     expect(projectOf(PROJECTS, null)).toBe("unknown");
+  });
+});
+
+describe("what the companion is handed about other sessions", () => {
+  const NOW = 1_800_000_000;
+  const digest = (over: Partial<import("./ipc").SessionDigest> = {}) =>
+    ({
+      session_id: "s1",
+      agent: "claude",
+      cwd: "/gh/canopy",
+      updated: NOW - 10,
+      ...over,
+    }) as import("./ipc").SessionDigest;
+  const stat = (id: number) =>
+    ({
+      id,
+      title: "claude",
+      cwd: "/gh/canopy",
+      total_cpu: 12,
+      total_mem_bytes: 0,
+      procs: [],
+      ports: [],
+      agent_hint: null,
+      quiet_ms: 500,
+      since_input_ms: 90_000,
+      output_bytes: 0,
+    }) as import("./ipc").SessionStats;
+
+  it("gives a live session the terminal id it can be reached on", () => {
+    // Without this the list is unactionable: canopy_message_agent addresses a
+    // session by ptyId, so a session you can see but cannot name is one you
+    // cannot hand anything to.
+    const { agents } = agentReports(
+      PROJECTS,
+      [digest({ surface: "7" })],
+      [stat(7)],
+      NOW,
+    );
+    expect(agents[0].ptyId).toBe(7);
+  });
+
+  it("gives no id for a session whose terminal has gone", () => {
+    const { agents } = agentReports(PROJECTS, [digest({ surface: "7" })], [], NOW);
+    expect(agents[0].ptyId).toBeNull();
+  });
+
+  it("gives no id for another launch's digest, whose pty id means something else now", () => {
+    const { agents } = agentReports(
+      PROJECTS,
+      [digest({ surface: "7", foreign: true })],
+      [stat(7)],
+      NOW,
+    );
+    expect(agents[0].ptyId).toBeNull();
+  });
+
+  it("caps the list and says what it left out", () => {
+    // A project worked in for months answers with hundreds of digests, which
+    // overran the tool-output cap and cost the caller the whole answer.
+    const many = Array.from({ length: 60 }, (_, i) =>
+      digest({ session_id: `s${i}`, updated: NOW - i }),
+    );
+    const { agents, note } = agentReports(PROJECTS, many, [], NOW);
+    expect(agents).toHaveLength(40);
+    // Newest first, so what is cut is the long-cold tail.
+    expect(agents[0].updated).toBe(NOW);
+    expect(note).toContain("20 older ones are not listed");
+  });
+
+  it("says nothing about truncation when nothing was truncated", () => {
+    const { note } = agentReports(PROJECTS, [digest()], [], NOW);
+    expect(note).not.toContain("not listed");
   });
 });

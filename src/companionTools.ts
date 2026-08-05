@@ -63,6 +63,11 @@ export const COMPANION_TOOL_GROUPS: AgentToolGroup[] = [
         label: "Act on a PR",
         note: "Review, reply, resolve, request review, update, merge or close",
       },
+      {
+        name: "canopy_start_session",
+        label: "Start a session",
+        note: "Set a coding agent going on a brief, in any project — including one with nothing running",
+      },
     ],
   },
   {
@@ -127,6 +132,7 @@ export const PER_PROJECT_TOOLS: string[] = [
  *  being a philosophical question and becomes the thing the authority setting
  *  is actually about. */
 export const MUTATING_TOOLS: string[] = [
+  "canopy_start_session",
   "canopy_start_server",
   "canopy_stop_server",
   "canopy_restart_server",

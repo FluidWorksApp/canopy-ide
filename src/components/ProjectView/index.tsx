@@ -4425,7 +4425,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // pty→session binding and can reopen an ended conversation or open a tab
       // for a fresh one. Same route as the PR tab's "Send a change".
       if (a.kind === "message_agent" && a.pr && a.text) {
-        void routeToRaiser(a.pr, a.text);
+        const opId = a.opId;
+        void routeToRaiser(a.pr, a.text).then(
+          ({ delivered, note }) => {
+            if (opId != null) void ipc.browserResult(opId, delivered, note);
+          },
+          (err) => {
+            if (opId != null) void ipc.browserResult(opId, false, String(err));
+          },
+        );
         return;
       }
       if (a.kind === "open_preview" && a.url) {
@@ -4499,6 +4507,56 @@ const ProjectViewBody = memo(function ProjectViewBody({
     patchTabRaw,
     showBrowserPip,
   ]);
+
+  // The companion asking for a coding session on a brief (canopy_start_session).
+  // App resolved and opened the project; this is the only layer that can
+  // actually start one, because the run needs tabs, a worktree and a place in
+  // the task history. The answer goes back on the ticket it came with — the
+  // caller is holding its tool call open for it, so a launch that silently did
+  // or did not happen is the one outcome this must never produce.
+  useEffect(() => {
+    // The request is re-announced until it is answered, because a project that
+    // was closed when it was made had nothing mounted to hear it. One run per
+    // ticket, however many times it arrives.
+    const seen = new Set<number>();
+    const onStart = (e: Event) => {
+      const d = (e as CustomEvent).detail as {
+        projectId: string;
+        ticket: number;
+        dir: string;
+        prompt: string;
+        label?: string;
+        agent?: string;
+      };
+      if (d?.projectId !== project.id || seen.has(d.ticket)) return;
+      seen.add(d.ticket);
+      const answer = (started: boolean, note: string) =>
+        window.dispatchEvent(
+          new CustomEvent("canopy:start-session-result", {
+            detail: { ticket: d.ticket, started, note },
+          }),
+        );
+      void startMicroTask(
+        adhocTaskDef(d.prompt, d.label),
+        { dir: d.dir },
+        "",
+        d.agent,
+      ).then(
+        (ok) =>
+          answer(
+            ok,
+            ok
+              ? `Started an agent in ${d.dir}.`
+              : // startMicroTask has already told the user why on screen; the
+                // caller gets the fact, which is what it can act on.
+                `Couldn't start an agent in ${d.dir} — Canopy refused the launch (no agent CLI installed, or the workspace it needed could not be prepared).`,
+          ),
+        (err) => answer(false, `Couldn't start an agent in ${d.dir}: ${String(err)}`),
+      );
+    };
+    window.addEventListener("canopy:start-session", onStart);
+    return () => window.removeEventListener("canopy:start-session", onStart);
+  }, [project.id, startMicroTask]);
 
   // The tail of a deep link (deepLinks.ts): App resolved the project and
   // opened it, and this lands on the actual thing — the terminal an agent was
@@ -6307,7 +6365,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  A cold PR still gets an agent; it just gets one that is told what it is
    *  picking up, rather than one that is pretending to be the original. */
   const sendToRaiser = useCallback(
-    async (repo: string, pr: ipc.PrInfo, to: PrAgent, text: string) => {
+    async (
+      repo: string,
+      pr: ipc.PrInfo,
+      to: PrAgent,
+      text: string,
+    ): Promise<{ delivered: boolean; note: string }> => {
       const brief =
         `About pull request #${pr.number} "${pr.title}" (${pr.url}), which you opened from ` +
         `${pr.branch}: ${text}\n\nWhen the change is made, push so the PR updates.`;
@@ -6317,14 +6380,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
           { repo, pr },
           text,
         );
-        onNotice(
-          started
-            ? `No conversation left to reopen — started a fresh agent on #${pr.number}.`
-            : `Couldn't start an agent for #${pr.number}.`,
-        );
-        return;
+        const note = started
+          ? `No conversation left to reopen — started a fresh agent on #${pr.number}.`
+          : `Couldn't start an agent for #${pr.number}.`;
+        onNotice(note);
+        return { delivered: started, note };
       }
-      const { note } = await messageAgent({
+      const { delivered, note } = await messageAgent({
         ptyId: to.ptyId,
         sessionId: to.sessionId,
         agentId: to.agent ?? undefined,
@@ -6332,6 +6394,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         text: brief,
       });
       onNotice(note);
+      return { delivered, note };
     },
     [messageAgent, onNotice, startMicroTask],
   );
@@ -6339,11 +6402,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** The same, entered by PR number or url rather than from the PR's own tab —
    *  which is how the companion asks (`canopy_message_agent({pr})`). */
   const routeToRaiser = useCallback(
-    async (pr: string, text: string) => {
+    async (pr: string, text: string): Promise<{ delivered: boolean; note: string }> => {
       const number = Number(parsePrUrl(pr)?.number ?? pr.replace(/^#/, ""));
       if (!Number.isSafeInteger(number) || number <= 0) {
-        onNotice(`"${pr}" isn't a pull request I can look up.`);
-        return;
+        const note = `"${pr}" isn't a pull request I can look up.`;
+        onNotice(note);
+        return { delivered: false, note };
       }
       // Through the watcher's rows, so a number alone resolves to the repo it
       // belongs to — the companion names a PR, not a checkout.
@@ -6355,8 +6419,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ),
       );
       if (!row) {
-        onNotice(`No open PR #${number} in this project.`);
-        return;
+        const note = `No open PR #${number} in this project.`;
+        onNotice(note);
+        return { delivered: false, note };
       }
       const edges = await ipc.provenanceForPr(row.repo, number).catch(() => []);
       const dirs = await Promise.all(
@@ -6367,7 +6432,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         live: liveSessionsRef.current,
         dirExists: (dir) => alive.has(dir),
       });
-      await sendToRaiser(row.repo, toPrInfo(row), to, text);
+      return sendToRaiser(row.repo, toPrInfo(row), to, text);
     },
     [onNotice, sendToRaiser],
   );
