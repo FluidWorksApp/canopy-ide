@@ -6,6 +6,21 @@
   color-scheme: light;
 }
 
+:root {
+  /* Control heights. Set explicitly, never via vertical padding. */
+  --btn-h-sm: 28px;   /* dense: panel-head, top bar */
+  --btn-h-md: 34px;   /* default: home actions, resume rows, icon buttons */
+  --btn-h-lg: 44px;   /* touch primary: sheet actions, FAB, gate, key row */
+  --btn-px-sm: 10px;
+  --btn-px-md: 14px;
+  --btn-px-lg: 18px;
+  /* Text roles on the shared scale so a theme push reaches them. */
+  --fs-row: var(--fs-md);
+  --fs-row-sub: var(--fs-xs);
+  --fs-section: var(--fs-lg);
+  --fs-kicker: var(--fs-xs);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -80,7 +95,7 @@ select {
 }
 .gate-sub {
   color: var(--text-dim);
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   margin: 12px 0 28px;
 }
 .gate form {
@@ -127,7 +142,8 @@ select {
   color: var(--on-accent);
   border: none;
   border-radius: 10px;
-  padding: 12px 16px;
+  height: var(--btn-h-lg);
+  padding: 0 var(--btn-px-lg);
   font-weight: 600;
 }
 .primary:active {
@@ -137,25 +153,32 @@ select {
   width: 100%;
 }
 .primary.sm {
-  padding: 8px 12px;
+  height: var(--btn-h-md);
+  padding: 0 var(--btn-px-md);
   border-radius: 9px;
-  font-size: 13px;
+  font-size: var(--fs-sm);
 }
 .primary:disabled {
   opacity: 0.4;
 }
 .ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   background: transparent;
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 8px 14px;
+  font-weight: 600;
+  height: var(--btn-h-md);
+  padding: 0 var(--btn-px-md);
 }
 .iconbtn {
   display: inline-grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: var(--btn-h-md);
+  height: var(--btn-h-md);
   border-radius: 9px;
   border: 1px solid var(--border);
   background: transparent;
@@ -170,17 +193,21 @@ select {
 .danger {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   background: transparent;
   color: var(--danger);
   border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
   border-radius: 9px;
-  padding: 8px 12px;
+  height: var(--btn-h-md);
+  padding: 0 var(--btn-px-md);
   font-weight: 600;
   flex: none;
 }
 .danger.sm {
-  font-size: 13px;
+  height: var(--btn-h-sm);
+  padding: 0 var(--btn-px-sm);
+  font-size: var(--fs-sm);
 }
 .term {
   flex: 1;
@@ -228,10 +255,11 @@ select {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 9px;
-  padding: 9px 14px;
+  height: var(--btn-h-lg);
+  padding: 0 var(--btn-px-md);
   min-width: 46px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .keys button:active {
   border-color: var(--accent);
@@ -257,6 +285,7 @@ select {
 }
 .send {
   width: 46px;
+  height: auto;
   padding: 0;
   border-radius: 11px;
   flex: none;
@@ -273,7 +302,7 @@ select {
   border: 1px solid var(--border);
   border-radius: 11px;
   padding: 12px 14px;
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
@@ -311,7 +340,8 @@ select {
   color: var(--on-accent);
   border: none;
   border-radius: 11px;
-  padding: 13px 18px 13px 15px;
+  height: var(--btn-h-lg);
+  padding: 0 var(--btn-px-lg) 0 var(--btn-px-md);
   font-weight: 600;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
 }
@@ -371,7 +401,7 @@ select {
   align-items: center;
   gap: 8px;
   margin: 0 0 4px;
-  font-size: 16px;
+  font-size: var(--fs-lg);
   font-weight: 650;
 }
 .sheet h3 svg {
@@ -421,7 +451,7 @@ select {
   border: 1px solid var(--border);
   background: var(--bg-raised);
   color: var(--text-dim);
-  font-size: 11.5px;
+  font-size: var(--fs-row-sub);
   font-weight: 550;
 }
 .cli.on {
@@ -435,7 +465,6 @@ select {
 }
 .sheet-actions .ghost {
   flex: none;
-  padding: 12px 18px;
 }
 .sheet-actions .primary {
   flex: 1;
@@ -490,9 +519,12 @@ select {
 }
 .portal-top-action {
   flex: none;
+  height: var(--btn-h-sm);
+  font-size: var(--fs-sm);
 }
 .portal-top-icon {
-  width: 26px;
+  width: var(--btn-h-sm);
+  height: var(--btn-h-sm);
   padding: 0;
   justify-content: center;
 }
@@ -568,9 +600,9 @@ select {
 }
 .home-kicker {
   color: var(--text-dim);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: .13em;
+  font-size: var(--fs-kicker);
+  font-weight: 650;
+  letter-spacing: .05em;
   text-transform: uppercase;
 }
 .home-components {
@@ -588,7 +620,7 @@ select {
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--text-dim);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -607,21 +639,22 @@ select {
   padding: 11px 13px;
   background: var(--bg-raised);
   color: var(--text-dim);
-  font-size: 11.5px;
+  font-size: var(--fs-row-sub);
   white-space: nowrap;
 }
 .home-summary strong {
   margin-right: 4px;
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .home-summary .hot,
 .home-summary .hot strong { color: var(--warn); }
 .home-section { margin-top: 26px; }
 .home-section h2 {
   margin: 3px 0 12px;
-  font-size: 15px;
+  font-size: var(--fs-section);
+  font-weight: 650;
   letter-spacing: -.015em;
 }
 .home-launch-grid {
@@ -640,8 +673,9 @@ select {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: color-mix(in srgb, var(--bg-raised) 88%, transparent);
-  color: var(--text);
-  font-size: 11.5px;
+  color: var(--text-dim);
+  font-size: var(--fs-row-sub);
+  font-weight: 550;
   transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
 }
 .home-launch-card:hover:not(:disabled) {
@@ -655,7 +689,7 @@ select {
   right: 6px;
   top: 6px;
   color: var(--text-dim);
-  font-size: 8px;
+  font-size: 10px;
 }
 .home-resume {
   overflow: hidden;
@@ -673,10 +707,9 @@ select {
   border-radius: 9px;
   background: var(--accent);
   color: var(--on-accent);
-  font-size: 10px;
+  font-size: var(--fs-xs);
 }
 .home-actions { display: flex; gap: 7px; }
-.home-actions .ghost { padding: 6px 10px; font-size: 11px; }
 .home-resume-row {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
@@ -699,9 +732,9 @@ select {
 }
 .home-resume-prompt,
 .home-resume-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.home-resume-prompt { font-size: 12px; }
+.home-resume-prompt { font-size: var(--fs-row); }
 .home-resume-meta,
-.home-age { color: var(--text-dim); font-size: 10px; }
+.home-age { color: var(--text-dim); font-size: var(--fs-row-sub); }
 .home-empty { padding: 24px; border-top: 1px solid var(--border); color: var(--text-dim); text-align: center; }
 .pane-scroll {
   flex: 1;
@@ -723,7 +756,7 @@ select {
 }
 .panel-title {
   font-weight: 650;
-  font-size: 13px;
+  font-size: var(--fs-md);
   letter-spacing: 0.01em;
 }
 .panel-count {
@@ -735,8 +768,8 @@ select {
   flex: 1;
 }
 .iconbtn.sm {
-  width: 28px;
-  height: 28px;
+  width: var(--btn-h-sm);
+  height: var(--btn-h-sm);
   border-radius: 7px;
   border-color: transparent;
 }
@@ -744,9 +777,10 @@ select {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 5px 9px;
+  height: var(--btn-h-sm);
+  padding: 0 var(--btn-px-sm);
   border-radius: 8px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-dim);
 }
 
@@ -762,7 +796,7 @@ select {
   border: none;
   background: transparent;
   color: var(--text);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   font-weight: 550;
   appearance: none;
   max-width: 100%;
@@ -777,7 +811,7 @@ select {
   align-items: center;
   gap: 5px;
   color: var(--text-dim);
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   max-width: 40%;
   overflow: hidden;
   white-space: nowrap;
@@ -837,7 +871,7 @@ select {
 }
 .cbar-title {
   font-weight: 650;
-  font-size: 15px;
+  font-size: var(--fs-section);
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -907,7 +941,7 @@ select {
   place-items: center;
 }
 .tb-l {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 550;
   letter-spacing: -0.01em;
 }
@@ -948,7 +982,7 @@ select {
   border: 1px solid var(--border);
   background: var(--bg-raised);
   color: var(--text-dim);
-  font-size: 11.5px;
+  font-size: var(--fs-row-sub);
   font-weight: 550;
 }
 .more-item.on {
@@ -959,7 +993,7 @@ select {
   position: absolute;
   top: 7px;
   right: 8px;
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   color: var(--accent);
   font-weight: 700;
 }
@@ -1007,7 +1041,7 @@ button.prow:active {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 13.5px;
+  font-size: var(--fs-row);
   font-weight: 550;
   min-width: 0;
   overflow: hidden;
@@ -1015,7 +1049,7 @@ button.prow:active {
   text-overflow: ellipsis;
 }
 .prow-sub {
-  font-size: 11.5px;
+  font-size: var(--fs-row-sub);
   color: var(--text-dim);
   overflow: hidden;
   white-space: nowrap;
@@ -1026,7 +1060,7 @@ button.prow:active {
   align-items: center;
   gap: 6px;
   flex: none;
-  font-size: 11px;
+  font-size: var(--fs-row-sub);
   color: var(--text-dim);
 }
 
@@ -1049,7 +1083,7 @@ button.prow:active {
   align-items: center;
   gap: 7px;
   padding: 14px 12px 5px;
-  font-size: 11px;
+  font-size: var(--fs-kicker);
   font-weight: 650;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -1061,7 +1095,7 @@ button.prow:active {
   opacity: 0.7;
 }
 .subhead-n {
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   opacity: 0.65;
   font-variant-numeric: tabular-nums;
 }
@@ -1073,7 +1107,7 @@ button.prow:active {
   border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--bg-raised);
-  font-size: 10.5px;
+  font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--text-dim);
   white-space: nowrap;
@@ -1109,7 +1143,7 @@ button.prow:active {
 .panel-error,
 .panel-note {
   padding: 18px 14px;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--text-dim);
   line-height: 1.55;
 }
@@ -1120,7 +1154,7 @@ button.prow:active {
   padding: 9px 14px;
   background: var(--bg-raised);
   border-bottom: 1px solid var(--border);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 .panel-pad {
   padding: 12px 14px 4px;
@@ -1166,7 +1200,7 @@ button.prow:active {
   background: transparent;
   color: var(--text-dim);
   padding: 6px 8px;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   font-weight: 550;
 }
 .segmented.tight button.on {
@@ -1180,7 +1214,7 @@ button.prow:active {
   border-radius: 11px;
   background: var(--bg-raised);
   padding: 12px 13px;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   line-height: 1.55;
   color: var(--text-dim);
 }
@@ -1226,7 +1260,7 @@ button.prow:active {
 }
 .usage-name {
   font-weight: 600;
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   flex: 1;
 }
 .meter-row {
@@ -1305,7 +1339,7 @@ button.prow:active {
 }
 .detail-name {
   font-weight: 650;
-  font-size: 14px;
+  font-size: var(--fs-md);
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -1314,7 +1348,7 @@ button.prow:active {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--text-dim);
   overflow: hidden;
   white-space: nowrap;
@@ -1377,7 +1411,7 @@ button.prow:active {
   align-items: baseline;
   gap: 10px;
   padding: 10px 14px 0;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
 }
 .commit-meta .doc {
   flex-basis: 100%;
@@ -1388,7 +1422,7 @@ button.prow:active {
   align-items: center;
   gap: 7px;
   padding: 16px 14px 6px;
-  font-size: 11px;
+  font-size: var(--fs-kicker);
   font-weight: 650;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -1417,7 +1451,7 @@ button.prow:active {
   gap: 12px;
   padding: 8px 14px;
   border-bottom: 1px solid var(--border);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
 }
 .diff-stat .add {
   color: var(--ok);
@@ -1429,7 +1463,7 @@ button.prow:active {
   margin: 0;
   padding: 8px 0 20px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   line-height: 1.55;
   /* The diff pans horizontally rather than wrapping: a wrapped code line makes
    * the +/- gutter meaningless, which is the only thing a diff has. */
@@ -1638,4 +1672,148 @@ button.prow:active {
     width: 100%;
     opacity: 0.5;
   }
+}
+
+/* ---- desktop-parity diff (GitDiff.tsx, @git-diff-view/react) ---- */
+.gdiff {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding-bottom: 20px;
+}
+.gdiff-file {
+  min-width: 0;
+  border-top: 1px solid var(--border);
+}
+.gdiff-file:first-child {
+  border-top: none;
+}
+.gdiff-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 14px;
+  font-size: var(--fs-xs);
+  border-bottom: 1px solid var(--border);
+}
+.gdiff-path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+.gdiff-stat {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+.gdiff-stat .add {
+  color: var(--ok);
+}
+.gdiff-stat .del {
+  color: var(--danger);
+}
+/* Wrap is off (a wrapped code line makes the gutter meaningless), so long
+ * lines pan inside this box — never the page body. */
+.gdiff-body {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+/* ---- file viewer with a line-number gutter (Detail.tsx CodeBlock) ---- */
+.codeview {
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.codeview-gutter {
+  flex: none;
+  margin: 0;
+  padding: 12px 10px 20px 14px;
+  text-align: right;
+  color: var(--text-dim);
+  opacity: 0.7;
+  user-select: none;
+  border-right: 1px solid var(--border);
+  font-size: inherit;
+  line-height: inherit;
+}
+.codeview-body {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 12px 14px 20px;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--text);
+  font-size: inherit;
+  line-height: inherit;
+}
+
+/* highlight.js token colours on the portal's own variables, so a theme push
+ * from the desktop recolours code the same way it recolours the chrome. */
+:root {
+  --hl-kw: #c792ea;
+  --hl-str: #9ece6a;
+  --hl-num: #e0af68;
+  --hl-fn: #82aaff;
+  --hl-type: #7dcfff;
+  --hl-cm: var(--text-dim);
+}
+:root[data-portal-theme='light'] {
+  --hl-kw: #8250df;
+  --hl-str: #116329;
+  --hl-num: #953800;
+  --hl-fn: #0550ae;
+  --hl-type: #0a7ea4;
+  --hl-cm: var(--text-dim);
+}
+.codeview .hljs-keyword,
+.codeview .hljs-literal,
+.codeview .hljs-selector-tag,
+.codeview .hljs-doctag {
+  color: var(--hl-kw);
+}
+.codeview .hljs-string,
+.codeview .hljs-regexp,
+.codeview .hljs-addition {
+  color: var(--hl-str);
+}
+.codeview .hljs-number,
+.codeview .hljs-symbol,
+.codeview .hljs-meta,
+.codeview .hljs-link {
+  color: var(--hl-num);
+}
+.codeview .hljs-title,
+.codeview .hljs-title.function_,
+.codeview .hljs-name,
+.codeview .hljs-attr,
+.codeview .hljs-attribute,
+.codeview .hljs-selector-id,
+.codeview .hljs-selector-class {
+  color: var(--hl-fn);
+}
+.codeview .hljs-type,
+.codeview .hljs-class,
+.codeview .hljs-title.class_,
+.codeview .hljs-built_in,
+.codeview .hljs-variable,
+.codeview .hljs-template-variable {
+  color: var(--hl-type);
+}
+.codeview .hljs-comment,
+.codeview .hljs-quote,
+.codeview .hljs-deletion {
+  color: var(--hl-cm);
+  font-style: italic;
+}
+.codeview .hljs-emphasis {
+  font-style: italic;
+}
+.codeview .hljs-strong {
+  font-weight: 700;
 }

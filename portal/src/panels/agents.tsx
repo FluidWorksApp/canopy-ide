@@ -27,7 +27,7 @@ function agentRow(ctx: PanelCtx, r: AgentRow, key: string) {
       icon={<AgentBadge agent={r.agent} sz={26} />}
       title={
         <>
-          {r.terminal ? (r.title ?? 'Terminal') : m.label}
+          {r.title ?? (r.terminal ? 'Terminal' : m.label)}
           {r.needsYou && <Pill tone="warn">needs you</Pill>}
         </>
       }
@@ -61,15 +61,20 @@ function forProject(ctx: PanelCtx): AgentRow[] {
   })
 }
 
+/** The desktop's split, not "has a digest": a row belongs under Agents when we
+ *  can name who is in the terminal (digest, process binary, or title), and
+ *  under Terminals only when it is genuinely a plain shell. */
+const isAgent = (r: AgentRow) => r.agent !== 'shell'
+
 export const agentsPanel: PanelDef = {
   id: 'agents',
   title: 'Agents',
   Icon: AgentsIcon,
   scope: 'project',
-  badge: (ctx) => forProject(ctx).filter((r) => !r.terminal).length,
+  badge: (ctx) => forProject(ctx).filter(isAgent).length,
   urgent: (ctx) => forProject(ctx).some((r) => r.needsYou),
   List({ ctx }) {
-    const rows = forProject(ctx).filter((r) => !r.terminal)
+    const rows = forProject(ctx).filter(isAgent)
     const live = rows.filter((r) => r.live)
     const past = rows.filter((r) => !r.live)
     if (!rows.length) {
@@ -99,9 +104,9 @@ export const terminalsPanel: PanelDef = {
   title: 'Terminals',
   Icon: IconTerminal,
   scope: 'project',
-  badge: (ctx) => forProject(ctx).filter((r) => r.terminal).length,
+  badge: (ctx) => forProject(ctx).filter((r) => !isAgent(r)).length,
   List({ ctx }) {
-    const rows = forProject(ctx).filter((r) => r.terminal)
+    const rows = forProject(ctx).filter((r) => !isAgent(r))
     const comps = ctx.project?.components ?? []
     return (
       <>

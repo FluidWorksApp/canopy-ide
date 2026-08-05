@@ -72,6 +72,11 @@ pub struct RemoteManager {
     theme: Arc<Mutex<Option<Value>>>,
     /// Browser-safe projection of the desktop's resolved agent CLI registry.
     clis: Arc<Mutex<Value>>,
+    /// Companion presence + transcript, pushed by the desktop frontend the same
+    /// way the theme is. The Rust core never sees the conversation (the
+    /// transcript lives in the frontend, by design — see companion.rs), so a
+    /// desktop push is the only honest source. Null until the first push.
+    companion: Arc<Mutex<Value>>,
     /// The session scope, cached — see `open_scope`.
     roots: RootsCache,
 }
@@ -130,6 +135,7 @@ struct Portal {
     /// Shared handle to the desktop-pushed theme tokens (see RemoteManager).
     theme: Arc<Mutex<Option<Value>>>,
     clis: Arc<Mutex<Value>>,
+    companion: Arc<Mutex<Value>>,
     /// Shared handle to the cached scoping roots (see RemoteManager).
     roots: RootsCache,
     /// Replay and single-flight bookkeeping for desktop-executed verbs. Shared
@@ -236,6 +242,7 @@ pub async fn remote_enable(
         events: events_tx,
         theme: mgr.theme.clone(),
         clis: mgr.clis.clone(),
+        companion: mgr.companion.clone(),
         roots: mgr.roots.clone(),
         verbs: Arc::new(VerbRouter::default()),
     };
@@ -345,6 +352,18 @@ pub async fn remote_set_clis(
     Ok(())
 }
 
+/// Push the companion's presence and transcript, from the one place that has
+/// them — the desktop frontend (companionSession.ts). Same contract as the
+/// theme: called on every change, cheap, idempotent, snapshot-carried.
+#[tauri::command]
+pub async fn remote_set_companion(
+    companion: Value,
+    mgr: tauri::State<'_, RemoteManager>,
+) -> Result<(), String> {
+    *mgr.companion.lock().unwrap() = companion;
+    Ok(())
+}
+
 /// A QR SVG for any URL — so the desktop can point the code at the LAN address
 /// or the active tunnel URL depending on the chosen scope.
 #[tauri::command]
@@ -426,7 +445,7 @@ async fn team_ws_handler(ws: WebSocketUpgrade, AxumState(p): AxumState<Portal>) 
 
 /// Serve the SPA: any path under `/remote` maps to a baked asset, with an
 /// index.html fallback so client-side routing works; everything else 404s.
-async fn asset_handler(uri: Uri) -> Response {
+async fn asset_handler(uri: Uri, headers: header::HeaderMap) -> Response {
     let path = uri.path();
     // The portal lives under /remote; send bare-domain hits (e.g. a tunnel URL
     // opened without the path) there instead of 404ing.
@@ -436,10 +455,24 @@ async fn asset_handler(uri: Uri) -> Response {
     let rel = rest.trim_start_matches('/');
     if !rel.is_empty() {
         if let Some(file) = PORTAL_ASSETS.get_file(rel) {
+            // Revalidation, not immutability: the vite build pins asset names
+            // (`assets/index.js`) because dist/index.html is committed, so a
+            // rebuild reuses the same URL with new bytes. An `immutable` header
+            // here strands every phone that ever loaded the portal on the old
+            // bundle for a year; a content ETag makes the repeat load a 304.
+            let etag = etag_of(file.contents());
+            if headers
+                .get(header::IF_NONE_MATCH)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v == etag)
+            {
+                return StatusCode::NOT_MODIFIED.into_response();
+            }
             return (
                 [
-                    (header::CONTENT_TYPE, content_type(rel)),
-                    (header::CACHE_CONTROL, cache_control(rel)),
+                    (header::CONTENT_TYPE, content_type(rel).to_string()),
+                    (header::CACHE_CONTROL, cache_control(rel).to_string()),
+                    (header::ETAG, etag),
                 ],
                 file.contents().to_vec(),
             )
@@ -460,16 +493,26 @@ async fn asset_handler(uri: Uri) -> Response {
     }
 }
 
-/// Vite emits content-hashed filenames under assets/, so those can be cached
-/// forever (a new build changes the hash); everything else must revalidate so a
-/// rebuild is always picked up. Lets the browser — and any tunnel/CDN in front —
-/// serve repeat loads from cache, which matters most over a higher-latency link.
-fn cache_control(rel: &str) -> &'static str {
-    if rel.starts_with("assets/") {
-        "public, max-age=31536000, immutable"
-    } else {
-        "no-cache"
+/// Everything revalidates. The build does NOT hash asset filenames (the vite
+/// config pins `assets/index.js` so the committed dist/index.html stays
+/// stable), so nothing here may claim `immutable` — that was serving year-old
+/// bundles to any phone that had visited before a rebuild. `no-cache` still
+/// caches; the ETag turns the revalidation into a 304, which is what actually
+/// matters over a higher-latency tunnel link.
+fn cache_control(_rel: &str) -> &'static str {
+    "no-cache"
+}
+
+/// A content ETag for a baked asset: FNV-1a over the bytes, computed per
+/// request. The assets are in-memory and small; hashing them is microseconds,
+/// and it saves carrying a lazy-static map alongside `include_dir`.
+fn etag_of(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
+    format!("\"{h:016x}\"")
 }
 
 // ---- WebSocket session ----------------------------------------------------
@@ -482,8 +525,9 @@ async fn ws_conn(mut socket: WebSocket, p: Portal) {
     // Initial snapshot.
     let theme0 = p.theme.lock().unwrap().clone();
     let clis0 = p.clis.lock().unwrap().clone();
+    let companion0 = p.companion.lock().unwrap().clone();
     if out_tx
-        .send(snapshot_msg(&p.app, theme0, clis0, &p.roots).await)
+        .send(snapshot_msg(&p.app, theme0, clis0, companion0, &p.roots).await)
         .await
         .is_err()
     {
@@ -625,10 +669,11 @@ fn handle_client_msg(
             let app = p.app.clone();
             let theme = p.theme.lock().unwrap().clone();
             let clis = p.clis.lock().unwrap().clone();
+            let companion = p.companion.lock().unwrap().clone();
             let roots = p.roots.clone();
             tokio::spawn(async move {
                 let _ = out
-                    .send(snapshot_msg(&app, theme, clis, &roots).await)
+                    .send(snapshot_msg(&app, theme, clis, companion, &roots).await)
                     .await;
             });
         }
@@ -811,6 +856,7 @@ async fn snapshot_msg(
     app: &AppHandle,
     theme: Option<Value>,
     clis: Value,
+    companion: Value,
     roots_cache: &RootsCache,
 ) -> String {
     let projects = crate::fsx::store_load()
@@ -821,7 +867,6 @@ async fn snapshot_msg(
     let sessions = crate::agents::session_digests(Some(scope.roots.clone()))
         .await
         .unwrap_or_default();
-    let sessions = scope_sessions(sessions, &scope.roots, &scope.other_worktrees, now_secs());
     let usage = crate::agents::agent_usage().await.unwrap_or_default();
     let ptys = app
         .state::<PtyManager>()
@@ -829,6 +874,15 @@ async fn snapshot_msg(
         .into_iter()
         .filter(|pty| in_scope(Some(&pty.cwd), &scope.roots, &scope.other_worktrees))
         .collect::<Vec<_>>();
+    let live_ids: std::collections::HashSet<u32> = ptys.iter().map(|p| p.id).collect();
+    let sessions = scope_sessions(
+        sessions,
+        &scope.roots,
+        &scope.other_worktrees,
+        now_secs(),
+        &live_ids,
+        crate::pty::instance_token(),
+    );
     json!({
         "t": "snapshot",
         "projects": projects,
@@ -839,6 +893,7 @@ async fn snapshot_msg(
         "instance": crate::pty::instance_token(),
         "theme": theme,
         "clis": clis,
+        "companion": companion,
     })
     .to_string()
 }
@@ -983,33 +1038,47 @@ fn scope_sessions(
     roots: &[String],
     other_worktrees: &[String],
     now: i64,
+    live_ptys: &std::collections::HashSet<u32>,
+    instance: &str,
 ) -> Vec<Value> {
     sessions
         .into_iter()
         .filter(|d| digest_in_scope(d, roots, other_worktrees))
         .filter(|d| {
-            // Only a session we can positively say has finished starts a
-            // clock. Two changes from the `state == "ended"` test this
-            // replaces, in opposite directions:
-            //
-            //   * `ended` is unreachable for five of the seven CLIs and absent
-            //     from every row read out of a CLI's own store, so in practice
-            //     almost nothing aged out. A finished turn now ages out
-            //     whichever CLI reported it.
-            //   * `unknown` never ages out. Dropping a row we merely lost track
-            //     of would take away the list the user reaches that agent
-            //     through, on a guess — the same rule that keeps `unknown` out
-            //     of everything else destructive.
-            let life = crate::agent_life::agent_life(d, None, now.max(0) as u64);
-            let finished = matches!(
-                life.state,
-                crate::agent_life::LifeState::Ended | crate::agent_life::LifeState::Idle
-            );
+            // The desktop's rule, applied at the source: a session is *running*
+            // iff this app instance's terminal for it is still alive, and only
+            // running sessions escape the recency clock. Everything else —
+            // finished turns, rows rebuilt from a CLI's own store (which record
+            // no lifecycle at all and used to sit in Recent forever), digests
+            // whose terminal died without a Stop — is history after 30 minutes,
+            // and history belongs behind the deliberate history tap, not in a
+            // list resent every four seconds.
             let updated = d.get("updated").and_then(|v| v.as_i64()).unwrap_or(0);
-            !finished || now - updated <= recent_secs()
+            attached_to_live_pty(d, live_ptys, instance) || now - updated <= recent_secs()
         })
         .map(trim_digest)
         .collect()
+}
+
+/// Whether a digest's recorded terminal is one of this instance's live PTYs —
+/// the same surface-id-within-this-instance identity the desktop's
+/// `digestBySurface` uses. A digest from a previous app run may reuse a
+/// current pty id, so the instance token must match too; store-read rows carry
+/// neither field and are never "live".
+fn attached_to_live_pty(
+    d: &Value,
+    live_ptys: &std::collections::HashSet<u32>,
+    instance: &str,
+) -> bool {
+    if d.get("instance").and_then(|v| v.as_str()) != Some(instance) {
+        return false;
+    }
+    let surface = match d.get("surface") {
+        Some(Value::String(s)) => s.parse::<u32>().ok(),
+        Some(Value::Number(n)) => n.as_u64().map(|n| n as u32),
+        _ => None,
+    };
+    surface.is_some_and(|id| live_ptys.contains(&id))
 }
 
 /// Path containment with a separator boundary, not a plain string prefix.
@@ -1236,6 +1305,10 @@ mod tests {
         assert!(!is_other_worktree("/w/canopy", &nested));
     }
 
+    fn no_live() -> std::collections::HashSet<u32> {
+        Default::default()
+    }
+
     #[test]
     fn scope_keeps_only_the_open_checkout() {
         let roots = vec!["/w/canopy".into()];
@@ -1254,6 +1327,8 @@ mod tests {
             &roots,
             &other_worktrees,
             now,
+            &no_live(),
+            "inst",
         );
         assert_eq!(out.len(), 1, "other worktrees must not travel");
         assert_eq!(out[0]["cwd"], "/w/canopy");
@@ -1272,6 +1347,8 @@ mod tests {
             &roots,
             &other_worktrees,
             now,
+            &no_live(),
+            "inst",
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["cwd"], roots[0]);
@@ -1290,34 +1367,51 @@ mod tests {
                 "agent": "claude",
             });
             moved[key] = json!("/w/canopy");
-            let out = scope_sessions(vec![moved], &roots, &other_worktrees, now);
+            let out = scope_sessions(vec![moved], &roots, &other_worktrees, now, &no_live(), "inst");
             assert_eq!(out.len(), 1, "{key} should retain the session");
         }
     }
 
     #[test]
-    fn scope_ages_out_ended_sessions_but_never_running_ones() {
+    fn scope_ages_out_everything_but_sessions_in_a_live_terminal() {
         let roots = vec!["/w/canopy".into()];
         let now = 1_000_000;
         let stale = now - recent_secs() - 1;
+        let live: std::collections::HashSet<u32> = [7u32].into_iter().collect();
+        // A stale digest whose terminal is one of this instance's live PTYs is
+        // running — it must survive however old its last hook event is.
+        let mut attached = digest("/w/canopy", "working", stale);
+        attached["surface"] = json!("7");
+        attached["instance"] = json!("inst");
+        // Same surface id, previous app run: the id collides, the session is
+        // not attachable, and it must age out like any other history.
+        let mut prior_run = digest("/w/canopy", "working", stale);
+        prior_run["surface"] = json!("7");
+        prior_run["instance"] = json!("older-inst");
         let out = scope_sessions(
             vec![
                 digest("/w/canopy", "ended", stale),
                 digest("/w/canopy", "ended", now - 60),
                 // A digest whose terminal died without a Stop stays "working"
-                // on disk forever. The ladder calls that `unknown` rather than
-                // believing it, and `unknown` is never aged out: the session may
-                // still be attachable, and this list is how you would reach it.
+                // on disk forever — and a row rebuilt from a CLI's own store
+                // records no lifecycle at all. Neither is running; both are
+                // history once the recency window passes. This is what kept
+                // every session ever run in the Recent list.
                 digest("/w/canopy", "working", stale),
+                attached,
+                prior_run,
             ],
             &roots,
             &[],
             now,
+            &live,
+            "inst",
         );
         assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|d| d["instance"] == "inst"));
         assert!(out
             .iter()
-            .all(|d| d["state"] != "ended" || d["updated"].as_i64().unwrap() > stale));
+            .any(|d| d["state"] == "ended" && d["updated"].as_i64().unwrap() == now - 60));
     }
 
     /// The snapshot runs every four seconds per connected client, so nothing in

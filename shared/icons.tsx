@@ -53,6 +53,17 @@ export const IconBranch = (p: IconProps) => (
   </Svg>
 )
 
+/** Ash, reduced to a rail glyph: the rounded face and two eyes. Presence, not
+ *  a portrait — the real face lives in the desktop's Ash.tsx. */
+export const CompanionIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <rect x="4" y="6" width="16" height="13" rx="4.5" />
+    <path d="M9.5 12v1.5M14.5 12v1.5" />
+    <path d="M12 6V3.5" />
+    <circle cx="12" cy="3" r="0.6" />
+  </Svg>
+)
+
 /** A chip: pins on four sides of a square die. Machine, not process — the load
  *  reading beside it is the machine's. */
 export const IconCpu = (p: IconProps) => (

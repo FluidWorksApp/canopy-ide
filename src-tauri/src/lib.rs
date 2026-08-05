@@ -776,6 +776,7 @@ pub fn run() {
             portal::remote_rotate_pin,
             portal::remote_set_theme,
             portal::remote_set_clis,
+            portal::remote_set_companion,
             portal::remote_qr,
             tunnel::tunnel_start,
             tunnel::tunnel_stop,

@@ -24,6 +24,7 @@ import {
   type Project,
   type Pty,
   type RemoteCli,
+  type RemoteCompanion,
   type Stat,
   type Usage,
   type Workspace,
@@ -116,6 +117,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [stats, setStats] = useState<Map<number, Stat>>(new Map())
   const [livePtys, setLivePtys] = useState<Pty[]>([])
   const [clis, setClis] = useState<RemoteCli[]>([])
+  const [companion, setCompanion] = useState<RemoteCompanion | null>(null)
   const [events, setEvents] = useState<AgentEventEntry[]>([])
 
   // ---- navigation ----
@@ -172,6 +174,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
         setRoots((m.roots as string[]) ?? [])
         setLivePtys((m.ptys as Pty[]) ?? [])
         setClis((m.clis as RemoteCli[]) ?? [])
+        setCompanion((m.companion as RemoteCompanion | null) ?? null)
         applyTheme(m.theme as Record<string, string> | undefined)
       } else if (m.t === 'event') {
         if (m.name === 'pty:stats') {
@@ -295,6 +298,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     stats,
     pending,
     clis,
+    companion,
     openKey: activeKey,
     open: openTarget,
     spawn,

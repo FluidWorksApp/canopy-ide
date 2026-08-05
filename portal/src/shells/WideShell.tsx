@@ -16,7 +16,7 @@ import type { PanelCtx, Target } from '../panels/types'
 import { targetKey } from '../panels/types'
 import { Detail } from '../views/Detail'
 import { PanelHead } from '../panels/ui'
-import type { Project } from '@shared/model'
+import { agentMeta, type AgentRow, type Project } from '@shared/model'
 import { ProjectHome } from '../ProjectHome'
 
 export interface ShellProps {
@@ -85,7 +85,7 @@ export function WideShell(props: ShellProps) {
           )}
         </button>
         <button className="project-tab portal-top-action" onClick={props.onNewAgent}>
-          <IconPlus s={13} /> <span>Agent</span>
+          <IconPlus s={14} /> <span>Agent</span>
         </button>
         <button
           className="project-tab portal-top-icon"
@@ -93,7 +93,7 @@ export function WideShell(props: ShellProps) {
           title="Sign out"
           aria-label="Sign out"
         >
-          <IconPower s={18} />
+          <IconPower s={16} />
         </button>
       </header>
 
@@ -159,14 +159,14 @@ export function WideShell(props: ShellProps) {
                       })
                     }}
                   >
-                    {tabLabel(t)}
+                    {tabLabel(t, ctx.rows)}
                   </button>
                   <button
                     className="tab-close"
                     onClick={() => onCloseTab(key)}
-                    aria-label={`Close ${tabLabel(t)}`}
+                    aria-label={`Close ${tabLabel(t, ctx.rows)}`}
                   >
-                    <IconClose s={12} />
+                    <IconClose s={14} />
                   </button>
                 </div>
               )
@@ -179,7 +179,7 @@ export function WideShell(props: ShellProps) {
             className="portal-tabpanel"
             id="portal-detail-panel"
             role="tabpanel"
-            aria-label={tabLabel(active)}
+            aria-label={tabLabel(active, ctx.rows)}
           >
             <Detail ctx={ctx} target={active} onBack={() => onCloseTab(activeKey!)} showBack={false} />
           </div>
@@ -254,14 +254,20 @@ export function ProjectPicker({ projects, ctx, onProject }: ShellProps) {
 }
 
 /** A tab's label: short enough for a strip, specific enough to tell two diffs
- *  of different files apart. */
-export function tabLabel(t: Target): string {
+ *  of different files apart. Terminal tabs get what the desktop's tab strip
+ *  shows — the pty's own title, then the agent's name — never a raw pty id. */
+export function tabLabel(t: Target, rows: AgentRow[] = []): string {
   const tail = (p: string) => p.split('/').filter(Boolean).pop() ?? p
   switch (t.kind) {
-    case 'terminal':
-      return `pty ${t.pty}`
-    case 'history':
-      return 'session'
+    case 'terminal': {
+      const row = rows.find((r) => r.ptyId === t.pty)
+      const name = row?.title ?? (row && row.agent !== 'shell' ? agentMeta(row.agent).label : undefined)
+      return name?.slice(0, 24) ?? `pty ${t.pty}`
+    }
+    case 'history': {
+      const row = rows.find((r) => r.key === t.key)
+      return (row?.title ?? row?.lastPrompt)?.slice(0, 24) ?? 'session'
+    }
     case 'file':
       return tail(t.path)
     case 'diff':

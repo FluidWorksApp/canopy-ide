@@ -75,6 +75,34 @@ describe('buildRows — terminals', () => {
     expect(rows[0]).toMatchObject({ agent: 'codex', terminal: true })
   })
 
+  it('identifies an unclaimed PTY from its foreground binary, not just its title', () => {
+    // An agent whose hooks never wired up has no digest and a task-name title
+    // ("✳ Fix the tests") — the process hint is what still names it, so it
+    // lands under Agents rather than masquerading as a plain terminal.
+    const stats = new Map<number, Stat>([
+      [
+        7,
+        {
+          id: 7,
+          title: '✳ Fix the tests',
+          cwd: ROOT,
+          total_cpu: 0,
+          total_mem_bytes: 0,
+          ports: [],
+          procs: [],
+          agent_hint: { bin: '/opt/bin/claude', pkg: null, path: null, interactive: true },
+        },
+      ],
+    ])
+    const [row] = buildRows([], [], stats, 'inst', [pty(7, ROOT, '✳ Fix the tests')])
+    expect(row).toMatchObject({ agent: 'claude', terminal: true, title: '✳ Fix the tests' })
+  })
+
+  it('keeps the PTY title on a claimed agent row, for tab strips', () => {
+    const [row] = buildRows([digest()], [], noStats, 'inst', [pty(101, ROOT, '✳ Ship it')])
+    expect(row).toMatchObject({ agent: 'claude', live: true, title: '✳ Ship it' })
+  })
+
   it('only claims a PTY once when two digests share its surface id', () => {
     const sessions = [
       digest({ session_id: 'new', updated: 20 }),

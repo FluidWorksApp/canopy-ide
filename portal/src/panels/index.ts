@@ -6,6 +6,7 @@
 // phone; wide follows the desktop's grouped activity rail instead.
 
 import { agentsPanel, serversPanel, terminalsPanel } from './agents'
+import { companionPanel } from './companion'
 import { notificationsPanel, usagePanel } from './alerts'
 import { changesPanel, filesPanel } from './code'
 import { instructionsPanel, researchPanel, ticketsPanel, toolsPanel } from './knowledge'
@@ -14,6 +15,7 @@ import type { PanelDef } from './types'
 
 export const PANELS: PanelDef[] = [
   notificationsPanel,
+  companionPanel,
   agentsPanel,
   terminalsPanel,
   filesPanel,
@@ -36,7 +38,7 @@ export const COMPACT_PRIMARY = ['notifications', 'agents', 'changes']
 export const WIDE_RAIL_GROUPS = [
   { id: 'project', label: 'Project', panels: ['files', 'servers'] },
   { id: 'review', label: 'Source control & Review', panels: ['changes', 'git', 'prs', 'tickets'] },
-  { id: 'agents', label: 'Agents', panels: ['agents', 'research', 'instructions'] },
+  { id: 'agents', label: 'Agents', panels: ['companion', 'agents', 'research', 'instructions'] },
   { id: 'runtime', label: 'Runtime', panels: ['terminals'] },
 ] as const
 

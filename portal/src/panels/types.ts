@@ -7,7 +7,7 @@
 // on a laptop and a tab on a phone by being added to one list.
 
 import type { ReactNode } from 'react'
-import type { AgentRow, Project, RemoteCli, Stat } from '@shared/model'
+import type { AgentRow, Project, RemoteCli, RemoteCompanion, Stat } from '@shared/model'
 import type { PendingItem } from '@shared/notifications'
 import type { Rpc } from '../rpc'
 import type { Transport } from '@shared/transport'
@@ -68,6 +68,9 @@ export interface PanelCtx {
   stats: Map<number, Stat>
   pending: PendingItem[]
   clis: RemoteCli[]
+  /** Companion presence + transcript tail, as the desktop last pushed it.
+   *  Null until the desktop pushes (or when it never has). */
+  companion?: RemoteCompanion | null
   /** What the detail pane is showing, so a list can mark its own row. */
   openKey?: string
   open: (t: Target) => void

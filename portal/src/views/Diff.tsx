@@ -1,11 +1,18 @@
 // A unified diff, rendered.
 //
 // Not Monaco: the desktop's side-by-side editor is 3MB of JavaScript and needs
-// horizontal room neither a phone nor a mobile connection has. A unified diff
-// with coloured gutters is what a diff looks like on a small screen anyway, and
-// it costs one pass over the text.
+// horizontal room neither a phone nor a mobile connection has. The real
+// renderer is the desktop's @git-diff-view/react (see GitDiff.tsx), loaded
+// lazily; the hand-rolled pass below stays as the Suspense fallback and the
+// only renderer for a patch too large for a phone to lay out.
 
-import { useMemo } from 'react'
+import { lazy, Suspense, useMemo } from 'react'
+
+const GitDiff = lazy(() => import('./GitDiff'))
+
+// Above this many total patch lines the library renderer is a freeze on a
+// phone — stay with the one-pass <pre>.
+const PLAIN_MAX = 4000
 
 type LineKind = 'add' | 'del' | 'hunk' | 'meta' | 'ctx'
 
@@ -41,7 +48,7 @@ export function DiffText({ patch }: { patch: string }) {
     [lines],
   )
   if (!patch.trim()) return <div className="panel-empty">No changes in this file.</div>
-  return (
+  const plain = (
     <div className="diff">
       <div className="diff-stat mono">
         <span className="add">+{stat.add}</span>
@@ -55,5 +62,11 @@ export function DiffText({ patch }: { patch: string }) {
         ))}
       </pre>
     </div>
+  )
+  if (lines.length > PLAIN_MAX) return plain
+  return (
+    <Suspense fallback={plain}>
+      <GitDiff patch={patch} />
+    </Suspense>
   )
 }
