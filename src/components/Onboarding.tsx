@@ -16,7 +16,7 @@ import {
   getSettings,
   updateSettings,
 } from "../settings";
-import { format, SHORTCUT_PROFILES } from "../shortcuts";
+import { currentPlatform, format, SHORTCUT_PROFILES } from "../shortcuts";
 import { AGENT_CLIS } from "../projects";
 
 interface OnboardingProps {
@@ -31,7 +31,7 @@ interface Slide {
   title: string;
   body: React.ReactNode;
   /** Animated mock of the relevant screen. */
-  mock: React.ReactNode;
+  mock: React.ReactNode | ((settings: Settings) => React.ReactNode);
 }
 
 /** Shared pointer: an arrow that follows the scene's --cx/--cy vars, plus a
@@ -80,18 +80,41 @@ function Logo({ bg, glyph, fg = "#fff" }: { bg: string; glyph: string; fg?: stri
   return <span className="ob-logo" style={{ background: bg, color: fg }}>{glyph}</span>;
 }
 
+const PLATFORM = currentPlatform();
+const PLATFORM_LABEL = PLATFORM === "macos" ? "macOS" : PLATFORM === "windows" ? "Windows" : "Linux";
+
 const SLIDES: Slide[] = [
   {
     icon: "⌨",
     title: "Keep your muscle memory",
     body: "Start with the shortcuts you already know.",
-    mock: (
+    mock: (settings) => (
       <Scene chrome="keyboard shortcuts" vars={{ "--cx0": "248px", "--cy0": "22px", "--cx1": "150px", "--cy1": "67px" } as React.CSSProperties}>
         <div className="ob-col" style={{ gap: 5 }}>
-          <div className="ob-row"><span className="grow">Canopy</span><span className="ob-chip">terminal-first</span></div>
-          <div className="ob-row"><span className="grow">VS Code</span><span className="ob-mono">Ctrl+P</span></div>
-          <div className="ob-row"><span className="grow">JetBrains</span><span className="ob-mono">Ctrl+Shift+N</span></div>
-          <div className="ob-row"><span className="grow">Sublime Text</span><span className="ob-mono">Ctrl+P</span></div>
+          {([
+            ["quick-open", "Quick open"],
+            ["spot-search", "Search everything"],
+            ["settings", "Settings"],
+          ] as const).map(([id, label]) => (
+            <div className="ob-row" key={id}>
+              <span className="grow">{label}</span>
+              <kbd
+                className="ob-chip ob-mono"
+                data-shortcut={id}
+                style={{ color: "var(--accent)", borderColor: "var(--accent)" }}
+              >
+                {format(id, PLATFORM, settings.keymapProfile)}
+              </kbd>
+            </div>
+          ))}
+          <div className="ob-row" style={{ border: 0, background: "none", paddingBlock: 2 }}>
+            <span className="grow">
+              {SHORTCUT_PROFILES.find(({ id }) => id === settings.keymapProfile)?.label}
+            </span>
+            <span className="ob-chip" data-shortcut-platform>
+              shortcuts shown for {PLATFORM_LABEL}
+            </span>
+          </div>
         </div>
       </Scene>
     ),
@@ -279,7 +302,9 @@ export function Onboarding({ onClose, onCreateProject }: OnboardingProps) {
         </button>
 
         <div className="onboarding-slide">
-          <div className="onboarding-mock">{slide.mock}</div>
+          <div className="onboarding-mock">
+            {typeof slide.mock === "function" ? slide.mock(settings) : slide.mock}
+          </div>
           <div className="set-head onboarding-title">
             <span aria-hidden>{slide.icon}</span> {slide.title}
           </div>
