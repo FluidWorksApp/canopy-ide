@@ -20,6 +20,7 @@ import {
   raisePrTask,
   resolveConflictsTask,
   reviewPrTask,
+  reviewPolicyBrief,
   runItReviewTask,
   stepsDone,
   MICRO_TASKS,
@@ -489,6 +490,46 @@ describe("PR tasks that report back through a file", () => {
     // Same bar either way — the lens adds a tail, it doesn't lower the bar.
     expect(theirs).toContain('"severity"');
     expect(theirs).toContain("/repo/.canopy/pr-12-map.md");
+  });
+
+  it("uses repository policy, linked requirements, checks, and configured analyzers", () => {
+    const ctx = prReviewTask.buildContext({ repo: "/repo", pr }, "");
+    expect(ctx).toContain("nearest applicable `AGENTS.md`");
+    expect(ctx).toContain("linked issue requirements");
+    expect(ctx).toContain("addressed, not addressed, or unclear");
+    expect(ctx).toContain("gh pr checks 12");
+    expect(ctx).toContain("configured focused tests, linters");
+    expect(ctx).toContain('"## Verification"');
+  });
+
+  it("makes a later review incremental without losing whole-PR context", () => {
+    const ctx = prReviewTask.buildContext(
+      { repo: "/repo", pr, sinceSha: "abc123", headSha: "def456" },
+      "",
+    );
+    expect(ctx).toContain("This is a re-review");
+    expect(ctx).toContain("compare/abc123...def456");
+    expect(ctx).toContain("use the full PR only for context");
+    expect(ctx).toContain("do not repeat findings against unchanged code");
+  });
+
+  it("applies path policy, custom checks, learnings, related repos, and diagrams", () => {
+    const policy = reviewPolicyBrief({
+      autoReview: true,
+      reviewDrafts: false,
+      diagrams: true,
+      excludedPaths: ["dist/**"],
+      pathInstructions: [{ path: "src/api/**", instructions: "Preserve v1." }],
+      checks: [{ name: "API", instructions: "No break.", severity: "error" }],
+      learnings: ["Require a regression test."],
+      relatedRepositories: ["/work/client"],
+    });
+    expect(policy).toContain("dist/**");
+    expect(policy).toContain("src/api/**");
+    expect(policy).toContain("persistent review preferences");
+    expect(policy).toContain("## Custom checks");
+    expect(policy).toContain("/work/client");
+    expect(policy).toContain("Mermaid");
   });
 
   it("asks every task that declares milestones to report all of them, from a clean file", () => {
