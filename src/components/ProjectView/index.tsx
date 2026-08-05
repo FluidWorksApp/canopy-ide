@@ -158,7 +158,6 @@ import {
   adhocTaskDef,
   customTaskDef,
   implementResearchTask,
-  raiseResearchPrTask,
   microTaskProtocol,
   oneLine,
   progressBrief,
@@ -3187,13 +3186,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!repo) return;
       try {
         const ok = await startMicroTask(
-          raiseResearchPrTask,
-          {
-            dir: repo,
-            repo,
-            entryId: entry.id,
-            title: entry.title,
-          },
+          raisePrTask,
+          { repo, research: { entryId: entry.id, title: entry.title } },
           "",
         );
         if (!ok) return;

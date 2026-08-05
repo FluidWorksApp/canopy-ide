@@ -269,36 +269,74 @@ export const prProgressPath = (repo: string, taskId: string, number: number): st
 
 /** Kept lean on purpose: the Git panel's branch rows only know a branch by
  *  name, while a branch tab has the full BranchWork — both can launch this.
- *  `unpushed` undefined = the launcher didn't know; the agent checks. */
-export interface RaisePrPayload {
-  repo: string;
-  branch: string;
-  worktree?: string | null;
-  unpushed?: boolean;
-}
+ *  `unpushed` undefined = the launcher didn't know; the agent checks.
+ *
+ *  The research variant carries no branch at all: the entry's history records
+ *  implementation in a local commit, and resolving that commit to a branch is
+ *  the task's first job — so the two origins are a union rather than one bag
+ *  of optionals a launcher could half-fill. */
+export type RaisePrPayload =
+  | {
+      repo: string;
+      branch: string;
+      worktree?: string | null;
+      unpushed?: boolean;
+      research?: undefined;
+    }
+  | {
+      repo: string;
+      research: { entryId: string; title: string };
+      branch?: undefined;
+      worktree?: undefined;
+      unpushed?: undefined;
+    };
 
 /** Raise the PR the repo's own conventions ask for: read the change, find the
  *  template (repo-level, or a nearer one for the area being touched), fill every
  *  section from evidence, and open it via --body-file so the template's headings
- *  survive the trip. Never commits — the branch ships as it is. */
+ *  survive the trip. Never commits — the branch ships as it is.
+ *
+ *  A research-origin run starts one step earlier: no branch is known, only a
+ *  history event recording a local implementation commit, so the agent first
+ *  resolves that commit to a branch, then publishes it the same way — and links
+ *  the created PR back to the entry so the reconciler can close the loop. */
 export const raisePrTask: MicroTaskDef<RaisePrPayload> = {
   id: "raise-pr",
   label: "Raise PR",
   icon: "⇈",
-  runLabel: (p) => `Raise PR · ${p.branch}`,
+  runLabel: (p) => `Raise PR · ${p.research ? p.research.title : p.branch}`,
   placeholder: "Anything the PR should mention…",
   blurb: "Opens the PR, filling in whatever template the repo asks for.",
   effect: "posts",
-  surfaceNote: "on a branch tab",
+  surfaceNote:
+    "on a branch tab, or beside a research history event that records a local implementation",
   cwd: (p) => p.worktree ?? p.repo,
+  env: (p) => (p.research ? [["CANOPY_RESEARCH", p.research.entryId]] : []),
   buildContext(p, userQuery) {
+    const query = oneLine(userQuery);
+    if (p.research) {
+      return oneLine(
+        `Raise the pull request for research ${p.research.entryId}: "${p.research.title}". ` +
+          `Start by calling canopy_research with action "get" for the full entry. Its history ` +
+          `records implementation in a local commit but no PR; use that commit and inspect the ` +
+          `repository's branches, log, status, and full diff against the base branch to identify ` +
+          `the exact implementation branch. Do not edit files, add implementation, amend commits, ` +
+          `rebase, force-push, or switch the shared checkout. If the commit is not named by a safe ` +
+          `feature branch, create one pointing at it without checking it out. Push that branch, find ` +
+          `and follow the repository's pull-request template, and open the PR with a title and body ` +
+          `grounded in the actual diff and tests already evidenced; do not invent verification. ` +
+          `Then call canopy_research_write with action "link" and the created PR ` +
+          `({ repo, number, url, state: "open" }). This link is mandatory: it is what lets Canopy ` +
+          `mark the research implemented after merge. Pass the PR URL to canopy_job_done.` +
+          (query ? ` The user adds: "${query}".` : ""),
+      );
+    }
     const push =
       p.unpushed === false
         ? ""
         : p.unpushed
           ? `Push it first (\`git push -u origin ${p.branch}\`). `
           : `If it has no upstream or unpushed commits, push it first (\`git push -u origin ${p.branch}\`). `;
-    const query = oneLine(userQuery);
     return oneLine(
       `Open a pull request for the branch ${p.branch}. ` +
         push +
@@ -899,43 +937,6 @@ export const implementResearchTask: MicroTaskDef<ImplementResearchPayload> = {
     ),
 };
 
-export interface RaiseResearchPrPayload {
-  dir: string;
-  repo: string;
-  entryId: string;
-  title: string;
-}
-
-/** Publish implementation that an earlier agent left in a local commit, then
- * link the PR so the normal research reconciler can close the loop. */
-export const raiseResearchPrTask: MicroTaskDef<RaiseResearchPrPayload> = {
-  id: "raise-research-pr",
-  label: "Raise PR",
-  icon: "⇈",
-  runLabel: (p) => `Raise PR · ${p.title}`,
-  placeholder: "",
-  blurb: "Finds the recorded local implementation, pushes it, and links its PR.",
-  effect: "pushes",
-  surfaceNote: "beside a research history event that records a local implementation",
-  cwd: (p) => p.dir,
-  env: (p) => [["CANOPY_RESEARCH", p.entryId]],
-  buildContext: (p) =>
-    oneLine(
-      `Raise the pull request for research ${p.entryId}: "${p.title}". ` +
-        `Start by calling canopy_research with action "get" for the full entry. Its history ` +
-        `records implementation in a local commit but no PR; use that commit and inspect the ` +
-        `repository's branches, log, status, and full diff against the base branch to identify ` +
-        `the exact implementation branch. Do not edit files, add implementation, amend commits, ` +
-        `rebase, force-push, or switch the shared checkout. If the commit is not named by a safe ` +
-        `feature branch, create one pointing at it without checking it out. Push that branch, find ` +
-        `and follow the repository's pull-request template, and open the PR with a title and body ` +
-        `grounded in the actual diff and tests already evidenced; do not invent verification. ` +
-        `Then call canopy_research_write with action "link" and the created PR ` +
-        `({ repo, number, url, state: "open" }). This link is mandatory: it is what lets Canopy ` +
-        `mark the research implemented after merge. Pass the PR URL to canopy_job_done.`,
-    ),
-};
-
 // ---------- the scratchpad ----------
 
 export interface NoteRunPayload {
@@ -997,7 +998,6 @@ export const MICRO_TASKS: MicroTaskDef<never>[] = [
   noteTask as MicroTaskDef<never>,
   researchTask as MicroTaskDef<never>,
   implementResearchTask as MicroTaskDef<never>,
-  raiseResearchPrTask as MicroTaskDef<never>,
   raisePrTask as MicroTaskDef<never>,
   reviewPrTask as MicroTaskDef<never>,
   addressPrCommentsTask as MicroTaskDef<never>,

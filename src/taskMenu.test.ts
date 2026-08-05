@@ -108,17 +108,11 @@ describe("taskMenuItem", () => {
   });
 
   it("disables a built-in it can't run and hints why", () => {
-    // Two built-ins share the "Raise PR" label; each disabled row still hints
-    // at its own surface.
     const raises = menu({ runnable: here }).filter((i) => i.label?.includes("Raise PR"));
-    expect(raises).toHaveLength(2);
-    for (const raise of raises) {
-      expect(raise.disabled).toBe(true);
-      expect(raise.onClick).toBeUndefined();
-    }
-    const hints = raises.map((r) => r.hint);
-    expect(hints.some((h) => h?.includes("research history event"))).toBe(true);
-    expect(hints.some((h) => h?.includes("branch tab"))).toBe(true);
+    expect(raises).toHaveLength(1); // one task serves both of its surfaces
+    expect(raises[0].disabled).toBe(true);
+    expect(raises[0].onClick).toBeUndefined();
+    expect(raises[0].hint).toContain("branch tab");
   });
 });
 

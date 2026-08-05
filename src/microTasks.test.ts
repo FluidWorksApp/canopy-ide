@@ -18,7 +18,6 @@ import {
   prReviewTask,
   progressBrief,
   raisePrTask,
-  raiseResearchPrTask,
   resolveConflictsTask,
   reviewPrTask,
   runItReviewTask,
@@ -32,7 +31,9 @@ import {
 import { isStopFor, parseAgentEvent } from "./notifications";
 import type * as ipc from "./ipc";
 
-const payload = (over: Partial<RaisePrPayload> = {}): RaisePrPayload => ({
+type BranchRaise = Extract<RaisePrPayload, { branch: string }>;
+
+const payload = (over: Partial<BranchRaise> = {}): RaisePrPayload => ({
   repo: "/repo",
   branch: "feat/micro-tasks",
   worktree: null,
@@ -99,22 +100,30 @@ describe("raisePrTask.buildContext", () => {
   });
 });
 
-describe("raiseResearchPrTask.buildContext", () => {
-  const research = {
-    dir: "/repo",
+describe("raisePrTask.buildContext, research origin", () => {
+  const research: Parameters<typeof raisePrTask.buildContext>[0] = {
     repo: "/repo",
-    entryId: "0007-elevenlabs",
-    title: "ElevenLabs voice workflow",
+    research: { entryId: "0007-elevenlabs", title: "ElevenLabs voice workflow" },
   };
 
   it("recovers the local commit without editing and links the resulting PR", () => {
-    const ctx = raiseResearchPrTask.buildContext(research, "");
+    const ctx = raisePrTask.buildContext(research, "");
     expect(ctx).toContain('canopy_research with action "get"');
     expect(ctx).toContain("local commit");
     expect(ctx).toContain("Do not edit files");
     expect(ctx).toContain("do not invent verification");
     expect(ctx).toContain('canopy_research_write with action "link"');
     expect(ctx).toContain("canopy_job_done");
+  });
+
+  it("names the run after the entry and binds the session to it", () => {
+    expect(raisePrTask.runLabel?.(research, "")).toBe(
+      "Raise PR · ElevenLabs voice workflow",
+    );
+    expect(raisePrTask.env?.(research)).toEqual([
+      ["CANOPY_RESEARCH", "0007-elevenlabs"],
+    ]);
+    expect(raisePrTask.cwd(research)).toBe("/repo");
   });
 });
 
@@ -253,7 +262,6 @@ describe("MICRO_TASKS", () => {
       "note",
       "research",
       "implement-research",
-      "raise-research-pr",
       "raise-pr",
       "review-pr",
       "address-pr-comments",
@@ -288,7 +296,6 @@ describe("MICRO_TASKS", () => {
     const pushes = MICRO_TASKS.filter((t) => t.effect === "pushes").map((t) => t.id);
     expect(pushes).toEqual([
       "implement-research",
-      "raise-research-pr",
       "address-pr-comments",
       "pr-resolve-conflicts",
       "pr-fix-ci",
@@ -297,12 +304,7 @@ describe("MICRO_TASKS", () => {
     // what there is to start from — a PR's head for work that already has one,
     // a fresh branch for work that does not (implementing research) — but
     // "edits code in the shared checkout" is not on the menu either way.
-    // The research PR task only publishes an existing commit and explicitly
-    // forbids edits and checkout changes, so it can safely inspect the shared
-    // checkout. Every task that edits gets an isolated worktree.
-    for (const t of MICRO_TASKS.filter(
-      (x) => x.effect === "pushes" && x.id !== "raise-research-pr",
-    ))
+    for (const t of MICRO_TASKS.filter((x) => x.effect === "pushes"))
       expect(
         t.isolation?.kind,
         `${t.id} edits code, so it needs its own worktree`,
