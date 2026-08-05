@@ -6,6 +6,7 @@
 // browser session, and a second agent's page is a different page. See the pip
 // routing in ProjectView for how a session gets a tab of its own.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { decodedFrame } from "../browserFrame";
 import * as ipc from "../ipc";
 import { AgentIcon, CloseIcon, GlobeIcon } from "./icons";
 
@@ -110,10 +111,23 @@ export function AgentBrowserPip({
         const page = await ipc.browserHere(tabId);
         if (stopped) return;
         if (page) {
-          const shot = await ipc.browserSnapshot(tabId, 720);
+          // JPEG, not PNG: this runs four times a second, and lossless pixels
+          // in a corner preview are only encode time and IPC weight.
+          const shot = await ipc.browserSnapshot(tabId, 720, "jpeg");
           if (stopped) return;
-          setFrame(`data:image/png;base64,${shot.image}`);
-          if (shot.width > 0 && shot.height > 0) setRatio(shot.width / shot.height);
+          const src = `data:${shot.mimeType || "image/jpeg"};base64,${shot.image}`;
+          // Decoded before the swap, so the <img> never spends a frame blank
+          // while the new picture's bytes are still being unpacked.
+          await decodedFrame(src);
+          if (stopped) return;
+          setFrame(src);
+          if (shot.width > 0 && shot.height > 0) {
+            // Ignore sub-percent wobble: the ratio drives the pip's height,
+            // and re-laying it out for a rounding difference makes the whole
+            // box jitter at the stream's cadence.
+            const next = shot.width / shot.height;
+            setRatio((r) => (Math.abs(next - r) / r > 0.01 ? next : r));
+          }
           setFailed(false);
         }
       } catch {
