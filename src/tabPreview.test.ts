@@ -77,11 +77,43 @@ describe("clonePane", () => {
     expect(clone.style.pointerEvents).toBe("none");
   });
 
-  it("refuses a pane past the cap rather than paying for it", () => {
+  it("truncates a pane past the cap instead of showing nothing", () => {
     const big = host("<i></i>".repeat(50));
     expect(paneNodeCount(big)).toBe(50);
-    expect(clonePane(big, 10)).toBeNull();
-    expect(clonePane(big, 100)).not.toBeNull();
+    const clipped = clonePane(big, 10)!;
+    expect(clipped).not.toBeNull();
+    expect(paneNodeCount(clipped)).toBe(10);
+    expect(paneNodeCount(clonePane(big, 100)!)).toBe(50);
+  });
+
+  it("keeps the top of the pane — the part a thumbnail has room for", () => {
+    const big = host(
+      `<header>first</header>${"<p>row</p>".repeat(40)}<footer>last</footer>`,
+    );
+    const clipped = clonePane(big, 5)!;
+    expect(clipped.textContent).toContain("first");
+    expect(clipped.textContent).not.toContain("last");
+  });
+
+  it("spends the budget inside a big container, not on skipping it", () => {
+    // One wrapper holding more than the budget: the wrapper is walked child by
+    // child so the preview shows its first rows, rather than the wrapper being
+    // dropped whole and the card coming out empty.
+    const big = host(`<div class="diff">${"<p>row</p>".repeat(40)}</div>`);
+    const clipped = clonePane(big, 5)!;
+    expect(clipped.querySelector(".diff")).not.toBeNull();
+    expect(clipped.querySelectorAll("p")).toHaveLength(4);
+  });
+
+  it("still strips and de-ids what it truncated down to", () => {
+    const big = host(
+      `<div id="head"><iframe src="http://x"></iframe><span>kept</span></div>` +
+        "<i></i>".repeat(50),
+    );
+    const clipped = clonePane(big, 6)!;
+    expect(clipped.querySelector("iframe")).toBeNull();
+    expect(clipped.querySelectorAll("[id]")).toHaveLength(0);
+    expect(clipped.textContent).toContain("kept");
   });
 
   it("has nothing to show for a missing or empty host", () => {
