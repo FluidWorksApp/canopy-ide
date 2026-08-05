@@ -12225,7 +12225,7 @@ input[type="radio"]:disabled {
 
 .prs-row {
   display: grid;
-  grid-template-columns: 14px auto minmax(0, 1fr) auto;
+  grid-template-columns: 14px auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 5px;
   padding: 5px 10px 6px;
@@ -12262,6 +12262,22 @@ input[type="radio"]:disabled {
 .prs-row-state {
   font-size: 9px;
   white-space: nowrap;
+}
+.prs-row-action.btn-sm {
+  min-height: 22px;
+  padding: 2px 8px;
+  font-size: 10px;
+  opacity: 0.72;
+}
+.prs-row:hover .prs-row-action,
+.prs-row-action:focus-visible {
+  opacity: 1;
+}
+.prs-panel:not(.collection-page) .prs-row {
+  grid-template-columns: 14px auto minmax(0, 1fr) auto;
+}
+.prs-panel:not(.collection-page) .prs-row-state {
+  display: none;
 }
 .prs-row-state.tone-bad {
   color: var(--danger);

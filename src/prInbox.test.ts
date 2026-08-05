@@ -6,6 +6,7 @@ import {
   laneOf,
   lanes,
   needsYouCount,
+  prQuickTask,
   rowChanged,
   rowState,
   since,
@@ -118,6 +119,29 @@ describe("rowState", () => {
     expect(rowState(row({ review_decision: "APPROVED" })).tone).toBe("ok");
     expect(rowState(row({ draft: true, checks: "FAIL" })).text).toBe("draft");
     expect(rowState(row()).text).toBe("open");
+  });
+});
+
+describe("prQuickTask", () => {
+  it("offers the task that unblocks the row, in blocking order", () => {
+    expect(prQuickTask(row({ mergeable: "CONFLICTING", checks: "FAIL" }))).toEqual({
+      id: "resolve-conflicts",
+      label: "Resolve conflicts",
+    });
+    expect(prQuickTask(row({ checks: "FAIL" }))).toEqual({ id: "fix-ci", label: "Fix CI" });
+    expect(prQuickTask(row({ mine: true, review_decision: "CHANGES_REQUESTED" }))).toEqual({
+      id: "address",
+      label: "Address comments",
+    });
+    expect(
+      prQuickTask(row({ requested_from_me: true, review_decision: "CHANGES_REQUESTED" })),
+    ).toEqual({ id: "review", label: "Review" });
+    expect(prQuickTask(row())).toEqual({ id: "review", label: "Review" });
+  });
+
+  it("does not offer a mutating task for someone else's requested changes or merge", () => {
+    expect(prQuickTask(row({ review_decision: "CHANGES_REQUESTED" }))).toBeNull();
+    expect(prQuickTask(row({ review_decision: "APPROVED" }))).toBeNull();
   });
 });
 

@@ -52,6 +52,26 @@ export interface LaneGroup {
   rows: ipc.PrRow[];
 }
 
+export type PrQuickAction = "review" | "address" | "fix-ci" | "resolve-conflicts";
+
+export interface PrQuickTask {
+  id: PrQuickAction;
+  label: string;
+}
+
+/** The one useful agent task to put directly on an inbox row. This deliberately
+ * omits merge: landing still needs a human to choose squash, merge, or rebase. */
+export function prQuickTask(row: ipc.PrRow): PrQuickTask | null {
+  if (row.mergeable === "CONFLICTING")
+    return { id: "resolve-conflicts", label: "Resolve conflicts" };
+  if (row.checks === "FAIL") return { id: "fix-ci", label: "Fix CI" };
+  if (row.mine && row.review_decision === "CHANGES_REQUESTED")
+    return { id: "address", label: "Address comments" };
+  if (row.requested_from_me || !row.review_decision || row.review_decision === "REVIEW_REQUIRED")
+    return { id: "review", label: "Review" };
+  return null;
+}
+
 /** Group into lanes, dropping empty ones so the panel has no dead headings. */
 export function lanes(rows: ipc.PrRow[]): LaneGroup[] {
   const byLane = new Map<Lane, ipc.PrRow[]>();

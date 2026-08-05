@@ -8,7 +8,16 @@
 // App to switch projects first.
 import { useMemo, useState } from "react";
 import type * as ipc from "../ipc";
-import { LANE_LABEL, lanes, rowState, since, toPrInfo, type Lane } from "../prInbox";
+import {
+  LANE_LABEL,
+  lanes,
+  prQuickTask,
+  rowState,
+  since,
+  toPrInfo,
+  type Lane,
+  type PrQuickAction,
+} from "../prInbox";
 import { refresh } from "../prWatchStore";
 import { usePrWatch } from "../usePrWatch";
 import { PullRequestIcon } from "./icons";
@@ -28,6 +37,7 @@ interface PrsPanelProps {
   page?: boolean;
   onOpenAll?: () => void;
   onAgentTask?: (repo: string, pr: ipc.PrInfo) => void;
+  onQuickTask?: (action: PrQuickAction, repo: string, pr: ipc.PrInfo) => void;
   relay?: RelayHandle;
   onNotice?: (message: string, kind?: "info" | "success" | "warn" | "error") => void;
   onOpenChat?: (peer: string, name: string) => void;
@@ -43,7 +53,7 @@ const LANE_TONE: Record<Lane, string> = {
   draft: "is-dim",
 };
 
-export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenAll, onAgentTask, relay, onNotice, onOpenChat }: PrsPanelProps) {
+export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenAll, onAgentTask, onQuickTask, relay, onNotice, onOpenChat }: PrsPanelProps) {
   const { rows, fetchedMs, errors, remaining, nextIn, busy, viewer } = usePrWatch();
   const [mineOnly, setMineOnly] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<Lane>>(new Set());
@@ -205,6 +215,7 @@ export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenA
             {!isCollapsed &&
               laneRows.map((row) => {
                 const st = rowState(row);
+                const quickTask = prQuickTask(row);
                 const project = projectFor(row.repo);
                 return (
                   <div
@@ -218,6 +229,20 @@ export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenA
                     <span className="prs-row-num">#{row.number}</span>
                     <span className="prs-row-title">{row.title}</span>
                     <span className={`prs-row-state tone-${st.tone}`}>{st.text}</span>
+                    {quickTask && onQuickTask && (
+                      <Button
+                        className="prs-row-action"
+                        size="sm"
+                        variant="ghost"
+                        title={`Run ${quickTask.label.toLowerCase()} as an agent task`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onQuickTask(quickTask.id, row.repo, toPrInfo(row));
+                        }}
+                      >
+                        {quickTask.label}
+                      </Button>
+                    )}
                     <div className="prs-row-sub">
                       <span>{project ?? row.nwo}</span>
                       <span>· {row.mine ? "yours" : row.author}</span>
