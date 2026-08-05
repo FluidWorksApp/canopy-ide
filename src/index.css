@@ -10039,6 +10039,74 @@ input[type="radio"]:disabled {
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
+.agent-close-stack {
+  position: fixed;
+  left: 50%;
+  bottom: 34px;
+  z-index: 305;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: flex-end;
+  gap: 6px;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.agent-close-undo {
+  min-width: 250px;
+  max-width: min(420px, 70vw);
+  padding: 9px 10px 9px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--bg-overlay);
+  box-shadow:
+    var(--shadow-2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  pointer-events: auto;
+}
+
+.agent-close-copy {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-close-copy strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-close-copy span {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-close-undo button {
+  padding: 5px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.agent-close-undo button:hover {
+  background: color-mix(in srgb, var(--accent) 21%, transparent);
+}
+
 /* palette: component scoping */
 
 .palette-scopes {

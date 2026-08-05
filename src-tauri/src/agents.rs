@@ -161,6 +161,17 @@ fn candidate_pid(
 #[derive(Default)]
 pub struct StatsCache(pub std::sync::Mutex<Vec<SessionStats>>);
 
+fn clear_stale_stats(cache: Option<&StatsCache>, last_ports: &mut HashMap<u32, Vec<u16>>) -> bool {
+    let mut changed = !last_ports.is_empty();
+    last_ports.clear();
+    if let Some(cache) = cache {
+        let mut stats = cache.0.lock().unwrap();
+        changed |= !stats.is_empty();
+        stats.clear();
+    }
+    changed
+}
+
 /// The latest process reading for every live terminal, on demand.
 ///
 /// The monitor emits `pty:stats` every 2s, which serves anything already
@@ -277,6 +288,16 @@ pub fn start_monitor(app: AppHandle) {
                         output_bytes: s.output_bytes(),
                     })
                     .collect();
+                // Publish the transition to zero once. Otherwise the final
+                // terminal remains in StatsCache and every frontend subscriber
+                // indefinitely, which looks like a live resource after its PTY
+                // and process are already gone.
+                if sessions.is_empty() {
+                    let cache = app.try_state::<StatsCache>();
+                    if clear_stale_stats(cache.as_deref(), &mut last_ports) {
+                        let _ = app.emit("pty:stats", Vec::<SessionStats>::new());
+                    }
+                }
                 // With no terminals there is nothing hot to watch — only the
                 // app-footprint number in the status bar, which nobody needs at
                 // 2s resolution. Skip two of every three ticks entirely.
@@ -4963,6 +4984,33 @@ mod integration_tests {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use super::{clear_stale_stats, SessionStats, StatsCache};
+
+    #[test]
+    fn final_pty_clears_cached_stats_and_ports_once() {
+        let cache = StatsCache(std::sync::Mutex::new(vec![SessionStats {
+            id: 7,
+            title: "agent".into(),
+            cwd: "/tmp/project".into(),
+            total_cpu: 1.0,
+            total_mem_bytes: 1024,
+            procs: Vec::new(),
+            ports: vec![4321],
+            agent_hint: None,
+            quiet_ms: None,
+            since_input_ms: None,
+            output_bytes: 0,
+        }]));
+        let mut ports = HashMap::from([(7, vec![4321])]);
+
+        assert!(clear_stale_stats(Some(&cache), &mut ports));
+        assert!(cache.0.lock().unwrap().is_empty());
+        assert!(ports.is_empty());
+        assert!(!clear_stale_stats(Some(&cache), &mut ports));
+    }
+
     /// The manifest must name every CLI we know how to set up. A supported CLI
     /// missing from it declares nothing, which is safe — it falls through to
     /// the process rungs — but silently: its hooks would stop being read and
