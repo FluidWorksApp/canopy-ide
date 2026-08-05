@@ -138,6 +138,35 @@ export function urgencyOf(item: Pick<AttentionItem, "kind" | "tone">): Urgency {
 export const isOutstanding = (item: AttentionItem): boolean =>
   item.kind === "question" && item.resolvedAt == null;
 
+/** Where clicking this item goes — its target, told which project it is about.
+ *
+ *  An item names its project properly: the poster resolves it once, knowing
+ *  things the link does not (which project launched a micro-task; that a
+ *  `<repo>-wt-…` checkout is still that repo's work). The link beside it
+ *  usually carries only a path, and `projectForLink` resolves a path by
+ *  containment — so a path under no component root, or a target with no path
+ *  at all, resolves to no project, and the router falls back to whichever
+ *  project is in front. That is the bug this closes: clicking "Task done"
+ *  opened the Tasks panel of an unrelated project. The row knew which project
+ *  it was about — the click did not.
+ *
+ *  Derived on read rather than stamped on post, so it also holds for the items
+ *  already in the list, and so both readers get it: the notification/toast
+ *  click, and the OS banner, which leaves the process as a `canopy://` string
+ *  and comes back carrying nothing but what was serialised into it.
+ *
+ *  Never overrides a link that already names a project. An item with no project
+ *  of its own is left alone — team surfaces (chat, transfers) are global and
+ *  are meant to land wherever the user is standing. */
+export function targetOf(
+  item: Pick<AttentionItem, "where" | "projectId">,
+): DeepLink | null {
+  const link = item.where;
+  if (!link) return null;
+  if (!item.projectId || link.projectId) return link;
+  return { ...link, projectId: item.projectId };
+}
+
 /** How long an item's toast stays up, or null for "until dismissed".
  *
  *  The old rule was "errors wait, everything else gets 4.5s". Questions join

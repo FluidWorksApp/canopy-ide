@@ -15,6 +15,7 @@ import {
   resolveAttention,
   resolveAttentionByKey,
   shouldReachOS,
+  targetOf,
   toastMs,
   unreadCount,
   urgencyOf,
@@ -242,6 +243,45 @@ describe("osPayload", () => {
     expect(osPayload(item({ title: "Blocked", body: "needs a token" })).body).toBe(
       "Blocked — needs a token",
     );
+  });
+});
+
+describe("targetOf", () => {
+  it("tells the target which project the item is about", () => {
+    // The bug: a "Task done" row whose link carried only a worktree path
+    // resolved to no project, and the click landed in whichever project
+    // happened to be in front.
+    expect(
+      targetOf(
+        item({
+          projectId: "p1",
+          where: { kind: "panel", panel: "tasks", path: "/repo-wt-x" },
+        }),
+      ),
+    ).toEqual({
+      kind: "panel",
+      panel: "tasks",
+      path: "/repo-wt-x",
+      projectId: "p1",
+    });
+  });
+
+  it("never overrides a project the link already names", () => {
+    expect(
+      targetOf(
+        item({ projectId: "p1", where: { kind: "project", projectId: "p2" } }),
+      ),
+    ).toEqual({ kind: "project", projectId: "p2" });
+  });
+
+  it("leaves a project-less item alone — team surfaces land where you are", () => {
+    expect(
+      targetOf(item({ source: "team", where: { kind: "chat", peer: null } })),
+    ).toEqual({ kind: "chat", peer: null });
+  });
+
+  it("is null for an item with nowhere to go", () => {
+    expect(targetOf(item({ projectId: "p1" }))).toBeNull();
   });
 });
 
