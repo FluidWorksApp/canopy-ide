@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { getSettings } from "../settings";
+import { currentPlatform, format } from "../shortcuts";
 import { Onboarding } from "./Onboarding";
 
 describe("Onboarding", () => {
@@ -40,5 +41,18 @@ describe("Onboarding", () => {
       spotSearchAllProjects: true,
       autoImportMarkdownResearch: false,
     });
+  });
+
+  it("previews the selected shortcut profile for the current platform", async () => {
+    const user = userEvent.setup();
+    render(<Onboarding onClose={vi.fn()} onCreateProject={vi.fn()} />);
+
+    expect(screen.getByText(format("quick-open", currentPlatform(), "canopy"))).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Keyboard shortcut profile" }), "jetbrains");
+
+    expect(screen.getByText(format("quick-open", currentPlatform(), "jetbrains"))).toBeInTheDocument();
+    const platform = currentPlatform() === "macos" ? "macOS" : currentPlatform() === "windows" ? "Windows" : "Linux";
+    expect(screen.getByText(`shortcuts shown for ${platform}`)).toHaveAttribute("data-shortcut-platform");
   });
 });
