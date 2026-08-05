@@ -52,6 +52,38 @@ export interface LaneGroup {
   rows: ipc.PrRow[];
 }
 
+export type PrQuickAction = "review" | "address" | "fix-ci" | "resolve-conflicts";
+
+export interface PrQuickTask {
+  id: PrQuickAction;
+  label: string;
+}
+
+/** Every agent task that applies to this row, most urgent first — the same
+ *  ordering opinion laneOf holds. A menu has room for all of them, so unlike a
+ *  single row button nothing is hidden behind the triage. Merge is deliberately
+ *  not here: it is not an agent task (see prMergeReady). */
+export function prContextActions(row: ipc.PrRow): PrQuickTask[] {
+  const actions: PrQuickTask[] = [];
+  if (row.mergeable === "CONFLICTING")
+    actions.push({ id: "resolve-conflicts", label: "Resolve conflicts" });
+  if (row.checks === "FAIL") actions.push({ id: "fix-ci", label: "Fix CI" });
+  if (row.mine && (row.review_decision === "CHANGES_REQUESTED" || row.threads + row.comments > 0))
+    actions.push({ id: "address", label: "Address comments" });
+  if (row.requested_from_me || !row.review_decision || row.review_decision === "REVIEW_REQUIRED")
+    actions.push({ id: "review", label: "Review" });
+  return actions;
+}
+
+/** Whether the row's menu should offer to merge: approved, green, conflict-free
+ *  and not a draft — the ready lane's own test. The click stays with the human,
+ *  and so does the squash/merge/rebase choice. */
+export const prMergeReady = (row: ipc.PrRow): boolean =>
+  !row.draft &&
+  row.review_decision === "APPROVED" &&
+  row.checks !== "FAIL" &&
+  row.mergeable !== "CONFLICTING";
+
 /** Group into lanes, dropping empty ones so the panel has no dead headings. */
 export function lanes(rows: ipc.PrRow[]): LaneGroup[] {
   const byLane = new Map<Lane, ipc.PrRow[]>();
