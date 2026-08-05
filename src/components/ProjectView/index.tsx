@@ -173,10 +173,13 @@ import {
   adhocLabel,
   adhocTaskDef,
   customTaskDef,
+  fixCiTask,
   implementResearchTask,
   microTaskProtocol,
   oneLine,
   progressBrief,
+  prReviewTask,
+  resolveConflictsTask,
   runLabelFor,
   raisePrTask,
   noteTask,
@@ -225,7 +228,7 @@ import {
 import { record as recordProvenance } from "../../provenance";
 import { resolveAgentForPr, type PrAgent } from "../../agentForPr";
 import { cached as provenanceCached, parsePrUrl } from "../../provenance";
-import { toPrInfo } from "../../prInbox";
+import { toPrInfo, type PrQuickAction } from "../../prInbox";
 import {
   askedLine,
   hasIdentity,
@@ -3038,6 +3041,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
       updateMicroRuns,
       switchTo,
     ],
+  );
+
+  /** The PR inbox's context actions, each mapped to the micro-task it names. */
+  const startPrQuickTask = useCallback(
+    (action: PrQuickAction, repo: string, pr: ipc.PrInfo) => {
+      const task = {
+        review: prReviewTask,
+        address: addressPrCommentsTask,
+        "fix-ci": fixCiTask,
+        "resolve-conflicts": resolveConflictsTask,
+      }[action];
+      void startMicroTask(task, { repo, pr }, "");
+    },
+    [startMicroTask],
   );
 
   /** Ask a question and put an agent on it.
@@ -9050,7 +9067,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       case "prs-list":
         return (
-          <PrsPanel page localRepos={repoPaths} projectFor={(repo) => repoPaths.includes(repo) ? project.name : undefined} onOpen={(repo, pr) => openPr(repo, pr)} onAgentTask={(repo, pr) => void startMicroTask(reviewPrTask, { repo, pr }, "")} relay={relay} onNotice={onNotice} onOpenChat={openChat} />
+          <PrsPanel page localRepos={repoPaths} projectFor={(repo) => repoPaths.includes(repo) ? project.name : undefined} onOpen={(repo, pr) => openPr(repo, pr)} onQuickTask={startPrQuickTask} relay={relay} onNotice={onNotice} onOpenChat={openChat} />
         );
       case "issues-list":
         return (
@@ -10448,7 +10465,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
           onOpen={(repo, pr) => openPr(repo, pr)}
           onOpenAll={() => openCollectionPage("prs-list")}
-          onAgentTask={(repo, pr) => void startMicroTask(reviewPrTask, { repo, pr }, "")}
+          onQuickTask={startPrQuickTask}
           relay={relay}
           onNotice={onNotice}
           onOpenChat={openChat}

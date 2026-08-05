@@ -6,6 +6,8 @@ import {
   laneOf,
   lanes,
   needsYouCount,
+  prContextActions,
+  prMergeReady,
   rowChanged,
   rowState,
   since,
@@ -174,6 +176,39 @@ describe("since", () => {
     expect(since(now - 30_000, now)).toBe("30s ago");
     expect(since(now - 5 * 60_000, now)).toBe("5m ago");
     expect(since(now - 3 * 3600_000, now)).toBe("3h ago");
+  });
+});
+
+describe("prContextActions", () => {
+  it("offers each action the row's state calls for, most urgent first", () => {
+    expect(
+      prContextActions(
+        row({ mine: true, mergeable: "CONFLICTING", checks: "FAIL", review_decision: "CHANGES_REQUESTED" }),
+      ).map((a) => a.id),
+    ).toEqual(["resolve-conflicts", "fix-ci", "address"]);
+  });
+
+  it("offers a review while the PR is still unreviewed or asked of you", () => {
+    expect(prContextActions(row()).map((a) => a.id)).toEqual(["review"]);
+    expect(prContextActions(row({ requested_from_me: true, review_decision: "REVIEW_REQUIRED" })).map((a) => a.id)).toEqual(["review"]);
+    // Approved and clean: nothing left for an agent — merging is the human's.
+    expect(prContextActions(row({ review_decision: "APPROVED" }))).toEqual([]);
+  });
+
+  it("offers addressing comments only on your own PR with something to answer", () => {
+    expect(prContextActions(row({ mine: true, threads: 2, review_decision: "APPROVED" })).map((a) => a.id)).toEqual(["address"]);
+    // Someone else's comments are not yours to address.
+    expect(prContextActions(row({ mine: false, threads: 2, review_decision: "APPROVED" }))).toEqual([]);
+  });
+});
+
+describe("prMergeReady", () => {
+  it("mirrors the ready lane: approved, green, mergeable, not a draft", () => {
+    expect(prMergeReady(row({ review_decision: "APPROVED" }))).toBe(true);
+    expect(prMergeReady(row({ review_decision: "APPROVED", checks: "FAIL" }))).toBe(false);
+    expect(prMergeReady(row({ review_decision: "APPROVED", mergeable: "CONFLICTING" }))).toBe(false);
+    expect(prMergeReady(row({ review_decision: "APPROVED", draft: true }))).toBe(false);
+    expect(prMergeReady(row())).toBe(false);
   });
 });
 
