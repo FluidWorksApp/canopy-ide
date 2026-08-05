@@ -31,7 +31,9 @@ import {
 import { isStopFor, parseAgentEvent } from "./notifications";
 import type * as ipc from "./ipc";
 
-const payload = (over: Partial<RaisePrPayload> = {}): RaisePrPayload => ({
+type BranchRaise = Extract<RaisePrPayload, { branch: string }>;
+
+const payload = (over: Partial<BranchRaise> = {}): RaisePrPayload => ({
   repo: "/repo",
   branch: "feat/micro-tasks",
   worktree: null,
@@ -95,6 +97,33 @@ describe("raisePrTask.buildContext", () => {
     expect(raisePrTask.cwd(payload({ worktree: "/repo-wt-x" }))).toBe(
       "/repo-wt-x",
     );
+  });
+});
+
+describe("raisePrTask.buildContext, research origin", () => {
+  const research: Parameters<typeof raisePrTask.buildContext>[0] = {
+    repo: "/repo",
+    research: { entryId: "0007-elevenlabs", title: "ElevenLabs voice workflow" },
+  };
+
+  it("recovers the local commit without editing and links the resulting PR", () => {
+    const ctx = raisePrTask.buildContext(research, "");
+    expect(ctx).toContain('canopy_research with action "get"');
+    expect(ctx).toContain("local commit");
+    expect(ctx).toContain("Do not edit files");
+    expect(ctx).toContain("do not invent verification");
+    expect(ctx).toContain('canopy_research_write with action "link"');
+    expect(ctx).toContain("canopy_job_done");
+  });
+
+  it("names the run after the entry and binds the session to it", () => {
+    expect(raisePrTask.runLabel?.(research, "")).toBe(
+      "Raise PR · ElevenLabs voice workflow",
+    );
+    expect(raisePrTask.env?.(research)).toEqual([
+      ["CANOPY_RESEARCH", "0007-elevenlabs"],
+    ]);
+    expect(raisePrTask.cwd(research)).toBe("/repo");
   });
 });
 
@@ -263,8 +292,7 @@ describe("MICRO_TASKS", () => {
   });
 
   it("does not call a task that pushes a task that only reads", () => {
-    // The grouping is a promise about consequence; these are the three that
-    // change the branch, and the isolation flag is the independent evidence.
+    // The grouping is a promise about consequence: these tasks push a branch.
     const pushes = MICRO_TASKS.filter((t) => t.effect === "pushes").map((t) => t.id);
     expect(pushes).toEqual([
       "implement-research",

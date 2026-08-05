@@ -137,6 +137,38 @@ describe("ResearchView", () => {
     expect(screen.queryByRole("button", { name: "Implement this" })).toBeNull();
   });
 
+  it("offers one Raise PR link for an implementation left in a local commit", async () => {
+    mockCommands({
+      research_get: () =>
+        detail({
+          history: [
+            {
+              at: 1_700_000_500,
+              from: "implementing",
+              to: "researched",
+              by: "capptivo",
+              note: "Implemented in local commit bfc4635; no push or PR requested.",
+            },
+          ],
+        }),
+    });
+    const onRaisePr = vi.fn();
+    render(
+      <ResearchView
+        projectId="p1"
+        researchId="0007-index-staleness"
+        onRaisePr={onRaisePr}
+      />,
+    );
+
+    const link = await screen.findByRole("button", { name: "Raise PR" });
+    await userEvent.click(link);
+    expect(onRaisePr).toHaveBeenCalledOnce();
+    expect(onRaisePr).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "0007-index-staleness" }),
+    );
+  });
+
   it("warns before it is read when a later entry replaced it", async () => {
     mockCommands({
       research_get: () => detail({ status: "superseded", superseded_by: "0009-better" }),

@@ -47,6 +47,8 @@ interface ResearchViewProps {
   onImplement?: (entry: ipc.ResearchDetail, agentId: string) => void;
   /** Hand it to an agent already running instead of starting one. */
   onSendImplement?: (target: AgentTarget, entry: ipc.ResearchDetail) => void;
+  /** Publish implementation that was recorded as a local commit without a PR. */
+  onRaisePr?: (entry: ipc.ResearchDetail) => void;
   /** Agent terminals open in this project — the "send it there" targets. */
   agentTargets?: AgentTarget[];
   /** Which agent CLIs are on PATH. */
@@ -71,6 +73,7 @@ export function ResearchView({
   researchId,
   onImplement,
   onSendImplement,
+  onRaisePr,
   agentTargets,
   installed,
   onContinue,
@@ -220,6 +223,11 @@ export function ResearchView({
   if (!entry) return <div className="research-view" />;
 
   const moves = NEXT_STATUSES[entry.status] ?? [];
+  const localImplementation = entry.history.find(
+    (h) =>
+      h.to === "researched" &&
+      /implement(?:ed|ation)?\b.*\blocal commit\b/i.test(h.note),
+  );
 
   const step = STATUS_STEP[entry.status] ?? 0;
 
@@ -556,6 +564,17 @@ export function ResearchView({
                     {STATUS_LABELS[h.to as ipc.ResearchStatus] ?? h.to}
                     {h.by ? ` · ${h.by}` : ""}
                     {h.note ? ` — ${h.note}` : ""}
+                    {h === localImplementation &&
+                      entry.status === "researched" &&
+                      entry.links.prs.length === 0 &&
+                      onRaisePr && (
+                        <button
+                          className="research-link research-raise-pr"
+                          onClick={() => onRaisePr(entry)}
+                        >
+                          Raise PR
+                        </button>
+                      )}
                   </li>
                 ))}
             </ul>
