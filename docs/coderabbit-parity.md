@@ -50,7 +50,7 @@ keeps public review, resolution, pushes, and merging under a human click.
 4. A semantic change-stack view; conditional review diagrams are built.
 5. GitLab, Azure DevOps, and Bitbucket provider adapters.
 
-## Stacked PR terminology
+## Stacked PR terminology and scope
 
 CodeRabbit's **Change Stack** is a semantic reading order for files and ranges
 inside one pull request. It is not a graph of dependent pull requests. Its
@@ -59,6 +59,13 @@ opens a child PR whose base is the current PR branch, so the generated fix can
 be reviewed before entering the parent. Canopy implements that delivery model
 and exposes its already-detected immediate parent/child relationships; it does
 not claim automatic transitive restacking or chain-wide landing.
+
+Full stack management — walking a chain past its immediate neighbours,
+rebasing descendants after a parent moves, aggregate stack status or approval,
+and ordered landing — is deliberately **not** listed as a parity gap above.
+CodeRabbit does not document any of it, so nothing here is behind. If Canopy
+builds it, it is its own feature standing on its own justification, and it
+should not arrive as a line item in a CodeRabbit comparison.
 
 ## Primary CodeRabbit sources
 
