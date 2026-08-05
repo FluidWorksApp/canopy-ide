@@ -770,6 +770,8 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
             }),
         "opencode" => [
             "chat.message",
+            "file.edited",
+            "tool_input: normalizeToolInput(input?.args)",
             "canopy_signal: \"turn-start\"",
             "canopy_signal: \"turn-progress\"",
             "canopy_signal: \"turn-end\"",
@@ -899,6 +901,28 @@ export const CanopyBridge = async ({ directory }) => {
   const sid = (e) =>
     e?.properties?.sessionID ?? e?.properties?.info?.sessionID ?? e?.properties?.info?.id ?? ""
   const base = (e) => ({ session_id: sid(e), cwd: directory, agent: "opencode" })
+  const canonicalTool = (tool) => ({
+    edit: "Edit",
+    write: "Write",
+    multiedit: "MultiEdit",
+    notebookedit: "NotebookEdit",
+  })[String(tool ?? "").toLowerCase()] ?? String(tool ?? "")
+  const normalizeToolInput = (args) => {
+    const input = { ...(args ?? {}) }
+    input.file_path = args?.filePath ?? args?.file_path ?? args?.path ?? ""
+    input.old_string = args?.oldString ?? args?.old_string
+    input.new_string = args?.newString ?? args?.new_string
+    input.notebook_path = args?.notebookPath ?? args?.notebook_path
+    input.new_source = args?.newSource ?? args?.new_source
+    if (Array.isArray(args?.edits)) {
+      input.edits = args.edits.map((edit) => ({
+        ...edit,
+        old_string: edit?.oldString ?? edit?.old_string,
+        new_string: edit?.newString ?? edit?.new_string,
+      }))
+    }
+    return input
+  }
   return {
     "chat.message": async (input, output) => {
       try {
@@ -992,7 +1016,11 @@ export const CanopyBridge = async ({ directory }) => {
           agent: "opencode",
           hook_event_name: "PostToolUse",
           canopy_signal: "turn-progress",
-          tool_name: input?.tool ?? "",
+          tool_name: canonicalTool(input?.tool),
+          // Unlike file.edited, this hook carries both the session id and the
+          // successful tool's original args. Keep them together so a shared
+          // checkout can attribute the path and journal the actual edit.
+          tool_input: normalizeToolInput(input?.args),
         })
       } catch {}
     },
@@ -4437,6 +4465,33 @@ mod integration_tests {
         assert!(src.contains("canopy_signal: \"turn-start\""));
         assert!(src.contains("canopy_signal: \"turn-progress\""));
         assert!(src.contains("canopy_signal: \"turn-end\""));
+    }
+
+    #[test]
+    fn opencodes_session_bearing_tool_event_reports_canonical_edits() {
+        let home = scratch_home("opencode-edits");
+        setup_agent("opencode", home.to_str().unwrap()).unwrap();
+        let src = std::fs::read_to_string(home.join(".config/opencode/plugin/canopy.ts")).unwrap();
+
+        // file.edited has a path but no session id in OpenCode's event schema.
+        // tool.execute.after has both the session and the original args, so it
+        // is the only event that can safely attribute a shared-checkout edit.
+        assert!(src.contains("session_id: input?.sessionID"));
+        assert!(src.contains("tool_name: canonicalTool(input?.tool)"));
+        assert!(src.contains("tool_input: normalizeToolInput(input?.args)"));
+        assert!(src.contains("input.file_path = args?.filePath"));
+        assert!(src.contains("input.old_string = args?.oldString"));
+        assert!(src.contains("input.new_string = args?.newString"));
+
+        // Health must reject an older plugin that reports lifecycle but still
+        // drops edit arguments, otherwise setup will never repair this bug.
+        assert!(hooks_are_ours("opencode", home.to_str().unwrap()));
+        let stale = src.replace(
+            "tool_input: normalizeToolInput(input?.args),",
+            "tool_input: {},",
+        );
+        std::fs::write(home.join(".config/opencode/plugin/canopy.ts"), stale).unwrap();
+        assert!(!hooks_are_ours("opencode", home.to_str().unwrap()));
     }
 
     #[test]
