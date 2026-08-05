@@ -1386,10 +1386,21 @@ pub(crate) fn run_net_with_input(cmd: &mut Command, input: Option<&str>) -> Resu
     // The longest block in the file: this waits on a remote for up to
     // NET_TIMEOUT_SECS, polling in 80ms sleeps. Holding a runtime worker for
     // two minutes is what `blocking::io` exists to prevent.
-    blocking::io(move || run_net_blocking(cmd, input))
+    blocking::io(move || run_net_blocking(cmd, input, false))
 }
 
-fn run_net_blocking(cmd: &mut Command, input: Option<&str>) -> Result<String, String> {
+fn run_graphql(cmd: &mut Command, input: Option<&str>) -> Result<String, String> {
+    // `gh api graphql` exits non-zero when GitHub returns field-level errors,
+    // even though stdout still contains the partial response. Keep that JSON so
+    // `graphql_data` can decide whether the response is usable.
+    blocking::io(move || run_net_blocking(cmd, input, true))
+}
+
+fn run_net_blocking(
+    cmd: &mut Command,
+    input: Option<&str>,
+    preserve_failure_stdout: bool,
+) -> Result<String, String> {
     use std::io::{Read, Write};
     use std::process::Stdio;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -1446,6 +1457,8 @@ fn run_net_blocking(cmd: &mut Command, input: Option<&str>) -> Result<String, St
                 // git reports progress on stderr even on success, so merge.
                 return if status.success() {
                     Ok(format!("{out}{err}").trim().to_string())
+                } else if preserve_failure_stdout && !out.trim().is_empty() {
+                    Ok(out.trim().to_string())
                 } else {
                     Err(if err.trim().is_empty() { out } else { err }
                         .trim()
@@ -2436,7 +2449,7 @@ fn gh_graphql(top: &Path, query: &str, vars: &[(&str, String)]) -> Result<Value,
     for (k, v) in vars {
         cmd.args(["-F", &format!("{k}={v}")]);
     }
-    graphql_data(run_net(&mut cmd)?)
+    graphql_data(run_graphql(&mut cmd, None)?)
 }
 
 /// GraphQL whose variables aren't all scalars.
@@ -2451,7 +2464,7 @@ fn gh_graphql_json(top: &Path, query: &str, variables: Value) -> Result<Value, S
     let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
     let mut cmd = gh_in(top);
     cmd.args(["api", "graphql", "--input", "-"]);
-    graphql_data(run_net_with_input(&mut cmd, Some(&body))?)
+    graphql_data(run_graphql(&mut cmd, Some(&body))?)
 }
 
 /// A GraphQL document that names its own targets, run with no repo context —
@@ -2460,7 +2473,7 @@ fn gh_graphql_json(top: &Path, query: &str, variables: Value) -> Result<Value, S
 pub(crate) fn gh_graphql_anywhere(query: &str) -> Result<Value, String> {
     let mut cmd = gh_anywhere();
     cmd.args(["api", "graphql", "-f", &format!("query={query}")]);
-    graphql_data(run_net(&mut cmd)?)
+    graphql_data(run_graphql(&mut cmd, None)?)
 }
 
 /// `data` out of a GraphQL response, or the errors as a message. A 200 with an
@@ -2469,8 +2482,12 @@ fn graphql_data(out: String) -> Result<Value, String> {
     let v: Value =
         serde_json::from_str(&out).map_err(|e| format!("gh returned unexpected output: {e}"))?;
     if let Some(errors) = v.get("errors").and_then(|e| e.as_array()) {
-        if !errors.is_empty() {
-            let msg = errors
+        let fatal = errors
+            .iter()
+            .filter(|error| !review_thread_line_error(error))
+            .collect::<Vec<_>>();
+        if !fatal.is_empty() {
+            let msg = fatal
                 .iter()
                 .filter_map(|e| e["message"].as_str())
                 .collect::<Vec<_>>()
@@ -2483,6 +2500,29 @@ fn graphql_data(out: String) -> Result<Value, String> {
         }
     }
     Ok(v.get("data").cloned().unwrap_or(Value::Null))
+}
+
+/// GitHub occasionally cannot map an outdated review thread back onto the
+/// current diff. It reports the nullable field as an error while returning the
+/// rest of the PR, with that line set to null. Treat only that precise partial
+/// failure as usable; unrelated GraphQL errors must still reach the user.
+fn review_thread_line_error(error: &Value) -> bool {
+    let message = error["message"].as_str().unwrap_or("");
+    let field = error["path"]
+        .as_array()
+        .and_then(|path| path.last())
+        .and_then(Value::as_str);
+    let in_review_threads = error["path"].as_array().is_some_and(|path| {
+        path.iter()
+            .any(|part| part.as_str() == Some("reviewThreads"))
+    });
+
+    in_review_threads
+        && matches!(field, Some("line") | Some("startLine"))
+        && matches!(
+            message,
+            "Line could not be resolved" | "Start line could not be resolved"
+        )
 }
 
 /// The repo toplevel for a component path, scope-checked. The PR watcher uses it
@@ -5593,6 +5633,36 @@ index 333..444 100644
         assert_eq!(rollup_state(""), "");
     }
 
+    #[test]
+    fn graphql_keeps_pr_data_when_an_outdated_thread_line_cannot_resolve() {
+        let response = json!({
+            "data": { "repository": { "pullRequest": { "id": "PR_1" } } },
+            "errors": [{
+                "message": "Line could not be resolved",
+                "path": ["repository", "pullRequest", "reviewThreads", "nodes", 0, "line"]
+            }]
+        });
+
+        let data = graphql_data(response.to_string()).expect("the partial PR remains usable");
+        assert_eq!(data["repository"]["pullRequest"]["id"], "PR_1");
+    }
+
+    #[test]
+    fn graphql_does_not_hide_unrelated_errors() {
+        let response = json!({
+            "data": { "repository": null },
+            "errors": [{
+                "message": "Line could not be resolved",
+                "path": ["repository", "line"]
+            }]
+        });
+
+        assert_eq!(
+            graphql_data(response.to_string()).unwrap_err(),
+            "Line could not be resolved"
+        );
+    }
+
     /// The regression this file's history most needs: a command whose output is
     /// bigger than a pipe buffer used to deadlock — the child blocked in write,
     /// never exited, and the user was told "timed out after 120s" 120 seconds
@@ -5644,6 +5714,20 @@ index 333..444 100644
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "echo trouble >&2; exit 3"]);
         assert_eq!(run_net(&mut cmd).unwrap_err(), "trouble");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graphql_keeps_json_stdout_when_gh_exits_for_a_field_error() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            "echo '{\"data\":{\"repository\":{}}}'; echo 'gh: Line could not be resolved' >&2; exit 1",
+        ]);
+        assert_eq!(
+            run_graphql(&mut cmd, None).unwrap(),
+            r#"{"data":{"repository":{}}}"#
+        );
     }
 
     #[test]
