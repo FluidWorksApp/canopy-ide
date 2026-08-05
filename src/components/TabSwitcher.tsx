@@ -14,35 +14,21 @@
 // the same tick. The tick rate answers to what the last pass cost — the point
 // is a stream, and a stream that stutters the keypress feeding it is worse than
 // a slower one.
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ReactNode, RefObject } from "react";
-import {
-  AgentIcon,
-  AgentsIcon,
-  ClaimIcon,
-  CommitIcon,
-  DocumentIcon,
-  GitBranchIcon,
-  GlobeIcon,
-  IssueIcon,
-  LiveShareIcon,
-  NoteIcon,
-  PlugIcon,
-  PullRequestIcon,
-  ResearchIcon,
-  TeamIcon,
-  TerminalIcon,
-  TrackerIcon,
-} from "./icons";
+import { useEffect, useRef, useState } from "react";
+import type { RefObject } from "react";
 import type { SubTab } from "./ProjectView";
 import { tabDisplayLabel } from "./ProjectView";
 import {
-  clonePane,
   nextTickMs,
-  tailLines,
   PREVIEW_TICK_MS,
 } from "../tabPreview";
 import { tabKind, tabToneColor } from "../tabKind";
+import {
+  TabPreviewShot,
+  tabPreviewIcon,
+  TAB_PREVIEW_H,
+  TAB_PREVIEW_W,
+} from "./TabPreviewShot";
 import { DOC_STACKS } from "../tabGroups";
 import type { TabSwitchRow } from "../tabSwitchOrder";
 import type { CardStatus } from "../tabCardStatus";
@@ -66,144 +52,6 @@ function rowLabel(row: TabSwitchRow): string {
  *  the DOM because the scale factor has to be known before the first paint, and
  *  a thumbnail that resizes on its second frame reads as a glitch. Matches
  *  `.tsw-shot` in index.css. */
-const SHOT_W = 236;
-const SHOT_H = 148;
-
-/** Rows of terminal tail a card shows. More than fits is harmless — the box
- *  clips from the bottom, which is where the prompt is, so the tail is what
- *  survives. */
-const TERM_ROWS = 26;
-
-function tabIcon(tab: SubTab, size = 12) {
-  switch (tab.type) {
-    case "terminal": {
-      // A session's mark is its CLI's own, drawn in its own brand colour — the
-      // thing that tells six agent cards apart before you have read a word of
-      // any of them. A shell with no CLI keeps the terminal glyph.
-      const cli = tabKind(tab).agent;
-      return cli ? <AgentIcon id={cli} size={size} /> : <TerminalIcon size={size} />;
-    }
-    case "pr":
-    case "review":
-      return <PullRequestIcon size={size} />;
-    case "ticket":
-      return <TrackerIcon id={tab.source} size={size} />;
-    case "commit":
-      return <CommitIcon size={size} />;
-    case "branch":
-      return <GitBranchIcon size={size} />;
-    case "agent":
-      return <AgentIcon id={tab.agent} size={size} />;
-    case "agents":
-      return <AgentsIcon size={size} />;
-    case "chat":
-    case "collab":
-      return <TeamIcon size={size} />;
-    case "shared-project":
-      return <LiveShareIcon size={size} />;
-    case "preview":
-      return <GlobeIcon size={size} />;
-    case "mcp":
-      return <PlugIcon size={size} />;
-    case "claim":
-      return <ClaimIcon size={size} />;
-    case "note":
-      return <NoteIcon size={size} />;
-    case "research":
-      return <ResearchIcon size={size} />;
-    case "task-history":
-      return <IssueIcon size={size} />;
-    default:
-      return <DocumentIcon size={size} />;
-  }
-}
-
-interface ShotProps {
-  tab: SubTab;
-  /** Drawn large and faint when there is no picture to take. */
-  icon: ReactNode;
-  /** The pane area every tab is mounted in — where a host is found, and the
-   *  size the clone is laid out at. */
-  paneRef: RefObject<HTMLDivElement | null>;
-  /** The terminal tail for a terminal tab, live off its xterm buffer. */
-  termText: (id: string) => string | null;
-  /** Bumped by the parent's adaptive clock; every bump is a re-read. */
-  tick: number;
-}
-
-/** One tab's picture. Terminals render as text; everything else renders as a
- *  scaled clone of its live pane; a tab with neither (a native webview, a pane
- *  too big to clone) falls back to its icon, which the card header carries
- *  anyway — so the box simply stays empty rather than showing a broken frame. */
-function Shot({ tab, icon, paneRef, termText, tick }: ShotProps) {
-  const boxRef = useRef<HTMLDivElement>(null);
-  const [lines, setLines] = useState<string[] | null>(null);
-  const [scale, setScale] = useState(0);
-  const [pane, setPane] = useState<{ w: number; h: number } | null>(null);
-  const [blank, setBlank] = useState(false);
-
-  // Measured before paint: the clone needs the pane's real size to lay out at,
-  // and the scale that turns it into a thumbnail.
-  useLayoutEffect(() => {
-    const el = paneRef.current;
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    if (r.width < 1 || r.height < 1) return;
-    setPane({ w: r.width, h: r.height });
-    setScale(SHOT_W / r.width);
-  }, [paneRef]);
-
-  useEffect(() => {
-    if (tab.type === "terminal") {
-      setLines(tailLines(termText(tab.id) ?? "", TERM_ROWS));
-      return;
-    }
-    const box = boxRef.current;
-    if (!box) return;
-    const host =
-      paneRef.current?.querySelector<HTMLElement>(
-        `[data-tab-id="${CSS.escape(tab.id)}"]`,
-      ) ?? null;
-    const clone = clonePane(host);
-    if (clone) box.replaceChildren(clone);
-    else box.replaceChildren();
-    setBlank(!clone);
-  }, [tab, tick, paneRef, termText]);
-
-  if (tab.type === "terminal") {
-    return (
-      <pre className="tsw-term" aria-hidden>
-        {lines?.join("\n") ?? ""}
-      </pre>
-    );
-  }
-  return (
-    <>
-      <div
-        className="tsw-scale"
-        ref={boxRef}
-        aria-hidden
-        style={
-          pane
-            ? {
-                width: pane.w,
-                height: pane.h,
-                transform: `scale(${scale})`,
-              }
-            : undefined
-        }
-      />
-      {/* A pane whose page this document can't see — a native webview's, or one
-          too large to clone. Its kind is the most the card can honestly say. */}
-      {blank && (
-        <div className="tsw-blank" aria-hidden>
-          {icon}
-        </div>
-      )}
-    </>
-  );
-}
-
 export interface TabSwitcherProps {
   /** In the order the switcher walks them — the same order Ctrl+Tab cycles. */
   tabs: SubTab[];
@@ -294,7 +142,7 @@ export function TabSwitcher({
         onClick={() => onPick(tab.id)}
       >
         <div className="tsw-head">
-          <span className="tsw-icon">{tabIcon(tab)}</span>
+          <span className="tsw-icon">{tabPreviewIcon(tab)}</span>
           <span className="tsw-title">{tabDisplayLabel(tab)}</span>
           {digits && i < 9 && <span className="tsw-digit">{i + 1}</span>}
         </div>
@@ -321,10 +169,10 @@ export function TabSwitcher({
             </span>
           )}
         </div>
-        <div className="tsw-shot" style={{ width: SHOT_W, height: SHOT_H }}>
-          <Shot
+        <div className="tsw-shot" style={{ width: TAB_PREVIEW_W, height: TAB_PREVIEW_H }}>
+          <TabPreviewShot
             tab={tab}
-            icon={tabIcon(tab, 34)}
+            icon={tabPreviewIcon(tab, 34)}
             paneRef={paneRef}
             termText={termText}
             tick={tick}

@@ -2846,9 +2846,10 @@ fn task_tool_defs() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
             "name": "canopy_name_task",
-            "description": "Name the job you are doing, so the user's Tasks list shows what you are working on rather than the first line of the brief you were given. Call it once, early — as soon as you know what the job actually is — and never instead of canopy_job_done, which is how a job ends. Outside a Canopy task this does nothing.",
+            "description": "Name the job you are doing and publish a one-line description for the tab's live hover preview. Set title/icon/tags once, early, when this is a Canopy task. Set description for any Canopy agent session, and call again whenever your current focus materially changes. Never use this instead of canopy_job_done, which is how a task ends.",
             "inputSchema": { "type": "object", "properties": {
                 "title": { "type": "string", "description": "A few words naming this specific run — \"Flaky PTY test, under load\", not \"Fix tests\"" },
+                "description": { "type": "string", "description": "One short line describing what you are working on now; update it when your focus materially changes" },
                 "icon": { "type": "string", "description": "One Unicode symbol to show beside it (◎ ⚒ ⇈ ◍ ◇ ⌕ ▶). Not a letter, a word, or a :shortcode:" },
                 "tags": { "type": "array", "items": { "type": "string" }, "description": "Up to four one-word tags: the area and the kind of work (\"review\", \"rust\", \"flaky-test\")" }
             }, "additionalProperties": false }
@@ -3941,6 +3942,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "ptyId": std::env::var("CANOPY_PTY").ok().and_then(|v| v.parse::<u64>().ok()),
                 "instance": std::env::var("CANOPY_INSTANCE").ok(),
                 "title": args.get("title").and_then(|v| v.as_str()),
+                "description": args.get("description").and_then(|v| v.as_str()),
                 "icon": args.get("icon").and_then(|v| v.as_str()),
                 "tags": args.get("tags").cloned(),
             })))
@@ -5682,7 +5684,7 @@ mod tests {
             .find(|t| t["name"] == "canopy_name_task")
             .expect("canopy_name_task is not published");
         let props = tool["inputSchema"]["properties"].as_object().unwrap();
-        for field in ["title", "icon", "tags"] {
+        for field in ["title", "description", "icon", "tags"] {
             assert!(props.contains_key(field), "missing {field}");
         }
         // Naming is not an outcome: nothing about it is required, so an agent

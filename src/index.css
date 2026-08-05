@@ -4330,6 +4330,91 @@ body.resizing-side * {
   background: color-mix(in srgb, var(--bg-raised) 55%, transparent);
 }
 
+/* A browser-style live peek, mounted only after hover intent. Fixed positioning
+   escapes the horizontally clipped strip; pointer-events keeps it a preview,
+   not a second interactive copy of the pane. */
+.tab-hover-preview {
+  position: fixed;
+  z-index: 1000;
+  box-sizing: content-box;
+  padding: 7px;
+  pointer-events: none;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  background: color-mix(in srgb, var(--bg-raised) 94%, transparent);
+  box-shadow: var(--shadow-3);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  animation: tab-hover-preview-in 110ms var(--ease-out);
+}
+
+.tab-hover-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 24px;
+  padding: 0 3px 5px;
+  color: var(--text);
+  font-size: var(--fs-xs);
+}
+
+.tab-hover-preview-icon {
+  display: flex;
+  flex: none;
+  color: var(--text-dim);
+}
+
+.tab-hover-preview-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-hover-preview-activity {
+  display: grid;
+  gap: 2px;
+  padding: 4px 5px 8px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+}
+
+.tab-hover-preview-activity span {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.tab-hover-preview-activity strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-hover-preview-shot {
+  box-sizing: border-box;
+}
+
+@keyframes tab-hover-preview-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px) scale(0.985);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-hover-preview {
+    animation: none;
+  }
+}
+
 /* Active tab in harbor mode is transparent — the blob behind it IS the surface;
    drop the inset accent + solid bg that the static docked treatment used. The
    agent tint is dropped too so the blob's clean editor surface shows through. */
