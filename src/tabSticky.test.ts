@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { revealScroll } from "./tabSticky";
+import { expandedStackScroll, revealScroll } from "./tabSticky";
 
 // A chip 60px wide, followed by three 100px tabs — one run of the strip.
 const CHIP = 60;
@@ -27,5 +27,16 @@ describe("revealScroll", () => {
 
   it("needs no clearance when the run has no chip", () => {
     expect(revealScroll(160, VIEW, 160, 100, 0)).toBeNull();
+  });
+});
+
+describe("expandedStackScroll", () => {
+  it("returns the hidden section start when its sticky chip has moved past it", () => {
+    expect(expandedStackScroll(240, 80)).toBe(80);
+  });
+
+  it("does not move a section that is already at or ahead of the viewport", () => {
+    expect(expandedStackScroll(80, 80)).toBeNull();
+    expect(expandedStackScroll(40, 80)).toBeNull();
   });
 });

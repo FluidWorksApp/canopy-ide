@@ -67,6 +67,7 @@ export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenA
   }, [scoped, mineOnly, query, page]);
   const groups = useMemo(() => lanes(shown), [shown]);
   const errorList = Object.entries(errors);
+  const hasActiveFilter = mineOnly || query.trim().length > 0;
 
   const open = (row: ipc.PrRow) => onOpen(row.repo, toPrInfo(row));
 
@@ -153,8 +154,32 @@ export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenA
       )}
 
       {shown.length === 0 && (
-        <div className="prs-empty">
-          {fetchedMs ? "No open pull requests in this project." : "Looking for pull requests…"}
+        <div className="prs-empty" role="status" aria-live="polite">
+          {page && <span className="prs-empty-icon"><PullRequestIcon size={22} /></span>}
+          <strong>
+            {!fetchedMs
+              ? "Checking for pull requests…"
+              : hasActiveFilter
+                ? "No matching pull requests"
+                : "No open pull requests"}
+          </strong>
+          <span className="prs-empty-copy">
+            {!fetchedMs
+              ? "This usually takes just a moment."
+              : hasActiveFilter
+                ? "Try another search or clear the active filters."
+                : "When someone opens one for this project, it will appear here."}
+          </span>
+          {fetchedMs && (
+            <span className="prs-empty-actions">
+              {hasActiveFilter && (
+                <Button size="sm" variant="accent" onClick={() => { setQuery(""); setMineOnly(false); }}>
+                  Clear filters
+                </Button>
+              )}
+              <Button size="sm" disabled={busy} onClick={refresh}>Check again</Button>
+            </span>
+          )}
         </div>
       )}
 
