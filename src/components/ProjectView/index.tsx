@@ -36,10 +36,16 @@ import {
 } from "../../terminalGroups";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
 import {
+  TAB_USE_DWELL_MS,
+  groupTabSwitch,
+  pruneTabUses,
   recordTabUse,
   resolveTabSwitch,
   stepTabSwitch,
+  stepTabSwitchAcrossRows,
+  stepTabSwitchInRow,
   tabSwitchSnapshot,
+  type TabSwitchRow,
 } from "../../tabSwitchOrder";
 import {
   DOC_STACKS,
@@ -340,6 +346,7 @@ import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
 import { ActivityRail } from "../ActivityRail";
 import { PaneBar } from "../PaneBar";
 import { TabSwitcher } from "../TabSwitcher";
+import { switchRowKey } from "../../tabKind";
 import { useCliLauncher } from "./hooks/useCliLauncher";
 
 import {
@@ -830,6 +837,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  its slot. Nothing switches until release. */
   const [switcher, setSwitcher] = useState<{
     ids: string[];
+    /** Grouped strips for recent mode, frozen with the snapshot; null keeps
+     *  the flat strip (order mode). */
+    rows: TabSwitchRow[] | null;
     selectedId: string;
   } | null>(null);
   const switcherRef = useRef(switcher);
@@ -965,14 +975,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  workspace preference: after a restart there is no honest "previous tab"
    *  until the user has moved between two of them. */
   const recentTabsRef = useRef<string[]>([]);
+  // Dwell gate: a tab passed through on the way somewhere else never enters
+  // the recency list. Depends on activeTabId alone — a tabs-array change must
+  // not restart the timer and fake a dwell; pruning closed tabs is the
+  // separate effect below.
   useEffect(() => {
     if (!activeTabId) return;
-    recentTabsRef.current = recordTabUse(
+    const timer = window.setTimeout(() => {
+      recentTabsRef.current = recordTabUse(
+        recentTabsRef.current,
+        activeTabId,
+        tabsRef.current.map((t) => t.id),
+      );
+    }, TAB_USE_DWELL_MS);
+    return () => window.clearTimeout(timer);
+  }, [activeTabId]);
+  useEffect(() => {
+    recentTabsRef.current = pruneTabUses(
       recentTabsRef.current,
-      activeTabId,
       tabs.map((t) => t.id),
     );
-  }, [activeTabId, tabs]);
+  }, [tabs]);
   /** The tabs in the order the pane bar draws them — what ⌘1..9 counts, and
    *  filled in below once the groups are known. */
   const barTabsRef = useRef<SubTab[]>([]);
@@ -3732,14 +3755,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
             )?.id ?? activeTabIdRef.current
           : activeTabIdRef.current;
       const current = switcherRef.current;
+      const mode = getSettings().tabSwitchMode;
       const ids =
         current?.ids ??
-        tabSwitchSnapshot(
-          openIds,
-          currentVisualId,
-          recentTabsRef.current,
-          getSettings().tabSwitchMode,
-        );
+        tabSwitchSnapshot(openIds, currentVisualId, recentTabsRef.current, mode);
+      const rows = current
+        ? current.rows
+        : mode === "recent"
+          ? groupTabSwitch(ids, (id) => {
+              const tab = tabsRef.current.find((t) => t.id === id);
+              return tab ? switchRowKey(tab) : "files";
+            })
+          : null;
       const selectedId = stepTabSwitch(
         ids,
         current?.selectedId ?? currentVisualId,
@@ -3747,9 +3774,32 @@ const ProjectViewBody = memo(function ProjectViewBody({
         dir,
       );
       if (!selectedId) return;
-      const next = { ids, selectedId };
+      const next = { ids, rows, selectedId };
       switcherRef.current = next;
       setSwitcher(next);
+    };
+    // Arrow keys are panel-internal, and only the grouped (recent-mode) panel
+    // has the second axis; with the panel closed they belong to whatever has
+    // focus.
+    const stepSwitcherArrow = (e: KeyboardEvent): boolean => {
+      const current = switcherRef.current;
+      if (!current?.rows) return false;
+      const horiz =
+        e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+      const vert = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
+      if (!horiz && !vert) return false;
+      e.preventDefault();
+      e.stopPropagation();
+      const openIds = visualTabs().map((t) => t.id);
+      const selectedId = horiz
+        ? stepTabSwitchInRow(current.rows, current.selectedId, openIds, horiz as 1 | -1)
+        : stepTabSwitchAcrossRows(current.rows, current.selectedId, openIds, vert as 1 | -1);
+      if (selectedId && selectedId !== current.selectedId) {
+        const next = { ...current, selectedId };
+        switcherRef.current = next;
+        setSwitcher(next);
+      }
+      return true;
     };
     // The tab-cycle chord is a native menu accelerator, but when focus is in
     // the webview (Monaco/xterm) macOS never routes it to the menu — the
@@ -3762,6 +3812,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const recentKeydown = () => Date.now() - lastKeydownNav.t < 150;
     const onKeydown = (e: KeyboardEvent) => {
       if (!visibleRef.current) return;
+      if (stepSwitcherArrow(e)) return;
       // ⌘1..9 (Ctrl off macOS) — the digits the tabs show while the modifier is
       // held. Handled here rather than as a menu accelerator: nine menu rows for
       // this would be absurd, and the key must land even when focus is inside
@@ -10339,6 +10390,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       {switcherOpen && visible && switcherTabs.length > 1 && switcher && (
         <TabSwitcher
           tabs={switcherTabs}
+          rows={switcher.rows ?? undefined}
           selectedId={switcher.selectedId}
           paneRef={contentRef}
           termText={termTailFor}
