@@ -93,6 +93,23 @@ import {
 } from "../prLoop";
 import { Button } from "./ui";
 import { basename } from "../paths";
+import {
+  ignorePrFindings,
+  ignoredPrFindings,
+  loadPrDraft,
+  savePrDraft,
+} from "../prDrafts";
+import {
+  DEFAULT_REVIEW_POLICY,
+  autoReviewedHead,
+  loadReviewPolicy,
+  parseReviewPolicy,
+  rememberAutoReviewedHead,
+  reviewPolicyJson,
+  saveReviewPolicy,
+  shouldAutoReview,
+  type ReviewPolicy,
+} from "../prPolicy";
 // NB: PR diffs arrive as real patches from `gh pr diff`, so they go straight
 // into the renderer. Working-tree diffs (components/DiffView.tsx) have to build
 // their patch first — see the note there about Monaco's diff not computing.
@@ -214,6 +231,9 @@ interface DraftComment {
    *  their name either way, which is exactly why the tab has to keep saying
    *  which of the two it is right up until they submit it. */
   fromAgent?: boolean;
+  /** The artifact identity survives edits, so dropping or posting the edited
+   *  draft still suppresses the original generated finding on the next mount. */
+  sourceKey?: string;
 }
 
 /** What a line's extension row is given: the threads that live on it plus any
@@ -319,7 +339,13 @@ export function PrView({
   const [patch, setPatch] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [split, setSplit] = useState(true);
-  const [comment, setComment] = useState("");
+  const initialDraft = useMemo(
+    () => loadPrDraft(repo, pr.number),
+    // The reset effect below handles a PR changing in an existing tab.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const [comment, setComment] = useState(initialDraft.body);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState<Review | null>(null);
   const [mergeOpen, setMergeOpen] = useState(false);
@@ -342,7 +368,15 @@ export function PrView({
   const [convError, setConvError] = useState<string | null>(null);
   /** The body read the old way, when the conversation query couldn't be run. */
   const [bodyFallback, setBodyFallback] = useState("");
-  const [drafts, setDrafts] = useState<DraftComment[]>([]);
+  const [drafts, setDrafts] = useState<DraftComment[]>(initialDraft.comments);
+  const draftScope = `${repo}#${pr.number}`;
+  const [loadedDraftScope, setLoadedDraftScope] = useState(draftScope);
+  const [policy, setPolicy] = useState<ReviewPolicy>(() => loadReviewPolicy(repo));
+  const [policyOpen, setPolicyOpen] = useState(false);
+  const [policyText, setPolicyText] = useState(() =>
+    reviewPolicyJson(loadReviewPolicy(repo)),
+  );
+  const [policyError, setPolicyError] = useState<string | null>(null);
   /** Which files' diffs are mounted. Declared up here, not beside the effect
    *  that seeds it, because staging findings has to open the files they land
    *  in — a draft comment inside a collapsed file is a comment nobody sees. */
@@ -360,6 +394,7 @@ export function PrView({
   /** What this PR is attached to. Its own request beside the conversation's —
    *  it's context, and context must never hold up the comments. */
   const [links, setLinks] = useState<ipc.PrLinks | null>(null);
+  const [linksError, setLinksError] = useState<string | null>(null);
   const [deltaOn, setDeltaOn] = useState(false);
   const [deltaPatch, setDeltaPatch] = useState<string | null>(null);
   const [loop, setLoop] = useState<PrLoop>(() => loadLoop(repo, pr.number));
@@ -424,7 +459,22 @@ export function PrView({
     };
   }, [repo]);
 
+  const refreshLinks = useCallback(async () => {
+    try {
+      const next = await ipc.ghPrLinks(repo, pr.number, pr.branch, pr.base);
+      setLinks(next);
+      setLinksError(null);
+      return next;
+    } catch (err) {
+      // Preserve the previous graph. A transient failure is not evidence that
+      // the PR stopped being stacked.
+      setLinksError(String(err));
+      return null;
+    }
+  }, [repo, pr.number, pr.branch, pr.base]);
+
   const refreshConv = useCallback(async () => {
+    void refreshLinks();
     try {
       const c = await ipc.ghPrConversation(repo, pr.number);
       setConv(c);
@@ -441,12 +491,18 @@ export function PrView({
         .catch(() => {});
       return null;
     }
-  }, [repo, pr.number]);
+  }, [repo, pr.number, refreshLinks]);
 
   /** Findings already turned into drafts, so a second read doesn't stack them —
    *  and a counter, because two findings can differ only in body. Both are per
    *  PR, and both reset with everything else when the tab changes PR. */
-  const stagedKeys = useRef<Set<string>>(new Set());
+  const stagedKeys = useRef<Set<string>>(
+    new Set(
+      initialDraft.comments
+        .filter((d) => d.fromAgent)
+        .map((d) => d.sourceKey ?? findingKey(d)),
+    ),
+  );
   const stageSeq = useRef(0);
 
   /** Load the findings the Review task left behind and turn them into draft
@@ -494,8 +550,12 @@ export function PrView({
     // now a live thread on GitHub would be offered back as a fresh draft.
     const key = findingKey;
     const posted = postedFindings(repo, pr.number);
+    const ignored = ignoredPrFindings(repo, pr.number);
     const fresh = found.filter(
-      (f) => !stagedKeys.current.has(key(f)) && !posted.has(key(f)),
+      (f) =>
+        !stagedKeys.current.has(key(f)) &&
+        !posted.has(key(f)) &&
+        !ignored.has(key(f)),
     );
     if (!fresh.length) return 0;
     for (const f of fresh) stagedKeys.current.add(key(f));
@@ -517,6 +577,7 @@ export function PrView({
         body: f.body.trim(),
         blocking: f.severity !== "nit",
         fromAgent: true,
+        sourceKey: key(f),
       })),
     ]);
     return fresh.length;
@@ -524,16 +585,29 @@ export function PrView({
 
   useEffect(() => {
     let live = true;
+    const nextPolicy = loadReviewPolicy(repo);
+    setPolicy(nextPolicy);
+    setPolicyText(reviewPolicyJson(nextPolicy));
+    setPolicyError(null);
+    setPolicyOpen(false);
     setPatch(null);
     setError(null);
     setConv(null);
     setBodyFallback("");
-    setDrafts([]);
+    const savedDraft = loadPrDraft(repo, pr.number);
+    setComment(savedDraft.body);
+    setDrafts(savedDraft.comments);
     setDeltaOn(false);
     setDeltaPatch(null);
     setMapRead(false);
     setLinks(null);
-    stagedKeys.current = new Set();
+    setLinksError(null);
+    stagedKeys.current = new Set(
+      savedDraft.comments
+        .filter((d) => d.fromAgent)
+        .map((d) => d.sourceKey ?? findingKey(d)),
+    );
+    setLoadedDraftScope(`${repo}#${pr.number}`);
     setLoop(loadLoop(repo, pr.number));
     void ipc
       .ghPrDiff(repo, pr.number)
@@ -554,22 +628,16 @@ export function PrView({
       .then((t) => live && setMap(t.trim() || null))
       .catch(() => {})
       .finally(() => live && setMapRead(true));
-    // Linked issues and the stack around it. Failure is silent on purpose:
-    // this is the one part of the tab that is pure context, and a red error
-    // where "nothing is linked" belongs would read as something being broken.
-    void ipc
-      .ghPrLinks(repo, pr.number, pr.branch, pr.base)
-      .then((l) => live && setLinks(l))
-      .catch(
-        () =>
-          live &&
-          setLinks({ closes: [], children: [], parents: [], mentions: [] }),
-      );
     void stageFindings();
     return () => {
       live = false;
     };
   }, [repo, pr.number, pr.branch, pr.base, refreshConv, stageFindings]);
+
+  useEffect(() => {
+    if (loadedDraftScope !== draftScope) return;
+    savePrDraft(repo, pr.number, { body: comment, comments: drafts });
+  }, [repo, pr.number, draftScope, loadedDraftScope, comment, drafts]);
 
   useEffect(() => {
     // The log is written by the launcher and by job_done; the event covers
@@ -696,7 +764,7 @@ export function PrView({
   /** Every task launch on this tab goes through here. */
   const launch = useCallback(
     <P,>(def: MicroTaskDef<P>, payload: P, query = "") => {
-      if (!onMicroTask) return;
+      if (!onMicroTask) return undefined;
       setPending((p) => ({ ...p, [def.id]: Date.now() }));
       // A new run starts the rail empty and re-arms the staleness guard, so the
       // last run's milestones don't flash up before this agent has written one.
@@ -710,7 +778,8 @@ export function PrView({
       // button out of the busy state it entered on the way in. Left to the 30s
       // sweep below, the pill sat there reading "Resolving…" directly above the
       // toast explaining that nothing was resolving.
-      void onMicroTask(def, payload, query).then((started) => {
+      const starting = onMicroTask(def, payload, query);
+      void starting.then((started) => {
         if (started) return;
         setPending((p) => {
           if (p[def.id] == null) return p;
@@ -728,6 +797,7 @@ export function PrView({
         "info",
         { body: pr.title },
       );
+      return starting;
     },
     [onMicroTask, pr.number, pr.title],
   );
@@ -816,6 +886,59 @@ export function PrView({
     [livePr, conv, act, loop.status],
   );
 
+  const reviewPayload = useCallback(
+    () => ({
+      repo,
+      pr,
+      sinceSha: conv?.my_last_review_sha,
+      headSha: conv?.head_sha,
+      policy,
+      stack: {
+        parents: (links?.parents ?? []).map(({ number, title }) => ({ number, title })),
+        children: (links?.children ?? []).map(({ number, title }) => ({ number, title })),
+      },
+    }),
+    [repo, pr, conv?.my_last_review_sha, conv?.head_sha, policy, links],
+  );
+
+  const fixCiPayload = useCallback(
+    (delivery: "stacked-pr" | "current-branch" = "stacked-pr") => ({
+      repo,
+      pr,
+      delivery,
+      stack: {
+        parents: (links?.parents ?? []).map(({ number, title }) => ({ number, title })),
+        children: (links?.children ?? []).map(({ number, title }) => ({ number, title })),
+      },
+    }),
+    [repo, pr, links],
+  );
+
+  const openPolicyEditor = useCallback(() => {
+    setPolicyText(reviewPolicyJson(policy));
+    setPolicyError(null);
+    setPolicyOpen(true);
+  }, [policy]);
+
+  const commitPolicy = useCallback(() => {
+    try {
+      const next = parseReviewPolicy(policyText);
+      setPolicy(saveReviewPolicy(repo, next));
+      setPolicyText(reviewPolicyJson(next));
+      setPolicyError(null);
+      setPolicyOpen(false);
+      onNotice("Review policy saved locally for this repository.", "success");
+    } catch (err) {
+      setPolicyError(err instanceof Error ? err.message : String(err));
+    }
+  }, [policyText, repo, onNotice]);
+
+  const toggleAutoReview = useCallback(() => {
+    const next = { ...policy, autoReview: !policy.autoReview };
+    setPolicy(saveReviewPolicy(repo, next));
+    setPolicyText(reviewPolicyJson(next));
+  }, [policy, repo]);
+
   /** The floating button's default action — its own four states, not the next
    *  move bar's list. See fabAction() for why they are deliberately different. */
   const fab = useMemo(
@@ -860,7 +983,7 @@ export function PrView({
         }.`,
       );
     },
-    [onMicroTask, gate, loop, conv, repo, pr, livePr, persist, onNotice],
+    [onMicroTask, gate, loop, conv, repo, pr, livePr, persist, onNotice, launch],
   );
 
   /** What the button says while its job runs — the job's own name, so a glance
@@ -887,19 +1010,60 @@ export function PrView({
         launch(resolveConflictsTask, { repo, pr });
         break;
       case "review":
-        launch(prReviewTask, { repo, pr });
+        launch(prReviewTask, reviewPayload());
         break;
       case "address":
         startRound(false);
         break;
       case "fix-ci":
-        launch(fixCiTask, { repo, pr });
+        launch(fixCiTask, fixCiPayload());
         break;
       case "merge":
         setMergeOpen(true);
         break;
     }
   };
+
+  /** CodeRabbit-style automatic review, but private: one run per head SHA and
+   * only after the repository opts in. The task writes local map/findings
+   * artifacts; posting remains the normal confirmed review action. */
+  const autoStarting = useRef("");
+  useEffect(() => {
+    const head = conv?.head_sha ?? "";
+    if (!onMicroTask || autoStarting.current === head) return;
+    if (
+      !shouldAutoReview(policy, {
+        head,
+        state: livePr.state,
+        draft: !!conv?.draft,
+        busy: reviewBusy,
+        lastHead: autoReviewedHead(repo, pr.number),
+      })
+    )
+      return;
+    autoStarting.current = head;
+    rememberAutoReviewedHead(repo, pr.number, head);
+    const starting = launch(
+      prReviewTask,
+      reviewPayload(),
+      "Automatic private review",
+    );
+    void starting?.then((started) => {
+      autoStarting.current = "";
+      if (!started) rememberAutoReviewedHead(repo, pr.number, "");
+    });
+  }, [
+    policy,
+    conv?.head_sha,
+    conv?.draft,
+    livePr.state,
+    reviewBusy,
+    onMicroTask,
+    repo,
+    pr.number,
+    launch,
+    reviewPayload,
+  ]);
 
   /** Drop staged findings the PR already carries as real comments.
    *
@@ -1050,7 +1214,17 @@ export function PrView({
       document.removeEventListener("visibilitychange", onVisible);
       window.clearInterval(id);
     };
-  }, [loop, pr, livePr, repo, refreshConv, onMicroTask, persist, onNotice]);
+  }, [
+    loop,
+    pr,
+    livePr,
+    repo,
+    refreshConv,
+    onMicroTask,
+    persist,
+    onNotice,
+    launch,
+  ]);
 
   // Only fetched when it's the move being offered: one API call, and only for
   // the PR where the answer is about to be shown.
@@ -1102,8 +1276,15 @@ export function PrView({
       // Written before the list is cleared, and only after the mutation came
       // back clean: these are on GitHub now, so the findings file must never
       // offer them again.
-      rememberPosted(repo, pr.number, drafts.map(findingKey));
+      rememberPosted(
+        repo,
+        pr.number,
+        drafts.map((d) => d.sourceKey ?? findingKey(d)),
+      );
       setDrafts([]);
+      // A verdict is a completed action, not a terminal state for this tab. Keep
+      // the confirmation visible, then let another review be composed here.
+      window.setTimeout(() => setDone(null), 3000);
       void refreshConv();
     } catch (err) {
       onNotice(String(err), "error");
@@ -1300,13 +1481,13 @@ export function PrView({
   const dispatchMove = (m: NextMove, e: React.MouseEvent) => {
     switch (m.id) {
       case "self-review":
-        launch(prReviewTask, { repo, pr });
+        launch(prReviewTask, reviewPayload());
         break;
       case "mark-ready":
         void ready();
         break;
       case "fix-ci":
-        launch(fixCiTask, { repo, pr });
+        launch(fixCiTask, fixCiPayload());
         break;
       case "update-branch":
         void runAction("Update branch", () =>
@@ -1320,7 +1501,7 @@ export function PrView({
         startRound(true);
         break;
       case "review-it":
-        launch(prReviewTask, { repo, pr });
+        launch(prReviewTask, reviewPayload());
         break;
       case "request-review":
         // The real event: useContextMenu calls preventDefault on it, so a
@@ -1549,8 +1730,23 @@ export function PrView({
     );
   }, []);
   const dropDraft = useCallback((id: string) => {
-    setDrafts((prev) => prev.filter((x) => x.id !== id));
-  }, []);
+    setDrafts((prev) => {
+      const dropped = prev.find((x) => x.id === id);
+      if (dropped?.fromAgent)
+        ignorePrFindings(repo, pr.number, [
+          dropped.sourceKey ?? findingKey(dropped),
+        ]);
+      return prev.filter((x) => x.id !== id);
+    });
+  }, [repo, pr.number]);
+
+  const dropAllDrafts = useCallback(() => {
+    const agentKeys = drafts
+      .filter((d) => d.fromAgent)
+      .map((d) => d.sourceKey ?? findingKey(d));
+    ignorePrFindings(repo, pr.number, agentKeys);
+    setDrafts([]);
+  }, [drafts, repo, pr.number]);
   const addDraft = useCallback((d: DraftComment) => {
     setDrafts((prev) => [...prev, d]);
   }, []);
@@ -1674,7 +1870,7 @@ export function PrView({
         icon: <span className="ctx-glyph">{prReviewTask.icon}</span>,
         hint: "stages drafts for you, posts nothing",
         disabled: isBusyTask(prReviewTask.id),
-        onClick: () => launch(prReviewTask, { repo, pr }),
+        onClick: () => launch(prReviewTask, reviewPayload()),
       });
       if (livePr.state === "OPEN") {
         items.push({
@@ -1692,7 +1888,18 @@ export function PrView({
             icon: <span className="ctx-glyph">{fixCiTask.icon}</span>,
             hint: "reads the failing logs first",
             disabled: isBusyTask(fixCiTask.id),
-            onClick: () => launch(fixCiTask, { repo, pr }),
+            submenu: [
+              {
+                label: "Create stacked PR",
+                hint: `targets ${pr.branch}`,
+                onClick: () => launch(fixCiTask, fixCiPayload("stacked-pr")),
+              },
+              {
+                label: "Commit on current branch",
+                hint: "updates this PR directly",
+                onClick: () => launch(fixCiTask, fixCiPayload("current-branch")),
+              },
+            ],
           });
       }
       items.push({
@@ -1885,7 +2092,7 @@ export function PrView({
           <div className="pr-actions">
             {/* Agent used to sit here and now floats bottom-right, where it
                 follows you down the diff. Two of it would be one too many. */}
-            {pr.draft && livePr.state === "OPEN" && (
+            {livePr.draft && livePr.state === "OPEN" && (
               <Button size="sm" variant="accent"
                 title="Take this PR out of draft so it can be reviewed and merged"
                 disabled={busy}
@@ -1893,7 +2100,7 @@ export function PrView({
                 Mark ready
               </Button>
             )}
-            {!pr.draft && livePr.state === "OPEN" && (
+            {!livePr.draft && livePr.state === "OPEN" && (
               <div className="cli-menu-anchor">
                 <Button
                   size="sm"
@@ -2041,7 +2248,7 @@ export function PrView({
                   <Button size="sm"
                     disabled={reviewBusy}
                     title="Have an agent read it again"
-                    onClick={() => launch(prReviewTask, { repo, pr })}>
+                    onClick={() => launch(prReviewTask, reviewPayload())}>
                     {reviewBusy ? "Reviewing…" : "Review again"}
                   </Button>
                 </div>
@@ -2093,7 +2300,7 @@ export function PrView({
                       wears the primary tier. As a btn-mini it sat at the same
                       weight as "Regenerate" and "Drop" and nobody found it. */}
                   <Button size="sm" variant="accent"
-                    onClick={() => launch(prReviewTask, { repo, pr })}>
+                    onClick={() => launch(prReviewTask, reviewPayload())}>
                     {prReviewTask.icon} Review this for me
                   </Button>
                   <span className="pr-files-note">
@@ -2339,13 +2546,47 @@ export function PrView({
                       </Button>
                       {onMicroTask && (
                         <Button size="sm"
-                          onClick={() => launch(fixCiTask, { repo, pr })}>
-                          Fix CI
+                          title={`Open a reviewable fix PR targeting ${pr.branch}`}
+                          onClick={() => launch(fixCiTask, fixCiPayload())}>
+                          Fix in child PR
                         </Button>
                       )}
                     </div>
                   )}
                   {logs && <pre className="pr-logs">{logs}</pre>}
+                </div>
+
+                <div className="pr-rail-section">
+                  <div className="pr-rail-title">
+                    Review policy
+                    <Button size="sm" onClick={openPolicyEditor}>
+                      Edit
+                    </Button>
+                  </div>
+                  <div className="pr-rail-row">
+                    <span
+                      className={`pr-thread-tag ${policy.autoReview ? "pr-ok" : ""}`}
+                    >
+                      {policy.autoReview ? "auto private review" : "manual review"}
+                    </span>
+                    <Button
+                      size="sm"
+                      title={
+                        policy.autoReview
+                          ? "Stop preparing a private review when the PR head changes"
+                          : "Prepare a private review when the PR head changes; nothing is posted"
+                      }
+                      onClick={toggleAutoReview}
+                    >
+                      {policy.autoReview ? "Disable" : "Enable"}
+                    </Button>
+                  </div>
+                  <div className="pr-rail-empty">
+                    {policy.pathInstructions.length} path rule(s) · {policy.checks.length}{" "}
+                    custom check(s) · {policy.learnings.length} learning(s)
+                    {policy.relatedRepositories.length > 0 &&
+                      ` · ${policy.relatedRepositories.length} related repo(s)`}
+                  </div>
                 </div>
               </>
             )}
@@ -2356,7 +2597,11 @@ export function PrView({
                 displaces nothing above it, so the one card that can't know its
                 own size in advance is also the one card whose growth nobody
                 feels. */}
-            <PrLinkRail links={links} />
+            <PrLinkRail
+              links={links}
+              error={linksError}
+              onRefresh={() => void refreshLinks()}
+            />
           </aside>
         </div>
 
@@ -2534,7 +2779,7 @@ export function PrView({
                 <div className="pr-rail-title">
                   {drafts.length} inline comment{drafts.length === 1 ? "" : "s"}{" "}
                   — not posted yet
-                  <Button size="sm" onClick={() => setDrafts([])}>
+                  <Button size="sm" onClick={dropAllDrafts}>
                     Drop all
                   </Button>
                 </div>
@@ -2574,11 +2819,7 @@ export function PrView({
                           <span className="pr-draft-gist">{gist(d.body)}</span>
                         </button>
                         <Button size="sm"
-                          onClick={() =>
-                            setDrafts((prev) =>
-                              prev.filter((x) => x.id !== d.id),
-                            )
-                          }>
+                          onClick={() => dropDraft(d.id)}>
                           Drop
                         </Button>
                       </li>
@@ -2636,6 +2877,45 @@ export function PrView({
           </>
         )}
       </div>
+
+      {policyOpen && (
+        <Dialog
+          size="lg"
+          title="Repository review policy"
+          body={
+            <>
+              Controls private agent reviews for this repository. Automatic
+              review prepares a map and draft findings only; it never posts,
+              approves, pushes, resolves, or merges.
+            </>
+          }
+          meta={repoName || repo}
+          dismissLabel="Cancel"
+          onDismiss={() => setPolicyOpen(false)}
+          actions={[
+            {
+              label: "Reset",
+              onClick: () => {
+                setPolicyText(reviewPolicyJson(DEFAULT_REVIEW_POLICY));
+                setPolicyError(null);
+              },
+            },
+            { label: "Save policy", primary: true, onClick: commitPolicy },
+          ]}
+        >
+          <textarea
+            className="pr-comment"
+            rows={18}
+            aria-label="Review policy JSON"
+            value={policyText}
+            onChange={(event) => {
+              setPolicyText(event.target.value);
+              setPolicyError(null);
+            }}
+          />
+          {policyError && <div className="pr-error">{policyError}</div>}
+        </Dialog>
+      )}
 
       {confirm && (
         <Dialog
@@ -2869,16 +3149,35 @@ function linkStateLabel(l: ipc.PrLink): string {
  *  this app, and a linked PR belongs to whichever project owns it, which may
  *  not be one that's open. Sending you somewhere that can actually show the
  *  thing beats a tab that can't. */
-function PrLinkRail({ links }: { links: ipc.PrLinks | null }) {
+function PrLinkRail({
+  links,
+  error,
+  onRefresh,
+}: {
+  links: ipc.PrLinks | null;
+  error: string | null;
+  onRefresh: () => void;
+}) {
   const groups = links
     ? LINK_GROUPS.map((g) => ({ ...g, rows: links[g.key] })).filter(
         (g) => g.rows.length > 0,
       )
     : [];
-  if (groups.length === 0) return null;
+  if (groups.length === 0 && !error) return null;
   return (
     <div className="pr-rail-section">
-      <div className="pr-rail-title">Linked</div>
+      <div className="pr-rail-title">
+        Stack &amp; linked work
+        <Button size="sm" title="Refresh stack relationships" onClick={onRefresh}>
+          ↻
+        </Button>
+      </div>
+      {error && (
+        <div className="pr-rail-empty">
+          Stack status could not be refreshed. The last known relationships are
+          still shown.
+        </div>
+      )}
       {groups.map((g) => (
         <div key={g.key} className="pr-link-group">
           <div className="pr-link-group-title" title={g.hint}>

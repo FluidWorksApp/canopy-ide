@@ -20,6 +20,7 @@ import {
   raisePrTask,
   resolveConflictsTask,
   reviewPrTask,
+  reviewPolicyBrief,
   runItReviewTask,
   stepsDone,
   MICRO_TASKS,
@@ -491,6 +492,46 @@ describe("PR tasks that report back through a file", () => {
     expect(theirs).toContain("/repo/.canopy/pr-12-map.md");
   });
 
+  it("uses repository policy, linked requirements, checks, and configured analyzers", () => {
+    const ctx = prReviewTask.buildContext({ repo: "/repo", pr }, "");
+    expect(ctx).toContain("nearest applicable `AGENTS.md`");
+    expect(ctx).toContain("linked issue requirements");
+    expect(ctx).toContain("addressed, not addressed, or unclear");
+    expect(ctx).toContain("gh pr checks 12");
+    expect(ctx).toContain("configured focused tests, linters");
+    expect(ctx).toContain('"## Verification"');
+  });
+
+  it("makes a later review incremental without losing whole-PR context", () => {
+    const ctx = prReviewTask.buildContext(
+      { repo: "/repo", pr, sinceSha: "abc123", headSha: "def456" },
+      "",
+    );
+    expect(ctx).toContain("This is a re-review");
+    expect(ctx).toContain("compare/abc123...def456");
+    expect(ctx).toContain("use the full PR only for context");
+    expect(ctx).toContain("do not repeat findings against unchanged code");
+  });
+
+  it("applies path policy, custom checks, learnings, related repos, and diagrams", () => {
+    const policy = reviewPolicyBrief({
+      autoReview: true,
+      reviewDrafts: false,
+      diagrams: true,
+      excludedPaths: ["dist/**"],
+      pathInstructions: [{ path: "src/api/**", instructions: "Preserve v1." }],
+      checks: [{ name: "API", instructions: "No break.", severity: "error" }],
+      learnings: ["Require a regression test."],
+      relatedRepositories: ["/work/client"],
+    });
+    expect(policy).toContain("dist/**");
+    expect(policy).toContain("src/api/**");
+    expect(policy).toContain("persistent review preferences");
+    expect(policy).toContain("## Custom checks");
+    expect(policy).toContain("/work/client");
+    expect(policy).toContain("Mermaid");
+  });
+
   it("asks every task that declares milestones to report all of them, from a clean file", () => {
     // Not just Review: the rail is only as good as the instructions, and a task
     // given `steps` but no reporting lines shows four chips that never light.
@@ -590,12 +631,45 @@ describe("PR tasks that report back through a file", () => {
     expect(ctx).toContain("report blocked");
   });
 
-  it("makes the CI task work from the logs and forbids the cheap fixes", () => {
+  it("makes the CI task use logs and default to a reviewable stacked PR", () => {
     const ctx = fixCiTask.buildContext({ repo: "/repo", pr }, "", undefined);
     expect(ctx).toContain("--log-failed");
     expect(ctx).toContain("do not delete, skip, or loosen a test");
+    expect(ctx).toContain("stacked child pull request");
+    expect(ctx).toContain("gh pr create --draft --base fix/parser");
+    expect(ctx).toContain("not `main` or the repository default");
+    expect(ctx).not.toContain("git push origin HEAD:fix/parser");
     expect(ctx).toContain("Never force-push");
     expect(fixCiTask.isolation?.kind).toBe("pr-worktree");
+  });
+
+  it("can deliver a CI fix directly to the current PR branch", () => {
+    const ctx = fixCiTask.buildContext(
+      { repo: "/repo", pr, delivery: "current-branch" },
+      "",
+      undefined,
+    );
+    expect(ctx).toContain("directly to the current PR branch");
+    expect(ctx).toContain("git push origin HEAD:fix/parser");
+    expect(ctx).not.toContain("gh pr create --draft");
+  });
+
+  it("keeps review findings inside the current stack layer", () => {
+    const ctx = prReviewTask.buildContext(
+      {
+        repo: "/repo",
+        pr,
+        stack: {
+          parents: [{ number: 11, title: "Add schema" }],
+          children: [{ number: 13, title: "Use schema" }],
+        },
+      },
+      "",
+    );
+    expect(ctx).toContain("one layer of a stack");
+    expect(ctx).toContain('"number":11');
+    expect(ctx).toContain('"number":13');
+    expect(ctx).toContain("do not ask this PR to repair unchanged parent code");
   });
 
   it("hands the suggestion to the agent as quoted data, not as an instruction", () => {

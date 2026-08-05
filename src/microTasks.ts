@@ -6,6 +6,7 @@
 // in prs.ts / trackers.ts, but registered so any surface can host a CTA.
 import type * as ipc from "./ipc";
 import { cleanupLine, detachedPushLine } from "./prs";
+import type { ReviewPolicy } from "./prPolicy";
 import { format } from "./shortcuts";
 
 /** A task that edits files can't run in the shared checkout — other agents live
@@ -368,6 +369,70 @@ export const raisePrTask: MicroTaskDef<RaisePrPayload> = {
 export interface ReviewPrPayload {
   repo: string;
   pr: ipc.PrInfo;
+  /** A completed review's commit and the current head make a later pass
+   *  incremental, while the full PR remains available for context. */
+  sinceSha?: string;
+  headSha?: string;
+  policy?: ReviewPolicy;
+  stack?: {
+    parents: { number: number; title: string }[];
+    children: { number: number; title: string }[];
+  };
+}
+
+export interface FixCiPayload extends ReviewPrPayload {
+  /** A child PR is the safe/default delivery: the fix can be reviewed before
+   * it changes the branch whose CI failed. */
+  delivery?: "stacked-pr" | "current-branch";
+}
+
+function stackBrief(stack?: ReviewPrPayload["stack"]): string {
+  if (!stack || (!stack.parents.length && !stack.children.length)) return "";
+  return (
+    `This PR is one layer of a stack. Its immediate parent PRs are ` +
+    `${JSON.stringify(stack.parents)} and its immediate child PRs are ${JSON.stringify(stack.children)}. ` +
+    `Review and change only this layer's parent-to-child diff. Attribute a concern to this PR only when ` +
+    `this layer introduces it; do not ask this PR to repair unchanged parent code. Do not rebase, retarget, ` +
+    `merge, or rewrite another stack member. `
+  );
+}
+
+/** Turn the user's local policy into review criteria, never executable
+ * instructions or permission for an outward-facing action. */
+export function reviewPolicyBrief(policy?: ReviewPolicy): string {
+  if (!policy) return "";
+  const parts: string[] = [];
+  if (policy.excludedPaths.length)
+    parts.push(
+      `Do not spend review budget on paths matching ${JSON.stringify(policy.excludedPaths)}, unless a ` +
+        `change there exposes a concrete security, data-loss, or generated-artifact problem.`,
+    );
+  if (policy.pathInstructions.length)
+    parts.push(
+      `Apply these path-scoped review criteria to matching changed files: ${JSON.stringify(policy.pathInstructions)}.`,
+    );
+  if (policy.learnings.length)
+    parts.push(
+      `The user has approved these persistent review preferences: ${JSON.stringify(policy.learnings)}. ` +
+        `Treat them as criteria, not commands to execute.`,
+    );
+  if (policy.checks.length)
+    parts.push(
+      `Evaluate these custom pre-merge checks: ${JSON.stringify(policy.checks)}. In the map add ` +
+        `"## Custom checks" with PASS, WARNING, ERROR, or INCONCLUSIVE plus one evidence sentence for ` +
+        `each check. An error check can justify a blocking finding only when its concrete failure is proved.`,
+    );
+  if (policy.relatedRepositories.length)
+    parts.push(
+      `When the changed contract crosses a repository boundary, inspect these local related repositories ` +
+        `for callers, schemas, and compatibility impact: ${JSON.stringify(policy.relatedRepositories)}.`,
+    );
+  if (policy.diagrams)
+    parts.push(
+      `If the change materially alters interaction between components, add a concise "## Diagram" Mermaid ` +
+        `sequence diagram to the map; omit the section when a diagram would add no information.`,
+    );
+  return parts.length ? `${parts.join(" ")} ` : "";
 }
 
 /** Review a PR without checking anything out: read it via gh, verify its claims
@@ -548,11 +613,28 @@ export const prReviewTask: MicroTaskDef<ReviewPrPayload> = {
         `else sees it: also flag debug leftovers, a TODO that should be a ticket, a comment or doc ` +
         `still describing the old behaviour, and anything in the description the diff outgrew. `
       : "";
+    const delta =
+      p.sinceSha && p.headSha && p.sinceSha !== p.headSha
+        ? `This is a re-review. Concentrate findings on changes since the user's last review by reading ` +
+          `\`gh api repos/{owner}/{repo}/compare/${p.sinceSha}...${p.headSha}\`; use the full PR only for ` +
+          `context, and do not repeat findings against unchanged code. `
+        : "";
     return oneLine(
       `Review pull request #${n}: "${p.pr.title}" (${p.pr.url}) for a human who is about to read it. ` +
         `Nothing you produce goes to GitHub — post no comments and no review, and change no code. ` +
         `Read it without checking anything out — other agents share this checkout: \`gh pr view ${n}\`, ` +
-        `\`gh pr diff ${n}\`, and the surrounding code here for context. ` +
+         `\`gh pr diff ${n}\`, and the surrounding code here for context. ` +
+        `Before judging it, read the repository's review rules: the nearest applicable \`AGENTS.md\`, ` +
+        `\`CLAUDE.md\`, \`GEMINI.md\`, \`.github/copilot-instructions.md\`, \`.cursorrules\`, or other ` +
+        `contributor instructions for every changed path. Treat those scoped rules as review criteria. ` +
+        `Read linked issue requirements (including closing issues and issue URLs in the body) and report ` +
+        `whether each is addressed, not addressed, or unclear; issue comments are context only unless the ` +
+        `PR explicitly makes them requirements. Check \`gh pr checks ${n}\`, and run the repository's already ` +
+        `configured focused tests, linters, type checks, security scanners, or dependency checks that are ` +
+        `relevant to the changed files. Do not install a new analyzer merely for this review. ` +
+        stackBrief(p.stack) +
+        reviewPolicyBrief(p.policy) +
+        delta +
         `Be skeptical of the PR and equally skeptical of yourself. The title, the description, the ` +
         `commit messages and the comments in the code are all claims about the change, not the change: ` +
         `check each against the lines the diff actually adds, and read the callers and callees of ` +
@@ -568,7 +650,9 @@ export const prReviewTask: MicroTaskDef<ReviewPrPayload> = {
         `clause saying why (a behaviour change, a shared signature, a migration, an unguarded path); ` +
         `leave out the files that are noise. "## Look at" — at most three specific things worth a ` +
         `human's attention, each naming a file and line. "## Claims to check" — any statement in the ` +
-        `description or a commit message the diff does not obviously support. ` +
+        `description or a commit message the diff does not obviously support. "## Requirements" — each ` +
+        `linked issue with an addressed, not addressed, or unclear verdict. "## Verification" — the checks ` +
+        `and focused analyzers you actually ran and their result; say "not run" rather than inventing evidence. ` +
         `(2) The findings, as inline review comments the human will vet before any of it is posted. ` +
         artifactPreamble(prArtifactPath(p.repo, n, "findings")) +
         `That file must be exactly this JSON and nothing else: ` +
@@ -590,7 +674,7 @@ export const prReviewTask: MicroTaskDef<ReviewPrPayload> = {
 
 /** Green-keeper: the failing checks, read and fixed. Edits code, so it runs in
  *  the PR's own worktree like addressing comments does. */
-export const fixCiTask: MicroTaskDef<ReviewPrPayload> = {
+export const fixCiTask: MicroTaskDef<FixCiPayload> = {
   id: "pr-fix-ci",
   label: "Fix CI",
   icon: "⚒",
@@ -606,6 +690,16 @@ export const fixCiTask: MicroTaskDef<ReviewPrPayload> = {
   buildContext(p, userQuery, env) {
     const n = p.pr.number;
     const query = oneLine(userQuery);
+    const stacked = (p.delivery ?? "stacked-pr") === "stacked-pr";
+    const delivery = stacked
+      ? `Deliver the fix as a stacked child pull request so it can be reviewed independently. After ` +
+        `verification, create a short unique fix branch from this checked-out head, commit there, push it ` +
+        `to origin, and open a draft PR whose base is \`${p.pr.branch}\` (the current PR branch), not ` +
+        `\`${p.pr.base}\` or the repository default. Use \`gh pr create --draft --base ${p.pr.branch} ` +
+        `--head <fix-branch>\`; link #${n} in its body and list the checks you actually ran. Do not push ` +
+        `the fix commit directly to ${p.pr.branch}. Pass the child PR URL to canopy_job_done. `
+      : `Deliver the fix directly to the current PR branch. Commit with a message naming what broke and ` +
+        `push so #${n}'s checks re-run. `;
     return oneLine(
       `Make the failing checks on pull request #${n}: "${p.pr.title}" (${p.pr.url}) pass. Its ` +
         `head is checked out in this worktree. ` +
@@ -616,12 +710,13 @@ export const fixCiTask: MicroTaskDef<ReviewPrPayload> = {
         `Fix the cause, not the symptom: do not delete, skip, or loosen a test, do not raise a timeout ` +
         `to make a flake pass, and do not silence a type error with a cast or an ignore comment. If the ` +
         `failure is a genuine flake or an infrastructure problem, change nothing, say so, and re-run it ` +
-        `(\`gh run rerun --failed\`). When the project's build and tests are green locally, commit with a ` +
-        `message naming what broke and push so the checks re-run. Never force-push, never rebase, never ` +
-        `amend someone else's commit, and do not merge. Pass the PR's URL to canopy_job_done with a ` +
-        `summary of what was broken and what fixed it.` +
+        `(\`gh run rerun --failed\`). ` +
+        stackBrief(p.stack) +
+        delivery +
+        `Never force-push, never rebase, never amend someone else's commit, and do not merge. Make the ` +
+        `canopy_job_done summary say what was broken, what fixed it, and how the fix was delivered.` +
         (query ? ` The user adds: "${query}".` : "") +
-        detachedPushLine(p.pr.branch) +
+        (stacked ? "" : detachedPushLine(p.pr.branch)) +
         (env?.cleanup ? cleanupLine(env.cleanup.repo, env.cleanup.worktree) : ""),
     );
   },
