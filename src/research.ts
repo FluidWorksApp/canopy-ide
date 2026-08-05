@@ -8,6 +8,7 @@
 // first keystroke instead of after a round trip, and refreshes it whenever the
 // store changes.
 import * as ipc from "./ipc";
+import { refreshPrLinks } from "./prLinkState";
 
 export type ResearchStatus = ipc.ResearchStatus;
 
@@ -257,42 +258,33 @@ export async function start(args: ipc.ResearchStartArgs): Promise<ipc.ResearchSu
  *    that is exactly the kind of quiet wrongness a status is supposed to
  *    prevent.
  *
- *  Every linked PR also has its recorded state refreshed on the way past, so
- *  the detail view shows what actually happened to each one. */
+ *  Refreshing what a link says and moving the entry holding it are two jobs,
+ *  and they used to be one loop behind one status gate. That gate is why a
+ *  linked PR's recorded state stopped being maintained the moment its entry
+ *  moved on — an entry back in `researched`, or already `implemented`, went on
+ *  showing "open" against a PR that had merged. So the refresh now covers every
+ *  entry with a linked PR (prLinkState.refreshPrLinks), and only the move stays
+ *  gated on `implementing`, which is the one status it was ever about. */
 export async function reconcileMerged(projectId: string): Promise<number> {
-  const rows = cached(projectId).filter(
-    (r) => r.status === "implementing" && r.pr_count > 0,
+  const rows = cached(projectId).filter((r) => r.pr_count > 0);
+  const allMerged = await refreshPrLinks(
+    rows,
+    async (id) => {
+      const detail = await ipc.researchGet(projectId, id).catch(() => null);
+      return detail?.links.prs ?? null;
+    },
+    async (id, pr) => {
+      await ipc.researchLink({ projectId, id, pr });
+    },
   );
   let moved = 0;
   for (const row of rows) {
-    const detail = await ipc.researchGet(projectId, row.id).catch(() => null);
-    if (!detail || detail.links.prs.length === 0) continue;
-    const states = await Promise.all(
-      detail.links.prs.map(async (pr) => ({
-        pr,
-        state: await ipc
-          .ghPrState(pr.repo, pr.number)
-          .then((s) => s.toLowerCase())
-          // Unreachable (no gh, no network, a repo that moved) is not "merged".
-          // Leaving the entry where it is costs a status that lags; guessing
-          // costs a finding marked shipped that never was.
-          .catch(() => ""),
-      })),
-    );
-    for (const { pr, state } of states) {
-      if (state && state !== pr.state) {
-        await ipc
-          .researchLink({ projectId, id: row.id, pr: { ...pr, state } })
-          .catch(() => {});
-      }
-    }
-    if (states.length > 0 && states.every((s) => s.state === "merged")) {
-      await ipc
-        .researchSetStatus(projectId, row.id, "implemented", "Canopy",
-          "every linked pull request merged")
-        .catch(() => {});
-      moved += 1;
-    }
+    if (row.status !== "implementing" || !allMerged.has(row.id)) continue;
+    await ipc
+      .researchSetStatus(projectId, row.id, "implemented", "Canopy",
+        "every linked pull request merged")
+      .catch(() => {});
+    moved += 1;
   }
   if (moved > 0) await refresh(projectId);
   return moved;

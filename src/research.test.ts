@@ -10,11 +10,13 @@ import {
   STATUS_STEP,
   forget,
   implementContext,
+  reconcileMerged,
   refresh,
   researchContext,
   resetStoreWatchForTest,
   watchStore,
 } from "./research";
+import { __reset as resetPrLinkState } from "./prLinkState";
 
 const STATUSES = STATUS_ORDER;
 
@@ -303,5 +305,103 @@ describe("writes that never came through this module", () => {
     get()?.("p1");
     await Promise.resolve();
     expect(list).not.toHaveBeenCalled();
+  });
+});
+
+// ---------- the closing half ----------
+
+describe("settling an entry whose PR merged", () => {
+  const summary = (over: Partial<ipc.ResearchSummary> = {}): ipc.ResearchSummary => ({
+    id: "0102-stacked-pr-review-parity",
+    title: "Stacked PR review parity",
+    status: "implementing",
+    digest: "",
+    tags: [],
+    agent: "claude",
+    created_at: 0,
+    updated_at: 0,
+    source_count: 0,
+    pr_count: 1,
+    superseded_by: null,
+    ...over,
+  });
+
+  const pr = { repo: "/repo", number: 447, url: "u", state: "open" };
+
+  const seed = async (rows: ipc.ResearchSummary[]) => {
+    vi.spyOn(ipc, "researchList").mockResolvedValue(rows);
+    await refresh("p1");
+  };
+
+  beforeEach(async () => {
+    vi.restoreAllMocks();
+    // A resolved PR state is remembered for the session — the module never
+    // asks twice about a merge — so each test starts from nothing known.
+    resetPrLinkState();
+    await seed([]);
+  });
+
+  it("moves an entry to implemented when every linked PR merged", async () => {
+    await seed([summary()]);
+    vi.spyOn(ipc, "researchGet").mockResolvedValue(entry({ links: {
+      tickets: [], prs: [pr], branches: [], files: [], supersedes: [], superseded_by: null,
+    } }));
+    vi.spyOn(ipc, "ghPrState").mockResolvedValue("MERGED");
+    vi.spyOn(ipc, "researchLink").mockResolvedValue({} as never);
+    const set = vi.spyOn(ipc, "researchSetStatus").mockResolvedValue({} as never);
+
+    expect(await reconcileMerged("p1")).toBe(1);
+    expect(set).toHaveBeenCalledWith(
+      "p1",
+      "0102-stacked-pr-review-parity",
+      "implemented",
+      "Canopy",
+      "every linked pull request merged",
+    );
+  });
+
+  it("refreshes a PR on an entry it will not move", async () => {
+    // The bug the user hit: an entry sitting in `researched` with a PR linked
+    // to it. The old reconciler only looked at `implementing`, so the chip in
+    // "What came of it" said "open" against a pull request that had merged.
+    await seed([summary({ status: "researched" })]);
+    vi.spyOn(ipc, "researchGet").mockResolvedValue(entry({ links: {
+      tickets: [], prs: [pr], branches: [], files: [], supersedes: [], superseded_by: null,
+    } }));
+    vi.spyOn(ipc, "ghPrState").mockResolvedValue("MERGED");
+    const link = vi.spyOn(ipc, "researchLink").mockResolvedValue({} as never);
+    const set = vi.spyOn(ipc, "researchSetStatus").mockResolvedValue({} as never);
+
+    expect(await reconcileMerged("p1")).toBe(0);
+    expect(link).toHaveBeenCalledWith({
+      projectId: "p1",
+      id: "0102-stacked-pr-review-parity",
+      pr: { ...pr, state: "merged" },
+    });
+    // The status move stays where it always was: only `implementing` is the
+    // claim "this is being built", and only that claim closes on a merge.
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it("never infers a merge from a PR it could not reach", async () => {
+    await seed([summary()]);
+    vi.spyOn(ipc, "researchGet").mockResolvedValue(entry({ links: {
+      tickets: [], prs: [pr], branches: [], files: [], supersedes: [], superseded_by: null,
+    } }));
+    vi.spyOn(ipc, "ghPrState").mockRejectedValue(new Error("no gh"));
+    const set = vi.spyOn(ipc, "researchSetStatus").mockResolvedValue({} as never);
+
+    expect(await reconcileMerged("p1")).toBe(0);
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it("leaves an entry with nothing linked alone", async () => {
+    await seed([summary({ pr_count: 0 })]);
+    const get = vi.spyOn(ipc, "researchGet");
+    const set = vi.spyOn(ipc, "researchSetStatus").mockResolvedValue({} as never);
+
+    expect(await reconcileMerged("p1")).toBe(0);
+    expect(get).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
   });
 });

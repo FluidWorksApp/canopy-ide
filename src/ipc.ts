@@ -975,8 +975,10 @@ export interface ResearchPrLink {
   repo: string;
   number: number;
   url: string;
-  /** "open" | "merged" | "closed" — kept current by the PR watcher, which is
-   *  what lets an entry reach `implemented` without anyone asserting it. */
+  /** "open" | "merged" | "closed" — as of the last time anything asked. This is
+   *  a record, not a live reading: it is written when the link is made and
+   *  corrected by the reconciler. Never render it directly; ask
+   *  prLinkState.stateOf, which knows what the PR is *now*. */
   state: string;
 }
 
@@ -1162,8 +1164,9 @@ export interface NotePrLink {
   repo: string;
   number: number;
   url: string;
-  /** "open" | "merged" | "closed" — a linked PR reaching "merged" is what moves
-   *  a note to `done` without anyone asserting it. */
+  /** "open" | "merged" | "closed" — as of the last time anything asked, on the
+   *  same terms as `ResearchPrLink.state`. A record, not a live reading: render
+   *  prLinkState.stateOf instead. */
   state: string;
 }
 

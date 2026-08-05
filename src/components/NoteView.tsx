@@ -38,8 +38,13 @@ import {
 } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 import { NoteReminder } from "./NoteReminder";
+import { usePrLinkStates } from "../prLinkState";
 import { Button } from "./ui";
 import { format, matches } from "../shortcuts";
+
+/** One array identity for "this note has no linked PRs", so the hook below is
+ *  not handed a fresh empty array on every render. */
+const NO_PRS: ipc.NotePrLink[] = [];
 
 interface NoteViewProps {
   projectId: string;
@@ -124,6 +129,13 @@ export function NoteView({
   useEffect(() => {
     if (titleDraft !== null) titleInput.current?.select();
   }, [titleDraft]);
+
+  // What each linked PR is *now*. The state on the record was written when the
+  // link was made and nothing ever revisited it — the scratchpad's reconciler
+  // was written and never wired up — so a note's "what came of it" showed
+  // "open" against pull requests that had long since landed. Above the early
+  // returns because hooks cannot be conditional.
+  const prState = usePrLinkStates(note?.links.prs ?? NO_PRS);
 
   if (error) {
     return (
@@ -463,16 +475,19 @@ export function NoteView({
                 </button>
               </li>
             ))}
-            {note.links.prs.map((pr) => (
-              <li key={`${pr.repo}#${pr.number}`}>
-                <span className="note-link-static">
-                  ⇅ #{pr.number}
-                  <span className={`note-pr-state note-pr-${pr.state}`}>
-                    {pr.state}
+            {note.links.prs.map((pr) => {
+              const state = prState(pr);
+              return (
+                <li key={`${pr.repo}#${pr.number}`}>
+                  <span className="note-link-static">
+                    ⇅ #{pr.number}
+                    <span className={`note-pr-state note-pr-${state}`}>
+                      {state}
+                    </span>
                   </span>
-                </span>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
         </section>
       )}

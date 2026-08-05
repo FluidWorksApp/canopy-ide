@@ -12,6 +12,7 @@
 // the same *kind* of thing to the app, and two stores that behave differently
 // would be two things to learn for no gain.
 import * as ipc from "./ipc";
+import { refreshPrLinks } from "./prLinkState";
 import { registerStore } from "./stores";
 
 export type NoteStatus = ipc.NoteStatus;
@@ -242,47 +243,34 @@ export async function rename(
  *    one may equally have been closed unmerged — and inferring "shipped" from
  *    that is exactly the quiet wrongness a status is supposed to prevent.
  *
- *  Every linked PR also has its recorded state refreshed on the way past, so
- *  the detail view shows what actually happened to each one. */
+ *  As in research.ts, refreshing what a link says is a different job from
+ *  moving the note holding it: every note with a linked PR has its recorded
+ *  state brought up to date, and only the move is gated on `doing`. */
 export async function reconcileMerged(projectId: string): Promise<number> {
-  const rows = cached(projectId).filter(
-    (r) => r.status === "doing" && r.pr_count > 0,
+  const rows = cached(projectId).filter((r) => r.pr_count > 0);
+  const allMerged = await refreshPrLinks(
+    rows,
+    async (id) => {
+      const detail = await ipc.notesGet(projectId, id).catch(() => null);
+      return detail?.links.prs ?? null;
+    },
+    async (id, pr) => {
+      await ipc.notesLink({ projectId, id, pr });
+    },
   );
   let moved = 0;
   for (const row of rows) {
-    const detail = await ipc.notesGet(projectId, row.id).catch(() => null);
-    if (!detail || detail.links.prs.length === 0) continue;
-    const states = await Promise.all(
-      detail.links.prs.map(async (pr) => ({
-        pr,
-        state: await ipc
-          .ghPrState(pr.repo, pr.number)
-          .then((s) => s.toLowerCase())
-          // Unreachable (no gh, no network, a repo that moved) is not "merged".
-          // Leaving the note where it is costs a status that lags; guessing
-          // costs a thought marked shipped that never was.
-          .catch(() => ""),
-      })),
-    );
-    for (const { pr, state } of states) {
-      if (state && state !== pr.state) {
-        await ipc
-          .notesLink({ projectId, id: row.id, pr: { ...pr, state } })
-          .catch(() => {});
-      }
-    }
-    if (states.length > 0 && states.every((s) => s.state === "merged")) {
-      await ipc
-        .notesSetStatus(
-          projectId,
-          row.id,
-          "done",
-          "Canopy",
-          "every linked pull request merged",
-        )
-        .catch(() => {});
-      moved += 1;
-    }
+    if (row.status !== "doing" || !allMerged.has(row.id)) continue;
+    await ipc
+      .notesSetStatus(
+        projectId,
+        row.id,
+        "done",
+        "Canopy",
+        "every linked pull request merged",
+      )
+      .catch(() => {});
+    moved += 1;
   }
   if (moved > 0) await refresh(projectId);
   return moved;
