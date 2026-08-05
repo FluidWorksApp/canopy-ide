@@ -4350,6 +4350,9 @@ pub struct AgentWorkspace {
     pub dirty: u32,
     pub ahead: u32,
     pub behind: u32,
+    /// Commits on the branch that its upstream doesn't have. None when the
+    /// branch has no upstream at all — i.e. it was never pushed.
+    pub unpushed: Option<u32>,
     pub merged: bool,
     pub commits: Vec<CommitInfo>,
 }
@@ -4680,6 +4683,7 @@ fn workspace_join(
     }
 
     let (mut ahead, mut behind, mut merged) = (0u32, 0u32, false);
+    let mut unpushed: Option<u32> = None;
     let mut commits = Vec::new();
     if !detached && !on_base {
         // checked_ref guards the digest-supplied fallback; a live branch from
@@ -4703,6 +4707,15 @@ fn workspace_join(
             })
             .map(|o| o.status.success())
             .unwrap_or(false);
+            // rev-list fails when the branch has no upstream, which is exactly
+            // the None this reports: never pushed, as opposed to 0 left to push.
+            unpushed = run(git(top).args([
+                "rev-list",
+                "--count",
+                &format!("{b}@{{upstream}}..{b}"),
+            ]))
+            .ok()
+            .and_then(|o| o.trim().parse().ok());
             commits = branch_commits_of(top, &base, &b);
         }
     }
@@ -4727,6 +4740,7 @@ fn workspace_join(
         dirty,
         ahead,
         behind,
+        unpushed,
         merged,
         commits,
     })

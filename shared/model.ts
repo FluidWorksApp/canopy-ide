@@ -149,6 +149,33 @@ export interface RemoteCompanion {
   error?: string | null
 }
 
+/** One attention-channel item (src/attention.ts), projected for the portal by
+ *  src/remoteAttention.ts. The desktop's `where` deep link is deliberately
+ *  dropped — it names desktop surfaces a browser cannot land on. */
+export interface RemoteAttentionItem {
+  id: string
+  kind: 'fyi' | 'question'
+  tone: 'info' | 'success' | 'warn' | 'error'
+  title: string
+  body?: string
+  source: string
+  projectId?: string
+  projectName?: string
+  ts: number
+  /** Questions only: set once answered or withdrawn. Unset = waiting on you. */
+  resolvedAt?: number
+  resolution?: string
+  /** Identity of the asker, carried so the portal can fold out the items the
+   *  desktop derives from the same hook stream the portal already renders
+   *  (`agent:<sessionId>` — see App.tsx's blocked-agents post). */
+  dedupeKey?: string
+}
+
+/** Outstanding = a question nobody has resolved — the same predicate the
+ *  desktop's badge uses, so the two shells cannot disagree. */
+export const isRemoteOutstanding = (item: RemoteAttentionItem): boolean =>
+  item.kind === 'question' && item.resolvedAt == null
+
 export const SESSION_ID_TOKEN = '__CANOPY_SESSION_ID__'
 
 /** The desktop's resolved CLI registry, projected into a browser-safe shape. */

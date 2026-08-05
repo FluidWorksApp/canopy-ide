@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { CleanupDialog } from "./CleanupDialog";
 import * as ipc from "../ipc";
 
@@ -167,6 +167,36 @@ describe("CleanupDialog", () => {
     open();
     await screen.findByText(/No installs, build output or caches were found/);
     expect(screen.queryByText(/Move .* to Trash/)).toBeNull();
+  });
+
+  it("shows a progress bar while the scan walks, and drops it after", async () => {
+    let emit: ((p: ipc.CleanupProgress) => void) | undefined;
+    vi.mocked(ipc.onCleanupProgress).mockImplementation((async (
+      cb: (p: ipc.CleanupProgress) => void,
+    ) => {
+      emit = cb;
+      return () => {};
+    }) as never);
+    let finish!: (s: typeof scan) => void;
+    vi.mocked(ipc.cleanupScan).mockReturnValue(
+      new Promise((r) => {
+        finish = r;
+      }) as never,
+    );
+    open();
+    const bar = await screen.findByRole("progressbar");
+    expect(bar.getAttribute("aria-valuenow")).toBe("0");
+    await waitFor(() => expect(emit).toBeDefined());
+    act(() =>
+      emit!({ workspace: "/repo/.claude/worktrees/old", done: 3, total: 12 }),
+    );
+    expect(screen.getByText("3 of 12 · old")).toBeTruthy();
+    expect(
+      screen.getByRole("progressbar").getAttribute("aria-valuenow"),
+    ).toBe("3");
+    act(() => finish(scan));
+    await screen.findByText("Move 2.0 GB to Trash");
+    expect(screen.queryByRole("progressbar")).toBeNull();
   });
 
   it("surfaces a scan that failed instead of an empty list", async () => {

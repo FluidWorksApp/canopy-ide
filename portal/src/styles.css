@@ -1314,6 +1314,11 @@ button.prow:active {
   margin: 0;
   padding: 0;
   min-height: 0;
+  /* The bar/body split only works as a column: without this the body is a
+   * plain block, grows to its content, and its own overflow-y never engages —
+   * which read as "can't scroll the file" on the wide shell. */
+  display: flex;
+  flex-direction: column;
 }
 .detail-bar {
   display: flex;
@@ -1403,6 +1408,106 @@ button.prow:active {
 .doc {
   font-size: 13px;
   line-height: 1.65;
+}
+
+/* Rendered markdown (views/MarkdownView.tsx) — the same sanitized HTML the
+ * desktop renders, styled for the portal's quieter type scale. */
+.md-body {
+  padding: 12px 16px 20px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.md-body > :first-child {
+  margin-top: 0;
+}
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  margin: 1.2em 0 0.45em;
+  line-height: 1.3;
+}
+.md-body h1 {
+  font-size: 1.45em;
+}
+.md-body h2 {
+  font-size: 1.22em;
+  padding-bottom: 0.2em;
+  border-bottom: 1px solid var(--border);
+}
+.md-body h3 {
+  font-size: 1.08em;
+}
+.md-body p,
+.md-body ul,
+.md-body ol,
+.md-body blockquote,
+.md-body table {
+  margin: 0.55em 0;
+}
+.md-body ul,
+.md-body ol {
+  padding-left: 1.4em;
+}
+.md-body li {
+  margin: 0.2em 0;
+}
+.md-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.92em;
+  background: var(--bg-raised, rgba(255, 255, 255, 0.06));
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+.md-body pre {
+  background: var(--bg-raised, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+.md-body pre code {
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.md-body blockquote {
+  border-left: 3px solid var(--border);
+  padding: 0.1em 0 0.1em 0.9em;
+  color: var(--text-dim);
+}
+.md-body a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.md-body a:hover {
+  text-decoration: underline;
+}
+.md-body table {
+  border-collapse: collapse;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid var(--border);
+  padding: 4px 9px;
+  font-size: 0.95em;
+}
+.md-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.2em 0;
+}
+.md-body img {
+  max-width: 100%;
+}
+.md-body input[type='checkbox'] {
+  margin-right: 0.45em;
 }
 
 .commit-meta {

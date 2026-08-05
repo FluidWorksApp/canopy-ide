@@ -2111,6 +2111,38 @@ body.resizing-side * {
   color: var(--danger);
 }
 
+/* The scan can take a minute on a big tree; a bar the eye can rest on, not a
+   line of small text under the title. */
+.cln-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 6px 2px 10px;
+}
+
+.cln-progress-track {
+  height: 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border-strong) 70%, transparent);
+  overflow: hidden;
+}
+
+.cln-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 320ms var(--ease-out);
+}
+
+.cln-progress-where {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Headline metrics: cost first, then the token flow and session count. */
 .stats-overview {
   display: grid;
@@ -5695,6 +5727,53 @@ body.dragging-tab * {
   font-size: inherit;
   font-family: inherit;
   color: inherit;
+}
+/* The trail: wrote › committed › pushed › PR. Same quiet register as the
+   stats strip; colour carries the verdict — green done, amber for the step
+   where work is currently at risk, dim for not-yet. */
+.aw-trail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 6px;
+  font-size: 11.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.aw-trail-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.aw-trail-arrow {
+  color: var(--text-dim);
+  opacity: 0.6;
+}
+.aw-trail-step {
+  white-space: nowrap;
+}
+.aw-trail-step.tr-done {
+  color: var(--ok);
+}
+.aw-trail-step.tr-attention {
+  color: var(--warn);
+}
+.aw-trail-step.tr-pending {
+  color: var(--text-dim);
+}
+.aw-trail-step.tr-cta {
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  padding: 0 7px;
+  cursor: pointer;
+}
+.aw-trail-step.tr-cta:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .aw-stat-model {
   color: var(--text);

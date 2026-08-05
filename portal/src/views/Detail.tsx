@@ -15,6 +15,7 @@ import { useHardwareKeyboard } from '../useMedia'
 import { AsyncBody } from '../panels/ui'
 import type { PanelCtx, Target } from '../panels/types'
 import { DiffText } from './Diff'
+import { MarkdownBody, isMarkdownPath } from './MarkdownView'
 
 /** `fs_read_file`'s remote projection — text, capped, and honest about it. */
 interface FileText {
@@ -144,7 +145,7 @@ function ResearchDetailView({
       showBack={showBack}
     >
       <AsyncBody state={state} empty="This entry is empty." skeletonRows={4}>
-        {(d) => <pre className="doc">{researchText(d)}</pre>}
+        {(d) => <MarkdownBody text={researchText(d)} />}
       </AsyncBody>
     </Frame>
   )
@@ -179,7 +180,13 @@ function DocDetail({
   return (
     <Frame title={target.title} subtitle={target.path} onBack={onBack} showBack={showBack}>
       <AsyncBody state={state} empty="This file is empty." skeletonRows={5}>
-        {(body) => <pre className="doc mono">{body}</pre>}
+        {(body) =>
+          isMarkdownPath(target.path) ? (
+            <MarkdownBody text={body} />
+          ) : (
+            <pre className="doc mono">{body}</pre>
+          )
+        }
       </AsyncBody>
     </Frame>
   )
@@ -263,7 +270,11 @@ function FileDetail({
                   Showing the first 512 KB of {Math.round(f.bytes / 1024)} KB.
                 </div>
               )}
-              <CodeBlock text={f.text ?? ''} name={basename(path)} bytes={f.bytes} />
+              {isMarkdownPath(path) ? (
+                <MarkdownBody text={f.text ?? ''} />
+              ) : (
+                <CodeBlock text={f.text ?? ''} name={basename(path)} bytes={f.bytes} />
+              )}
             </>
           )
         }
@@ -427,7 +438,7 @@ function PrDetail({
       </div>
       {tab === 'body' ? (
         <AsyncBody state={body} empty="This pull request has no description.">
-          {(text) => <pre className="doc">{text}</pre>}
+          {(text) => <MarkdownBody text={text} />}
         </AsyncBody>
       ) : (
         <Patch

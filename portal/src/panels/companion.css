@@ -70,3 +70,51 @@
 .comp-note {
   margin-top: 2px;
 }
+
+/* ---- the floating face ----
+   Fixed to the shell, not the rail: the companion is cross-project, and the
+   rail is one project's index. Bottom-right, clear of the detail pane's
+   scrollbar and of a phone's home indicator. */
+.comp-fab {
+  position: fixed;
+  right: max(14px, env(safe-area-inset-right));
+  bottom: max(14px, env(safe-area-inset-bottom));
+  z-index: 40;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  background: var(--bg-raised, rgba(255, 255, 255, 0.05));
+  color: var(--text-dim);
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+.comp-fab:hover {
+  color: var(--text);
+}
+.comp-fab.on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.comp-fab.asleep {
+  opacity: 0.75;
+}
+.comp-fab-z {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-dim);
+}
+.comp-fab-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+}

@@ -728,6 +728,11 @@ export interface SpotQuery {
    *  owns the files, and the sources only need to know that a bare Enter has
    *  something to send even with nothing typed. */
   attachments?: number;
+  /** Typing has become writing (spotCompose.isPrompt): a paragraph, a line
+   *  break, a pasted image. Only sources that declare `composing` are asked —
+   *  ranking prose against filenames is work whose every row the palette is
+   *  about to discard. */
+  composing?: boolean;
 }
 
 export interface SpotSource {
@@ -747,11 +752,15 @@ export interface SpotSource {
   /** Below this query length the source isn't asked. Deferred sources default
    *  to 1: a round trip per keystroke on an empty box helps nobody. */
   minQuery?: number;
+  /** Still asked once the input is a prompt rather than a query. Off by
+   *  default: a composing palette offers what to do with the sentence, not
+   *  matches for it. */
+  composing?: boolean;
   rows: (q: SpotQuery) => SpotRow[] | Promise<SpotRow[]>;
 }
 
 const SOURCES: SpotSource[] = [
-  { id: "actions", group: "Actions", blurb: "The launcher entries, and running what you typed as a one-shot task.", timing: "instant", rows: (q) => actionRows(q.query, q.ctx, q.attachments) },
+  { id: "actions", group: "Actions", blurb: "The launcher entries, and running what you typed as a one-shot task.", timing: "instant", composing: true, rows: (q) => actionRows(q.query, q.ctx, q.attachments) },
   { id: "tabs", group: "Open Tabs", blurb: "Everything open in this project's tab strip.", timing: "instant", rows: (q) => tabRows(q.query, q.ctx) },
   // High, and above Files on purpose: what you copied a minute ago is the thing
   // you are most likely to be reaching for, and it is the one row here that
@@ -827,9 +836,10 @@ const disabled = (): string[] => {
   }
 };
 
-const asks = (s: SpotSource, query: string, off: string[]) =>
+const asks = (s: SpotSource, q: SpotQuery, off: string[]) =>
   !off.includes(s.id) &&
-  query.trim().length >= (s.minQuery ?? (s.timing === "deferred" ? 1 : 0));
+  (!q.composing || s.composing) &&
+  q.query.trim().length >= (s.minQuery ?? (s.timing === "deferred" ? 1 : 0));
 
 /** The synchronous sources, on every keystroke. A throwing source costs its own
  *  rows and nothing else. */
@@ -837,7 +847,7 @@ export function instantRows(q: SpotQuery): SpotRow[] {
   const out: SpotRow[] = [];
   const off = disabled();
   for (const s of SOURCES) {
-    if (s.timing !== "instant" || !asks(s, q.query, off)) continue;
+    if (s.timing !== "instant" || !asks(s, q, off)) continue;
     try {
       const rows = s.rows(q);
       if (Array.isArray(rows)) out.push(...rows);
@@ -855,7 +865,7 @@ export function instantRows(q: SpotQuery): SpotRow[] {
 export async function deferredRows(q: SpotQuery): Promise<SpotRow[]> {
   const off = disabled();
   const lists = await Promise.all(
-    SOURCES.filter((s) => s.timing === "deferred" && asks(s, q.query, off)).map((s) =>
+    SOURCES.filter((s) => s.timing === "deferred" && asks(s, q, off)).map((s) =>
       Promise.resolve()
         .then(() => s.rows(q))
         .catch((err) => {

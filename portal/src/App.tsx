@@ -20,9 +20,11 @@ import { NewAgentSheet } from './NewAgentSheet'
 import {
   applyTheme,
   buildRows,
+  isRemoteOutstanding,
   type Digest,
   type Project,
   type Pty,
+  type RemoteAttentionItem,
   type RemoteCli,
   type RemoteCompanion,
   type Stat,
@@ -118,6 +120,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
   const [livePtys, setLivePtys] = useState<Pty[]>([])
   const [clis, setClis] = useState<RemoteCli[]>([])
   const [companion, setCompanion] = useState<RemoteCompanion | null>(null)
+  const [attention, setAttention] = useState<RemoteAttentionItem[]>([])
   const [events, setEvents] = useState<AgentEventEntry[]>([])
 
   // ---- navigation ----
@@ -157,9 +160,14 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
         const ws = (m.projects as Workspace) || { projects: [] }
         const all = ws?.projects ?? []
         const openIds = ws?.openIds
+        // A hibernating project keeps its IDE tab (so it stays in openIds),
+        // but nothing in it is running — the portal must not offer it.
+        const asleep = new Set(Array.isArray(m.hibernated) ? (m.hibernated as string[]) : [])
         // Only the projects open in the IDE (its tabs), not every one ever
         // registered — the same scope the server now applies to sessions.
-        const visible = openIds && openIds.length ? all.filter((p) => openIds.includes(p.id)) : all
+        const visible = (
+          openIds && openIds.length ? all.filter((p) => openIds.includes(p.id)) : all
+        ).filter((p) => !asleep.has(p.id))
         setProjects(visible)
         setProjectId((current) =>
           current && visible.some((project) => project.id === current)
@@ -175,6 +183,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
         setLivePtys((m.ptys as Pty[]) ?? [])
         setClis((m.clis as RemoteCli[]) ?? [])
         setCompanion((m.companion as RemoteCompanion | null) ?? null)
+        setAttention(Array.isArray(m.attention) ? (m.attention as RemoteAttentionItem[]) : [])
         applyTheme(m.theme as Record<string, string> | undefined)
       } else if (m.t === 'event') {
         if (m.name === 'pty:stats') {
@@ -252,6 +261,32 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     if (notified.current.size > 500) notified.current = new Set(pending.map((p) => p.key))
   }, [pending])
 
+  // The same buzz for attention-channel questions — the ones that never touch
+  // the hook stream (canopy_ask_user, a dialog raised in a background project).
+  // Its own ref so trimming one set cannot re-fire the other's alerts.
+  const attNotified = useRef(new Set<string>())
+  useEffect(() => {
+    // Blocked-agent questions also arrive as pending cards (which buzz above);
+    // where the card is already on screen, don't buzz its attention twin.
+    const carded = new Set(pending.map((p) => `agent:${p.sessionId}`))
+    for (const item of attention) {
+      if (!isRemoteOutstanding(item) || attNotified.current.has(item.id)) continue
+      if (item.dedupeKey && carded.has(item.dedupeKey)) continue
+      attNotified.current.add(item.id)
+      void showAlert({
+        key: `att:${item.id}`,
+        title: item.projectName ? `${item.title} · ${item.projectName}` : item.title,
+        body: (item.body ?? 'Waiting on you.').slice(0, 180),
+        pty: null,
+        urgent: true,
+      })
+    }
+    if (attNotified.current.size > 500) {
+      const live = new Set(attention.map((a) => a.id))
+      attNotified.current = new Set([...attNotified.current].filter((id) => live.has(id)))
+    }
+  }, [attention, pending])
+
   const project = useMemo(
     () => projects.find((p) => p.id === projectId) ?? projects[0],
     [projects, projectId],
@@ -297,6 +332,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     rows,
     stats,
     pending,
+    attention,
     clis,
     companion,
     openKey: activeKey,

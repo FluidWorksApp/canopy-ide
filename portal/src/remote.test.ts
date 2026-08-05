@@ -21,8 +21,11 @@ describe('the panel rail', () => {
     // `browser` is capability:none — it declares why it cannot travel instead of
     // pretending to. `core` is the project addressing space, which the shell
     // renders as the project switcher rather than a panel of its own.
+    // `instructions` keeps its manifest (the spine's grant tests hold in both
+    // directions) but is deliberately not surfaced: the owner removed its menu
+    // from the portal. If it comes back, delete it from this exclusion.
     const listing = MANIFESTS.filter(
-      (m) => m.capability.level !== 'none' && m.id !== 'core',
+      (m) => m.capability.level !== 'none' && m.id !== 'core' && m.id !== 'instructions',
     ).map((m) => m.id)
     for (const id of listing) {
       // `agents` covers both the agents and terminals panels; `stats` renders as
@@ -58,13 +61,24 @@ describe('the panel rail', () => {
   })
 
   it('places every wide panel in desktop-style chrome exactly once', () => {
+    // `notifications` lives in the title bar; `companion` floats above the
+    // shell (it is cross-project, so it has no place in a rail that indexes
+    // one project). Everything else is a rail entry.
     const placed = [
       'notifications',
+      'companion',
       ...WIDE_RAIL_GROUPS.flatMap((group) => group.panels),
       ...WIDE_RAIL_FOOTER,
     ]
     expect(new Set(placed).size).toBe(placed.length)
     expect(new Set(placed)).toEqual(new Set(PANELS.map((panel) => panel.id)))
+  })
+
+  it('keeps the companion off the rail and on the floating face', () => {
+    const railed = WIDE_RAIL_GROUPS.flatMap((group) => group.panels as readonly string[])
+    expect(railed).not.toContain('companion')
+    const shell = readFileSync(join(process.cwd(), 'portal/src/shells/WideShell.tsx'), 'utf8')
+    expect(shell).toContain('<CompanionFab')
   })
 
   it('consumes the shared desktop chrome contract', () => {
