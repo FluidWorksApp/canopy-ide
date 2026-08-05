@@ -38,7 +38,12 @@ import {
 } from "./icons";
 import { TaskProgress } from "./TaskProgress";
 import { RESEARCH_STEPS, stepsDone } from "../microTasks";
+import { usePrLinkStates } from "../prLinkState";
 import { Button } from "./ui";
+
+/** One array identity for "this entry has no linked PRs", so the hook below is
+ *  not handed a fresh empty array on every render. */
+const NO_PRS: ipc.ResearchPrLink[] = [];
 
 interface ResearchViewProps {
   projectId: string;
@@ -210,6 +215,12 @@ export function ResearchView({
     };
   }, [live, projectId, researchId]);
 
+  // What each linked PR is *now*, rather than what it was when the agent linked
+  // it. The state on the record is written once, at link time, and an entry
+  // that has left `implementing` is never swept by the reconciler — so without
+  // this the chip below says "open" against a pull request that merged weeks
+  // ago. Above the early returns because hooks cannot be conditional.
+  const prState = usePrLinkStates(entry?.links.prs ?? NO_PRS);
 
   if (error) {
     return (
@@ -518,15 +529,20 @@ export function ResearchView({
           <section className="research-section">
             <h3>What came of it</h3>
             <ul className="research-links">
-              {entry.links.prs.map((pr) => (
-                <li key={`${pr.repo}#${pr.number}`}>
-                  <button className="research-link" onClick={() => onOpenPr?.(pr)}>
-                    #{pr.number}
-                  </button>
-                  <span className={`research-pr-state research-pr-${pr.state}`}>{pr.state}</span>
-                  <span className="research-source-meta">{pr.repo}</span>
-                </li>
-              ))}
+              {entry.links.prs.map((pr) => {
+                const state = prState(pr);
+                return (
+                  <li key={`${pr.repo}#${pr.number}`}>
+                    <button className="research-link" onClick={() => onOpenPr?.(pr)}>
+                      #{pr.number}
+                    </button>
+                    <span className={`research-pr-state research-pr-${state}`}>
+                      {state}
+                    </span>
+                    <span className="research-source-meta">{pr.repo}</span>
+                  </li>
+                );
+              })}
               {entry.links.tickets.map((t) => (
                 <li key={t.id}>
                   <button className="research-link" onClick={() => void openUrl(t.url)}>

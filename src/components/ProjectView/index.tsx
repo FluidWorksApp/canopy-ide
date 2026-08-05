@@ -211,6 +211,7 @@ import {
   cached as notesCached,
   create as createNote,
   noteContext,
+  reconcileMerged as reconcileNotesMerged,
   refresh as refreshNotes,
   setStatus as setNoteStatus,
 } from "../../notes";
@@ -6032,20 +6033,30 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return () => window.removeEventListener(HIBERNATE_EVENT, onHibernate);
   }, [project.id]);
 
-  // Warm the research cache once per project, so ⌘K can offer "this has
-  // already been looked into" on the first keystroke rather than after a round
-  // trip. One directory read of a few dozen small files.
+  // Warm the research and scratchpad caches once per project, so ⌘K can offer
+  // "this has already been looked into" on the first keystroke rather than
+  // after a round trip. One directory read of a few dozen small files each.
   //
-  // Then close the loop: any entry whose linked PRs have merged becomes
-  // "implemented". Driven off the PR watcher's ticks rather than a timer of its
-  // own — it is the thing that already knows when PR state moved — and it costs
-  // one `gh pr view` per linked PR of an entry that is actually mid-flight,
-  // which in practice is none most of the time.
+  // Then close the loop for both: what a linked PR says gets brought up to
+  // date, and an entry or note whose PRs have all merged moves to
+  // "implemented" / "done". Driven off the PR watcher's ticks rather than a
+  // timer of its own — it is the thing that already knows when PR state moved.
+  // The `gh pr view` behind it is cached per PR and never repeated for one that
+  // merged (prLinkState.ts), so a tick over settled work costs nothing.
+  //
+  // The scratchpad half was written and never called: `notes.reconcileMerged`
+  // existed with tests and no caller, which is why every note's linked PR sat
+  // on the state it was linked with forever.
   useEffect(() => {
-    void researchRefresh(project.id).then(() => reconcileMerged(project.id));
-    return prWatchSubscribe(() => {
+    const sweep = () => {
       void reconcileMerged(project.id);
-    });
+      void reconcileNotesMerged(project.id);
+    };
+    void Promise.all([
+      researchRefresh(project.id),
+      refreshNotes(project.id),
+    ]).then(sweep);
+    return prWatchSubscribe(sweep);
   }, [project.id]);
 
   /** Rebuild one snapshotted tab and answer with its id, so the tab that was in

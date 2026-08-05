@@ -13,6 +13,7 @@ import {
   reconcileMerged,
   refresh,
 } from "./notes";
+import { __reset as resetPrLinkState } from "./prLinkState";
 
 const STATUSES = STATUS_ORDER;
 
@@ -229,6 +230,10 @@ describe("the brief an agent picks a note up with", () => {
 describe("settling a note whose PR merged", () => {
   beforeEach(async () => {
     vi.restoreAllMocks();
+    // Live PR states are resolved once and remembered — a merged PR is never
+    // asked about twice, which is the point of prLinkState. That memory
+    // outlives a test, so each one starts from nothing known.
+    resetPrLinkState();
     // reconcileMerged reads the module cache, so seed it through the same door
     // the app uses rather than reaching into module state.
     vi.spyOn(ipc, "notesList").mockResolvedValue([]);
@@ -300,6 +305,30 @@ describe("settling a note whose PR merged", () => {
 
     expect(await reconcileMerged("p1")).toBe(0);
     expect(get).not.toHaveBeenCalled();
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it("refreshes a PR on a note it will not move", async () => {
+    // The fundamental one. A note parked, or already done, or still in
+    // ideation, holds linked PRs too — and the old reconciler only ever looked
+    // at `doing`, so every one of those chips kept saying whatever it was
+    // linked with. Refreshing the record and moving the note are two jobs now.
+    await seed([row({ status: "parked" })]);
+    vi.spyOn(ipc, "notesGet").mockResolvedValue(
+      note({ links: { prs: [pr], research: [], task_runs: [], branches: [], files: [] } }),
+    );
+    vi.spyOn(ipc, "ghPrState").mockResolvedValue("MERGED");
+    const link = vi.spyOn(ipc, "notesLink").mockResolvedValue({} as never);
+    const set = vi.spyOn(ipc, "notesSetStatus").mockResolvedValue({} as never);
+
+    expect(await reconcileMerged("p1")).toBe(0);
+    expect(link).toHaveBeenCalledWith({
+      projectId: "p1",
+      id: "0007-tier-donations",
+      pr: { ...pr, state: "merged" },
+    });
+    // Parked is the user's decision. A merged PR corrects the chip; it does
+    // not overrule where they put the note.
     expect(set).not.toHaveBeenCalled();
   });
 
