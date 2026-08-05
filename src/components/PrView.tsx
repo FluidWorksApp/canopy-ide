@@ -394,6 +394,7 @@ export function PrView({
   /** What this PR is attached to. Its own request beside the conversation's —
    *  it's context, and context must never hold up the comments. */
   const [links, setLinks] = useState<ipc.PrLinks | null>(null);
+  const [linksError, setLinksError] = useState<string | null>(null);
   const [deltaOn, setDeltaOn] = useState(false);
   const [deltaPatch, setDeltaPatch] = useState<string | null>(null);
   const [loop, setLoop] = useState<PrLoop>(() => loadLoop(repo, pr.number));
@@ -458,7 +459,22 @@ export function PrView({
     };
   }, [repo]);
 
+  const refreshLinks = useCallback(async () => {
+    try {
+      const next = await ipc.ghPrLinks(repo, pr.number, pr.branch, pr.base);
+      setLinks(next);
+      setLinksError(null);
+      return next;
+    } catch (err) {
+      // Preserve the previous graph. A transient failure is not evidence that
+      // the PR stopped being stacked.
+      setLinksError(String(err));
+      return null;
+    }
+  }, [repo, pr.number, pr.branch, pr.base]);
+
   const refreshConv = useCallback(async () => {
+    void refreshLinks();
     try {
       const c = await ipc.ghPrConversation(repo, pr.number);
       setConv(c);
@@ -475,7 +491,7 @@ export function PrView({
         .catch(() => {});
       return null;
     }
-  }, [repo, pr.number]);
+  }, [repo, pr.number, refreshLinks]);
 
   /** Findings already turned into drafts, so a second read doesn't stack them —
    *  and a counter, because two findings can differ only in body. Both are per
@@ -585,6 +601,7 @@ export function PrView({
     setDeltaPatch(null);
     setMapRead(false);
     setLinks(null);
+    setLinksError(null);
     stagedKeys.current = new Set(
       savedDraft.comments
         .filter((d) => d.fromAgent)
@@ -611,17 +628,6 @@ export function PrView({
       .then((t) => live && setMap(t.trim() || null))
       .catch(() => {})
       .finally(() => live && setMapRead(true));
-    // Linked issues and the stack around it. Failure is silent on purpose:
-    // this is the one part of the tab that is pure context, and a red error
-    // where "nothing is linked" belongs would read as something being broken.
-    void ipc
-      .ghPrLinks(repo, pr.number, pr.branch, pr.base)
-      .then((l) => live && setLinks(l))
-      .catch(
-        () =>
-          live &&
-          setLinks({ closes: [], children: [], parents: [], mentions: [] }),
-      );
     void stageFindings();
     return () => {
       live = false;
@@ -887,8 +893,25 @@ export function PrView({
       sinceSha: conv?.my_last_review_sha,
       headSha: conv?.head_sha,
       policy,
+      stack: {
+        parents: (links?.parents ?? []).map(({ number, title }) => ({ number, title })),
+        children: (links?.children ?? []).map(({ number, title }) => ({ number, title })),
+      },
     }),
-    [repo, pr, conv?.my_last_review_sha, conv?.head_sha, policy],
+    [repo, pr, conv?.my_last_review_sha, conv?.head_sha, policy, links],
+  );
+
+  const fixCiPayload = useCallback(
+    (delivery: "stacked-pr" | "current-branch" = "stacked-pr") => ({
+      repo,
+      pr,
+      delivery,
+      stack: {
+        parents: (links?.parents ?? []).map(({ number, title }) => ({ number, title })),
+        children: (links?.children ?? []).map(({ number, title }) => ({ number, title })),
+      },
+    }),
+    [repo, pr, links],
   );
 
   const openPolicyEditor = useCallback(() => {
@@ -993,7 +1016,7 @@ export function PrView({
         startRound(false);
         break;
       case "fix-ci":
-        launch(fixCiTask, { repo, pr });
+        launch(fixCiTask, fixCiPayload());
         break;
       case "merge":
         setMergeOpen(true);
@@ -1464,7 +1487,7 @@ export function PrView({
         void ready();
         break;
       case "fix-ci":
-        launch(fixCiTask, { repo, pr });
+        launch(fixCiTask, fixCiPayload());
         break;
       case "update-branch":
         void runAction("Update branch", () =>
@@ -1865,7 +1888,18 @@ export function PrView({
             icon: <span className="ctx-glyph">{fixCiTask.icon}</span>,
             hint: "reads the failing logs first",
             disabled: isBusyTask(fixCiTask.id),
-            onClick: () => launch(fixCiTask, { repo, pr }),
+            submenu: [
+              {
+                label: "Create stacked PR",
+                hint: `targets ${pr.branch}`,
+                onClick: () => launch(fixCiTask, fixCiPayload("stacked-pr")),
+              },
+              {
+                label: "Commit on current branch",
+                hint: "updates this PR directly",
+                onClick: () => launch(fixCiTask, fixCiPayload("current-branch")),
+              },
+            ],
           });
       }
       items.push({
@@ -2512,8 +2546,9 @@ export function PrView({
                       </Button>
                       {onMicroTask && (
                         <Button size="sm"
-                          onClick={() => launch(fixCiTask, { repo, pr })}>
-                          Fix CI
+                          title={`Open a reviewable fix PR targeting ${pr.branch}`}
+                          onClick={() => launch(fixCiTask, fixCiPayload())}>
+                          Fix in child PR
                         </Button>
                       )}
                     </div>
@@ -2562,7 +2597,11 @@ export function PrView({
                 displaces nothing above it, so the one card that can't know its
                 own size in advance is also the one card whose growth nobody
                 feels. */}
-            <PrLinkRail links={links} />
+            <PrLinkRail
+              links={links}
+              error={linksError}
+              onRefresh={() => void refreshLinks()}
+            />
           </aside>
         </div>
 
@@ -3110,16 +3149,35 @@ function linkStateLabel(l: ipc.PrLink): string {
  *  this app, and a linked PR belongs to whichever project owns it, which may
  *  not be one that's open. Sending you somewhere that can actually show the
  *  thing beats a tab that can't. */
-function PrLinkRail({ links }: { links: ipc.PrLinks | null }) {
+function PrLinkRail({
+  links,
+  error,
+  onRefresh,
+}: {
+  links: ipc.PrLinks | null;
+  error: string | null;
+  onRefresh: () => void;
+}) {
   const groups = links
     ? LINK_GROUPS.map((g) => ({ ...g, rows: links[g.key] })).filter(
         (g) => g.rows.length > 0,
       )
     : [];
-  if (groups.length === 0) return null;
+  if (groups.length === 0 && !error) return null;
   return (
     <div className="pr-rail-section">
-      <div className="pr-rail-title">Linked</div>
+      <div className="pr-rail-title">
+        Stack &amp; linked work
+        <Button size="sm" title="Refresh stack relationships" onClick={onRefresh}>
+          ↻
+        </Button>
+      </div>
+      {error && (
+        <div className="pr-rail-empty">
+          Stack status could not be refreshed. The last known relationships are
+          still shown.
+        </div>
+      )}
       {groups.map((g) => (
         <div key={g.key} className="pr-link-group">
           <div className="pr-link-group-title" title={g.hint}>

@@ -631,12 +631,45 @@ describe("PR tasks that report back through a file", () => {
     expect(ctx).toContain("report blocked");
   });
 
-  it("makes the CI task work from the logs and forbids the cheap fixes", () => {
+  it("makes the CI task use logs and default to a reviewable stacked PR", () => {
     const ctx = fixCiTask.buildContext({ repo: "/repo", pr }, "", undefined);
     expect(ctx).toContain("--log-failed");
     expect(ctx).toContain("do not delete, skip, or loosen a test");
+    expect(ctx).toContain("stacked child pull request");
+    expect(ctx).toContain("gh pr create --draft --base fix/parser");
+    expect(ctx).toContain("not `main` or the repository default");
+    expect(ctx).not.toContain("git push origin HEAD:fix/parser");
     expect(ctx).toContain("Never force-push");
     expect(fixCiTask.isolation?.kind).toBe("pr-worktree");
+  });
+
+  it("can deliver a CI fix directly to the current PR branch", () => {
+    const ctx = fixCiTask.buildContext(
+      { repo: "/repo", pr, delivery: "current-branch" },
+      "",
+      undefined,
+    );
+    expect(ctx).toContain("directly to the current PR branch");
+    expect(ctx).toContain("git push origin HEAD:fix/parser");
+    expect(ctx).not.toContain("gh pr create --draft");
+  });
+
+  it("keeps review findings inside the current stack layer", () => {
+    const ctx = prReviewTask.buildContext(
+      {
+        repo: "/repo",
+        pr,
+        stack: {
+          parents: [{ number: 11, title: "Add schema" }],
+          children: [{ number: 13, title: "Use schema" }],
+        },
+      },
+      "",
+    );
+    expect(ctx).toContain("one layer of a stack");
+    expect(ctx).toContain('"number":11');
+    expect(ctx).toContain('"number":13');
+    expect(ctx).toContain("do not ask this PR to repair unchanged parent code");
   });
 
   it("hands the suggestion to the agent as quoted data, not as an instruction", () => {

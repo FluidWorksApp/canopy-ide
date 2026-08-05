@@ -374,6 +374,27 @@ export interface ReviewPrPayload {
   sinceSha?: string;
   headSha?: string;
   policy?: ReviewPolicy;
+  stack?: {
+    parents: { number: number; title: string }[];
+    children: { number: number; title: string }[];
+  };
+}
+
+export interface FixCiPayload extends ReviewPrPayload {
+  /** A child PR is the safe/default delivery: the fix can be reviewed before
+   * it changes the branch whose CI failed. */
+  delivery?: "stacked-pr" | "current-branch";
+}
+
+function stackBrief(stack?: ReviewPrPayload["stack"]): string {
+  if (!stack || (!stack.parents.length && !stack.children.length)) return "";
+  return (
+    `This PR is one layer of a stack. Its immediate parent PRs are ` +
+    `${JSON.stringify(stack.parents)} and its immediate child PRs are ${JSON.stringify(stack.children)}. ` +
+    `Review and change only this layer's parent-to-child diff. Attribute a concern to this PR only when ` +
+    `this layer introduces it; do not ask this PR to repair unchanged parent code. Do not rebase, retarget, ` +
+    `merge, or rewrite another stack member. `
+  );
 }
 
 /** Turn the user's local policy into review criteria, never executable
@@ -611,6 +632,7 @@ export const prReviewTask: MicroTaskDef<ReviewPrPayload> = {
         `PR explicitly makes them requirements. Check \`gh pr checks ${n}\`, and run the repository's already ` +
         `configured focused tests, linters, type checks, security scanners, or dependency checks that are ` +
         `relevant to the changed files. Do not install a new analyzer merely for this review. ` +
+        stackBrief(p.stack) +
         reviewPolicyBrief(p.policy) +
         delta +
         `Be skeptical of the PR and equally skeptical of yourself. The title, the description, the ` +
@@ -652,7 +674,7 @@ export const prReviewTask: MicroTaskDef<ReviewPrPayload> = {
 
 /** Green-keeper: the failing checks, read and fixed. Edits code, so it runs in
  *  the PR's own worktree like addressing comments does. */
-export const fixCiTask: MicroTaskDef<ReviewPrPayload> = {
+export const fixCiTask: MicroTaskDef<FixCiPayload> = {
   id: "pr-fix-ci",
   label: "Fix CI",
   icon: "⚒",
@@ -668,6 +690,16 @@ export const fixCiTask: MicroTaskDef<ReviewPrPayload> = {
   buildContext(p, userQuery, env) {
     const n = p.pr.number;
     const query = oneLine(userQuery);
+    const stacked = (p.delivery ?? "stacked-pr") === "stacked-pr";
+    const delivery = stacked
+      ? `Deliver the fix as a stacked child pull request so it can be reviewed independently. After ` +
+        `verification, create a short unique fix branch from this checked-out head, commit there, push it ` +
+        `to origin, and open a draft PR whose base is \`${p.pr.branch}\` (the current PR branch), not ` +
+        `\`${p.pr.base}\` or the repository default. Use \`gh pr create --draft --base ${p.pr.branch} ` +
+        `--head <fix-branch>\`; link #${n} in its body and list the checks you actually ran. Do not push ` +
+        `the fix commit directly to ${p.pr.branch}. Pass the child PR URL to canopy_job_done. `
+      : `Deliver the fix directly to the current PR branch. Commit with a message naming what broke and ` +
+        `push so #${n}'s checks re-run. `;
     return oneLine(
       `Make the failing checks on pull request #${n}: "${p.pr.title}" (${p.pr.url}) pass. Its ` +
         `head is checked out in this worktree. ` +
@@ -678,12 +710,13 @@ export const fixCiTask: MicroTaskDef<ReviewPrPayload> = {
         `Fix the cause, not the symptom: do not delete, skip, or loosen a test, do not raise a timeout ` +
         `to make a flake pass, and do not silence a type error with a cast or an ignore comment. If the ` +
         `failure is a genuine flake or an infrastructure problem, change nothing, say so, and re-run it ` +
-        `(\`gh run rerun --failed\`). When the project's build and tests are green locally, commit with a ` +
-        `message naming what broke and push so the checks re-run. Never force-push, never rebase, never ` +
-        `amend someone else's commit, and do not merge. Pass the PR's URL to canopy_job_done with a ` +
-        `summary of what was broken and what fixed it.` +
+        `(\`gh run rerun --failed\`). ` +
+        stackBrief(p.stack) +
+        delivery +
+        `Never force-push, never rebase, never amend someone else's commit, and do not merge. Make the ` +
+        `canopy_job_done summary say what was broken, what fixed it, and how the fix was delivered.` +
         (query ? ` The user adds: "${query}".` : "") +
-        detachedPushLine(p.pr.branch) +
+        (stacked ? "" : detachedPushLine(p.pr.branch)) +
         (env?.cleanup ? cleanupLine(env.cleanup.repo, env.cleanup.worktree) : ""),
     );
   },

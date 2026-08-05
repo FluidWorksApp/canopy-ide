@@ -18,6 +18,8 @@ keeps public review, resolution, pushes, and merging under a human click.
 | CI and analyzers | CI-log analysis plus managed linter/security catalog | Reads GitHub checks and runs relevant analyzers already configured by the repository; no opaque third-party scanner installation |
 | Suggested fixes | GitHub suggestions and agent Autofix | Applies GitHub suggestion fences in an isolated PR worktree, verifies, commits, pushes, and replies |
 | Review remediation | Autofix current branch or stacked PR | Fix CI, resolve conflicts, address comments, test, push, and create follow-up issues in isolated worktrees |
+| Stacked fix delivery | Fix CI can open a child PR targeting the current PR branch or commit directly | Fix CI defaults to a draft child PR targeting the current PR branch, with an explicit direct-commit alternative |
+| Stack context | Follow-up fixes remain independently reviewable | Review and fix agents receive immediate parent/child context and stay scoped to the current layer; the rail refreshes stack relationships without erasing stale known state on failure |
 | Contextual chat | PR bot commands and thread chat | Visible steerable agent terminal, companion PR actions, and routing back to the PR's originating session |
 | Persistent preferences | Organisation/repository Learnings | Explicit repository learnings are user-owned and editable in the Review policy dialog before agents apply them |
 | Custom checks | Natural-language pre-merge checks with warning/error policy | Repository policy defines warning/error checks; the review map reports PASS/WARNING/ERROR/INCONCLUSIVE with evidence |
@@ -47,6 +49,16 @@ keeps public review, resolution, pushes, and merging under a human click.
 3. A managed security/dependency scanner catalog with normalised findings.
 4. A semantic change-stack view; conditional review diagrams are built.
 5. GitLab, Azure DevOps, and Bitbucket provider adapters.
+
+## Stacked PR terminology
+
+CodeRabbit's **Change Stack** is a semantic reading order for files and ranges
+inside one pull request. It is not a graph of dependent pull requests. Its
+recent **Create stacked PR** option is narrower: Fix CI or another coding task
+opens a child PR whose base is the current PR branch, so the generated fix can
+be reviewed before entering the parent. Canopy implements that delivery model
+and exposes its already-detected immediate parent/child relationships; it does
+not claim automatic transitive restacking or chain-wide landing.
 
 ## Primary CodeRabbit sources
 
