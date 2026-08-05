@@ -2822,13 +2822,14 @@ pub async fn claude_session_stats(transcript_path: String) -> Result<ClaudeSessi
 // The status tray (claude_session_stats above) follows one live Claude session.
 // The Statistics panel wants the whole picture: every session Canopy knows,
 // across every CLI, summed into token/cost totals and per-CLI / per-model
-// breakdowns. Each CLI records usage in its own transcript format, so a small
-// per-agent fold normalizes them into one shape.
+// breakdowns. Each CLI records usage in its own store format — JSONL
+// transcripts for claude/omp/codex, SQLite session rows for opencode — so a
+// small per-agent reader normalizes them into one shape.
 
 /// Normalized token/cost usage for one agent session, summed across its turns.
-/// `cost` is set only when the CLI records its own cost (omp); otherwise it is
-/// None and the frontend estimates from `model` + a pricing table (as the tray
-/// already does for Claude).
+/// `cost` is set only when the CLI records its own cost (omp, opencode);
+/// otherwise it is None and the frontend estimates from `model` + a pricing
+/// table (as the tray already does for Claude).
 #[derive(Serialize, Clone, Default)]
 pub struct AgentSessionUsage {
     pub session_id: String,
@@ -2994,6 +2995,7 @@ fn fold_codex(v: &serde_json::Value, u: &mut Usage) {
 }
 
 /// One session's identity + resolved transcript path, before folding.
+#[derive(Clone)]
 struct Candidate {
     agent: String,
     session_id: String,
@@ -3005,6 +3007,10 @@ struct Candidate {
     /// its statusLine, which canopy-hook records on the digest; transcripts
     /// carry no such figure. None falls back to the price-table estimate.
     cost: Option<f64>,
+    /// Usage that arrived already summed (opencode keeps running totals on its
+    /// session rows). When set, `agent_usage` uses it instead of folding a
+    /// transcript.
+    usage: Option<Usage>,
 }
 
 fn secs_mtime(meta: &std::fs::Metadata) -> u64 {
@@ -3022,8 +3028,8 @@ fn claude_transcript_path(home: &str, session_id: &str) -> Option<std::path::Pat
 }
 
 /// Sessions Canopy learned about from hook digests (~/.canopy/sessions). Covers
-/// Claude (and any hook-reporting CLI); omp/codex are filled in from their own
-/// stores below, so only Claude paths are resolved here.
+/// Claude (and any hook-reporting CLI); omp/codex/opencode are filled in from
+/// their own stores below, so only Claude paths are resolved here.
 fn canopy_digest_candidates(home: &str) -> Vec<Candidate> {
     let dir = std::path::PathBuf::from(home)
         .join(".canopy")
@@ -3072,6 +3078,7 @@ fn canopy_digest_candidates(home: &str) -> Vec<Candidate> {
             path,
             updated,
             cost: v["cost_usd"].as_f64(),
+            usage: None,
         });
     }
     out
@@ -3139,6 +3146,7 @@ fn omp_sessions(home: &str) -> Vec<Candidate> {
                 // omp reports cost per turn inside its transcript; fold_omp
                 // picks it up, so nothing to carry on the candidate.
                 cost: None,
+                usage: None,
             })
         })
         .collect()
@@ -3201,9 +3209,99 @@ fn codex_sessions(cfg: &str) -> Vec<Candidate> {
                 path: Some(path),
                 updated: mtime,
                 cost: None,
+                usage: None,
             })
         })
         .collect()
+}
+
+/// Result of one opencode store read, cached against the store's on-disk
+/// state. The db + wal (length, mtime) stamp changes on every commit, so an
+/// unchanged stamp means the candidates can be replayed without a query.
+type OpencodeCache = HashMap<std::path::PathBuf, ([u64; 4], Vec<Candidate>)>;
+static OPENCODE_CACHE: std::sync::LazyLock<std::sync::Mutex<OpencodeCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// opencode's model column is JSON (`{"id":"gpt-5.6","providerID":...}`) in
+/// current versions, a bare name in older ones.
+fn opencode_model(raw: Option<String>) -> Option<String> {
+    let raw = raw?;
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(v) => v["id"]
+            .as_str()
+            .or_else(|| v.as_str())
+            .map(str::to_string)
+            .or(Some(raw)),
+        Err(_) => Some(raw),
+    }
+}
+
+/// The most recent opencode sessions, from the SQLite store under a profile
+/// root's XDG data dir. Nothing to fold here: each `session` row keeps running
+/// token totals and the CLI's own billed cost, so the candidate carries its
+/// usage pre-summed. Reasoning tokens are billed as output and counted there;
+/// a zero cost (subscription-billed models) is left unset so the frontend
+/// falls back to its price-table estimate, as it does for Claude.
+fn opencode_sessions(cfg: &str) -> Vec<Candidate> {
+    const MAX: u32 = 60;
+    let db = std::path::PathBuf::from(cfg).join(".local/share/opencode/opencode.db");
+    let stamp_of = |p: &std::path::Path| -> [u64; 2] {
+        std::fs::metadata(p)
+            .map(|m| [m.len(), secs_mtime(&m)])
+            .unwrap_or([0, 0])
+    };
+    let [dl, dm] = stamp_of(&db);
+    if dl == 0 {
+        return Vec::new();
+    }
+    let [wl, wm] = stamp_of(&db.with_extension("db-wal"));
+    let stamp = [dl, dm, wl, wm];
+    if let Some((seen, cached)) = OPENCODE_CACHE.lock().unwrap().get(&db) {
+        if *seen == stamp {
+            return cached.clone();
+        }
+    }
+    let Some(conn) = crate::stores::open_ro(&db) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT s.id, COALESCE(s.directory, ''), COALESCE(s.title, ''), s.model, \
+                s.cost, s.tokens_input, s.tokens_output + s.tokens_reasoning, \
+                s.tokens_cache_read, s.tokens_cache_write, COALESCE(s.time_updated, 0), \
+                (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id \
+                    AND json_extract(m.data, '$.role') = 'assistant') \
+         FROM session s ORDER BY s.time_updated DESC LIMIT ?1",
+    ) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map([MAX], |r| {
+        Ok(Candidate {
+            agent: "opencode".into(),
+            session_id: r.get::<_, String>(0)?,
+            cwd: r.get::<_, String>(1)?,
+            title: Some(r.get::<_, String>(2)?).filter(|t| !t.is_empty()),
+            path: Some(db.clone()),
+            // opencode stores milliseconds.
+            updated: r.get::<_, i64>(9)?.max(0) as u64 / 1000,
+            cost: None,
+            usage: Some(Usage {
+                model: opencode_model(r.get::<_, Option<String>>(3)?),
+                input: r.get::<_, i64>(5)?.max(0) as u64,
+                output: r.get::<_, i64>(6)?.max(0) as u64,
+                cache_read: r.get::<_, i64>(7)?.max(0) as u64,
+                cache_creation: r.get::<_, i64>(8)?.max(0) as u64,
+                cost: r.get::<_, f64>(4).ok().filter(|c| *c > 0.0),
+                turns: r.get::<_, i64>(10)?.max(0) as u64,
+            }),
+        })
+    });
+    let Ok(rows) = rows else { return Vec::new() };
+    let out: Vec<Candidate> = rows.flatten().collect();
+    OPENCODE_CACHE
+        .lock()
+        .unwrap()
+        .insert(db, (stamp, out.clone()));
+    out
 }
 
 /// Keep the best candidate per (agent, session id): a resolved path beats none,
@@ -3226,7 +3324,8 @@ fn upsert(map: &mut HashMap<(String, String), Candidate>, c: Candidate) {
 /// Token + cost usage for every session Canopy currently knows, across all
 /// supported CLIs. Powers the Statistics panel and the status-tray grand total.
 /// "Known" = hook digests (Claude and any hook-reporting CLI) plus the most
-/// recent sessions in omp's and Codex's own stores — not a full-history scan.
+/// recent sessions in omp's, Codex's, and opencode's own stores — not a
+/// full-history scan.
 #[tauri::command]
 pub async fn agent_usage() -> Result<Vec<AgentSessionUsage>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
@@ -3237,21 +3336,28 @@ pub async fn agent_usage() -> Result<Vec<AgentSessionUsage>, String> {
     for c in omp_sessions(&home) {
         upsert(&mut by_key, c);
     }
-    // Codex files rollouts under CODEX_HOME, so each profile has its own.
+    // Codex files rollouts under CODEX_HOME and opencode its SQLite store
+    // under XDG_DATA_HOME, so each profile has its own.
     for (_, root) in crate::profiles::roots(&home) {
-        for c in codex_sessions(&root.to_string_lossy()) {
+        let root = root.to_string_lossy();
+        for c in codex_sessions(&root) {
+            upsert(&mut by_key, c);
+        }
+        for c in opencode_sessions(&root) {
             upsert(&mut by_key, c);
         }
     }
 
     let mut out = Vec::new();
     for c in by_key.into_values() {
-        let supported = matches!(c.agent.as_str(), "claude" | "codex" | "omp");
+        let supported = matches!(c.agent.as_str(), "claude" | "codex" | "omp" | "opencode");
         let usage = match (supported, c.path.as_deref()) {
             (true, Some(path)) => match c.agent.as_str() {
                 "claude" => fold_usage(path, fold_claude),
                 "omp" => fold_usage(path, fold_omp),
                 "codex" => fold_usage(path, fold_codex),
+                // Pre-summed on the candidate; nothing to fold.
+                "opencode" => c.usage.clone().unwrap_or_default(),
                 _ => Usage::default(),
             },
             _ => Usage::default(),
@@ -5497,5 +5603,75 @@ mod tests {
         assert_eq!(probe_target("acme run claude"), None);
         // A newline would corrupt the line-based parse of the probe's output.
         assert_eq!(probe_target("claude\necho pwned"), None);
+    }
+
+    // ---------- opencode usage capture ----------
+    //
+    // opencode keeps running token totals and its own billed cost on `session`
+    // rows in a SQLite store, not in an appendable transcript, so its reader
+    // is a query rather than a fold. These pin the row → Usage mapping.
+
+    fn opencode_db(tag: &str) -> std::path::PathBuf {
+        let root = tmp_home(&format!("oc-{tag}"));
+        let dir = root.join(".local/share/opencode");
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY, directory TEXT, title TEXT, model TEXT,
+                cost REAL DEFAULT 0, tokens_input INTEGER DEFAULT 0,
+                tokens_output INTEGER DEFAULT 0, tokens_reasoning INTEGER DEFAULT 0,
+                tokens_cache_read INTEGER DEFAULT 0, tokens_cache_write INTEGER DEFAULT 0,
+                time_updated INTEGER);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+             INSERT INTO session VALUES
+                ('ses_a', '/w', 'Fix the build',
+                 '{\"id\":\"gpt-5.6-sol\",\"providerID\":\"azure\"}',
+                 0.25, 100, 200, 50, 9000, 300, 1785898400000),
+                ('ses_b', '/w', 'Free ride', 'gpt-5.6-sol',
+                 0.0, 10, 20, 0, 0, 0, 1785898300000);
+             INSERT INTO message VALUES
+                ('m1', 'ses_a', '{\"role\":\"user\"}'),
+                ('m2', 'ses_a', '{\"role\":\"assistant\"}'),
+                ('m3', 'ses_a', '{\"role\":\"assistant\"}'),
+                ('m4', 'ses_b', '{\"role\":\"assistant\"}');",
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn opencode_session_rows_become_usage_candidates() {
+        let root = opencode_db("rows");
+        let out = super::opencode_sessions(root.to_str().unwrap());
+        assert_eq!(out.len(), 2);
+        let a = &out[0];
+        assert_eq!(a.agent, "opencode");
+        assert_eq!(a.session_id, "ses_a");
+        assert_eq!(a.cwd, "/w");
+        assert_eq!(a.title.as_deref(), Some("Fix the build"));
+        // Milliseconds on disk, seconds on the wire.
+        assert_eq!(a.updated, 1785898400);
+        let u = a.usage.as_ref().expect("usage rides the candidate");
+        assert_eq!(u.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(u.input, 100);
+        // Reasoning tokens are billed as output.
+        assert_eq!(u.output, 250);
+        assert_eq!(u.cache_read, 9000);
+        assert_eq!(u.cache_creation, 300);
+        assert_eq!(u.cost, Some(0.25));
+        assert_eq!(u.turns, 2, "turns counts assistant messages only");
+        // A bare-string model still resolves, and a zero cost stays None so
+        // the frontend can fall back to its estimate.
+        let b = &out[1];
+        let u = b.usage.as_ref().unwrap();
+        assert_eq!(u.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(u.cost, None);
+    }
+
+    #[test]
+    fn opencode_reader_is_absent_not_empty_without_a_store() {
+        let root = tmp_home("oc-none");
+        assert!(super::opencode_sessions(root.to_str().unwrap()).is_empty());
     }
 }
