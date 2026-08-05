@@ -1,9 +1,10 @@
 import { memo } from "react";
-import type { UpdateAvailability } from "../updater";
+import { releaseHighlights, type UpdateAvailability, type UpdateInfo } from "../updater";
 import { ashStateFor, type AttentionItem } from "../attention";
 import { Mascot } from "./Mascot";
 import { CloseIcon } from "./icons";
 import { Button } from "./ui";
+import "../releaseNotes.css";
 
 interface UpdateToastProps {
   /** Non-null when an update is available; the toast renders nothing otherwise. */
@@ -12,6 +13,7 @@ interface UpdateToastProps {
   progress: number | null;
   onOpenDownloads: () => void;
   onInstall: () => void;
+  onOpenReleaseNotes: () => void;
   onDismiss: () => void;
 }
 
@@ -23,6 +25,7 @@ function UpdateToastImpl({
   progress,
   onOpenDownloads,
   onInstall,
+  onOpenReleaseNotes,
   onDismiss,
 }: UpdateToastProps) {
   return (
@@ -30,7 +33,10 @@ function UpdateToastImpl({
       <div className="update-head">
         <strong>Canopy {update.info.version}</strong> is available
       </div>
-      {update.info.notes && <div className="update-notes">{update.info.notes}</div>}
+      <p className="update-summary">A new build is ready. Review what changed, then update when your agents are at a safe stopping point.</p>
+      <button className="update-release-link" onClick={onOpenReleaseNotes}>
+        View release notes <span aria-hidden="true">↗</span>
+      </button>
       {update.kind === "manual" ? (
         <div className="update-actions">
           <Button variant="accent" onClick={onOpenDownloads}>
@@ -62,6 +68,50 @@ function UpdateToastImpl({
 }
 
 export const UpdateToast = memo(UpdateToastImpl);
+
+interface ReleaseNotesToastProps {
+  release: UpdateInfo;
+  onOpen: () => void;
+  onDismiss: () => void;
+}
+
+/** Shown once for a fresh install and once after each update relaunch. It is a
+ * concise index into the canonical GitHub release, not a second markdown
+ * renderer that can drift from it. */
+function ReleaseNotesToastImpl({ release, onOpen, onDismiss }: ReleaseNotesToastProps) {
+  const highlights = releaseHighlights(release.notes);
+  const date = release.date
+    ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(
+        new Date(release.date),
+      )
+    : null;
+  return (
+    <section className="release-notes-toast" aria-label={`What's new in Canopy ${release.version}`}>
+      <div className="release-notes-kicker">WHAT'S NEW</div>
+      <div className="release-notes-title">
+        <div>
+          <strong>Canopy {release.version}</strong>
+          <span>{date ? `Released ${date}` : "You’re running the latest build"}</span>
+        </div>
+        <button className="release-notes-close" aria-label="Dismiss release notes" onClick={onDismiss}>
+          <CloseIcon size={12} />
+        </button>
+      </div>
+      {highlights.length > 0 ? (
+        <ul className="release-notes-list">
+          {highlights.map((line) => <li key={line}>{line}</li>)}
+        </ul>
+      ) : (
+        <p className="release-notes-fallback">See the improvements, fixes, and technical details in the full release notes.</p>
+      )}
+      <button className="release-notes-open" onClick={onOpen}>
+        Read the full release on GitHub <span aria-hidden="true">↗</span>
+      </button>
+    </section>
+  );
+}
+
+export const ReleaseNotesToast = memo(ReleaseNotesToastImpl);
 
 interface NoticeToastProps {
   item: AttentionItem;

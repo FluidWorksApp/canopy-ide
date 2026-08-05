@@ -19,6 +19,58 @@ export interface UpdateInfo {
   version: string;
   notes?: string;
   date?: string;
+  releaseUrl?: string;
+}
+
+const RELEASES = "https://github.com/FluidWorksApp/canopy-ide/releases";
+const RELEASE_API = "https://api.github.com/repos/FluidWorksApp/canopy-ide/releases";
+
+export const releaseUrlFor = (version: string) => `${RELEASES}/tag/v${version.replace(/^v/, "")}`;
+
+/** Turn a GitHub markdown body into the few scannable lines a small in-app
+ * card can carry. The full prose remains one click away on GitHub. */
+export function releaseHighlights(notes?: string, limit = 3): string[] {
+  if (!notes) return [];
+  return notes
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*#{1,6}\s+/.test(line))
+    .map((line) =>
+      line
+        .trim()
+        .replace(/^[-*+]\s+/, "")
+        .replace(/^\d+[.)]\s+/, "")
+        .replace(/\[([^\]]+)]\([^)]*\)/g, "$1")
+        .replace(/[*_`~]/g, "")
+        .trim(),
+    )
+    .filter((line) => line.length > 0 && !/^full changelog:?/i.test(line))
+    .slice(0, limit);
+}
+
+/** Fetch the canonical release body shown after a first install or update.
+ * A missing/rate-limited response still yields a useful card and link. */
+export async function releaseInfoForVersion(version: string): Promise<UpdateInfo> {
+  const clean = version.replace(/^v/, "");
+  const fallback: UpdateInfo = { version: clean, releaseUrl: releaseUrlFor(clean) };
+  try {
+    const res = await fetch(`${RELEASE_API}/tags/v${clean}`, {
+      headers: { Accept: "application/vnd.github+json" },
+    });
+    if (!res.ok) return fallback;
+    const rel = (await res.json()) as {
+      body?: string;
+      published_at?: string;
+      html_url?: string;
+    };
+    return {
+      version: clean,
+      notes: rel.body,
+      date: rel.published_at,
+      releaseUrl: rel.html_url ?? fallback.releaseUrl,
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 /** `auto` installs in place; `manual` can only point at the downloads page
@@ -35,7 +87,12 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
   const update = await check();
   if (!update) return null;
   pending = update;
-  return { version: update.version, notes: update.rawJson?.notes as string | undefined, date: update.date };
+  return {
+    version: update.version,
+    notes: update.rawJson?.notes as string | undefined,
+    date: update.date,
+    releaseUrl: releaseUrlFor(update.version),
+  };
 }
 
 /**
@@ -92,16 +149,29 @@ export async function checkForUpdateAnyChannel(): Promise<UpdateAvailability> {
   if (!pluginFailed && !/Linux/.test(navigator.userAgent)) return null;
   try {
     const res = await fetch(
-      "https://api.github.com/repos/FluidWorksApp/canopy-ide/releases/latest",
+      `${RELEASE_API}/latest`,
       { headers: { Accept: "application/vnd.github+json" } },
     );
     if (!res.ok) return null;
-    const rel = (await res.json()) as { tag_name?: string; published_at?: string };
+    const rel = (await res.json()) as {
+      tag_name?: string;
+      published_at?: string;
+      body?: string;
+      html_url?: string;
+    };
     const latest = rel.tag_name?.replace(/^v/, "");
     const { getVersion } = await import("@tauri-apps/api/app");
     const current = await getVersion();
     if (latest && newerThan(latest, current)) {
-      return { kind: "manual", info: { version: latest, date: rel.published_at } };
+      return {
+        kind: "manual",
+        info: {
+          version: latest,
+          notes: rel.body,
+          date: rel.published_at,
+          releaseUrl: rel.html_url ?? releaseUrlFor(latest),
+        },
+      };
     }
   } catch {
     // offline or rate-limited — a background check just stays quiet

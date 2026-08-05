@@ -79,7 +79,7 @@ import {
   HIBERNATION_CHANGE_EVENT,
   type ProjectSnapshot,
 } from "./hibernation";
-import { UpdateToast, NoticeToast } from "./components/Toast";
+import { ReleaseNotesToast, UpdateToast, NoticeToast } from "./components/Toast";
 import { ProjectDialog } from "./components/ProjectDialog";
 import { ProjectManager } from "./components/ProjectManager";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -118,7 +118,10 @@ import { commandHeld, matches, terminalOwnsCtrl } from "./shortcuts";
 import {
   checkForUpdateAnyChannel,
   installUpdate,
+  releaseInfoForVersion,
+  releaseUrlFor,
   type UpdateAvailability,
+  type UpdateInfo,
 } from "./updater";
 
 /** Tell the hook helper which projects share context between their sessions.
@@ -508,6 +511,7 @@ export default function App() {
   }, []);
   const [updateAvail, setUpdateAvail] = useState<UpdateAvailability>(null);
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
+  const [releaseNotes, setReleaseNotes] = useState<UpdateInfo | null>(null);
   // "Later" mutes that version for this run; the next launch may ask again.
   const dismissedUpdate = useRef<string | null>(null);
 
@@ -1109,6 +1113,23 @@ export default function App() {
     );
     return () => unlisten?.();
   }, [loaded, openDirAsProject]);
+
+  // A first install and an update relaunch both cross a version boundary. Show
+  // the canonical GitHub release once per installed version; ordinary launches
+  // stay quiet after the card has been dismissed.
+  useEffect(() => {
+    if (!loaded || isSelftest()) return;
+    let cancelled = false;
+    void import("@tauri-apps/api/app").then(async ({ getVersion }) => {
+      const version = await getVersion();
+      if (localStorage.getItem("canopy.releaseNotes.seen") === version) return;
+      const info = await releaseInfoForVersion(version);
+      if (!cancelled) setReleaseNotes(info);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loaded]);
 
   // The embedded browser's invariants, watched while the app runs (see
   // browserWatchdog.ts). Dev builds always; a release build only when somebody
@@ -2135,6 +2156,11 @@ export default function App() {
       openUrl("https://canopyide.dev/downloads"),
     );
   }, []);
+  const openReleaseNotes = useCallback((info: UpdateInfo) => {
+    void import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+      openUrl(info.releaseUrl ?? releaseUrlFor(info.version)),
+    );
+  }, []);
   const installAndRestart = useCallback(() => {
     setUpdateProgress(0);
     void installUpdate(setUpdateProgress).catch((err) => {
@@ -2147,6 +2173,10 @@ export default function App() {
     if (updateAvail) dismissedUpdate.current = updateAvail.info.version;
     setUpdateAvail(null);
   }, [updateAvail]);
+  const dismissReleaseNotes = useCallback(() => {
+    if (releaseNotes) localStorage.setItem("canopy.releaseNotes.seen", releaseNotes.version);
+    setReleaseNotes(null);
+  }, [releaseNotes]);
   /** Clicking an item, from the toast or from the list.
    *
    *  Follows the target; deliberately does NOT resolve a question. Arriving at
@@ -2695,7 +2725,15 @@ export default function App() {
           progress={updateProgress}
           onOpenDownloads={openDownloadsPage}
           onInstall={installAndRestart}
+          onOpenReleaseNotes={() => openReleaseNotes(updateAvail.info)}
           onDismiss={dismissUpdate}
+        />
+      )}
+      {releaseNotes && !updateAvail && (
+        <ReleaseNotesToast
+          release={releaseNotes}
+          onOpen={() => openReleaseNotes(releaseNotes)}
+          onDismiss={dismissReleaseNotes}
         />
       )}
 

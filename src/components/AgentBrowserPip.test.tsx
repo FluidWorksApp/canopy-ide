@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { mockCommands } from "../test/setup";
 import { AgentBrowserPip, clampPip, pipOwnerVisible } from "./AgentBrowserPip";
@@ -47,6 +47,7 @@ function pointer(el: HTMLElement | Window, type: "Down" | "Move" | "Up", x: numb
 describe("AgentBrowserPip", () => {
   it("streams the linked browser as a passive image and can be minimized", async () => {
     mockCommands({
+      browser_here: { url: "http://localhost:5173/form", title: "Form" },
       browser_snapshot: { image: "cG5n", width: 1200, height: 800 },
     });
     render(
@@ -83,6 +84,48 @@ describe("AgentBrowserPip", () => {
     );
     fireEvent.click(screen.getByLabelText("Close browser picture in picture"));
     expect(closed).toBe(true);
+  });
+
+  it("does not accept a blank snapshot before the background page is ready", async () => {
+    vi.useFakeTimers();
+    let ready = false;
+    let snapshots = 0;
+    mockCommands({
+      browser_here: () =>
+        ready ? { url: "http://localhost:5173/form", title: "Form" } : null,
+      browser_snapshot: () => {
+        snapshots++;
+        return { image: "cG5n", width: 1200, height: 800 };
+      },
+    });
+
+    try {
+      render(
+        <AgentBrowserPip
+          tabId="preview-1"
+          url="http://localhost:5173/form"
+          agentId="opencode"
+          agentTitle="Fix the form"
+          supported
+          onClose={() => {}}
+        />,
+      );
+      await act(async () => void (await Promise.resolve()));
+      expect(snapshots).toBe(0);
+      expect(screen.getByText("Connecting to browser...")).toBeInTheDocument();
+
+      ready = true;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250);
+      });
+      expect(snapshots).toBe(1);
+      expect(screen.getByAltText("Live read-only view of localhost:5173")).toHaveAttribute(
+        "src",
+        "data:image/png;base64,cG5n",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("is dragged by its header and anchors where it is dropped", () => {
@@ -215,7 +258,10 @@ describe("AgentBrowserPip staying inside the pane", () => {
   });
 
   it("pulls a pip back in when a taller frame arrives", async () => {
-    mockCommands({ browser_snapshot: { image: "cG5n", width: 400, height: 1200 } });
+    mockCommands({
+      browser_here: { url: "http://localhost:5173/form", title: "Form" },
+      browser_snapshot: { image: "cG5n", width: 400, height: 1200 },
+    });
     mount({ supported: true });
     const rects = stubRects(pip(), { left: 0, top: 0, width: 400, height: 260 });
     act(() => {
@@ -270,6 +316,7 @@ describe("AgentBrowserPip staying inside the pane", () => {
   it("does not stream while hidden", async () => {
     let shots = 0;
     mockCommands({
+      browser_here: { url: "http://localhost:5173/form", title: "Form" },
       browser_snapshot: () => {
         shots++;
         return { image: "cG5n", width: 1200, height: 800 };
