@@ -140,6 +140,36 @@ describe("authority withholds rather than asks", () => {
   });
 });
 
+describe("the companion's tools do not need a project to run in", () => {
+  // The companion runs in no directory by design. App.tsx answers a ui op by
+  // first finding the project the caller's cwd falls in, and refuses when there
+  // is none — so a companion tool missing from PROJECTLESS_OPS is a tool that
+  // exists, is listed, is called, and always answers "this session's directory
+  // isn't inside any open Canopy project". That is not a hypothetical: it is
+  // how the whole PR half of this set was unreachable, `project` argument or
+  // not.
+  const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+  const projectless = (() => {
+    const start = app.indexOf("const PROJECTLESS_OPS = new Set([");
+    expect(start).toBeGreaterThan(-1);
+    const body = app.slice(start, app.indexOf("]);", start));
+    return [...body.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+  })();
+
+  it("lists every companion tool's op", () => {
+    for (const name of COMPANION_TOOLS) {
+      expect(projectless).toContain(name.replace(/^canopy_/, ""));
+    }
+  });
+
+  it("includes the shared tools that answer across the workspace for it", () => {
+    // `canopy_reviews` is a coding agent's tool too, and answers about its
+    // project — but for a caller that is in none it answers about all of them,
+    // which it cannot do if it never reaches the handler.
+    expect(projectless).toContain("reviews");
+  });
+});
+
 describe("tools that cannot answer for this agent are withheld", () => {
   it("keeps the per-project tools out of the companion's list", () => {
     // Asking it not to call canopy_project did not work: it called it, got

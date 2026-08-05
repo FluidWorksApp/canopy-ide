@@ -2388,6 +2388,7 @@ const COMPANION_BLIND_TOOLS: &[&str] = &["canopy_project", "canopy_component_fil
 /// the rest of this file's descriptors: the name is the contract, and
 /// companionToolsGuard.test.ts asserts the two lists stay identical.
 const COMPANION_MUTATING_TOOLS: &[&str] = &[
+    "canopy_start_session",
     "canopy_start_server",
     "canopy_stop_server",
     "canopy_restart_server",
@@ -2793,6 +2794,17 @@ fn companion_tool_defs() -> Vec<serde_json::Value> {
             }, "required": ["repo", "number", "action"], "additionalProperties": false }
         }),
         serde_json::json!({
+            "name": "canopy_start_session",
+            "description": "Set a coding agent going on a brief, in one component of one project — the way to hand work off to a repo that has no session running in it. Give `dir` (a component path from canopy_workspace) and `prompt`: everything the agent needs, in full, because it starts with no memory of this conversation and cannot ask you anything. It runs as a Canopy task in the user's window and reports back to them when it finishes; follow it with canopy_workspace_agents. Use canopy_message_agent instead when a session for this work already exists, or when the work is about a pull request.",
+            "inputSchema": { "type": "object", "properties": {
+                "dir": { "type": "string", "description": "Absolute component path from canopy_workspace. Omit only for a project with a single component, and then pass `project`" },
+                "prompt": { "type": "string", "description": "The whole brief: what to do, in which files, and what done looks like" },
+                "project": { "type": "string", "description": "The project by name — checked against `dir` when both are given" },
+                "label": { "type": "string", "description": "A few words naming this run in the user's Tasks list" },
+                "agent": { "type": "string", "description": "Which CLI to run it on (claude, codex, …). Omit to let Canopy choose" }
+            }, "required": ["prompt"], "additionalProperties": false }
+        }),
+        serde_json::json!({
             "name": "canopy_open_project",
             "description": "Bring a project to the front of the user's window, opening it if it was closed and waking it if it was asleep. Use it when your answer is somewhere they should be looking. This moves what is on their screen, so do it because the answer is there — not to be helpful at the end of every turn.",
             "inputSchema": { "type": "object", "properties": {
@@ -3184,8 +3196,10 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_reviews",
-            "description": "What's waiting on a review: requests teammates sent over Canopy's team relay (which exist nowhere else), and the open pull requests for this project's repos with their review state.",
-            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+            "description": "What's waiting on a review: requests teammates sent over Canopy's team relay (which exist nowhere else), and the open pull requests for this project's repos with their review state. Canopy's companion is in no project, so it gets every project's — narrow that with `project`.",
+            "inputSchema": { "type": "object", "properties": {
+                "project": { "type": "string", "description": "Just this project, by name. Only meaningful for a session that is in no project; a coding agent always gets its own" }
+            }, "additionalProperties": false }
         }
     ]);
     // Split out rather than one literal: `json!` blows its recursion limit
@@ -3312,6 +3326,15 @@ fn describe_action(name: &str, args: &serde_json::Value) -> (String, Option<Stri
         "canopy_start_server" => (
             "Start a server".into(),
             arg("command").or_else(|| arg("dir")),
+        ),
+        // What is being approved is an agent that will edit files in that
+        // directory, so the brief is the detail — not the label it gave the run.
+        "canopy_start_session" => (
+            match arg("dir").or_else(|| arg("project")) {
+                Some(where_) => format!("Start a coding agent in {where_}"),
+                None => "Start a coding agent".into(),
+            },
+            arg("prompt").map(|p| p.chars().take(240).collect()),
         ),
         "canopy_stop_server" => ("Stop a server".into(), arg("ptyId")),
         "canopy_restart_server" => ("Restart a server".into(), arg("ptyId")),
@@ -3557,13 +3580,29 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 .get("text")
                 .and_then(|v| v.as_str())
                 .ok_or("missing required argument: text")?;
-            text(ctx_post(serde_json::json!({
+            let request = serde_json::json!({
                 "kind": "message_agent",
                 "cwd": cwd(),
                 "ptyId": pty,
                 "pr": pr,
                 "text": body,
-            })))
+            });
+            // The `pr` form answers with what actually happened, and finding
+            // that out can mean reopening an ended conversation or preparing a
+            // workspace for a fresh agent. Held open past Canopy's own ceiling
+            // for it (MESSAGE_PR_TIMEOUT in context.rs): give up first and the
+            // agent is told the send failed while it is still being delivered,
+            // which is a worse lie than the one this replaced.
+            if pr.is_some() {
+                text(ctx_request_with_timeout(
+                    "POST",
+                    "/ctx/action",
+                    Some(request.to_string()),
+                    std::time::Duration::from_secs(310),
+                ))
+            } else {
+                text(ctx_post(request))
+            }
         }
         "canopy_diagnostics" => text(ui_op("diagnostics", args, 25)),
         "canopy_references" => text(ui_op("references", args, 25)),
@@ -3571,7 +3610,9 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
         "canopy_hover" => text(ui_op("hover", args, 25)),
         "canopy_symbols" => text(ui_op("symbols", args, 25)),
         "canopy_tickets" => text(ui_op("tickets", args, 25)),
-        "canopy_reviews" => text(ui_op("reviews", args, 25)),
+        // Held open like the other GitHub-delegating tools: one `gh` call per
+        // repo, and for the companion that is every repo the user has.
+        "canopy_reviews" => text(ui_op("reviews", args, 605)),
         "canopy_research" | "canopy_research_write" => {
             let action = args
                 .get("action")
@@ -3716,6 +3757,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
         | "canopy_workspace_search"
         | "canopy_workspace_prs"
         | "canopy_pr_details"
+        | "canopy_start_session"
         | "canopy_open_project"
         | "canopy_recall"
         | "canopy_remember" => {
@@ -3748,11 +3790,41 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             {
                 return Err("missing required argument: fact".into());
             }
+            if name == "canopy_start_session" {
+                if args
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .map_or(true, |p| p.trim().is_empty())
+                {
+                    return Err("missing required argument: prompt".into());
+                }
+                // The agent it starts inherits nothing from this conversation,
+                // so a one-line brief is a session that comes straight back to
+                // the user asking what was meant.
+                if args
+                    .get("dir")
+                    .and_then(|v| v.as_str())
+                    .map_or(true, str::is_empty)
+                    && args
+                        .get("project")
+                        .and_then(|v| v.as_str())
+                        .map_or(true, str::is_empty)
+                {
+                    return Err(
+                        "missing required argument: dir (a component path from canopy_workspace), \
+                         or project for a project with a single component"
+                            .into(),
+                    );
+                }
+            }
             let mut body = args.clone();
             // The op name is the tool name without the prefix, so adding a
             // companion tool is one descriptor and one case in agentOps.ts.
             body["op"] = serde_json::json!(name.trim_start_matches("canopy_"));
-            let timeout = if matches!(name, "canopy_workspace_prs" | "canopy_pr_details") {
+            let timeout = if matches!(
+                name,
+                "canopy_workspace_prs" | "canopy_pr_details" | "canopy_start_session"
+            ) {
                 605
             } else {
                 25

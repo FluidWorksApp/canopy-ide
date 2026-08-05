@@ -327,7 +327,11 @@ async function tickets(repos: string[]) {
 }
 
 /** What's waiting on a review: teammates' requests that arrived over the relay
- *  (which exist nowhere but this app) and the repos' open PRs. */
+ *  (which exist nowhere but this app) and the repos' open PRs.
+ *
+ *  `repos` is the calling session's project for a coding agent, and the
+ *  workspace's — optionally narrowed by name — for the companion, which is in
+ *  no project and would otherwise be asking about an empty set. */
 async function reviews(repos: string[], inbox: ipc.RelayCommandMsg[]) {
   const relay = inbox
     .filter((i) => i.kind === "review")
@@ -342,24 +346,28 @@ async function reviews(repos: string[], inbox: ipc.RelayCommandMsg[]) {
         note: "Open it in Canopy's Team panel to read the diff.",
       };
     });
-  const prs: unknown[] = [];
-  for (const repo of repos) {
-    const list = await ipc.ghPrList(repo).catch(() => []);
-    prs.push(
-      ...list.map((pr) => ({
-        repo,
-        number: pr.number,
-        title: pr.title,
-        author: pr.author,
-        branch: pr.branch,
-        draft: pr.draft,
-        mine: pr.mine,
-        reviewDecision: pr.review_decision,
-        mergeable: pr.mergeable,
-        url: pr.url,
-      })),
-    );
-  }
+  // In parallel, because this now covers the whole workspace when the caller
+  // is in no project: one `gh` call per repo, one after another, is the
+  // difference between an answer and a timeout.
+  const prs = (
+    await Promise.all(
+      repos.map(async (repo) => {
+        const list = await ipc.ghPrList(repo).catch(() => []);
+        return list.map((pr) => ({
+          repo,
+          number: pr.number,
+          title: pr.title,
+          author: pr.author,
+          branch: pr.branch,
+          draft: pr.draft,
+          mine: pr.mine,
+          reviewDecision: pr.review_decision,
+          mergeable: pr.mergeable,
+          url: pr.url,
+        }));
+      }),
+    )
+  ).flat();
   return { relayRequests: relay, pullRequests: prs };
 }
 
@@ -408,13 +416,27 @@ export interface UiOpContext {
   agents?: (project?: string | null) => Promise<unknown>;
   /** Branch/ahead/behind/dirty per repo, across the workspace. */
   workspaceGit?: (project?: string | null) => Promise<unknown>;
+  /** Set a coding agent going on a brief, in a component the caller names.
+   *  Resolves once Canopy has actually tried — a handoff whose outcome the
+   *  caller cannot see is not a handoff. */
+  startSession?: (req: {
+    project?: string | null;
+    dir?: string | null;
+    prompt?: string | null;
+    label?: string | null;
+    agent?: string | null;
+  }) => Promise<{ started: boolean; project: string; dir: string; note: string }>;
   /** The preview tab an agent's browser ops are driving, for the vault ops:
    *  filling a credential needs to know which page is being logged in to. */
   preview: () => Promise<PreviewTarget | null>;
 }
 
-function companionRepos(ctx: UiOpContext, project?: string | null): { project: string; repo: string }[] {
-  const projects = needCompanion(ctx.workspace, "canopy_workspace_prs")();
+function companionRepos(
+  ctx: UiOpContext,
+  project?: string | null,
+  tool = "canopy_workspace_prs",
+): { project: string; repo: string }[] {
+  const projects = needCompanion(ctx.workspace, tool)();
   const wanted = project?.trim().toLowerCase();
   const scoped = wanted ? projects.filter((p) => p.name.toLowerCase() === wanted) : projects;
   if (wanted && scoped.length === 0) {
@@ -532,7 +554,13 @@ async function prAction(op: ipc.AgentUiOp, ctx: UiOpContext) {
 export type CompanionOps = Required<
   Pick<
     UiOpContext,
-    "workspace" | "confirm" | "openProject" | "search" | "agents" | "workspaceGit"
+    | "workspace"
+    | "confirm"
+    | "openProject"
+    | "search"
+    | "agents"
+    | "workspaceGit"
+    | "startSession"
   >
 >;
 
@@ -565,7 +593,16 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
     case "tickets":
       return tickets(ctx.repos);
     case "reviews":
-      return reviews(ctx.repos, ctx.inbox);
+      // A session inside a project asks about that project. The companion is
+      // inside none, so its `ctx.repos` is empty — and answering "nothing is
+      // waiting on you" from an empty repo list is the most misleading thing
+      // this tool could do. Fall through to the workspace it can actually see.
+      return reviews(
+        ctx.repos.length || !ctx.workspace
+          ? ctx.repos
+          : companionRepos(ctx, op.project, "canopy_reviews").map((r) => r.repo),
+        ctx.inbox,
+      );
     case "ask":
       return { answer: await ctx.ask(op.question ?? "", op.options ?? []) };
     case "vault":
@@ -596,6 +633,14 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
       );
     case "workspace_prs":
       return workspacePrs(ctx, op.project);
+    case "start_session":
+      return needCompanion(ctx.startSession, "canopy_start_session")({
+        project: op.project,
+        dir: op.dir,
+        prompt: op.prompt,
+        label: op.label,
+        agent: op.agent,
+      });
     case "pr_details":
       return prDetails(op, ctx);
     case "pr_action":

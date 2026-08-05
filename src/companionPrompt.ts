@@ -313,7 +313,16 @@ export function buildCompanionPrompt(input: PromptInput): string {
           "  scrolls away.",
         ]
       : []),
-    "- And say plainly that starting a coding session on it is theirs to do.",
+    ...(has("canopy_start_session")
+      ? [
+          "- If no session is working there, `canopy_start_session` starts one:",
+          "  `dir` from `canopy_workspace` and a `prompt` that is the whole brief.",
+          "  It inherits nothing from this conversation and cannot ask you anything,",
+          "  so write it as you would for someone who was not in the room — what to",
+          "  change, where, and what done looks like. It answers with whether the",
+          "  launch actually happened; that answer is the only thing you may report.",
+        ]
+      : ["- And say plainly that starting a coding session on it is theirs to do."]),
     "",
     "**Use the tools, not the shell.** This is the mistake to avoid: reaching for",
     "`Bash`, `ls` or `git` to answer something a `canopy_*` tool already knows.",

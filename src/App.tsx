@@ -61,6 +61,7 @@ import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
 import { readRemoteThemeTokens } from "./remoteTheme";
 import { useTabDrag } from "./tabDrag";
 import * as prWatch from "./prWatchStore";
+import { parsePrUrl } from "./provenance";
 import * as clipboardStore from "./clipboardStore";
 import { CollabManager, safeName } from "./collab";
 import { ProjectView } from "./components/ProjectView";
@@ -166,10 +167,26 @@ const PROJECTLESS_OPS = new Set([
   "workspace_git",
   "workspace_agents",
   "workspace_search",
+  // The PR half of the companion's set. Every one of them addresses a repo by
+  // the absolute path it was handed (checked against the workspace in
+  // agentOps.ts), so the caller's own directory decides nothing — and requiring
+  // one meant the companion could not enumerate a single project's pull
+  // requests, `project` argument or not. `reviews` is the same question asked
+  // of the whole workspace when the caller is in no project.
+  "workspace_prs",
+  "pr_details",
+  "pr_action",
+  "reviews",
+  "start_session",
   "open_project",
   "recall",
   "remember",
 ]);
+
+/** Ticket for one companion-requested session launch, so the ProjectView that
+ *  runs it answers the request that asked for it and not another. */
+let sessionTicket = 0;
+const nextSessionTicket = () => ++sessionTicket;
 
 function publishScopes(state: WorkspaceState) {
   void ipc
@@ -643,16 +660,23 @@ export default function App() {
       // old app-wide home is adopted here, once, before anything reads it.
       const state = adoptLegacyCustomTasks(loadedState);
       if (state !== loadedState) await saveWorkspace(state);
-      for (const id of state.openIds) {
-        if (isHibernating(id)) continue;
-        const project = state.projects.find((p) => p.id === id);
-        for (const c of project?.components ?? []) {
-          await ipc.workspaceAdd(c.path).catch(() => {});
-        }
-      }
+      // State first. Registering the watchers is a recursive walk per
+      // component, and awaiting them one after another before the first
+      // setState is why a cold start showed the Welcome screen for a moment
+      // and then replaced it with the user's projects. Nothing rendered reads
+      // the scopes, so they can land afterwards — and together.
       setWs(state);
       publishScopes(state);
       setLoaded(true);
+      const paths = state.openIds
+        .filter((id) => !isHibernating(id))
+        .flatMap(
+          (id) =>
+            state.projects
+              .find((p) => p.id === id)
+              ?.components.map((c) => c.path) ?? [],
+        );
+      await Promise.all(paths.map((p) => ipc.workspaceAdd(p).catch(() => {})));
     });
     const subs = [
       ipc.onAgentEvents((raws) => {
@@ -1887,6 +1911,54 @@ export default function App() {
           });
           return;
         }
+        // Reaching whoever raised a pull request. The PR itself says which
+        // project this is about — the watcher holds every repo's rows, window
+        // wide — and routing it by the caller's directory instead is why a
+        // message from the companion, which sits in no directory at all, landed
+        // nowhere and said nothing. The caller is holding its tool call open on
+        // `opId`, so every path out of here answers it.
+        if (a.kind === "message_agent" && a.pr && a.text) {
+          const answer = (ok: boolean, note: string) => {
+            if (a.opId != null) void ipc.browserResult(a.opId, ok, note);
+            else if (!ok) notify(note, "info");
+          };
+          const number = Number(
+            parsePrUrl(a.pr)?.number ?? a.pr.replace(/^#/, ""),
+          );
+          if (!Number.isSafeInteger(number) || number <= 0) {
+            answer(false, `"${a.pr}" isn't a pull request I can look up.`);
+            return;
+          }
+          const row = prWatch.getSnapshot().rows.find((r) => r.number === number);
+          // The repo is a checkout root; a component may be that root or a
+          // directory inside it, so both directions count as "this project's".
+          const target = !row
+            ? undefined
+            : (projectIdentity(row.repo).projectId ??
+              wsRef.current.projects.find((p) =>
+                p.components.some((c) => c.path.startsWith(row.repo + "/")),
+              )?.id);
+          if (!target) {
+            answer(
+              false,
+              row
+                ? `PR #${number} is in ${row.repo}, which isn't in any project the user has open — nothing was delivered.`
+                : `No open PR #${number} in any of the user's projects — nothing was delivered. Check canopy_workspace_prs for the number.`,
+            );
+            return;
+          }
+          await prepareProjectForAgentAction(target, false);
+          window.setTimeout(
+            () =>
+              window.dispatchEvent(
+                new CustomEvent("canopy:agent-action", {
+                  detail: { projectId: target, action: a },
+                }),
+              ),
+            80,
+          );
+          return;
+        }
         const projectId =
           // A path the action NAMES beats the directory its caller happens to
           // sit in. This is what the companion needs and every agent benefits
@@ -2425,6 +2497,124 @@ export default function App() {
    *  chat. One at a time: the agent is blocked on the answer, so it cannot be
    *  asking two things at once. */
   const [proposal, setProposal] = useState<CompanionProposal | null>(null);
+  /** Start a coding session on a brief, in a project the caller names.
+   *
+   *  The companion's missing verb. Until this it could see every repo, every
+   *  session and every PR, and the only agent it could set in motion was the
+   *  one that had already raised a pull request — so work in a repo with no
+   *  live session could not be handed off at all, which is most of what a
+   *  companion is asked to do.
+   *
+   *  The run itself belongs to a ProjectView (it owns the tabs, the worktrees
+   *  and the task history), so this resolves and opens the project, hands the
+   *  brief over, and waits for the answer rather than acking a request it has
+   *  not seen land. A handoff the caller cannot verify is the failure this
+   *  whole note was about. */
+  const startSession = useCallback(
+    async (req: {
+      project?: string | null;
+      dir?: string | null;
+      prompt?: string | null;
+      label?: string | null;
+      agent?: string | null;
+    }) => {
+      const prompt = (req.prompt ?? "").trim();
+      if (!prompt) throw new Error("prompt is required: what the session should do");
+      const wanted = (req.project ?? "").trim().toLowerCase();
+      const named = wanted
+        ? wsRef.current.projects.find((p) => p.name.toLowerCase() === wanted)
+        : undefined;
+      if (wanted && !named) {
+        throw new Error(
+          `no project called "${req.project}" — the projects are: ${wsRef.current.projects
+            .map((p) => p.name)
+            .join(", ")}`,
+        );
+      }
+      // A component path is the precise answer and a project name the coarse
+      // one; a project with a single component needs neither spelled out.
+      const dir = (req.dir ?? "").trim() || named?.components[0]?.path;
+      if (!dir) {
+        throw new Error(
+          "dir is required: the component to work in, as its path from canopy_workspace",
+        );
+      }
+      const identity = projectIdentity(dir);
+      const projectId = named?.id ?? identity.projectId;
+      if (!projectId) {
+        throw new Error(
+          `${dir} isn't inside any of the user's projects — pass a component path from canopy_workspace`,
+        );
+      }
+      const target = wsRef.current.projects.find((p) => p.id === projectId);
+      if (named && identity.projectId && identity.projectId !== named.id) {
+        throw new Error(
+          `${dir} isn't in ${named.name} — it belongs to ${identity.projectName}`,
+        );
+      }
+      // Opened (and woken) first: the ProjectView that runs this is mounted
+      // only while its project is open, and a closed project would otherwise
+      // swallow the brief in silence. Never in the foreground — starting an
+      // agent is background work, and the user is looking at something else.
+      await prepareProjectForAgentAction(projectId, false);
+      const ticket = nextSessionTicket();
+      const answer = new Promise<{ started: boolean; note: string }>((resolve) => {
+        const done = (e: Event) => {
+          const d = (e as CustomEvent).detail as {
+            ticket: number;
+            started: boolean;
+            note: string;
+          };
+          if (d?.ticket !== ticket) return;
+          window.removeEventListener("canopy:start-session-result", done);
+          window.clearTimeout(timer);
+          resolve({ started: d.started, note: d.note });
+        };
+        // A ProjectView that has just mounted may not be listening yet, and a
+        // launch can genuinely take a while (a worktree, a cold CLI). Bounded
+        // so the caller is told "unknown" rather than held to its own timeout.
+        const timer = window.setTimeout(() => {
+          window.removeEventListener("canopy:start-session-result", done);
+          resolve({
+            started: false,
+            note: "Canopy didn't report the launch in time — check canopy_workspace_agents before starting it again.",
+          });
+        }, 60000);
+        window.addEventListener("canopy:start-session-result", done);
+      });
+      // Announced more than once, because a project that was closed a moment
+      // ago is a ProjectView that is still mounting and listening to nothing.
+      // Re-announcing is safe: the ticket is the identity, and the ProjectView
+      // starts one run per ticket however many times it hears about it.
+      const send = () =>
+        window.dispatchEvent(
+          new CustomEvent("canopy:start-session", {
+            detail: {
+              projectId,
+              ticket,
+              dir,
+              prompt,
+              label: (req.label ?? "").trim() || undefined,
+              agent: (req.agent ?? "").trim() || undefined,
+            },
+          }),
+        );
+      const retries = [80, 1200, 4000].map((ms) => window.setTimeout(send, ms));
+      const { started, note } = await answer;
+      for (const t of retries) window.clearTimeout(t);
+      return {
+        started,
+        project: target?.name ?? projectId,
+        dir,
+        note: started
+          ? `${note} It runs as a Canopy task: watch it with canopy_workspace_agents, and it reports back to the user when it finishes.`
+          : note,
+      };
+    },
+    [prepareProjectForAgentAction, projectIdentity],
+  );
+  const startSessionRef = useRef(startSession);
+  startSessionRef.current = startSession;
   const companionOpsRef = useRef<CompanionOps | null>(null);
   companionOpsRef.current = useMemo(
     () =>
@@ -2463,6 +2653,7 @@ export default function App() {
             agents: (project: string | null | undefined) =>
               workspaceAgents(companionProjects, project),
             search: (query: string, limit: number) => workspaceSearch(query, limit),
+            startSession: (req) => startSessionRef.current(req),
           }
         : null,
     // `companionProjects` is the only live input; everything else is a ref or

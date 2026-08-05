@@ -2052,6 +2052,16 @@ async fn action(
                         "message_agent needs text with something in it".into(),
                     );
                 }
+                // Waited on rather than fired off. The frontend is the only
+                // thing that knows whether this landed — it may find no open PR
+                // by that number, no project to route it to, or a conversation
+                // that cannot be resumed — and an ack that described the
+                // intention instead of the outcome is how an agent came to
+                // believe it had handed work off that nobody ever received.
+                // Same ticket/oneshot machinery the ui ops use.
+                let id = snaps.next_op.fetch_add(1, Ordering::Relaxed);
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                snaps.pending.lock().unwrap().insert(id, tx);
                 let _ = app.emit(
                     "agent:action",
                     serde_json::json!({
@@ -2059,24 +2069,37 @@ async fn action(
                         "route": act.cwd.clone().unwrap_or_default(),
                         "cwd": act.cwd,
                         "pr": pr,
+                        "opId": id,
                         "text": format!("{} {body}", sender_tag(&who)),
                     }),
                 );
-                // Handed over, not delivered — and said that way. Canopy may
-                // find no open PR by that number, or no project to route it to,
-                // and both of those are reported to the user rather than back
-                // here. Claiming delivery in that case is how an agent came to
-                // believe it had handed work off that nobody ever received.
-                return (
-                    StatusCode::OK,
-                    format!(
-                        "Asked Canopy to find whoever raised {pr}: it types into that session if \
-                         it is still running, reopens its conversation if not, and starts a fresh \
-                         agent if there is nothing left to reopen. None of that is confirmed \
-                         here — if no open {pr} exists in this project the user is told and \
-                         nothing is delivered. Check canopy_agents for a session working on it."
+                // Generous, because the honest answers are the slow ones:
+                // reopening an ended conversation waits for the CLI to come up,
+                // and a PR with nothing left to reopen gets a fresh agent in a
+                // workspace that has to be prepared first.
+                return match tokio::time::timeout(MESSAGE_PR_TIMEOUT, rx).await {
+                    Ok(Ok((true, data))) => (StatusCode::OK, body_text(data)),
+                    Ok(Ok((false, data))) => (StatusCode::BAD_REQUEST, body_text(data)),
+                    Ok(Err(_)) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Canopy dropped this request".into(),
                     ),
-                );
+                    Err(_) => {
+                        app.state::<ContextBridge>()
+                            .pending
+                            .lock()
+                            .unwrap()
+                            .remove(&id);
+                        (
+                            StatusCode::GATEWAY_TIMEOUT,
+                            format!(
+                                "Canopy didn't report back on {pr} in time. Whether it was \
+                                 delivered is unknown — check canopy_agents for a session working \
+                                 on it before sending it again."
+                            ),
+                        )
+                    }
+                };
             }
             let Some(id) = act.pty_id else {
                 return (
@@ -2622,6 +2645,12 @@ struct UiOp {
     detail: Option<String>,
     /// open_project: one line the user sees explaining why their window moved.
     why: Option<String>,
+    /// start_session: which component to work in, the brief the new agent is
+    /// given, what to call the run, and which CLI to run it on.
+    dir: Option<String>,
+    prompt: Option<String>,
+    label: Option<String>,
+    agent: Option<String>,
     /// workspace_search: how many rows to return.
     limit: Option<u32>,
     /// remember: the fact, what it concerns, and whether this retracts one.
@@ -2658,6 +2687,10 @@ const PR_UI_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600
 /// A question waits on a human, so it gets minutes — bounded so a forgotten
 /// dialog can't pin an agent forever.
 const MAX_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Reaching whoever raised a pull request can mean resuming an ended
+/// conversation, or preparing a workspace for a fresh agent. Long enough to
+/// cover both, short enough that a window that never answers is not forever.
+const MESSAGE_PR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 async fn ui_op(
     State(app): State<tauri::AppHandle>,
@@ -2668,7 +2701,10 @@ async fn ui_op(
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     }
     let deadline = match op.op.as_str() {
-        "diagnostics" | "tickets" | "reviews" => UI_OP_TIMEOUT,
+        "diagnostics" | "tickets" => UI_OP_TIMEOUT,
+        // Shells out to GitHub once per repo, and for a caller that is in no
+        // project that is every repo in the workspace.
+        "reviews" => PR_UI_OP_TIMEOUT,
         "references" | "definition" | "hover" => {
             if op.path.is_none() {
                 return (StatusCode::BAD_REQUEST, format!("{} needs a path", op.op));
@@ -2720,6 +2756,27 @@ async fn ui_op(
         // These delegate to GitHub. A details call can download several failing
         // logs, and writes must not time out locally while the remote succeeds.
         "workspace_prs" | "pr_details" | "pr_action" => PR_UI_OP_TIMEOUT,
+        // Starting a session waits on the app: a project to open or wake, a
+        // worktree to prepare, a CLI to come up. The frontend bounds it and
+        // answers either way, so this only has to outlast that.
+        "start_session" => {
+            if op.prompt.as_deref().map_or(true, |p| p.trim().is_empty()) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "start_session needs a prompt: what the session should do".into(),
+                );
+            }
+            if op.dir.as_deref().map_or(true, |d| d.trim().is_empty())
+                && op.project.as_deref().map_or(true, |p| p.trim().is_empty())
+            {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "start_session needs dir (a component path from canopy_workspace) or project"
+                        .into(),
+                );
+            }
+            MAX_ASK_TIMEOUT
+        }
         "workspace_search" => {
             if op.query.as_deref().map_or(true, |q| q.trim().is_empty()) {
                 return (
@@ -2770,6 +2827,10 @@ async fn ui_op(
             "action": op.action,
             "detail": op.detail,
             "why": op.why,
+            "dir": op.dir,
+            "prompt": op.prompt,
+            "label": op.label,
+            "agent": op.agent,
             "limit": op.limit,
             "fact": op.fact,
             "about": op.about,
