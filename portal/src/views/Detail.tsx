@@ -5,7 +5,7 @@
 // phone it is the pushed screen, and neither the panel nor this file knows
 // which.
 
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AgentTerminal } from '@shared/AgentTerminal'
 import { AgentBadge } from '@shared/components'
 import { IconBack, IconBranch, IconFile, IconSend, IconStop, IconTerminal } from '@shared/icons'
@@ -263,12 +263,82 @@ function FileDetail({
                   Showing the first 512 KB of {Math.round(f.bytes / 1024)} KB.
                 </div>
               )}
-              <pre className="code mono">{f.text}</pre>
+              <CodeBlock text={f.text ?? ''} name={basename(path)} bytes={f.bytes} />
             </>
           )
         }
       </AsyncBody>
     </Frame>
+  )
+}
+
+// Highlighting limits: highlight.js is O(file) work on the main thread, so a
+// big file gets line numbers and nothing else. Auto-detection (no extension
+// match) costs every grammar, so it is reserved for genuinely small files.
+const HL_MAX_BYTES = 512 * 1024
+const HL_MAX_LINES = 8000
+const AUTO_DETECT_MAX_BYTES = 64 * 1024
+
+/** A file, with a line-number gutter and (for reasonably sized files) syntax
+ *  colour. highlight.js arrives via dynamic import so it lands in its own lazy
+ *  chunk — the plain text is on screen immediately either way. */
+function CodeBlock({ text, name, bytes }: { text: string; name: string; bytes: number }) {
+  const lineCount = useMemo(() => {
+    const n = text.split('\n').length
+    // A trailing newline is an end-of-line marker, not an extra line.
+    return text.endsWith('\n') ? Math.max(1, n - 1) : n
+  }, [text])
+  const [html, setHtml] = useState<string | null>(null)
+  const eligible = bytes <= HL_MAX_BYTES && lineCount <= HL_MAX_LINES
+
+  useEffect(() => {
+    setHtml(null)
+    if (!eligible) return
+    let dead = false
+    import('highlight.js/lib/common').then(
+      ({ default: hljs }) => {
+        if (dead) return
+        const dot = name.lastIndexOf('.')
+        const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
+        const lang = ext && hljs.getLanguage(ext) ? ext : null
+        try {
+          if (lang) {
+            setHtml(hljs.highlight(text, { language: lang, ignoreIllegals: true }).value)
+          } else if (text.length <= AUTO_DETECT_MAX_BYTES) {
+            setHtml(hljs.highlightAuto(text).value)
+          }
+        } catch {
+          // Plain text is always a correct rendering.
+        }
+      },
+      () => {},
+    )
+    return () => {
+      dead = true
+    }
+  }, [text, name, eligible])
+
+  const gutter = useMemo(
+    () => Array.from({ length: lineCount }, (_, i) => i + 1).join('\n'),
+    [lineCount],
+  )
+
+  return (
+    <div className="codeview">
+      <pre className="codeview-gutter mono" aria-hidden="true">
+        {gutter}
+      </pre>
+      {html !== null ? (
+        // Safe: hljs.highlight escapes the source; only its own <span>s remain.
+        <pre className="codeview-body mono">
+          <code dangerouslySetInnerHTML={{ __html: html }} />
+        </pre>
+      ) : (
+        <pre className="codeview-body mono">
+          <code>{text}</code>
+        </pre>
+      )}
+    </div>
   )
 }
 
