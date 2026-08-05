@@ -174,6 +174,9 @@ export interface AgentAction {
    *  model and clamped where it is read (taskIdentity.ts) — nothing here has
    *  been checked for length, for being one glyph, or for being a string. */
   title?: string;
+  /** task_named: the agent's current one-line focus. Unlike title, this may be
+   *  updated throughout an ordinary or micro-task session. */
+  activity?: string;
   icon?: string;
   tags?: unknown;
 }
@@ -2805,6 +2808,11 @@ export const remoteSetTheme = (theme: Record<string, string>) =>
   invoke<void>("remote_set_theme", { theme });
 export const remoteSetClis = (clis: import("../shared/model").RemoteCli[]) =>
   invoke<void>("remote_set_clis", { clis });
+/** Push the companion's presence + transcript tail — the desktop frontend is
+ *  the only place that has them (see remoteCompanion.ts). */
+export const remoteSetCompanion = (
+  companion: import("../shared/model").RemoteCompanion,
+) => invoke<void>("remote_set_companion", { companion });
 /** A QR SVG for any URL (LAN address or the active tunnel URL). */
 export const remoteQr = (text: string) =>
   invoke<string | null>("remote_qr", { text });

@@ -111,7 +111,7 @@ export function ProjectHome({
           </div>
         </div>
         <button className="primary sm" onClick={onNewAgent}>
-          <IconPlus s={15} /> New agent
+          <IconPlus s={14} /> New agent
         </button>
       </div>
 
@@ -134,7 +134,7 @@ export function ProjectHome({
         </div>
         <div className="home-launch-grid">
           <button className="home-launch-card" onClick={() => ctx.spawn(project.components[0]?.path)}>
-            <IconTerminal s={27} /><span>Shell</span>
+            <IconTerminal s={28} /><span>Shell</span>
           </button>
           {clis.map((cli) => (
             <button
@@ -149,7 +149,7 @@ export function ProjectHome({
                 else onNewAgent()
               }}
             >
-              <AgentBadge agent={cli.id} sz={29} />
+              <AgentBadge agent={cli.id} sz={28} />
               <span>{cli.name}</span>
               {!cli.available && <small>not found</small>}
             </button>
@@ -194,7 +194,7 @@ export function ProjectHome({
                   return next
                 })}
               />
-              <AgentBadge agent={item.agentId} sz={25} />
+              <AgentBadge agent={item.agentId} sz={24} />
               <button className="home-resume-main" onClick={() => restore([item])}>
                 <span className="home-resume-prompt">{item.prompt || '(no prompt captured)'}</span>
                 <span className="home-resume-meta">
@@ -206,7 +206,7 @@ export function ProjectHome({
               <span className="home-age">{age(item.digest.updated)}</span>
               <button className="primary sm" onClick={() => restore([item])}>Resume</button>
               <button className="iconbtn" aria-label="Forget session" onClick={() => void forget([item])}>
-                <IconClose s={13} />
+                <IconClose s={14} />
               </button>
             </div>
           )

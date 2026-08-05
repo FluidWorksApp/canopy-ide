@@ -51,6 +51,15 @@ export interface Digest {
   run_started?: number
 }
 
+/** What a terminal is running, resolved from its foreground process by
+ *  agentid.rs. Evidence, not a verdict — see src/agentIdentity.ts. */
+export interface AgentHint {
+  bin: string
+  pkg: string | null
+  path: string | null
+  interactive: boolean
+}
+
 /** Live process-tree stats for one PTY this run (pty:stats event). */
 export interface Stat {
   id: number
@@ -58,6 +67,7 @@ export interface Stat {
   cwd: string
   total_cpu: number
   total_mem_bytes: number
+  agent_hint?: AgentHint | null
   ports: number[]
   procs: { name: string; cmd: string }[]
   /** Milliseconds since this terminal last painted / was typed into. The
@@ -116,6 +126,27 @@ export interface AgentRow {
   sessionId?: string
   profile?: string
   resumable?: boolean
+}
+
+/** One companion exchange, projected for the portal: prose and provenance,
+ *  no attachments (their paths are desktop-local and useless on a phone). */
+export interface RemoteCompanionMessage {
+  who: 'you' | 'ash'
+  text: string
+  failed?: boolean
+  /** Names of tools the reply ran, for the provenance chips. */
+  tools?: string[]
+}
+
+/** The companion's presence + transcript as the desktop pushes it to the
+ *  portal — the same channel the theme uses, because the conversation lives in
+ *  the desktop frontend and the Rust core never sees a word of it. */
+export interface RemoteCompanion {
+  status: 'off' | 'starting' | 'ready' | 'working' | 'failed' | 'unavailable'
+  cliName: string
+  generation: number
+  messages: RemoteCompanionMessage[]
+  error?: string | null
 }
 
 export const SESSION_ID_TOKEN = '__CANOPY_SESSION_ID__'
@@ -234,6 +265,7 @@ export function buildRows(
         branch: d.branch,
         cwd: d.cwd,
         lastPrompt: lastHumanPrompt(d.prompts),
+        title: livePty?.title?.trim() || undefined,
         ptyId: live ? surfaceId : undefined,
         live,
         cpu: liveStat?.total_cpu,
@@ -263,6 +295,12 @@ export function buildRows(
     .filter((p) => !claimed.has(p.id))
     .map((p) => {
       const stat = stats.get(p.id)
+      // Who is in this terminal: the foreground process's own binary first —
+      // the same rung the desktop's identity ladder trusts most — then the
+      // title. A pty running an agent whose hooks never wired up (or whose
+      // digest predates this app run) is still that agent, not a plain shell;
+      // classifying it by "has a digest" is what put Claudes under Terminals.
+      const agent = agentFromHint(stat?.agent_hint, clis) ?? agentFromTitle(p.title, clis) ?? 'shell'
       // A terminal with no digest is not "idle" — that was a hard-coded string
       // sitting two lines above a CPU reading it ignored, and it let the portal
       // call a terminal idle while the desktop called the same pty working. The
@@ -270,7 +308,7 @@ export function buildRows(
       const life = agentLife({
         pty: {
           kind: 'live',
-          hint: { bin: agentFromTitle(p.title, clis) ?? 'shell', interactive: true },
+          hint: { bin: agent, interactive: true },
           cpu: stat?.total_cpu ?? 0,
           quietForMs: stat?.quiet_ms ?? undefined,
           sinceInputMs: stat?.since_input_ms ?? undefined,
@@ -279,7 +317,7 @@ export function buildRows(
       })
       return {
         key: `pty:${p.id}`,
-        agent: agentFromTitle(p.title, clis) ?? 'shell',
+        agent,
         state: life.state,
         cwd: p.cwd,
         title: p.title?.trim() || undefined,
@@ -295,10 +333,9 @@ export function buildRows(
   return [...agents, ...terminals].sort(sortRows)
 }
 
-/** The agent CLI a terminal is running, read off its title ("claude",
- *  "codex — canopy"). Undefined for an ordinary shell. */
-export function agentFromTitle(title?: string, clis: readonly RemoteCli[] = []): string | undefined {
-  const word = title?.trim().toLowerCase().split(/[\s—:/\\]+/)[0]
+/** The registry id `word` names, matched exactly against ids, known agents,
+ *  and each CLI's command head. A near-miss is nobody: no brand from a guess. */
+function agentForWord(word: string | undefined, clis: readonly RemoteCli[]): string | undefined {
   if (!word || word === 'shell') return undefined
   if (word in AGENT_META) return word
   const match = clis.find((cli) => {
@@ -311,6 +348,22 @@ export function agentFromTitle(title?: string, clis: readonly RemoteCli[] = []):
     return cli.id === word || head?.split(/[/\\]/).pop()?.toLowerCase() === word
   })
   return match?.id
+}
+
+/** The agent CLI a terminal is running, read off its title ("claude",
+ *  "codex — canopy"). Undefined for an ordinary shell. */
+export function agentFromTitle(title?: string, clis: readonly RemoteCli[] = []): string | undefined {
+  return agentForWord(title?.trim().toLowerCase().split(/[\s—:/\\]+/)[0], clis)
+}
+
+/** The agent CLI a terminal is running, from its foreground process's own
+ *  binary — the strongest evidence pty:stats carries, and the same rung the
+ *  desktop's identity ladder reads before it ever looks at a title. */
+export function agentFromHint(
+  hint: AgentHint | null | undefined,
+  clis: readonly RemoteCli[] = [],
+): string | undefined {
+  return agentForWord(hint?.bin?.split(/[/\\]/).pop()?.toLowerCase(), clis)
 }
 
 /** The single project an agent belongs to: the one with the deepest (most

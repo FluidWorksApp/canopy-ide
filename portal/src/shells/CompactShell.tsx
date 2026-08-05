@@ -57,7 +57,7 @@ export function CompactShell(props: ShellProps) {
           projects.length === 1 && <span className="cbar-proj">{projects[0].name}</span>
         )}
         <button className="iconbtn" onClick={props.onLogout} aria-label="Sign out">
-          <IconPower s={17} />
+          <IconPower s={16} />
         </button>
       </header>
 
@@ -71,7 +71,7 @@ export function CompactShell(props: ShellProps) {
 
       {panel.id === 'agents' && ctx.project && (
         <button className="fab" onClick={props.onNewAgent}>
-          <IconPlus s={19} /> New agent
+          <IconPlus s={14} /> New agent
         </button>
       )}
 
@@ -113,7 +113,7 @@ export function CompactShell(props: ShellProps) {
             <h3>
               Everything else
               <button className="iconbtn" onClick={() => setMore(false)} aria-label="Close">
-                <IconClose s={16} />
+                <IconClose s={14} />
               </button>
             </h3>
             <div className="more-grid">

@@ -1564,13 +1564,14 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 </Item>
                 <Item
                   name="Ctrl+Tab switching"
-                  desc="Choose whether the switcher follows what you used last or the tab strip's stable order."
+                  desc="Choose whether the switcher follows what you used last, the tab strip's stable order, or the work items your tabs belong to."
                 >
                   <Segmented<TabSwitchMode>
                     aria-label="Ctrl+Tab switching order"
                     options={[
                       { id: "recent", label: "Recent activity" },
                       { id: "order", label: "Tab order" },
+                      { id: "items", label: "Work items" },
                     ]}
                     value={s.tabSwitchMode}
                     onChange={(tabSwitchMode) => patch({ tabSwitchMode })}

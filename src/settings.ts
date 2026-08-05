@@ -88,9 +88,11 @@ export type CursorStyle = "block" | "underline" | "bar";
  *
  * "recent" answers "where was I?" and makes a quick press return to the
  * previous context. "order" answers "what is next to this?" and follows the
- * user's stable tab arrangement. Direct Next/Previous Tab commands stay
- * positional whichever mode is selected. */
-export type TabSwitchMode = "recent" | "order";
+ * user's stable tab arrangement. "items" answers "what was I working on?" —
+ * it walks clusters of tabs joined on recorded edges (a session, its
+ * workspace, its PR, its preview, its files; see workItems.ts). Direct
+ * Next/Previous Tab commands stay positional whichever mode is selected. */
+export type TabSwitchMode = "recent" | "order" | "items";
 
 /** A dictation hotkey as captured from a keydown: the modifier flags plus the
  *  physical `KeyboardEvent.code` (layout-independent, so it survives non-US

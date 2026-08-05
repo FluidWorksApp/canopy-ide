@@ -1,0 +1,72 @@
+/* Companion panel. A conversation tail, not a chat app: newest at the bottom,
+   the same quiet chrome as every other panel. */
+
+.comp {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.comp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+.comp-name {
+  font-size: var(--fs-md);
+  font-weight: 650;
+}
+
+.comp-cli {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+
+.comp-error {
+  font-size: var(--fs-sm);
+  color: var(--danger);
+}
+
+.comp-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.comp-msg {
+  max-width: 88%;
+  padding: 7px 10px;
+  border-radius: 10px;
+  font-size: var(--fs-sm);
+  line-height: var(--lh-ui);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.comp-msg.you {
+  align-self: flex-end;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.comp-msg.ash {
+  align-self: flex-start;
+  background: var(--bg-raised, rgba(255, 255, 255, 0.05));
+}
+
+.comp-msg.failed {
+  border: 1px solid var(--danger);
+}
+
+.comp-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.comp-note {
+  margin-top: 2px;
+}
