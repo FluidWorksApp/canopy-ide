@@ -18,6 +18,7 @@
 // the Trash is emptied, which the footer says out loud.
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
+import { basename } from "../paths";
 import {
   bytesOf,
   countOf,
@@ -203,7 +204,7 @@ export function CleanupDialog({
             </div>
             <div className="cln-progress-where">
               {progress
-                ? `${progress.done} of ${progress.total} · ${progress.workspace.split("/").pop() ?? progress.workspace}`
+                ? `${progress.done} of ${progress.total} · ${basename(progress.workspace)}`
                 : "finding workspaces…"}
             </div>
           </div>

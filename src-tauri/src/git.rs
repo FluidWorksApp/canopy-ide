@@ -4709,13 +4709,10 @@ fn workspace_join(
             .unwrap_or(false);
             // rev-list fails when the branch has no upstream, which is exactly
             // the None this reports: never pushed, as opposed to 0 left to push.
-            unpushed = run(git(top).args([
-                "rev-list",
-                "--count",
-                &format!("{b}@{{upstream}}..{b}"),
-            ]))
-            .ok()
-            .and_then(|o| o.trim().parse().ok());
+            unpushed =
+                run(git(top).args(["rev-list", "--count", &format!("{b}@{{upstream}}..{b}")]))
+                    .ok()
+                    .and_then(|o| o.trim().parse().ok());
             commits = branch_commits_of(top, &base, &b);
         }
     }
