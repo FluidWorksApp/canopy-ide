@@ -347,6 +347,7 @@ import {
   describeTab,
   deviceLabel,
   previewLabel,
+  restoredFront,
   tabDisplayLabel,
   tabId,
   tabPrefs as readTabPrefs,
@@ -2084,12 +2085,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
     async (card: TerminalResumeCard, only?: TerminalResumeLeaf) => {
       const leaves = only ? [only] : card.leaves;
       const ids = new Map<string, string>();
+      // Every tab that came back, in strip order. The map above only holds the
+      // ones that carry a remembered tabId — a resumed agent session has none —
+      // so it can never be what decides which tab ends up in front.
+      const opened: (string | null)[] = [];
       for (const leaf of leaves) {
         const id = leaf.restorable
           ? await resumeSession(leaf.restorable, false)
           : leaf.remembered
             ? reopenTerminal(leaf.remembered, false)
             : null;
+        opened.push(id);
         if (id && leaf.remembered?.tabId) ids.set(leaf.remembered.tabId, id);
       }
 
@@ -2118,8 +2124,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         setTerminalGroups(terminalGroupsRef.current);
         setActiveTabId(group.activeTabId);
       } else {
-        const first = [...ids.values()][0];
-        if (first) setActiveTabId(first);
+        const front = restoredFront(opened, null);
+        if (front) setActiveTabId(front);
       }
     },
     [reopenTerminal, resumeSession],
@@ -5252,6 +5258,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
     () => tabs.find((t) => t.id === activeTabId) ?? null,
     [tabs, activeTabId],
   );
+  // A full strip with nothing in front renders a blank workspace, and every
+  // path that opens tabs without activating one can leave it there. The invariant
+  // is worth holding here rather than at each of them: if there are tabs, one of
+  // them is on screen.
+  useEffect(() => {
+    if (activeTab || tabs.length === 0) return;
+    setActiveTabId(tabs[0].id);
+  }, [activeTab, tabs]);
   // Publish the tab in front to the one channel anything can subscribe to
   // (activeView.ts). Only the visible project publishes — every open project
   // keeps a ProjectView mounted, and a backgrounded one announcing its own tab
@@ -5706,8 +5720,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         terminalGroupsRef.current = restoredGroups;
         setTerminalGroups(restoredGroups);
       }
-      const front =
-        restore.activeIndex != null ? ids[restore.activeIndex] : null;
+      const front = restoredFront(ids, restore.activeIndex);
       if (front) setActiveTabId(front);
       restoredRef.current?.();
     })();
