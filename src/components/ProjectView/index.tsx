@@ -33,6 +33,7 @@ import {
   type SplitDivider,
   type SplitAxis,
   type TerminalGroup,
+  type TerminalSplitNode,
 } from "../../terminalGroups";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
 import {
@@ -317,6 +318,12 @@ import {
   sessionChangesContext,
 } from "../../diffContext";
 import { AgentQueryBar } from "../AgentQueryBar";
+import { AgentCloseUndo } from "../AgentCloseUndo";
+import {
+  AGENT_CLOSE_UNDO_MS,
+  pendingAgentTabIds,
+  type PendingAgentClose,
+} from "../../agentClose";
 import {
   forgetSessions,
   markRestored,
@@ -678,6 +685,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, [sidePrefs.overlay, sideOpen]);
   const [tabs, setTabs] = useState<SubTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [pendingAgentCloses, setPendingAgentCloses] = useState(
+    new Map<string, PendingAgentClose>(),
+  );
+  const pendingAgentClosesRef = useRef(pendingAgentCloses);
+  pendingAgentClosesRef.current = pendingAgentCloses;
+  const pendingAgentIds = useMemo(
+    () => pendingAgentTabIds(pendingAgentCloses),
+    [pendingAgentCloses],
+  );
+  const visibleTabs = useMemo(
+    () => tabs.filter((tab) => !pendingAgentIds.has(tab.id)),
+    [tabs, pendingAgentIds],
+  );
   /** Every pip whose tab still exists — what gets RENDERED, including the one
    *  whose tab is in front. That one is rendered hidden rather than dropped:
    *  where the user dragged it, how wide they made it and whether it is
@@ -699,7 +719,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  view there, and the small duplicate would only cover its corner. */
   const shownBrowserPips = useMemo(
     () => {
-      const terminals = tabs.filter(
+      const terminals = visibleTabs.filter(
         (tab): tab is TermSubTab => tab.type === "terminal",
       );
       return livePips.filter(
@@ -708,7 +728,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           pipOwnerVisible(pip.ptyId, terminals, activeTabId),
       );
     },
-    [livePips, activeTabId, tabs],
+    [livePips, activeTabId, visibleTabs],
   );
   const [terminalGroups, setTerminalGroups] = useState<Record<string, TerminalGroup>>({});
   const terminalGroupsRef = useRef(terminalGroups);
@@ -1019,21 +1039,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     recentTabsRef.current = pruneTabUses(
       recentTabsRef.current,
-      tabs.map((t) => t.id),
+      visibleTabs.map((t) => t.id),
     );
-  }, [tabs]);
+  }, [visibleTabs]);
   // Feed the switcher brain in Work items mode: a compact digest of the
   // deterministic grouping, off the gesture path. The brain debounces and
   // floors the CLI turns itself; identical digests never leave this effect.
   useEffect(() => {
     if (getSettings().tabSwitchMode !== "items") return;
-    const byId = new Map(tabs.map((t) => [t.id, t]));
-    const digest = buildWorkItemDigest(clusterWorkItems(tabs, workItemJoins), (id) => {
+    const byId = new Map(visibleTabs.map((t) => [t.id, t]));
+    const digest = buildWorkItemDigest(clusterWorkItems(visibleTabs, workItemJoins), (id) => {
       const tab = byId.get(id);
       return tab ? `${tabKind(tab).label} ${tabDisplayLabel(tab)}` : id;
     });
     noteWorkItems(digest);
-  }, [tabs]);
+  }, [visibleTabs]);
   /** The tabs in the order the pane bar draws them — what ⌘1..9 counts, and
    *  filled in below once the groups are known. */
   const barTabsRef = useRef<SubTab[]>([]);
@@ -1041,6 +1061,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     id: string,
     origin?: "automatic" | "user",
   ) => void>(() => {});
+  const isAgentTabRef = useRef<(tab: SubTab) => boolean>(() => false);
   const splitActiveRef = useRef<(axis: SplitAxis) => void>(() => {});
   const focusPaneRef = useRef<(direction: PaneDirection) => void>(() => {});
   const movePaneRef = useRef<(direction: PaneDirection) => void>(() => {});
@@ -1271,6 +1292,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Pending self-closes for finished chore runs, by tab id. Held so leaving the
   // project doesn't leave a timer holding a closure over tabs that are gone.
   const reapTimers = useRef(new Map<string, number>());
+  const agentCloseTimers = useRef(new Map<string, number>());
+  const agentCloseSequence = useRef(0);
   // Restores still waiting to see whether the CLI accepts them, by tab id.
   const restoreWatches = useRef(new Map<string, () => void>());
   // CLIs without a prompt argument (OpenCode, Amp, Aider, etc.) must receive
@@ -1282,6 +1305,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     () => () => {
       for (const t of reapTimers.current.values()) window.clearTimeout(t);
       reapTimers.current.clear();
+      for (const t of agentCloseTimers.current.values()) window.clearTimeout(t);
+      agentCloseTimers.current.clear();
       for (const cancel of restoreWatches.current.values()) cancel();
       restoreWatches.current.clear();
     },
@@ -4078,13 +4103,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const switcherOpen = switcher !== null;
   const visualOpenTabs = useMemo(() => {
     const groups = new Set<string>();
-    return tabs.filter((tab) => {
+    return visibleTabs.filter((tab) => {
       if (tab.type !== "terminal" || !tab.paneGroup) return true;
       if (groups.has(tab.paneGroup)) return false;
       groups.add(tab.paneGroup);
       return true;
     });
-  }, [tabs]);
+  }, [visibleTabs]);
   const switcherTabs = useMemo(
     () =>
       switcher?.ids
@@ -4667,10 +4692,74 @@ const ProjectViewBody = memo(function ProjectViewBody({
     );
   }, []);
 
-  const closeTab = useCallback((
+  const commitPendingAgentCloses = useCallback(
+    (next: Map<string, PendingAgentClose>) => {
+      pendingAgentClosesRef.current = next;
+      setPendingAgentCloses(next);
+    },
+    [],
+  );
+
+  const dropPendingAgentTab = useCallback(
+    (tabId: string) => {
+      const current = pendingAgentClosesRef.current;
+      const entry = [...current.values()].find((close) =>
+        close.tabIds.includes(tabId),
+      );
+      if (!entry) return;
+      const next = new Map(current);
+      const tabIds = entry.tabIds.filter((id) => id !== tabId);
+      if (tabIds.length === 0) {
+        const timer = agentCloseTimers.current.get(entry.id);
+        if (timer != null) window.clearTimeout(timer);
+        agentCloseTimers.current.delete(entry.id);
+        next.delete(entry.id);
+      } else {
+        const groups: Record<string, TerminalGroup> = {};
+        for (const [groupId, group] of Object.entries(entry.groups)) {
+          const root = removeLeaf(group.root, tabId);
+          if (!root || leafIds(root).length < 2) continue;
+          groups[groupId] = {
+            ...group,
+            root,
+            activeTabId:
+              group.activeTabId === tabId ? leafIds(root)[0] : group.activeTabId,
+            zoomedTabId:
+              group.zoomedTabId === tabId ? undefined : group.zoomedTabId,
+          };
+        }
+        next.set(entry.id, {
+          ...entry,
+          tabIds,
+          groups,
+          restoreTabId:
+            entry.restoreTabId === tabId ? tabIds[0] : entry.restoreTabId,
+        });
+      }
+      commitPendingAgentCloses(next);
+    },
+    [commitPendingAgentCloses],
+  );
+
+  const finalizeTabClose = useCallback((
     id: string,
     origin: "automatic" | "user" = "automatic",
   ) => {
+    const pendingClose = [...pendingAgentClosesRef.current.values()].find(
+      (close) => close.tabIds.includes(id),
+    );
+    if (pendingClose && Object.keys(pendingClose.groups).length > 0) {
+      const restored = {
+        ...terminalGroupsRef.current,
+        ...pendingClose.groups,
+      };
+      terminalGroupsRef.current = restored;
+      setTerminalGroups(restored);
+    }
+    // A process can exit while its tab is in the grace period. Remove only that
+    // member from the pending transaction; surviving panes can still be
+    // restored until their shared deadline.
+    dropPendingAgentTab(id);
     // The last moment the terminal's scrollback exists: the handle goes on the
     // next line and the buffer dies with the unmount. Both endings pass through
     // here — job_done's self-close and the user closing the tab — so capturing
@@ -4796,7 +4885,204 @@ const ProjectViewBody = memo(function ProjectViewBody({
       });
       return next;
     });
-  }, []);
+  }, [dropPendingAgentTab]);
+
+  const finalizePendingAgentClose = useCallback(
+    (closeId: string) => {
+      const close = pendingAgentClosesRef.current.get(closeId);
+      if (!close) return;
+      const timer = agentCloseTimers.current.get(closeId);
+      if (timer != null) window.clearTimeout(timer);
+      agentCloseTimers.current.delete(closeId);
+      if (Object.keys(close.groups).length > 0) {
+        const restored = { ...terminalGroupsRef.current, ...close.groups };
+        terminalGroupsRef.current = restored;
+        setTerminalGroups(restored);
+      }
+      const next = new Map(pendingAgentClosesRef.current);
+      next.delete(closeId);
+      commitPendingAgentCloses(next);
+      for (const id of close.tabIds) finalizeTabClose(id, "user");
+      // The members finalize in one React turn, so each close can observe the
+      // same pre-close group ref. Reconcile once from the captured tree instead
+      // of allowing the last queued update to resurrect an already-closed leaf.
+      const groupRemainders = new Map<string, string[]>();
+      for (const group of Object.values(close.groups)) {
+        let root: TerminalSplitNode | null = group.root;
+        for (const id of close.tabIds) {
+          if (!root) break;
+          root = removeLeaf(root, id);
+        }
+        const ids = root ? leafIds(root) : [];
+        groupRemainders.set(group.id, ids);
+        setTerminalGroups((prev) => {
+          const reconciled = { ...prev };
+          if (!root || ids.length < 2) delete reconciled[group.id];
+          else {
+            reconciled[group.id] = {
+              ...group,
+              root,
+              activeTabId: ids.includes(group.activeTabId)
+                ? group.activeTabId
+                : ids[0],
+              zoomedTabId:
+                group.zoomedTabId && ids.includes(group.zoomedTabId)
+                  ? group.zoomedTabId
+                  : undefined,
+            };
+          }
+          terminalGroupsRef.current = reconciled;
+          return reconciled;
+        });
+      }
+      if (groupRemainders.size > 0) {
+        setTabs((prev) =>
+          prev.map((tab) => {
+            if (tab.type !== "terminal" || !tab.paneGroup) return tab;
+            const remaining = groupRemainders.get(tab.paneGroup);
+            return remaining && remaining.length < 2
+              ? { ...tab, paneGroup: undefined }
+              : tab;
+          }),
+        );
+      }
+    },
+    [commitPendingAgentCloses, finalizeTabClose],
+  );
+
+  const requestAgentClose = useCallback(
+    (requestedIds: string[]): boolean => {
+      const alreadyPending = pendingAgentTabIds(pendingAgentClosesRef.current);
+      const closingTabs = requestedIds
+        .filter((id) => !alreadyPending.has(id))
+        .map((id) => tabsRef.current.find((tab) => tab.id === id))
+        .filter((tab): tab is SubTab => Boolean(tab));
+      if (
+        closingTabs.length === 0 ||
+        !closingTabs.some((tab) => isAgentTabRef.current(tab))
+      ) {
+        return false;
+      }
+
+      const tabIds = closingTabs.map((tab) => tab.id);
+      const hidden = new Set([...alreadyPending, ...tabIds]);
+      const groups: Record<string, TerminalGroup> = {};
+      for (const tab of closingTabs) {
+        if (tab.type !== "terminal" || !tab.paneGroup) continue;
+        const group = terminalGroupsRef.current[tab.paneGroup];
+        if (group) groups[group.id] = group;
+      }
+
+      // Remove pending panes from the effective split immediately, but retain
+      // the original group in the transaction. The terminal hosts stay mounted.
+      if (Object.keys(groups).length > 0) {
+        setTerminalGroups((prev) => {
+          const next = { ...prev };
+          for (const group of Object.values(groups)) {
+            let root: TerminalSplitNode | null = group.root;
+            for (const id of tabIds) {
+              if (!root) break;
+              root = removeLeaf(root, id);
+            }
+            const ids = root ? leafIds(root) : [];
+            if (!root || ids.length < 2) delete next[group.id];
+            else {
+              next[group.id] = {
+                ...group,
+                root,
+                activeTabId: ids.includes(group.activeTabId)
+                  ? group.activeTabId
+                  : ids[0],
+                zoomedTabId:
+                  group.zoomedTabId && ids.includes(group.zoomedTabId)
+                    ? group.zoomedTabId
+                    : undefined,
+              };
+            }
+          }
+          terminalGroupsRef.current = next;
+          return next;
+        });
+      }
+
+      const id = `agent-close:${Date.now()}:${agentCloseSequence.current++}`;
+      const groupRestoreTabId = Object.values(groups)
+        .map((group) => group.activeTabId)
+        .find((tabId) => tabIds.includes(tabId));
+      const restoreTabId = tabIds.includes(activeTabIdRef.current ?? "")
+        ? (activeTabIdRef.current as string)
+        : groupRestoreTabId ?? tabIds[0];
+      const first = closingTabs[0];
+      const baseTitle =
+        first.type === "terminal"
+          ? first.customTitle ?? first.title
+          : "Agent";
+      const close: PendingAgentClose = {
+        id,
+        tabIds,
+        title: tabIds.length > 1 ? `${baseTitle} +${tabIds.length - 1}` : baseTitle,
+        deadline: Date.now() + AGENT_CLOSE_UNDO_MS,
+        restoreTabId,
+        groups,
+      };
+      const next = new Map(pendingAgentClosesRef.current);
+      next.set(id, close);
+      commitPendingAgentCloses(next);
+      agentCloseTimers.current.set(
+        id,
+        window.setTimeout(
+          () => finalizePendingAgentClose(id),
+          AGENT_CLOSE_UNDO_MS,
+        ),
+      );
+
+      if (tabIds.includes(activeTabIdRef.current ?? "")) {
+        const remaining = tabsRef.current.filter((tab) => !hidden.has(tab.id));
+        const firstIndex = tabsRef.current.findIndex((tab) => tab.id === tabIds[0]);
+        setActiveTabId(
+          remaining.length === 0
+            ? null
+            : remaining[Math.min(Math.max(firstIndex, 0), remaining.length - 1)].id,
+        );
+      }
+      return true;
+    },
+    [commitPendingAgentCloses, finalizePendingAgentClose],
+  );
+
+  const restorePendingAgentClose = useCallback(
+    (closeId: string) => {
+      const close = pendingAgentClosesRef.current.get(closeId);
+      if (!close) return;
+      const timer = agentCloseTimers.current.get(closeId);
+      if (timer != null) window.clearTimeout(timer);
+      agentCloseTimers.current.delete(closeId);
+      const next = new Map(pendingAgentClosesRef.current);
+      next.delete(closeId);
+      commitPendingAgentCloses(next);
+      if (Object.keys(close.groups).length > 0) {
+        setTerminalGroups((prev) => {
+          const restored = { ...prev, ...close.groups };
+          terminalGroupsRef.current = restored;
+          return restored;
+        });
+      }
+      const restoreId = close.tabIds.includes(close.restoreTabId)
+        ? close.restoreTabId
+        : close.tabIds[0];
+      if (tabsRef.current.some((tab) => tab.id === restoreId))
+        setActiveTabId(restoreId);
+    },
+    [commitPendingAgentCloses],
+  );
+
+  const closeTab = useCallback((
+    id: string,
+    origin: "automatic" | "user" = "automatic",
+  ) => {
+    if (origin === "user" && requestAgentClose([id])) return;
+    finalizeTabClose(id, origin);
+  }, [finalizeTabClose, requestAgentClose]);
   closeTabRef.current = closeTab;
 
   const splitActiveTerminal = useCallback(
@@ -4960,6 +5246,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const group = terminalGroupsRef.current[groupId];
       if (!group) return;
       const ids = leafIds(group.root);
+      // An agent group is one visual tab and one undo transaction. Do not send
+      // the eager kills used by ordinary terminal groups: its mounted Terms are
+      // the resources Restore preserves during the grace period.
+      if (requestAgentClose(ids)) return;
       for (const id of ids) {
         const tab = tabsRef.current.find(
           (t): t is TermSubTab => t.id === id && t.type === "terminal",
@@ -4980,7 +5270,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return next;
       });
     },
-    [],
+    [requestAgentClose],
   );
 
   const closeTerminalGroup = useCallback(
@@ -6874,6 +7164,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       ),
     [agentPtyIds, tabs],
   );
+  isAgentTabRef.current = isAgentTab;
   // The one verdict for a terminal, from every channel at once: what the CLI's
   // hooks proved, whether its process is still there, whether it is painting,
   // and what its CPU is doing — ranked, in shared/agentLife.
@@ -7000,7 +7291,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const stripTabs = useMemo(() => {
     const seen = new Set<string>();
     const out: SubTab[] = [];
-    for (const tab of tabs) {
+    for (const tab of visibleTabs) {
       if (tab.type === "terminal" && tab.run) continue;
       if (tab.type !== "terminal" || !tab.paneGroup) {
         out.push(tab);
@@ -7028,7 +7319,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       });
     }
     return out;
-  }, [tabs, terminalGroups]);
+  }, [visibleTabs, tabs, terminalGroups]);
   const activeVisualTabId = useMemo(() => {
     if (activeTab?.type !== "terminal" || !activeTab.paneGroup) return activeTabId;
     return (
@@ -7521,7 +7812,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   // Agent terminals that can receive a ticket, shared by the Issues panel and
   // the ticket tab.
-  const agentTargets: AgentTarget[] = tabs
+  const agentTargets: AgentTarget[] = visibleTabs
     .filter(
       (t): t is TermSubTab =>
         t.type === "terminal" && !t.run && isAgentTab(t) && t.ptyId != null,
@@ -7761,10 +8052,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         visible
           ? {
               project: project.name,
-              tab: describeTab(tabs.find((t) => t.id === activeTabId)),
+              tab: describeTab(visibleTabs.find((t) => t.id === activeTabId)),
               caret:
                 caret &&
-                tabs.some((t) => t.type === "file" && t.file.path === caret.path)
+                visibleTabs.some((t) => t.type === "file" && t.file.path === caret.path)
                   ? { path: caret.path, line: caret.line }
                   : null,
             }
@@ -7846,7 +8137,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ],
         // Open preview tabs, so agents know what the browser-control tools
         // (canopy_browser_*) are currently pointed at.
-        previews: tabs
+        previews: visibleTabs
           .filter((t): t is PreviewSubTab => t.type === "preview")
           .map((t) => ({
             url: t.url || null,
@@ -7857,11 +8148,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // this is it.
         editor: {
           focused: visible,
-          activeTab: describeTab(tabs.find((t) => t.id === activeTabId)),
-          openTabs: tabs.map(describeTab).filter(Boolean),
+          activeTab: describeTab(visibleTabs.find((t) => t.id === activeTabId)),
+          openTabs: visibleTabs.map(describeTab).filter(Boolean),
           caret:
             caret &&
-            tabs.some((t) => t.type === "file" && t.file.path === caret.path)
+            visibleTabs.some((t) => t.type === "file" && t.file.path === caret.path)
               ? caret
               : null,
         },
@@ -9081,6 +9372,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         {tabs
           .filter((t): t is TermSubTab => t.type === "terminal")
           .map((tab) => {
+            const softClosed = pendingAgentIds.has(tab.id);
             const group = tab.paneGroup
               ? terminalGroups[tab.paneGroup]
               : undefined;
@@ -9093,6 +9385,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 ? identifyAgent(statsByPty.get(tab.ptyId)?.agent_hint)
                 : null;
             const shown =
+              !softClosed &&
               visible &&
               (pane != null || (!grouped && tab.id === activeTabId));
             const paneStyle: CSSProperties = pane
@@ -9209,7 +9502,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   termHandles.current.set(tab.id, h);
                 }}
                 cwd={tab.cwd}
-                active={tab.id === activeTabId && visible}
+                active={!softClosed && tab.id === activeTabId && visible}
                 attachId={tab.attachId}
                 killAttachedOnClose={tab.killAttachedOnClose}
                 // A run tab hands its command to the shell to run-and-exit
@@ -9396,7 +9689,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             <ErrorBoundary label="this tab">{paneFor(tab)}</ErrorBoundary>
           </div>
         ))}
-        {tabs.length === 0 && (
+        {visibleTabs.length === 0 && (
           <div className="editor-empty">
             <h2>{project.name}</h2>
             {/* Missing foundations the CLI installers themselves need (Node for
@@ -10406,6 +10699,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         agentId={activeAgentId}
         agentProfile={activeAgent.profile}
         activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
+      />
+      <AgentCloseUndo
+        pending={[...pendingAgentCloses.values()]}
+        onRestore={restorePendingAgentClose}
       />
       {/* This action starts in the editor's empty state, so its confirmation
           must not live in sidePanel: overlay mode slides that whole subtree
