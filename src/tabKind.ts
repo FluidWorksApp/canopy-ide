@@ -14,6 +14,7 @@
 import type { SubTab } from "./components/ProjectView/helpers";
 import { agentIdForCommand } from "./agentIdentity";
 import { AGENT_BRAND_COLOR } from "../shared/agentGlyphs";
+import { docStackFor } from "./tabGroups";
 
 /** The palette token a kind is drawn in. Deliberately few: six hues over
  *  fifteen tab types, grouped by what the tab is FOR rather than by what
@@ -121,6 +122,14 @@ export function tabKind(tab: SubTab): TabKind {
     case "shared-project":
       return { label: "shared", tone: "people", detail: tab.ownerName };
   }
+}
+
+/** Which grouped-switcher row a tab belongs to. The doc stacks, except that a
+ *  terminal is split by its contents — an agent session and the shell beside it
+ *  are different rows, for the same reason tabKind names them apart. */
+export function switchRowKey(tab: SubTab): string {
+  if (tab.type === "terminal") return tabKind(tab).agent ? "agents" : "shells";
+  return docStackFor(tab.type);
 }
 
 /** What colour to draw an agent card in: the CLI's own, where it has one.
