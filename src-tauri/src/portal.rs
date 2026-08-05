@@ -1367,7 +1367,14 @@ mod tests {
                 "agent": "claude",
             });
             moved[key] = json!("/w/canopy");
-            let out = scope_sessions(vec![moved], &roots, &other_worktrees, now, &no_live(), "inst");
+            let out = scope_sessions(
+                vec![moved],
+                &roots,
+                &other_worktrees,
+                now,
+                &no_live(),
+                "inst",
+            );
             assert_eq!(out.len(), 1, "{key} should retain the session");
         }
     }
