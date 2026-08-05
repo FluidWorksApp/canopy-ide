@@ -47,6 +47,7 @@ import {
   resolveAttentionByKey,
   shouldReachOS,
   subscribeAttention,
+  targetOf,
   toastMs,
   type AttentionItem,
 } from "./attention";
@@ -350,7 +351,11 @@ export default function App() {
         .notifyNative(
           title,
           body,
-          formatDeepLink(item.where ?? { kind: "app" }),
+          // `targetOf`, not `item.where`: the banner's link is all a click on
+          // it will ever have — it goes out to the OS as a string and comes
+          // back through the parser — so the project the item names has to be
+          // written into it before it leaves.
+          formatDeepLink(targetOf(item) ?? { kind: "app" }),
         )
         // Notifications are a garnish — never fail anything over them.
         .catch(() => {});
@@ -1720,11 +1725,17 @@ export default function App() {
       const projectId =
         projectForLink(link, state.projects) ??
         // An agent running in a worktree has a cwd (`<repo>-wt-…`) under no
-        // component root, so a hinted link can still fail to resolve. With
-        // exactly one project open there is only one place it could mean —
+        // component root, so a *path*-hinted link can still fail to resolve.
+        // With exactly one project open there is only one place it could mean —
         // the same fallback agent actions already take.
+        //
+        // Deliberately not offered to a link that names a projectId which is
+        // no longer in the workspace: there the link said which project it
+        // meant, and "the only one open" is a different project. Landing there
+        // is the bug this guard exists to prevent, and one open project is the
+        // common case, not an exotic one.
         (hinted
-          ? state.openIds.length === 1
+          ? !link.projectId && state.openIds.length === 1
             ? state.openIds[0]
             : undefined
           : (state.activeId ?? state.openIds[0]));
@@ -1848,6 +1859,26 @@ export default function App() {
           const run = a.ptyId == null
             ? undefined
             : taskRuns().find((candidate) => candidate.ptyId === a.ptyId);
+          // Which project this is about. The run is asked first, because it is
+          // the only one that *knows*: `projectId` is stamped on it when the
+          // task is launched, from the project it was launched from. `a.route`
+          // is where the agent happened to be standing, and a task that made
+          // itself a worktree (`raise-pr` and friends do, routinely) stands
+          // outside every component root — `projectIdentity` folds `<repo>-wt-…`
+          // back, but not a worktree parked anywhere else, and not a route the
+          // sidecar never sent. When it fails the item has no project at all,
+          // which is how a "Task done" row ended up with no project chip and a
+          // click that landed in whichever project was in front.
+          const runProject = run
+            ? {
+                projectId: run.projectId,
+                // The workspace's current name where the project is still
+                // there; the recorded one otherwise, which outlives it.
+                projectName:
+                  wsRef.current.projects.find((p) => p.id === run.projectId)
+                    ?.name ?? run.projectName,
+              }
+            : undefined;
           // A blocked task is a *question*, not an FYI, and this is the split
           // the channel exists to close: a task that stops to ask and an agent
           // that stops to ask are the same event to the user, and used to have
@@ -1871,7 +1902,7 @@ export default function App() {
             title: ok ? `Task done: ${summary}` : `Task blocked: ${summary}`,
             body: a.url ?? undefined,
             source: "task",
-            ...projectIdentity(a.route),
+            ...(runProject ?? projectIdentity(a.route)),
             where:
               !ok && a.ptyId != null
                 ? { kind: "terminal", ptyId: a.ptyId, path: a.route }
@@ -2309,7 +2340,7 @@ export default function App() {
   const followAttention = useCallback(
     async (item: AttentionItem) => {
       dismissToast(item.id);
-      await followDeepLink(item.where ?? null);
+      await followDeepLink(targetOf(item));
     },
     [followDeepLink],
   );
