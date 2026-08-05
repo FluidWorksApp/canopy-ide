@@ -92,6 +92,7 @@ import {
   type PrLoop,
 } from "../prLoop";
 import { Button } from "./ui";
+import { autoExpanded, AUTO_EXPAND_TOTAL, HIGHLIGHT_MAX } from "../patchBudget";
 import { basename } from "../paths";
 import {
   ignorePrFindings,
@@ -193,10 +194,9 @@ const MERGE_LABEL: Record<MergeMethod, string> = {
 // churn is tens of thousands of lines). So: parse once, collapse by default on
 // large PRs, mount each diff only when expanded, and refuse to inline-render an
 // absurdly large file.
-const AUTO_EXPAND_TOTAL = 500; // whole-PR changed lines under which we open all
-const AUTO_EXPAND_FILE = 200; // biggest file we auto-open individually on a big PR
-const AUTO_EXPAND_BUDGET = 1200; // total auto-opened lines on a big PR
-const HIGHLIGHT_MAX = 800; // syntax-highlight only files at/under this many lines
+// The four budgets are imported, not declared here: the commit, branch and
+// review tabs render the same diffs under the same rule (PatchFileList), and
+// two copies of these numbers would be two answers to "how big is too big".
 const RENDER_CAP = 4000; // never inline-render a file bigger than this
 
 /** Safety net only: the cross-project poller is what normally wakes the loop
@@ -1671,26 +1671,11 @@ export function PrView({
   // Seed what's mounted. Small PRs open everything (it's cheap and you want to
   // read it all); big PRs open only the small, human files up to a budget and
   // leave lockfile-scale churn collapsed, so the tab paints instantly instead
-  // of blocking on a highlight of 28k lines.
+  // of blocking on a highlight of 28k lines. Shared with the commit, branch and
+  // review tabs — see src/patchBudget.ts.
   useEffect(() => {
-    if (!files.length) {
-      setExpanded(new Set());
-      return;
-    }
-    if (totalChanged <= AUTO_EXPAND_TOTAL) {
-      setExpanded(new Set(files.map((f) => f.path)));
-      return;
-    }
-    const open = new Set<string>();
-    let budget = AUTO_EXPAND_BUDGET;
-    for (const f of files) {
-      if (f.binary || f.changed > AUTO_EXPAND_FILE || budget - f.changed < 0)
-        continue;
-      open.add(f.path);
-      budget -= f.changed;
-    }
-    setExpanded(open);
-  }, [files, totalChanged]);
+    setExpanded(autoExpanded(files));
+  }, [files]);
 
   const toggleFile = useCallback(
     (path: string) =>

@@ -3,11 +3,9 @@
 // channel inside the request, so a teammate can review a branch they don't have
 // checked out (or a repo they don't have at all). Same diff widget as commits
 // and PRs; only the source differs.
-import { useDiffData } from "../diffData";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { DiffView, DiffModeEnum } from "@git-diff-view/react";
-import "@git-diff-view/react/styles/diff-view.css";
+import { PatchFileList } from "./PatchFileList";
 import { splitPatch } from "./PrView";
 import { Button } from "./ui";
 
@@ -31,10 +29,11 @@ export function ReviewView({
   /** "Ask an agent to review this" control. */
   agentBar?: ReactNode;
 }) {
-  // Stable diff `data` identities; see diffData.ts.
-  const dataFor = useDiffData();
   const [split, setSplit] = useState(true);
-  const files = review.patch ? splitPatch(review.patch) : [];
+  const files = useMemo(
+    () => (review.patch ? splitPatch(review.patch) : []),
+    [review.patch],
+  );
   return (
     <div className="commit-view">
       <div className="commit-head">
@@ -59,20 +58,7 @@ export function ReviewView({
         {files.length === 0 ? (
           <div className="tree-empty">This review request carried no changes.</div>
         ) : (
-          files.map((f) => (
-            <div key={f.path} className="pr-file">
-              <div className="pr-file-name">{f.path}</div>
-              <DiffView
-                data={dataFor(f)}
-                diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
-                diffViewHighlight
-                diffViewTheme="dark"
-                diffViewWrap
-                diffViewAddWidget={false}
-                diffViewFontSize={12}
-              />
-            </div>
-          ))
+          <PatchFileList files={files} split={split} />
         )}
         {review.truncated && (
           <div className="tree-empty">

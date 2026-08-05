@@ -203,6 +203,11 @@ export function PreviewView({
   // frame forever; now nothing that matters depends on this identity.
   const onPatchRef = useRef(onPatch);
   onPatchRef.current = onPatch;
+  // Same story, same owner: `onNotice` is a fresh arrow too, and it was the
+  // last thing keeping `navigate` — and through it `handleMessage` and the
+  // listeners that close over them — changing identity on every render.
+  const onNoticeRef = useRef(onNotice);
+  onNoticeRef.current = onNotice;
   // Read inside callbacks that must not re-create on every engine probe.
   const engineRef = useRef(engine);
   engineRef.current = engine;
@@ -476,11 +481,11 @@ export function PreviewView({
     (raw: string) => {
       const target = normalize(raw);
       if (!target) {
-        onNotice(`Not a URL: ${raw}`);
+        onNoticeRef.current(`Not a URL: ${raw}`);
         return;
       }
       setDraft(target);
-      onPatch({ url: target });
+      onPatchRef.current({ url: target });
       const t = transportRef.current;
       if (t) {
         if (opened.current) void t.navigate(tabId, target, null).catch(() => {});
@@ -494,7 +499,7 @@ export function PreviewView({
       }
       // A different origin re-runs the proxy effect via the `origin` dep.
     },
-    [onNotice, onPatch, tabId],
+    [tabId],
   );
 
   /** Consecutive off-origin redirects followed, so a redirect loop between two
@@ -513,7 +518,10 @@ export function PreviewView({
         // the new origin and keeps the page annotatable and drivable. Bounded,
         // because two hosts redirecting to each other would otherwise loop.
         if (redirects.current++ < 5) navigate(d.url);
-        else onNotice(`${d.url} keeps redirecting — the preview stopped following it.`);
+        else
+          onNoticeRef.current(
+            `${d.url} keeps redirecting — the preview stopped following it.`,
+          );
         return;
       }
       if (d.canopy === "input") {
@@ -542,7 +550,7 @@ export function PreviewView({
       if (d.canopy === "ready" || d.canopy === "nav") {
         const real = typeof d.url === "string" ? unproxied(d.url) : null;
         if (real && real !== urlRef.current) {
-          onPatch({ url: real });
+          onPatchRef.current({ url: real });
           if (!draftFocused.current) setDraft(real);
         }
         const arrived = navWaiters.current;
@@ -579,13 +587,15 @@ export function PreviewView({
           n: annotationsRef.current.length + 1,
           comment: "",
         };
-        onPatch({
+        onPatchRef.current({
           annotations: [...annotationsRef.current, next],
           feedbackPanelHidden: false,
         });
       }
     },
-    [answer, navigate, onNotice, onPatch, post, postAgentOp, restoreFocus, unproxied],
+    // Every entry here is now identity-stable, so this callback is too — which
+    // is what stops the listener effects below re-registering per render.
+    [answer, navigate, post, postAgentOp, restoreFocus, unproxied],
   );
 
   // The picker inside a proxied page talks postMessage; accept only messages

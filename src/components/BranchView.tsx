@@ -2,10 +2,8 @@
 // Uncommitted work first (it exists nowhere else), then the commits it has
 // that the base branch doesn't, then the cumulative diff. Each commit row
 // opens the commit tab — the same one History opens, not a second renderer.
-import { useDiffData } from "../diffData";
-import { useCallback, useEffect, useState } from "react";
-import { DiffView, DiffModeEnum } from "@git-diff-view/react";
-import "@git-diff-view/react/styles/diff-view.css";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { PatchFileList } from "./PatchFileList";
 import * as ipc from "../ipc";
 import type { Notify, RelayHandle } from "../types";
 import { askDialog, heldBadge } from "../branchSwitch";
@@ -45,8 +43,6 @@ export function BranchView({
   relay,
   onMicroTask,
 }: BranchViewProps) {
-  // Stable diff `data` identities; see diffData.ts.
-  const dataFor = useDiffData();
   const [commits, setCommits] = useState<ipc.CommitInfo[] | null>(null);
   // Which patch is on screen. Defaults to uncommitted work when there is any,
   // because that's the part that exists nowhere else.
@@ -170,7 +166,10 @@ export function BranchView({
 
   useEffect(() => loadPatch(), [loadPatch]);
 
-  const files = patch?.patch ? splitPatch(patch.patch) : [];
+  const files = useMemo(
+    () => (patch?.patch ? splitPatch(patch.patch) : []),
+    [patch],
+  );
 
   return (
     <div className="ticket-view">
@@ -361,20 +360,7 @@ export function BranchView({
               : "No differences from the base branch."}
           </div>
         ) : (
-          files.map((f) => (
-            <div key={f.path} className="pr-file">
-              <div className="pr-file-name">{f.path}</div>
-              <DiffView
-                data={dataFor(f)}
-                diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
-                diffViewHighlight
-                diffViewTheme="dark"
-                diffViewWrap
-                diffViewAddWidget={false}
-                diffViewFontSize={12}
-              />
-            </div>
-          ))
+          <PatchFileList files={files} split={split} />
         )}
         {patch?.truncated && (
           <div className="tree-empty">
