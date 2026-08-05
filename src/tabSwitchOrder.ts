@@ -71,6 +71,9 @@ export function stepTabSwitch(
 export interface TabSwitchRow {
   key: string;
   ids: string[];
+  /** Caption override; absent, the panel derives one from the key (the kind
+   *  stacks). Work items pass theirs in — a key there is just a tab id. */
+  label?: string;
 }
 
 /** Fold the frozen snapshot into rows. Row order is the order of each row's

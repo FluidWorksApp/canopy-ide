@@ -17,7 +17,15 @@ export interface WorkItemJoins {
   prEdge(repo: string, prNumber: number): PrJoin | undefined;
 }
 
+/** One work item. `key` is the founding tab's id — stable for the item's
+ *  life, so labels and hints keyed on it survive membership changes. */
+export interface WorkItem {
+  key: string;
+  ids: string[];
+}
+
 interface Cluster {
+  key: string;
   ids: string[];
   cwds: Set<string>;
   ptys: Set<number>;
@@ -39,12 +47,13 @@ const under = (path: string, dir: string) =>
 export function clusterWorkItems(
   tabs: readonly SubTab[],
   joins: WorkItemJoins,
-): string[][] {
+): WorkItem[] {
   const clusters: Cluster[] = [];
   const claimed = new Set<string>();
 
   const found = (tab: SubTab, cwd: string | null, pty: number | null | undefined, sessionId?: string) => {
     const c: Cluster = {
+      key: tab.id,
       ids: [tab.id],
       cwds: new Set(cwd ? [normDir(cwd)] : []),
       ptys: new Set(pty != null ? [pty] : []),
@@ -127,9 +136,9 @@ export function clusterWorkItems(
     }
   }
 
-  const groups = clusters.map((c) => c.ids);
+  const groups: WorkItem[] = clusters.map((c) => ({ key: c.key, ids: c.ids }));
   for (const tab of tabs) {
-    if (!claimed.has(tab.id)) groups.push([tab.id]);
+    if (!claimed.has(tab.id)) groups.push({ key: tab.id, ids: [tab.id] });
   }
   return groups;
 }
@@ -142,11 +151,11 @@ export function clusterWorkItems(
  * group lands. Closed tabs are dropped; empty groups vanish.
  */
 export function workItemSnapshot(
-  groups: readonly (readonly string[])[],
+  groups: readonly WorkItem[],
   openIds: readonly string[],
   activeId: string | null,
   recent: readonly string[],
-): string[][] {
+): WorkItem[] {
   const open = new Set(openIds);
   const rank = new Map<string, number>();
   let n = 0;
@@ -158,15 +167,42 @@ export function workItemSnapshot(
   openIds.forEach(note);
 
   const seen = new Set<string>();
-  const out: { ids: string[]; best: number }[] = [];
+  const out: { item: WorkItem; best: number }[] = [];
   for (const group of groups) {
-    const ids = group
+    const ids = group.ids
       .filter((id) => open.has(id) && !seen.has(id))
       .sort((a, b) => (rank.get(a) ?? Infinity) - (rank.get(b) ?? Infinity));
     if (!ids.length) continue;
     ids.forEach((id) => seen.add(id));
-    out.push({ ids, best: rank.get(ids[0]) ?? Infinity });
+    out.push({ item: { key: group.key, ids }, best: rank.get(ids[0]) ?? Infinity });
   }
   out.sort((a, b) => a.best - b.best);
-  return out.map((g) => g.ids);
+  return out.map((g) => g.item);
+}
+
+/**
+ * Ctrl+Tab's step in Work items mode: the next ITEM, landing on its first
+ * surviving member. With a single live item it degrades to walking that
+ * item's members, so the chord never goes dead. Closed tabs and emptied
+ * items are skipped the way stepTabSwitch skips closed ids.
+ */
+export function stepWorkItem(
+  rows: readonly WorkItem[],
+  selectedId: string | null,
+  openIds: readonly string[],
+  dir: 1 | -1,
+): string | null {
+  const open = new Set(openIds);
+  const live = rows
+    .map((r) => r.ids.filter((id) => open.has(id)))
+    .filter((ids) => ids.length > 0);
+  if (!live.length) return null;
+  const at = Math.max(0, live.findIndex((ids) => ids.includes(selectedId ?? "")));
+  if (live.length === 1) {
+    const ids = live[0];
+    if (ids.length < 2) return null;
+    const i = Math.max(0, ids.indexOf(selectedId ?? ""));
+    return ids[(i + dir + ids.length) % ids.length];
+  }
+  return live[(at + dir + live.length) % live.length][0];
 }

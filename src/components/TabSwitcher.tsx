@@ -45,6 +45,7 @@ import {
 import { tabKind, tabToneColor } from "../tabKind";
 import { DOC_STACKS } from "../tabGroups";
 import type { TabSwitchRow } from "../tabSwitchOrder";
+import type { CardStatus } from "../tabCardStatus";
 
 /** The two row keys the doc stacks don't know: terminals, split by contents. */
 const TERM_ROW_LABELS: Record<string, string> = {
@@ -52,11 +53,12 @@ const TERM_ROW_LABELS: Record<string, string> = {
   shells: "Shells",
 };
 
-function rowLabel(key: string): string {
+function rowLabel(row: TabSwitchRow): string {
   return (
-    TERM_ROW_LABELS[key] ??
-    DOC_STACKS.find((s) => s.key === key)?.label ??
-    key
+    row.label ??
+    TERM_ROW_LABELS[row.key] ??
+    DOC_STACKS.find((s) => s.key === row.key)?.label ??
+    row.key
   );
 }
 
@@ -218,6 +220,8 @@ export interface TabSwitcherProps {
   termText: (id: string) => string | null;
   /** Clicking a card is the mouse's version of releasing on it. */
   onPick: (id: string) => void;
+  /** Why you'd go there: the agent bucket mark and one line of state. */
+  status?: (tab: SubTab) => CardStatus;
 }
 
 export function TabSwitcher({
@@ -228,6 +232,7 @@ export function TabSwitcher({
   paneRef,
   termText,
   onPick,
+  status,
 }: TabSwitcherProps) {
   const [tick, setTick] = useState(0);
   const everyRef = useRef(PREVIEW_TICK_MS);
@@ -263,6 +268,7 @@ export function TabSwitcher({
   const grouped = rows
     ?.map((row) => ({
       key: row.key,
+      label: rowLabel(row),
       tabs: row.ids
         .map((id) => byId.get(id))
         .filter((tab): tab is SubTab => Boolean(tab)),
@@ -273,6 +279,7 @@ export function TabSwitcher({
     const kind = tabKind(tab);
     const brand = tabToneColor(kind);
     const i = indexById.get(tab.id) ?? 0;
+    const st = status?.(tab);
     return (
       <div
         key={tab.id}
@@ -303,6 +310,15 @@ export function TabSwitcher({
               </span>
               <span className="tsw-kind-detail">{kind.detail}</span>
             </>
+          )}
+          {st && (st.bucket || st.line) && (
+            <span
+              className={`tsw-status${st.bucket ? ` tsw-status-${st.bucket}` : ""}`}
+              title={st.line}
+            >
+              {st.bucket && <span className="tsw-status-dot" aria-hidden />}
+              {st.line}
+            </span>
           )}
         </div>
         <div className="tsw-shot" style={{ width: SHOT_W, height: SHOT_H }}>
@@ -343,11 +359,11 @@ export function TabSwitcher({
         >
           {grouped.map((row) => (
             <div key={row.key} className="tsw-row">
-              <div className="tsw-row-label">{rowLabel(row.key)}</div>
+              <div className="tsw-row-label">{row.label}</div>
               <div
                 className="tsw-row-strip"
                 role="group"
-                aria-label={rowLabel(row.key)}
+                aria-label={row.label}
               >
                 {row.tabs.map(card)}
               </div>

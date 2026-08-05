@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { clusterWorkItems, workItemSnapshot, type WorkItemJoins } from "./workItems";
+import {
+  clusterWorkItems,
+  stepWorkItem,
+  workItemSnapshot,
+  type WorkItemJoins,
+} from "./workItems";
 import type { SubTab } from "./components/ProjectView/helpers";
 
 const noJoins: WorkItemJoins = { prEdge: () => undefined };
@@ -69,8 +74,8 @@ describe("clusterWorkItems", () => {
       file("f2", "/elsewhere/y.ts"),
     ];
     const groups = clusterWorkItems(tabs, noJoins);
-    expect(groups).toContainEqual(["s1", "ws1", "p1", "f1"]);
-    expect(groups).toContainEqual(["f2"]);
+    expect(groups).toContainEqual({ key: "s1", ids: ["s1", "ws1", "p1", "f1"] });
+    expect(groups).toContainEqual({ key: "f2", ids: ["f2"] });
   });
 
   it("joins a PR by provenance session id", () => {
@@ -84,8 +89,8 @@ describe("clusterWorkItems", () => {
       pr("pr2", "/repo", 43),
     ];
     const groups = clusterWorkItems(tabs, joins);
-    expect(groups).toContainEqual(["ws1", "pr1"]);
-    expect(groups).toContainEqual(["pr2"]);
+    expect(groups).toContainEqual({ key: "ws1", ids: ["ws1", "pr1"] });
+    expect(groups).toContainEqual({ key: "pr2", ids: ["pr2"] });
   });
 
   it("joins a PR by cwd only when exactly one cluster owns it", () => {
@@ -93,12 +98,12 @@ describe("clusterWorkItems", () => {
       prEdge: () => ({ sessionId: "gone", cwd: "/w/shared" }),
     };
     const one = clusterWorkItems([session("s1", "/w/shared", 1), pr("pr1", "/r", 1)], joins);
-    expect(one).toContainEqual(["s1", "pr1"]);
+    expect(one).toContainEqual({ key: "s1", ids: ["s1", "pr1"] });
     const two = clusterWorkItems(
       [session("s1", "/w/shared", 1), session("s2", "/w/shared", 2), pr("pr1", "/r", 1)],
       joins,
     );
-    expect(two).toContainEqual(["pr1"]);
+    expect(two).toContainEqual({ key: "pr1", ids: ["pr1"] });
   });
 
   it("leaves files in a cwd two sessions share loose, deepest cwd wins otherwise", () => {
@@ -109,14 +114,14 @@ describe("clusterWorkItems", () => {
       file("shallow", "/repo/src/b.ts"),
     ];
     const groups = clusterWorkItems(tabs, noJoins);
-    expect(groups).toContainEqual(["s2", "deep"]);
-    expect(groups).toContainEqual(["s1", "shallow"]);
+    expect(groups).toContainEqual({ key: "s2", ids: ["s2", "deep"] });
+    expect(groups).toContainEqual({ key: "s1", ids: ["s1", "shallow"] });
 
     const shared = clusterWorkItems(
       [session("s1", "/repo", 1), session("s2", "/repo", 2), file("f", "/repo/src/a.ts")],
       noJoins,
     );
-    expect(shared).toContainEqual(["f"]);
+    expect(shared).toContainEqual({ key: "f", ids: ["f"] });
   });
 
   it("plain shells and runs found nothing", () => {
@@ -124,8 +129,8 @@ describe("clusterWorkItems", () => {
       [shell("sh1", "/repo", 1), file("f", "/repo/src/a.ts")],
       noJoins,
     );
-    expect(groups).toContainEqual(["sh1"]);
-    expect(groups).toContainEqual(["f"]);
+    expect(groups).toContainEqual({ key: "sh1", ids: ["sh1"] });
+    expect(groups).toContainEqual({ key: "f", ids: ["f"] });
   });
 
   it("a workspace whose session closed founds its own cluster", () => {
@@ -133,7 +138,7 @@ describe("clusterWorkItems", () => {
       [workspace("ws1", "/w/feat-a", { sessionId: "sess-a" }), file("f", "/w/feat-a/x.ts")],
       noJoins,
     );
-    expect(groups).toContainEqual(["ws1", "f"]);
+    expect(groups).toContainEqual({ key: "ws1", ids: ["ws1", "f"] });
   });
 
   it("previews join by recipient when there is no initiator", () => {
@@ -141,8 +146,8 @@ describe("clusterWorkItems", () => {
       [session("s1", "/w", 5), preview("p1", { recipientPtyId: 5 }), preview("p2")],
       noJoins,
     );
-    expect(groups).toContainEqual(["s1", "p1"]);
-    expect(groups).toContainEqual(["p2"]);
+    expect(groups).toContainEqual({ key: "s1", ids: ["s1", "p1"] });
+    expect(groups).toContainEqual({ key: "p2", ids: ["p2"] });
   });
 
   it("every tab appears exactly once", () => {
@@ -153,7 +158,9 @@ describe("clusterWorkItems", () => {
       shell("sh1", "/w", 2),
       preview("p1"),
     ];
-    const all = clusterWorkItems(tabs, noJoins).flat().sort();
+    const all = clusterWorkItems(tabs, noJoins)
+      .flatMap((g) => g.ids)
+      .sort();
     expect(all).toEqual(["f1", "p1", "s1", "sh1", "ws1"]);
   });
 });
@@ -161,33 +168,87 @@ describe("clusterWorkItems", () => {
 describe("workItemSnapshot", () => {
   it("orders groups by their best-ranked member and members by rank", () => {
     const groups = [
-      ["a1", "a2"],
-      ["b1", "b2"],
+      { key: "a", ids: ["a1", "a2"] },
+      { key: "b", ids: ["b1", "b2"] },
     ];
     const snap = workItemSnapshot(groups, ["a1", "a2", "b1", "b2"], "b2", ["b2", "a2"]);
     expect(snap).toEqual([
-      ["b2", "b1"],
-      ["a2", "a1"],
+      { key: "b", ids: ["b2", "b1"] },
+      { key: "a", ids: ["a2", "a1"] },
     ]);
   });
 
   it("drops closed tabs and empty groups", () => {
-    const snap = workItemSnapshot([["a"], ["b", "c"]], ["c"], null, []);
-    expect(snap).toEqual([["c"]]);
+    const snap = workItemSnapshot(
+      [
+        { key: "a", ids: ["a"] },
+        { key: "b", ids: ["b", "c"] },
+      ],
+      ["c"],
+      null,
+      [],
+    );
+    expect(snap).toEqual([{ key: "b", ids: ["c"] }]);
   });
 
   it("unvisited groups keep strip order after the recent ones", () => {
     const snap = workItemSnapshot(
-      [["a"], ["b"], ["c"]],
+      [
+        { key: "a", ids: ["a"] },
+        { key: "b", ids: ["b"] },
+        { key: "c", ids: ["c"] },
+      ],
       ["a", "b", "c"],
       "c",
       ["c"],
     );
-    expect(snap).toEqual([["c"], ["a"], ["b"]]);
+    expect(snap.map((g) => g.key)).toEqual(["c", "a", "b"]);
   });
 
   it("never duplicates a tab listed in two groups", () => {
-    const snap = workItemSnapshot([["a", "x"], ["x", "b"]], ["a", "x", "b"], null, []);
-    expect(snap.flat().sort()).toEqual(["a", "b", "x"]);
+    const snap = workItemSnapshot(
+      [
+        { key: "g1", ids: ["a", "x"] },
+        { key: "g2", ids: ["x", "b"] },
+      ],
+      ["a", "x", "b"],
+      null,
+      [],
+    );
+    expect(snap.flatMap((g) => g.ids).sort()).toEqual(["a", "b", "x"]);
+  });
+});
+
+describe("stepWorkItem", () => {
+  const rows = [
+    { key: "a", ids: ["a1", "a2"] },
+    { key: "b", ids: ["b1"] },
+    { key: "c", ids: ["c1", "c2"] },
+  ];
+  const open = ["a1", "a2", "b1", "c1", "c2"];
+
+  it("steps to the next item's landing tab, wrapping both ways", () => {
+    expect(stepWorkItem(rows, "a2", open, 1)).toBe("b1");
+    expect(stepWorkItem(rows, "b1", open, 1)).toBe("c1");
+    expect(stepWorkItem(rows, "c1", open, 1)).toBe("a1");
+    expect(stepWorkItem(rows, "a1", open, -1)).toBe("c1");
+  });
+
+  it("skips an item whose tabs all closed", () => {
+    expect(stepWorkItem(rows, "a1", ["a1", "a2", "c1", "c2"], 1)).toBe("c1");
+  });
+
+  it("walks members when only one item survives", () => {
+    expect(stepWorkItem(rows, "a1", ["a1", "a2"], 1)).toBe("a2");
+    expect(stepWorkItem(rows, "a2", ["a1", "a2"], 1)).toBe("a1");
+    expect(stepWorkItem(rows, "a1", ["a1"], 1)).toBeNull();
+  });
+
+  it("starts from the first item for an unknown selection", () => {
+    expect(stepWorkItem(rows, null, open, 1)).toBe("b1");
+  });
+
+  it("is null with nothing open", () => {
+    expect(stepWorkItem(rows, "a1", [], 1)).toBeNull();
   });
 });

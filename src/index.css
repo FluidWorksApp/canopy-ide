@@ -23644,6 +23644,38 @@ a.btn-sm {
   color: var(--tsw-tone, var(--text-dim));
 }
 
+/* Why you'd go there: the same state vocabulary the strip's dots speak,
+   right-aligned on the kind line. Marks only — state never reorders cards. */
+.tsw-status {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.tsw-status-dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.tsw-status-attention {
+  color: var(--warn);
+}
+
+.tsw-status-active {
+  color: var(--ok);
+}
+
 /* Six tones over fifteen tab types, grouped by what a tab is FOR. Eleven
    colours would tell nothing apart; these are the distinctions you actually
    make while the panel is up. */
