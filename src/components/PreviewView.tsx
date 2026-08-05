@@ -1176,24 +1176,29 @@ export function PreviewView({
           </span>
         )}
       </div>
-      <div
-        className="preview-body"
-        style={viewport ? { overflow: "auto", alignItems: "flex-start" } : undefined}
-      >
+      <div className="preview-body">
+        {/* The emulated viewport scrolls inside this box, not in .preview-body:
+            a page wider than the window has to push against a scrollbar, not
+            against the feedback panel beside it. */}
         <div
-          className="preview-frame-wrap"
-          style={
-            viewport
-              ? {
-                  width: viewport.width,
-                  height: viewport.height,
-                  flex: "0 0 auto",
-                  marginInline: "auto",
-                }
-              : undefined
-          }
+          className="preview-scroll"
+          style={viewport ? { overflow: "auto", alignItems: "flex-start" } : undefined}
         >
-          {body}
+          <div
+            className="preview-frame-wrap"
+            style={
+              viewport
+                ? {
+                    width: viewport.width,
+                    height: viewport.height,
+                    flex: "0 0 auto",
+                    marginInline: "auto",
+                  }
+                : undefined
+            }
+          >
+            {body}
+          </div>
         </div>
         {!feedbackPanelHidden && (annotations.length > 0 || picking || shots.length > 0) && (
           <div className="preview-panel">

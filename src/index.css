@@ -18098,6 +18098,16 @@ a.btn-sm {
   flex: 1;
   display: flex;
   min-height: 0;
+  min-width: 0;
+}
+/* Holds the page; the feedback panel is its sibling, not its content. The
+   emulated viewport scrolls in here so a page wider than the window can never
+   push the panel past the right edge of the app. */
+.preview-scroll {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
 }
 .preview-frame-wrap {
   flex: 1;
