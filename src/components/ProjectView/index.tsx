@@ -4533,7 +4533,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       } else if (act.do === "panel") {
         setSideTab(act.panel);
         setPinned(true);
-        if (act.note) onNotice(act.note);
+        // Keyed on the fallback, not the click: re-clicking the same stale
+        // notification refreshes one explanation instead of stacking a new
+        // "that terminal has closed" row per click.
+        if (act.note)
+          onNotice(act.note, "info", {
+            projectId: project.id,
+            dedupe: `link-fallback:${project.id}:${act.panel}`,
+          });
       } else if (act.do === "chat") {
         openChat(act.peer, act.name);
       } else if (act.do === "pr") {
@@ -4562,7 +4569,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
             else {
               setSideTab("trackers");
               setPinned(true);
-              onNotice(`Issue ${act.issueId} is no longer in the active list.`);
+              onNotice(`Issue ${act.issueId} is no longer in the active list.`, "info", {
+                projectId: project.id,
+                dedupe: `link-fallback:${project.id}:trackers`,
+              });
             }
           }).catch(() => {
             setSideTab("trackers");

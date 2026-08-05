@@ -35,6 +35,7 @@ import {
 import { Button } from "./ui";
 import { format, matches } from "../shortcuts";
 import { PROVENANCE_EVENT } from "../provenance";
+import { agentGitTrail } from "../agentGitTrail";
 
 const fmtCost = (n: number) =>
   n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
@@ -586,7 +587,24 @@ export function AgentWorkspaceView({
   }, [edits, repo]);
 
   // The join: digest re-read fresh + branch/workdir/counts/commits. Refetched
-  // on Refresh and whenever the panel hands over a newer digest.
+  // on Refresh, whenever the panel hands over a newer digest, and whenever git
+  // says this repo or the agent's worktree moved — so a commit or push made in
+  // the agent's terminal updates the trail without anyone pressing Refresh.
+  const [gitTick, setGitTick] = useState(0);
+  useEffect(() => {
+    if (!repo) return;
+    let cancelled = false;
+    const workdir = ws?.workdir;
+    const sub = ipc.onGitChange((e) => {
+      if (cancelled) return;
+      if (e.root === repo || (workdir && e.root === workdir))
+        setGitTick((t) => t + 1);
+    });
+    return () => {
+      cancelled = true;
+      void sub.then((fn) => fn());
+    };
+  }, [repo, ws?.workdir]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     let live = true;
     setWsErr(null);
@@ -601,7 +619,7 @@ export function AgentWorkspaceView({
     return () => {
       live = false;
     };
-  }, [repo, cwd, agent, sessionId, digest?.updated, tick]);
+  }, [repo, cwd, agent, sessionId, digest?.updated, tick, gitTick]);
 
   // Open on this agent's own edits when we have them — that's the per-agent
   // view the shared-checkout tree can't give. Otherwise fall back to whichever
@@ -1061,7 +1079,10 @@ export function AgentWorkspaceView({
           working, and the window controls — no second header repeating the
           agent name below it. The dropped chips (±uncommitted, ↑vs base) were
           whole-checkout/whole-branch counts, not this agent's; the commit list
-          and the scoped diff below carry the real numbers. */}
+          and the scoped diff below carry the real numbers. The trail strip
+          under the stats answers where the work stands on its way out
+          (wrote → committed → pushed → PR), with the shared-checkout caveat
+          in its tooltips rather than as a silent count. */}
       <div className="ticket-view-head aw-banner">
         <div className="ticket-view-title">
           {st &&
@@ -1333,6 +1354,60 @@ export function AgentWorkspaceView({
                 {usage.turns} {usage.turns === 1 ? "turn" : "turns"}
               </span>
             )}
+          </div>
+        )}
+        {/* The trail: wrote → committed → pushed → PR, each step carrying its
+            count in the tooltip. When the branch has commits but no PR, the
+            last step is the one-click Raise PR task instead of a grey label. */}
+        {repo && ws && (
+          <div className="aw-trail" role="status">
+            {agentGitTrail({
+              dirty: ws.dirty,
+              commits: ws.commits.length,
+              unpushed: ws.unpushed,
+              onBase: ws.on_base,
+              merged: ws.merged,
+              isolated: ws.isolated,
+              touched: ws.touched.length,
+              prNumber: pr?.number ?? null,
+              raised: raised.map((e) => e.pr_number),
+            }).map((s, i) => (
+              <span key={s.id} className="aw-trail-seg">
+                {i > 0 && <span className="aw-trail-arrow">›</span>}
+                {s.id === "pr" &&
+                s.state === "pending" &&
+                onRaisePrTask &&
+                ws.branch &&
+                !ws.on_base &&
+                !pr &&
+                ws.commits.length > 0 ? (
+                  <button
+                    className="aw-trail-step tr-cta"
+                    title={`${s.detail} — run the Raise PR task on ${ws.branch}`}
+                    onClick={() =>
+                      onRaisePrTask(
+                        ws.branch as string,
+                        ws.isolated ? ws.workdir : null,
+                      )
+                    }
+                  >
+                    {raisePrTask.icon} Raise PR
+                  </button>
+                ) : (
+                  <span
+                    className={`aw-trail-step tr-${s.state}`}
+                    title={s.detail}
+                  >
+                    {s.state === "done"
+                      ? "✓ "
+                      : s.state === "attention"
+                        ? "● "
+                        : ""}
+                    {s.label}
+                  </span>
+                )}
+              </span>
+            ))}
           </div>
         )}
       </div>

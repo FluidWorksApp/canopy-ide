@@ -8,7 +8,12 @@
 import { useState } from 'react'
 import { AgentBadge } from '@shared/components'
 import { IconBell, IconCheck, IconGauge } from '@shared/icons'
-import { agentMeta, basename } from '@shared/model'
+import {
+  agentMeta,
+  basename,
+  isRemoteOutstanding,
+  type RemoteAttentionItem,
+} from '@shared/model'
 import type { PendingItem } from '@shared/notifications'
 import { useAsync } from '../useAsync'
 import {
@@ -109,25 +114,70 @@ function alertRow(ctx: PanelCtx, item: PendingItem) {
   )
 }
 
+/** One attention-channel item — the desktop's bell list, mirrored. There is no
+ *  terminal to land on (many of these come from dialogs, not sessions), so the
+ *  row is informational: what was raised, by which project, and whether it is
+ *  still waiting. */
+function attentionRow(item: RemoteAttentionItem) {
+  const waiting = isRemoteOutstanding(item)
+  return (
+    <Row
+      key={`att:${item.id}`}
+      icon={<IconBell s={18} />}
+      title={
+        <>
+          {item.title}
+          {waiting && <Pill tone="warn">needs you</Pill>}
+          {!waiting && item.tone === 'error' && <Pill tone="warn">error</Pill>}
+        </>
+      }
+      sub={item.body}
+      meta={item.projectName ? <span className="dim">{item.projectName}</span> : undefined}
+    />
+  )
+}
+
+/** The attention items worth showing beside the hook-stream cards. The desktop
+ *  derives a question per blocked agent from the same hook stream this panel
+ *  already renders, keyed `agent:<sessionId>` — where both copies are present
+ *  the card wins (it can jump to the terminal). The attention copy still shows
+ *  when the event predates this page's tail, so nothing waiting goes
+ *  invisible. */
+function attentionSansCards(ctx: PanelCtx): RemoteAttentionItem[] {
+  const shown = new Set(ctx.pending.map((i) => `agent:${i.sessionId}`))
+  return ctx.attention.filter((i) => !i.dedupeKey || !shown.has(i.dedupeKey))
+}
+
 export const notificationsPanel: PanelDef = {
   id: 'notifications',
   title: 'Notifications',
   Icon: IconBell,
   scope: 'global',
-  badge: (ctx) => ctx.pending.filter((i) => i.kind !== 'idle').length,
-  urgent: (ctx) => ctx.pending.some((i) => i.kind !== 'idle'),
+  badge: (ctx) =>
+    ctx.pending.filter((i) => i.kind !== 'idle').length +
+    attentionSansCards(ctx).filter(isRemoteOutstanding).length,
+  urgent: (ctx) =>
+    ctx.pending.some((i) => i.kind !== 'idle') ||
+    attentionSansCards(ctx).some(isRemoteOutstanding),
   List({ ctx }) {
     const urgent = ctx.pending.filter((i) => i.kind !== 'idle')
     const done = ctx.pending.filter((i) => i.kind === 'idle')
+    const attention = attentionSansCards(ctx)
+    // Questions still waiting lead, then the rest of the history, newest
+    // first (the push is already newest-first).
+    const asking = attention.filter(isRemoteOutstanding)
+    const rest = attention.filter((i) => !isRemoteOutstanding(i))
+    const empty = ctx.pending.length === 0 && ctx.attention.length === 0
     return (
       <>
         <div className="panel-pad">
           <NotifyControl />
         </div>
-        {urgent.length > 0 && (
+        {(urgent.length > 0 || asking.length > 0) && (
           <>
-            <SubHead title="Waiting on you" n={urgent.length} />
+            <SubHead title="Waiting on you" n={urgent.length + asking.length} />
             {urgent.map((i) => alertRow(ctx, i))}
+            {asking.map(attentionRow)}
           </>
         )}
         {done.length > 0 && (
@@ -136,7 +186,13 @@ export const notificationsPanel: PanelDef = {
             {done.map((i) => alertRow(ctx, i))}
           </>
         )}
-        {ctx.pending.length === 0 && (
+        {rest.length > 0 && (
+          <>
+            <SubHead title="Notifications" n={rest.length} />
+            {rest.map(attentionRow)}
+          </>
+        )}
+        {empty && (
           <div className="panel-empty">
             Nothing is waiting on you. Anything an agent raises will show up here — and buzz your
             phone once notifications are on.

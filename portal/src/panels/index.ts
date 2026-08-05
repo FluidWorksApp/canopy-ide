@@ -9,7 +9,7 @@ import { agentsPanel, serversPanel, terminalsPanel } from './agents'
 import { companionPanel } from './companion'
 import { notificationsPanel, usagePanel } from './alerts'
 import { changesPanel, filesPanel } from './code'
-import { instructionsPanel, researchPanel, ticketsPanel, toolsPanel } from './knowledge'
+import { researchPanel, ticketsPanel, toolsPanel } from './knowledge'
 import { gitPanel, prsPanel } from './vcs'
 import type { PanelDef } from './types'
 
@@ -25,7 +25,6 @@ export const PANELS: PanelDef[] = [
   serversPanel,
   ticketsPanel,
   researchPanel,
-  instructionsPanel,
   toolsPanel,
   usagePanel,
 ]
@@ -34,11 +33,16 @@ export const PANELS: PanelDef[] = [
 export const COMPACT_PRIMARY = ['notifications', 'agents', 'changes']
 
 /** Wide Remote uses the desktop rail's information architecture. The panel
- * renderers stay remote-specific; only their placement is shared vocabulary. */
+ * renderers stay remote-specific; only their placement is shared vocabulary.
+ *
+ * The companion is deliberately NOT here. It lives above the construct of a
+ * single project — it is across all of them — so it does not belong in a rail
+ * that answers "what is in this project". It floats instead, as the desktop's
+ * face does: see CompanionFab in panels/companion.tsx, placed by WideShell. */
 export const WIDE_RAIL_GROUPS = [
   { id: 'project', label: 'Project', panels: ['files', 'servers'] },
   { id: 'review', label: 'Source control & Review', panels: ['changes', 'git', 'prs', 'tickets'] },
-  { id: 'agents', label: 'Agents', panels: ['companion', 'agents', 'research', 'instructions'] },
+  { id: 'agents', label: 'Agents', panels: ['agents', 'research'] },
   { id: 'runtime', label: 'Runtime', panels: ['terminals'] },
 ] as const
 

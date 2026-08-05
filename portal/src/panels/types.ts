@@ -7,7 +7,14 @@
 // on a laptop and a tab on a phone by being added to one list.
 
 import type { ReactNode } from 'react'
-import type { AgentRow, Project, RemoteCli, RemoteCompanion, Stat } from '@shared/model'
+import type {
+  AgentRow,
+  Project,
+  RemoteAttentionItem,
+  RemoteCli,
+  RemoteCompanion,
+  Stat,
+} from '@shared/model'
 import type { PendingItem } from '@shared/notifications'
 import type { Rpc } from '../rpc'
 import type { Transport } from '@shared/transport'
@@ -67,6 +74,10 @@ export interface PanelCtx {
   rows: AgentRow[]
   stats: Map<number, Stat>
   pending: PendingItem[]
+  /** The desktop's attention channel, as it last pushed it — every project's
+   *  questions and notifications, including the ones (canopy_ask_user, dialogs
+   *  in background projects) that never touch the hook stream. */
+  attention: RemoteAttentionItem[]
   clis: RemoteCli[]
   /** Companion presence + transcript tail, as the desktop last pushed it.
    *  Null until the desktop pushes (or when it never has). */

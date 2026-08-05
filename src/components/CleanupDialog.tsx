@@ -143,8 +143,6 @@ export function CleanupDialog({
     outcomeSummary(outcome)
   ) : scan ? (
     scanSummary(scan)
-  ) : progress ? (
-    `Scanning ${progress.done} of ${progress.total} workspaces…`
   ) : (
     "Looking for build output, installs and caches…"
   );
@@ -185,6 +183,32 @@ export function CleanupDialog({
       }
     >
       <div className="cln-body">
+        {!scan && !error && (
+          <div
+            className="cln-progress"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={progress?.total ?? 0}
+            aria-valuenow={progress?.done ?? 0}
+          >
+            <div className="cln-progress-track">
+              <div
+                className="cln-progress-fill"
+                style={{
+                  width: progress
+                    ? `${(progress.done / Math.max(progress.total, 1)) * 100}%`
+                    : "0%",
+                }}
+              />
+            </div>
+            <div className="cln-progress-where">
+              {progress
+                ? `${progress.done} of ${progress.total} · ${progress.workspace.split("/").pop() ?? progress.workspace}`
+                : "finding workspaces…"}
+            </div>
+          </div>
+        )}
+
         {scan && scan.targets.length > 0 && (
           <label className="cln-mode" title="Trash keeps a way back; deleting frees the space now.">
             <input

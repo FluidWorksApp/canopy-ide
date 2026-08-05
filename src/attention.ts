@@ -326,7 +326,8 @@ const newId = () =>
  *  Queues; never replaces. Two things reporting at once produce two items,
  *  which is the single most-broken property of the toast this succeeds. The
  *  one exception is `dedupeKey`, which is not replacement but identity: the
- *  same question re-posted is still one question. */
+ *  same question re-posted is still one question, and the same keyed FYI
+ *  re-posted is still one announcement, made again. */
 export function postAttention(input: AttentionInput): string {
   const items = read();
   const ts = input.ts ?? Date.now();
@@ -348,6 +349,28 @@ export function postAttention(input: AttentionInput): string {
       next[i] = merged;
       write(next);
       return merged.id;
+    }
+    // A keyed FYI is the same announcement made again — the user clicking the
+    // same dead link twice, a reminder re-set on the same note. Refresh the
+    // one item (fresh time, back to the top, toast back on screen) instead of
+    // stacking a copy per repeat. Unlike a question, "announced again now" is
+    // the useful timestamp, not "first announced".
+    if (input.kind === "fyi") {
+      const j = items.findIndex(
+        (x) => x.dedupeKey === input.dedupeKey && x.kind === "fyi",
+      );
+      if (j !== -1) {
+        const refreshed: AttentionItem = {
+          ...items[j],
+          ...input,
+          id: items[j].id,
+          ts,
+          readAt: undefined,
+          toastDismissedAt: undefined,
+        };
+        write([refreshed, ...items.filter((_, k) => k !== j)]);
+        return refreshed.id;
+      }
     }
   }
   const id = newId();

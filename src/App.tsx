@@ -46,9 +46,11 @@ import {
   resolveAttention,
   resolveAttentionByKey,
   shouldReachOS,
+  subscribeAttention,
   toastMs,
   type AttentionItem,
 } from "./attention";
+import { remoteAttentionSnapshot } from "./remoteAttention";
 import { useAttention } from "./useAttention";
 import { NotificationCenter } from "./components/NotificationCenter";
 import { runUiOp, type CompanionOps, type WorkspaceProject } from "./agentOps";
@@ -285,6 +287,7 @@ export default function App() {
         ...identity,
         ...(opts?.body ? { body: opts.body } : {}),
         ...(opts?.where ? { where: opts.where } : {}),
+        ...(opts?.dedupe ? { dedupeKey: opts.dedupe } : {}),
       });
     },
     [projectIdentity, projectNameFor],
@@ -1095,6 +1098,26 @@ export default function App() {
     };
   }, []);
 
+  // The attention channel rides the same push channel as the companion, and
+  // for the same reason: a question raised in this frontend (canopy_ask_user,
+  // a branch-switch dialog) never touches the hook stream the portal already
+  // receives, so a push is the only way it reaches a phone. Debounced — the
+  // derived agent-pending source re-posts on every hook event it sees.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const publish = () =>
+      void ipc.remoteSetAttention(remoteAttentionSnapshot()).catch(() => {});
+    publish();
+    const unsub = subscribeAttention(() => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(publish, 250);
+    });
+    return () => {
+      if (timer) clearTimeout(timer);
+      unsub();
+    };
+  }, []);
+
   // Remote launches from the same resolved registry as desktop: custom CLIs,
   // binary overrides, availability and verified resume syntax included.
   useEffect(() => {
@@ -1325,6 +1348,12 @@ export default function App() {
     window.addEventListener(HIBERNATION_CHANGE_EVENT, sync);
     return () => window.removeEventListener(HIBERNATION_CHANGE_EVENT, sync);
   }, []);
+  // The portal must not offer a sleeping project (its tab survives in openIds,
+  // so scope alone can't tell). The marker lives in this frontend's
+  // localStorage — Rust can only be told, same as the theme.
+  useEffect(() => {
+    void ipc.remoteSetHibernated(Object.keys(hibernated)).catch(() => {});
+  }, [hibernated]);
   // The project frosting over right now, and the snapshot it produced (shown
   // as the frost forms, so you see what is being put away). `leaving` is the
   // handover: the frost lifts while the wake screen takes its place underneath,

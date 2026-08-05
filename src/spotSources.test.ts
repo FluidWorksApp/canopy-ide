@@ -237,6 +237,39 @@ describe("the source registry", () => {
     expect(instantRows(req("anything")).map((r) => r.id)).not.toContain("plug:1");
   });
 
+  it("stops asking sources once typing is composing, unless they opt in", () => {
+    // Past the prompt threshold every keystroke is writing, not searching —
+    // the only rows the palette will show are what you can do with a sentence,
+    // so ranking it against tabs, clips and task history is work per keystroke
+    // whose every row is discarded. A source that answers prose says so.
+    const searcher = vi.fn(() => [row("plug:1", "Plugin")]);
+    const offSearcher = registerSpotSource({
+      id: "plug-search",
+      group: "Plugin",
+      timing: "instant",
+      rows: searcher,
+    });
+    const offComposer = registerSpotSource({
+      id: "plug-compose",
+      group: "Plugin",
+      timing: "instant",
+      composing: true,
+      rows: () => [row("comp:1", "Plugin")],
+    });
+    try {
+      const prompt = "the dev server tab flickers whenever the diff gets wide, please fix it";
+      const ids = instantRows(req(prompt, { composing: true })).map((r) => r.id);
+      expect(searcher).not.toHaveBeenCalled();
+      expect(ids).toContain("comp:1");
+      // The built-in actions are the source that opted in: running what was
+      // typed is still on offer.
+      expect(ids).toContain("act:run-task");
+    } finally {
+      offSearcher();
+      offComposer();
+    }
+  });
+
   it("places a source before another one, and the section order follows", () => {
     const off = registerSpotSource(
       { id: "plug", group: "Plugin", timing: "instant", rows: () => [] },

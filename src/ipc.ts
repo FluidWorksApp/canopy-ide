@@ -2295,6 +2295,9 @@ export interface AgentWorkspace {
   dirty: number;
   ahead: number;
   behind: number;
+  /** Commits the branch's upstream doesn't have; null when it has no upstream
+   *  at all — never pushed, as opposed to 0 left to push. */
+  unpushed: number | null;
   merged: boolean;
   commits: CommitInfo[];
 }
@@ -2816,6 +2819,15 @@ export const remoteSetClis = (clis: import("../shared/model").RemoteCli[]) =>
 export const remoteSetCompanion = (
   companion: import("../shared/model").RemoteCompanion,
 ) => invoke<void>("remote_set_companion", { companion });
+/** Push the ids of hibernating projects — the marker lives in this frontend's
+ *  localStorage (hibernation.ts), so Rust can only be told. */
+export const remoteSetHibernated = (ids: string[]) =>
+  invoke<void>("remote_set_hibernated", { ids });
+/** Push the attention channel (see remoteAttention.ts) — questions raised in
+ *  the desktop UI never touch the hook stream the portal already gets. */
+export const remoteSetAttention = (
+  items: import("../shared/model").RemoteAttentionItem[],
+) => invoke<void>("remote_set_attention", { items });
 /** A QR SVG for any URL (LAN address or the active tunnel URL). */
 export const remoteQr = (text: string) =>
   invoke<string | null>("remote_qr", { text });

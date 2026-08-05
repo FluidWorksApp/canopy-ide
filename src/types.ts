@@ -56,6 +56,10 @@ export interface NoticeOpts {
   where?: import("./deepLinks").DeepLink;
   /** A second line under the title — the PR's title, the run's name. */
   body?: string;
+  /** Identity for a notice that can repeat — clicking the same dead deep link
+   *  twice, say. Re-posting refreshes the one item instead of stacking a copy
+   *  per repeat (attention.ts `dedupeKey`). */
+  dedupe?: string;
 }
 
 export type Notify = (

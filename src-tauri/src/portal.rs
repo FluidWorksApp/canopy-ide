@@ -77,6 +77,17 @@ pub struct RemoteManager {
     /// transcript lives in the frontend, by design — see companion.rs), so a
     /// desktop push is the only honest source. Null until the first push.
     companion: Arc<Mutex<Value>>,
+    /// Ids of projects the desktop reports as hibernating. The marker lives in
+    /// the desktop webview's localStorage (hibernation.ts is the single source
+    /// of truth), so a push is the only honest way to learn it here. A
+    /// hibernating project keeps its IDE tab but nothing in it is running —
+    /// the portal must not offer it.
+    hibernated: Mutex<Vec<String>>,
+    /// The desktop's attention channel (src/attention.ts), pushed like the
+    /// companion is: questions agents raised in the desktop UI never touch the
+    /// hook stream, so without this push the portal cannot know an agent is
+    /// waiting on an answer. Null until the first push.
+    attention: Mutex<Value>,
     /// The session scope, cached — see `open_scope`.
     roots: RootsCache,
 }
@@ -361,6 +372,31 @@ pub async fn remote_set_companion(
     mgr: tauri::State<'_, RemoteManager>,
 ) -> Result<(), String> {
     *mgr.companion.lock().unwrap() = companion;
+    Ok(())
+}
+
+/// Push the ids of hibernating projects. Same contract as the theme: called on
+/// every change, cheap, idempotent, snapshot-carried. Also drops the scope
+/// cache — the scope folds hibernated projects out, so it is stale the moment
+/// the set changes.
+#[tauri::command]
+pub async fn remote_set_hibernated(
+    ids: Vec<String>,
+    mgr: tauri::State<'_, RemoteManager>,
+) -> Result<(), String> {
+    *mgr.hibernated.lock().unwrap() = ids;
+    *mgr.roots.lock().unwrap() = None;
+    Ok(())
+}
+
+/// Push the desktop's attention channel (questions + notifications), from the
+/// one place that has it — the frontend's localStorage-backed queue.
+#[tauri::command]
+pub async fn remote_set_attention(
+    items: Value,
+    mgr: tauri::State<'_, RemoteManager>,
+) -> Result<(), String> {
+    *mgr.attention.lock().unwrap() = items;
     Ok(())
 }
 
@@ -883,6 +919,12 @@ async fn snapshot_msg(
         &live_ids,
         crate::pty::instance_token(),
     );
+    let (hibernated, attention) = {
+        let mgr = app.state::<RemoteManager>();
+        let h = mgr.hibernated.lock().unwrap().clone();
+        let a = mgr.attention.lock().unwrap().clone();
+        (h, a)
+    };
     json!({
         "t": "snapshot",
         "projects": projects,
@@ -894,6 +936,8 @@ async fn snapshot_msg(
         "theme": theme,
         "clis": clis,
         "companion": companion,
+        "hibernated": hibernated,
+        "attention": attention,
     })
     .to_string()
 }
@@ -970,9 +1014,24 @@ async fn open_scope(app: &AppHandle, store: &Value) -> SessionScope {
         .and_then(|v| v.as_array())
         .map(|ids| ids.iter().filter_map(|v| v.as_str()).collect())
         .filter(|s: &HashSet<&str>| !s.is_empty());
+    // A hibernating project keeps its IDE tab (so it stays in `openIds`) but
+    // nothing in it is running; its roots must not widen the portal's scope.
+    let asleep: HashSet<String> = app
+        .state::<RemoteManager>()
+        .hibernated
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect();
 
     let mut roots: Vec<String> = Vec::new();
     for p in projects {
+        if let Some(id) = p.get("id").and_then(|v| v.as_str()) {
+            if asleep.contains(id) {
+                continue;
+            }
+        }
         if let (Some(open), Some(id)) = (&open, p.get("id").and_then(|v| v.as_str())) {
             if !open.contains(id) {
                 continue;

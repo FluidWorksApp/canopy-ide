@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react'
 import { IconBell, IconClose, IconFolder, IconPlus, IconPower } from '@shared/icons'
 import { PANELS, WIDE_RAIL_FOOTER, WIDE_RAIL_GROUPS, panelById } from '../panels'
+import { CompanionFab } from '../panels/companion'
 import type { PanelCtx, Target } from '../panels/types'
 import { targetKey } from '../panels/types'
 import { Detail } from '../views/Detail'
@@ -191,6 +192,11 @@ export function WideShell(props: ShellProps) {
         )}
         </section>
       </>}
+      <CompanionFab
+        ctx={ctx}
+        active={!props.home && panelId === 'companion'}
+        onOpen={() => onPanel('companion')}
+      />
     </div>
   )
 }

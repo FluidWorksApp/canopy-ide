@@ -149,19 +149,22 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
   const ctxRef = useRef(ctx);
   ctxRef.current = ctx;
 
-  // The synchronous sources — recomputed every keystroke, no round trips.
-  const syncRows = useMemo(
-    () => instantRows({ query, ctx, corpus, roots, attachments: shots.length }),
-    [query, ctx, corpus, roots, shots.length],
-  );
-  const syncRowsRef = useRef(syncRows);
-  syncRowsRef.current = syncRows;
-
   /** Typing has become writing: a sentence, a line break, or a pasted image.
    *  Ranking a paragraph against filenames produces a list of things that share
    *  letters with it and answer nothing, so the palette stops offering matches
    *  and offers the two things you can do with what you wrote. */
   const composing = isPrompt(query, shots.length);
+
+  // The synchronous sources — recomputed every keystroke, no round trips. Once
+  // the text is a prompt, only the sources that answer prose are asked (the
+  // actions); the registry skips the rest, so a keystroke in a paragraph ranks
+  // nothing it is about to throw away.
+  const syncRows = useMemo(
+    () => instantRows({ query, ctx, corpus, roots, attachments: shots.length, composing }),
+    [query, ctx, corpus, roots, shots.length, composing],
+  );
+  const syncRowsRef = useRef(syncRows);
+  syncRowsRef.current = syncRows;
 
   // The debounced ones. Stale responses are dropped rather than merged late —
   // results for a query you're no longer typing are noise under the cursor.
@@ -197,8 +200,9 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
   }, [query, corpus, roots.join("\n"), composing]);
 
   const items = useMemo(() => {
-    const all = [...syncRows, ...asyncRows];
-    return sectioned(composing ? all.filter((r) => r.group === "Actions") : all);
+    // While composing, the async rows are a search that has already been called
+    // off — they are cleared by the effect above, but that lands a render late.
+    return sectioned(composing ? syncRows : [...syncRows, ...asyncRows]);
   }, [syncRows, asyncRows, composing]);
   const selectable = useMemo(
     () => items.flatMap((i) => ("row" in i ? [i.row] : [])),

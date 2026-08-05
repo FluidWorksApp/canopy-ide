@@ -777,6 +777,8 @@ pub fn run() {
             portal::remote_set_theme,
             portal::remote_set_clis,
             portal::remote_set_companion,
+            portal::remote_set_hibernated,
+            portal::remote_set_attention,
             portal::remote_qr,
             tunnel::tunnel_start,
             tunnel::tunnel_stop,

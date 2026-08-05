@@ -277,9 +277,35 @@ describe("the queue", () => {
     expect(attentionItems()).toHaveLength(2);
   });
 
-  it("does not dedupe FYIs sharing a key", () => {
-    post({ title: "one", dedupeKey: "k" });
-    post({ title: "two", dedupeKey: "k" });
+  it("collapses a re-posted keyed FYI onto one refreshed item", () => {
+    // Clicking the same dead deep link five times is one announcement, not
+    // five rows — the spam this rule exists to stop.
+    const a = post({ title: "one", dedupeKey: "k", ts: 100 });
+    const b = post({ title: "two", dedupeKey: "k", ts: 900 });
+    expect(b).toBe(a);
+    expect(attentionItems()).toHaveLength(1);
+    const [only] = attentionItems();
+    expect(only.title).toBe("two");
+    // "Announced again now", unlike a question's "waiting since".
+    expect(only.ts).toBe(900);
+  });
+
+  it("re-announcing a keyed FYI clears read and dismissed state", () => {
+    post({ title: "one", dedupeKey: "k", ts: 100 });
+    markAllRead();
+    dismissToast(attentionItems()[0].id);
+    post({ title: "one", dedupeKey: "k", ts: 900 });
+    const [only] = attentionItems();
+    expect(only.readAt).toBeUndefined();
+    expect(only.toastDismissedAt).toBeUndefined();
+    expect(liveToasts(attentionItems(), 1000)).toHaveLength(1);
+  });
+
+  it("keeps a keyed FYI out of a question's identity", () => {
+    const q = post({ kind: "question", title: "q", dedupeKey: "k" });
+    resolveAttention(q, "answered");
+    post({ title: "fyi", dedupeKey: "k" });
+    // The resolved question is history, not the FYI's earlier self.
     expect(attentionItems()).toHaveLength(2);
   });
 });
