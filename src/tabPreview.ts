@@ -13,10 +13,13 @@
 // buffer tail read as text — the same read Term.captureText and ptyText do.
 // That one is live by construction: the buffer IS what the pty just wrote.
 
-/** Panes past this many elements aren't cloned. Not a correctness limit — the
- *  clone would be right, just expensive — and the fallback (icon and title) is
- *  what the switcher shows for a native webview anyway. A file tree with a
- *  large repo expanded, or a diff of a generated file, is what hits it. */
+/** How many elements one clone may copy. Not a correctness limit — the whole
+ *  clone would be right, just expensive — so a pane past it is copied as far as
+ *  the budget reaches instead of being refused. A PR or review tab is the case
+ *  that made this matter: a diff mounts a row of spans per line, so an ordinary
+ *  hundred-line patch is already tens of thousands of elements, and an
+ *  all-or-nothing cap turned every one of those tabs into a blank card with an
+ *  icon in it. The top of a pane is a picture of the pane; nothing is a bug. */
 export const PREVIEW_NODE_CAP = 6000;
 
 /** Elements a clone must not carry.
@@ -68,17 +71,56 @@ export function paneNodeCount(host: HTMLElement): number {
   return host.querySelectorAll("*").length;
 }
 
+/** As much of a pane as `budget` elements buys, in document order — the top of
+ *  what the pane shows, which is the part a thumbnail has room for anyway.
+ *
+ *  A subtree that fits whole is taken with one native deep clone, which is the
+ *  fast path and the common one; only the containers straddling the end of the
+ *  budget are walked child by child. The walk stops the moment the budget runs
+ *  out, so the cost of a preview no longer depends on how big the pane is. */
+function cloneWithin(host: HTMLElement, budget: number): HTMLElement {
+  const root = host.cloneNode(false) as HTMLElement;
+  let left = budget;
+  const fill = (src: Element, dst: Element) => {
+    const kids = src.childNodes;
+    for (let i = 0; i < kids.length; i++) {
+      if (left <= 0) return;
+      const node = kids[i];
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node as HTMLElement;
+        const size = paneNodeCount(el) + 1;
+        if (size <= left) {
+          dst.appendChild(el.cloneNode(true));
+          left -= size;
+          continue;
+        }
+        left -= 1;
+        const shallow = el.cloneNode(false) as Element;
+        dst.appendChild(shallow);
+        fill(el, shallow);
+      } else if (node.nodeType === Node.TEXT_NODE) {
+        // Text is free: it is the content, and copying it costs no elements.
+        dst.appendChild(node.cloneNode(false));
+      }
+    }
+  };
+  fill(host, root);
+  return root;
+}
+
 /** A detached, inert copy of a pane, ready to be laid out at pane size and
- *  scaled. Null when there is nothing worth showing: no host, a host too large
- *  to clone cheaply, or a host whose content lives somewhere this document
- *  can't see (a native webview's page). */
+ *  scaled — truncated to `cap` elements when the pane is bigger than that.
+ *  Null when there is nothing worth showing: no host, or a host whose content
+ *  lives somewhere this document can't see (a native webview's page). */
 export function clonePane(
   host: HTMLElement | null | undefined,
   cap = PREVIEW_NODE_CAP,
 ): HTMLElement | null {
   if (!host) return null;
-  if (paneNodeCount(host) > cap) return null;
-  const clone = host.cloneNode(true) as HTMLElement;
+  const clone =
+    paneNodeCount(host) > cap
+      ? cloneWithin(host, cap)
+      : (host.cloneNode(true) as HTMLElement);
   clone.querySelectorAll(STRIP).forEach((el) => el.remove());
   // A duplicated id makes `getElementById`, `aria-labelledby` and every `#id`
   // selector in the app ambiguous — the thumbnail would start answering
