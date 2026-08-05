@@ -312,6 +312,7 @@ import type { PreviewServer } from "../../preview";
 import { dispatchBrowserOp } from "../../previewAgent";
 import { suppressBrowserViewsOver, useBrowserEngine } from "../../browserHost";
 import { OPEN_URL_EVENT, type OpenUrlDetail } from "../../links";
+import { resolveGitLink } from "../../gitLinks";
 import { previewAgentTarget, serverForUrl } from "../../preview";
 import { TRACKERS, ticketBranch, ticketContext, ticketWorktree } from "../../trackers";
 import { prConflictContext, prReviewContext } from "../../prs";
@@ -4737,6 +4738,57 @@ const ProjectViewBody = memo(function ProjectViewBody({
       window.removeEventListener("canopy:agent-browser", onBrowserOp);
   }, [project.id, openPreview, patchTabRaw, showBrowserPip]);
 
+  /** A pull request, commit, issue or file on a git host, opened as the tab
+   *  Canopy already has for it rather than as a page of github.com. False for
+   *  everything that isn't openable *right now* — someone else's repository, a
+   *  fork's PR, a commit never fetched, a path on a branch we don't have — and
+   *  the caller shows the page instead. resolveGitLink decides; this only
+   *  supplies the lookups and opens what comes back. */
+  const openGitLink = useCallback(
+    async (url: string): Promise<boolean> => {
+      const action = await resolveGitLink(url, {
+        repos: componentsRef.current.map((component) => component.path),
+        remoteUrl: (repo) => ipc.gitRemoteUrl(repo),
+        prs: (repo) => ipc.ghPrList(repo),
+        issues: (repo) => ipc.ghIssueList(repo),
+        commit: (repo, hash) => ipc.gitCommitDetail(repo, hash),
+        fileExists: (repo, path) =>
+          ipc.fsStat(`${repo.replace(/\/+$/, "")}/${path}`).then((s) => !s.is_dir),
+      });
+      if (!action) return false;
+      switch (action.do) {
+        case "pr":
+          openPr(action.repo, action.pr);
+          return true;
+        case "ticket":
+          openTicket(action.ticket, "github", action.repo);
+          return true;
+        case "commit":
+          // The abbreviated hash in a URL is not the one a tab is keyed on —
+          // the resolved commit carries the full one.
+          openCommit(action.repo, {
+            hash: action.commit.hash,
+            short: action.commit.short,
+            subject: action.commit.subject,
+          });
+          return true;
+        case "file": {
+          const path = `${action.repo.replace(/\/+$/, "")}/${action.path}`;
+          const line = action.line;
+          await openFileRef.current(path);
+          if (line)
+            requestAnimationFrame(() =>
+              window.dispatchEvent(
+                new CustomEvent("canopy:reveal-line", { detail: { path, line } }),
+              ),
+            );
+          return true;
+        }
+      }
+    },
+    [openPr, openTicket, openCommit],
+  );
+
   // A link the user clicked, from anywhere in the app: main.tsx delegates every
   // anchor through links.ts, which asks here first when Settings → Browser says
   // links open in Canopy.
@@ -4746,17 +4798,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // tab in a project you are not. Cancelling is the answer: links.ts reads a
   // dispatch that nobody cancelled as "there was no view to take this" and
   // sends it to the OS browser, so a click is never swallowed.
+  //
+  // A URL that names something we have a real view for (a PR, a commit, an
+  // issue, a file) opens that view instead of a web page — see openGitLink.
+  // The claim is made synchronously either way: whether the native tab is
+  // possible takes a round trip to git, and a link must never escape to the OS
+  // browser because the answer was slow.
   useEffect(() => {
     if (!visible) return;
     const onUrl = (e: Event) => {
       const url = (e as CustomEvent<OpenUrlDetail>).detail?.url;
       if (!url) return;
       e.preventDefault();
-      openPreview(url);
+      void openGitLink(url)
+        .catch(() => false)
+        .then((opened) => {
+          if (!opened) openPreview(url);
+        });
     };
     window.addEventListener(OPEN_URL_EVENT, onUrl);
     return () => window.removeEventListener(OPEN_URL_EVENT, onUrl);
-  }, [visible, openPreview]);
+  }, [visible, openGitLink, openPreview]);
 
   const patchTab = useCallback(
     (id: string, patch: Partial<TermSubTab> & Partial<FileSubTab>) => {
