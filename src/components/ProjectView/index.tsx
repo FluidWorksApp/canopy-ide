@@ -178,13 +178,13 @@ import {
   microTaskProtocol,
   oneLine,
   progressBrief,
+  prReviewTask,
+  resolveConflictsTask,
   runLabelFor,
   raisePrTask,
   noteTask,
   researchTask,
-  resolveConflictsTask,
   reviewPrTask,
-  prReviewTask,
   type CustomMicroTask,
   type MicroTaskDef,
   type MicroTaskEnv,
@@ -3043,6 +3043,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     ],
   );
 
+  /** The PR inbox's context actions, each mapped to the micro-task it names. */
   const startPrQuickTask = useCallback(
     (action: PrQuickAction, repo: string, pr: ipc.PrInfo) => {
       const task = {
@@ -9066,7 +9067,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       case "prs-list":
         return (
-          <PrsPanel page localRepos={repoPaths} projectFor={(repo) => repoPaths.includes(repo) ? project.name : undefined} onOpen={(repo, pr) => openPr(repo, pr)} onAgentTask={(repo, pr) => void startMicroTask(reviewPrTask, { repo, pr }, "")} onQuickTask={startPrQuickTask} relay={relay} onNotice={onNotice} onOpenChat={openChat} />
+          <PrsPanel page localRepos={repoPaths} projectFor={(repo) => repoPaths.includes(repo) ? project.name : undefined} onOpen={(repo, pr) => openPr(repo, pr)} onQuickTask={startPrQuickTask} relay={relay} onNotice={onNotice} onOpenChat={openChat} />
         );
       case "issues-list":
         return (
@@ -10464,7 +10465,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
           onOpen={(repo, pr) => openPr(repo, pr)}
           onOpenAll={() => openCollectionPage("prs-list")}
-          onAgentTask={(repo, pr) => void startMicroTask(reviewPrTask, { repo, pr }, "")}
           onQuickTask={startPrQuickTask}
           relay={relay}
           onNotice={onNotice}

@@ -132,6 +132,9 @@ The load-bearing pieces every feature hangs off:
   `opencode.db`; assistant messages persist per-step token usage
   (in/out/cache/reasoning), model, and cost. `opencode session list
   --format json`; resume `--session <id>` (in registry).
+- Usage & cost: captured. `agent_usage` reads running token totals, model, and
+  billed cost straight off `session` rows in `opencode.db` (per profile root),
+  so opencode sessions appear in the Statistics panel beside claude/codex/omp.
 - `/models` picker, F2 cycles recent models. AGENTS.md + CLAUDE.md fallback.
   Built-in `attention` config (sounds/desktop notifications on questions,
   permissions, errors, completion).

@@ -11,6 +11,8 @@ import type * as ipc from "../ipc";
 import {
   LANE_LABEL,
   lanes,
+  prContextActions,
+  prMergeReady,
   prQuickTask,
   rowState,
   since,
@@ -36,7 +38,8 @@ interface PrsPanelProps {
   projectFor: (repo: string) => string | undefined;
   page?: boolean;
   onOpenAll?: () => void;
-  onAgentTask?: (repo: string, pr: ipc.PrInfo) => void;
+  /** Start the agent micro-task the row's state calls for (review, address
+   *  comments, fix CI, resolve conflicts). */
   onQuickTask?: (action: PrQuickAction, repo: string, pr: ipc.PrInfo) => void;
   relay?: RelayHandle;
   onNotice?: (message: string, kind?: "info" | "success" | "warn" | "error") => void;
@@ -53,7 +56,7 @@ const LANE_TONE: Record<Lane, string> = {
   draft: "is-dim",
 };
 
-export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenAll, onAgentTask, onQuickTask, relay, onNotice, onOpenChat }: PrsPanelProps) {
+export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenAll, onQuickTask, relay, onNotice, onOpenChat }: PrsPanelProps) {
   const { rows, fetchedMs, errors, remaining, nextIn, busy, viewer } = usePrWatch();
   const [mineOnly, setMineOnly] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<Lane>>(new Set());
@@ -99,9 +102,40 @@ export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenA
         onNotice?.(String(err), "error");
       }
     };
+    // Merging stays a human click, and GitHub's three methods are not one
+    // button: the submenu is the choice, made per PR at the moment it lands.
+    const mergePr = async (method: "squash" | "merge" | "rebase") => {
+      try {
+        const result = await import("../ipc").then((m) => m.ghPrMerge(row.repo, row.number, method));
+        onNotice?.(result.message, result.pending ? "info" : "success");
+        refresh();
+      } catch (err) {
+        onNotice?.(String(err), "error");
+      }
+    };
     const items: MenuItem[] = [
       { label: "Open pull request", onClick: () => open(row) },
-      { label: "Agent task", hint: "review this PR", disabled: !onAgentTask, onClick: () => onAgentTask?.(row.repo, pr) },
+      // What the row's state calls for, not a fixed list: conflicts offer
+      // resolving, red checks offer fixing, comments offer addressing, an
+      // unreviewed PR offers a review — each as an agent task.
+      ...prContextActions(row).map((action) => ({
+        label: action.label,
+        hint: "agent task",
+        disabled: !onQuickTask,
+        onClick: () => onQuickTask?.(action.id, row.repo, pr),
+      })),
+      ...(prMergeReady(row)
+        ? [
+            {
+              label: "Merge pull request",
+              submenu: [
+                { label: "Squash and merge", onClick: () => void mergePr("squash") },
+                { label: "Create a merge commit", onClick: () => void mergePr("merge") },
+                { label: "Rebase and merge", onClick: () => void mergePr("rebase") },
+              ],
+            },
+          ]
+        : []),
       peers.length > 0
         ? {
             label: "Send to",

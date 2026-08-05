@@ -591,7 +591,7 @@ fn gemini_log_sessions(v: &Value, cwd: &str, updated: i64) -> Vec<StoreSession> 
 }
 
 /// A read-only connection to a store another program owns and may be writing.
-fn open_ro(path: &Path) -> Option<rusqlite::Connection> {
+pub(crate) fn open_ro(path: &Path) -> Option<rusqlite::Connection> {
     rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
