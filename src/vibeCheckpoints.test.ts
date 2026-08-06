@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  checkpointDecision,
-  reconcileCheckpoint,
-  type CheckpointContext,
-  type CheckpointRecord,
-} from "./vibeCheckpoints";
+import { checkpointDecision, type CheckpointContext } from "./vibeCheckpoints";
 
 const SAFE: CheckpointContext = {
   isolatedOrGreenfield: true,
@@ -47,41 +42,5 @@ describe("checkpointDecision", () => {
     });
     if (d.checkpoint) throw new Error("should refuse");
     expect(d.reasons).toEqual(["dirty-at-start", "secrets-flagged", "not-verified"]);
-  });
-});
-
-describe("reconcileCheckpoint", () => {
-  const record = (phase: CheckpointRecord["phase"], commit?: string): CheckpointRecord => ({
-    checkpointId: "cp-1",
-    attemptId: "a-1",
-    phase,
-    title: "add checkout page",
-    commit: commit ?? null,
-    at: 1,
-  });
-
-  it("keeps a sealed record whose commit exists", () => {
-    expect(reconcileCheckpoint(record("sealed", "abc"), () => true, null)).toEqual({
-      action: "keep",
-    });
-  });
-
-  it("voids a sealed record whose commit vanished — never trusted blind", () => {
-    expect(reconcileCheckpoint(record("sealed", "abc"), () => false, null)).toEqual({
-      action: "void",
-    });
-  });
-
-  it("seals an intent whose commit landed before the crash", () => {
-    expect(reconcileCheckpoint(record("intent"), () => true, "abc")).toEqual({
-      action: "seal",
-      commit: "abc",
-    });
-  });
-
-  it("voids an intent with no commit — nothing happened, say so", () => {
-    expect(reconcileCheckpoint(record("intent"), () => false, null)).toEqual({
-      action: "void",
-    });
   });
 });

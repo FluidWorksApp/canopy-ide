@@ -170,21 +170,10 @@ const JUSTIFYING_FUNCTIONS = [
     enabled: true,
     cost: "the sentence explaining that a secret is why a turn was not saved is never said, so the refusal has no reason attached",
   },
-  {
-    // Skipped, and NOT because a caller is missing. `CheckpointRecord` is never
-    // written in production either, so the two-phase intent/seal protocol is
-    // unimplemented rather than unreconciled — there is nothing to reconcile.
-    // The session commits first and appends `checkpoint.saved` second, so a
-    // crash between them loses the record and keeps the commit: the system
-    // understates what happened rather than claiming a checkpoint that does not
-    // exist. The safety property already holds; what is missing is a label.
-    // Enabling this guard is a design decision (implement two-phase, or delete
-    // the record type), not a bug fix.
-    module: "vibeCheckpoints.ts",
-    symbol: "reconcileCheckpoint",
-    enabled: false,
-    cost: "two-phase checkpoint record unimplemented; ordering is commit-then-event, which understates rather than overstates, so a crashed checkpoint leaves a commit nothing labels as one",
-  },
+  // The `reconcileCheckpoint` entry that stood here is gone with the function.
+  // It was the one case this table could not decide, because the missing piece
+  // was not a caller but the whole two-phase protocol; the design call was to
+  // remove it rather than half-build it. See the note in vibeCheckpoints.ts.
   {
     module: "vibePackages.ts",
     symbol: "planInstall",
