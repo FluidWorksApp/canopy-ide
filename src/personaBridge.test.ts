@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ASH_STATES, ashMayInterrupt, ashTone } from "./ash";
+import { ASH_STATES, ASH_TONE_VARS, ashMayInterrupt } from "./ash";
 import {
   INITIAL_PERSONA,
   personaBridge,
@@ -40,7 +40,7 @@ describe("personaBridge", () => {
     for (const input of EVERY_INPUT) {
       const output = personaBridge(input);
       expect(ASH_STATES, input.kind).toContain(output.state);
-      expect(output.tone, input.kind).toBe(ashTone(output.state));
+      expect(Object.keys(ASH_TONE_VARS), input.kind).toContain(output.tone);
       expect(output.utterance === null || typeof output.utterance === "string").toBe(
         true,
       );
@@ -63,7 +63,6 @@ describe("personaBridge", () => {
     ).map((input) => input.kind);
 
     expect(interrupting).toEqual([
-      "verify-failed",
       "question-asked",
       "permission-stall",
       "incident",
@@ -78,6 +77,10 @@ describe("personaBridge", () => {
     expect(personaBridge(INPUTS["turn-started"]).state).toBe("thinking");
     expect(personaBridge(INPUTS["verify-running"]).state).toBe("explaining");
     expect(personaBridge(INPUTS["verify-passed"]).state).toBe("done");
+    expect(personaBridge(INPUTS["verify-failed"])).toMatchObject({
+      state: "thinking",
+      tone: "warn",
+    });
     expect(personaBridge(INPUTS["rate-limited-waiting"]).state).toBe("sleeping");
     expect(personaBridge(INPUTS["publish-succeeded"]).state).toBe("celebrating");
   });
@@ -100,12 +103,12 @@ describe("reducePersona", () => {
   it("keeps a question in needs until it is answered", () => {
     let current = reducePersona(INITIAL_PERSONA, INPUTS["question-asked"]);
     expect(current.state).toBe("needs");
+    expect(current.questionPending).toBe(true);
 
     for (const input of [
       INPUTS["turn-progress"],
       INPUTS["verify-running"],
       INPUTS["route-switched"],
-      INPUTS.incident,
     ]) {
       current = reducePersona(current, input);
       expect(current.state, input.kind).toBe("needs");
@@ -113,8 +116,27 @@ describe("reducePersona", () => {
     }
 
     current = reducePersona(current, INPUTS["question-answered"]);
-    expect(current).toEqual(personaBridge(INPUTS["question-answered"]));
+    expect(current).toMatchObject(personaBridge(INPUTS["question-answered"]));
     expect(current.state).toBe("thinking");
+    expect(current.questionPending).toBe(false);
+  });
+
+  it("gives blocked precedence, then re-surfaces the pinned question", () => {
+    let current = reducePersona(INITIAL_PERSONA, INPUTS["question-asked"]);
+
+    current = reducePersona(current, INPUTS["permission-stall"]);
+    expect(current).toMatchObject({
+      state: "blocked",
+      tone: "danger",
+      questionPending: true,
+    });
+
+    current = reducePersona(current, INPUTS["turn-progress"]);
+    expect(current).toMatchObject({
+      state: "needs",
+      tone: "warn",
+      questionPending: true,
+    });
   });
 
   it("does not invent state when no question is outstanding", () => {
@@ -123,7 +145,11 @@ describe("reducePersona", () => {
       (candidate) => candidate.kind !== "question-asked",
     )) {
       current = reducePersona(current, input);
-      expect(current, input.kind).toEqual(personaBridge(input));
+      expect(current, input.kind).toMatchObject(personaBridge(input));
+      expect(current.questionPending, input.kind).toBe(input.kind === "incident");
+      if (input.kind === "incident") {
+        current = reducePersona(current, INPUTS["question-answered"]);
+      }
     }
   });
 });

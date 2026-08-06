@@ -25,10 +25,15 @@ export interface PersonaOutput {
   utterance: string | null;
 }
 
-export const INITIAL_PERSONA: PersonaOutput = {
+export interface PersonaState extends PersonaOutput {
+  questionPending: boolean;
+}
+
+export const INITIAL_PERSONA: PersonaState = {
   state: "idle",
   tone: "dim",
   utterance: null,
+  questionPending: false,
 };
 
 export function routeSwitchUtterance(route: string): string {
@@ -51,8 +56,8 @@ export function personaBridge(input: PersonaInput): PersonaOutput {
       return { state: "done", tone: "ok", utterance: null };
     case "verify-failed":
       return {
-        state: "blocked",
-        tone: "danger",
+        state: "thinking",
+        tone: "warn",
         utterance: "one of my checks failed — taking another look",
       };
     case "question-asked":
@@ -67,8 +72,8 @@ export function personaBridge(input: PersonaInput): PersonaOutput {
       };
     case "incident":
       return {
-        state: "blocked",
-        tone: "danger",
+        state: "needs",
+        tone: "warn",
         utterance: "something broke after the last change — want me to fix it?",
       };
     case "incident-recovered":
@@ -92,7 +97,7 @@ export function personaBridge(input: PersonaInput): PersonaOutput {
     case "task-ended":
       return { state: "sleeping", tone: "dim", utterance: null };
     case "idle":
-      return INITIAL_PERSONA;
+      return { state: "idle", tone: "dim", utterance: null };
     default: {
       const exhaustive: never = input;
       return exhaustive;
@@ -100,12 +105,22 @@ export function personaBridge(input: PersonaInput): PersonaOutput {
   }
 }
 
-/** Keeps an outstanding question visible while unrelated execution events pass. */
+/** Applies blocked > outstanding question > routine event precedence. */
 export function reducePersona(
-  current: PersonaOutput,
+  current: PersonaState,
   input: PersonaInput,
-): PersonaOutput {
+): PersonaState {
   const next = personaBridge(input);
-  if (current.state !== "needs" || input.kind === "question-answered") return next;
-  return { ...next, state: "needs", tone: "warn" };
+  const questionPending =
+    input.kind === "question-answered"
+      ? false
+      : current.questionPending ||
+        input.kind === "question-asked" ||
+        input.kind === "incident";
+
+  if (next.state === "blocked") return { ...next, questionPending };
+  if (questionPending) {
+    return { ...next, state: "needs", tone: "warn", questionPending };
+  }
+  return { ...next, questionPending };
 }
