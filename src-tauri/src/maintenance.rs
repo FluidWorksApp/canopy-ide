@@ -102,14 +102,18 @@ fn is_due(
     ran_this_session: bool,
 ) -> bool {
     let Some(r) = record else { return true };
-    let Some(last_run) = r.last_run else { return true };
+    let Some(last_run) = r.last_run else {
+        return true;
+    };
     if r.failures > 0 {
         return now_ms.saturating_sub(last_run) >= retry_delay_ms(r.failures, every_ms);
     }
     if eager && !ran_this_session {
         return true;
     }
-    let Some(last_ok) = r.last_ok else { return true };
+    let Some(last_ok) = r.last_ok else {
+        return true;
+    };
     // A record from the future means the clock moved back under us; running
     // resets the record to times that can age normally.
     if last_ok > now_ms {
