@@ -769,6 +769,16 @@ terms govern use of the model:
 - **sync_wrapper 1.0.2** — Copyright Actyx AG (per package manifest; the distributed license file carries no copyright line)
 - **tao 0.35.3** — Copyright Tauri Programme within The Commons Conservancy, The winit contributors (per package manifest; the distributed license file carries no copyright line)
 
+### BSD-3-Clause — 7
+
+- **alloc-no-stdlib 2.0.4** — Copyright (c) 2016 Dropbox, Inc
+- **alloc-stdlib 0.2.4** — Copyright Daniel Reiter Horn (per package manifest; the distributed license file carries no copyright line)
+- **curve25519-dalek 4.1.3** — Copyright (c) 2016-2021 isis agora lovecruft. All rights reserved; Copyright (c) 2016-2021 Henry de Valence. All rights reserved; Copyright (c) 2012 The Go Authors. All rights reserved
+- **ed25519-dalek 2.2.0** — Copyright (c) 2017-2019 isis agora lovecruft. All rights reserved
+- **moxcms 0.8.1** — Copyright (c) Radzivon Bartoshyk. All rights reserved
+- **pxfm 0.1.30** — Copyright (c) Radzivon Bartoshyk. All rights reserved
+- **subtle 2.6.1** — Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All rights reserved; Copyright (c) 2016-2024 Isis Agora Lovecruft. All rights reserved
+
 ### ISC — 7
 
 - **hmac-sha256 1.1.14** — Copyright (c) 2019-2026, Frank Denis
@@ -778,14 +788,6 @@ terms govern use of the model:
 - **libloading 0.9.0** — Copyright © 2015, Simonas Kazlauskas
 - **rustls-webpki 0.103.13** — Copyright 2015 Brian Smith
 - **untrusted 0.9.0** — Copyright Brian Smith (per package manifest; the distributed license file carries no copyright line)
-
-### BSD-3-Clause — 5
-
-- **alloc-no-stdlib 2.0.4** — Copyright (c) 2016 Dropbox, Inc
-- **alloc-stdlib 0.2.4** — Copyright Daniel Reiter Horn (per package manifest; the distributed license file carries no copyright line)
-- **curve25519-dalek 4.1.3** — Copyright (c) 2016-2021 isis agora lovecruft. All rights reserved; Copyright (c) 2016-2021 Henry de Valence. All rights reserved; Copyright (c) 2012 The Go Authors. All rights reserved
-- **ed25519-dalek 2.2.0** — Copyright (c) 2017-2019 isis agora lovecruft. All rights reserved
-- **subtle 2.6.1** — Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All rights reserved; Copyright (c) 2016-2024 Isis Agora Lovecruft. All rights reserved
 
 ### MPL-2.0 — 5
 
@@ -810,11 +812,6 @@ terms govern use of the model:
 
 - **brotli 8.0.4** — Copyright (c) 2016 Dropbox, Inc
 - **matchit 0.7.3** — Copyright (c) 2022 Ibraheem Ahmed
-
-### BSD-3-Clause OR Apache-2.0 — 2
-
-- **moxcms 0.8.1** — Copyright (c) Radzivon Bartoshyk. All rights reserved
-- **pxfm 0.1.30** — Copyright (c) Radzivon Bartoshyk. All rights reserved
 
 ### MIT-0 — 2
 
