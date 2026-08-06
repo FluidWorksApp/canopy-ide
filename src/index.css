@@ -504,6 +504,51 @@ body,
   }
 }
 
+/* Low-memory banner (issue #488): the Rust memory watchdog reports pressure
+   that is one jetsam decision away from killing the WebKit renderer. Stripe
+   the warning/critical states so the difference survives monochrome, and keep
+   it above the titlebar (z 200+) so it reads over zen chrome. */
+.mem-banner {
+  position: fixed;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 220;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(680px, calc(100vw - 48px));
+  padding: 8px 12px 8px 16px;
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-2);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+
+.mem-banner.critical {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg-overlay));
+}
+
+.mem-banner button {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--r-sm);
+}
+
+.mem-banner button:hover {
+  background: var(--bg-raised);
+  color: var(--text);
+}
+
 /* ---------- chrome ---------- */
 
 /* macOS frameless "Overlay" titlebar: the native traffic lights float over our

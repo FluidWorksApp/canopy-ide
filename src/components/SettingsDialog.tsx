@@ -1587,7 +1587,10 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     hint={
                       "Each CLI gets its own flag — claude --dangerously-skip-permissions, " +
                       "codex --dangerously-bypass-approvals-and-sandbox, opencode --auto, and so on. " +
-                      "A CLI with no such flag (Amp) launches unchanged. Applies to agents started from now on."
+                      "A CLI with no such flag (Amp) launches unchanged. Applies to agents started from now on. " +
+                      "Leave it off and an agent started on a task still launches in its CLI's least " +
+                      "intrusive working mode — claude --permission-mode auto, opencode --agent build — " +
+                      "so a brief never lands in plan mode; it just keeps asking before it acts."
                     }
                   />
                   {s.dangerouslySkipPermissions && (

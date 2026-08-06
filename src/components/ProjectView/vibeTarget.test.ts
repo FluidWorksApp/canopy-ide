@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Project } from "../../projects";
-import { resolveVibeTarget } from "./helpers";
+import { matchesVibeRun, resolveVibeTarget } from "./helpers";
 
 const project = (over: Partial<Project> = {}): Project => ({
   id: "p1",
@@ -90,5 +90,47 @@ describe("resolveVibeTarget", () => {
     });
 
     expect(resolveVibeTarget(input)).toEqual({ kind: "needs-setup" });
+  });
+});
+
+describe("matchesVibeRun", () => {
+  const component = { id: "cmp-web", path: "/repo/web" };
+  const run = { id: "run-dev", name: "Dev", command: "npm run dev" };
+
+  it("requires stable identity and the active checkout path", () => {
+    expect(
+      matchesVibeRun(
+        {
+          cwd: "/repo/web",
+          command: "different",
+          componentId: "cmp-web",
+          runCommandId: "run-dev",
+        },
+        component,
+        run,
+      ),
+    ).toBe(true);
+    expect(
+      matchesVibeRun(
+        {
+          cwd: "/repo-wt/web",
+          command: "npm run dev",
+          componentId: "cmp-web",
+          runCommandId: "run-dev",
+        },
+        component,
+        run,
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps cwd plus command fallback for legacy run tabs", () => {
+    expect(
+      matchesVibeRun(
+        { cwd: "/repo/web", command: "npm run dev" },
+        component,
+        run,
+      ),
+    ).toBe(true);
   });
 });

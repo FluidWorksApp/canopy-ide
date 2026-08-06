@@ -268,9 +268,22 @@ export function adoptLegacyCustomTasks(state: WorkspaceState): WorkspaceState {
   return { ...state, projects };
 }
 
+let workspaceSaveQueue: Promise<void> = Promise.resolve();
+
+export function saveWorkspaceStrict(state: WorkspaceState): Promise<void> {
+  const data = JSON.stringify(state, null, 2);
+  const write = workspaceSaveQueue.then(() =>
+    invoke<void>("store_save", { data }),
+  );
+  // Keep the queue alive after a failed strict caller; that caller still gets
+  // the rejection, while the next autosave is allowed to repair the store.
+  workspaceSaveQueue = write.catch(() => {});
+  return write;
+}
+
 export async function saveWorkspace(state: WorkspaceState): Promise<void> {
   try {
-    await invoke("store_save", { data: JSON.stringify(state, null, 2) });
+    await saveWorkspaceStrict(state);
   } catch (err) {
     console.warn("workspace save failed", err);
   }
@@ -463,6 +476,39 @@ export interface AgentCli {
    * did and keeps asking (amp: its help names no such flag).
    */
   skipPermissions?: string;
+
+  /**
+   * The CLI's least-intrusive *working* mode: the flag that starts it able to
+   * do the work, for a run nobody is sitting in front of.
+   *
+   * Appended to task launches only — a ticket, a PR, a diff surface, a
+   * micro-task (see startCommand) — never to the bare launcher, because a
+   * session someone opened by hand is a session someone is watching, and the
+   * mode they cycle to there is theirs to choose.
+   *
+   * This exists because a launched task inherits the CLI's *configured* mode,
+   * and the usual configurations stop it dead: Claude Code's default Manual
+   * mode asks before the first edit, and a repo or user that sets
+   * `defaultMode: "plan"` gets an agent that writes a plan and waits for an
+   * approval no one will give. The brief was handed over, the terminal is
+   * detached, and the work simply never happens. Pinning the mode at launch is
+   * the only place that can be fixed — a mode set in the CLI's own settings is
+   * otherwise the mode it keeps.
+   *
+   * Deliberately NOT the same rung as `skipPermissions`. Each flag here is the
+   * most autonomous mode that still leaves that CLI's own safety net standing —
+   * claude's classifier, codex's workspace sandbox, agy's edits-only mode,
+   * omp's write-scoped approvals — so a task that was launched, not authorised
+   * in front of a warning, never quietly gains the powers that warning is
+   * about. A CLI whose only rung above "ask about everything" is that warning's
+   * rung (aider: `--yes-always` and nothing between) is left undefined on
+   * purpose: it launches exactly as it does today and keeps asking, which is
+   * the honest answer, and the setting is there for someone who wants more.
+   *
+   * Same verification rule as the fields above: only syntax read off the CLI's
+   * own --help goes in here.
+   */
+  unattended?: string;
 }
 
 /**
@@ -517,6 +563,26 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
     // Verified: `--dangerously-skip-permissions  Bypass all permission checks.`
     skipPermissions: "--dangerously-skip-permissions",
+    // Verified: `--permission-mode <mode>` takes "acceptEdits", "auto",
+    // "bypassPermissions", "manual", "dontAsk", "plan". `auto` is the one that
+    // keeps working — it auto-approves with a classifier checking each action
+    // against the request, and Anthropic's own docs point at it as the
+    // "background safety checks with far fewer permission prompts" answer to
+    // bypassPermissions. It is also the only value that undoes both halves of
+    // what stalls a task: `manual` (the default, asks first thing) and `plan`
+    // (reads only, waits for a plan approval).
+    //
+    // Not `acceptEdits`: it auto-approves edits but still stops at the first
+    // shell command. Not `dontAsk`: it never prompts, but it auto-*denies*
+    // everything not pre-approved, which is a task that stops without even
+    // saying so.
+    //
+    // Needs Claude Code v2.1.158 or later (auto mode); an older CLI rejects the
+    // value at startup, loudly, in a terminal that is on screen. Auto mode
+    // being unavailable to the account or model is not an error: verified
+    // against an unsupported model, the session starts and falls back to the
+    // configured mode.
+    unattended: "--permission-mode auto",
   },
   {
     id: "codex",
@@ -536,6 +602,16 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // confirmation prompts and execute commands without sandboxing`, and
     // `codex resume --help` lists the same flag, so resumes carry it too.
     skipPermissions: "--dangerously-bypass-approvals-and-sandbox",
+    // Verified: `-a, --ask-for-approval <APPROVAL_POLICY>` takes `never`
+    // ("Never ask for user approval. Execution failures are immediately
+    // returned to the model"), and `-s, --sandbox <SANDBOX_MODE>` takes
+    // `workspace-write`. Two flags because codex splits the question in two —
+    // when it asks, and what a command may touch — and only the pair says
+    // "keep going, inside this workspace".
+    //
+    // NOT `--full-auto`, which every guide still names: it is gone from codex
+    // 0.146's --help, and a flag clap doesn't know refuses to launch at all.
+    unattended: "--ask-for-approval never --sandbox workspace-write",
   },
   {
     id: "amp",
@@ -553,7 +629,9 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // does not ask before running tools unless permissions are configured
     // (settings-driven — amp.permissions / amp.dangerouslyAllowAll). The old
     // --dangerously-allow-all flag is gone, so there is nothing to append —
-    // and a removed flag would refuse to launch.
+    // and a removed flag would refuse to launch. No `unattended` either, for
+    // the same reason and with the happier consequence: a CLI that does not
+    // stop to ask is already in the mode a task needs.
   },
   {
     id: "aider",
@@ -569,6 +647,10 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     latestUrl: "https://pypi.org/pypi/aider-chat/json",
     // Verified: `--yes-always  Always say yes to every confirmation`.
     skipPermissions: "--yes-always",
+    // No `unattended`, and not for want of looking: aider's help offers
+    // nothing between "confirm everything" and `--yes-always`. There is no mode
+    // to pin, so a task launches it exactly as a person would and it asks —
+    // rather than being handed the skip-permissions rung it was never granted.
   },
   // Gemini CLI is gone from this list on purpose: Google killed its "Login
   // with Google" path for individuals (2026-06-18, "migrate to the Antigravity
@@ -591,6 +673,12 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // Verified: `--dangerously-skip-permissions  Auto-approve all tool
     // permission requests without prompting` — same spelling as claude's.
     skipPermissions: "--dangerously-skip-permissions",
+    // Verified: `--mode  Set the agent execution mode for this session
+    // (accept-edits, plan)`. Two modes, and one of them is the one that stalls
+    // a task — so pinning `accept-edits` is exactly the "not plan" this field
+    // exists for. Antigravity keeps asking about commands either way; that is
+    // its safety net and this leaves it alone.
+    unattended: "--mode accept-edits",
   },
   {
     id: "opencode",
@@ -609,6 +697,13 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // denied (dangerous!)` — a flag of the default TUI command, so it rides
     // along with `--session` resumes as well.
     skipPermissions: "--auto",
+    // Verified: `--agent  agent to use`, and `opencode agent list` names both
+    // primaries — `build (primary)` and `plan (primary)`. Build is the default
+    // and the one with every tool enabled; plan sets file edits and bash to
+    // `ask`, which for a detached task is a session that stops. Pinning build
+    // is all opencode allows short of `--auto`: its only other control is that
+    // per-tool permission table, and `--auto` is the skip-permissions rung.
+    unattended: "--agent build",
   },
   // oh-my-pi. NB: the bare `omp` npm package is an unrelated squat — the
   // official installer is the omp.sh script.
@@ -626,6 +721,13 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // prompts)`. NOT `--approval-mode=yolo`: --auto-approve is the standalone
     // spelling its help gives for exactly this.
     skipPermissions: "--auto-approve",
+    // Verified: `--approval-mode=<value>  Override tools.approvalMode for this
+    // session (always-ask|write|yolo)`. `write` is the middle rung — writes go
+    // through, the rest still asks — and `yolo` is `--auto-approve` by another
+    // name, which is the rung above. Pinned rather than left alone because
+    // `always-ask` is a configurable default, and a task that inherits it stops
+    // on its first edit.
+    unattended: "--approval-mode=write",
   },
 ];
 
@@ -1115,6 +1217,14 @@ export const updateCommand = (cli: AgentCli) => cli.update ?? cli.install;
  * prompt syntax simply launch bare and get the text typed into them, rather
  * than being excluded from the feature (which is what hardcoding one CLI
  * amounted to).
+ *
+ * This is the task path, and only the task path: its four callers (a ticket, a
+ * PR, a diff surface, a micro-task — see startCommandParked) all hand an agent
+ * a brief and walk away. So the launch also pins the CLI's least-intrusive
+ * working mode, because the alternative is what it used to do — inherit
+ * whatever mode that CLI is configured for, which is Manual on a fresh Claude
+ * Code and `plan` in any repo that set it, and hand the brief to an agent that
+ * asks a question nobody is there to answer. See withUnattendedMode.
  */
 /** `command` with `cli`'s skip-permissions flag appended — only while the
  *  dangerouslySkipPermissions setting is on and the CLI has a verified flag.
@@ -1141,6 +1251,22 @@ export function launchCommand(cli: AgentCli): string {
   return withSkipPermissions(shellBin(cli.bin), cli);
 }
 
+/** `command` with `cli`'s least-intrusive working mode pinned on — see
+ *  AgentCli.unattended for what each flag is and why it is that one.
+ *
+ *  Task launches only. The bare launcher (launchCommand) deliberately does not
+ *  go through here: someone opening a CLI by hand is present, and the mode they
+ *  set in that CLI's own settings is the mode they meant.
+ *
+ *  Skipped entirely while the skip-permissions setting is on and this CLI has a
+ *  flag for it, because that flag is strictly more autonomous than anything
+ *  here — and two mode flags on one line is a question about precedence that
+ *  every CLI answers differently. One rung or the other, never both. */
+function withUnattendedMode(command: string, cli: AgentCli): string {
+  if (cli.skipPermissions && getSettings().dangerouslySkipPermissions) return command;
+  return cli.unattended ? `${command} ${cli.unattended}` : command;
+}
+
 export function startCommand(
   agentId: string,
   text: string,
@@ -1148,8 +1274,11 @@ export function startCommand(
   const cli = AGENT_CLIS.find((c) => c.id === agentId);
   if (!cli) return null;
   return cli.prompt
-    ? { command: withSkipPermissions(cli.prompt(text), cli), typePrompt: false }
-    : { command: launchCommand(cli), typePrompt: true };
+    ? {
+        command: withUnattendedMode(withSkipPermissions(cli.prompt(text), cli), cli),
+        typePrompt: false,
+      }
+    : { command: withUnattendedMode(launchCommand(cli), cli), typePrompt: true };
 }
 
 export function restoreCommand(agentId: string, sessionId: string): string | null {
