@@ -218,11 +218,3 @@ export function clientVarName(provider: ServiceProvider, secret: ServiceSecret):
     ? secret.name
     : `${provider.clientPrefix}${secret.name}`;
 }
-
-/** A line for the env file. Kept here so the one place that formats a secret
- *  is the one place that can be audited for quoting. */
-export function envLine(name: string, value: string): string {
-  const needsQuotes = /[\s"'#$`\\]/.test(value);
-  const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  return needsQuotes ? `${name}="${escaped}"` : `${name}=${value}`;
-}

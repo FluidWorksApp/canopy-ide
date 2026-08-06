@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   PUBLISH_CONFIRMATION,
-  deployProviderById,
   detectDeployProvider,
   planDeploy,
   type DeployContext,
 } from "./vibeDeploy";
 
-const vercel = deployProviderById("vercel")!;
+const vercel = detectDeployProvider(["vercel.json"])!;
 const ctx = (over: Partial<DeployContext> = {}): DeployContext => ({
   verification: "verified",
   dirty: false,

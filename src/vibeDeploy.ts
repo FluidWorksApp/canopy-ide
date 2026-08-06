@@ -68,9 +68,6 @@ export const DEPLOY_PROVIDERS: readonly DeployProvider[] = [
   },
 ];
 
-export const deployProviderById = (id: string): DeployProvider | undefined =>
-  DEPLOY_PROVIDERS.find((p) => p.id === id);
-
 /** Which provider this project already uses, by the config it committed.
  *  Guessing a provider it doesn't use would publish somewhere nobody expects,
  *  so absence returns null rather than a default. */

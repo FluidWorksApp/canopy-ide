@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   SERVICE_PROVIDERS,
   clientVarName,
-  envLine,
   planLink,
   providerById,
   type LinkContext,
@@ -85,7 +84,7 @@ describe("link planning", () => {
   });
 });
 
-describe("client exposure and env formatting", () => {
+describe("client exposure", () => {
   it("prefixes only publishable keys, and never twice", () => {
     const supabase = providerById("supabase")!;
     const anon = supabase.secrets.find((s) => s.name === "SUPABASE_ANON_KEY")!;
@@ -95,13 +94,5 @@ describe("client exposure and env formatting", () => {
     expect(
       clientVarName(supabase, { ...anon, name: "NEXT_PUBLIC_SUPABASE_ANON_KEY" }),
     ).toBe("NEXT_PUBLIC_SUPABASE_ANON_KEY");
-  });
-
-  it("quotes and escapes values that would otherwise break the file", () => {
-    expect(envLine("A", "plain")).toBe("A=plain");
-    expect(envLine("A", "has space")).toBe('A="has space"');
-    expect(envLine("A", 'quote"inside')).toBe('A="quote\\"inside"');
-    expect(envLine("A", "back\\slash")).toBe('A="back\\\\slash"');
-    expect(envLine("A", "hash#comment")).toBe('A="hash#comment"');
   });
 });
