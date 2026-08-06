@@ -1097,27 +1097,11 @@ export function PreviewView({
           </div>
         ) : (
           <div className="preview-setup">
-            <p className="preview-setup-lead">No servers are running in this project yet.</p>
+            <p className="preview-setup-lead">I'm getting your project ready.</p>
             <p className="preview-setup-note">
-              The preview lists the dev servers Canopy detects in your project's terminals, each
-              linked to the component it runs in — that link is what tells an agent which codebase
-              your feedback is about. To get one here:
+              Canopy is understanding what this project needs and will open the preview when it is
+              ready.
             </p>
-            <ol className="preview-setup-steps">
-              <li>
-                Add a run command to a component in <strong>project settings</strong> (each
-                component has a “Run commands” list — for example a <code>dev</code> command like{" "}
-                <code>npm run dev</code>).
-              </li>
-              <li>
-                Start it — from the component's <strong>▶</strong> in the Components panel, or the{" "}
-                <strong>＋ ▾</strong> launcher. It runs in the <strong>RUNS</strong> rail.
-              </li>
-              <li>
-                Once it's listening, its <code>localhost</code> address appears here, tagged with
-                its component. Pick it to start previewing.
-              </li>
-            </ol>
           </div>
         )}
       </div>
