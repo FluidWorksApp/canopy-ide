@@ -41,6 +41,9 @@ import { Dialog } from "./Dialog";
 import { BroomIcon, HeartIcon, StatsIcon } from "./icons";
 import { ClipboardHistory } from "./ClipboardHistory";
 import type { AgentEventEntry } from "../types";
+// `git_status` runs with --ignored, so `!!` rows are in the list. The chip
+// says "N changes", so it counts changes. One spelling, in shared/gitStatus.ts.
+import { trackedChanges } from "../../shared/gitStatus";
 import { modelCommandLine, type ModelSwitch } from "../agentModels";
 import { useBranchSwitch } from "../useBranchSwitch";
 
@@ -405,7 +408,7 @@ export const StatusBar = memo(function StatusBar({
         .then((s) => {
           if (cancelled) return;
           setBranch(s.branch);
-          setDirty(s.entries.filter((e) => e.status !== "!!").length);
+          setDirty(trackedChanges(s.entries).length);
         })
         .catch(() => {});
     };
