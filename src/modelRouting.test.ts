@@ -27,6 +27,12 @@ describe("routingTierOf", () => {
     expect(routingTierOf("google", "gemini-3.6-flash")).toBe("workhorse");
   });
 
+  it("classifies the gpt-5.6 sol/terra/luna family", () => {
+    expect(routingTierOf("openai", "gpt-5.6-sol")).toBe("frontier");
+    expect(routingTierOf("openai", "gpt-5.6-terra")).toBe("workhorse");
+    expect(routingTierOf("openai", "gpt-5.6-luna")).toBe("fast");
+  });
+
   it("answers null for the unrecognizable rather than guessing", () => {
     expect(routingTierOf("anthropic", "mystery-model")).toBeNull();
   });

@@ -45,9 +45,12 @@ const TIER_PATTERNS: Record<ModelFamily, [RoutingTier, RegExp][]> = {
     ["workhorse", /^sonnet$|^claude-sonnet-/],
   ],
   openai: [
-    ["fast", /-(mini|nano)$/],
-    ["frontier", /^gpt-[\d.]+-codex(-max)?$/],
-    ["workhorse", /^gpt-[\d.]+$/],
+    ["fast", /-(luna|mini|nano)$/],
+    ["frontier", /-sol$|^gpt-[\d.]+-codex(-max)?$/],
+    // A bare `gpt-N.N` may alias to the flagship upstream, but an id that
+    // doesn't say so routes conservatively — cost surprises beat capability
+    // surprises in the wrong direction.
+    ["workhorse", /-terra$|^gpt-[\d.]+$/],
   ],
   google: [
     ["fast", /-flash-lite(-preview)?$/],
