@@ -663,7 +663,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, []);
   const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT_W);
   const sideWidthRef = useRef(SIDE_DEFAULT_W);
-  const sideOpen = !zen && (pinned || peeking);
+  const vibe = project.vibe?.enabled === true;
+  const sideOpen = !zen && !vibe && (pinned || peeking);
 
   // The overlay peek slides over the pane, and a child webview cannot be drawn
   // under it — so the panel has to be announced, not discovered. The occlusion
@@ -10739,13 +10740,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
   return (
     <div
       ref={rootRef}
-      className="project-view"
+      className={`project-view ${vibe ? "project-view-vibe" : ""}`}
       style={{ display: visible ? "flex" : "none" }}
     >
       {/* Rail + panels share a row; the status bar sits below it so it spans the
           full window width (rail + sidebar + main), not just the editor column. */}
       <div className="project-body">
-        {!zen && (
+        {!zen && !vibe && (
           <ActivityRail
             sideTab={sideTab}
             open={sideOpen}
@@ -10774,7 +10775,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             non-default, but it's the right trade for anyone who wants the panel
             up while they work. Same `sidePanel` element either way; only one of
             the two branches renders it. */}
-        {!zen && !sidePrefs.overlay && (
+        {!zen && !vibe && !sidePrefs.overlay && (
           <div
             className={`side-dock ${sideOpen ? "open" : ""}`}
             // Collapsed to nothing rather than unmounted, for the same reason
@@ -10794,7 +10795,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             on the border, invisible and all but unhittable, which is why the
             docked panel read as fixed-width. Out here it straddles the seam at
             its full width and nothing clips it. */}
-        {!zen && !sidePrefs.overlay && sideOpen && (
+        {!zen && !vibe && !sidePrefs.overlay && sideOpen && (
           <div
             className="side-dock-grip"
             style={{ left: RAIL_W + sideWidth - 4 }}
@@ -10814,6 +10815,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onMouseLeave={() => schedulePeekClose()}
           />
         )}
+        <aside className="vibe-chat-placeholder" aria-label="Build chat placeholder">
+          <div className="vibe-chat-placeholder-title">Build chat</div>
+          <div className="vibe-chat-placeholder-note">Structured chat arrives in S4.</div>
+        </aside>
         {/* The PanelGroup renders in every mode on purpose. Swapping mainArea
             between a bare child and a <Panel> changes its element type, which
             unmounts the subtree — and Term's cleanup kills the PTY. Toggling
@@ -10829,7 +10834,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             a terminal never re-wraps because you glanced at the file tree.
             Always mounted, slid out of frame when closed, for the same reason
             the panes inside it are display-toggled. */}
-        {!zen && sidePrefs.overlay && (
+        {!zen && !vibe && sidePrefs.overlay && (
           <div className="side-peek-layer">
             <div
               className={`side-peek ${sideOpen ? "open" : ""}`}
