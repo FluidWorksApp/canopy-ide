@@ -88,6 +88,26 @@ describe("toast lifetime", () => {
     const q = item({ id: "b", kind: "question", ts: 0, toastDismissedAt: 5 });
     expect(liveToasts([q], 1000)).toEqual([]);
   });
+
+  it("shows no toast for the question whose own dialog is open", () => {
+    // The agent's question is already on screen in `AskDialog`, which is the
+    // surface that can answer it. A toast beside it is the same sentence twice.
+    const asked = item({ id: "b", kind: "question", ts: 0 });
+    const elsewhere = item({ id: "c", kind: "question", ts: 0 });
+    expect(
+      liveToasts([asked, elsewhere], 1000, new Set(["b"])).map((x) => x.id),
+    ).toEqual(["c"]);
+  });
+
+  it("leaves the suppressed question outstanding in every other surface", () => {
+    // Hiding the duplicate view is not answering: the badge, the waiting list
+    // and the OS banner must all still see a question nobody has replied to.
+    const asked = item({ id: "b", kind: "question", ts: 0 });
+    expect(liveToasts([asked], 1000, new Set(["b"]))).toEqual([]);
+    expect(outstandingQuestions([asked]).map((x) => x.id)).toEqual(["b"]);
+    expect(badgeFor([asked])).toEqual({ count: 1, urgency: "high" });
+    expect(shouldReachOS(asked, false)).toBe(true);
+  });
 });
 
 describe("routing to the OS", () => {

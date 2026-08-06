@@ -478,13 +478,37 @@ export function subscribeAttention(cb: () => void): () => void {
 // Selectors — every surface's count comes from here, so none can disagree
 // ---------------------------------------------------------------------------
 
+/** No dialog is holding a question. One shared instance, so the callers that
+ *  pass nothing — the tests, and any surface with no dialog of its own — do not
+ *  allocate an empty set per call. */
+const NOTHING_ASKED: ReadonlySet<string> = new Set<string>();
+
 /** Toasts still on screen: not dismissed, and either high urgency (no timer)
  *  or still inside their window. `now` is passed in so the caller's tick drives
- *  the fade and the function stays pure. */
-export function liveToasts(items: AttentionItem[], now: number): AttentionItem[] {
+ *  the fade and the function stays pure.
+ *
+ *  `asked` is the ids of items whose question is *already* in front of the user
+ *  in the surface that can answer it — the modal `AskDialog` an agent's
+ *  question raises, the companion's proposal card. Posting those to the channel
+ *  is right and stays: they are counted, they reach the OS when the window is
+ *  not focused, and they survive as history. Rendering them a second time,
+ *  beside the dialog quoting the same sentence, is not: one question became two
+ *  cards, and the copy that could not answer it was the one covering the work.
+ *
+ *  Suppressed here rather than at the post, and as a *view* rather than as a
+ *  property of the item, because nothing else about it changes — still
+ *  outstanding, still counted, still in the list. When the dialog goes the id
+ *  leaves this set, and by then the question is answered or withdrawn, so
+ *  `isResolvedQuestion` retires the toast on its own. */
+export function liveToasts(
+  items: AttentionItem[],
+  now: number,
+  asked: ReadonlySet<string> = NOTHING_ASKED,
+): AttentionItem[] {
   return items.filter((x) => {
     if (x.toastDismissedAt != null) return false;
     if (isResolvedQuestion(x)) return false;
+    if (asked.has(x.id)) return false;
     const ms = toastMs(x);
     return ms == null || now - x.ts < ms;
   });
