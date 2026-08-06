@@ -1,4 +1,5 @@
 import type { LifeState } from "../shared/agentLife";
+import type { TaskAttemptState } from "./taskEnvelope";
 // Micro-tasks that run without a tab. A one-shot job — review this PR, raise
 // that one — used to open a terminal tab, take the front of the window, and
 // close itself when it was done: a lot of ceremony for something the user
@@ -11,13 +12,13 @@ import type { LifeState } from "../shared/agentLife";
 // job_done, reaping) lives in ProjectView, which owns the PTYs; keeping the data
 // here means it can be reasoned about, and tested, on its own.
 
-/** A micro-task in flight with no tab of its own. Keyed by pty id everywhere:
- *  that's the identity the hook stamps on its events, the MCP bridge sends with
- *  job_done, and the panel stops and attaches by. */
+/** A live projection of one durable TaskEnvelope attempt. PTY id is only the
+ * attach/stop binding; attemptId is the logical identity. */
 export interface MicroRun {
   ptyId: number;
-  /** The task history entry this run writes its outcome into. */
-  runId?: string;
+  runId: string;
+  attemptId: string;
+  attemptState: TaskAttemptState;
   /** MicroTaskDef id — `review-pr`, `custom-<uuid>`. */
   taskId: string;
   label: string;
@@ -44,7 +45,9 @@ export interface MicroRun {
 /** Add a run, replacing any stale entry on the same pty — ids are recycled
  *  across a session, and two rows for one terminal would both try to reap it. */
 export const withRun = (runs: MicroRun[], run: MicroRun): MicroRun[] => [
-  ...runs.filter((r) => r.ptyId !== run.ptyId),
+  ...runs.filter(
+    (r) => r.ptyId !== run.ptyId && r.attemptId !== run.attemptId,
+  ),
   run,
 ];
 
@@ -78,7 +81,22 @@ export function runNote(
   now: number,
 ): string {
   const age = elapsedLabel(now - run.startedAt);
-  if (run.blocked || state === "waiting") return `Needs you · ${age}`;
+  if (
+    run.attemptState === "waiting" ||
+    run.attemptState === "blocked" ||
+    run.blocked ||
+    state === "waiting"
+  )
+    return `Needs you · ${age}`;
+  if (run.attemptState === "reserved" || run.attemptState === "launching")
+    return `Starting · ${age}`;
+  if (
+    run.attemptState === "completed" ||
+    run.attemptState === "failed" ||
+    run.attemptState === "interrupted" ||
+    run.attemptState === "cancelled"
+  )
+    return `Wrapping up · ${age}`;
   if (state === "ended") return `Wrapping up · ${age}`;
   // We have lost track of it. Said plainly rather than dressed as "Started N
   // ago", which reads as a run that is fine and merely young.

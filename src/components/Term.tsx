@@ -66,6 +66,8 @@ interface TermProps {
    *  workspace's port lease here, which is what lets two checkouts of the same
    *  repo serve at once instead of losing the race for one hard-coded port. */
   env?: [string, string][];
+  runId?: string;
+  attemptId?: string;
   /** Attach to an already-running PTY (spawned headless from the remote portal)
    *  instead of spawning a fresh one. The tab mirrors that session's live
    *  output and drives its input; closing the tab detaches, it does not kill the
@@ -80,7 +82,7 @@ interface TermProps {
 }
 
 export const Term = forwardRef<TermHandle, TermProps>(function Term(
-  { cwd, active, initialCommand, runCommand, env, attachId, killAttachedOnClose, onSpawned, onExited, onTitle, onNotify },
+  { cwd, active, initialCommand, runCommand, env, runId, attemptId, attachId, killAttachedOnClose, onSpawned, onExited, onTitle, onNotify },
   ref,
 ) {
   // Frozen once: a Term never switches between spawn and attach mid-life, and
@@ -462,6 +464,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             highWater: settings.ptyHighWater,
             runCommand,
             env,
+            runId,
+            attemptId,
           },
           (bytes) => {
             // Feed xterm's own write buffer and ack once it has consumed the

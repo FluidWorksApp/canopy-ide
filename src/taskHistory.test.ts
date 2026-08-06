@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as ipc from "./ipc";
 import {
   clearTaskHistory,
   completedTaskRuns,
@@ -6,6 +7,7 @@ import {
   recordTaskEnd,
   recordTaskStart,
   removeTaskRun,
+  resetTaskHistoryForTests,
   runIcon,
   runTitle,
   canResumeRun,
@@ -16,6 +18,7 @@ import {
   researchEntryForFile,
   resolveTaskFile,
   tidyOutput,
+  hydrateTaskHistory,
 } from "./taskHistory";
 
 const start = (over: Partial<Omit<TaskRun, "id" | "status" | "startedAt">> = {}) =>
@@ -31,6 +34,85 @@ const start = (over: Partial<Omit<TaskRun, "id" | "status" | "startedAt">> = {})
 
 beforeEach(() => {
   localStorage.clear();
+  resetTaskHistoryForTests();
+  vi.restoreAllMocks();
+});
+
+describe("legacy adoption", () => {
+  it("hands localStorage rows to TaskEnvelope once, then reads the store", async () => {
+    const legacyId = start();
+    const summary = {
+      runId: "run-imported",
+      projectId: "p1",
+      componentId: "p1",
+      kind: "raise-pr",
+      title: "Raise PR",
+      status: "failed" as const,
+      attemptCount: 1,
+      createdAt: 10,
+      updatedAt: 20,
+      metadata: {
+        history: true,
+        legacySourceId: legacyId,
+        attemptId: "attempt-imported",
+        taskId: "raise-pr",
+        label: "Raise PR",
+        agent: "claude",
+        cwd: "/repo",
+        projectId: "p1",
+        brief: "Open a pull request.",
+        startedAt: 10,
+      },
+    };
+    vi.spyOn(ipc, "taskListHistory")
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([summary]);
+    vi.spyOn(ipc, "taskReserve").mockResolvedValue({
+      envelope: { ...summary, status: "running", metadata: {} },
+      attempt: {
+        attemptId: "attempt-imported",
+        runId: "run-imported",
+        ordinal: 1,
+        state: "reserved",
+        route: {
+          cli: "claude",
+          profileId: "default",
+          harnessVersion: "legacy",
+          promptVersion: "legacy",
+          toolPolicyVersion: "legacy",
+          executionMode: "pty",
+        },
+      },
+    });
+    vi.spyOn(ipc, "taskUpdateMetadata").mockResolvedValue(summary);
+    const settle = vi.spyOn(ipc, "taskAttemptSettle").mockResolvedValue({
+      attemptId: "attempt-imported",
+      runId: "run-imported",
+      ordinal: 1,
+      state: "interrupted",
+      route: {
+        cli: "claude",
+        profileId: "default",
+        harnessVersion: "legacy",
+        promptVersion: "legacy",
+        toolPolicyVersion: "legacy",
+        executionMode: "pty",
+      },
+    });
+
+    await hydrateTaskHistory();
+
+    expect(localStorage.getItem("canopy.taskHistory")).toBeNull();
+    expect(taskRuns()).toMatchObject([
+      { id: "run-imported", attemptId: "attempt-imported", status: "stopped" },
+    ]);
+    expect(settle).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attemptId: "attempt-imported",
+        state: "interrupted",
+      }),
+    );
+  });
 });
 
 describe("recordTaskStart", () => {
