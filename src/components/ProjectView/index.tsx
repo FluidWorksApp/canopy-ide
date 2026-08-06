@@ -124,6 +124,7 @@ import {
   PREREQS,
   restoreCommand,
   resumeSessionId,
+  launchCommand,
   shellBin,
   updateCommand,
 } from "../../projects";
@@ -2240,7 +2241,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (item.action.kind === "resume") markRestored(item.action.sessionId);
       addTerminal(
         item.action.kind === "resume" ? item.action.cwd : item.agent.cwd,
-        item.action.kind === "resume" ? item.action.command : shellBin(cli.bin),
+        item.action.kind === "resume" ? item.action.command : launchCommand(cli),
         cli.name,
         cli.icon,
         false,
@@ -7116,7 +7117,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         const profile = activeProfile();
         const env = await launchEnv(cli.id);
         const terminal = {
-          command: shellBin(cli.bin),
+          command: launchCommand(cli),
           title: cli.name,
           icon: cli.icon,
           env,

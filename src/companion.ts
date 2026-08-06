@@ -22,6 +22,10 @@
 import { AGENT_CLIS, type AgentCli } from "./projects";
 import { mascotDef } from "./mascots";
 import { getSettings, updateSettings } from "./settings";
+import {
+  STRUCTURED_RUNNERS,
+  type StructuredRunnerLaunch,
+} from "./structuredRunners";
 
 /** What the companion may do on its own.
  *
@@ -109,24 +113,6 @@ export function companionSlug(): string {
  *  a session that ignores half of what it was told. */
 export type CompanionTier = "structured" | "oneshot" | "terminal";
 
-/** The verified way to run one CLI as a companion.
- *
- *  Absent from the table entirely means `terminal`: the fallback needs no
- *  knowledge beyond what projects.ts already has, which is what makes every
- *  agent the user installs usable here on day one.
- */
-export interface CompanionRunner {
-  tier: "structured" | "oneshot";
-  /** Build the argv tail for a fresh session. `bin` is the *resolved* binary
-   *  (Settings → Agents can rebind it), never the vendor's name. */
-  args(o: CompanionLaunch): string[];
-  /** The same, resuming the session id the companion has been using. A CLI
-   *  that cannot resume by id has no business in this tier: the companion's
-   *  memory of the user *is* its conversation, and losing it on every restart
-   *  would make "remembers who it is" false. */
-  resumeArgs(o: CompanionLaunch & { sessionId: string }): string[];
-}
-
 export interface CompanionLaunch {
   bin: string;
   sessionId: string;
@@ -138,176 +124,31 @@ export interface CompanionLaunch {
   authority: CompanionAuthority;
 }
 
-/**
- * Verified against `claude --help` on the installed CLI:
- *   --session-id <uuid>            fixed id, so the conversation is ours to resume
- *   --append-system-prompt <text>  adds to the default prompt, does not replace it
- *   --add-dir <dirs...>            the cross-project reach, in one session
- *   --model <model>                alias or full id
- *   -p --input-format stream-json --output-format stream-json
- *                                  JSONL both ways, which is the whole tier
- *   --include-partial-messages     token deltas rather than whole turns
- *   --verbose                      REQUIRED with `-p --output-format stream-json`;
- *                                  without it the CLI refuses to start at all
- *   --permission-mode <mode>       the CLI's own gate on its own tools
- *
- * `--append-system-prompt` rather than `--system-prompt` on purpose: replacing
- * the prompt would also throw away the CLI's knowledge of its own tools, and
- * the companion's brief is an addition to that, not a substitute for it.
- */
-/**
- * Permission flags — the half of the design that nearly sank it.
- *
- * Claude Code does not auto-grant MCP tools: they wait on a prompt. In headless
- * `-p` mode there is nobody to answer that prompt, so every `canopy_*` call
- * came back ungranted — including read-only ones like `canopy_project`. The
- * companion could see its tools, call them, and have all of them refused, which
- * it then explained to the user as "approve these in Canopy's permission
- * settings" — a screen that does not exist.
- *
- * So the CLI's own prompt is bypassed, and the gating is done where it can
- * actually reach a human: `companion_gate` in canopy_hook.rs, which puts the
- * action on screen and blocks on the answer.
- *
- * That leaves the CLI's *built-in* tools, which the bridge cannot see. Bash,
- * Edit and Write would change the world without ever passing the gate, so they
- * are disallowed outright — at every authority, including "act freely".
- *
- * At every authority because the companion does not edit files. That is what it
- * *is*, not a caution that scales with trust: it is the assistant that answers
- * across eight projects, and the thing that edits code is a coding agent in one
- * checkout, whose work the user can see in a diff, on a branch, in a session
- * they opened. "Act freely" is freedom with Canopy's own tools — start a
- * server, make a worktree, write a note — not a licence to rewrite source in a
- * project whose tab is not even open.
- *
- * Withheld rather than requested, on this file's usual terms: the brief also
- * says it, but a brief is a rule an agent can reason its way past, and this is
- * the worst agent to discover that on. Reading is untouched (Read, Grep, Glob),
- * which is what "understand code across repos" actually needs.
- */
 const BUILTIN_WRITERS = ["Edit", "Write", "NotebookEdit", "Bash", "KillShell"];
 
-export function permissionArgs(_authority: CompanionAuthority): string[] {
-  return [
-    "--permission-mode",
-    "bypassPermissions",
-    "--disallowedTools",
-    ...BUILTIN_WRITERS,
-  ];
+export function companionRunnerLaunch(
+  launch: CompanionLaunch,
+  opts?: { cwd?: string; env?: [string, string][] },
+): StructuredRunnerLaunch {
+  return {
+    bin: launch.bin,
+    policy: {
+      systemPromptAppend: launch.systemPrompt,
+      permissionMode: "bypassPermissions",
+      disallowedTools: BUILTIN_WRITERS,
+      model: launch.model,
+      sessionId: launch.sessionId,
+      cwd: opts?.cwd,
+      // CompanionAuthority governs canopy_* calls. Its CLI remains read-only.
+      authority: "read-only",
+    },
+    additionalDirectories: launch.roots,
+    env: opts?.env,
+  };
 }
-
-const CLAUDE_RUNNER: CompanionRunner = {
-  tier: "structured",
-  args: (o) => [
-    "-p",
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--include-partial-messages",
-    // Not optional and not cosmetic: `-p --output-format stream-json` without
-    // it exits immediately with "requires --verbose", so the companion never
-    // starts. It costs a few extra `type: "system"` lines the parser ignores.
-    "--verbose",
-    "--session-id",
-    o.sessionId,
-    "--append-system-prompt",
-    o.systemPrompt,
-    ...o.roots.flatMap((r) => ["--add-dir", r]),
-    ...(o.model ? ["--model", o.model] : []),
-    ...permissionArgs(o.authority),
-  ],
-  // --resume takes the id and keeps the same conversation; the prompt and dirs
-  // are passed again because they describe *this* launch (the workspace may
-  // have gained a project since) and neither is stored in the transcript.
-  resumeArgs: (o) => [
-    "-p",
-    "--input-format",
-    "stream-json",
-    "--output-format",
-    "stream-json",
-    "--include-partial-messages",
-    "--verbose",
-    "--resume",
-    o.sessionId,
-    "--append-system-prompt",
-    o.systemPrompt,
-    ...o.roots.flatMap((r) => ["--add-dir", r]),
-    ...(o.model ? ["--model", o.model] : []),
-    ...permissionArgs(o.authority),
-  ],
-};
-
-/**
- * Codex, in the `oneshot` tier.
- *
- * `codex exec` is non-interactive and ends with its turn — there is no
- * long-lived stdin to write the next message to, so a process per turn is not
- * a workaround, it is the shape of the CLI. `exec resume <thread_id>` is what
- * makes that a conversation rather than a series of strangers.
- *
- * Verified against the installed CLI, both halves:
- *   codex exec --json                 -> {"type":"thread.started","thread_id":…}
- *                                       {"type":"item.completed","item":{"type":"agent_message","text":…}}
- *                                       {"type":"turn.completed",…}
- *   codex exec resume <id> --json     -> same thread_id, and it recalled a fact
- *                                       from the previous turn
- *
- * `--skip-git-repo-check` is required: the companion runs in ~/.canopy/companion,
- * which is deliberately not a repo, and codex refuses to start outside one.
- *
- * The thread id comes back on the FIRST turn rather than being chosen up front
- * (unlike claude's `--session-id`), which is why `sessionId` is ignored here and
- * companionSession records what `thread.started` reports.
- */
-const CODEX_RUNNER: CompanionRunner = {
-  tier: "oneshot",
-  args: (o) => [
-    "exec",
-    "--json",
-    "--skip-git-repo-check",
-    ...(o.model ? ["-m", o.model] : []),
-    ...codexSandbox(o.authority),
-  ],
-  resumeArgs: (o) => [
-    "exec",
-    "resume",
-    o.sessionId,
-    "--json",
-    "--skip-git-repo-check",
-    ...(o.model ? ["-m", o.model] : []),
-    ...codexSandbox(o.authority),
-  ],
-};
-
-/** Codex's own sandbox — read-only at every authority, which is codex's half of
- *  "the companion does not edit files".
- *
- *  The same reasoning as claude's disallowed built-ins, and it has to be the
- *  same *answer* or the guarantee would depend on which CLI the user happened
- *  to pick: codex's default sandbox is workspace-write, so leaving anything
- *  above answer-only to the default meant the companion could edit files
- *  through its own tools on codex while it could not on claude. The gate only
- *  governs `canopy_*` calls; it never sees a write codex makes on its own.
- *
- *  `authority` is still what decides the gate, and every mutating canopy_* tool
- *  it grants keeps working — this sandbox governs codex's own shell and file
- *  ops, not MCP. */
-function codexSandbox(_authority: CompanionAuthority): string[] {
-  return ["-c", "sandbox_mode=\"read-only\""];
-}
-
-/** Keyed by the registry id in projects.ts. Each entry is a statement about
- *  what has been *verified* against that CLI, not about what is supported:
- *  every CLI without one still runs, in the terminal tier. */
-export const COMPANION_RUNNERS: Record<string, CompanionRunner> = {
-  claude: CLAUDE_RUNNER,
-  codex: CODEX_RUNNER,
-};
 
 export function tierFor(cliId: string): CompanionTier {
-  return COMPANION_RUNNERS[cliId]?.tier ?? "terminal";
+  return STRUCTURED_RUNNERS[cliId]?.tier ?? "terminal";
 }
 
 /** One line for the settings row, so the choice is made with its consequence

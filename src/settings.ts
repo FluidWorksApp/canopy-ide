@@ -333,6 +333,17 @@ export interface Settings {
    *  Was hardcoded to claude, which quietly made every other agent a
    *  second-class citizen in a product built to run all of them. */
   defaultAgent: string;
+  /** Launch every agent with its CLI's own skip-permissions flag (claude
+   *  --dangerously-skip-permissions, codex
+   *  --dangerously-bypass-approvals-and-sandbox, …see skipPermissions in
+   *  projects.ts), so nothing stops to ask before acting. Off by default and
+   *  it must stay that way: this removes the one confirmation standing
+   *  between an agent and the machine, so it has to follow a decision the
+   *  user made in front of the warning, never an upgrade. Read at
+   *  command-build time, so flipping it affects the next launch — sessions
+   *  already running keep the mode they started with. A CLI with no verified
+   *  flag (amp) launches unchanged. */
+  dangerouslySkipPermissions: boolean;
   /** Registry id -> the executable this machine actually has, for CLIs whose
    *  binary isn't the name the vendor ships: an enterprise build of Claude Code
    *  installed as `acme-claude`, or a wrapper at an absolute path. Without it
@@ -560,6 +571,7 @@ export const DEFAULTS: Settings = {
   runawayMemBytes: 4 * 1024 * 1024 * 1024,
   ptyHighWater: 2 * 1024 * 1024,
   defaultAgent: "claude",
+  dangerouslySkipPermissions: false,
   cliBins: {},
   activeProfile: "default",
   customClis: [],

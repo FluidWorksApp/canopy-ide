@@ -1896,6 +1896,29 @@ body.resizing-side * {
   padding-top: 8px;
 }
 
+/* The panel is a couple of screens tall and opens bottom-anchored, so the
+   title is the first thing scrolling pushes out of reach. Pinned instead:
+   sticky offsets from the scrollport's visible edge, so the header cannot
+   end up beyond the viewport at any scroll position or window height. The
+   background layers the raised tint over the near-opaque overlay because
+   vitrine's --bg-raised alone is a 5% wash rows would show through. */
+.stats-panel > .ap-head:first-child {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: linear-gradient(var(--bg-raised), var(--bg-raised)),
+    var(--bg-overlay);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The pinned title's bottom rule already separates it from the section that
+   follows — a border-top there would double the line. */
+.stats-panel > .ap-head:first-child + .stats-section-head {
+  margin-top: 0;
+  border-top: 0;
+  padding-top: 6px;
+}
+
 /* Plan limits: one group per CLI, one bar per rolling window. */
 .plan-list {
   padding: 6px 12px 2px;
@@ -8877,6 +8900,21 @@ body.dragging-tab * {
   align-items: center;
   gap: 5px;
   font-size: 12px;
+}
+
+/* The warning under a switch that disarms a safety. Bordered in the danger
+   colour rather than filled with it: it has to read as a standing condition
+   the user agreed to, not a transient error toast. */
+.set-danger-note {
+  margin-top: 8px;
+  padding: 8px 10px;
+  max-width: 60ch;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
 }
 
 /* A stack of switches that each need a line of explanation: the box stays on

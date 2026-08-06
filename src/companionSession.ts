@@ -27,9 +27,9 @@ import {
   startOneshot,
   startStructured,
   startTerminal,
-  type CompanionEvent,
   type CompanionTransport,
 } from "./companionTransport";
+import type { StructuredRunnerEvent } from "./structuredEvents";
 import { getSettings, updateSettings } from "./settings";
 import { shellBin, shellQuote } from "./projects";
 
@@ -156,7 +156,7 @@ function amendReply(fn: (m: CompanionMessage) => CompanionMessage): void {
   set({ messages });
 }
 
-function onEvent(event: CompanionEvent): void {
+function onEvent(event: StructuredRunnerEvent): void {
   switch (event.kind) {
     case "ready":
       // Marked here, and only here. Marking it at spawn time was the bug that

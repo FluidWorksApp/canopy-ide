@@ -4,6 +4,18 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ShortcutProfile } from "./shortcuts";
+import type {
+  TaskAttempt,
+  TaskAttemptReserveInput,
+  TaskAttemptSettlement,
+  TaskEnvelopeDetail,
+  TaskEnvelopeSummary,
+  TaskEvent,
+  TaskEventInput,
+  TaskReservation,
+  TaskReserveInput,
+} from "./taskEnvelope";
+import type { TaskTranscriptEntry, TaskTranscriptKind } from "./taskTranscript";
 
 // ---------- App shell ----------
 
@@ -420,21 +432,44 @@ export const onAgentMessage = (
 ): Promise<UnlistenFn> =>
   listen<AgentMessageDelivery>("agent:message", (event) => cb(event.payload));
 
-/** One message an agent typed into another agent's session. */
+/** A file shared with a mesh message, by path — the reference, not the bytes. */
+export interface MeshItem {
+  /** "image" for formats a model can look at directly, else "file". */
+  kind: string;
+  path: string;
+  note?: string;
+}
+
+/** One agent-to-agent mesh message (mesh.rs). Kept across app runs. */
 export interface MeshMessage {
   id: string;
   /** The terminal it came from; null for the companion. */
   from_pty_id: number | null;
   from_cwd: string | null;
+  /** Which CLI each end was, and what its run was titled at send time. */
+  from_agent?: string | null;
+  from_task?: string | null;
   to_pty_id: number;
-  /** What was delivered — after flattening and sanitising, not what was
-   *  passed. The record is of the delivery. */
+  to_cwd?: string | null;
+  to_agent?: string | null;
+  to_task?: string | null;
+  /** The message as the sender wrote it. For a plain message_agent send this
+   *  is the sanitised delivered line; for a mesh send the full body, with the
+   *  typed notice in `delivered`. */
   text: string;
+  delivered?: string | null;
+  items?: MeshItem[];
+  /** The message this answers, by id. */
+  reply_to?: string | null;
+  /** A typed reference ({kind, id}) the history can be queried by. */
+  ref?: { kind: string; id: string } | null;
+  /** The app run that delivered it — pty ids only mean anything within one. */
+  instance?: string | null;
   at_ms: number;
   submitted: boolean;
 }
 
-/** Every agent-to-agent message this app run, newest last. */
+/** Every kept agent-to-agent message, oldest first. */
 export const contextMessages = () => invoke<MeshMessage[]>("context_messages");
 
 /** PNG (base64) of a rectangle of the app's own webview, via the webview's own
@@ -1564,6 +1599,63 @@ export const onStoreChange = (
   cb: (e: StoreChange) => void,
 ): Promise<UnlistenFn> =>
   listen<StoreChange>("store:change", (event) => cb(event.payload));
+
+// ---------- Durable task envelopes ----------
+
+/** Atomically creates an envelope and its first attempt. This command is the
+ * pre-spawn boundary: callers receive durable ids before starting a process. */
+export const taskReserve = (input: TaskReserveInput) =>
+  invoke<TaskReservation>("task_reserve", { input });
+
+export const taskAttemptReserve = (input: TaskAttemptReserveInput) =>
+  invoke<TaskAttempt>("task_attempt_reserve", { input });
+
+export const taskAttemptStart = (attemptId: string) =>
+  invoke<TaskAttempt>("task_attempt_start", { attemptId });
+
+export const taskAttemptSettle = (input: TaskAttemptSettlement) =>
+  invoke<TaskAttempt>("task_attempt_settle", { input });
+
+export const taskList = (projectId: string, limit = 50) =>
+  invoke<TaskEnvelopeSummary[]>("task_list", { projectId, limit });
+
+export const taskGet = (runId: string) =>
+  invoke<TaskEnvelopeDetail | null>("task_get", { runId });
+
+export const taskTranscriptAppend = (args: {
+  runId: string;
+  attemptId?: string | null;
+  kind: TaskTranscriptKind;
+  body: string;
+}) => invoke<TaskTranscriptEntry>("task_transcript_append", args);
+
+export const taskTranscriptList = (runId: string, limit = 200) =>
+  invoke<TaskTranscriptEntry[]>("task_transcript_list", { runId, limit });
+
+export const taskEventAppend = (input: TaskEventInput) =>
+  invoke<TaskEvent>("task_event_append", { input });
+
+export const taskEventList = (runId: string, limit = 200) =>
+  invoke<TaskEvent[]>("task_event_list", { runId, limit });
+
+export interface TaskArtifact {
+  id: string;
+  runId: string;
+  attemptId?: string | null;
+  kind: string;
+  bytes: number;
+  createdAt: number;
+}
+
+export const taskArtifactWrite = (args: {
+  runId: string;
+  attemptId?: string | null;
+  kind: string;
+  content: string;
+}) => invoke<TaskArtifact>("task_artifact_write", args);
+
+export const taskArtifactRead = (id: string) =>
+  invoke<string>("task_artifact_read", { id });
 
 // ---------- Provenance (which session produced which PR) ----------
 
@@ -3315,7 +3407,7 @@ export const cleanupDisk = (roots: string[]) =>
 
 /** One thing the companion's CLI said. `line` is a raw stdout line — expected
  *  to be JSON, deliberately unparsed in Rust so the protocol stays owned by
- *  companionTransport.ts (see companion.rs). */
+ *  structuredEvents.ts (see companion.rs). */
 export type CompanionOut =
   | { kind: "line"; text: string }
   | { kind: "stderr"; text: string }
