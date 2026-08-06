@@ -24,7 +24,48 @@
 // file, which is what the screenshots themselves already do.
 
 import * as ipc from "./ipc";
-import { startCommand } from "./projects";
+import { AGENT_CLIS, startCommand, type AgentCli } from "./projects";
+import { getSettings } from "./settings";
+
+/**
+ * Which CLI a launch runs on.
+ *
+ * One answer for every launcher — a ticket, a PR, a diff surface, a micro-task
+ * — because the question is the same one each time and a second copy of it is
+ * where a preference quietly stops being honoured. The micro-task launcher used
+ * to put `claude` ahead of the setting on the grounds that it was the only CLI
+ * Canopy registered the MCP bridge with; that has not been true since the
+ * bridge learned codex, opencode, aider, agy and amp, and the launcher already
+ * decides detached-vs-tab from the CLI's actual `mcp === "ours"` health rather
+ * than from its name. So the name-check bought nothing and cost the user the
+ * setting they had just changed: Settings said OpenCode, every task and every
+ * review still started Claude.
+ *
+ * `requested` is the CLI a caller was explicitly told to use — the agent picked
+ * from a split-button's menu, the one recorded on a re-run. It wins outright,
+ * including over the default, and is looked up in the whole registry rather
+ * than in what's installed: a caller naming a CLI that isn't here should get
+ * "Unknown agent", not a silent substitution.
+ *
+ * Otherwise: the user's default agent if it is installed on this machine, else
+ * the first CLI that is. Falling through to the registry — the default again,
+ * then its first entry — only when nothing at all is detected, so the choice
+ * never silently endorses a vendor that isn't even present.
+ */
+export function pickLaunchCli(
+  requested: string | undefined,
+  installed: (bin: string) => boolean,
+): AgentCli | undefined {
+  if (requested) return AGENT_CLIS.find((c) => c.id === requested);
+  const here = AGENT_CLIS.filter((c) => installed(c.bin));
+  const preferred = getSettings().defaultAgent;
+  return (
+    here.find((c) => c.id === preferred) ??
+    here[0] ??
+    AGENT_CLIS.find((c) => c.id === preferred) ??
+    AGENT_CLIS[0]
+  );
+}
 
 /** Darwin's MAX_CANON: the most a canonical-mode tty will hold for one line
  *  before it starts dropping. Linux allows 4096; the smaller number is the one
