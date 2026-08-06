@@ -176,7 +176,11 @@ import {
   pendingForRoots,
   type PendingItem,
 } from "../../notifications";
-import { isOutstanding } from "../../attention";
+import {
+  isOutstanding,
+  postAttention,
+  resolveAttentionByKey,
+} from "../../attention";
 import { useAttention } from "../../useAttention";
 import {
   findRun,
@@ -188,6 +192,13 @@ import {
 } from "../../microRuns";
 import { renderPtyText } from "../../ptyText";
 import { scheduleReap } from "../../runReap";
+import {
+  INITIAL_VIBE_SERVER_HEALTH,
+  judgeVibeServerExit,
+  resetVibeServerHealth,
+  vibeServerLogTail,
+  type VibeServerHealthState,
+} from "../../vibeServerHealth";
 import { watchFailedRestore } from "../../restoreReap";
 import { followLink, type DeepLink } from "../../deepLinks";
 import {
@@ -401,7 +412,10 @@ import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
 import { ActivityRail } from "../ActivityRail";
 import { PaneBar } from "../PaneBar";
 import { VibeBuilderPane } from "../VibeBuilderPane";
-import { createVibeBuilderSession } from "../../vibeBuilderSession";
+import {
+  createVibeBuilderSession,
+  type VibeServerIncidentInput,
+} from "../../vibeBuilderSession";
 import {
   createVibeTargetQuestionSession,
   createVibeTargetStatusSession,
@@ -1174,6 +1188,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const baselines = useRef(new Map<string, string>());
   const recentSaves = useRef(new Map<string, number>());
   const termHandles = useRef(new Map<string, TermHandle | null>());
+  const livePtyByTab = useRef(new Map<string, number>());
+  const vibeServerHealth = useRef<VibeServerHealthState>(
+    INITIAL_VIBE_SERVER_HEALTH,
+  );
+  const openVibeServerIncident = useRef<string | null>(null);
+  const vibeServerWatch = useRef<{
+    targetKey: string;
+    componentId: string;
+    runCommandId: string;
+    path: string;
+    command: string;
+    session: ReturnType<typeof createVibeBuilderSession>;
+  } | null>(null);
+  const vibeServerExit = useRef<
+    (tabId: string, event: ipc.PtyExit) => void
+  >(() => {});
   /** The live tail of a terminal tab, for its thumbnail: a read of the xterm
    *  buffer that is already in memory. No capture and no screenshot — what it
    *  returns is what the pty has painted by the moment it is asked, which is
@@ -3999,9 +4029,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
       ServerEntry,
       "command" | "name" | "componentId" | "runCommandId"
     >,
+    origin: "explicit" | "watchdog" = "explicit",
   ) => {
     const tab = tabsRef.current.find((t) => t.id === id);
     if (tab?.type !== "terminal") return;
+    const watched = vibeServerWatch.current;
+    if (
+      origin === "explicit" &&
+      watched &&
+      tab.cwd === watched.path &&
+      (tab.runCommandId
+        ? tab.componentId === watched.componentId &&
+          tab.runCommandId === watched.runCommandId
+        : tab.command === watched.command)
+    ) {
+      vibeServerHealth.current = resetVibeServerHealth(watched.targetKey);
+    }
     const component = tab.componentId
       ? componentsRef.current.find((item) => item.id === tab.componentId)
       : undefined;
@@ -4018,7 +4061,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
         : undefined;
     const nextConfigured = configured ?? current;
-    if (tab.ptyId != null) void ipc.ptyKill(tab.ptyId);
+    if (origin === "explicit" && tab.ptyId != null) void ipc.ptyKill(tab.ptyId);
     // Remount Term with a fresh key by clearing the pty and exit state; the
     // effect below respawns it.
     setTabs((prev) =>
@@ -8758,6 +8801,137 @@ const ProjectViewBody = memo(function ProjectViewBody({
     ],
   );
   useEffect(() => () => void vibeSession?.stop(), [vibeSession]);
+  const vibeServerTargetKey =
+    vibeComponent && vibeRun
+      ? `${vibeComponent.path}:${vibeComponent.id}:${vibeRun.id}:${vibeRun.command}`
+      : null;
+  vibeServerWatch.current =
+    vibe && vibeSession && vibeComponent && vibeRun && vibeServerTargetKey
+      ? {
+          targetKey: vibeServerTargetKey,
+          componentId: vibeComponent.id,
+          runCommandId: vibeRun.id,
+          path: vibeComponent.path,
+          command: vibeRun.command,
+          session: vibeSession,
+        }
+      : null;
+  useEffect(() => {
+    if (
+      vibeSession &&
+      vibeComponent &&
+      vibeRun &&
+      vibeServerTargetKey &&
+      openVibeServerIncident.current === vibeServerTargetKey
+    ) {
+      vibeSession.restoreServerIncident(
+        vibeServerTargetKey,
+        vibeComponent.id,
+        vibeRun.id,
+      );
+    }
+  }, [vibeSession, vibeComponent, vibeRun, vibeServerTargetKey]);
+  vibeServerExit.current = (tabId, event) => {
+    const watched = vibeServerWatch.current;
+    const tab = tabsRef.current.find(
+      (candidate): candidate is TermSubTab =>
+        candidate.type === "terminal" && candidate.id === tabId,
+    );
+    if (
+      !watched ||
+      !tab ||
+      tab.cwd !== watched.path ||
+      (tab.runCommandId
+        ? tab.componentId !== watched.componentId ||
+          tab.runCommandId !== watched.runCommandId
+        : tab.command !== watched.command)
+    ) {
+      return;
+    }
+    const decision = judgeVibeServerExit(
+      vibeServerHealth.current,
+      watched.targetKey,
+      {
+        at: Date.now(),
+        exitCode: event.exit_code,
+        requested: event.requested,
+      },
+    );
+    vibeServerHealth.current = decision.state;
+    if (decision.action === "restart") {
+      restartRun(tabId, undefined, "watchdog");
+      return;
+    }
+    if (decision.action !== "crash-loop") return;
+    openVibeServerIncident.current = watched.targetKey;
+
+    const stats =
+      tab.ptyId == null
+        ? undefined
+        : statsRef.current.find((sample) => sample.id === tab.ptyId);
+    const log =
+      termHandles.current.get(tabId)?.captureTextSettled() ??
+      Promise.resolve("");
+    const incident: VibeServerIncidentInput = {
+      key: watched.targetKey,
+      componentId: watched.componentId,
+      runCommandId: watched.runCommandId,
+      exitCode: event.exit_code,
+      crashTimes: decision.state.failures,
+      automaticRestarts: decision.state.failures.length - 1,
+      ports: stats?.ports ?? [],
+      outputBytes: stats?.output_bytes ?? null,
+      totalCpu: stats?.total_cpu ?? null,
+      totalMemBytes: stats?.total_mem_bytes ?? null,
+      logTail: log.then((text) => vibeServerLogTail(text)),
+    };
+    const repairSettlements = (
+      session: ReturnType<typeof createVibeBuilderSession>,
+      attempt: number,
+      after?: () => void,
+    ) => {
+      void session.repairServerIncidentSettlements().then((settled) => {
+        if (settled) {
+          after?.();
+        } else if (attempt < 5) {
+          window.setTimeout(
+            () => repairSettlements(session, attempt + 1, after),
+            (attempt + 1) * 1000,
+          );
+        }
+      });
+    };
+    const record = (attempt: number) => {
+      incident.present =
+        openVibeServerIncident.current === watched.targetKey;
+      void watched.session
+        .reportServerIncident(incident)
+        .then((result) => {
+          if (result === "recorded-unsettled") {
+            repairSettlements(watched.session, 0);
+          } else if (result === "failed" && attempt < 2) {
+            repairSettlements(watched.session, 0, () => {
+              window.setTimeout(
+                () => record(attempt + 1),
+                (attempt + 1) * 1000,
+              );
+            });
+          }
+        });
+    };
+    record(0);
+    postAttention({
+      kind: "question",
+      tone: "error",
+      title: "The Build server keeps stopping",
+      body: "I stopped restarting it. Open the failed run to inspect its output.",
+      source: "project",
+      projectId: project.id,
+      projectName: project.name,
+      where: { kind: "project", projectId: project.id, path: watched.path },
+      dedupeKey: `vibe-server:${project.id}:${watched.componentId}:${watched.runCommandId}`,
+    });
+  };
 
   const autoStartedVibeRun = useRef<string | null>(null);
   useEffect(() => {
@@ -8782,6 +8956,43 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
     }
   }, [visible, vibe, vibeComponent, vibeRun, runTabs, addTerminal]);
+
+  useEffect(() => {
+    if (
+      !vibe ||
+      !vibeComponent ||
+      !vibeRun ||
+      !vibeSession ||
+      !vibeServerTargetKey ||
+      openVibeServerIncident.current !== vibeServerTargetKey
+    ) {
+      return;
+    }
+    const running = runTabs.find((tab) =>
+      matchesVibeRun(tab, vibeComponent, vibeRun),
+    );
+    const port =
+      running?.ptyId == null
+        ? null
+        : projectStats.find((sample) => sample.id === running.ptyId)?.ports[0];
+    if (!port) return;
+    vibeSession.resolveServerIncident(vibeServerTargetKey);
+    openVibeServerIncident.current = null;
+    vibeServerHealth.current = resetVibeServerHealth(vibeServerTargetKey);
+    resolveAttentionByKey(
+      `vibe-server:${project.id}:${vibeComponent.id}:${vibeRun.id}`,
+      "withdrawn",
+    );
+  }, [
+    vibe,
+    vibeComponent,
+    vibeRun,
+    vibeSession,
+    vibeServerTargetKey,
+    runTabs,
+    projectStats,
+    project.id,
+  ]);
 
   const engineerTabBeforeVibe = useRef<string | null>(null);
   const vibeWasVisible = useRef(false);
@@ -10358,6 +10569,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 runId={tab.micro?.runId}
                 attemptId={tab.micro?.attemptId}
                 onSpawned={(ptyId) => {
+                  livePtyByTab.current.set(tab.id, ptyId);
                   // A freshly spawned pty is alive by definition, so clear any
                   // stale exited/failed state. Restart kills the old pty and
                   // remounts a beat later; that kill's late pty:exit can land in
@@ -10380,7 +10592,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 250);
                   }, 2500);
                 }}
-                onExited={(code) => {
+                onExited={(event) => {
+                  if (livePtyByTab.current.get(tab.id) !== event.id) return;
+                  livePtyByTab.current.delete(tab.id);
+                  const code = event.exit_code;
                   // Shell tabs close on exit; run tabs stay so the output and
                   // exit status remain readable.
                   if (tab.run) {
@@ -10422,6 +10637,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         ),
                       closeTab,
                     );
+                    vibeServerExit.current(tab.id, event);
                   } else closeTab(tab.id);
                 }}
                 onTitle={(title) =>

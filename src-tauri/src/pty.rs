@@ -156,6 +156,7 @@ pub struct PtyManager {
 pub struct PtyExit {
     pub id: u32,
     pub exit_code: Option<u32>,
+    pub requested: bool,
 }
 
 /// Emitted (`pty:spawned`) when a headless PTY is opened remotely, so the
@@ -245,6 +246,9 @@ impl PtyManager {
     /// `pty_kill` does. Shared with the remote portal's kill/restart controls.
     pub fn kill(&self, id: u32) -> Result<(), String> {
         let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
+        // Mark intent before yielding to the teardown thread. A fast child can
+        // exit in this gap; the pty:exit consumer must still know it was asked.
+        session.shutdown.store(true, Ordering::SeqCst);
         thread::spawn(move || session.terminate());
         Ok(())
     }
@@ -978,6 +982,7 @@ impl PtyManager {
                         PtyExit {
                             id: session.id,
                             exit_code,
+                            requested: session.shutdown.load(Ordering::SeqCst),
                         },
                     );
                 })
@@ -1452,5 +1457,17 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
         }
         assert!(pm.get(id).is_none(), "session not removed after kill");
+    }
+
+    #[test]
+    fn kill_marks_exit_requested_before_teardown_thread_runs() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None, None)
+            .expect("spawn");
+        let session = pm.get(id).expect("session");
+        pm.kill(id).expect("kill");
+        assert!(session.shutdown.load(Ordering::SeqCst));
     }
 }

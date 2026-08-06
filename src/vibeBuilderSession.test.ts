@@ -132,6 +132,7 @@ function harness(over: Partial<VibeBuilderSessionDeps> = {}) {
     commit: vi.fn(async () => "commit-1"),
     now: () => 10,
     sessionId: () => "session-1",
+    sleep: vi.fn(async () => {}),
     ...over,
   };
   const session = createVibeBuilderSession(
@@ -246,6 +247,329 @@ describe("VibeBuilderSession", () => {
     expect(h.transcripts).toContainEqual(
       expect.objectContaining({ kind: "user", body: "Make the button blue" }),
     );
+  });
+
+  it("records a crash loop on the active attempt with a capped log artifact", async () => {
+    const h = harness();
+    await h.session.send("Make the button blue");
+
+    await expect(
+      h.session.reportServerIncident({
+        key: "server-1",
+        componentId: "app",
+        runCommandId: "dev",
+        exitCode: 1,
+        crashTimes: [1, 2, 3],
+        automaticRestarts: 2,
+        ports: [5173],
+        outputBytes: 9000,
+        totalCpu: 12,
+        totalMemBytes: 1024,
+        logTail: "server exploded",
+      }),
+    ).resolves.toBe("recorded");
+
+    expect(h.deps.reserve).toHaveBeenCalledTimes(2);
+    expect(h.deps.writeArtifact).toHaveBeenCalledWith({
+      runId: "run-1",
+      attemptId: "attempt-1",
+      kind: "vibe-server-log-tail",
+      content: "server exploded",
+    });
+    expect(h.events).toContainEqual(
+      expect.objectContaining({
+        kind: "watchdog-incident",
+        code: "vibe-server-crash-loop",
+        metadata: expect.objectContaining({
+          logArtifactId: "artifact-vibe-server-log-tail",
+          lastObservedPorts: [5173],
+          activeRunId: "run-1",
+          activeAttemptId: "attempt-1",
+        }),
+      }),
+    );
+    expect(h.session.state.question?.prompt).toBe(
+      "The app server keeps stopping.",
+    );
+  });
+
+  it("correlates a retried incident to the attempt that was live when it crashed", async () => {
+    // The crash is observed during one turn but only persists during a later
+    // one. What the bundle has to say is which attempt was running when the
+    // server died, so the correlation is captured once and carried through the
+    // retry rather than re-read from whatever attempt is current by then.
+    let turns = 0;
+    const reserve = vi.fn(
+      async (request: Parameters<VibeBuilderSessionDeps["reserve"]>[0]) => {
+        const base = reservation();
+        if (request.kind === "vibe-server-health") {
+          return {
+            envelope: { ...base.envelope, runId: "server-run" },
+            attempt: {
+              ...base.attempt,
+              runId: "server-run",
+              attemptId: "server-attempt",
+            },
+          };
+        }
+        turns += 1;
+        return {
+          envelope: { ...base.envelope, runId: `run-${turns}` },
+          attempt: {
+            ...base.attempt,
+            runId: `run-${turns}`,
+            attemptId: `attempt-${turns}`,
+          },
+        };
+      },
+    );
+    let writable = false;
+    const h = harness({
+      reserve,
+      writeArtifact: vi.fn(async ({ kind }) => {
+        if (!writable) throw new Error("disk busy");
+        return {
+          id: `artifact-${kind}`,
+          runId: "server-run",
+          attemptId: "server-attempt",
+          kind,
+          bytes: 10,
+          createdAt: 1,
+        };
+      }),
+    });
+    await h.session.send("Make the button blue");
+    const incident = {
+      key: "server-drift",
+      componentId: "app",
+      runCommandId: "dev",
+      exitCode: 1,
+      crashTimes: [1, 2, 3],
+      automaticRestarts: 2,
+      ports: [] as number[],
+      outputBytes: null,
+      totalCpu: null,
+      totalMemBytes: null,
+      logTail: "server exploded",
+    };
+    await expect(h.session.reportServerIncident(incident)).resolves.toBe(
+      "failed",
+    );
+    expect(h.events).not.toContainEqual(
+      expect.objectContaining({ kind: "watchdog-incident" }),
+    );
+
+    // A fresh attempt takes over before the retry lands.
+    h.emit({ kind: "exit" });
+    await h.session.send("Try again");
+    expect(h.deps.startAttempt).toHaveBeenCalledWith("attempt-2");
+
+    writable = true;
+    await expect(h.session.reportServerIncident(incident)).resolves.toBe(
+      "recorded",
+    );
+    expect(h.events).toContainEqual(
+      expect.objectContaining({
+        kind: "watchdog-incident",
+        metadata: expect.objectContaining({
+          activeRunId: "run-1",
+          activeAttemptId: "attempt-1",
+        }),
+      }),
+    );
+  });
+
+  it("creates a dedicated durable incident attempt before the first Build turn", async () => {
+    const h = harness();
+    const result = await h.session.reportServerIncident({
+      key: "server-early",
+      componentId: "app",
+      runCommandId: "dev",
+      exitCode: 1,
+      crashTimes: [1, 2, 3],
+      automaticRestarts: 2,
+      ports: [],
+      outputBytes: null,
+      totalCpu: null,
+      totalMemBytes: null,
+      logTail: "early failure",
+    });
+
+    expect(result).toBe("recorded");
+    expect(h.deps.reserve).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "vibe-server-health" }),
+    );
+    expect(h.deps.startAttempt).toHaveBeenCalledWith("attempt-1");
+    expect(h.deps.settleAttempt).toHaveBeenCalledWith({
+      attemptId: "attempt-1",
+      state: "blocked",
+      failureClass: "watchdog",
+      failureCode: "vibe-server-crash-loop",
+    });
+    expect(
+      vi.mocked(h.deps.writeArtifact).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(h.deps.appendEvent).mock.invocationCallOrder[0]);
+  });
+
+  it("retries the required log artifact before recording the incident", async () => {
+    const writeArtifact = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("disk busy"))
+      .mockResolvedValue({
+        id: "artifact-retry",
+        runId: "run-1",
+        attemptId: "attempt-1",
+        kind: "vibe-server-log-tail",
+        bytes: 10,
+        createdAt: 1,
+      });
+    const h = harness({
+      writeArtifact,
+    });
+    await expect(h.session.reportServerIncident({
+      key: "server-no-artifact",
+      componentId: "app",
+      runCommandId: "dev",
+      exitCode: 1,
+      crashTimes: [1, 2, 3],
+      automaticRestarts: 2,
+      ports: [],
+      outputBytes: null,
+      totalCpu: null,
+      totalMemBytes: null,
+      logTail: "failure",
+    })).resolves.toBe("recorded");
+    expect(writeArtifact).toHaveBeenCalledTimes(2);
+    expect(h.events[0]).toMatchObject({
+      kind: "watchdog-incident",
+      metadata: { logArtifactId: "artifact-retry" },
+    });
+  });
+
+  it("reports when the durable incident exists but its dedicated attempt did not settle", async () => {
+    let canSettle = false;
+    const h = harness({
+      settleAttempt: vi.fn(async () => {
+        if (!canSettle) throw new Error("store busy");
+        return reservation().attempt;
+      }),
+    });
+    await expect(
+      h.session.reportServerIncident({
+        key: "server-unsettled",
+        componentId: "app",
+        runCommandId: "dev",
+        exitCode: 1,
+        crashTimes: [1, 2, 3],
+        automaticRestarts: 2,
+        ports: [],
+        outputBytes: null,
+        totalCpu: null,
+        totalMemBytes: null,
+        logTail: "failure",
+      }),
+    ).resolves.toBe("recorded-unsettled");
+    expect(h.events).toContainEqual(
+      expect.objectContaining({ kind: "watchdog-incident" }),
+    );
+    expect(h.deps.settleAttempt).toHaveBeenCalledTimes(3);
+    canSettle = true;
+    await expect(h.session.repairServerIncidentSettlements()).resolves.toBe(true);
+    expect(h.deps.settleAttempt).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps checkpoint safety blocked until server recovery", async () => {
+    const h = harness();
+    await h.session.send("Make the button blue");
+    await h.session.reportServerIncident({
+      key: "server-blocks-checkpoint",
+      componentId: "app",
+      runCommandId: "dev",
+      exitCode: 1,
+      crashTimes: [1, 2, 3],
+      automaticRestarts: 2,
+      ports: [],
+      outputBytes: null,
+      totalCpu: null,
+      totalMemBytes: null,
+      logTail: "failure",
+    });
+    h.emit({ kind: "turnEnd" });
+
+    await vi.waitFor(() => {
+      expect(h.deps.reviewCheckpoint).toHaveBeenCalledWith(
+        expect.objectContaining({ noOpenIncident: false }),
+      );
+    });
+    h.session.resolveServerIncident("server-blocks-checkpoint");
+    expect(h.session.state.persona.kind).toBe("incident-recovered");
+  });
+
+  it("rechecks incidents after an awaited checkpoint review before committing", async () => {
+    let finishReview!: (review: CheckpointReview) => void;
+    const review = new Promise<CheckpointReview>((resolve) => {
+      finishReview = resolve;
+    });
+    const h = harness({ reviewCheckpoint: vi.fn(() => review) });
+    await h.session.send("Make the button blue");
+    h.emit({ kind: "turnEnd" });
+    await vi.waitFor(() => expect(h.deps.reviewCheckpoint).toHaveBeenCalled());
+
+    await h.session.reportServerIncident({
+      key: "server-during-review",
+      componentId: "app",
+      runCommandId: "dev",
+      exitCode: 1,
+      crashTimes: [1, 2, 3],
+      automaticRestarts: 2,
+      ports: [],
+      outputBytes: null,
+      totalCpu: null,
+      totalMemBytes: null,
+      logTail: "failure",
+    });
+    finishReview(safeReview("verified"));
+    await vi.waitFor(() => {
+      expect(h.session.state.question?.prompt).toBe("This turn was not auto-saved.");
+    });
+    expect(h.deps.commit).not.toHaveBeenCalled();
+  });
+
+  it("does not re-dedupe an incident that recovered while persistence was in flight", async () => {
+    let finishArtifact!: (artifact: Awaited<ReturnType<VibeBuilderSessionDeps["writeArtifact"]>>) => void;
+    const artifact = new Promise<
+      Awaited<ReturnType<VibeBuilderSessionDeps["writeArtifact"]>>
+    >((resolve) => {
+      finishArtifact = resolve;
+    });
+    const h = harness({ writeArtifact: vi.fn(() => artifact) });
+    const input = {
+      key: "server-recovery-race",
+      componentId: "app",
+      runCommandId: "dev",
+      exitCode: 1,
+      crashTimes: [1, 2, 3],
+      automaticRestarts: 2,
+      ports: [] as number[],
+      outputBytes: null,
+      totalCpu: null,
+      totalMemBytes: null,
+      logTail: "failure",
+    };
+    const first = h.session.reportServerIncident(input);
+    await vi.waitFor(() => expect(h.deps.writeArtifact).toHaveBeenCalled());
+    h.session.resolveServerIncident(input.key);
+    finishArtifact({
+      id: "artifact-race",
+      runId: "run-1",
+      attemptId: "attempt-1",
+      kind: "vibe-server-log-tail",
+      bytes: 10,
+      createdAt: 1,
+    });
+    await first;
+    await h.session.reportServerIncident(input);
+    expect(h.deps.reserve).toHaveBeenCalledTimes(2);
   });
 
   it("persists activity and the completed assistant turn", async () => {

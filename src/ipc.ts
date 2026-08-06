@@ -130,6 +130,8 @@ export async function ptyAttach(
 export interface PtyExit {
   id: number;
   exit_code: number | null;
+  /** True when Canopy requested shutdown; false for a process that died itself. */
+  requested: boolean;
 }
 export const onPtyExit = (cb: (e: PtyExit) => void): Promise<UnlistenFn> =>
   listen<PtyExit>("pty:exit", (event) => cb(event.payload));

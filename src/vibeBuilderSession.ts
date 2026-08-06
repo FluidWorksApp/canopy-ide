@@ -15,6 +15,7 @@ import {
   writeTaskArtifact,
 } from "./taskEnvelopes";
 import type { TaskReservation } from "./taskEnvelope";
+import type { TaskAttemptSettlement } from "./taskEnvelope";
 import { appendTranscript } from "./taskTranscript";
 import {
   checkpointDecision,
@@ -66,6 +67,24 @@ export interface BrowserInspection {
   screenshot?: string | null;
 }
 
+export interface VibeServerIncidentInput {
+  key: string;
+  componentId: string;
+  runCommandId: string;
+  exitCode: number | null;
+  crashTimes: number[];
+  automaticRestarts: number;
+  ports: number[];
+  outputBytes: number | null;
+  totalCpu: number | null;
+  totalMemBytes: number | null;
+  logTail: string | Promise<string>;
+  /** False for a historical persistence retry after the server recovered. */
+  present?: boolean;
+  /** Captured once at observation time and retained across persistence retries. */
+  activeAttempt?: { runId: string; attemptId: string } | null;
+}
+
 export interface CheckpointReview {
   context: CheckpointContext;
   repoRoot: string;
@@ -99,6 +118,7 @@ export interface VibeBuilderSessionDeps {
   commit(cwd: string, paths: string[], message: string): Promise<string>;
   now(): number;
   sessionId(): string;
+  sleep(ms: number): Promise<void>;
 }
 
 function randomId(): string {
@@ -498,6 +518,7 @@ export const DEFAULT_VIBE_BUILDER_DEPS: VibeBuilderSessionDeps = {
     paths.length === 0 ? Promise.resolve("") : ipc.gitCommitPaths(cwd, message, paths),
   now: () => Date.now(),
   sessionId: randomId,
+  sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
 };
 
 function visualTask(goal: string): boolean {
@@ -546,6 +567,8 @@ export class VibeBuilderSession implements BuilderSession {
   private baseline: TurnBaseline | null = null;
   private assistant = "";
   private incidentOpen = false;
+  private serverIncidentOpen = false;
+  private runtimeIncidentOpen = false;
   private settled = false;
   private stopped = false;
   private closedAttempts = new Set<string>();
@@ -559,6 +582,8 @@ export class VibeBuilderSession implements BuilderSession {
   } | null = null;
   private persistQueue: Promise<void> = Promise.resolve();
   private networkScoped = false;
+  private serverIncidentKeys = new Set<string>();
+  private unsettledServerAttempts = new Map<string, TaskAttemptSettlement>();
   private options: VibeBuilderSessionOptions;
   private deps: VibeBuilderSessionDeps;
 
@@ -617,6 +642,22 @@ export class VibeBuilderSession implements BuilderSession {
     );
   }
 
+  private routeSnapshot() {
+    return {
+      cli: "claude",
+      cliVersion: null,
+      executableFingerprint: null,
+      profileId: "default",
+      requestedModel: null,
+      observedModel: null,
+      harnessVersion: HARNESS_VERSION,
+      promptVersion: PROMPT_VERSION,
+      toolPolicyVersion: TOOL_POLICY_VERSION,
+      executionMode: "structured" as const,
+      selection: { policy: "vibe-mvp-claude", eligible: ["claude"] },
+    };
+  }
+
   private async ensureStarted(goal: string): Promise<ProjectRunnerTransport> {
     if (this.stopped) throw new Error("the builder session is closed");
     if (this.transport) return this.transport;
@@ -625,19 +666,7 @@ export class VibeBuilderSession implements BuilderSession {
       this.baseline = await this.deps.captureBaseline(this.options.componentPath);
       if (this.stopped) throw new Error("the builder session was closed during launch");
       const contract = contractFor(goal);
-      const route = {
-        cli: "claude",
-        cliVersion: null,
-        executableFingerprint: null,
-        profileId: "default",
-        requestedModel: null,
-        observedModel: null,
-        harnessVersion: HARNESS_VERSION,
-        promptVersion: PROMPT_VERSION,
-        toolPolicyVersion: TOOL_POLICY_VERSION,
-        executionMode: "structured" as const,
-        selection: { policy: "vibe-mvp-claude", eligible: ["claude"] },
-      };
+      const route = this.routeSnapshot();
       const reservation = await this.deps.reserve({
         kind: "vibe-turn",
         projectId: this.options.projectId,
@@ -733,6 +762,178 @@ export class VibeBuilderSession implements BuilderSession {
     return accepted;
   }
 
+  async reportServerIncident(
+    input: VibeServerIncidentInput,
+  ): Promise<"recorded" | "recorded-unsettled" | "failed"> {
+    if (this.serverIncidentKeys.has(input.key)) return "recorded";
+    this.serverIncidentKeys.add(input.key);
+    if (input.present !== false) {
+      this.serverIncidentOpen = true;
+      this.incidentOpen = true;
+      this.present(
+        { kind: "incident" },
+        {
+          id: `vibe-server-${input.componentId}-${input.runCommandId}`,
+          kind: "question",
+          prompt: "The app server keeps stopping.",
+          detail: "I stopped restarting it. The failed run keeps the server output for inspection.",
+        },
+      );
+    }
+
+    if (input.activeAttempt === undefined) {
+      input.activeAttempt =
+        this.reservation && !this.settled && !this.stopped
+          ? {
+              runId: this.reservation.envelope.runId,
+              attemptId: this.reservation.attempt.attemptId,
+            }
+          : null;
+    }
+    const active = input.activeAttempt;
+    let reservation: TaskReservation | null = null;
+    try {
+      reservation = await this.deps.reserve({
+        kind: "vibe-server-health",
+        projectId: this.options.projectId,
+        componentId: this.options.componentId,
+        worktreePath: this.options.componentPath,
+        goal: "Record a Build server crash loop",
+        acceptance: ["Retain the observed server failure and its capped log tail."],
+        contextSummary: `Build server health in ${this.options.projectName}`,
+        riskClass: "reversible",
+        authorityPolicy: {
+          writes: "none",
+          shell: "denied",
+          verification: { required: [] },
+        },
+        failoverPolicy: { automatic: false },
+        attemptCap: 1,
+        title: "Build server crash loop",
+        route: this.routeSnapshot(),
+      });
+      await this.deps.startAttempt(reservation.attempt.attemptId);
+      const { runId } = reservation.envelope;
+      const { attemptId } = reservation.attempt;
+      const logTail = await Promise.resolve(input.logTail).catch(() => "");
+      let recorded = false;
+      for (let attempt = 0; attempt < 3 && !recorded; attempt += 1) {
+        try {
+          const artifact = await this.deps.writeArtifact({
+            runId,
+            attemptId,
+            kind: "vibe-server-log-tail",
+            content: logTail,
+          });
+          await this.deps.appendEvent({
+            runId,
+            attemptId,
+            kind: "watchdog-incident",
+            code: "vibe-server-crash-loop",
+            source: "vibe-server-health",
+            confidence: "observed",
+            metadata: {
+              componentId: input.componentId,
+              runCommandId: input.runCommandId,
+              exitCode: input.exitCode,
+              crashTimes: input.crashTimes,
+              threshold: 3,
+              windowMs: 60_000,
+              automaticRestarts: input.automaticRestarts,
+              lastObservedPorts: input.ports,
+              outputBytes: input.outputBytes,
+              totalCpu: input.totalCpu,
+              totalMemBytes: input.totalMemBytes,
+              logArtifactId: artifact.id,
+              activeRunId: active?.runId ?? null,
+              activeAttemptId: active?.attemptId ?? null,
+            },
+            occurredAt: this.deps.now(),
+          });
+          recorded = true;
+        } catch {
+          // Retry the artifact+event pair. An orphaned artifact is bounded and
+          // preferable to claiming an incident whose required log was lost.
+          if (attempt < 2) await this.deps.sleep((attempt + 1) * 250);
+        }
+      }
+      if (!recorded) throw new Error("server incident persistence failed");
+      const settled = await this.settleServerAttempt({
+        attemptId,
+        state: "blocked",
+        failureClass: "watchdog",
+        failureCode: "vibe-server-crash-loop",
+      });
+      if (input.present === false) this.serverIncidentKeys.delete(input.key);
+      return settled ? "recorded" : "recorded-unsettled";
+    } catch {
+      this.serverIncidentKeys.delete(input.key);
+      if (reservation) {
+        await this.settleServerAttempt({
+          attemptId: reservation.attempt.attemptId,
+          state: "failed",
+          failureClass: "persistence",
+          failureCode: "server-incident-write-failed",
+        });
+      }
+      return "failed";
+    }
+  }
+
+  private async settleServerAttempt(
+    settlement: TaskAttemptSettlement,
+  ): Promise<boolean> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const settled = await this.deps
+        .settleAttempt(settlement)
+        .then(() => true)
+        .catch(() => false);
+      if (settled) {
+        this.unsettledServerAttempts.delete(settlement.attemptId);
+        return true;
+      }
+      if (attempt < 2) await this.deps.sleep((attempt + 1) * 250);
+    }
+    this.unsettledServerAttempts.set(settlement.attemptId, settlement);
+    return false;
+  }
+
+  async repairServerIncidentSettlements(): Promise<boolean> {
+    for (const settlement of [...this.unsettledServerAttempts.values()]) {
+      await this.settleServerAttempt(settlement);
+    }
+    return this.unsettledServerAttempts.size === 0;
+  }
+
+  resolveServerIncident(key: string): void {
+    this.serverIncidentKeys.delete(key);
+    this.serverIncidentOpen = false;
+    this.incidentOpen = this.runtimeIncidentOpen;
+    if (!this.runtimeIncidentOpen) {
+      this.present({ kind: "incident-recovered" }, null);
+    }
+  }
+
+  restoreServerIncident(
+    key: string,
+    componentId: string,
+    runCommandId: string,
+  ): void {
+    if (this.serverIncidentOpen && this.serverIncidentKeys.has(key)) return;
+    this.serverIncidentKeys.add(key);
+    this.serverIncidentOpen = true;
+    this.incidentOpen = true;
+    this.present(
+      { kind: "incident" },
+      {
+        id: `vibe-server-${componentId}-${runCommandId}`,
+        kind: "question",
+        prompt: "The app server keeps stopping.",
+        detail: "I stopped restarting it. The failed run keeps the server output for inspection.",
+      },
+    );
+  }
+
   private async runTurn(
     message: string,
     sent: () => void,
@@ -746,7 +947,8 @@ export class VibeBuilderSession implements BuilderSession {
       if (this.stopped) throw new Error("the builder session is closed");
       const reservation = this.reservation;
       if (!reservation) throw new Error("the builder task was not reserved");
-      this.incidentOpen = false;
+      this.runtimeIncidentOpen = false;
+      this.incidentOpen = this.serverIncidentOpen;
       this.snapshot = { persona: { kind: "turn-started" }, question: null };
       try {
         await this.persist(() =>
@@ -812,6 +1014,7 @@ export class VibeBuilderSession implements BuilderSession {
         }
         break;
       case "error":
+        this.runtimeIncidentOpen = true;
         this.incidentOpen = true;
         this.snapshot = {
           persona: { kind: "incident" },
@@ -839,6 +1042,7 @@ export class VibeBuilderSession implements BuilderSession {
         this.publish(event);
         this.verifying = this.verifyTurn()
           .catch((error) => {
+            this.runtimeIncidentOpen = true;
             this.incidentOpen = true;
             this.snapshot = {
               persona: { kind: "incident" },
@@ -862,6 +1066,7 @@ export class VibeBuilderSession implements BuilderSession {
         this.transport = null;
         this.finishTurn?.();
         this.finishTurn = null;
+        this.runtimeIncidentOpen = true;
         this.incidentOpen = true;
         this.snapshot = {
           persona: { kind: "permission-stall" },
@@ -965,7 +1170,14 @@ export class VibeBuilderSession implements BuilderSession {
       noOpenIncident: !this.incidentOpen,
     });
     if (this.stopped) return;
-    const decision = checkpointDecision(review.context);
+    const safeReview = {
+      ...review,
+      context: {
+        ...review.context,
+        noOpenIncident: review.context.noOpenIncident && !this.incidentOpen,
+      },
+    };
+    const decision = checkpointDecision(safeReview.context);
     let summary = verificationSummary(contract, observations, verdict.outcome);
     this.pendingCheckpoint = null;
 
@@ -987,7 +1199,7 @@ export class VibeBuilderSession implements BuilderSession {
       summary += " Saved this verified version automatically.";
       this.present({ kind: "checkpoint-saved" }, null);
     } else if (!decision.checkpoint && review.paths.length > 0) {
-      this.pendingCheckpoint = { review, verification: verdict.outcome };
+      this.pendingCheckpoint = { review: safeReview, verification: verdict.outcome };
       const artifact = await this.deps
         .writeArtifact({ runId, attemptId, kind: "turn-diff", content: review.diff })
         .catch(() => null);
