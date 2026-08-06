@@ -1099,6 +1099,44 @@ describe("VibeBuilderSession", () => {
   });
 });
 
+describe("finding the env file in a monorepo", () => {
+  // The component's own .env.local is committed, so git says nothing about it.
+  // The repo root's is gitignored, so git reports it as `!!`. Matching by
+  // basename finds the root one, reads "ignored, therefore safe", and never
+  // reaches the absence rule that would have refused — telling the user their
+  // keys stay out of git while writing them into a file git carries.
+  const monorepo = (h: ReturnType<typeof harness>) => {
+    vi.spyOn(ipc, "gitWorktrees").mockResolvedValue([
+      { path: "/repo", head: "abc", is_main: true, branch: "main" },
+    ] as never);
+    vi.spyOn(ipc, "gitStatus").mockResolvedValue({
+      is_repo: true,
+      branch: "main",
+      entries: [{ status: "!!", path: ".env.local" }],
+    } as never);
+    vi.spyOn(ipc, "fsReadDir").mockResolvedValue([
+      { name: "package.json", path: "/repo/apps/web/package.json", is_dir: false },
+      { name: ".env.local", path: "/repo/apps/web/.env.local", is_dir: false },
+    ] as never);
+    vi.spyOn(ipc, "fsReadFile").mockRejectedValue(new Error("no package.json"));
+    return h;
+  };
+
+  it("does not let the repo root's ignored file vouch for the component's tracked one", async () => {
+    const h = monorepo(
+      harness({ abstractionContext: DEFAULT_VIBE_BUILDER_DEPS.abstractionContext }, {
+        componentPath: "/repo/apps/web",
+      }),
+    );
+    await h.session.send("connect supabase");
+    const q = h.session.state.question;
+    const said = `${q?.prompt ?? ""} ${q?.detail ?? ""}`;
+    // It must refuse, and it must not claim the file is safely out of git.
+    expect(said).not.toMatch(/untracked|stay out of git|out of git/i);
+    expect(said).toMatch(/can't link|tracked/i);
+  });
+});
+
 describe("managed abstractions", () => {
   it("proposes an install instead of running it, and never sends it to the agent", async () => {
     const h = harness();
