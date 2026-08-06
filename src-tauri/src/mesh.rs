@@ -188,7 +188,6 @@ impl MeshStore {
 
     /// Open the store at an explicit location — the test seam, and what
     /// `load` resolves to.
-    #[cfg(test)]
     pub fn at(path: Option<PathBuf>) -> Self {
         let mut messages: Vec<MeshMessage> = Vec::new();
         if let Some(p) = &path {
@@ -359,6 +358,7 @@ impl ClaimStore {
         )
     }
 
+    #[cfg(test)]
     pub fn at(path: Option<PathBuf>) -> Self {
         Self::open(path, format!("test-{}", std::process::id()), false)
     }
