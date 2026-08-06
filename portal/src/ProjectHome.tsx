@@ -9,6 +9,7 @@ import {
 import { restorableSessions, type RestorableSession } from '@shared/restorable'
 import { IconClose, IconFolder, IconPlus, IconTerminal } from '@shared/icons'
 import type { PanelCtx } from './panels/types'
+import { trackedChanges } from './panels/code'
 import { useAsync } from './useAsync'
 
 const FORGOTTEN_KEY = 'canopy:remote:forgotten-sessions'
@@ -45,10 +46,13 @@ export function ProjectHome({
     [project?.id, roots.join('\0')],
   )
   const repo = project?.components[0]?.path
-  const git = useAsync<{ is_repo: boolean; branch?: string | null; entries: unknown[] }>(
+  const git = useAsync<{ is_repo: boolean; branch?: string | null; entries: { status: string }[] }>(
     () => repo ? ctx.rpc.call('git_status', { path: repo }) : Promise.resolve({ is_repo: false, entries: [] }),
     [repo],
   )
+  // `git_status` runs with --ignored, so the raw list carries `!!` rows for
+  // node_modules/, dist/ and friends. "N changes" has to mean changes.
+  const changeCount = trackedChanges(git.data?.entries ?? []).length
   const rows = useMemo(
     () => project ? agentsForProject(project, ctx.rows, ctx.projects) : [],
     [project, ctx.rows, ctx.projects],
@@ -117,7 +121,7 @@ export function ProjectHome({
 
       <div className="home-summary" aria-label="Project status">
         {git.data?.is_repo && <span><strong>{git.data.branch || 'detached'}</strong> branch</span>}
-        {git.data?.is_repo && <span><strong>{git.data.entries.length}</strong> changes</span>}
+        {git.data?.is_repo && <span><strong>{changeCount}</strong> changes</span>}
         <span className={waiting ? 'hot' : ''}><strong>{waiting}</strong> needs you</span>
         <span><strong>{working}</strong> working</span>
         <span><strong>{liveAgents.length}</strong> agents</span>
