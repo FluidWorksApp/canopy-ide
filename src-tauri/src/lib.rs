@@ -22,6 +22,7 @@ mod fsx;
 mod git;
 mod instructions;
 mod lsp;
+mod maintenance;
 mod mcp;
 mod mcp_client;
 mod notes;
@@ -486,6 +487,7 @@ pub fn run() {
             agents::heal_integrations(app.handle().clone());
             agents::start_monitor(app.handle().clone());
             agents::start_hook_bridge(app.handle().clone());
+            maintenance::start(app.handle().clone());
             context::start(app.handle().clone());
             // Only does anything when this launch asked to test itself.
             selftest::start(app.handle());
