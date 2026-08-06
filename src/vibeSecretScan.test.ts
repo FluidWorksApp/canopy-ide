@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  REDACTION,
+  redactionMarker,
   describeSecretFindings,
   entropy,
   redactSecrets,
@@ -105,7 +105,9 @@ describe("redacting an artifact", () => {
       [`+const stripe = "${key}";`, "+const port = 3000;"].join("\n"),
     );
     expect(redacted).not.toContain(key);
-    expect(redacted).toContain(REDACTION);
+    // The marker names the rule, so the artifact explains itself later
+    // without the finding record beside it.
+    expect(redacted).toContain(redactionMarker("stripe-secret-key"));
     expect(redacted).toContain("const port = 3000;");
   });
 
@@ -118,6 +120,7 @@ describe("redacting an artifact", () => {
     const redacted = redactSecrets(`+const DB_PASSWORD = "${HIGH_ENTROPY}";`);
     expect(redacted).not.toContain(HIGH_ENTROPY);
     expect(redacted).toContain("DB_PASSWORD");
+    expect(redacted).toContain(redactionMarker("high-entropy-secret-assignment"));
   });
 
   it("leaves a clean diff byte-identical", () => {

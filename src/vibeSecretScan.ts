@@ -131,7 +131,17 @@ export function scanDiffForSecrets(diff: string): SecretScanResult {
   return { clean: findings.length === 0, findings, scope: SCOPE };
 }
 
-export const REDACTION = "[redacted by Canopy]";
+/** Visible, and it names the rule.
+ *
+ *  Visible because a silent deletion would make the stored diff lie about what
+ *  the turn changed — the record is the truth and neither writer nor reader may
+ *  improve on it, so a redaction has to say "something was here".
+ *
+ *  Named because findings already carry the rule on the principle that the rule
+ *  is safe to state and only the value is not; carrying it here makes the
+ *  artifact self-explanatory to someone reading it later without the finding
+ *  beside it, and leaks nothing the finding record does not already say. */
+export const redactionMarker = (rule: string) => `[redacted by Canopy: ${rule}]`;
 
 /** Replace credential-shaped spans with a marker, keeping the surrounding diff
  *  readable.
@@ -151,7 +161,10 @@ export function redactSecrets(text: string): string {
     .map((line) => {
       let out = line;
       for (const rule of RULES) {
-        out = out.replace(new RegExp(rule.test.source, "g"), REDACTION);
+        out = out.replace(
+          new RegExp(rule.test.source, "g"),
+          redactionMarker(rule.id),
+        );
       }
       const assigned = ASSIGNMENT.exec(out);
       if (
@@ -159,7 +172,10 @@ export function redactSecrets(text: string): string {
         !PLACEHOLDER.test(assigned[2]) &&
         entropy(assigned[2]) >= ENTROPY_FLOOR
       ) {
-        out = out.replace(assigned[2], REDACTION);
+        out = out.replace(
+          assigned[2],
+          redactionMarker("high-entropy-secret-assignment"),
+        );
       }
       return out;
     })
