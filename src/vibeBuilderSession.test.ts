@@ -130,6 +130,21 @@ function harness(over: Partial<VibeBuilderSessionDeps> = {}) {
     })),
     reviewCheckpoint: vi.fn(async ({ verification }) => safeReview(verification)),
     commit: vi.fn(async () => "commit-1"),
+    listRoutes: vi.fn(async () => [
+      {
+        cli: "claude",
+        profileId: "default",
+        family: "anthropic" as const,
+        state: {
+          agent: "claude",
+          profile: "default",
+          kind: "ready" as const,
+          reasons: [],
+        },
+        choices: [{ id: "claude-fable-5", label: "Fable 5", hint: "" }],
+      },
+    ]),
+    cliVersion: vi.fn(async () => "1.2.3"),
     now: () => 10,
     sessionId: () => "session-1",
     sleep: vi.fn(async () => {}),
@@ -141,7 +156,8 @@ function harness(over: Partial<VibeBuilderSessionDeps> = {}) {
       projectName: "Shop",
       componentId: "app",
       componentPath: "/repo",
-      cliBin: "claude",
+      cliId: "claude",
+    cliBin: "claude",
       checkCommand: "npm test",
       previewTabId: () => "preview-1",
     },
@@ -224,6 +240,66 @@ describe("VibeBuilderSession", () => {
     expect(scopedGitEntries(entries, "/repo", "/repo/packages/web")).toEqual([
       { status: " M", path: "/repo/packages/web/src/App.tsx" },
     ]);
+  });
+
+  it("records the route it actually chose, not a literal", async () => {
+    const h = harness();
+    await h.session.send("Make the button blue");
+    expect(h.deps.reserve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        route: expect.objectContaining({
+          cli: "claude",
+          profileId: "default",
+          cliVersion: "1.2.3",
+          requestedModel: "claude-fable-5",
+          // No CLI reports the model it really used, so claiming one would
+          // turn a request into a false observation.
+          observedModel: null,
+          selection: expect.objectContaining({
+            policy: "vibe-fleet-ranked-1",
+            eligible: ["claude:default"],
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("refuses to launch, and reserves nothing, when the fleet has no usable route", async () => {
+    const h = harness({
+      listRoutes: vi.fn(async () => [
+        {
+          cli: "claude",
+          profileId: "default",
+          family: "anthropic" as const,
+          state: {
+            agent: "claude",
+            profile: "default",
+            kind: "unusable" as const,
+            reasons: ["signed-out" as const],
+          },
+          choices: [{ id: "claude-fable-5", label: "Fable 5", hint: "" }],
+        },
+      ]),
+    });
+    await expect(h.session.send("Make the button blue")).rejects.toThrow(
+      /No agent is ready to build/i,
+    );
+    expect(h.deps.reserve).not.toHaveBeenCalled();
+    expect(h.deps.runner.start).not.toHaveBeenCalled();
+  });
+
+  it("launches on the model the route asked for", async () => {
+    const h = harness();
+    await h.session.send("Make the button blue");
+    expect(h.deps.runner.start).toHaveBeenCalledWith(
+      expect.anything(),
+      "claude",
+      expect.objectContaining({
+        policy: expect.objectContaining({ model: "claude-fable-5" }),
+      }),
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it("reserves and starts the durable attempt before spawning", async () => {

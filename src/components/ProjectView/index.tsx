@@ -8785,6 +8785,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             projectName: project.name,
             componentId: vibeComponentId,
             componentPath: vibeComponentPath,
+            cliId: "claude",
             cliBin: claudeBin,
             checkCommand: vibeCheck?.command ?? null,
             previewTabId: () => vibePreviewIdRef.current,

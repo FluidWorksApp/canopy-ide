@@ -89,6 +89,88 @@ export function selectRoute(
   return rankRoutes(candidates, task)[0] ?? null;
 }
 
+/** Which model family a coding CLI speaks. Only the three that route today —
+ *  an agent absent here has no family we can name, and naming one anyway is
+ *  how a route tuple starts lying. */
+export const FAMILY_FOR_CLI: Readonly<Record<string, ModelFamily>> = {
+  claude: "anthropic",
+  codex: "openai",
+  gemini: "google",
+};
+
+/** The route record the task store keeps. Deliberately mirrors
+ *  TaskRouteSnapshot rather than importing it: this module decides routes and
+ *  should not depend on the envelope's shape to do it. */
+export interface ResolvedRoute {
+  cli: string;
+  cliVersion: string | null;
+  executableFingerprint: string | null;
+  profileId: string;
+  requestedModel: string | null;
+  observedModel: string | null;
+  harnessVersion: string;
+  promptVersion: string;
+  toolPolicyVersion: string;
+  executionMode: "structured";
+  selection: { policy: string; eligible: string[]; degradedTier?: boolean; caveat?: string | null };
+}
+
+export interface RouteVersions {
+  harnessVersion: string;
+  promptVersion: string;
+  toolPolicyVersion: string;
+}
+
+/** The honest record of a route Canopy actually chose.
+ *
+ *  `observedModel` stays null on purpose: no CLI reports back which model it
+ *  really used, so the only truthful value is "not observed". Filling it with
+ *  the requested id would turn a request into a false observation, which is
+ *  the one thing the attempt record exists to keep apart.
+ *
+ *  `executableFingerprint` is null for the same reason — there is no native
+ *  hash of the resolved binary yet. */
+export function resolveRoute(
+  chosen: SelectedRoute,
+  eligible: readonly SelectedRoute[],
+  versions: RouteVersions,
+  cliVersion: string | null,
+): ResolvedRoute {
+  return {
+    cli: chosen.cli,
+    cliVersion,
+    executableFingerprint: null,
+    profileId: chosen.profileId,
+    requestedModel: chosen.requestedModel,
+    observedModel: null,
+    ...versions,
+    executionMode: "structured",
+    selection: {
+      policy: "vibe-fleet-ranked-1",
+      eligible: eligible.map((r) => `${r.cli}:${r.profileId}`),
+      degradedTier: chosen.degradedTier,
+      caveat: chosen.caveat,
+    },
+  };
+}
+
+/** What the route is before any turn has launched. A server incident can be
+ *  recorded before the first turn, and it must not claim a route that was
+ *  never selected. */
+export function unresolvedRoute(cli: string, versions: RouteVersions): ResolvedRoute {
+  return {
+    cli,
+    cliVersion: null,
+    executableFingerprint: null,
+    profileId: "",
+    requestedModel: null,
+    observedModel: null,
+    ...versions,
+    executionMode: "structured",
+    selection: { policy: "unresolved", eligible: [] },
+  };
+}
+
 export type FailoverAction =
   | { kind: "retry-same"; reason: string; narration: string }
   | {

@@ -17,6 +17,20 @@ import {
 import type { TaskReservation } from "./taskEnvelope";
 import type { TaskAttemptSettlement } from "./taskEnvelope";
 import { appendTranscript } from "./taskTranscript";
+import { fleetGate } from "./fleetState";
+import { inspectFleetRoute } from "./fleetSnapshot";
+import { choicesFor } from "./modelCatalog";
+import { AGENT_CLIS, checkCliUpdates, checkInstalledClis } from "./projects";
+import { DEFAULT_PROFILE, launchProfile } from "./profiles";
+import {
+  FAMILY_FOR_CLI,
+  rankRoutes,
+  resolveRoute,
+  unresolvedRoute,
+  type ResolvedRoute,
+  type RouteCandidate,
+  type SelectedRoute,
+} from "./vibeFailover";
 import {
   checkpointDecision,
   type CheckpointContext,
@@ -39,12 +53,18 @@ const SAVE_CHECKPOINT = "Save this version";
 const HARNESS_VERSION = "vibe-mvp-1";
 const PROMPT_VERSION = "vibe-builder-1";
 const TOOL_POLICY_VERSION = "workspace-write-no-shell-1";
+const ROUTE_VERSIONS = {
+  harnessVersion: HARNESS_VERSION,
+  promptVersion: PROMPT_VERSION,
+  toolPolicyVersion: TOOL_POLICY_VERSION,
+};
 
 export interface VibeBuilderSessionOptions {
   projectId: string;
   projectName: string;
   componentId: string;
   componentPath: string;
+  cliId: string;
   cliBin: string;
   checkCommand?: string | null;
   previewTabId(): string | null;
@@ -116,6 +136,10 @@ export interface VibeBuilderSessionDeps {
     noOpenIncident: boolean;
   }): Promise<CheckpointReview>;
   commit(cwd: string, paths: string[], message: string): Promise<string>;
+  /** Every route Canopy could launch this turn on, with its fleet state. */
+  listRoutes(): Promise<RouteCandidate[]>;
+  /** Installed version of a CLI, or null when it cannot be probed. */
+  cliVersion(cli: string): Promise<string | null>;
   now(): number;
   sessionId(): string;
   sleep(ms: number): Promise<void>;
@@ -494,6 +518,36 @@ async function reviewGitCheckpoint(args: {
   };
 }
 
+/** Every CLI Canopy could route this project onto, with its live fleet state
+ *  and the models that family currently offers. Only CLIs with a known family
+ *  are candidates — a route whose family we cannot name cannot be ranked. */
+async function listNativeRoutes(): Promise<RouteCandidate[]> {
+  const installed = await checkInstalledClis();
+  const candidates = await Promise.all(
+    Object.entries(FAMILY_FOR_CLI).map(async ([cli, family]) => {
+      const def = AGENT_CLIS.find((c) => c.id === cli);
+      if (!def || installed[def.bin] !== true) return null;
+      const profileId = launchProfile(cli) ?? DEFAULT_PROFILE;
+      const snapshot = await inspectFleetRoute(def, profileId, installed);
+      return {
+        cli,
+        profileId,
+        family,
+        state: snapshot.state,
+        choices: choicesFor(family),
+      } satisfies RouteCandidate;
+    }),
+  );
+  return candidates.filter((c): c is RouteCandidate => c !== null);
+}
+
+async function nativeCliVersion(cli: string): Promise<string | null> {
+  const bin = AGENT_CLIS.find((c) => c.id === cli)?.bin;
+  if (!bin) return null;
+  const versions = await checkCliUpdates();
+  return versions[bin]?.installed ?? null;
+}
+
 export const DEFAULT_VIBE_BUILDER_DEPS: VibeBuilderSessionDeps = {
   runner: nativeRunner(),
   reserve: reserveTask,
@@ -516,6 +570,8 @@ export const DEFAULT_VIBE_BUILDER_DEPS: VibeBuilderSessionDeps = {
   reviewCheckpoint: reviewGitCheckpoint,
   commit: (cwd, paths, message) =>
     paths.length === 0 ? Promise.resolve("") : ipc.gitCommitPaths(cwd, message, paths),
+  listRoutes: listNativeRoutes,
+  cliVersion: nativeCliVersion,
   now: () => Date.now(),
   sessionId: randomId,
   sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
@@ -584,6 +640,7 @@ export class VibeBuilderSession implements BuilderSession {
   private networkScoped = false;
   private serverIncidentKeys = new Set<string>();
   private unsettledServerAttempts = new Map<string, TaskAttemptSettlement>();
+  private activeRoute: ResolvedRoute | null = null;
   private options: VibeBuilderSessionOptions;
   private deps: VibeBuilderSessionDeps;
 
@@ -642,20 +699,39 @@ export class VibeBuilderSession implements BuilderSession {
     );
   }
 
-  private routeSnapshot() {
-    return {
-      cli: "claude",
-      cliVersion: null,
-      executableFingerprint: null,
-      profileId: "default",
-      requestedModel: null,
-      observedModel: null,
-      harnessVersion: HARNESS_VERSION,
-      promptVersion: PROMPT_VERSION,
-      toolPolicyVersion: TOOL_POLICY_VERSION,
-      executionMode: "structured" as const,
-      selection: { policy: "vibe-mvp-claude", eligible: ["claude"] },
-    };
+  /** The one place a route comes from. Before the first launch this is the
+   *  unresolved route — a server incident can be recorded before any turn, and
+   *  it must not claim a route nobody selected. */
+  private routeSnapshot(): ResolvedRoute {
+    return (
+      this.activeRoute ?? unresolvedRoute(this.options.cliId, ROUTE_VERSIONS)
+    );
+  }
+
+  /** Rank the fleet, refuse when nothing can run, and record what was chosen.
+   *  This is the gate the vibe launch never had: without it `rankFleet` ranks
+   *  nothing and the route tuple is a literal. */
+  private async resolveRouteForLaunch(): Promise<SelectedRoute> {
+    const candidates = await this.deps.listRoutes();
+    const eligible = rankRoutes(candidates, "build");
+    const chosen = eligible[0];
+    if (!chosen) {
+      // Say which of the two reasons it was, because "no agent available" sends
+      // someone to the wrong place half the time.
+      const gated = candidates.filter((c) => !fleetGate(c.state).allowed);
+      throw new Error(
+        gated.length === candidates.length && candidates.length > 0
+          ? `No agent is ready to build right now: ${gated
+              .map((c) => `${c.cli} (${fleetGate(c.state).why})`)
+              .join(", ")}`
+          : "No agent with a usable model is available to build right now.",
+      );
+    }
+    const cliVersion = await this.deps
+      .cliVersion(chosen.cli)
+      .catch(() => null);
+    this.activeRoute = resolveRoute(chosen, eligible, ROUTE_VERSIONS, cliVersion);
+    return chosen;
   }
 
   private async ensureStarted(goal: string): Promise<ProjectRunnerTransport> {
@@ -665,6 +741,9 @@ export class VibeBuilderSession implements BuilderSession {
     this.launching = (async () => {
       this.baseline = await this.deps.captureBaseline(this.options.componentPath);
       if (this.stopped) throw new Error("the builder session was closed during launch");
+      // Gate before reserving: a run whose route was never usable should not
+      // exist in the store at all.
+      const chosen = await this.resolveRouteForLaunch();
       const contract = contractFor(goal);
       const route = this.routeSnapshot();
       const reservation = await this.deps.reserve({
@@ -701,7 +780,10 @@ export class VibeBuilderSession implements BuilderSession {
             "do not use a shell. Explain outcomes in plain language. Canopy runs verification independently.",
           permissionMode: "acceptEdits",
           disallowedTools: ["Bash", "KillShell", "NotebookEdit"],
-          model: "",
+          // The model the route asked for, actually applied — it becomes
+          // `--model`/`-m` at launch. Recording a requestedModel we never
+          // passed would make the attempt record fiction.
+          model: chosen.requestedModel ?? "",
           sessionId: this.cliSessionId,
           cwd: this.options.componentPath,
           authority: "workspace-write",
