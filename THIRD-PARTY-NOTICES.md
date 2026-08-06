@@ -74,9 +74,9 @@ terms govern use of the model:
 - **SenseVoice Small (int8)** — FunASR MODEL_LICENSE (custom) — <https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE>, by FunAudioLLM / Alibaba. <https://huggingface.co/FunAudioLLM/SenseVoiceSmall>
 - **Moonshine Base** — MIT, by Useful Sensors. <https://huggingface.co/UsefulSensors/moonshine>
 
-## Rust crates (712)
+## Rust crates (718)
 
-### MIT — 655
+### MIT — 659
 
 - **adler2 2.0.1** — Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
 - **aead 0.5.2** — Copyright (c) 2019 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC
@@ -129,6 +129,7 @@ terms govern use of the model:
 - **bumpalo 3.20.3** — Copyright (c) 2019 Nick Fitzgerald
 - **bytemuck 1.25.1** — Copyright (c) 2019 Daniel "Lokathor" Gee
 - **byteorder 1.5.0** — Copyright (c) 2015 Andrew Gallant
+- **byteorder-lite 0.1.0** — Copyright (c) 2015 Andrew Gallant
 - **bytes 1.12.1** — Copyright (c) 2018 Carl Lerche
 - **cairo-rs 0.18.5** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **cairo-sys-rs 0.18.2** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
@@ -301,6 +302,7 @@ terms govern use of the model:
 - **idna 1.1.0** — Copyright (c) 2013-2025 The rust-url developers
 - **idna_adapter 1.2.2** — Copyright (c) The rust-url developers
 - **ignore 0.4.31** — Copyright (c) 2015 Andrew Gallant
+- **image 0.25.10** — Copyright The image-rs Developers (per package manifest; the distributed license file carries no copyright line)
 - **include_dir 0.7.4** — Copyright Michael Bryan (per package manifest; the distributed license file carries no copyright line)
 - **include_dir_macros 0.7.4** — Copyright Michael Bryan (per package manifest; the distributed license file carries no copyright line)
 - **indexmap 1.9.3** — Copyright (c) 2016--2017
@@ -730,6 +732,8 @@ terms govern use of the model:
 - **zeroize_derive 1.5.0** — Copyright (c) 2019-2026 The RustCrypto Project Developers
 - **zip 4.6.1** — Copyright (c) 2014 Mathijs van de Nes
 - **zmij 1.0.23** — Copyright David Tolnay (per package manifest; the distributed license file carries no copyright line)
+- **zune-core 0.5.1** — Copyright (c) zune-image developers
+- **zune-jpeg 0.5.15** — Copyright (c) zune-image developers
 - **zvariant 5.13.1** — Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
 - **zvariant_derive 5.13.1** — Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
 - **zvariant_utils 3.5.0** — Copyright Zeeshan Ali Khan, turbocooler (per package manifest; the distributed license file carries no copyright line)
@@ -806,6 +810,11 @@ terms govern use of the model:
 
 - **brotli 8.0.4** — Copyright (c) 2016 Dropbox, Inc
 - **matchit 0.7.3** — Copyright (c) 2022 Ibraheem Ahmed
+
+### BSD-3-Clause OR Apache-2.0 — 2
+
+- **moxcms 0.8.1** — Copyright (c) Radzivon Bartoshyk. All rights reserved
+- **pxfm 0.1.30** — Copyright (c) Radzivon Bartoshyk. All rights reserved
 
 ### MIT-0 — 2
 
