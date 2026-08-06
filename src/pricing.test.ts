@@ -37,6 +37,23 @@ describe("estimateCost", () => {
     expect(estimateCost(usage({ model: "gpt-4o", input_tokens: 1e6 }))).toBeCloseTo(2.5, 6);
     expect(estimateCost(usage({ model: "gemini-2.5-pro", input_tokens: 1e6 }))).toBeCloseTo(1.25, 6);
   });
+
+  it("prices the gpt-5.6 family per variant, not per family", () => {
+    // The 2026-07-30 rates: sol 5/30 (bare gpt-5.6 serves sol), terra 2/12,
+    // luna 0.20/1.20 — a family row here once under-billed sol 4x.
+    expect(estimateCost(usage({ model: "gpt-5.6-sol", output_tokens: 1e6 }))).toBeCloseTo(30, 6);
+    expect(estimateCost(usage({ model: "gpt-5.6", output_tokens: 1e6 }))).toBeCloseTo(30, 6);
+    expect(estimateCost(usage({ model: "gpt-5.6-terra", output_tokens: 1e6 }))).toBeCloseTo(12, 6);
+    expect(estimateCost(usage({ model: "gpt-5.6-luna", output_tokens: 1e6 }))).toBeCloseTo(1.2, 6);
+  });
+
+  it("prices gemini 3.x flash as flash — the pro row must not shadow it", () => {
+    // `gemini-3` sat before the flash row and billed every 3.x flash at the
+    // pro rate; the flash row was unreachable for the whole generation.
+    expect(estimateCost(usage({ model: "gemini-3.6-flash", input_tokens: 1e6 }))).toBeCloseTo(1.5, 6);
+    expect(estimateCost(usage({ model: "gemini-3.5-flash-lite", input_tokens: 1e6 }))).toBeCloseTo(0.3, 6);
+    expect(estimateCost(usage({ model: "gemini-3.1-pro-preview", input_tokens: 1e6 }))).toBeCloseTo(2, 6);
+  });
 });
 
 describe("sessionCost", () => {

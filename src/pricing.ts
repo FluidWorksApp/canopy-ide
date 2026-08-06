@@ -21,14 +21,25 @@ const PRICING: [RegExp, { in: number; out: number }][] = [
   [/opus/i, { in: 5, out: 25 }],
   [/sonnet/i, { in: 3, out: 15 }],
   [/haiku/i, { in: 1, out: 5 }],
-  // OpenAI (Codex)
-  [/gpt-5\.?5|gpt-5/i, { in: 1.25, out: 10 }],
+  // OpenAI (Codex) — verified against the 2026-07-30 price change (gpt-5.6
+  // family: sol $5/$30, terra $2/$12, luna $0.20/$1.20; gpt-5.5 matches sol)
+  // on 2026-08-06. Suffix rows go first: a bare gpt-5.6 alias serves sol.
+  [/-terra/i, { in: 2, out: 12 }],
+  [/-luna/i, { in: 0.2, out: 1.2 }],
+  [/gpt-5\.?[56]/i, { in: 5, out: 30 }],
+  [/gpt-5/i, { in: 1.25, out: 10 }],
   [/o4|o3|o1/i, { in: 2, out: 8 }],
   [/gpt-4\.1/i, { in: 2, out: 8 }],
   [/gpt-4o/i, { in: 2.5, out: 10 }],
-  // Google (Gemini / Antigravity)
-  [/gemini-3|gemini-2\.5-pro|gemini.*pro/i, { in: 1.25, out: 10 }],
+  // Google (Gemini / Antigravity) — verified against ai.google.dev pricing on
+  // 2026-08-06 (3.1 pro preview $2/$12, 3.6 flash $1.50/$7.50, flash-lite
+  // $0.30/$2.50). Flash rows must precede the pro/family rows: `gemini-3`
+  // used to sit first and billed every 3.x flash model at the pro rate.
+  [/gemini.*flash-lite/i, { in: 0.3, out: 2.5 }],
+  [/gemini-3.*flash/i, { in: 1.5, out: 7.5 }],
   [/gemini.*flash/i, { in: 0.3, out: 2.5 }],
+  [/gemini-3/i, { in: 2, out: 12 }],
+  [/gemini-2\.5-pro|gemini.*pro/i, { in: 1.25, out: 10 }],
 ];
 
 /** Estimated $ for a session's token usage, or null when the model is unknown

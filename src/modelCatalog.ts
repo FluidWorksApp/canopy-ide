@@ -56,14 +56,17 @@ export const SEEDS: Record<ModelFamily, ModelChoice[]> = {
     { id: "haiku", label: "Haiku", hint: "fastest" },
   ],
   // Verified against openai.com/index/gpt-5-6 on 2026-08-06: the 5.6 family is
-  // sol/terra/luna, bare `gpt-5.6` aliases to sol, and 5.4 + 5.4-mini retire
-  // from Codex on 2026-08-31 — which is why the older rows are gone.
+  // sol/terra/luna and bare `gpt-5.6` serves sol. 5.4 + 5.4-mini retire from
+  // ChatGPT-authenticated Codex on 2026-08-31 (they stay on the API), which is
+  // reason enough to drop them from a Codex-facing menu.
   openai: [
     { id: "gpt-5.6", label: "GPT-5.6 Sol", hint: "most capable" },
     { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "balanced" },
     { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", hint: "fastest, cheapest" },
     { id: "gpt-5.5", label: "GPT-5.5", hint: "previous" },
   ],
+  // Verified against ai.google.dev/gemini-api/docs/latest-model on 2026-08-06:
+  // 3.1-pro-preview is still the live pro id, 3.6-flash GA, 3.5 rows served.
   google: [
     { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", hint: "most capable" },
     { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash", hint: "latest flash" },
