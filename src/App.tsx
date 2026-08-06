@@ -381,25 +381,10 @@ export default function App() {
   }, [attention]);
   // Toasts fade on a clock the store knows nothing about, so a tick drives the
   // re-render that retires them. Only while something is actually on screen:
-  // an idle app should not hold a repeating timer for an empty overlay.
+  // an idle app should not hold a repeating timer for an empty overlay. The
+  // list itself is built further down, once the dialogs that may already be
+  // showing one of these questions are in scope — see `askedInDialog`.
   const [toastTick, setToastTick] = useState(0);
-  const toasts = useMemo(
-    () => liveToasts(attention, Date.now()),
-    // `toastTick` is the clock this depends on — the items themselves do not
-    // change when one merely ages out.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [attention, toastTick],
-  );
-  // Depend on the *fact* that something is timed, not on the array. `toasts` is
-  // a fresh array every tick, so `[toasts]` tore the interval down and built a
-  // new one on each of its own ticks — nine teardown/setup cycles for a 4.5s
-  // toast, on top of nine full App re-renders.
-  const toastsAreTimed = toasts.some((t) => toastMs(t) != null);
-  useEffect(() => {
-    if (!toastsAreTimed) return;
-    const t = window.setInterval(() => setToastTick((n) => n + 1), 500);
-    return () => window.clearInterval(t);
-  }, [toastsAreTimed]);
   // Team relay: one socket per app, so the state lives here and every
   // ProjectView renders the same picture. Chat keeps a rolling transcript
   // (received + our own sends); the inbox holds commands awaiting action.
@@ -2600,6 +2585,35 @@ export default function App() {
    *  chat. One at a time: the agent is blocked on the answer, so it cannot be
    *  asking two things at once. */
   const [proposal, setProposal] = useState<CompanionProposal | null>(null);
+  /** The questions whose own dialog is on screen right now. Both of these post
+   *  to the attention channel — they must, or a question asked of a project the
+   *  user is not looking at is a stall nothing reports — but while their dialog
+   *  is up, a toast repeating them is the same question twice on one screen,
+   *  and the copy in the corner is the one that cannot answer it. `liveToasts`
+   *  drops them from the view and leaves everything else about them alone. */
+  const askedInDialog = useMemo(() => {
+    const ids = new Set<string>();
+    if (ask) ids.add(ask.attentionId);
+    if (proposal?.attentionId) ids.add(proposal.attentionId);
+    return ids;
+  }, [ask, proposal]);
+  const toasts = useMemo(
+    () => liveToasts(attention, Date.now(), askedInDialog),
+    // `toastTick` is the clock this depends on — the items themselves do not
+    // change when one merely ages out.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [attention, askedInDialog, toastTick],
+  );
+  // Depend on the *fact* that something is timed, not on the array. `toasts` is
+  // a fresh array every tick, so `[toasts]` tore the interval down and built a
+  // new one on each of its own ticks — nine teardown/setup cycles for a 4.5s
+  // toast, on top of nine full App re-renders.
+  const toastsAreTimed = toasts.some((t) => toastMs(t) != null);
+  useEffect(() => {
+    if (!toastsAreTimed) return;
+    const t = window.setInterval(() => setToastTick((n) => n + 1), 500);
+    return () => window.clearInterval(t);
+  }, [toastsAreTimed]);
   /** Start a coding session on a brief, in a project the caller names.
    *
    *  The companion's missing verb. Until this it could see every repo, every
