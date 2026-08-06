@@ -582,8 +582,11 @@ describe("project vibe serialization", () => {
       vibe: {
         version: 1,
         enabled: true,
+        setupRevision: "repo-fingerprint",
         componentId: "cmp-app",
         runCommandId: "run-dev",
+        requiredProcesses: [{ componentId: "cmp-app", runCommandId: "run-dev" }],
+        externalServices: [],
       },
     };
 
@@ -616,11 +619,7 @@ describe("project vibe serialization", () => {
 
     expect(project.components[0].id).toMatch(/^cmp_/);
     expect(project.components[0].commands?.[0].id).toMatch(/^run_/);
-    expect(project.vibe).toMatchObject({
-      version: 1,
-      componentId: project.components[0].id,
-      runCommandId: project.components[0].commands?.[0].id,
-    });
+    expect(project.vibe).toEqual({ version: 1, enabled: true });
   });
 
   it("adopts deterministic IDs in a pre-vibe workspace without inventing vibe", async () => {
@@ -673,12 +672,55 @@ describe("project vibe serialization", () => {
 
     const normalized = normalizeProjectStructure(legacy);
 
-    expect(normalized.vibe).toEqual({
-      version: 1,
-      enabled: true,
-      componentId: normalized.components[0].id,
-      runCommandId: normalized.components[0].commands?.[0].id,
-    });
+    expect(normalized.vibe).toEqual({ version: 1, enabled: true });
+  });
+
+  it("clears a target-only development setup before it can enter app state", () => {
+    const stale: Project = {
+      id: "stale",
+      name: "Stale",
+      components: [{
+        id: "cmp-web",
+        label: "web",
+        path: "/repo/web",
+        commands: [{ id: "run-dev", name: "dev", command: "npm run dev" }],
+      }],
+      vibe: {
+        version: 1,
+        enabled: true,
+        componentId: "cmp-web",
+        runCommandId: "run-dev",
+      },
+    };
+
+    const normalized = normalizeProjectStructure(stale);
+    expect(normalized.vibe).toEqual({ version: 1, enabled: true });
+    expect(normalized.components).toStrictEqual(stale.components);
+    expect(normalizeProjectStructure(normalized)).toBe(normalized);
+  });
+
+  it("preserves a complete agent-owned v1 setup", () => {
+    const complete: Project = {
+      id: "complete",
+      name: "Complete",
+      components: [{
+        id: "cmp-web",
+        label: "web",
+        path: "/repo/web",
+        commands: [{ id: "run-dev", name: "dev", command: "npm run dev" }],
+      }],
+      vibe: {
+        version: 1,
+        enabled: true,
+        setupRevision: "repo-fingerprint",
+        componentId: "cmp-web",
+        runCommandId: "run-dev",
+        requiredProcesses: [{ componentId: "cmp-web", runCommandId: "run-dev" }],
+        externalServices: [],
+      },
+    };
+
+    expect(normalizeProjectStructure(complete)).toBe(complete);
   });
 
   it("leaves ambiguous legacy references in needs-setup shape", () => {
@@ -692,12 +734,7 @@ describe("project vibe serialization", () => {
       vibe: { enabled: true, component: "web", runCommand: "dev" },
     } as unknown as Project;
 
-    expect(normalizeProjectStructure(legacy).vibe).toEqual({
-      version: 1,
-      enabled: true,
-      componentId: undefined,
-      runCommandId: undefined,
-    });
+    expect(normalizeProjectStructure(legacy).vibe).toEqual({ version: 1, enabled: true });
   });
 
   it("does not choose the first duplicate legacy command name", () => {
@@ -719,11 +756,7 @@ describe("project vibe serialization", () => {
 
     const normalized = normalizeProjectStructure(legacy);
 
-    expect(normalized.vibe).toMatchObject({
-      version: 1,
-      componentId: normalized.components[0].id,
-      runCommandId: undefined,
-    });
+    expect(normalized.vibe).toEqual({ version: 1, enabled: true });
   });
 
   it("preserves unique IDs and replaces duplicate IDs deterministically", () => {
@@ -792,13 +825,8 @@ describe("project vibe serialization", () => {
 
     const normalized = normalizeProjectStructure(project);
 
-    expect(normalized.vibe).toEqual({
-      version: 1,
-      enabled: true,
-      componentId: "cmp-web",
-      runCommandId: normalized.components[0].commands?.[0].id,
-    });
-    expect(normalized.vibe?.runCommandId).not.toBe("run-dev");
+    expect(normalized.vibe).toEqual({ version: 1, enabled: true });
+    expect(normalized.components[0].commands?.[0].id).not.toBe("run-dev");
   });
 });
 

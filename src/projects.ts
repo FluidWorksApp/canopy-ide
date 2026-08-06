@@ -229,6 +229,36 @@ export function normalizeProjectStructure(project: Project): Project {
     changed = true;
   }
 
+  // This setup format has not shipped yet. Development builds briefly wrote a
+  // target-only v1 shape before agent-owned setup made v1 complete (topology,
+  // repository fingerprint, dependencies and services). There is no released
+  // compatibility contract to preserve: carrying those partial IDs into state
+  // makes Build show the old setup path and lets a later save resurrect them.
+  // Reset only the incomplete setup payload; keep the person's enabled choice
+  // and every project/component/run command intact. App persists this
+  // normalization before rendering the workspace.
+  if (vibe) {
+    const complete =
+      vibe.version === 1 &&
+      Boolean(nonBlankId(vibe.setupRevision)) &&
+      Boolean(nonBlankId(vibe.componentId)) &&
+      Boolean(nonBlankId(vibe.runCommandId)) &&
+      Array.isArray(vibe.requiredProcesses) &&
+      vibe.requiredProcesses.length > 0 &&
+      Array.isArray(vibe.externalServices);
+    if (!complete) {
+      const reset: VibeConfig = { version: 1, enabled: vibe.enabled === true };
+      if (
+        vibe.version !== reset.version ||
+        vibe.enabled !== reset.enabled ||
+        Object.keys(vibe).length !== 2
+      ) {
+        vibe = reset;
+        changed = true;
+      }
+    }
+  }
+
   return changed ? { ...project, components, vibe } : project;
 }
 
