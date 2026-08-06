@@ -91,7 +91,9 @@ describe("startCommandParked", () => {
 
   it("types a short brief as it always did", async () => {
     const start = await startCommandParked("claude", "fix the failing test", "/repo");
-    expect(start?.command).toBe("claude 'fix the failing test'");
+    // Brief on the line, plus the working mode every task launch pins (see
+    // AgentCli.unattended) — the parking guard is what's not triggered here.
+    expect(start?.command).toBe("claude 'fix the failing test' --permission-mode auto");
     expect(spotSaveContextText).not.toHaveBeenCalled();
   });
 

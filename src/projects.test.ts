@@ -59,7 +59,12 @@ describe("shellQuote", () => {
 describe("startCommand", () => {
   it("uses the CLI's prompt builder when it has one (no typing needed)", () => {
     const got = startCommand("claude", "fix the bug");
-    expect(got).toEqual({ command: "claude 'fix the bug'", typePrompt: false });
+    // Plus the working mode every task launch pins — see the "unattended
+    // working mode" block below for what that is and why.
+    expect(got).toEqual({
+      command: "claude 'fix the bug' --permission-mode auto",
+      typePrompt: false,
+    });
   });
 
   it("launches bare and asks the caller to type when there's no prompt builder", () => {
@@ -145,13 +150,17 @@ describe("dangerouslySkipPermissions", () => {
   afterEach(() => skipping(false));
 
   it("changes nothing while off — the default", () => {
-    expect(startCommand("claude", "hi")?.command).toBe("claude 'hi'");
+    // The working mode a task pins is a separate rung and is still there; the
+    // dangerous flag is what's absent.
+    expect(startCommand("claude", "hi")?.command).toBe("claude 'hi' --permission-mode auto");
     expect(restoreCommand("claude", "abc")).toBe("claude --resume abc");
     expect(launchCommand(AGENT_CLIS.find((c) => c.id === "codex")!)).toBe("codex");
   });
 
-  it("appends each CLI's own verified flag to fresh starts", () => {
+  it("appends each CLI's own verified flag to fresh starts, and only that flag", () => {
     skipping(true);
+    // No --permission-mode alongside it: the dangerous rung replaces the
+    // working-mode rung rather than stacking with it (see withUnattendedMode).
     expect(startCommand("claude", "hi")?.command).toBe(
       "claude 'hi' --dangerously-skip-permissions",
     );
@@ -208,6 +217,75 @@ describe("dangerouslySkipPermissions", () => {
       resumeTemplate:
         "claude --resume __CANOPY_SESSION_ID__ --dangerously-skip-permissions",
     });
+  });
+});
+
+describe("unattended working mode", () => {
+  afterEach(() => {
+    updateSettings({ dangerouslySkipPermissions: false, customClis: [] });
+    refreshAgentClis();
+  });
+
+  it("pins a mode a task can work in, for every CLI that has one", () => {
+    // Each of these is read off that CLI's own --help; see the entry comments.
+    expect(startCommand("claude", "hi")?.command).toBe("claude 'hi' --permission-mode auto");
+    expect(startCommand("codex", "hi")?.command).toBe(
+      "codex 'hi' --ask-for-approval never --sandbox workspace-write",
+    );
+    // No prompt builder: the mode still reaches the bare launch that gets the
+    // brief typed into it.
+    expect(startCommand("opencode", "hi")).toEqual({
+      command: "opencode --agent build",
+      typePrompt: true,
+    });
+    expect(startCommand("agy", "hi")).toEqual({
+      command: "agy --mode accept-edits",
+      typePrompt: true,
+    });
+    expect(startCommand("omp", "hi")).toEqual({
+      command: "omp --approval-mode=write",
+      typePrompt: true,
+    });
+  });
+
+  it("names no mode where the CLI has no rung below skip-permissions", () => {
+    // aider: nothing between "confirm everything" and --yes-always.
+    // amp: does not ask in the first place.
+    expect(startCommand("aider", "hi")).toEqual({ command: "aider", typePrompt: true });
+    expect(startCommand("amp", "hi")).toEqual({ command: "amp", typePrompt: true });
+  });
+
+  it("leaves the bare launcher and resumes alone — those are sessions someone opened", () => {
+    for (const cli of AGENT_CLIS) {
+      if (!cli.unattended) continue;
+      expect(launchCommand(cli)).not.toContain(cli.unattended);
+      const resumed = restoreCommand(cli.id, "SID42");
+      if (resumed) expect(resumed).not.toContain(cli.unattended);
+    }
+  });
+
+  it("gives way to the skip-permissions rung rather than stacking with it", () => {
+    updateSettings({ dangerouslySkipPermissions: true });
+    expect(startCommand("claude", "hi")?.command).toBe(
+      "claude 'hi' --dangerously-skip-permissions",
+    );
+    expect(startCommand("codex", "hi")?.command).toBe(
+      "codex 'hi' --dangerously-bypass-approvals-and-sandbox",
+    );
+    expect(startCommand("opencode", "hi")?.command).toBe("opencode --auto");
+  });
+
+  it("says nothing about a CLI the user added — its modes are unknown to us", () => {
+    addClis([{ id: "acme", name: "Acme", bin: "acme", promptArgs: "go {prompt}" }]);
+    expect(startCommand("acme", "hi")?.command).toBe("acme go 'hi'");
+  });
+
+  it("keeps the resolved binary at the head of the line when one is rebound", () => {
+    rebind({ claude: "/opt/Acme CLI/claude" });
+    expect(startCommand("claude", "hi")?.command).toBe(
+      "'/opt/Acme CLI/claude' 'hi' --permission-mode auto",
+    );
+    rebind({});
   });
 });
 
@@ -296,7 +374,7 @@ describe("binary overrides", () => {
   it("launches, resumes and prompts with the overridden binary", () => {
     rebind({ claude: "acme-claude" });
     expect(startCommand("claude", "fix it")).toEqual({
-      command: "acme-claude 'fix it'",
+      command: "acme-claude 'fix it' --permission-mode auto",
       typePrompt: false,
     });
     expect(restoreCommand("claude", "abc123")).toBe("acme-claude --resume abc123");
@@ -332,7 +410,7 @@ describe("binary overrides", () => {
     // name never needs it.
     rebind({ claude: "/Applications/Acme CLI/bin/claude", codex: "/opt/acme/codex" });
     expect(startCommand("claude", "fix it")).toEqual({
-      command: "'/Applications/Acme CLI/bin/claude' 'fix it'",
+      command: "'/Applications/Acme CLI/bin/claude' 'fix it' --permission-mode auto",
       typePrompt: false,
     });
     expect(restoreCommand("claude", "abc123")).toBe(
