@@ -135,6 +135,10 @@ The load-bearing pieces every feature hangs off:
 - Usage & cost: captured. `agent_usage` reads running token totals, model, and
   billed cost straight off `session` rows in `opencode.db` (per profile root),
   so opencode sessions appear in the Statistics panel beside claude/codex/omp.
+  The status tray follows the live session the same way
+  (`opencode_session_stats`, keyed by the pty-stamped hook events' session id),
+  preferring the CLI's billed figure — the only cost that exists for a custom
+  provider (e.g. an Azure deployment) the frontend price table can't name.
 - `/models` picker, F2 cycles recent models. AGENTS.md + CLAUDE.md fallback.
   Built-in `attention` config (sounds/desktop notifications on questions,
   permissions, errors, completion).
