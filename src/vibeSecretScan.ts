@@ -131,6 +131,57 @@ export function scanDiffForSecrets(diff: string): SecretScanResult {
   return { clean: findings.length === 0, findings, scope: SCOPE };
 }
 
+/** Visible, and it names the rule.
+ *
+ *  Visible because a silent deletion would make the stored diff lie about what
+ *  the turn changed — the record is the truth and neither writer nor reader may
+ *  improve on it, so a redaction has to say "something was here".
+ *
+ *  Named because findings already carry the rule on the principle that the rule
+ *  is safe to state and only the value is not; carrying it here makes the
+ *  artifact self-explanatory to someone reading it later without the finding
+ *  beside it, and leaks nothing the finding record does not already say. */
+export const redactionMarker = (rule: string) => `[redacted by Canopy: ${rule}]`;
+
+/** Replace credential-shaped spans with a marker, keeping the surrounding diff
+ *  readable.
+ *
+ *  A refused turn persists its diff as an artifact so the user can see what
+ *  was refused — which would otherwise write the credential to disk under
+ *  `~/.canopy`, the same leak the finding rules exist to prevent, through a
+ *  door nobody was watching. The scanner already knows the matching spans, so
+ *  redacting is available rather than aspirational.
+ *
+ *  Deliberately redacts on every line, added or not: an artifact is stored
+ *  text, not a change proposal, and a secret sitting in a context line is
+ *  still a secret sitting on disk. */
+export function redactSecrets(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      let out = line;
+      for (const rule of RULES) {
+        out = out.replace(
+          new RegExp(rule.test.source, "g"),
+          redactionMarker(rule.id),
+        );
+      }
+      const assigned = ASSIGNMENT.exec(out);
+      if (
+        assigned &&
+        !PLACEHOLDER.test(assigned[2]) &&
+        entropy(assigned[2]) >= ENTROPY_FLOOR
+      ) {
+        out = out.replace(
+          assigned[2],
+          redactionMarker("high-entropy-secret-assignment"),
+        );
+      }
+      return out;
+    })
+    .join("\n");
+}
+
 /** What Ash says when the scan is why a turn was not saved. Names the rule and
  *  the place, never the value. */
 export function describeSecretFindings(findings: readonly SecretFinding[]): string {

@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  redactionMarker,
   describeSecretFindings,
   entropy,
+  redactSecrets,
   scanDiffForSecrets,
 } from "./vibeSecretScan";
 
@@ -93,6 +95,37 @@ describe("high-entropy assignments", () => {
   it("separates random strings from English by entropy", () => {
     expect(entropy(HIGH_ENTROPY)).toBeGreaterThan(4);
     expect(entropy("the token that we use for testing")).toBeLessThan(3.6);
+  });
+});
+
+describe("redacting an artifact", () => {
+  it("replaces the credential but keeps the diff readable", () => {
+    const key = join("sk", "_live_", "q".repeat(24));
+    const redacted = redactSecrets(
+      [`+const stripe = "${key}";`, "+const port = 3000;"].join("\n"),
+    );
+    expect(redacted).not.toContain(key);
+    // The marker names the rule, so the artifact explains itself later
+    // without the finding record beside it.
+    expect(redacted).toContain(redactionMarker("stripe-secret-key"));
+    expect(redacted).toContain("const port = 3000;");
+  });
+
+  it("redacts on context lines too, since an artifact is stored text", () => {
+    const redacted = redactSecrets(` const k = "${AWS}";`);
+    expect(redacted).not.toContain(AWS);
+  });
+
+  it("redacts a high-entropy assignment without eating the variable name", () => {
+    const redacted = redactSecrets(`+const DB_PASSWORD = "${HIGH_ENTROPY}";`);
+    expect(redacted).not.toContain(HIGH_ENTROPY);
+    expect(redacted).toContain("DB_PASSWORD");
+    expect(redacted).toContain(redactionMarker("high-entropy-secret-assignment"));
+  });
+
+  it("leaves a clean diff byte-identical", () => {
+    const clean = "+const port = 3000;\n const name = 'app';";
+    expect(redactSecrets(clean)).toBe(clean);
   });
 });
 
