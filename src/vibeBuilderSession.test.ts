@@ -3,10 +3,12 @@ import * as ipc from "./ipc";
 import type { ProjectRunnerController } from "./projectRunner";
 import type { StructuredRunnerHost } from "./structuredEvents";
 import type { TaskReservation } from "./taskEnvelope";
+import type { AbstractionRunResult } from "./vibeAbstractionRunner";
 import {
   createVibeBuilderSession,
   DEFAULT_VIBE_BUILDER_DEPS,
   scopedGitEntries,
+  type AbstractionOwnership,
   type CheckpointReview,
   type VibeBuilderSessionDeps,
   type VibeBuilderSessionOptions,
@@ -1197,6 +1199,30 @@ describe("managed abstractions", () => {
     expect(h.abstractionRuns[0].argv[0]).toBe("vercel");
   });
 
+  it("does not claim nothing ran when a stop kills a publish mid-flight", async () => {
+    const abstraction = longRunningAbstraction();
+    const h = harness({ runAbstraction: abstraction.runAbstraction });
+    await deployable(h);
+    await verified(h);
+    await h.session.send("deploy to production");
+    const answering = h.session.send("Publish to production");
+    await abstraction.spawned;
+
+    await h.session.stop();
+    await answering;
+
+    const q = h.session.state.question;
+    const said = `${q?.prompt ?? ""} ${q?.detail ?? ""}`;
+    // Killing `vercel --prod` does not un-deploy it: whatever it had already
+    // done server-side stands, and this side cannot see how much. Reusing the
+    // declined card's "Nothing ran." here would be the system asserting
+    // something it does not know.
+    expect(said).not.toMatch(/nothing ran|nothing happened|nothing has changed|left it alone/i);
+    expect(said).toMatch(/stopped waiting/i);
+    // And it must still say which command that was about.
+    expect(said).toContain("vercel");
+  });
+
   it("carries on with a build request typed instead of an answer", async () => {
     const h = harness();
     await h.session.send("install stripe");
@@ -1225,5 +1251,147 @@ describe("managed abstractions", () => {
     await h.session.send("add a login button");
     expect(h.order).toContain("spawn");
     expect(h.abstractionRuns).toHaveLength(0);
+  });
+});
+
+/** Let every already-scheduled microtask and timer run. Used to prove a
+ *  negative — that nothing *else* started — which a `waitFor` cannot do. */
+const settleMicrotasks = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+/** A `runAbstraction` that behaves the way the real one does: it hands the
+ *  process it spawned to whoever owns the run, and it does not finish until
+ *  that process is killed. A whole substituted object rather than a spy on
+ *  something the environment owns, so it cannot silently fail to intercept. */
+function longRunningAbstraction(ptyId = 77) {
+  const killed: number[] = [];
+  const spawns: number[] = [];
+  let announceSpawn!: () => void;
+  const spawned = new Promise<void>((resolve) => {
+    announceSpawn = resolve;
+  });
+  const runAbstraction = (
+    argv: string[],
+    cwd: string,
+    ownership?: AbstractionOwnership,
+  ): Promise<AbstractionRunResult> =>
+    new Promise<AbstractionRunResult>((resolve) => {
+      void argv;
+      void cwd;
+      ownership?.spawned({
+        id: ptyId,
+        kill: async () => {
+          killed.push(ptyId);
+          // A killed pty exits, exactly as the real one would.
+          ownership?.exited(ptyId);
+          resolve({ ok: false, exitCode: null, output: "", timedOut: false });
+        },
+      });
+      spawns.push(ptyId);
+      announceSpawn();
+    });
+  return { runAbstraction, killed, spawns, spawned };
+}
+
+describe("a stopped session and a running abstraction", () => {
+  it("kills the process it left running", async () => {
+    const abstraction = longRunningAbstraction();
+    const h = harness({ runAbstraction: abstraction.runAbstraction });
+    await h.session.send("install stripe");
+    const confirm = h.session.state.question!.actions![0];
+    const answering = h.session.send(confirm.response);
+    await abstraction.spawned;
+    expect(abstraction.killed).toEqual([]);
+
+    // Closing the project. The install is detached — runAbstractionPlan holds
+    // its pty id in a local and kills only on its own timeout — so if the
+    // session does not take it down here, nobody ever will.
+    await h.session.stop();
+
+    expect(abstraction.killed).toEqual([77]);
+    await answering;
+  });
+
+  it("drops a proposal that was still queued when the session stopped", async () => {
+    const h = harness();
+    await h.session.send("install stripe");
+    const confirm = h.session.state.question!.actions![0];
+
+    // The confirm is queued, not yet run: `send` chains it onto the send queue
+    // as a microtask, and `stop()` runs its synchronous prefix first. So this
+    // is the real window in which a stopped session used to go on and run a
+    // deploy — and present a card — for a project that is already closed.
+    const answering = h.session.send(confirm.response);
+    await h.session.stop();
+    await answering;
+    await settleMicrotasks();
+
+    expect(h.abstractionRuns).toHaveLength(0);
+    // Nor may it leave a card behind claiming anything about a run.
+    expect(h.session.state.question?.id ?? "").not.toContain("vibe-abstraction-done");
+  });
+});
+
+describe("concurrent messages", () => {
+  /** An `abstractionContext` the test releases by hand, so "two messages
+   *  arrived before the first proposal resolved" is a state the test can hold
+   *  open rather than one it has to hit by luck. */
+  function gatedContext(h: ReturnType<typeof harness>, base: Awaited<ReturnType<VibeBuilderSessionDeps["abstractionContext"]>>) {
+    const release: (() => void)[] = [];
+    h.deps.abstractionContext = async (cwd) => {
+      await new Promise<void>((resolve) => release.push(resolve));
+      return { ...base, cwd };
+    };
+    return release;
+  }
+
+  it("serialises proposals so the second cannot overwrite the first", async () => {
+    const h = harness();
+    const base = await h.deps.abstractionContext("/repo", {
+      kind: "deploy",
+      target: "preview",
+    });
+    const release = gatedContext(h, base);
+
+    const first = h.session.send("install stripe");
+    const second = h.session.send("install lodash");
+    await settleMicrotasks();
+
+    // The decisive assertion. Unserialised, both branches chain off the same
+    // settled sendQueue, so both proposals are already in flight here — and
+    // whichever lands second silently overwrites the other's pendingAbstraction
+    // while the user is looking at a card for the one that will not run.
+    expect(release).toHaveLength(1);
+
+    release[0]();
+    await first;
+    expect(h.session.state.question?.diff).toContain("stripe");
+
+    await settleMicrotasks();
+    expect(release).toHaveLength(2);
+    release[1]();
+    await second;
+
+    // The last proposal shown is the one that is pending, so confirming the
+    // card the user is actually reading runs the plan that card describes.
+    expect(h.session.state.question?.diff).toContain("lodash");
+    await h.session.send(h.session.state.question!.actions![0].response);
+    expect(h.abstractionRuns).toHaveLength(1);
+    expect(h.abstractionRuns[0].argv).toContain("lodash");
+  });
+
+  it("still runs a double confirm only once", async () => {
+    const h = harness();
+    await h.session.send("install stripe");
+    const confirm = h.session.state.question!.actions![0].response;
+
+    // Both are routed against a pendingAbstraction that is still set, because
+    // neither has run yet. What makes the second a no-op is `answerAbstraction`
+    // nulling it before it can be read again — remove that null and this runs
+    // the install twice. Serialising the branch must not disturb it.
+    const a = h.session.send(confirm);
+    const b = h.session.send(confirm);
+    await Promise.all([a, b]);
+
+    expect(h.abstractionRuns).toHaveLength(1);
   });
 });
