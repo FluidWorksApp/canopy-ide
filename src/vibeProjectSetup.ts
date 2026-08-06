@@ -336,8 +336,6 @@ export function vibeSetupSystemPrompt(fingerprint: string): string {
   return `You are Canopy's project setup agent. Read the entire repository, including non-JavaScript components. Do not edit files. Discover every component, how each runs, the one page-serving preview target, every process required for that page to work, external services, and deployment evidence. Return exactly one JSON object with schemaVersion 1 and repositoryFingerprint ${JSON.stringify(fingerprint)}. Commands are argv arrays, never shell strings. Evidence fields contain repository paths. If you cannot determine a complete setup, return no proposal and explain the blocker plainly.`;
 }
 
-const SKIP_DIRS = new Set([".git", "node_modules", "target", "dist", "build", ".next", ".cache", "vendor"]);
-
 export interface VibeSetupRepositoryObservation {
   projectRoot: string;
   fingerprint: string;
@@ -355,22 +353,22 @@ export async function observeVibeSetupRepository(project: Project): Promise<Vibe
   }
   const projectRoot = shared.join("/") || "/";
   const paths = new Set<string>(roots);
-  const facts: string[] = [];
-  const queue = [...roots];
-  while (queue.length > 0 && paths.size < 20_000) {
-    const dir = queue.shift()!;
-    const entries = await ipc.fsReadDir(dir).catch(() => []);
-    for (const entry of entries) {
-      const path = normalized(entry.path);
-      paths.add(path);
-      if (entry.is_dir) {
-        if (!SKIP_DIRS.has(entry.name) && paths.size < 20_000) queue.push(path);
-      } else {
-        const stat = await ipc.fsStat(path).catch(() => null);
-        facts.push(`${path}:${stat?.size ?? -1}:${stat?.modified_ms ?? -1}`);
-      }
+  const snapshots = await ipc.fsSnapshotFiles(roots, 20_000);
+  const facts: string[] = snapshots.map((snapshot) => {
+    const path = normalized(snapshot.path);
+    paths.add(path);
+    // Validation also needs to recognize a command cwd or component root. The
+    // native inventory is intentionally files-only, so derive only ancestors
+    // that remain inside one of the registered component roots.
+    let parent = path.slice(0, path.lastIndexOf("/"));
+    while (parent && roots.some((root) => inside(root, parent))) {
+      paths.add(parent);
+      const slash = parent.lastIndexOf("/");
+      if (slash <= 0) break;
+      parent = parent.slice(0, slash);
     }
-  }
+    return `${path}:${snapshot.size}:${snapshot.modified_ms ?? -1}`;
+  });
   facts.sort();
   return { projectRoot, paths, fingerprint: `fs-${hash(facts.join("\n"))}` };
 }
