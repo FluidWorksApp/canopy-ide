@@ -9,6 +9,7 @@ import {
   scopedGitEntries,
   type CheckpointReview,
   type VibeBuilderSessionDeps,
+  type VibeBuilderSessionOptions,
 } from "./vibeBuilderSession";
 import type { VerificationObservation } from "./vibeVerification";
 
@@ -64,7 +65,10 @@ const safeReview = (verification: CheckpointReview["context"]["verification"]): 
   diff: "diff --git a/src/App.tsx b/src/App.tsx",
 });
 
-function harness(over: Partial<VibeBuilderSessionDeps> = {}) {
+function harness(
+  over: Partial<VibeBuilderSessionDeps> = {},
+  options: Partial<VibeBuilderSessionOptions> = {},
+) {
   const order: string[] = [];
   let host: StructuredRunnerHost | null = null;
   const transport = {
@@ -130,6 +134,13 @@ function harness(over: Partial<VibeBuilderSessionDeps> = {}) {
     })),
     reviewCheckpoint: vi.fn(async ({ verification }) => safeReview(verification)),
     commit: vi.fn(async () => "commit-1"),
+    // Unarmed by default, which is what a real machine looks like the first
+    // time this code ever runs. A harness that armed it would hide the gate
+    // from every test that does not mention it — and the gate exists precisely
+    // because a green suite is not evidence that `git commit` works here.
+    autoCheckpointObserved: vi.fn(() => false),
+    recordAutoCheckpointObserved: vi.fn(),
+    updateMetadata: vi.fn(async () => ({})),
     reserveAttempt: vi.fn(async () => ({
       ...reservation().attempt,
       attemptId: "attempt-2",
@@ -165,6 +176,7 @@ function harness(over: Partial<VibeBuilderSessionDeps> = {}) {
     cliBin: "claude",
       checkCommand: "npm test",
       previewTabId: () => "preview-1",
+      ...options,
     },
     deps,
   );
@@ -237,6 +249,119 @@ describe("VibeBuilderSession", () => {
     );
     expect(inspection.observations).toContainEqual(
       expect.objectContaining({ kind: "network", verdict: "pass" }),
+    );
+  });
+
+  // The scan itself is unit-tested next door; what this covers is the wiring
+  // that made it dead code — `secretScanClean` was a hardcoded `false`, so no
+  // turn could ever save itself however clean the diff, and no test noticed
+  // because every checkpoint test injects the flag through a stub.
+  it("derives the secret verdict from the diff the production review builds", async () => {
+    const files = {
+      clean: "-  const a = 1;\n+  const a = 2;",
+      // Assembled at runtime: a literal AWS key in this file is what a secret
+      // scanner in CI is for, and it would flag its own test fixture.
+      leaky: `+  const key = "${"AKIA"}${"J".repeat(16)}";`,
+    };
+    for (const [name, body] of Object.entries(files)) {
+      vi.spyOn(ipc, "gitStatus").mockResolvedValue({
+        is_repo: true,
+        entries: [{ status: " M", path: "src/App.tsx" }],
+      } as Awaited<ReturnType<typeof ipc.gitStatus>>);
+      vi.spyOn(ipc, "gitWorktrees").mockResolvedValue([
+        { path: "/repo", head: "abc", is_main: false } as Awaited<
+          ReturnType<typeof ipc.gitWorktrees>
+        >[number],
+      ]);
+      vi.spyOn(ipc, "contextClaims").mockResolvedValue([]);
+      vi.spyOn(ipc, "gitDiff").mockImplementation(async (_root, _path, staged) =>
+        staged ? "" : `+++ b/src/App.tsx\n@@ -1,1 +1,1 @@\n${body}`,
+      );
+
+      const review = await DEFAULT_VIBE_BUILDER_DEPS.reviewCheckpoint({
+        cwd: "/repo",
+        baseline: {
+          cleanAtStart: true,
+          head: "abc",
+          isolated: true,
+          repoRoot: "/repo",
+        },
+        verification: "verified",
+        noOpenIncident: true,
+      });
+      expect(review.context.secretScanClean).toBe(name === "clean");
+      expect(review.secrets?.clean).toBe(name === "clean");
+      if (name === "leaky") {
+        expect(review.secrets?.findings[0].rule).toBe("aws-access-key");
+        // A finding names the rule and the place; repeating the value here
+        // would leak it into the record the scan exists to keep clean.
+        expect(JSON.stringify(review.secrets)).not.toContain("AKIA");
+      }
+    }
+  });
+
+  it("reserves a Build turn the task panels can actually list", async () => {
+    const h = harness();
+    await h.session.send("Make the button blue");
+    expect(h.deps.reserve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        // Both panels gate on this: `json_extract(metadata_json,'$.history')=1`
+        // in tasks.rs and `if (!metadata?.history) return null` in
+        // taskHistory.ts. Reserving without it filed a complete evidence ledger
+        // somewhere no surface would ever look.
+        metadata: expect.objectContaining({
+          history: true,
+          taskId: "vibe-turn",
+          agent: "claude",
+          cwd: "/repo",
+          projectId: "project-1",
+          brief: "Make the button blue",
+        }),
+      }),
+    );
+  });
+
+  it("puts the verification summary on the run's history row", async () => {
+    const h = harness();
+    await h.session.send("Make the button blue");
+    h.emit({ kind: "turnEnd" });
+    await vi.waitFor(() => expect(h.deps.updateMetadata).toHaveBeenCalled());
+    expect(h.deps.updateMetadata).toHaveBeenCalledWith(
+      "run-1",
+      expect.objectContaining({
+        history: true,
+        summary: expect.stringContaining("all required evidence passed"),
+      }),
+    );
+  });
+
+  it("says why a project with no check script stays unverified", async () => {
+    const caveat =
+      "app has no check, typecheck, test or build script, so there's no check I can run — turns here stay unverified until you add one.";
+    const h = harness(
+      {
+        runCheck: vi.fn(async () => ({
+          observation: observation("check", "unknown"),
+          output: "",
+        })),
+      },
+      { checkCommand: null, checkCaveat: caveat },
+    );
+    await h.session.send("Make the button blue");
+    h.emit({ kind: "turnEnd" });
+
+    await vi.waitFor(() =>
+      expect(h.transcripts).toContainEqual(
+        expect.objectContaining({ kind: "system", body: expect.stringContaining(caveat) }),
+      ),
+    );
+    // And in the durable ledger, not only in a message that scrolls away.
+    expect(h.events).toContainEqual(
+      expect.objectContaining({
+        kind: "verification.observation",
+        code: "check",
+        metadata: expect.objectContaining({ note: caveat }),
+      }),
     );
   });
 
@@ -765,7 +890,9 @@ describe("VibeBuilderSession", () => {
   });
 
   it("auto-commits only when independent verification and checkpoint policy pass", async () => {
-    const h = harness();
+    // Armed explicitly: on a machine that has never made a checkpoint the
+    // policy passing is not enough, which the test below is about.
+    const h = harness({ autoCheckpointObserved: () => true });
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
 
@@ -777,6 +904,63 @@ describe("VibeBuilderSession", () => {
     expect(h.deps.settleAttempt).toHaveBeenCalledWith(
       expect.objectContaining({ state: "completed" }),
     );
+  });
+
+  it("holds the first automatic checkpoint on a machine that has never made one", async () => {
+    const h = harness();
+    await h.session.send("Make the button blue");
+    h.emit({ kind: "turnEnd" });
+
+    await vi.waitFor(() => expect(h.session.state.question).not.toBeNull());
+    // No unattended git write along a path that has never executed here.
+    expect(h.deps.commit).not.toHaveBeenCalled();
+    expect(h.session.state.question?.prompt).toBe(
+      "This is the first version I'd save here.",
+    );
+    expect(h.session.state.question?.diff).toContain("diff --git");
+    // The evidence trail is intact: the decision, the paths, the baseline and
+    // an empty reason list, because the policy did not refuse anything.
+    const held = h.events.find((event) => event.kind === "checkpoint.held");
+    expect(held).toBeDefined();
+    expect(held?.code).toBe("auto-checkpoint-never-observed");
+    expect(held?.metadata).toMatchObject({
+      reasons: [],
+      paths: ["src/App.tsx"],
+      repoRoot: "/repo",
+      baselineHead: "abc",
+      secretScan: "unknown",
+      context: expect.objectContaining({ verification: "verified" }),
+    });
+    expect(h.events).not.toContainEqual(
+      expect.objectContaining({ kind: "checkpoint.refused" }),
+    );
+  });
+
+  it("arms automatic checkpointing only once a save has actually committed", async () => {
+    const h = harness();
+    await h.session.send("Make the button blue");
+    h.emit({ kind: "turnEnd" });
+    await vi.waitFor(() => expect(h.session.state.question).not.toBeNull());
+    expect(h.deps.recordAutoCheckpointObserved).not.toHaveBeenCalled();
+
+    await h.session.send("Save this version");
+    expect(h.deps.commit).toHaveBeenCalledTimes(1);
+    expect(h.deps.recordAutoCheckpointObserved).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not arm the gate when the checkpoint commit fails", async () => {
+    const h = harness({
+      commit: vi.fn(async () => {
+        throw new Error("index.lock exists");
+      }),
+    });
+    await h.session.send("Make the button blue");
+    h.emit({ kind: "turnEnd" });
+    await vi.waitFor(() => expect(h.session.state.question).not.toBeNull());
+
+    await h.session.send("Save this version");
+    expect(h.deps.commit).toHaveBeenCalledTimes(1);
+    expect(h.deps.recordAutoCheckpointObserved).not.toHaveBeenCalled();
   });
 
   it("commits a refused checkpoint only after the explicit save response", async () => {
