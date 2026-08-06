@@ -40,6 +40,8 @@ interface TicketViewProps {
   taskRunning?: boolean;
   /** Open the Tasks panel, where the running task reports. */
   onShowTasks?: () => void;
+  /** Forward the ticket to research — an entry and an agent on the question. */
+  onResearch: () => void;
   onSendToAgent: (target: AgentTarget) => void;
 }
 
@@ -54,6 +56,7 @@ export function TicketView({
   onStartTask,
   taskRunning,
   onShowTasks,
+  onResearch,
   onSendToAgent,
 }: TicketViewProps) {
   const trackerName = TRACKERS.find((t) => t.id === source)?.name ?? source;
@@ -301,6 +304,14 @@ export function TicketView({
             onShow: onShowTasks,
           }}
         />
+        {/* The other destination: not every issue is a decision yet. This one
+            opens a research entry linked back to the ticket instead of a
+            worktree — same shape as the palette's "Research…". */}
+        <Button onClick={onResearch}>Research this</Button>
+        <span className="ticket-view-note">
+          Opens a research entry and puts an agent on the question. No branch,
+          no code.
+        </span>
       </div>
     </div>
   );

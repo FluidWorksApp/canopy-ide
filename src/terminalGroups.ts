@@ -58,22 +58,23 @@ export function splitLeaf(
   tabId: string,
   nextTabId: string,
   axis: SplitAxis,
+  before = false,
 ): TerminalSplitNode {
   if (node.type === "leaf") {
-    return node.tabId === tabId
-      ? {
-          type: "split",
-          id: splitId(),
-          axis,
-          ratio: 0.5,
-          first: node,
-          second: { type: "leaf", tabId: nextTabId },
-        }
-      : node;
+    if (node.tabId !== tabId) return node;
+    const added: TerminalSplitNode = { type: "leaf", tabId: nextTabId };
+    return {
+      type: "split",
+      id: splitId(),
+      axis,
+      ratio: 0.5,
+      first: before ? added : node,
+      second: before ? node : added,
+    };
   }
-  const first = splitLeaf(node.first, tabId, nextTabId, axis);
+  const first = splitLeaf(node.first, tabId, nextTabId, axis, before);
   if (first !== node.first) return { ...node, first };
-  const second = splitLeaf(node.second, tabId, nextTabId, axis);
+  const second = splitLeaf(node.second, tabId, nextTabId, axis, before);
   return second === node.second ? node : { ...node, second };
 }
 
@@ -231,6 +232,63 @@ export function layoutSplit(
   };
   walk(node, 0, 0, 1, 1);
   return { panes, dividers };
+}
+
+/** Where a tab dragged over the split surface would land: which pane it
+ *  splits, along which axis, on which side — plus the half-pane rectangle to
+ *  preview, in the same 0..1 surface fractions layoutSplit deals in. */
+export interface PaneDropZone {
+  targetTabId: string;
+  axis: SplitAxis;
+  before: boolean;
+  rect: { left: number; top: number; width: number; height: number };
+}
+
+/** Resolve the drop zone for a pointer at (x, y), both 0..1 fractions of the
+ *  surface. The hovered pane is split toward its nearest edge, so the preview
+ *  is always the half of the pane the pointer is closest to. Out-of-bounds
+ *  pointers resolve to nothing rather than clamping — leaving the surface is
+ *  how a drag stops being a drop. */
+export function paneDropZone(
+  panes: PaneRect[],
+  x: number,
+  y: number,
+): PaneDropZone | null {
+  if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+  const pane = panes.find(
+    (p) =>
+      x >= p.left && x <= p.left + p.width && y >= p.top && y <= p.top + p.height,
+  );
+  if (!pane || pane.width <= 0 || pane.height <= 0) return null;
+  const dx = (x - pane.left) / pane.width;
+  const dy = (y - pane.top) / pane.height;
+  const edges = [
+    { d: dx, axis: "horizontal" as const, before: true },
+    { d: 1 - dx, axis: "horizontal" as const, before: false },
+    { d: dy, axis: "vertical" as const, before: true },
+    { d: 1 - dy, axis: "vertical" as const, before: false },
+  ];
+  const nearest = edges.reduce((a, b) => (b.d < a.d ? b : a));
+  const rect =
+    nearest.axis === "horizontal"
+      ? {
+          left: nearest.before ? pane.left : pane.left + pane.width / 2,
+          top: pane.top,
+          width: pane.width / 2,
+          height: pane.height,
+        }
+      : {
+          left: pane.left,
+          top: nearest.before ? pane.top : pane.top + pane.height / 2,
+          width: pane.width,
+          height: pane.height / 2,
+        };
+  return {
+    targetTabId: pane.tabId,
+    axis: nearest.axis,
+    before: nearest.before,
+    rect,
+  };
 }
 
 export type PaneDirection = "left" | "right" | "up" | "down";

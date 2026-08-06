@@ -35,7 +35,7 @@ const detail = {
   }],
 };
 
-const view = (commands: Record<string, unknown> = {}) => {
+const view = (commands: Record<string, unknown> = {}, onResearch = vi.fn()) => {
   mockCommands({ gh_issue_detail: detail, ...commands });
   return render(
     <TicketView
@@ -47,6 +47,7 @@ const view = (commands: Record<string, unknown> = {}) => {
       installed={{}}
       onStartNew={vi.fn()}
       onStartTask={vi.fn()}
+      onResearch={onResearch}
       onSendToAgent={vi.fn()}
     />,
   );
@@ -60,6 +61,13 @@ describe("TicketView", () => {
     expect(await screen.findByText("opened by octocat")).toBeInTheDocument();
     expect(screen.getByText("Please ship this.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Close issue" })).toBeInTheDocument();
+  });
+
+  it("forwards the ticket to research", async () => {
+    const onResearch = vi.fn();
+    view({}, onResearch);
+    await userEvent.click(screen.getByRole("button", { name: "Research this" }));
+    expect(onResearch).toHaveBeenCalledTimes(1);
   });
 
   it("closes an issue and posts a comment", async () => {
@@ -99,6 +107,7 @@ describe("TicketView", () => {
       onStartNew: vi.fn(),
       onStartTask: start,
       onShowTasks: showTasks,
+      onResearch: vi.fn(),
       onSendToAgent: vi.fn(),
     };
     const { rerender } = render(<TicketView {...props} />);
@@ -151,6 +160,7 @@ describe("TicketView", () => {
         installed={{}}
         onStartNew={vi.fn()}
         onStartTask={vi.fn()}
+        onResearch={vi.fn()}
         onSendToAgent={vi.fn()}
       />,
     );

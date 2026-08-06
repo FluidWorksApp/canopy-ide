@@ -50,6 +50,10 @@ export async function ptySpawn(
     /** Stamped onto the child. A run inside a workspace carries that
      *  workspace's port lease here, so two checkouts can serve at once. */
     env?: [string, string][];
+    /** Reserved together by taskReserve. Rust refuses a partial or unknown
+     * binding before starting the child. */
+    runId?: string;
+    attemptId?: string;
   },
   onData: (bytes: Uint8Array) => void,
 ): Promise<SpawnResult> {
@@ -94,6 +98,8 @@ export const ptySpawnDetached = (opts: {
   cwd?: string;
   command: string;
   env?: [string, string][];
+  runId?: string;
+  attemptId?: string;
 }) => invoke<SpawnResult>("pty_spawn_detached", opts);
 
 /** The tail of a PTY's raw output, escape sequences and all — the transcript of
@@ -2799,6 +2805,9 @@ export interface SessionDigest {
    *  a digest to a live terminal must also match this. Absent for pre-upgrade
    *  digests. */
   instance?: string;
+  /** Durable task binding inherited from CANOPY_RUN_ID/CANOPY_ATTEMPT_ID. */
+  run_id?: string;
+  attempt_id?: string;
   /** Directory the agent's resume must run in — claude files a conversation
    *  under its project root, not the directory the agent ran in. Derived in
    *  agents.rs; may differ from `cwd`. */
