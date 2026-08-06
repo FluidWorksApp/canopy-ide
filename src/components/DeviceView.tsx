@@ -43,7 +43,11 @@ interface DeviceViewProps {
   agentTargets: AgentTarget[];
   installed: Record<string, boolean>;
   onSendToAgent: (target: AgentTarget, text: string) => void;
-  onStartNew: (agentId: string, text: string, cwd: string | null) => void;
+  onStartNew: (
+    agentId: string,
+    text: string,
+    cwd: string | null,
+  ) => Promise<boolean>;
   /** This project's components. The chosen one resolves the SDK (its
    *  local.properties pins one) and is the codebase feedback names. */
   projects: { label: string; path: string }[];

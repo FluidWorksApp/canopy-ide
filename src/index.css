@@ -790,6 +790,36 @@ body,
   position: relative;
 }
 
+.fleet-launch-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  padding: 6px 10px 6px 12px;
+  color: var(--text);
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-xs);
+}
+
+.fleet-launch-note-degraded {
+  border-bottom-color: color-mix(in srgb, var(--warn) 50%, var(--border));
+}
+
+.fleet-launch-note-unusable {
+  border-bottom-color: color-mix(in srgb, var(--danger) 60%, var(--border));
+}
+
+.fleet-launch-note button {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
 .vibe-chat-placeholder {
   display: none;
 }
@@ -18563,6 +18593,89 @@ a.btn-sm {
 .agent-chip-active {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
+}
+
+.fleet-readout {
+  position: relative;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
+.fleet-readout table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-xs);
+}
+
+.fleet-readout th,
+.fleet-readout td {
+  padding: 7px 9px;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--border);
+}
+
+.fleet-readout tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.fleet-readout th {
+  color: var(--text-dim);
+  background: var(--bg-alt);
+  font-weight: 600;
+}
+
+.fleet-route-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.fleet-route-profile {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-faint);
+}
+
+.fleet-state {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+}
+
+.fleet-state-ready {
+  color: var(--ok);
+}
+
+.fleet-state-degraded {
+  color: var(--warn);
+}
+
+.fleet-state-unusable {
+  color: var(--danger);
+}
+
+.fleet-reasons {
+  color: var(--text-dim);
+}
+
+.fleet-readout-loading {
+  padding: 8px 9px;
+  color: var(--text-faint);
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-xs);
+}
+
+.fleet-readout-error {
+  padding: 8px 9px;
+  color: var(--danger);
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-xs);
 }
 
 .cli-bins {

@@ -60,9 +60,11 @@ import {
 } from "./icons";
 import {
   AGENT_CLIS,
+  AGENT_CLIS_CHANGED_EVENT,
   binName,
   BUILTIN_AGENT_CLIS,
   checkInstalledClis,
+  CLI_INSTALLS_CHANGED_EVENT,
   currentPlatform,
   customCliIssue,
   namesArguments,
@@ -72,6 +74,11 @@ import {
   type AgentCliDef,
   type CustomAgentCli,
 } from "../projects";
+import { FLEET_REASON_LABELS } from "../fleetState";
+import {
+  inspectFleetTable,
+  type FleetRouteSnapshot,
+} from "../fleetSnapshot";
 import {
   loginCommand,
   supportsProfiles,
@@ -698,6 +705,114 @@ function AgentBinaries({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function AgentFleetReadout() {
+  const [rows, setRows] = useState<FleetRouteSnapshot[]>([]);
+  const [profiles, setProfiles] = useState<ipc.AgentProfile[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const refreshSeq = useRef(0);
+
+  const refresh = useCallback(() => {
+    const seq = ++refreshSeq.current;
+    setLoading(true);
+    setError(null);
+    void Promise.all([checkInstalledClis(), ipc.profilesList()])
+      .then(([installed, nextProfiles]) =>
+        inspectFleetTable(AGENT_CLIS, nextProfiles, installed).then((nextRows) => ({
+          nextProfiles,
+          nextRows,
+        })),
+      )
+      .then(({ nextProfiles, nextRows }) => {
+        if (seq !== refreshSeq.current) return;
+        setProfiles(nextProfiles);
+        setRows(nextRows);
+      })
+      .catch((reason: unknown) => {
+        if (seq === refreshSeq.current) setError(String(reason));
+      })
+      .finally(() => {
+        if (seq === refreshSeq.current) setLoading(false);
+      });
+  }, []);
+
+  useEffect(refresh, [refresh]);
+  useEffect(() => {
+    window.addEventListener(PROFILE_CHANGE_EVENT, refresh);
+    window.addEventListener(AGENT_CLIS_CHANGED_EVENT, refresh);
+    window.addEventListener(CLI_INSTALLS_CHANGED_EVENT, refresh);
+    window.addEventListener("focus", refresh);
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void ipc.onIntegrationHealth(refresh).then((off) => {
+      if (disposed) off();
+      else unlisten = off;
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      refreshSeq.current += 1;
+      window.removeEventListener(PROFILE_CHANGE_EVENT, refresh);
+      window.removeEventListener(AGENT_CLIS_CHANGED_EVENT, refresh);
+      window.removeEventListener(CLI_INSTALLS_CHANGED_EVENT, refresh);
+      window.removeEventListener("focus", refresh);
+      unlisten?.();
+    };
+  }, [refresh]);
+
+  return (
+    <div className="fleet-readout">
+      <table>
+        <thead>
+          <tr>
+            <th>Route</th>
+            <th>State</th>
+            <th>Reasons</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={`${row.cli.id}:${row.profile}`}>
+              <td>
+                <span className="fleet-route-name">
+                  <AgentIcon id={row.cli.id} size={14} />
+                  {row.cli.name}
+                </span>
+                <span className="fleet-route-profile">
+                  {profiles.find((profile) => profile.id === row.profile)?.label ??
+                    row.profile}
+                </span>
+              </td>
+              <td>
+                <span className={`fleet-state fleet-state-${row.state.kind}`}>
+                  {row.state.kind}
+                </span>
+              </td>
+              <td className="fleet-reasons">
+                {row.state.reasons.length
+                  ? row.state.reasons
+                      .map((reason) => FLEET_REASON_LABELS[reason])
+                      .join(" · ")
+                  : "all checks ready"}
+              </td>
+            </tr>
+          ))}
+          {!loading && rows.length === 0 && (
+            <tr>
+              <td colSpan={3}>No agent routes found.</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+      {loading && <div className="fleet-readout-loading">Checking fleet…</div>}
+      {error && (
+        <div className="fleet-readout-error" role="alert">
+          Fleet check unavailable: {error}
+        </div>
+      )}
     </div>
   );
 }
@@ -1425,6 +1540,12 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
 
             {tab === "agents" && (
               <>
+                <Item
+                  name="Fleet readiness"
+                  desc="What can launch now, composed from install, account, plan, and integration signals."
+                >
+                  <AgentFleetReadout />
+                </Item>
                 <Item
                   name="Ask for attention"
                   desc="Control whether an agent can bring the project or tab it is working on to the front."
