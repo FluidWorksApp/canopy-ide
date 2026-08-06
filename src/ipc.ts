@@ -420,21 +420,44 @@ export const onAgentMessage = (
 ): Promise<UnlistenFn> =>
   listen<AgentMessageDelivery>("agent:message", (event) => cb(event.payload));
 
-/** One message an agent typed into another agent's session. */
+/** A file shared with a mesh message, by path — the reference, not the bytes. */
+export interface MeshItem {
+  /** "image" for formats a model can look at directly, else "file". */
+  kind: string;
+  path: string;
+  note?: string;
+}
+
+/** One agent-to-agent mesh message (mesh.rs). Kept across app runs. */
 export interface MeshMessage {
   id: string;
   /** The terminal it came from; null for the companion. */
   from_pty_id: number | null;
   from_cwd: string | null;
+  /** Which CLI each end was, and what its run was titled at send time. */
+  from_agent?: string | null;
+  from_task?: string | null;
   to_pty_id: number;
-  /** What was delivered — after flattening and sanitising, not what was
-   *  passed. The record is of the delivery. */
+  to_cwd?: string | null;
+  to_agent?: string | null;
+  to_task?: string | null;
+  /** The message as the sender wrote it. For a plain message_agent send this
+   *  is the sanitised delivered line; for a mesh send the full body, with the
+   *  typed notice in `delivered`. */
   text: string;
+  delivered?: string | null;
+  items?: MeshItem[];
+  /** The message this answers, by id. */
+  reply_to?: string | null;
+  /** A typed reference ({kind, id}) the history can be queried by. */
+  ref?: { kind: string; id: string } | null;
+  /** The app run that delivered it — pty ids only mean anything within one. */
+  instance?: string | null;
   at_ms: number;
   submitted: boolean;
 }
 
-/** Every agent-to-agent message this app run, newest last. */
+/** Every kept agent-to-agent message, oldest first. */
 export const contextMessages = () => invoke<MeshMessage[]>("context_messages");
 
 /** PNG (base64) of a rectangle of the app's own webview, via the webview's own

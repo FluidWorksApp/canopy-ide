@@ -24,6 +24,7 @@ mod instructions;
 mod lsp;
 mod mcp;
 mod mcp_client;
+mod mesh;
 mod notes;
 mod notify;
 mod portal;
