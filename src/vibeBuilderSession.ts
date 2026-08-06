@@ -9,6 +9,7 @@ import type { StructuredRunnerEvent } from "./structuredEvents";
 import type { StructuredRunnerLaunch } from "./structuredRunners";
 import {
   appendTaskEvent,
+  reserveAttempt,
   reserveTask,
   settleAttempt,
   startAttempt,
@@ -24,9 +25,11 @@ import { AGENT_CLIS, checkCliUpdates, checkInstalledClis } from "./projects";
 import { DEFAULT_PROFILE, launchProfile } from "./profiles";
 import {
   FAMILY_FOR_CLI,
+  failoverDecision,
   rankRoutes,
   resolveRoute,
   unresolvedRoute,
+  type AttemptOutcomeRecord,
   type ResolvedRoute,
   type RouteCandidate,
   type SelectedRoute,
@@ -53,6 +56,7 @@ const SAVE_CHECKPOINT = "Save this version";
 const HARNESS_VERSION = "vibe-mvp-1";
 const PROMPT_VERSION = "vibe-builder-1";
 const TOOL_POLICY_VERSION = "workspace-write-no-shell-1";
+const VIBE_ATTEMPT_CAP = 3;
 const ROUTE_VERSIONS = {
   harnessVersion: HARNESS_VERSION,
   promptVersion: PROMPT_VERSION,
@@ -136,6 +140,7 @@ export interface VibeBuilderSessionDeps {
     noOpenIncident: boolean;
   }): Promise<CheckpointReview>;
   commit(cwd: string, paths: string[], message: string): Promise<string>;
+  reserveAttempt: typeof reserveAttempt;
   /** Every route Canopy could launch this turn on, with its fleet state. */
   listRoutes(): Promise<RouteCandidate[]>;
   /** Installed version of a CLI, or null when it cannot be probed. */
@@ -570,6 +575,7 @@ export const DEFAULT_VIBE_BUILDER_DEPS: VibeBuilderSessionDeps = {
   reviewCheckpoint: reviewGitCheckpoint,
   commit: (cwd, paths, message) =>
     paths.length === 0 ? Promise.resolve("") : ipc.gitCommitPaths(cwd, message, paths),
+  reserveAttempt,
   listRoutes: listNativeRoutes,
   cliVersion: nativeCliVersion,
   now: () => Date.now(),
@@ -641,6 +647,14 @@ export class VibeBuilderSession implements BuilderSession {
   private serverIncidentKeys = new Set<string>();
   private unsettledServerAttempts = new Map<string, TaskAttemptSettlement>();
   private activeRoute: ResolvedRoute | null = null;
+  /** Every settled attempt on this run, so a signature that has failed on two
+   *  routes can be recognised as being about the task. */
+  private attemptHistory: AttemptOutcomeRecord[] = [];
+  /** The last thing the runner complained about, as failure evidence. */
+  private lastRunnerError = "";
+  /** The message being worked on, replayed verbatim onto a reseeded attempt. */
+  private currentGoal: string | null = null;
+  private attemptsUsed = 0;
   private options: VibeBuilderSessionOptions;
   private deps: VibeBuilderSessionDeps;
 
@@ -771,29 +785,12 @@ export class VibeBuilderSession implements BuilderSession {
       this.reservation = reservation;
       this.settled = false;
 
-      const launch: StructuredRunnerLaunch = {
-        bin: this.options.cliBin,
-        policy: {
-          systemPromptAppend:
-            `You are the Build-mode executor for ${this.options.projectName}. ` +
-            `Work only inside ${this.options.componentPath}. Use Edit, Write, Read, Grep and Glob; ` +
-            "do not use a shell. Explain outcomes in plain language. Canopy runs verification independently.",
-          permissionMode: "acceptEdits",
-          disallowedTools: ["Bash", "KillShell", "NotebookEdit"],
-          // The model the route asked for, actually applied — it becomes
-          // `--model`/`-m` at launch. Recording a requestedModel we never
-          // passed would make the attempt record fiction.
-          model: chosen.requestedModel ?? "",
-          sessionId: this.cliSessionId,
-          cwd: this.options.componentPath,
-          authority: "workspace-write",
-        },
-        env: [
-          ["CANOPY_VIBE", "1"],
-          ["CANOPY_RUN_ID", reservation.envelope.runId],
-          ["CANOPY_ATTEMPT_ID", reservation.attempt.attemptId],
-        ],
-      };
+      const launch = this.launchSpec(
+        reservation.envelope.runId,
+        reservation.attempt.attemptId,
+        chosen.requestedModel,
+        chosen.cli,
+      );
       try {
         await this.deps.startAttempt(reservation.attempt.attemptId);
         if (this.stopped) throw new Error("the builder session was closed during launch");
@@ -1025,6 +1022,13 @@ export class VibeBuilderSession implements BuilderSession {
       if (this.verifying) await this.verifying;
       if (this.stopped) throw new Error("the builder session is closed");
       this.pendingCheckpoint = null;
+      // Held so a reseeded attempt replays the same request verbatim. A
+      // failover that paraphrased the goal would be solving a different
+      // problem than the one that failed.
+      this.currentGoal = message;
+      this.attemptsUsed = 1;
+      this.attemptHistory = [];
+      this.lastRunnerError = "";
       const transport = await this.ensureStarted(message);
       if (this.stopped) throw new Error("the builder session is closed");
       const reservation = this.reservation;
@@ -1096,6 +1100,7 @@ export class VibeBuilderSession implements BuilderSession {
         }
         break;
       case "error":
+        this.lastRunnerError = event.message;
         this.runtimeIncidentOpen = true;
         this.incidentOpen = true;
         this.snapshot = {
@@ -1146,22 +1151,10 @@ export class VibeBuilderSession implements BuilderSession {
         return;
       case "exit":
         this.transport = null;
-        this.finishTurn?.();
-        this.finishTurn = null;
-        this.runtimeIncidentOpen = true;
-        this.incidentOpen = true;
-        this.snapshot = {
-          persona: { kind: "permission-stall" },
-          question: {
-            id: `runner-exit-${this.deps.now()}`,
-            kind: "question",
-            prompt: "The builder process stopped.",
-            detail: "Send another message to start a fresh managed attempt.",
-          },
-        };
-        void this.flushAssistant().finally(() =>
-          this.settle("failed", "route", "process-exit"),
-        );
+        // A process that stopped mid-turn is a failed attempt, not the end of
+        // the work. Whether to retry, move to another model, or stop is a
+        // decision about the evidence — see vibeFailover.
+        void this.flushAssistant().finally(() => void this.handleAttemptFailure());
         break;
       case "ready":
         if (this.snapshot.persona.kind === "turn-started") {
@@ -1329,6 +1322,168 @@ export class VibeBuilderSession implements BuilderSession {
     await this.finishAttempt(
       verdict.outcome === "verified" ? "completed" : "blocked",
     );
+  }
+
+  /** One launch spec for both the first attempt and any reseeded one, so a
+   *  retry cannot quietly run under different rules than the attempt it
+   *  replaces. */
+  private launchSpec(
+    runId: string,
+    attemptId: string,
+    model: string | null,
+    cli: string,
+  ): StructuredRunnerLaunch {
+    return {
+      bin: AGENT_CLIS.find((c) => c.id === cli)?.bin ?? this.options.cliBin,
+      policy: {
+        systemPromptAppend:
+          `You are the Build-mode executor for ${this.options.projectName}. ` +
+          `Work only inside ${this.options.componentPath}. Use Edit, Write, Read, Grep and Glob; ` +
+          "do not use a shell. Explain outcomes in plain language. Canopy runs verification independently.",
+        permissionMode: "acceptEdits",
+        disallowedTools: ["Bash", "KillShell", "NotebookEdit"],
+        // The model the route asked for, actually applied — it becomes
+        // `--model`/`-m` at launch. Recording a requestedModel we never passed
+        // would make the attempt record fiction.
+        model: model ?? "",
+        sessionId: this.cliSessionId,
+        cwd: this.options.componentPath,
+        authority: "workspace-write",
+      },
+      env: [
+        ["CANOPY_VIBE", "1"],
+        ["CANOPY_RUN_ID", runId],
+        ["CANOPY_ATTEMPT_ID", attemptId],
+      ],
+    };
+  }
+
+  /** An attempt ended badly. Classify it, let the failover policy decide
+   *  whether to retry here, move to another model, or stop — and say which,
+   *  out loud. A silent model switch is the same lie as a silent failure. */
+  private async handleAttemptFailure(): Promise<void> {
+    const reservation = this.reservation;
+    const route = this.activeRoute;
+    if (this.stopped || !reservation || !route) return;
+
+    const candidates = await this.deps.listRoutes().catch(() => []);
+    const { action, verdict } = failoverDecision({
+      evidence: { agent: route.cli, text: this.lastRunnerError },
+      history: this.attemptHistory,
+      current: { cli: route.cli, profileId: route.profileId },
+      candidates,
+      task: "build",
+      attemptsUsed: this.attemptsUsed,
+      attemptCap: VIBE_ATTEMPT_CAP,
+    });
+    this.attemptHistory.push({
+      route: `${route.cli}:${route.profileId}`,
+      verdict,
+    });
+    await this.deps
+      .appendEvent({
+        runId: reservation.envelope.runId,
+        attemptId: reservation.attempt.attemptId,
+        kind: "failover.decision",
+        code: action.kind,
+        source: "canopy",
+        confidence: "independent",
+        metadata: { verdict, reason: action.reason },
+        occurredAt: this.deps.now(),
+      })
+      .catch(() => {});
+
+    if (action.kind === "stop") {
+      this.finishTurn?.();
+      this.finishTurn = null;
+      this.runtimeIncidentOpen = true;
+      this.incidentOpen = true;
+      this.snapshot = {
+        persona: { kind: "permission-stall" },
+        question: {
+          id: `runner-exit-${this.deps.now()}`,
+          kind: "question",
+          prompt: action.narration,
+          detail: "Send another message to start a fresh managed attempt.",
+        },
+      };
+      this.publish({ kind: "reply", text: action.narration });
+      await this.settle("failed", verdict.class, verdict.signature ?? action.reason);
+      return;
+    }
+
+    // Retrying or switching. Say so before doing it, so nobody watches silence
+    // while a second model starts.
+    this.publish({ kind: "reply", text: action.narration });
+    await this.deps
+      .appendTranscript({
+        runId: reservation.envelope.runId,
+        attemptId: reservation.attempt.attemptId,
+        kind: "system",
+        body: action.narration,
+      })
+      .catch(() => {});
+    await this.settle("failed", verdict.class, verdict.signature ?? action.reason);
+    const switched = action.kind === "switch-route" ? action.to : null;
+    if (switched) {
+      const cliVersion = await this.deps.cliVersion(switched.cli).catch(() => null);
+      this.activeRoute = resolveRoute(switched, [switched], ROUTE_VERSIONS, cliVersion);
+    }
+    await this.reseed(reservation, switched);
+  }
+
+  /** Start a fresh attempt on the same run, linked to the one that failed.
+   *  `recoveryFromAttemptId` is the only thread joining them: it records that
+   *  this attempt exists because that one failed, without either attempt
+   *  claiming the other's evidence. */
+  private async reseed(
+    failed: TaskReservation,
+    switched: SelectedRoute | null,
+  ): Promise<void> {
+    const goal = this.currentGoal;
+    if (!goal || this.stopped) return;
+    const route = this.routeSnapshot();
+    try {
+      // A switched route is a different CLI, so the old session id means
+      // nothing to it; a same-route retry keeps its id and can resume.
+      if (switched) this.cliSessionId = this.deps.sessionId();
+      const attempt = await this.deps.reserveAttempt({
+        runId: failed.envelope.runId,
+        route,
+        recoveryFromAttemptId: failed.attempt.attemptId,
+      });
+      this.reservation = { envelope: failed.envelope, attempt };
+      this.settled = false;
+      this.attemptsUsed += 1;
+      await this.deps.startAttempt(attempt.attemptId);
+      const transport = await this.deps.runner.start(
+        attempt.attemptId,
+        route.cli,
+        this.launchSpec(
+          failed.envelope.runId,
+          attempt.attemptId,
+          route.requestedModel,
+          route.cli,
+        ),
+        { emit: (event) => this.onRunnerEvent(event, attempt.attemptId) },
+        { resume: !switched },
+      );
+      if (this.stopped) {
+        await transport.stop().catch(() => {});
+        return;
+      }
+      this.transport = transport;
+      this.lastRunnerError = "";
+      await transport.send(goal);
+    } catch (error) {
+      this.publish({
+        kind: "error",
+        message: `Could not start another attempt: ${String(error)}`,
+      });
+      this.finishTurn?.();
+      this.finishTurn = null;
+      await this.settle("failed", "route", "reseed-failed");
+    }
   }
 
   private async finishAttempt(

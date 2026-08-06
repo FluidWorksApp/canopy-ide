@@ -130,6 +130,11 @@ function harness(over: Partial<VibeBuilderSessionDeps> = {}) {
     })),
     reviewCheckpoint: vi.fn(async ({ verification }) => safeReview(verification)),
     commit: vi.fn(async () => "commit-1"),
+    reserveAttempt: vi.fn(async () => ({
+      ...reservation().attempt,
+      attemptId: "attempt-2",
+      ordinal: 2,
+    })),
     listRoutes: vi.fn(async () => [
       {
         cli: "claude",
@@ -163,7 +168,12 @@ function harness(over: Partial<VibeBuilderSessionDeps> = {}) {
     },
     deps,
   );
+  const replies: string[] = [];
+  session.events$.subscribe((event) => {
+    if (event.kind === "reply") replies.push(event.text);
+  });
   return {
+    replies,
     session,
     deps,
     order,
@@ -302,6 +312,58 @@ describe("VibeBuilderSession", () => {
     );
   });
 
+  it("moves to another model when the route runs out of quota, and says so", async () => {
+    const h = harness({
+      listRoutes: vi.fn(async () => [
+        {
+          cli: "claude",
+          profileId: "default",
+          family: "anthropic" as const,
+          state: { agent: "claude", profile: "default", kind: "ready" as const, reasons: [] },
+          choices: [{ id: "claude-fable-5", label: "Fable 5", hint: "" }],
+        },
+        {
+          cli: "codex",
+          profileId: "default",
+          family: "openai" as const,
+          state: { agent: "codex", profile: "default", kind: "ready" as const, reasons: [] },
+          choices: [{ id: "gpt-5.6-sol", label: "GPT-5.6", hint: "" }],
+        },
+      ]),
+    });
+    await h.session.send("Make the button blue");
+    h.emit({ kind: "error", message: "usage limit reached for your plan" });
+    h.emit({ kind: "exit" });
+
+    await vi.waitFor(() => expect(h.deps.reserveAttempt).toHaveBeenCalled());
+    // The new attempt is linked to the one that failed, and to nothing else.
+    expect(h.deps.reserveAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recoveryFromAttemptId: "attempt-1",
+        route: expect.objectContaining({ cli: "codex" }),
+      }),
+    );
+    expect(h.deps.settleAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({ state: "failed", failureClass: "route" }),
+    );
+    expect(h.replies.join(" ")).toMatch(/Claude .*quota.*switched to Codex/i);
+  });
+
+  it("does not switch when the failure is about the task", async () => {
+    const h = harness();
+    await h.session.send("Make the button blue");
+    h.emit({ kind: "error", message: "prompt is too long: context window exceeded" });
+    h.emit({ kind: "exit" });
+
+    await vi.waitFor(() =>
+      expect(h.deps.settleAttempt).toHaveBeenCalledWith(
+        expect.objectContaining({ state: "failed", failureClass: "task" }),
+      ),
+    );
+    expect(h.deps.reserveAttempt).not.toHaveBeenCalled();
+    expect(h.replies.join(" ")).toMatch(/not the model/i);
+  });
+
   it("reserves and starts the durable attempt before spawning", async () => {
     const h = harness();
     await h.session.send("Make the button blue");
@@ -435,10 +497,13 @@ describe("VibeBuilderSession", () => {
       expect.objectContaining({ kind: "watchdog-incident" }),
     );
 
-    // A fresh attempt takes over before the retry lands.
+    // A fresh attempt takes over before the retry lands. An unexplained exit
+    // now reseeds the turn rather than ending it, so the later attempt becomes
+    // current on its own — which is exactly the drift this test guards against.
     h.emit({ kind: "exit" });
-    await h.session.send("Try again");
-    expect(h.deps.startAttempt).toHaveBeenCalledWith("attempt-2");
+    await vi.waitFor(() =>
+      expect(h.deps.startAttempt).toHaveBeenCalledWith("attempt-2"),
+    );
 
     writable = true;
     await expect(h.session.reportServerIncident(incident)).resolves.toBe(

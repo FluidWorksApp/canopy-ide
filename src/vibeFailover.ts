@@ -181,6 +181,10 @@ export type FailoverAction =
     }
   | { kind: "stop"; reason: string; narration: string };
 
+/** An attempt outcome as the session records it, re-exported so callers keep
+ *  one vocabulary for route history. */
+export type AttemptOutcomeRecord = AttemptOutcome;
+
 export interface FailoverInput {
   /** The failure text from the attempt that just ended. */
   evidence: { agent?: string; text: string };
