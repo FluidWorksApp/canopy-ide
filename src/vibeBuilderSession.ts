@@ -75,6 +75,9 @@ import type {
   BuilderSession,
   BuilderSessionState,
 } from "./vibeBuilderSessionTypes";
+// The one place a git porcelain code is read. See shared/gitStatus.ts for why
+// "absent from status" is not an answer about a file.
+import { isWithin, resolveEntryPath, trackedChanges } from "../shared/gitStatus";
 
 const SAVE_CHECKPOINT = "Save this version";
 /** Sentinels a question's own buttons send back. Deliberately not words anyone
@@ -542,15 +545,9 @@ export function scopedGitEntries(
   repoRoot: string,
   componentPath: string,
 ): ipc.GitStatusResult["entries"] {
-  const root = normalized(repoRoot);
-  const component = normalized(componentPath);
-  return entries.filter((entry) => {
-    if (entry.status === "!!") return false;
-    const path = /^(?:[A-Za-z]:\/|\/)/.test(normalized(entry.path))
-      ? normalized(entry.path)
-      : `${root}/${normalized(entry.path)}`;
-    return path === component || path.startsWith(`${component}/`);
-  });
+  return trackedChanges(entries).filter((entry) =>
+    isWithin(resolveEntryPath(entry.path, repoRoot), componentPath),
+  );
 }
 
 async function reviewGitCheckpoint(args: {
