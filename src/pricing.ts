@@ -28,7 +28,9 @@ const PRICING: [RegExp, { in: number; out: number }][] = [
   [/-luna/i, { in: 0.2, out: 1.2 }],
   [/gpt-5\.?[56]/i, { in: 5, out: 30 }],
   [/gpt-5/i, { in: 1.25, out: 10 }],
-  [/o4|o3|o1/i, { in: 2, out: 8 }],
+  [/o1/i, { in: 15, out: 60 }],
+  [/o4-mini/i, { in: 1.1, out: 4.4 }],
+  [/o4|o3/i, { in: 2, out: 8 }],
   [/gpt-4\.1/i, { in: 2, out: 8 }],
   [/gpt-4o/i, { in: 2.5, out: 10 }],
   // Google (Gemini / Antigravity) — verified against ai.google.dev pricing on
