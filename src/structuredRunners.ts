@@ -4,6 +4,9 @@ export type StructuredRunnerAuthority = "read-only" | "workspace-write";
 export interface StructuredRunnerPolicy {
   systemPromptAppend: string;
   permissionMode: string;
+  /** Exact tools an owned non-interactive task may use without waiting for a
+   * permission prompt nobody can answer. */
+  allowedTools?: readonly string[];
   disallowedTools: readonly string[];
   model: string;
   sessionId: string;
@@ -25,11 +28,14 @@ export interface StructuredRunner {
 }
 
 export function permissionArgs(
-  policy: Pick<StructuredRunnerPolicy, "permissionMode" | "disallowedTools">,
+  policy: Pick<StructuredRunnerPolicy, "permissionMode" | "allowedTools" | "disallowedTools">,
 ): string[] {
   return [
     ...(policy.permissionMode
       ? ["--permission-mode", policy.permissionMode]
+      : []),
+    ...(policy.allowedTools?.length
+      ? ["--allowedTools", ...policy.allowedTools]
       : []),
     ...(policy.disallowedTools.length
       ? ["--disallowedTools", ...policy.disallowedTools]

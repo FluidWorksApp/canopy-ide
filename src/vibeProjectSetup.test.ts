@@ -187,7 +187,7 @@ describe("setup identity materialization", () => {
     const result = materializeVibeSetup(project(), proposal());
     expect(result.componentIds).toEqual({ web: "cmp-web", api: "cmp-api" });
     expect(result.project.vibe).toMatchObject({
-      version: 2,
+      version: 1,
       componentId: "cmp-web",
       requiredProcesses: [
         { componentId: "cmp-web", runCommandId: expect.any(String) },
@@ -274,7 +274,14 @@ describe("bounded setup agent task", () => {
     expect(result).toMatchObject({ ok: true, attempts: 1 });
     expect(deps.launches[0]).toMatchObject({
       cli: "claude",
-      launch: { policy: { authority: "read-only", disallowedTools: expect.arrayContaining(["Bash", "Edit", "Write"]) } },
+      launch: { policy: {
+        authority: "read-only",
+        allowedTools: [
+          "mcp__canopy__canopy_project",
+          "mcp__canopy__canopy_component_files",
+        ],
+        disallowedTools: expect.arrayContaining(["Bash", "Edit", "Write"]),
+      } },
     });
     expect(deps.settlements).toContainEqual(expect.objectContaining({ state: "completed" }));
   });
@@ -355,7 +362,7 @@ describe("non-technical setup surface", () => {
     });
     await ready;
     expect(configured).toHaveLength(1);
-    expect(configured[0].vibe?.version).toBe(2);
+    expect(configured[0].vibe?.version).toBe(1);
   });
 
   it("stops plainly on invalid setup instead of falling back to a picker", async () => {

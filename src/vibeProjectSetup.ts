@@ -307,7 +307,7 @@ export function materializeVibeSetup(project: Project, proposal: VibeProjectSetu
       ...project,
       components,
       vibe: {
-        version: 2,
+        version: 1,
         enabled: project.vibe?.enabled ?? true,
         setupRevision: proposal.repositoryFingerprint,
         componentId: previewComponentId,
@@ -515,6 +515,10 @@ export async function runVibeProjectSetupTask(
       policy: {
         systemPromptAppend: vibeSetupSystemPrompt(input.repositoryFingerprint),
         permissionMode: "plan",
+        allowedTools: [
+          "mcp__canopy__canopy_project",
+          "mcp__canopy__canopy_component_files",
+        ],
         disallowedTools: ["Bash", "Edit", "Write", "NotebookEdit", "KillShell"],
         model: chosen.requestedModel ?? "",
         sessionId: deps.sessionId(),

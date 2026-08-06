@@ -1938,6 +1938,11 @@ export class VibeBuilderSession implements BuilderSession {
           `Work only inside ${this.options.componentPath}. Use Edit, Write, Read, Grep and Glob; ` +
           "do not use a shell. Explain outcomes in plain language. Canopy runs verification independently.",
         permissionMode: "acceptEdits",
+        allowedTools: [
+          "mcp__canopy__canopy_project",
+          "mcp__canopy__canopy_start_server",
+          "mcp__canopy__canopy_server_output",
+        ],
         disallowedTools: ["Bash", "KillShell", "NotebookEdit"],
         // The model the route asked for, actually applied — it becomes
         // `--model`/`-m` at launch. Recording a requestedModel we never passed

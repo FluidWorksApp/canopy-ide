@@ -19,6 +19,16 @@ const project = (over: Partial<Project> = {}): Project => ({
   ...over,
 });
 
+const configured = (componentId = "cmp-web", runCommandId = "run-dev"): Project["vibe"] => ({
+  version: 1,
+  enabled: true,
+  componentId,
+  runCommandId,
+  setupRevision: "repo-fingerprint",
+  requiredProcesses: [{ componentId, runCommandId }],
+  externalServices: [],
+});
+
 describe("resolveVibeTarget", () => {
   it("requires explicit IDs even when there is only one possible target", () => {
     expect(resolveVibeTarget(project())).toEqual({ kind: "needs-setup" });
@@ -29,12 +39,7 @@ describe("resolveVibeTarget", () => {
 
   it("resolves the exact configured component and run command", () => {
     const input = project({
-      vibe: {
-        version: 1,
-        enabled: true,
-        componentId: "cmp-web",
-        runCommandId: "run-dev",
-      },
+      vibe: configured(),
     });
 
     expect(resolveVibeTarget(input)).toEqual({
@@ -54,12 +59,7 @@ describe("resolveVibeTarget", () => {
           commands: [{ id: "run-dev", name: "Preview", command: "pnpm dev" }],
         },
       ],
-      vibe: {
-        version: 1,
-        enabled: true,
-        componentId: "cmp-web",
-        runCommandId: "run-dev",
-      },
+      vibe: configured(),
     });
 
     expect(resolveVibeTarget(renamed).kind).toBe("ready");
@@ -73,7 +73,7 @@ describe("resolveVibeTarget", () => {
     expect(
       resolveVibeTarget(
         project({
-          vibe: { version: 1, enabled: true, componentId, runCommandId },
+          vibe: configured(componentId, runCommandId),
         }),
       ),
     ).toEqual({ kind: "needs-setup" });
