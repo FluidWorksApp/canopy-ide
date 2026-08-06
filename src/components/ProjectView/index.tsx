@@ -114,6 +114,7 @@ import { CollabView } from "../CollabView";
 import { SharedProjectView } from "../SharedProjectView";
 import type { AgentCli } from "../../projects";
 import {
+  envReachesProfile,
   reloadPlan,
   reloading,
   reloadSummary,
@@ -121,6 +122,7 @@ import {
 } from "../../accountSwitch";
 import {
   activeProfile,
+  DEFAULT_PROFILE,
   launchEnv,
   launchEnvSync,
   launchProfile,
@@ -2266,8 +2268,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!cli || !item.action) continue;
       const env = launchEnvSync(cli.id);
       // No env means the account could not be resolved after all; leaving the
-      // agent where it is beats moving it somewhere we cannot name.
-      if (env.length === 0) continue;
+      // agent where it is beats moving it somewhere we cannot name. The default
+      // account is the exception: it carries no env by design.
+      if (!envReachesProfile(ask.profile, env)) continue;
       closeTabRef.current(item.agent.tabId);
       if (item.action.kind === "resume") markRestored(item.action.sessionId);
       addTerminal(
@@ -2277,7 +2280,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         cli.icon,
         false,
         env,
-        ask.profile,
+        ask.profile === DEFAULT_PROFILE ? undefined : ask.profile,
       );
     }
   }, [addTerminal]);

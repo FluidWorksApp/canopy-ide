@@ -89,6 +89,13 @@ export function reloadPlan(opts: {
 /** Agents the plan would actually touch. */
 export const reloading = (plan: ReloadItem[]) => plan.filter((p) => p.action);
 
+export function envReachesProfile(
+  profile: string,
+  env: [string, string][],
+): boolean {
+  return profile === DEFAULT_PROFILE || env.length > 0;
+}
+
 /** One line per agent for the confirmation dialog. */
 export function reloadSummary(item: ReloadItem): string {
   if (!item.action) {

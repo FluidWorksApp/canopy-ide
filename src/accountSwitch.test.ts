@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { reloadPlan, reloading, reloadSummary, type OpenAgent } from "./accountSwitch";
+import {
+  envReachesProfile,
+  reloadPlan,
+  reloading,
+  reloadSummary,
+  type OpenAgent,
+} from "./accountSwitch";
 import type { AccountStatus, SessionDigest } from "./ipc";
 import type { Restorable } from "./restorable";
 
@@ -135,6 +141,20 @@ describe("reloadPlan", () => {
       "single-account",
     ]);
     expect(reloading(plan).map((p) => p.agent.tabId)).toEqual(["a"]);
+  });
+});
+
+describe("envReachesProfile", () => {
+  /** Switching back to the default account resolves an empty env for every
+   *  CLI — that is its normal state, not a failed lookup, and treating it as
+   *  failure made "Reload as Default" a silent no-op. */
+  it("lets the default account through with no env", () => {
+    expect(envReachesProfile("default", [])).toBe(true);
+  });
+
+  it("treats an empty env on a named account as a failed lookup", () => {
+    expect(envReachesProfile("work", [])).toBe(false);
+    expect(envReachesProfile("work", [["CLAUDE_CONFIG_DIR", "/x"]])).toBe(true);
   });
 });
 
