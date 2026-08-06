@@ -80,7 +80,7 @@ function harness(initial: BuilderSessionState) {
 const idle = (): BuilderSessionState => ({ persona: { kind: "idle" } });
 
 describe("VibeBuilderPane", () => {
-  it("renders streamed prose and one collapsed activity card per tool event", () => {
+  it("renders consecutive tool events as one latest-tool row with a count", () => {
     const h = harness(idle());
     render(<VibeBuilderPane session={h.session} />);
 
@@ -94,14 +94,29 @@ describe("VibeBuilderPane", () => {
 
     expect(screen.getByText("I added the checkout page.")).toBeTruthy();
     const cards = document.querySelectorAll(".vibe-builder-activity");
-    expect(cards).toHaveLength(2);
-    const read = screen.getByRole("button", { name: "Read" });
-    expect(read.getAttribute("aria-expanded")).toBe("false");
+    expect(cards).toHaveLength(1);
+    expect(document.querySelectorAll(".companion-tool")).toHaveLength(0);
+    const row = screen.getByRole("button", { name: /canopy_browser_snapshot/ });
+    expect(row.getAttribute("aria-expanded")).toBe("false");
+    expect(within(row).getByText("+1")).toBeTruthy();
     expect(screen.queryByText("src/Checkout.tsx")).toBeNull();
 
-    fireEvent.click(read);
-    expect(read.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(row);
+    expect(row.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("src/Checkout.tsx")).toBeTruthy();
+    expect(document.querySelectorAll(".companion-tool")).toHaveLength(2);
+  });
+
+  it("starts a new activity row after assistant prose resumes", () => {
+    const h = harness(idle());
+    render(<VibeBuilderPane session={h.session} />);
+    act(() => {
+      h.emit({ kind: "tool", name: "Glob" });
+      h.emit({ kind: "tool", name: "Grep" });
+      h.emit({ kind: "delta", text: "I found it." });
+      h.emit({ kind: "tool", name: "Edit" });
+    });
+    expect(document.querySelectorAll(".vibe-builder-activity")).toHaveLength(2);
   });
 
   it("sends from the plain input row and shows the local user turn", () => {

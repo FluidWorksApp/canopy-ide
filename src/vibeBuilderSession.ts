@@ -328,12 +328,13 @@ export function scopedGitEntries(
 ): ipc.GitStatusResult["entries"] {
   const root = normalized(repoRoot);
   const component = normalized(componentPath);
-  const prefix = component === root ? "" : `${component.slice(root.length).replace(/^\//, "")}/`;
-  return entries.filter(
-    (entry) =>
-      entry.status !== "!!" &&
-      (!prefix || entry.path === prefix.slice(0, -1) || entry.path.startsWith(prefix)),
-  );
+  return entries.filter((entry) => {
+    if (entry.status === "!!") return false;
+    const path = /^(?:[A-Za-z]:\/|\/)/.test(normalized(entry.path))
+      ? normalized(entry.path)
+      : `${root}/${normalized(entry.path)}`;
+    return path === component || path.startsWith(`${component}/`);
+  });
 }
 
 async function reviewGitCheckpoint(args: {
@@ -656,14 +657,23 @@ export class VibeBuilderSession implements BuilderSession {
       if (!reservation) throw new Error("the builder task was not reserved");
       this.incidentOpen = false;
       this.snapshot = { persona: { kind: "turn-started" }, question: null };
-      await this.persist(() =>
-        this.deps.appendTranscript({
-          runId: reservation.envelope.runId,
-          attemptId: reservation.attempt.attemptId,
-          kind: "user",
-          body: message,
-        }),
-      );
+      try {
+        await this.persist(() =>
+          this.deps.appendTranscript({
+            runId: reservation.envelope.runId,
+            attemptId: reservation.attempt.attemptId,
+            kind: "user",
+            body: message,
+          }),
+        );
+      } catch (error) {
+        await this.finishAttempt(
+          "failed",
+          "persistence",
+          "transcript-write-failed",
+        );
+        throw error;
+      }
       await this.deps.beginBrowserTurn(this.options.previewTabId());
       const completed = new Promise<void>((resolve) => {
         this.finishTurn = resolve;
@@ -1016,15 +1026,16 @@ export class VibeBuilderSession implements BuilderSession {
     failureCode?: string,
   ): Promise<void> {
     if (this.settled || !this.reservation) return;
-    this.settled = true;
-    await this.deps
+    const settled = await this.deps
       .settleAttempt({
         attemptId: this.reservation.attempt.attemptId,
         state,
         failureClass,
         failureCode,
       })
-      .catch(() => {});
+      .then(() => true)
+      .catch(() => false);
+    if (settled) this.settled = true;
   }
 
   async stop(): Promise<void> {

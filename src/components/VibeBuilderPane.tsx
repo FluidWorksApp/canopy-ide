@@ -16,7 +16,12 @@ import { Mascot } from "./Mascot";
 type BuilderItem =
   | { id: string; kind: "you"; text: string }
   | { id: string; kind: "ash"; text: string }
-  | { id: string; kind: "activity"; name: string; detail?: string; open: boolean }
+  | {
+      id: string;
+      kind: "activity";
+      tools: { name: string; detail?: string }[];
+      open: boolean;
+    }
   | { id: string; kind: "error"; text: string };
 
 interface BuilderView {
@@ -110,13 +115,23 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
             openReplyId = null;
             break;
           case "tool":
-            items.push({
-              id: nextId(),
-              kind: "activity",
-              name: event.name,
-              detail: event.detail,
-              open: false,
-            });
+            if (items[items.length - 1]?.kind === "activity") {
+              const held = items[items.length - 1];
+              if (held.kind === "activity") {
+                items[items.length - 1] = {
+                  ...held,
+                  tools: [...held.tools, { name: event.name, detail: event.detail }],
+                  open: false,
+                };
+              }
+            } else {
+              items.push({
+                id: nextId(),
+                kind: "activity",
+                tools: [{ name: event.name, detail: event.detail }],
+                open: false,
+              });
+            }
             openReplyId = null;
             break;
           case "error":
@@ -253,6 +268,8 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
         )}
         {view.items.map((item) => {
           if (item.kind === "activity") {
+            const latest = item.tools[item.tools.length - 1]!;
+            const before = item.tools.length - 1;
             return (
               <div className="vibe-builder-activity companion-trail" key={item.id}>
                 <button
@@ -264,11 +281,27 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
                   <span className="companion-trail-mark" aria-hidden>
                     {item.open ? "-" : "+"}
                   </span>
-                  <span className="companion-trail-name">{item.name}</span>
+                  <span className="companion-trail-name">{latest.name}</span>
+                  {latest.detail && (
+                    <span className="companion-trail-detail">{latest.detail}</span>
+                  )}
+                  {before > 0 && (
+                    <span className="companion-trail-count">+{before}</span>
+                  )}
                 </button>
                 {item.open && (
-                  <div className="vibe-builder-activity-detail companion-tool">
-                    {item.detail || "No additional detail."}
+                  <div className="vibe-builder-activity-detail companion-trail-all">
+                    {item.tools.map((tool, index) => (
+                      <span
+                        className="companion-tool"
+                        key={`${tool.name}-${index}`}
+                      >
+                        {tool.name}
+                        {tool.detail && (
+                          <span className="companion-tool-detail">{tool.detail}</span>
+                        )}
+                      </span>
+                    ))}
                   </div>
                 )}
               </div>

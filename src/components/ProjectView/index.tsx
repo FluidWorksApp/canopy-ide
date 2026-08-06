@@ -8515,15 +8515,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const vibePreviewIdRef = useRef<string | null>(null);
   vibePreviewIdRef.current = vibePreview?.id ?? null;
   const claudeBin = AGENT_CLIS.find((cli) => cli.id === "claude")?.bin ?? "claude";
+  const vibeComponentId = vibeComponent?.id ?? null;
   const vibeComponentLabel = vibeComponent?.label ?? null;
   const vibeComponentPath = vibeComponent?.path ?? null;
   const vibeSession = useMemo(
     () =>
-      vibeComponentLabel && vibeComponentPath
+      vibeComponentId && vibeComponentLabel && vibeComponentPath
         ? createVibeBuilderSession({
             projectId: project.id,
             projectName: project.name,
-            componentId: vibeComponentLabel,
+            componentId: vibeComponentId,
             componentPath: vibeComponentPath,
             cliBin: claudeBin,
             checkCommand: vibeCheck?.command ?? null,
@@ -8533,6 +8534,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [
       project.id,
       project.name,
+      vibeComponentId,
       vibeComponentLabel,
       vibeComponentPath,
       vibeCheck?.command,
