@@ -354,7 +354,7 @@ import { AgentBrowserPip, pipOwnerVisible } from "../AgentBrowserPip";
 import { BROWSER_INPUT_EVENT, PreviewView } from "../PreviewView";
 import DeviceView from "../DeviceView";
 import type { PreviewServer } from "../../preview";
-import { dispatchBrowserOp } from "../../previewAgent";
+import { dispatchBrowserOp, forgetBrowserTarget } from "../../previewAgent";
 import { suppressBrowserViewsOver, useBrowserEngine } from "../../browserHost";
 import { OPEN_URL_EVENT, type OpenUrlDetail } from "../../links";
 import { resolveGitLink } from "../../gitLinks";
@@ -5208,6 +5208,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // once here covers a finished task and an abandoned one alike. recordTaskEnd
     // ignores a run that already settled, so "stopped" can't clobber "done".
     const closingTab = tabsRef.current.find((t) => t.id === id);
+    if (closingTab?.type === "preview") forgetBrowserTarget(id);
     if (
       origin === "user" &&
       closingTab?.type === "terminal" &&

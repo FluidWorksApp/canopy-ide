@@ -19,6 +19,7 @@ import {
   shouldPrompt,
 } from "../branchSync";
 import { fmtTokens } from "../format";
+import { setBounded } from "../boundedMap";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
 import { chipText, planFor, planTone, tooltip } from "../planUsage";
@@ -88,6 +89,7 @@ const TRANSCRIPT_STATS = new Map<string, ipc.ClaudeSessionStats>();
 /** Same, per store-backed session id (opencode) — the tray for a CLI with no
  *  transcript reads its numbers out of the CLI's own store instead. */
 const STORE_STATS = new Map<string, ipc.StoreSessionStats>();
+const SESSION_STATS_CACHE_LIMIT = 128;
 
 interface StatusBarProps {
   roots: string[];
@@ -574,7 +576,7 @@ export const StatusBar = memo(function StatusBar({
       void ipc
         .claudeSessionStats(transcript)
         .then((s) => {
-          TRANSCRIPT_STATS.set(transcript, s);
+          setBounded(TRANSCRIPT_STATS, transcript, s, SESSION_STATS_CACHE_LIMIT);
           if (!cancelled) setStats(s);
         })
         .catch(() => {});
@@ -604,7 +606,7 @@ export const StatusBar = memo(function StatusBar({
         .opencodeSessionStats(storeSessionId)
         .then((s) => {
           if (!s) return;
-          STORE_STATS.set(storeSessionId, s);
+          setBounded(STORE_STATS, storeSessionId, s, SESSION_STATS_CACHE_LIMIT);
           if (!cancelled) setStoreStats(s);
         })
         .catch(() => {});
@@ -852,6 +854,7 @@ export const StatusBar = memo(function StatusBar({
             title={withLoadNote(
               `canopy: ${app.procs} process${app.procs === 1 ? "" : "es"} — ` +
                 `Rust core, language servers, terminals and everything they spawned. ` +
+                `Memory is charged physical footprint on macOS (resident memory elsewhere). ` +
                 `Click for the per-project breakdown.\n\n` +
                 `Does not include the WebView: macOS runs it in system-owned WebKit ` +
                 `processes parented to launchd, which can't be attributed back to us.`,

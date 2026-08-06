@@ -16,7 +16,7 @@ beforeEach(() => {
 describe("getSettings / updateSettings", () => {
   it("returns defaults when nothing is stored", () => {
     const s = getSettings();
-    expect(s.scrollback).toBe(10_000);
+    expect(s.scrollback).toBe(5_000);
     expect(s.theme).toBe("gotham");
     expect(s.trackerKeys).toEqual({});
     expect(s.tabSwitchMode).toBe("recent");
@@ -59,7 +59,7 @@ describe("getSettings / updateSettings", () => {
 
   it("falls back to defaults on corrupt stored JSON", () => {
     localStorage.setItem("canopy.settings", "{not json");
-    expect(getSettings().scrollback).toBe(10_000);
+    expect(getSettings().scrollback).toBe(5_000);
   });
 
   it("migrates the former default combo and reserved Command trigger", () => {
