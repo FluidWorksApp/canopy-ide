@@ -6,8 +6,9 @@
 // One model is installed by default — NVIDIA Parakeet TDT 0.6B v3, multilingual
 // — but the registry below offers alternatives (SenseVoice for CJK languages,
 // Moonshine for fast English). Each is a tarball fetched on demand into
-// ~/.canopy/models/ and loaded lazily on first use, then kept resident. Users
-// who never press the shortcut pay nothing.
+// ~/.canopy/models/ and loaded lazily on first use, then kept warm briefly for
+// reuse before an idle timer releases it. Users who never press the shortcut
+// pay nothing.
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -99,6 +100,10 @@ const TARGET_RATE: u32 = 16_000;
 // Bound the capture buffer: 10 minutes of speech at 48 kHz mono f32 is
 // ~115 MB. Past the cap the stream keeps running but stops accumulating.
 const MAX_SECONDS: u32 = 600;
+// Loading the default model takes seconds, so keep it warm across a short burst
+// of dictations. After that, hundreds of MB of ONNX weights are a poor idle
+// trade for saving the next one-time load.
+const MODEL_IDLE_EVICT_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 // How far either side of a chunk boundary to hunt for the quietest frame, so
 // splits land in a pause rather than mid-word.
@@ -124,8 +129,8 @@ fn find_def(id: &str) -> Result<&'static ModelDef, String> {
         .ok_or_else(|| format!("Unknown dictation model: {id}"))
 }
 
-#[derive(Default)]
-pub struct DictationManager(Mutex<Inner>);
+#[derive(Clone, Default)]
+pub struct DictationManager(Arc<Mutex<Inner>>);
 
 /// The loaded model, shared rather than owned, because the streaming preview
 /// decodes on its own thread while the manager lock has to stay free for
@@ -141,6 +146,48 @@ struct Inner {
     recording: Option<Recording>,
     downloading: Option<String>,
     streaming: Option<StreamHandle>,
+    /// Incremented whenever a new use begins. An older idle timer may only
+    /// evict the model if this still matches the epoch it was scheduled for.
+    model_use_epoch: u64,
+}
+
+fn can_idle_evict(
+    scheduled_epoch: u64,
+    current_epoch: u64,
+    recording: bool,
+    streaming: bool,
+) -> bool {
+    scheduled_epoch == current_epoch && !recording && !streaming
+}
+
+fn begin_model_use(state: &DictationManager) {
+    let mut inner = state.0.lock().unwrap();
+    inner.model_use_epoch = inner.model_use_epoch.wrapping_add(1);
+}
+
+fn schedule_idle_model_evict(state: &DictationManager) {
+    let state = state.clone();
+    let scheduled_epoch = state.0.lock().unwrap().model_use_epoch;
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(MODEL_IDLE_EVICT_AFTER).await;
+        let mut inner = state.0.lock().unwrap();
+        if !can_idle_evict(
+            scheduled_epoch,
+            inner.model_use_epoch,
+            inner.recording.is_some(),
+            inner.streaming.is_some(),
+        ) {
+            return;
+        }
+        let loaded = inner.loaded_model.take();
+        if loaded.is_some() {
+            *inner.engine.lock().unwrap() = None;
+            log::info!(
+                "dictation: released idle voice model {}",
+                loaded.as_deref().unwrap_or("unknown")
+            );
+        }
+    });
 }
 
 struct Recording {
@@ -725,6 +772,7 @@ pub fn dictation_delete_model(
         if inner.loaded_model.as_deref() == Some(def.id) {
             *inner.engine.lock().unwrap() = None;
             inner.loaded_model = None;
+            inner.model_use_epoch = inner.model_use_epoch.wrapping_add(1);
         }
     }
     if dir.exists() {
@@ -759,7 +807,9 @@ pub async fn dictation_start(
         spawn_download(app, &state, def);
         return Ok("downloading".into());
     }
-    // Load (or switch) the model off the main thread, then keep it resident.
+    begin_model_use(&state);
+    // Load (or switch) the model off the main thread, then keep it warm until
+    // the idle eviction scheduled by stop/cancel.
     let need_load = {
         let inner = state.0.lock().unwrap();
         inner.loaded_model.as_deref() != Some(def.id)
@@ -774,16 +824,23 @@ pub async fn dictation_start(
         // wait so a stuck load surfaces as an error instead of hanging.
         emit_progress(&app, def.id, "load", 0.0, None);
         let load = tauri::async_runtime::spawn_blocking(move || load_engine(def));
-        let engine = match tokio::time::timeout(std::time::Duration::from_secs(90), load).await {
-            Ok(joined) => joined.map_err(|e| e.to_string())??,
+        let loaded = match tokio::time::timeout(std::time::Duration::from_secs(90), load).await {
+            Ok(joined) => joined.map_err(|e| e.to_string()).and_then(|result| result),
             // The blocking load can't be cancelled, so it runs on to completion
             // and is dropped; the user gets an actionable error either way.
-            Err(_) => {
-                return Err(
-                    "Loading the voice model timed out — the model files may be corrupt. \
+            Err(_) => Err(
+                "Loading the voice model timed out — the model files may be corrupt. \
                      Remove and re-download the model in Settings → Dictation."
-                        .into(),
-                );
+                    .into(),
+            ),
+        };
+        let engine = match loaded {
+            Ok(engine) => engine,
+            Err(error) => {
+                // `begin_model_use` invalidated the preceding idle timer. If a
+                // model switch failed, the prior engine can still be resident.
+                schedule_idle_model_evict(&state);
+                return Err(error);
             }
         };
         let mut inner = state.0.lock().unwrap();
@@ -800,6 +857,7 @@ pub async fn dictation_start(
         Err(e) => {
             // A mic that never opened must not leave the speakers muted.
             crate::sysaudio::restore();
+            schedule_idle_model_evict(&state);
             return Err(e);
         }
     };
@@ -900,6 +958,10 @@ pub async fn dictation_stop(
         .recording
         .take()
         .ok_or("Not recording")?;
+    // The timer is invalidated by the next dictation start. Schedule before
+    // decoding so every early return (empty mic, silence, no speech) still
+    // releases the model eventually.
+    schedule_idle_model_evict(&state);
     rec.stop.store(true, Ordering::Relaxed);
     let samples = tauri::async_runtime::spawn_blocking(move || {
         let _ = rec.join.join();
@@ -1001,6 +1063,7 @@ pub fn dictation_cancel(state: tauri::State<'_, DictationManager>) {
         // The capture thread notices within one 30ms tick and exits; nothing
         // to join for — the samples are dropped with the handle.
     }
+    schedule_idle_model_evict(&state);
 }
 
 /// Whether this build can run dictation. Reaching this compile unit means the
@@ -1014,6 +1077,14 @@ pub fn dictation_supported() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_model_evict_requires_the_same_inactive_use_epoch() {
+        assert!(can_idle_evict(7, 7, false, false));
+        assert!(!can_idle_evict(7, 8, false, false));
+        assert!(!can_idle_evict(7, 7, true, false));
+        assert!(!can_idle_evict(7, 7, false, true));
+    }
 
     /// A chunk runs to its target plus the split-search window plus padding on
     /// both sides, and that worst case is what the engine actually sees.

@@ -117,7 +117,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     const buf = term.buffer.active;
     const lines: string[] = [];
     // Walk backwards and stop once we have enough: the scrollback is up to
-    // `scrollback` rows (10k by default) and a finished task only needs its
+    // `scrollback` rows (5k by default) and a finished task only needs its
     // ending, so reading the whole buffer to throw most of it away would be
     // the expensive way round.
     let chars = 0;

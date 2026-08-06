@@ -88,17 +88,97 @@ pub struct MemoryPressure {
 
 /// One reading of host memory, as a level. Pure of any process state, so the
 /// thresholds are unit-testable. `available` is what the kernel could hand to
-/// a new allocation (free + inactive/cached); `free` is the truly idle pages.
-pub fn pressure_level(total_bytes: u64, available_bytes: u64, free_bytes: u64) -> u8 {
+/// a new allocation (free + inactive/cached). Truly idle pages are deliberately
+/// not a signal: macOS keeps that pool tiny even when most RAM is reclaimable.
+pub fn pressure_level(total_bytes: u64, available_bytes: u64) -> u8 {
     let total = total_bytes.max(1) as f64;
     let available_frac = available_bytes as f64 / total;
-    let free_frac = free_bytes as f64 / total;
-    if available_frac < 0.05 || free_frac < 0.02 {
+    if available_frac < 0.05 {
         MEM_CRIT
-    } else if available_frac < 0.12 || free_frac < 0.05 {
+    } else if available_frac < 0.12 {
         MEM_WARN
     } else {
         MEM_OK
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HostMemorySample {
+    total_bytes: u64,
+    available_bytes: u64,
+    used_bytes: u64,
+    free_bytes: u64,
+}
+
+fn sysinfo_memory(sys: &mut System) -> HostMemorySample {
+    sys.refresh_memory();
+    HostMemorySample {
+        total_bytes: sys.total_memory(),
+        available_bytes: sys.available_memory(),
+        used_bytes: sys.used_memory(),
+        free_bytes: sys.free_memory(),
+    }
+}
+
+/// sysinfo 0.33 subtracts every compressed page from free + inactive on macOS.
+/// On a healthy machine with a warm compressor that can saturate to zero, even
+/// though the inactive/file-backed pages remain reclaimable. Read the same Mach
+/// counters directly and keep compressed pages out of the available-page sum.
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // libc exposes the SDK call we need; mach2 would duplicate bindings.
+fn host_memory(sys: &mut System) -> HostMemorySample {
+    let fallback = sysinfo_memory(sys);
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return fallback;
+    }
+
+    let mut stats = unsafe { std::mem::zeroed::<libc::vm_statistics64>() };
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    let result = unsafe {
+        // SAFETY: `stats` is the exact output structure required by
+        // HOST_VM_INFO64 and `count` is initialized to its published size.
+        libc::host_statistics64(
+            libc::mach_host_self(),
+            libc::HOST_VM_INFO64,
+            &mut stats as *mut libc::vm_statistics64 as *mut _,
+            &mut count,
+        )
+    };
+    if result != libc::KERN_SUCCESS {
+        return fallback;
+    }
+
+    let page_size = page_size as u64;
+    // Apple documents speculative pages as already included in free_count.
+    let free_pages = u64::from(stats.free_count).saturating_sub(u64::from(stats.speculative_count));
+    let available_pages = u64::from(stats.free_count)
+        .saturating_add(u64::from(stats.inactive_count))
+        .saturating_add(u64::from(stats.purgeable_count));
+    let available_bytes = available_pages
+        .saturating_mul(page_size)
+        .min(fallback.total_bytes);
+    HostMemorySample {
+        total_bytes: fallback.total_bytes,
+        available_bytes,
+        used_bytes: fallback.total_bytes.saturating_sub(available_bytes),
+        free_bytes: free_pages.saturating_mul(page_size),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn host_memory(sys: &mut System) -> HostMemorySample {
+    sysinfo_memory(sys)
+}
+
+fn memory_pressure(sys: &mut System) -> MemoryPressure {
+    let sample = host_memory(sys);
+    MemoryPressure {
+        level: pressure_level(sample.total_bytes, sample.available_bytes),
+        total_bytes: sample.total_bytes,
+        available_bytes: sample.available_bytes,
+        used_bytes: sample.used_bytes,
+        free_bytes: sample.free_bytes,
     }
 }
 
@@ -193,18 +273,7 @@ fn start_memory_watchdog(app: AppHandle) {
             let mut last: u8 = MEM_OK;
             loop {
                 std::thread::sleep(MEM_POLL_EVERY);
-                sys.refresh_memory();
-                let p = MemoryPressure {
-                    level: pressure_level(
-                        sys.total_memory(),
-                        sys.available_memory(),
-                        sys.free_memory(),
-                    ),
-                    total_bytes: sys.total_memory(),
-                    available_bytes: sys.available_memory(),
-                    used_bytes: sys.used_memory(),
-                    free_bytes: sys.free_memory(),
-                };
+                let p = memory_pressure(&mut sys);
                 if p.level != last {
                     last = p.level;
                     if p.level >= MEM_WARN {
@@ -228,18 +297,7 @@ fn start_memory_watchdog(app: AppHandle) {
 #[tauri::command]
 pub fn memory_info() -> MemoryPressure {
     let mut sys = System::new();
-    sys.refresh_memory();
-    MemoryPressure {
-        level: pressure_level(
-            sys.total_memory(),
-            sys.available_memory(),
-            sys.free_memory(),
-        ),
-        total_bytes: sys.total_memory(),
-        available_bytes: sys.available_memory(),
-        used_bytes: sys.used_memory(),
-        free_bytes: sys.free_memory(),
-    }
+    memory_pressure(&mut sys)
 }
 
 #[cfg(test)]
@@ -249,17 +307,29 @@ mod tests {
     #[test]
     fn pressure_level_thresholds() {
         // 50% available: fine.
-        assert_eq!(pressure_level(100, 50, 40), MEM_OK);
+        assert_eq!(pressure_level(100, 50), MEM_OK);
         // 10% available: warn.
-        assert_eq!(pressure_level(100, 10, 40), MEM_WARN);
+        assert_eq!(pressure_level(100, 10), MEM_WARN);
         // 3% available: critical.
-        assert_eq!(pressure_level(100, 3, 40), MEM_CRIT);
-        // Free-page driven: warn at 4% free, critical at 1% even when the
-        // available figure still looks livable.
-        assert_eq!(pressure_level(100, 30, 4), MEM_WARN);
-        assert_eq!(pressure_level(100, 30, 1), MEM_CRIT);
+        assert_eq!(pressure_level(100, 3), MEM_CRIT);
+        // A tiny truly-free pool is normal when the OS has reclaimable cache.
+        // Only the available figure belongs in the pressure decision.
+        assert_eq!(pressure_level(100, 30), MEM_OK);
         // A machine with nothing left at all.
-        assert_eq!(pressure_level(1, 0, 0), MEM_CRIT);
+        assert_eq!(pressure_level(1, 0), MEM_CRIT);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_host_snapshot_uses_consistent_reclaimable_memory() {
+        let mut sys = System::new();
+        let sample = host_memory(&mut sys);
+        assert!(sample.total_bytes > 0);
+        assert!(sample.free_bytes <= sample.available_bytes);
+        assert_eq!(
+            sample.used_bytes.saturating_add(sample.available_bytes),
+            sample.total_bytes
+        );
     }
 
     #[test]

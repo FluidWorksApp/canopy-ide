@@ -46,7 +46,7 @@ export function paneState({ native, wanted, shown, frame }: PaneInput): PaneStat
 /** Least time between two captures of the same view. A capture is a real
  *  render plus a JPEG encode plus an IPC hop, and nothing needs it faster than
  *  this — the frame only has to be right at the moment something covers it. */
-export const CAPTURE_INTERVAL_MS = 900;
+export const CAPTURE_INTERVAL_MS = 5_000;
 
 export interface CaptureInput {
   native: boolean;

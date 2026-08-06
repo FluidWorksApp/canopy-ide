@@ -36,6 +36,34 @@ pub struct ProcInfo {
     pub mem_bytes: u64,
 }
 
+/// macOS RSS includes clean mapped pages that the kernel can discard and map
+/// again, which made the resource tray look far more alarming than the memory
+/// pressure the process actually creates. `ri_phys_footprint` is the kernel's
+/// charged footprint for the process. Keep RSS as the portable fallback.
+#[cfg(target_os = "macos")]
+fn process_memory_bytes(pid: u32, rss_bytes: u64) -> u64 {
+    let mut usage = unsafe { std::mem::zeroed::<libc::rusage_info_v4>() };
+    let result = unsafe {
+        // SAFETY: `usage` matches RUSAGE_INFO_V4 and remains writable for the
+        // duration of this synchronous call.
+        libc::proc_pid_rusage(
+            pid as libc::c_int,
+            libc::RUSAGE_INFO_V4,
+            &mut usage as *mut libc::rusage_info_v4 as _,
+        )
+    };
+    if result == 0 && usage.ri_phys_footprint > 0 {
+        usage.ri_phys_footprint
+    } else {
+        rss_bytes
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_memory_bytes(_pid: u32, rss_bytes: u64) -> u64 {
+    rss_bytes
+}
+
 /// Whole-app resource usage: this process and every descendant.
 #[derive(Serialize, Clone)]
 pub struct AppStats {
@@ -349,7 +377,7 @@ pub fn start_monitor(app: AppHandle) {
                     seen.push(pid);
                     if let Some(p) = sys.process(Pid::from_u32(pid)) {
                         app_cpu += p.cpu_usage();
-                        app_mem += p.memory();
+                        app_mem += process_memory_bytes(pid, p.memory());
                         app_procs += 1;
                     }
                     if let Some(kids) = children.get(&pid) {
@@ -419,7 +447,7 @@ pub fn start_monitor(app: AppHandle) {
                                     .collect::<Vec<_>>()
                                     .join(" "),
                                 cpu: p.cpu_usage(),
-                                mem_bytes: p.memory(),
+                                mem_bytes: process_memory_bytes(pid, p.memory()),
                             });
                         }
                         if let Some(kids) = children.get(&pid) {
@@ -5199,6 +5227,16 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{clear_stale_stats, SessionStats, StatsCache};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_process_memory_uses_a_real_physical_footprint() {
+        let measured = super::process_memory_bytes(std::process::id(), 1);
+        assert!(
+            measured > 1,
+            "own process footprint should replace fallback RSS"
+        );
+    }
 
     #[test]
     fn final_pty_clears_cached_stats_and_ports_once() {

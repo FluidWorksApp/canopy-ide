@@ -564,7 +564,7 @@ export interface Settings {
 // that must actually change for existing users has to be removed outright —
 // which is exactly why `webgl` is gone rather than defaulted to false.
 export const DEFAULTS: Settings = {
-  scrollback: 10_000,
+  scrollback: 5_000,
   keymapProfile: "canopy",
   fontSize: 13,
   runawayCpuPercent: 300,
