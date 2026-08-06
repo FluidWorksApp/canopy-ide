@@ -74,9 +74,9 @@ terms govern use of the model:
 - **SenseVoice Small (int8)** — FunASR MODEL_LICENSE (custom) — <https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE>, by FunAudioLLM / Alibaba. <https://huggingface.co/FunAudioLLM/SenseVoiceSmall>
 - **Moonshine Base** — MIT, by Useful Sensors. <https://huggingface.co/UsefulSensors/moonshine>
 
-## Rust crates (712)
+## Rust crates (718)
 
-### MIT — 655
+### MIT — 659
 
 - **adler2 2.0.1** — Copyright (C) Jonas Schievink <jonasschievink@gmail.com>
 - **aead 0.5.2** — Copyright (c) 2019 The RustCrypto Project Developers; Copyright (c) 2019 MobileCoin, LLC
@@ -129,6 +129,7 @@ terms govern use of the model:
 - **bumpalo 3.20.3** — Copyright (c) 2019 Nick Fitzgerald
 - **bytemuck 1.25.1** — Copyright (c) 2019 Daniel "Lokathor" Gee
 - **byteorder 1.5.0** — Copyright (c) 2015 Andrew Gallant
+- **byteorder-lite 0.1.0** — Copyright (c) 2015 Andrew Gallant
 - **bytes 1.12.1** — Copyright (c) 2018 Carl Lerche
 - **cairo-rs 0.18.5** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
 - **cairo-sys-rs 0.18.2** — Copyright The gtk-rs Project Developers (per package manifest; the distributed license file carries no copyright line)
@@ -301,6 +302,7 @@ terms govern use of the model:
 - **idna 1.1.0** — Copyright (c) 2013-2025 The rust-url developers
 - **idna_adapter 1.2.2** — Copyright (c) The rust-url developers
 - **ignore 0.4.31** — Copyright (c) 2015 Andrew Gallant
+- **image 0.25.10** — Copyright The image-rs Developers (per package manifest; the distributed license file carries no copyright line)
 - **include_dir 0.7.4** — Copyright Michael Bryan (per package manifest; the distributed license file carries no copyright line)
 - **include_dir_macros 0.7.4** — Copyright Michael Bryan (per package manifest; the distributed license file carries no copyright line)
 - **indexmap 1.9.3** — Copyright (c) 2016--2017
@@ -730,6 +732,8 @@ terms govern use of the model:
 - **zeroize_derive 1.5.0** — Copyright (c) 2019-2026 The RustCrypto Project Developers
 - **zip 4.6.1** — Copyright (c) 2014 Mathijs van de Nes
 - **zmij 1.0.23** — Copyright David Tolnay (per package manifest; the distributed license file carries no copyright line)
+- **zune-core 0.5.1** — Copyright (c) zune-image developers
+- **zune-jpeg 0.5.15** — Copyright (c) zune-image developers
 - **zvariant 5.13.1** — Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
 - **zvariant_derive 5.13.1** — Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
 - **zvariant_utils 3.5.0** — Copyright Zeeshan Ali Khan, turbocooler (per package manifest; the distributed license file carries no copyright line)
@@ -765,6 +769,16 @@ terms govern use of the model:
 - **sync_wrapper 1.0.2** — Copyright Actyx AG (per package manifest; the distributed license file carries no copyright line)
 - **tao 0.35.3** — Copyright Tauri Programme within The Commons Conservancy, The winit contributors (per package manifest; the distributed license file carries no copyright line)
 
+### BSD-3-Clause — 7
+
+- **alloc-no-stdlib 2.0.4** — Copyright (c) 2016 Dropbox, Inc
+- **alloc-stdlib 0.2.4** — Copyright Daniel Reiter Horn (per package manifest; the distributed license file carries no copyright line)
+- **curve25519-dalek 4.1.3** — Copyright (c) 2016-2021 isis agora lovecruft. All rights reserved; Copyright (c) 2016-2021 Henry de Valence. All rights reserved; Copyright (c) 2012 The Go Authors. All rights reserved
+- **ed25519-dalek 2.2.0** — Copyright (c) 2017-2019 isis agora lovecruft. All rights reserved
+- **moxcms 0.8.1** — Copyright (c) Radzivon Bartoshyk. All rights reserved
+- **pxfm 0.1.30** — Copyright (c) Radzivon Bartoshyk. All rights reserved
+- **subtle 2.6.1** — Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All rights reserved; Copyright (c) 2016-2024 Isis Agora Lovecruft. All rights reserved
+
 ### ISC — 7
 
 - **hmac-sha256 1.1.14** — Copyright (c) 2019-2026, Frank Denis
@@ -774,14 +788,6 @@ terms govern use of the model:
 - **libloading 0.9.0** — Copyright © 2015, Simonas Kazlauskas
 - **rustls-webpki 0.103.13** — Copyright 2015 Brian Smith
 - **untrusted 0.9.0** — Copyright Brian Smith (per package manifest; the distributed license file carries no copyright line)
-
-### BSD-3-Clause — 5
-
-- **alloc-no-stdlib 2.0.4** — Copyright (c) 2016 Dropbox, Inc
-- **alloc-stdlib 0.2.4** — Copyright Daniel Reiter Horn (per package manifest; the distributed license file carries no copyright line)
-- **curve25519-dalek 4.1.3** — Copyright (c) 2016-2021 isis agora lovecruft. All rights reserved; Copyright (c) 2016-2021 Henry de Valence. All rights reserved; Copyright (c) 2012 The Go Authors. All rights reserved
-- **ed25519-dalek 2.2.0** — Copyright (c) 2017-2019 isis agora lovecruft. All rights reserved
-- **subtle 2.6.1** — Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All rights reserved; Copyright (c) 2016-2024 Isis Agora Lovecruft. All rights reserved
 
 ### MPL-2.0 — 5
 
