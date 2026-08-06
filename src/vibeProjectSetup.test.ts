@@ -386,6 +386,37 @@ describe("bounded setup agent task", () => {
 });
 
 describe("non-technical setup surface", () => {
+  it("does not begin repository work until the Build surface owns the session", async () => {
+    const observe = vi.fn(async () => ({
+      projectRoot: root,
+      fingerprint: "tree-1",
+      paths: context().existingPaths,
+    }));
+    const session = createVibeProjectSetupSession(
+      project(),
+      async () => true,
+      {
+        observe,
+        run: async () => ({
+          ok: false,
+          reason: "agent-failed",
+          message: "I couldn't inspect this project.",
+          runId: null,
+          attempts: 0,
+        }),
+        providerIds: context().providerIds,
+      },
+    );
+
+    await Promise.resolve();
+    expect(observe).not.toHaveBeenCalled();
+
+    const unsubscribe = session.events$.subscribe(() => {});
+    await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(1));
+    unsubscribe();
+    await session.stop();
+  });
+
   it("persists a valid proposal without ever presenting a technical question", async () => {
     const configured: Project[] = [];
     const ready = new Promise<void>((resolve) => {

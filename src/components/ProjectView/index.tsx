@@ -742,13 +742,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
       cancelled = true;
     };
   }, [vibe, vibeTarget.kind, vibePackageKey, project.components]);
-  const vibeProjectSetupSession = useMemo(
-    () => vibe && vibeTarget.kind === "needs-setup"
-      ? createVibeProjectSetupSession(project, onPersistVibeSetup)
-      : null,
-    [vibe, vibeTarget.kind, project, onPersistVibeSetup],
-  );
-  useEffect(() => () => void vibeProjectSetupSession?.stop(), [vibeProjectSetupSession]);
+  const [vibeProjectSetupSession, setVibeProjectSetupSession] = useState<
+    ReturnType<typeof createVibeProjectSetupSession> | null
+  >(null);
+  useEffect(() => {
+    if (!vibe || vibeTarget.kind !== "needs-setup") {
+      setVibeProjectSetupSession(null);
+      return;
+    }
+    // Session construction starts an owned task once the chat subscribes, so
+    // it belongs in the effect rather than render. In a development build
+    // Strict Mode deliberately replays effect setup -> cleanup -> setup. The
+    // old useMemo session was stopped by the test cleanup and then reused in
+    // the second setup, leaving Build permanently waiting with no task.
+    const session = createVibeProjectSetupSession(project, onPersistVibeSetup);
+    setVibeProjectSetupSession(session);
+    return () => {
+      void session.stop();
+    };
+  }, [vibe, vibeTarget.kind, project, onPersistVibeSetup]);
   const vibeWaitingSession = useMemo(
     () => createVibeTargetStatusSession("I'm getting your project ready."),
     [],

@@ -636,6 +636,7 @@ export function createVibeProjectSetupSession(
   const listeners = new Set<(event: import("./structuredEvents").StructuredRunnerEvent) => void>();
   let state: BuilderSession["state"] = { persona: { kind: "turn-progress" }, question: null };
   let stopped = false;
+  let started = false;
   const abort = new AbortController();
   const publish = (event: import("./structuredEvents").StructuredRunnerEvent) => {
     if (!stopped) for (const listener of listeners) listener(event);
@@ -692,12 +693,20 @@ export function createVibeProjectSetupSession(
       publish({ kind: "reply", text: "I couldn't determine a safe complete setup for this project." });
     }
   };
-  queueMicrotask(() => void execute());
+  const start = () => {
+    if (started || stopped) return;
+    started = true;
+    // Start after the listener is installed. Besides avoiding work during
+    // React render, this makes the first plain-language status observable
+    // instead of publishing it into an empty listener set.
+    queueMicrotask(() => void execute());
+  };
   return {
     get state() { return state; },
     events$: {
       subscribe(listener) {
         listeners.add(listener);
+        start();
         return () => listeners.delete(listener);
       },
     },
