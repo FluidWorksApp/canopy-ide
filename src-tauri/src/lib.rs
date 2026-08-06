@@ -538,6 +538,7 @@ pub fn run() {
             tasks::task_update_metadata,
             tasks::task_interrupt_stale,
             tasks::task_delete,
+            tasks::task_clear_history,
             tasks::task_transcript_append,
             tasks::task_transcript_list,
             tasks::task_event_append,

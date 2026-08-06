@@ -1661,6 +1661,9 @@ export const taskInterruptStale = (currentInstance: string) =>
 export const taskDelete = (runId: string) =>
   invoke<void>("task_delete", { runId });
 
+export const taskClearHistory = () =>
+  invoke<number>("task_clear_history");
+
 export const taskTranscriptAppend = (args: {
   runId: string;
   attemptId?: string | null;

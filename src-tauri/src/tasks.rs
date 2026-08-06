@@ -946,6 +946,31 @@ impl TaskStore {
         Ok(())
     }
 
+    fn clear_history(&self) -> Result<usize, String> {
+        let run_ids = self.with_conn(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT run_id FROM task_envelopes
+                     WHERE json_extract(metadata_json, '$.history') = 1
+                       AND status NOT IN ('running','blocked')",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(rows)
+        })?;
+        let mut deleted = 0;
+        for run_id in run_ids {
+            if self.delete(run_id).is_ok() {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
+    }
+
     fn append_transcript(
         &self,
         run_id: String,
@@ -2004,6 +2029,11 @@ pub fn task_delete(run_id: String, store: State<'_, TaskStore>) -> Result<(), St
 }
 
 #[tauri::command]
+pub fn task_clear_history(store: State<'_, TaskStore>) -> Result<usize, String> {
+    store.clear_history()
+}
+
+#[tauri::command]
 pub fn task_transcript_append(
     run_id: String,
     attempt_id: Option<String>,
@@ -2349,6 +2379,10 @@ mod tests {
                 .status,
             "blocked"
         );
+        assert!(store
+            .delete(binding.run_id.clone())
+            .unwrap_err()
+            .contains("live task"));
         assert_eq!(
             store
                 .settle_attempt(TaskAttemptSettlement {

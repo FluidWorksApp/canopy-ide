@@ -86,6 +86,7 @@ const KEY = "canopy.taskHistory";
 
 /** How many runs to keep. Past this the oldest are dropped. */
 const MAX_RUNS = 200;
+const MAX_IMPORT_SCAN = 1000;
 
 /** How many of those keep their captured output. An 8KB transcript on every one
  *  of 200 runs would be 1.6MB of a ~5MB localStorage budget shared with the
@@ -322,7 +323,7 @@ export function hydrateTaskHistory(): Promise<TaskRun[]> {
   if (hydrating) return hydrating;
   hydrating = (async () => {
     const legacy = read();
-    const existing = await ipc.taskListHistory(MAX_RUNS);
+    const existing = await ipc.taskListHistory(MAX_IMPORT_SCAN);
     await importLegacy(legacy, existing);
     localStorage.removeItem(KEY);
     cache = null;
@@ -518,13 +519,9 @@ export function removeTaskRun(id: string): void {
 }
 
 export function clearTaskHistory(): void {
-  const old = read();
   if (authoritative) {
-    void Promise.all(
-      old
-        .filter((run) => run.status !== "running" && run.status !== "blocked")
-        .map((run) => ipc.taskDelete(run.id)),
-    )
+    void ipc
+      .taskClearHistory()
       .then(() => refreshTaskHistory())
       .catch((error) => console.warn("task history clear failed", error));
     return;
