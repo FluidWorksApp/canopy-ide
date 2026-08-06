@@ -3173,6 +3173,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       patchTabRaw,
       onNotice,
       project.id,
+      project.name,
+      project.components,
       getInstalledForLaunch,
       gateManagedLaunch,
       updateMicroRuns,
