@@ -146,9 +146,48 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// How long an exited session's output stays readable, and how many such
+/// sessions are kept. Bounded on both axes because this is memory held for
+/// processes that are already gone: at SCROLLBACK_CAP each, the ceiling is
+/// REAPED_SESSIONS × 256 KB.
+const REAPED_TTL: Duration = Duration::from_secs(60);
+const REAPED_SESSIONS: usize = 8;
+
+type ReapedOutput = Arc<Mutex<VecDeque<(u32, Vec<u8>, std::time::Instant)>>>;
+
+/// Keep an exited session's output readable for a short while. Called once,
+/// immediately before the session leaves the live map.
+fn reap_output(reaped: &ReapedOutput, id: u32, session: &Session) {
+    let bytes: Vec<u8> = session.scrollback.lock().unwrap().iter().copied().collect();
+    let mut reaped = reaped.lock().unwrap();
+    reaped.push_back((id, bytes, std::time::Instant::now()));
+    let now = std::time::Instant::now();
+    while reaped
+        .front()
+        .is_some_and(|(_, _, at)| now.duration_since(*at) > REAPED_TTL)
+    {
+        reaped.pop_front();
+    }
+    while reaped.len() > REAPED_SESSIONS {
+        reaped.pop_front();
+    }
+}
+
 #[derive(Default)]
 pub struct PtyManager {
     sessions: Arc<Mutex<HashMap<u32, Arc<Session>>>>,
+    /// Output of sessions that have exited, kept briefly.
+    ///
+    /// Teardown removes the session and then emits `pty:exit`, so every
+    /// consumer that waits for the exit and *then* reads the output — which is
+    /// the only correct order, since output is not complete until the process
+    /// is — used to find the session already gone and get nothing. That is how
+    /// a one-shot check or a package install loses the very output it ran for.
+    ///
+    /// Emitting the event before the removal would only narrow the race, not
+    /// close it, and would briefly advertise a live session that is not. So the
+    /// bytes outlive the session instead.
+    reaped: Arc<Mutex<VecDeque<(u32, Vec<u8>, std::time::Instant)>>>,
     next_id: AtomicU32,
 }
 
@@ -273,11 +312,20 @@ impl PtyManager {
     /// The last `max` bytes of a session's scrollback ring, for the context
     /// bridge's server-output tool. None if the session is gone.
     pub fn scrollback_tail(&self, id: u32, max: usize) -> Option<Vec<u8>> {
-        let session = self.get(id)?;
-        let ring = session.scrollback.lock().unwrap();
-        let skip = ring.len().saturating_sub(max);
-        Some(ring.iter().skip(skip).copied().collect())
+        if let Some(session) = self.get(id) {
+            let ring = session.scrollback.lock().unwrap();
+            let skip = ring.len().saturating_sub(max);
+            return Some(ring.iter().skip(skip).copied().collect());
+        }
+        // Gone from the live map, but it may have only just exited — and a
+        // caller reading output *because* it exited is the expected order, not
+        // an error.
+        let reaped = self.reaped.lock().unwrap();
+        let bytes = &reaped.iter().find(|(sid, _, _)| *sid == id)?.1;
+        let skip = bytes.len().saturating_sub(max);
+        Some(bytes[skip..].to_vec())
     }
+
 
     /// Stop every session; called on app exit so no child processes outlive us.
     ///
@@ -985,6 +1033,7 @@ impl PtyManager {
         {
             let session = session.clone();
             let sessions = state.sessions.clone();
+            let reaped = state.reaped.clone();
             thread::Builder::new()
                 .name(format!("pty-flush-{id}"))
                 .spawn(move || {
@@ -1053,6 +1102,9 @@ impl PtyManager {
                             });
                         }
                     }
+                    // Before the session leaves the map, so that a consumer
+                    // woken by the pty:exit below can still read what ran.
+                    reap_output(&reaped, session.id, &session);
                     sessions.lock().unwrap().remove(&session.id);
                     // The terminal's bridge credential dies with it, and so do
                     // the advisory claims it was holding. Nothing used to watch
@@ -1309,6 +1361,48 @@ mod tests {
     // readable afterwards from the session itself — that read is the only
     // transcript a task nobody watched ever gets.
     #[test]
+    fn output_of_an_exited_session_is_still_readable() {
+        // The order every one-shot consumer must use: wait for the process to
+        // end, THEN read its output, because output is not complete until the
+        // process is. Teardown removes the session before emitting pty:exit, so
+        // that read used to land after the session was gone and return nothing
+        // — a check or an install losing the output it ran for.
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let res = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Argv(vec!["echo".into(), "REAPED_MARKER".into()])),
+                None,
+                None,
+                None,
+            )
+            .expect("spawn");
+
+        // Wait for the session to actually leave the live map, which is the
+        // state the bug needed: reading while it is still alive proves nothing.
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while pm.get(res.id).is_some() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(pm.get(res.id).is_none(), "session never exited");
+
+        let tail = pm
+            .scrollback_tail(res.id, 64 * 1024)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        assert!(
+            tail.contains("REAPED_MARKER"),
+            "output was lost when the session was reaped. tail: {tail:?}"
+        );
+    }
+
+    #[test]
     fn argv_spawn_never_lets_the_shell_see_its_arguments() {
         // The property the whole RunSpec::Argv branch exists for. A package name
         // or version reaching this boundary may contain anything; as an argument
@@ -1335,19 +1429,27 @@ mod tests {
                 None,
             )
             .expect("spawn");
-        let seen = wait_for(&pm, res.id, "ARGV_$HOME; whoami", Duration::from_secs(8));
+        // `echo` exits immediately, so read after it has gone rather than
+        // racing it — the retained output above is what makes that possible.
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while pm.get(res.id).is_some() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
         let tail = pm
             .scrollback_tail(res.id, 64 * 1024)
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default();
         let _ = pm.kill(res.id);
-        assert!(
-            seen,
-            "argv did not survive as literal text; shell expansion is the likely cause. tail: {tail}"
-        );
-        assert!(
-            !tail.contains("pwned"),
-            "the shell ran a second command out of an argument. tail: {tail}"
+        // Exact equality, not `contains`. The hostile string necessarily
+        // includes the word a shell would have printed, so "does pwned appear"
+        // cannot distinguish the literal from an execution — it appears either
+        // way. What DOES distinguish them is that a shell would have produced
+        // MORE than this: `whoami`'s output, or a second echo. One line, equal
+        // to the argument as written, is the whole property.
+        assert_eq!(
+            tail.trim_end_matches(['\r', '\n']),
+            format!("ARGV_{hostile}"),
+            "argv did not reach the process as one literal argument"
         );
     }
 
