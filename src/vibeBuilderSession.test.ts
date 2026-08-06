@@ -158,18 +158,16 @@ function harness(over: Partial<VibeBuilderSessionDeps> = {}) {
 beforeEach(() => vi.clearAllMocks());
 
 describe("VibeBuilderSession", () => {
-  it("filters ignored and sibling-package changes out of the component checkpoint", () => {
-    expect(
-      scopedGitEntries(
-        [
-          { status: "!!", path: "node_modules/" },
-          { status: " M", path: "packages/web/src/App.tsx" },
-          { status: " M", path: "packages/api/src/index.ts" },
-        ],
-        "/repo",
-        "/repo/packages/web",
-      ),
-    ).toEqual([{ status: " M", path: "packages/web/src/App.tsx" }]);
+  it("scopes absolute git-status paths for root and nested components", () => {
+    const entries = [
+      { status: "!!", path: "/repo/node_modules/" },
+      { status: " M", path: "/repo/packages/web/src/App.tsx" },
+      { status: " M", path: "/repo/packages/api/src/index.ts" },
+    ];
+    expect(scopedGitEntries(entries, "/repo", "/repo")).toEqual(entries.slice(1));
+    expect(scopedGitEntries(entries, "/repo", "/repo/packages/web")).toEqual([
+      { status: " M", path: "/repo/packages/web/src/App.tsx" },
+    ]);
   });
 
   it("reserves and starts the durable attempt before spawning", async () => {
@@ -340,6 +338,23 @@ describe("VibeBuilderSession", () => {
     await expect(h.session.send("Start")).rejects.toThrow("store unavailable");
     expect(h.deps.settleAttempt).toHaveBeenCalledWith(
       expect.objectContaining({ state: "failed", failureCode: "spawn-failed" }),
+    );
+  });
+
+  it("kills and settles the running attempt when user transcript persistence fails", async () => {
+    const h = harness({
+      appendTranscript: vi.fn(async () => {
+        throw new Error("disk full");
+      }),
+    });
+    await expect(h.session.send("Start")).rejects.toThrow("disk full");
+    expect(h.transport.stop).toHaveBeenCalled();
+    expect(h.deps.settleAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: "failed",
+        failureClass: "persistence",
+        failureCode: "transcript-write-failed",
+      }),
     );
   });
 
