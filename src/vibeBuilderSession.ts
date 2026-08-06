@@ -154,6 +154,24 @@ export interface CheckpointReview {
   secrets?: SecretScanResult;
 }
 
+/** How a running abstraction reports itself to whoever owns it.
+ *
+ *  A managed abstraction is the one thing a session starts that outlives the
+ *  agent transport: `vercel --prod` keeps running after the project window is
+ *  gone, and nothing else in the session holds a handle to it. These callbacks
+ *  hand that handle to the session so `stop()` has something to stop. */
+export interface AbstractionOwnership {
+  /** Called once, as soon as the plan has a process, with the means to end it. */
+  spawned(handle: AbstractionHandle): void;
+  /** Called for every pty exit the run observes; the owner matches on id. */
+  exited(ptyId: number): void;
+}
+
+export interface AbstractionHandle {
+  id: number;
+  kill(): Promise<void>;
+}
+
 export interface VibeBuilderSessionDeps {
   runner: ProjectRunnerController;
   reserve: typeof reserveTask;
@@ -198,8 +216,16 @@ export interface VibeBuilderSessionDeps {
    *  from a stale tree could publish something the user has since changed. */
   abstractionContext(cwd: string, intent: VibeIntent): Promise<AbstractionContext>;
   /** Execute a planned argv. Argv-native by contract: no implementation may
-   *  join these into a shell string. */
-  runAbstraction(argv: string[], cwd: string): Promise<AbstractionRunResult>;
+   *  join these into a shell string.
+   *
+   *  `ownership` is optional so a caller that only wants the result can ignore
+   *  it, but the session always passes one: an unowned `vercel --prod` is a
+   *  process nobody can stop. */
+  runAbstraction(
+    argv: string[],
+    cwd: string,
+    ownership?: AbstractionOwnership,
+  ): Promise<AbstractionRunResult>;
   now(): number;
   sessionId(): string;
   sleep(ms: number): Promise<void>;
@@ -618,7 +644,15 @@ async function nativeCliVersion(cli: string): Promise<string | null> {
 /** Probing runs a CLI, so it goes through the same argv-only path an
  *  abstraction does. A single shared object because the probe cache is keyed on
  *  deps identity: one instance means one process spends `vercel --version` once
- *  per app run rather than once per message. */
+ *  per app run rather than once per message.
+ *
+ *  Deliberately NOT session-owned, unlike the execution path below. This is a
+ *  decision, not an omission: `--version` is idempotent and already capped at
+ *  10 seconds, so killing it when a session stops buys nothing and adds a
+ *  failure path — and the cache is shared across sessions, so one session's
+ *  stop would be tearing down a probe another session is awaiting. The
+ *  execution path is unbounded and side-effecting, which is the entire reason
+ *  stop() needs a handle on that one. */
 const nativeCliProbeDeps: CliProbeDeps = {
   runArgv: ({ argv }) =>
     runAbstractionPlan(argv, ".", {
@@ -726,12 +760,23 @@ async function nativeAbstractionContext(
 
 export const DEFAULT_VIBE_BUILDER_DEPS: VibeBuilderSessionDeps = {
   abstractionContext: nativeAbstractionContext,
-  runAbstraction: (argv, cwd) =>
+  runAbstraction: (argv, cwd, ownership) =>
     runAbstractionPlan(argv, cwd, {
       // Argv crosses to Rust as an array and is spawned without a shell.
-      ptySpawnDetached: (opts) => ipc.ptySpawnArgv(opts),
+      // Wrapped rather than passed straight through so the owner learns the
+      // pty id: runAbstractionPlan keeps that id to itself and only kills on
+      // its own timeout, which leaves a stopped session's deploy running.
+      ptySpawnDetached: async (opts) => {
+        const spawned = await ipc.ptySpawnArgv(opts);
+        ownership?.spawned({ id: spawned.id, kill: () => ipc.ptyKill(spawned.id) });
+        return spawned;
+      },
       onPtyExit: (listener) =>
-        ipc.onPtyExit((e) => listener({ id: e.id, exit_code: e.exit_code ?? null })),
+        ipc.onPtyExit((e) => {
+          // Every pty exit passes here, not just ours; the owner matches on id.
+          ownership?.exited(e.id);
+          listener({ id: e.id, exit_code: e.exit_code ?? null });
+        }),
       ptyOutput: ipc.ptyOutput,
       ptyKill: ipc.ptyKill,
     }),
@@ -824,6 +869,12 @@ export class VibeBuilderSession implements BuilderSession {
     confirm: string;
     requiresTypedPhrase: boolean;
   } | null = null;
+  /** The process a confirmed abstraction is running in, for exactly as long as
+   *  it is running. Held because nothing else does: runAbstractionPlan keeps
+   *  the pty id in a local and kills only on its own timeout, so without this a
+   *  session that is stopped mid-`vercel --prod` leaves that deploy running
+   *  with no owner left to stop it. */
+  private runningAbstraction: AbstractionHandle | null = null;
   private snapshot: BuilderSessionState = { persona: { kind: "idle" }, question: null };
   private listeners = new Set<(event: StructuredRunnerEvent) => void>();
   private reservation: TaskReservation | null = null;
@@ -1066,20 +1117,39 @@ export class VibeBuilderSession implements BuilderSession {
     return this.launching;
   }
 
+  /** Chain work onto the send queue AND advance the queue.
+   *
+   *  Advancing it is the whole point: a branch that only chains off the queue
+   *  without reassigning it leaves the queue on the promise it started from, so
+   *  the next message chains off that same settled promise and the two run
+   *  concurrently. Two proposals racing that way silently overwrite each
+   *  other's `pendingAbstraction`, and the user is shown one card while the
+   *  other is the one that would have run. */
+  private enqueue(work: () => Promise<void>): Promise<void> {
+    const queued = this.sendQueue.then(work);
+    this.sendQueue = queued.catch(() => {});
+    return queued;
+  }
+
   send(text: string): Promise<void> {
     const message = text.trim();
     if (!message || this.stopped) return Promise.resolve();
     if (message === SAVE_CHECKPOINT && this.pendingCheckpoint) {
-      return this.sendQueue.then(() => this.saveCheckpoint());
+      return this.enqueue(() => this.saveCheckpoint());
     }
     // An abstraction awaiting an answer owns the next message, so "yes" is read
     // as the answer to what was asked rather than as a new build request.
+    //
+    // Reading `pendingAbstraction` here and nulling it synchronously inside
+    // answerAbstraction is what makes a double-confirm safe: the second call
+    // finds it already null and runs nothing. Serialising these branches does
+    // not weaken that — it only stops two *proposals* from racing.
     if (this.pendingAbstraction) {
-      return this.sendQueue.then(() => this.answerAbstraction(message));
+      return this.enqueue(() => this.answerAbstraction(message));
     }
     const intent = parseVibeIntent(message);
     if (intent) {
-      return this.sendQueue.then(() => this.proposeIntent(intent, message));
+      return this.enqueue(() => this.proposeIntent(intent, message));
     }
     let sent!: () => void;
     let failed!: (error: unknown) => void;
@@ -1095,6 +1165,10 @@ export class VibeBuilderSession implements BuilderSession {
   /** Turn a recognised request into something the user can say yes or no to.
    *  Nothing runs here — this only ever asks. */
   private async proposeIntent(intent: VibeIntent, message: string): Promise<void> {
+    // Queued behind an earlier message, so the session may have been stopped in
+    // between. A stopped session must not offer a card there is no longer
+    // anyone to answer.
+    if (this.stopped) return;
     const cwd = this.options.componentPath;
     let proposal: AbstractionProposal;
     try {
@@ -1106,6 +1180,7 @@ export class VibeBuilderSession implements BuilderSession {
         this.lastVerification,
       );
     } catch {
+      if (this.stopped) return;
       // If the project can't be read, the honest answer is to stop, not to
       // guess a plan from defaults and ask the user to approve it.
       this.present(
@@ -1119,6 +1194,9 @@ export class VibeBuilderSession implements BuilderSession {
       );
       return;
     }
+    // Reading the project is asynchronous, so the session can have been stopped
+    // while it was read. Recheck rather than present onto a closed session.
+    if (this.stopped) return;
 
     if (proposal.kind !== "run") {
       this.pendingAbstraction = null;
@@ -1184,6 +1262,14 @@ export class VibeBuilderSession implements BuilderSession {
   private async answerAbstraction(message: string): Promise<void> {
     const pending = this.pendingAbstraction;
     if (!pending) return;
+    // Nulled synchronously, before any await: this is what makes a second
+    // confirm arriving in the same tick a no-op rather than a second run.
+    //
+    // There is deliberately no `this.stopped` check here. It would be
+    // unreachable cover — send() refuses a stopped session, and stop() clears
+    // `pendingAbstraction`, so a confirm still queued when the session stops
+    // returns at the guard above. A second, redundant guard would only make
+    // that clearing impossible to test.
     this.pendingAbstraction = null;
 
     if (message !== pending.confirm) {
@@ -1210,7 +1296,41 @@ export class VibeBuilderSession implements BuilderSession {
 
     const { proposal } = pending;
     this.present({ kind: "turn-progress" }, null);
-    const result = await this.deps.runAbstraction(proposal.argv, proposal.cwd);
+    const result = await this.deps.runAbstraction(proposal.argv, proposal.cwd, {
+      spawned: (handle) => {
+        // Stopped between the confirmation and the spawn: take the process with
+        // us now rather than record a handle nobody will read again.
+        if (this.stopped) {
+          void handle.kill().catch(() => {});
+          return;
+        }
+        this.runningAbstraction = handle;
+      },
+      // Every pty exit arrives here, so match on id before letting go.
+      exited: (ptyId) => {
+        if (this.runningAbstraction?.id === ptyId) this.runningAbstraction = null;
+      },
+    });
+    this.runningAbstraction = null;
+
+    if (this.stopped) {
+      // stop() killed the process we were waiting on. What is true is that we
+      // stopped watching — NOT that nothing happened. Killing `vercel --prod`
+      // does not un-deploy it: whatever it had already done server-side stands,
+      // and we cannot see which. So this deliberately does not reuse the
+      // declined path's "Nothing ran", which is a claim we are not entitled to.
+      this.present(
+        { kind: "idle" },
+        {
+          id: `vibe-abstraction-interrupted-${this.deps.now()}`,
+          kind: "question",
+          prompt: "I stopped waiting for that.",
+          detail: `Closing the project ended \`${proposal.argv.join(" ")}\` here. It may have already finished what it started — I can't tell you either way from this side.`,
+        },
+      );
+      return;
+    }
+
     this.present(
       { kind: "idle" },
       {
@@ -2056,6 +2176,16 @@ export class VibeBuilderSession implements BuilderSession {
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    // A proposal nobody can answer any more must not survive the session: left
+    // set, a queued `answerAbstraction` would still find it and run the plan on
+    // a closed session.
+    this.pendingAbstraction = null;
+    // The transport is not the only thing this session started. An abstraction
+    // is detached, so nothing else will ever end it — kill it here, first,
+    // before any of the slower teardown.
+    const abstraction = this.runningAbstraction;
+    this.runningAbstraction = null;
+    if (abstraction) await abstraction.kill().catch(() => {});
     if (this.reservation) {
       this.closedAttempts.add(this.reservation.attempt.attemptId);
     }
