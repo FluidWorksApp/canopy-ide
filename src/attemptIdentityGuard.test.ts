@@ -82,6 +82,9 @@ describe("managed attempt identity propagation", () => {
       ),
     ).toContain("AttemptBinding");
     expect(context).toContain('.route("/ctx/identity", get(identity))');
+    const action = rustFn(context, "action");
+    expect(action).toContain('"runId": identity.and_then');
+    expect(action).toContain('"attemptId": identity.and_then');
 
     const ipc = read("src/ipc.ts");
     expect(ipc).toContain("runId?: string");

@@ -4,9 +4,11 @@
 // scrolled past are gone the moment it lands, with a toast as the only record.
 // This is that record, kept.
 //
-// localStorage rather than the workspace file, same call as terminalMemory.ts:
-// a convenience log whose corruption should cost nothing, and which is about
-// how the user works rather than about any one project.
+// TaskEnvelope is now the authority. localStorage below is read only as a
+// one-shot compatibility source and emptied after the Rust store adopts it.
+import * as ipc from "./ipc";
+import type { TaskEnvelopeSummary, TaskReservation } from "./taskEnvelope";
+import { TASK_ENVELOPES_EVENT } from "./taskEnvelopes";
 
 export type TaskRunStatus = "running" | "done" | "blocked" | "stopped";
 
@@ -37,6 +39,11 @@ export interface TaskRun {
   /** PTY identity retained so the completion event can resolve its notification
    *  to this stable run id before the terminal is torn down. */
   ptyId?: number;
+  /** Durable attempt behind this run. PTY/session ids are only live bindings. */
+  attemptId?: string;
+  /** App process that owns the live PTY; preserved across metadata patches so
+   * a WebView reload cannot sweep a still-running Rust process. */
+  appInstance?: string;
   /** Research run target, when this task is advancing one stored entry. */
   researchId?: string;
   /** The brief it was launched with, minus the completion protocol. */
@@ -52,6 +59,8 @@ export interface TaskRun {
   files?: string[];
   /** Tail of the terminal, plain text, captured just before the tab closed. */
   output?: string;
+  /** Durable copy of output; raw text itself stays out of metadata. */
+  outputArtifactId?: string;
   /** The CLI's own session id for this run — the conversation behind it.
    *
    *  Recorded while the run is still going, because nothing else will: a
@@ -89,8 +98,19 @@ const MAX_WITH_OUTPUT = 60;
  *  tab and Tasks panel on every history event — parsing it once per write
  *  instead of once per reader matters. Callers must not mutate the array. */
 let cache: { raw: string | null; runs: TaskRun[] } | null = null;
+let authoritative: TaskRun[] | null = null;
+let hydrating: Promise<TaskRun[]> | null = null;
+const persistQueues = new Map<string, Promise<void>>();
+let refreshGeneration = 0;
+
+export function resetTaskHistoryForTests(): void {
+  cache = null;
+  authoritative = null;
+  hydrating = null;
+}
 
 function read(): TaskRun[] {
+  if (authoritative) return authoritative;
   const raw = localStorage.getItem(KEY);
   if (cache && cache.raw === raw) return cache.runs;
   let runs: TaskRun[];
@@ -113,7 +133,9 @@ function write(runs: TaskRun[]) {
         ? r
         : { ...r, output: undefined },
     );
-  try {
+  if (authoritative) {
+    authoritative = trimmed;
+  } else try {
     const s = JSON.stringify(trimmed);
     localStorage.setItem(KEY, s);
     cache = { raw: s, runs: trimmed };
@@ -125,6 +147,196 @@ function write(runs: TaskRun[]) {
   // Fired here rather than by each caller so no write can forget it. `storage`
   // events only reach *other* tabs, which in a one-window desktop app is never.
   window.dispatchEvent(new CustomEvent(TASK_HISTORY_EVENT));
+}
+
+const statusFromEnvelope = (
+  status: TaskEnvelopeSummary["status"],
+): TaskRunStatus =>
+  status === "completed"
+    ? "done"
+    : status === "blocked"
+      ? "blocked"
+      : status === "running"
+        ? "running"
+        : "stopped";
+
+function rowFromSummary(summary: TaskEnvelopeSummary): TaskRun | null {
+  const metadata =
+    summary.metadata && typeof summary.metadata === "object"
+      ? (summary.metadata as Partial<TaskRun> & { history?: boolean })
+      : null;
+  if (!metadata?.history) return null;
+  return {
+    taskId: summary.kind,
+    label: summary.title || summary.kind,
+    agent: "unknown",
+    cwd: "",
+    projectId: summary.projectId,
+    brief: "",
+    ...metadata,
+    id: summary.runId,
+    status: statusFromEnvelope(summary.status),
+    startedAt: metadata.startedAt ?? summary.createdAt,
+    endedAt:
+      summary.status === "running"
+        ? undefined
+        : (metadata.endedAt ?? summary.updatedAt),
+  };
+}
+
+function metadataFor(run: TaskRun): Record<string, unknown> {
+  const { output: _output, ...metadata } = run;
+  return { ...metadata, history: true };
+}
+
+function persistRun(run: TaskRun): void {
+  if (!authoritative) return;
+  const previous = persistQueues.get(run.id) ?? Promise.resolve();
+  const next = previous
+    .catch(() => {})
+    .then(async () => {
+      let durable = run;
+      if (run.output && !run.outputArtifactId) {
+        const artifact = await ipc.taskArtifactWrite({
+          runId: run.id,
+          attemptId: run.attemptId,
+          kind: "terminal-output",
+          content: run.output,
+        });
+        durable = { ...run, outputArtifactId: artifact.id };
+        if (authoritative)
+          authoritative = authoritative.map((candidate) =>
+            candidate.id === run.id ? durable : candidate,
+          );
+      }
+      await ipc.taskUpdateMetadata(run.id, metadataFor(durable));
+    })
+    .catch((error) => console.warn("task history persistence failed", error))
+    .finally(() => {
+      if (persistQueues.get(run.id) === next) persistQueues.delete(run.id);
+    });
+  persistQueues.set(run.id, next);
+}
+
+async function importLegacy(rows: TaskRun[], existing: TaskEnvelopeSummary[]) {
+  const adopted = new Map(
+    existing.flatMap((summary) => {
+      const metadata = summary.metadata as { legacySourceId?: unknown } | undefined;
+      return typeof metadata?.legacySourceId === "string"
+        ? [[metadata.legacySourceId, summary] as const]
+        : [];
+    }),
+  );
+  for (const legacy of rows) {
+    const prior = adopted.get(legacy.id);
+    const reservation = prior
+      ? await ipc.taskGet(prior.runId).then((detail) => {
+          const attempt = detail?.attempts[0];
+          if (!attempt) throw new Error(`Imported task ${prior.runId} has no attempt`);
+          return { envelope: prior, attempt };
+        })
+      : await ipc.taskReserve({
+          kind: legacy.taskId || "legacy-micro-task",
+          projectId: legacy.projectId || "legacy",
+          componentId: legacy.projectId || "legacy",
+          worktreePath: legacy.cwd || ".",
+          goal: legacy.brief || legacy.label,
+          acceptance: [],
+          taskClasses: { legacy: 1 },
+          contextSummary: "Imported from the pre-TaskEnvelope task history.",
+          riskClass: "legacy",
+          authorityPolicy: {},
+          failoverPolicy: { automatic: false },
+          attemptCap: 1,
+          title: legacy.title || legacy.label,
+          metadata: {
+            ...metadataFor(legacy),
+            legacySourceId: legacy.id,
+          },
+          route: {
+            cli: legacy.agent || "unknown",
+            profileId: "default",
+            harnessVersion: "legacy",
+            promptVersion: "legacy",
+            toolPolicyVersion: "legacy",
+            executionMode: "pty",
+          },
+        });
+    const outputArtifactId = legacy.output
+      ? (
+          await ipc.taskArtifactWrite({
+            runId: reservation.envelope.runId,
+            attemptId: reservation.attempt.attemptId,
+            kind: "legacy-terminal-output",
+            content: legacy.output,
+          })
+        ).id
+      : legacy.outputArtifactId;
+    await ipc.taskUpdateMetadata(reservation.envelope.runId, {
+      ...metadataFor(legacy),
+      legacySourceId: legacy.id,
+      attemptId: reservation.attempt.attemptId,
+      outputArtifactId,
+    });
+    const state =
+      legacy.status === "done"
+        ? "completed"
+        : legacy.status === "blocked" || legacy.askedForUser
+          ? "blocked"
+          : "interrupted";
+    if (["reserved", "launching", "running", "waiting"].includes(reservation.attempt.state))
+      await ipc.taskAttemptSettle({
+        attemptId: reservation.attempt.attemptId,
+        state,
+        failureClass: state === "completed" ? null : "route",
+        failureCode: state === "completed" ? null : "legacy-import",
+      });
+  }
+}
+
+export async function refreshTaskHistory(): Promise<TaskRun[]> {
+  const generation = ++refreshGeneration;
+  const projected = (await ipc.taskListHistory(MAX_RUNS))
+    .map(rowFromSummary)
+    .filter((row): row is TaskRun => Boolean(row));
+  const rows = await Promise.all(
+    projected.map(async (run) =>
+      run.outputArtifactId
+        ? {
+            ...run,
+            output: await ipc.taskArtifactRead(run.outputArtifactId).catch(() => undefined),
+          }
+        : run,
+    ),
+  );
+  if (generation !== refreshGeneration) return authoritative ?? rows;
+  authoritative = rows;
+  write(rows);
+  return rows;
+}
+
+/** Adopt the old localStorage log exactly once. The source is removed only
+ * after every row is durably present, so a failed migration retries safely. */
+export function hydrateTaskHistory(): Promise<TaskRun[]> {
+  if (authoritative) return Promise.resolve(authoritative);
+  if (hydrating) return hydrating;
+  hydrating = (async () => {
+    const legacy = read();
+    const existing = await ipc.taskListHistory(MAX_RUNS);
+    await importLegacy(legacy, existing);
+    localStorage.removeItem(KEY);
+    cache = null;
+    return refreshTaskHistory();
+  })().finally(() => {
+    hydrating = null;
+  });
+  return hydrating;
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener(TASK_ENVELOPES_EVENT, () => {
+    if (authoritative) void refreshTaskHistory();
+  });
 }
 
 /** Emitted whenever the log changes, so panels showing a count refresh without
@@ -147,6 +359,22 @@ export function recordTaskStart(
   return id;
 }
 
+export function adoptTaskReservation(
+  reservation: TaskReservation,
+  run: Omit<TaskRun, "id" | "status" | "startedAt" | "attemptId">,
+): TaskRun {
+  const row: TaskRun = {
+    ...run,
+    id: reservation.envelope.runId,
+    attemptId: reservation.attempt.attemptId,
+    status: "running",
+    startedAt: reservation.envelope.createdAt,
+  };
+  write([row, ...read().filter((candidate) => candidate.id !== row.id)]);
+  persistRun(row);
+  return row;
+}
+
 /** Complete a run. A no-op for an unknown id, and — deliberately — for a run
  *  that already ended: the tab-close path fires after job_done on every
  *  successful task, and must not overwrite "done" with "stopped". */
@@ -156,9 +384,22 @@ export function recordTaskEnd(
 ): void {
   const runs = [...read()];
   const i = runs.findIndex((r) => r.id === id);
-  if (i === -1 || runs[i].status !== "running") return;
+  if (i === -1 || !["running", "blocked"].includes(runs[i].status)) return;
   runs[i] = { ...runs[i], ...patch, endedAt: patch.endedAt ?? Date.now() };
   write(runs);
+  persistRun(runs[i]);
+  const attemptId = runs[i].attemptId;
+  if (attemptId) {
+    const state =
+      runs[i].status === "done"
+        ? "completed"
+        : runs[i].status === "blocked"
+          ? "blocked"
+          : "interrupted";
+    void ipc
+      .taskAttemptSettle({ attemptId, state })
+      .catch(() => {});
+  }
 }
 
 /** Settle a run whose tab is closing without it ever having reported done.
@@ -185,8 +426,13 @@ export function updateTaskRun(
   const runs = [...read()];
   const i = runs.findIndex((r) => r.id === id);
   if (i === -1) return;
-  runs[i] = { ...runs[i], ...patch };
+  runs[i] = {
+    ...runs[i],
+    ...patch,
+    ...(patch.output !== undefined ? { outputArtifactId: undefined } : {}),
+  };
   write(runs);
+  persistRun(runs[i]);
 }
 
 /** Settle anything left `running` by a previous app launch. Micro-task tabs are
@@ -195,7 +441,13 @@ export function updateTaskRun(
  *  good: invisible to the history tab (which lists only finished runs), yet
  *  still taking up one of the 200 slots. Call once, on startup, before anything
  *  new is recorded. */
-export function sweepStaleRuns(): void {
+export async function sweepStaleRuns(currentInstance?: string): Promise<void> {
+  if (authoritative) {
+    const instance = currentInstance ?? (await ipc.instanceId());
+    await ipc.taskInterruptStale(instance).catch(() => 0);
+    await refreshTaskHistory();
+    return;
+  }
   const runs = read();
   if (!runs.some((r) => r.status === "running")) return;
   write(
@@ -255,10 +507,28 @@ export const canResumeRun = (run: TaskRun): boolean =>
   Boolean(run.sessionId) && !run.ephemeralCwd;
 
 export function removeTaskRun(id: string): void {
+  if (authoritative) {
+    void ipc
+      .taskDelete(id)
+      .then(() => refreshTaskHistory())
+      .catch((error) => console.warn("task history delete failed", error));
+    return;
+  }
   write(read().filter((r) => r.id !== id));
 }
 
 export function clearTaskHistory(): void {
+  const old = read();
+  if (authoritative) {
+    void Promise.all(
+      old
+        .filter((run) => run.status !== "running" && run.status !== "blocked")
+        .map((run) => ipc.taskDelete(run.id)),
+    )
+      .then(() => refreshTaskHistory())
+      .catch((error) => console.warn("task history clear failed", error));
+    return;
+  }
   write([]);
 }
 

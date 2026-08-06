@@ -36,8 +36,8 @@ export async function refreshTaskEnvelopes(
 /** Called by the central store router. Exported rather than registering here so
  * stores.ts can install every handler without a circular module dependency. */
 export function taskStoreChanged(e: ipc.StoreChange): void {
-  if (!cache.has(e.scope)) return;
-  void refreshTaskEnvelopes(e.scope, e.id);
+  if (cache.has(e.scope)) void refreshTaskEnvelopes(e.scope, e.id);
+  else announce(e.scope, e.id);
 }
 
 export const taskGet = (runId: string): Promise<TaskEnvelopeDetail | null> =>

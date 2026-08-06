@@ -11,8 +11,10 @@ import {
 } from "./microRuns";
 
 const run = (over: Partial<MicroRun> = {}): MicroRun => ({
-  ptyId: 7,
+  ptyId: over.ptyId ?? 7,
   runId: "r1",
+  attemptId: over.attemptId ?? `attempt-${over.ptyId ?? 7}`,
+  attemptState: "running",
   taskId: "review-pr",
   label: "Review PR",
   cwd: "/repo",

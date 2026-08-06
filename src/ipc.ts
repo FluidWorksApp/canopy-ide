@@ -177,6 +177,9 @@ export interface AgentAction {
   /** The terminal the action is keyed to. For close_session it is the calling
    *  agent's own — the tool takes no id, so it can name no other session. */
   ptyId?: number;
+  /** Durable task attribution resolved from the PTY's live TaskEnvelope row. */
+  runId?: string;
+  attemptId?: string;
   path?: string;
   line?: number;
   text?: string;
@@ -1634,11 +1637,29 @@ export const taskAttemptStart = (attemptId: string) =>
 export const taskAttemptSettle = (input: TaskAttemptSettlement) =>
   invoke<TaskAttempt>("task_attempt_settle", { input });
 
+export const taskAttemptWait = (attemptId: string) =>
+  invoke<TaskAttempt>("task_attempt_wait", { attemptId });
+
 export const taskList = (projectId: string, limit = 50) =>
   invoke<TaskEnvelopeSummary[]>("task_list", { projectId, limit });
 
 export const taskGet = (runId: string) =>
   invoke<TaskEnvelopeDetail | null>("task_get", { runId });
+
+export const taskListAll = (limit = 200) =>
+  invoke<TaskEnvelopeSummary[]>("task_list_all", { limit });
+
+export const taskListHistory = (limit = 200) =>
+  invoke<TaskEnvelopeSummary[]>("task_list_history", { limit });
+
+export const taskUpdateMetadata = (runId: string, metadata: unknown) =>
+  invoke<TaskEnvelopeSummary>("task_update_metadata", { runId, metadata });
+
+export const taskInterruptStale = (currentInstance: string) =>
+  invoke<number>("task_interrupt_stale", { currentInstance });
+
+export const taskDelete = (runId: string) =>
+  invoke<void>("task_delete", { runId });
 
 export const taskTranscriptAppend = (args: {
   runId: string;

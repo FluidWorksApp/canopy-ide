@@ -17,18 +17,20 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use tauri::State;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const ENVELOPE_SCHEMA_VERSION: i64 = 1;
 const DEFAULT_ATTEMPT_CAP: i64 = 3;
 const MAX_ATTEMPT_CAP: i64 = 8;
 const DEFAULT_LIST: usize = 50;
 const MAX_LIST: usize = 200;
+const MAX_HISTORY_LIST: usize = 1000;
 const MAX_GOAL_BYTES: usize = 16 * 1024;
 const MAX_CONTEXT_BYTES: usize = 24 * 1024;
 const MAX_ACCEPTANCE: usize = 32;
 const MAX_ACCEPTANCE_BYTES: usize = 1024;
 const MAX_POLICY_BYTES: usize = 16 * 1024;
 const MAX_TITLE_BYTES: usize = 256;
+const MAX_METADATA_BYTES: usize = 64 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
 const MAX_TRANSCRIPT_LIST: usize = 2000;
 const MAX_TRANSCRIPT_ENTRIES: i64 = 2000;
@@ -104,6 +106,8 @@ pub struct TaskReserveInput {
     pub attempt_cap: Option<i64>,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub metadata: Value,
     pub route: TaskRouteSnapshot,
 }
 
@@ -143,6 +147,7 @@ pub struct TaskEnvelopeSummary {
     pub attempt_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    pub metadata: Value,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -339,6 +344,7 @@ impl TaskStore {
         let task_classes = json(&input.task_classes, "task classes")?;
         let authority = json(&input.authority_policy, "authority policy")?;
         let failover = json(&input.failover_policy, "failover policy")?;
+        let metadata = json(&input.metadata, "task metadata")?;
         let route_json = json(&input.route, "route")?;
         let project_id = input.project_id.clone();
         let component_id = input.component_id.clone();
@@ -354,9 +360,9 @@ impl TaskStore {
                     run_id, schema_version, kind, project_id, component_id, worktree_path,
                     goal, acceptance_json, task_classes_json, context_summary, risk_class,
                     authority_policy_json, failover_policy_json, deadline_at, attempt_cap,
-                    status, title, attempt_count, created_at, updated_at
+                    status, title, attempt_count, created_at, updated_at, metadata_json
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                           ?13, ?14, ?15, 'running', ?16, 1, ?17, ?17)",
+                           ?13, ?14, ?15, 'running', ?16, 1, ?17, ?17, ?18)",
                 params![
                     run_id,
                     ENVELOPE_SCHEMA_VERSION,
@@ -374,7 +380,8 @@ impl TaskStore {
                     input.deadline_at,
                     cap,
                     input.title,
-                    now
+                    now,
+                    metadata
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -391,6 +398,7 @@ impl TaskStore {
                 attempt_count: 1,
                 created_at: now,
                 updated_at: now,
+                metadata: input.metadata,
             };
             let attempt = TaskAttempt {
                 attempt_id: attempt_id.clone(),
@@ -484,6 +492,49 @@ impl TaskStore {
         .map(|_| ())
     }
 
+    fn wait_attempt(&self, attempt_id: String) -> Result<TaskAttempt, String> {
+        validate_id(&attempt_id, "attempt id")?;
+        let now = now_ms();
+        self.mutate(move |conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+            let (run_id, project_id, state, ordinal, current): (String, String, String, i64, i64) =
+                tx.query_row(
+                    "SELECT a.run_id, e.project_id, a.state, a.ordinal, e.attempt_count
+                     FROM task_attempts a JOIN task_envelopes e ON e.run_id = a.run_id
+                     WHERE a.attempt_id = ?1",
+                    [&attempt_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .map_err(|_| "task attempt not found".to_string())?;
+            if state != "running" || ordinal != current {
+                return Err("only the current running attempt can wait".into());
+            }
+            tx.execute(
+                "UPDATE task_attempts SET state = 'waiting' WHERE attempt_id = ?1",
+                [&attempt_id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE task_envelopes SET status = 'blocked', updated_at = ?1 WHERE run_id = ?2",
+                params![now, run_id],
+            )
+            .map_err(|e| e.to_string())?;
+            let attempt = read_attempt(&tx, &attempt_id)?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok((project_id, run_id, attempt))
+        })
+    }
+
     fn reserve_attempt(&self, input: TaskAttemptReserveInput) -> Result<TaskAttempt, String> {
         validate_id(&input.run_id, "run id")?;
         validate_route(&input.route)?;
@@ -514,7 +565,7 @@ impl TaskStore {
             let active: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM task_attempts
-                     WHERE run_id = ?1 AND state IN ('reserved','launching','running'))",
+                     WHERE run_id = ?1 AND state IN ('reserved','launching','running','waiting'))",
                     [&input.run_id],
                     |row| row.get(0),
                 )
@@ -671,7 +722,10 @@ impl TaskStore {
                     },
                 )
                 .map_err(|_| "task attempt not found".to_string())?;
-            if !matches!(current.as_str(), "reserved" | "launching" | "running") {
+            if !matches!(
+                current.as_str(),
+                "reserved" | "launching" | "running" | "waiting"
+            ) {
                 return Err(format!("attempt is already {current}"));
             }
             if ordinal != count {
@@ -719,7 +773,7 @@ impl TaskStore {
             let mut statement = conn
                 .prepare(
                     "SELECT run_id, project_id, component_id, kind, title, status,
-                            attempt_count, created_at, updated_at
+                            attempt_count, created_at, updated_at, metadata_json
                      FROM task_envelopes WHERE project_id = ?1
                      ORDER BY updated_at DESC LIMIT ?2",
                 )
@@ -735,6 +789,161 @@ impl TaskStore {
     fn get(&self, run_id: &str) -> Result<Option<TaskEnvelopeDetail>, String> {
         validate_id(run_id, "run id")?;
         self.with_conn(|conn| read_detail(conn, run_id))
+    }
+
+    fn list_all(&self, limit: usize) -> Result<Vec<TaskEnvelopeSummary>, String> {
+        let limit = limit.clamp(1, MAX_LIST) as i64;
+        self.with_conn(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT run_id, project_id, component_id, kind, title, status,
+                            attempt_count, created_at, updated_at, metadata_json
+                     FROM task_envelopes ORDER BY updated_at DESC LIMIT ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = statement
+                .query_map([limit], read_summary_row)
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn list_history(&self, limit: usize) -> Result<Vec<TaskEnvelopeSummary>, String> {
+        let limit = limit.clamp(1, MAX_HISTORY_LIST) as i64;
+        self.with_conn(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT run_id, project_id, component_id, kind, title, status,
+                            attempt_count, created_at, updated_at, metadata_json
+                     FROM task_envelopes
+                     WHERE json_extract(metadata_json, '$.history') = 1
+                     ORDER BY updated_at DESC LIMIT ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = statement
+                .query_map([limit], read_summary_row)
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn update_metadata(
+        &self,
+        run_id: String,
+        metadata: Value,
+    ) -> Result<TaskEnvelopeSummary, String> {
+        validate_id(&run_id, "run id")?;
+        let encoded = json(&metadata, "task metadata")?;
+        if encoded.len() > MAX_METADATA_BYTES {
+            return Err(format!("task metadata exceeds {MAX_METADATA_BYTES} bytes"));
+        }
+        let now = now_ms();
+        self.mutate(move |conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+            let project_id: String = tx
+                .query_row(
+                    "SELECT project_id FROM task_envelopes WHERE run_id = ?1",
+                    [&run_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| "task envelope not found".to_string())?;
+            tx.execute(
+                "UPDATE task_envelopes SET metadata_json = ?1, updated_at = ?2 WHERE run_id = ?3",
+                params![encoded, now, run_id],
+            )
+            .map_err(|e| e.to_string())?;
+            let summary = tx
+                .query_row(
+                    "SELECT run_id, project_id, component_id, kind, title, status,
+                            attempt_count, created_at, updated_at, metadata_json
+                     FROM task_envelopes WHERE run_id = ?1",
+                    [&run_id],
+                    read_summary_row,
+                )
+                .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok((project_id, run_id, summary))
+        })
+    }
+
+    fn interrupt_stale(&self, current_instance: &str) -> Result<usize, String> {
+        validate_text(current_instance, 256, "app instance", false)?;
+        let attempts = self.with_conn(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT a.attempt_id, a.state FROM task_attempts a
+                     JOIN task_envelopes e ON e.run_id = a.run_id
+                     WHERE a.state IN ('reserved','launching','running','waiting')
+                       AND json_extract(e.metadata_json, '$.history') = 1
+                       AND COALESCE(json_extract(e.metadata_json, '$.appInstance'), '') != ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = statement
+                .query_map([current_instance], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(rows)
+        })?;
+        let mut settled = 0;
+        for (attempt_id, state) in attempts {
+            if self
+                .settle_attempt(TaskAttemptSettlement {
+                    attempt_id,
+                    state: if state == "waiting" {
+                        "blocked".into()
+                    } else {
+                        "interrupted".into()
+                    },
+                    failure_class: Some(if state == "waiting" {
+                        "human_required".into()
+                    } else {
+                        "route".into()
+                    }),
+                    failure_code: Some("previous-app-ended".into()),
+                })
+                .is_ok()
+            {
+                settled += 1;
+            }
+        }
+        Ok(settled)
+    }
+
+    fn delete(&self, run_id: String) -> Result<(), String> {
+        validate_id(&run_id, "run id")?;
+        let (_, artifact_root) = self.paths()?;
+        let deleted_run = run_id.clone();
+        self.mutate(move |conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+            let (project_id, status): (String, String) = tx
+                .query_row(
+                    "SELECT project_id, status FROM task_envelopes WHERE run_id = ?1",
+                    [&run_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|_| "task envelope not found".to_string())?;
+            if matches!(status.as_str(), "running" | "blocked") {
+                return Err("a live task cannot be removed from history".into());
+            }
+            tx.execute("DELETE FROM task_envelopes WHERE run_id = ?1", [&run_id])
+                .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok((project_id, run_id, ()))
+        })?;
+        let dir = artifact_root.join(deleted_run);
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        Ok(())
     }
 
     fn append_transcript(
@@ -1149,6 +1358,16 @@ fn open_db(path: &Path) -> Result<Connection, String> {
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
+    } else if version < 2 {
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute_batch(
+            "ALTER TABLE task_envelopes
+             ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';",
+        )
+        .map_err(|e| e.to_string())?;
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
     }
     Ok(conn)
 }
@@ -1179,6 +1398,7 @@ fn create_schema(conn: &Connection) -> Result<(), String> {
              created_at INTEGER NOT NULL,
              updated_at INTEGER NOT NULL,
              settled_at INTEGER
+             ,metadata_json TEXT NOT NULL DEFAULT '{}'
          );
          CREATE INDEX task_envelopes_project_updated
              ON task_envelopes(project_id, updated_at DESC);
@@ -1332,6 +1552,10 @@ fn read_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEnvelopeSum
         attempt_count: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+        metadata: {
+            let raw: String = row.get(9)?;
+            from_json(&raw, 9)?
+        },
     })
 }
 
@@ -1385,13 +1609,14 @@ fn read_detail(conn: &Connection, run_id: &str) -> Result<Option<TaskEnvelopeDet
         Option<i64>,
         i64,
         i64,
+        String,
     )> = conn
         .query_row(
             "SELECT run_id, schema_version, kind, project_id, component_id, worktree_path,
                     goal, acceptance_json, task_classes_json, context_summary, risk_class,
                     authority_policy_json, failover_policy_json, status, deadline_at, attempt_cap,
                     title, base_baseline_id, attempt_count, last_green_baseline_id, settled_at,
-                    created_at, updated_at
+                    created_at, updated_at, metadata_json
              FROM task_envelopes WHERE run_id = ?1",
             [run_id],
             |row| {
@@ -1419,6 +1644,7 @@ fn read_detail(conn: &Connection, run_id: &str) -> Result<Option<TaskEnvelopeDet
                     row.get(20)?,
                     row.get(21)?,
                     row.get(22)?,
+                    row.get(23)?,
                 ))
             },
         )
@@ -1435,6 +1661,7 @@ fn read_detail(conn: &Connection, run_id: &str) -> Result<Option<TaskEnvelopeDet
         attempt_count: row.18,
         created_at: row.21,
         updated_at: row.22,
+        metadata: serde_json::from_str(&row.23).map_err(|e| e.to_string())?,
     };
     let envelope = TaskEnvelope {
         summary,
@@ -1506,6 +1733,9 @@ fn validate_reserve(input: &TaskReserveInput) -> Result<(), String> {
         if json(value, label)?.len() > MAX_POLICY_BYTES {
             return Err(format!("{label} exceeds {MAX_POLICY_BYTES} bytes"));
         }
+    }
+    if json(&input.metadata, "task metadata")?.len() > MAX_METADATA_BYTES {
+        return Err(format!("task metadata exceeds {MAX_METADATA_BYTES} bytes"));
     }
     validate_route(&input.route)
 }
@@ -1711,6 +1941,14 @@ pub fn task_attempt_settle(
 }
 
 #[tauri::command]
+pub fn task_attempt_wait(
+    attempt_id: String,
+    store: State<'_, TaskStore>,
+) -> Result<TaskAttempt, String> {
+    store.wait_attempt(attempt_id)
+}
+
+#[tauri::command]
 pub fn task_list(
     project_id: String,
     limit: Option<usize>,
@@ -1725,6 +1963,44 @@ pub fn task_get(
     store: State<'_, TaskStore>,
 ) -> Result<Option<TaskEnvelopeDetail>, String> {
     store.get(&run_id)
+}
+
+#[tauri::command]
+pub fn task_list_all(
+    limit: Option<usize>,
+    store: State<'_, TaskStore>,
+) -> Result<Vec<TaskEnvelopeSummary>, String> {
+    store.list_all(limit.unwrap_or(DEFAULT_LIST))
+}
+
+#[tauri::command]
+pub fn task_list_history(
+    limit: Option<usize>,
+    store: State<'_, TaskStore>,
+) -> Result<Vec<TaskEnvelopeSummary>, String> {
+    store.list_history(limit.unwrap_or(DEFAULT_LIST))
+}
+
+#[tauri::command]
+pub fn task_update_metadata(
+    run_id: String,
+    metadata: Value,
+    store: State<'_, TaskStore>,
+) -> Result<TaskEnvelopeSummary, String> {
+    store.update_metadata(run_id, metadata)
+}
+
+#[tauri::command]
+pub fn task_interrupt_stale(
+    current_instance: String,
+    store: State<'_, TaskStore>,
+) -> Result<usize, String> {
+    store.interrupt_stale(&current_instance)
+}
+
+#[tauri::command]
+pub fn task_delete(run_id: String, store: State<'_, TaskStore>) -> Result<(), String> {
+    store.delete(run_id)
 }
 
 #[tauri::command]
@@ -1820,6 +2096,7 @@ mod tests {
             deadline_at: None,
             attempt_cap: Some(2),
             title: Some("Checkout".into()),
+            metadata: serde_json::json!({"label": "Checkout"}),
             route: route("claude"),
         }
     }
@@ -1834,6 +2111,7 @@ mod tests {
         assert_eq!(reservation.attempt.state, "reserved");
         assert!(reservation.attempt.started_at.is_none());
         assert_eq!(store.list("p1", 50).unwrap().len(), 1);
+        assert_eq!(reservation.envelope.metadata["label"], "Checkout");
         let binding = store
             .spawn_binding(
                 Some(&reservation.envelope.run_id),
@@ -1998,6 +2276,126 @@ mod tests {
             .spawn_binding(Some(&binding.run_id), None)
             .unwrap_err()
             .contains("both runId and attemptId"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn metadata_stale_sweep_and_history_delete_are_authoritative() {
+        let root = root();
+        let store = TaskStore::at(root.clone());
+        let reserved = store.reserve(input()).unwrap();
+        let binding = store
+            .spawn_binding(
+                Some(&reserved.envelope.run_id),
+                Some(&reserved.attempt.attempt_id),
+            )
+            .unwrap()
+            .unwrap();
+        store.mark_spawned(&binding).unwrap();
+        assert!(store
+            .delete(binding.run_id.clone())
+            .unwrap_err()
+            .contains("live task"));
+        let summary = store
+            .update_metadata(
+                binding.run_id.clone(),
+                serde_json::json!({
+                    "history": true,
+                    "label": "Imported",
+                    "appInstance": "old-instance"
+                }),
+            )
+            .unwrap();
+        assert_eq!(summary.metadata["label"], "Imported");
+        assert_eq!(store.list_all(10).unwrap().len(), 1);
+        assert_eq!(store.interrupt_stale("old-instance").unwrap(), 0);
+        assert_eq!(store.interrupt_stale("current-instance").unwrap(), 1);
+        assert_eq!(
+            store.get(&binding.run_id).unwrap().unwrap().attempts[0].state,
+            "interrupted"
+        );
+        store.delete(binding.run_id.clone()).unwrap();
+        assert!(store.get(&binding.run_id).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_waiting_attempt_can_later_complete() {
+        let root = root();
+        let store = TaskStore::at(root.clone());
+        let reserved = store.reserve(input()).unwrap();
+        let binding = store
+            .spawn_binding(
+                Some(&reserved.envelope.run_id),
+                Some(&reserved.attempt.attempt_id),
+            )
+            .unwrap()
+            .unwrap();
+        store.mark_spawned(&binding).unwrap();
+        assert_eq!(
+            store
+                .wait_attempt(binding.attempt_id.clone())
+                .unwrap()
+                .state,
+            "waiting"
+        );
+        assert_eq!(
+            store
+                .get(&binding.run_id)
+                .unwrap()
+                .unwrap()
+                .envelope
+                .summary
+                .status,
+            "blocked"
+        );
+        assert_eq!(
+            store
+                .settle_attempt(TaskAttemptSettlement {
+                    attempt_id: binding.attempt_id,
+                    state: "completed".into(),
+                    failure_class: None,
+                    failure_code: None,
+                })
+                .unwrap()
+                .state,
+            "completed"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema_one_migrates_metadata_without_rebuilding() {
+        let root = root();
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("tasks.sqlite");
+        let conn = Connection::open(&path).unwrap();
+        create_schema(&conn).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE task_envelopes DROP COLUMN metadata_json;
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = TaskStore::at(root.clone());
+        assert!(store.list_all(10).unwrap().is_empty());
+        let conn = Connection::open(path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let has_metadata: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pragma_table_info('task_envelopes')
+                    WHERE name = 'metadata_json'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_metadata);
         let _ = std::fs::remove_dir_all(root);
     }
 

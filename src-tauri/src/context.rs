@@ -2202,6 +2202,7 @@ async fn action(
                 .as_deref()
                 .is_some_and(|i| i != crate::pty::instance_token());
             if !stale {
+                let identity = who.agent();
                 // Keyed by terminal like restart_server: route is empty, App
                 // broadcasts, and the ProjectView owning the pty acts.
                 let _ = app.emit(
@@ -2209,7 +2210,9 @@ async fn action(
                     serde_json::json!({
                         "kind": "job_done",
                         "route": "",
-                        "ptyId": act.pty_id,
+                        "ptyId": identity.map(|agent| agent.pty_id).or(act.pty_id),
+                        "runId": identity.and_then(|agent| agent.run_id.as_deref()),
+                        "attemptId": identity.and_then(|agent| agent.attempt_id.as_deref()),
                         "status": status,
                         "summary": summary,
                         "asked": act.asked,

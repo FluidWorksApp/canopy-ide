@@ -241,14 +241,20 @@ import {
 import { TaskHistoryView } from "../TaskHistoryView";
 import { InstructionsView } from "../InstructionsView";
 import {
+  adoptTaskReservation,
   endAbandonedRun,
+  hydrateTaskHistory,
   recordTaskEnd,
-  recordTaskStart,
   researchEntryForFile,
   runTitle,
   updateTaskRun,
   type TaskRun,
 } from "../../taskHistory";
+import {
+  reserveTask,
+  taskGet,
+  TASK_ENVELOPES_EVENT,
+} from "../../taskEnvelopes";
 import { record as recordProvenance } from "../../provenance";
 import { resolveAgentForPr, type PrAgent } from "../../agentForPr";
 import { cached as provenanceCached, parsePrUrl } from "../../provenance";
@@ -2896,6 +2902,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [],
   );
+  useEffect(() => {
+    const sync = (event: Event) => {
+      const changed = (event as CustomEvent<{ runId?: string }>).detail?.runId;
+      const runs = changed
+        ? microRunsRef.current.filter((run) => run.runId === changed)
+        : microRunsRef.current;
+      for (const run of runs) {
+        void taskGet(run.runId).then((detail) => {
+          const state = detail?.attempts.find(
+            (attempt) => attempt.attemptId === run.attemptId,
+          )?.state;
+          if (state)
+            updateMicroRuns((current) =>
+              patchRun(current, run.ptyId, { attemptState: state }),
+            );
+        });
+      }
+    };
+    window.addEventListener(TASK_ENVELOPES_EVENT, sync);
+    return () => window.removeEventListener(TASK_ENVELOPES_EVENT, sync);
+  }, [updateMicroRuns]);
   // Ages the "· 2m" on each running row, and only while something is running:
   // a project with no task in flight should not repaint on a timer.
   const [microClock, setMicroClock] = useState(() => Date.now());
@@ -2932,7 +2959,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // caller that has no agent picker; the split-button surfaces pass the
       // one the user chose from its menu.
       preferAgent?: string,
+      onReserved?: (ids: { runId: string; attemptId: string }) => void,
     ): Promise<boolean> => {
+      await hydrateTaskHistory();
       const installed = await getInstalledForLaunch();
       const cli = pickLaunchCli(preferAgent, (bin) => Boolean(installed[bin]));
       const agent = cli?.id;
@@ -2947,7 +2976,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // make a throwaway the brief tells the agent to remove. If that fails we
       // stop rather than fall back to the shared checkout — the agent would
       // commit onto whatever branch happens to be sitting there.
-      let dir = def.cwd(payload);
+      const requestedDir = def.cwd(payload);
+      let dir = requestedDir;
       let env: MicroTaskEnv | undefined;
       if (def.isolation) {
         // Both isolation kinds want the same thing — this work, in a workspace
@@ -2979,8 +3009,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         dir = r.path;
         env = r.created ? { cleanup: { repo, worktree: r.path } } : undefined;
       }
+      const brief = def.buildContext(payload, userQuery, env);
       const seed = oneLine(
-        `${def.buildContext(payload, userQuery, env)} ${progressBrief(def, payload)} ${microTaskProtocol()}`,
+        `${brief} ${progressBrief(def, payload)} ${microTaskProtocol()}`,
       );
       const start = await startCommandParked(agent, seed, dir);
       if (!start) {
@@ -2991,28 +3022,66 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // than what to call the task. Resolved once so the history row, the
       // running chip and the tab title cannot disagree about which run this is.
       const runName = runLabelFor(def, payload, userQuery);
-      // Logged at launch, not at completion: a task that is stopped, or whose
-      // agent dies without ever reporting, still has to leave a trace — and the
-      // brief is only in hand here. The protocol is stripped back off; it is the
-      // same boilerplate on every run and pure noise in the history.
-      const record = () =>
-        recordTaskStart({
-          taskId: def.id,
-          label: runName,
-          icon: def.icon,
-          agent: cli.id,
-          cwd: dir,
+      const component = [...project.components]
+        .filter(
+          (candidate) =>
+            requestedDir === candidate.path ||
+            requestedDir.startsWith(`${candidate.path}/`) ||
+            candidate.path.startsWith(`${requestedDir}/`),
+        )
+        .sort((a, b) => b.path.length - a.path.length)[0];
+      const history = {
+        taskId: def.id,
+        label: runName,
+        icon: def.icon,
+        agent: cli.id,
+        cwd: dir,
+        projectId: project.id,
+        projectName: project.name,
+        brief,
+        // A worktree we made for this run is one the brief tells the agent to
+        // delete. The launcher's metadata is the only durable place that knows.
+        ephemeralCwd: Boolean(env?.cleanup),
+      };
+      let reservation;
+      let durableHistory;
+      try {
+        const appInstance = await ipc.instanceId();
+        durableHistory = { ...history, appInstance };
+        reservation = await reserveTask({
+          kind: def.id,
           projectId: project.id,
-          projectName: project.name,
-          brief: def.buildContext(payload, userQuery, env),
-          // A worktree we made for this run is one the brief tells the agent
-          // to delete, which takes the conversation's directory with it — and
-          // `--resume` is resolved inside the CLI's config dir, keyed by that
-          // directory. Recorded now, while the launcher is the only thing that
-          // knows: afterwards there is nothing on disk to tell a throwaway
-          // worktree from a real one the user happened to be working in.
-          ephemeralCwd: Boolean(env?.cleanup),
+          componentId: component?.id ?? project.id,
+          worktreePath: dir,
+          goal: brief,
+          acceptance: def.steps?.map((step) => step.done) ?? [],
+          taskClasses: { micro_task: 1 },
+          contextSummary: `One-shot ${def.effect ?? "reads"} task launched from ${runName}.`,
+          riskClass: def.effect ?? "reads",
+          authorityPolicy: { effect: def.effect ?? "reads" },
+          failoverPolicy: { automatic: false },
+          attemptCap: 1,
+          title: runName,
+          metadata: { ...durableHistory, history: true },
+          route: {
+            cli: cli.id,
+            profileId: launchProfile(agent) ?? "default",
+            harnessVersion: "micro-task-v1",
+            promptVersion: "micro-task-v1",
+            toolPolicyVersion: "micro-task-v1",
+            executionMode: "pty",
+          },
         });
+      } catch (err) {
+        onNotice(`Couldn't reserve "${def.label}": ${String(err)}`, "error");
+        return false;
+      }
+      const durableRun = adoptTaskReservation(reservation, durableHistory);
+      const { runId, attemptId } = {
+        runId: reservation.envelope.runId,
+        attemptId: reservation.attempt.attemptId,
+      };
+      onReserved?.({ runId, attemptId });
       /** Type the brief in for a CLI that takes no prompt argument: write, then
        *  submit a beat later, once the agent has had time to come up. */
       const seedPrompt = (pty: number) => {
@@ -3038,18 +3107,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
             cwd: dir,
             command: start.command,
             env: [["CANOPY_MICRO_TASK", "1"], ...extraEnv],
+            runId,
+            attemptId,
           });
           pty = res.id;
         } catch (err) {
           onNotice(`Couldn't start "${def.label}": ${String(err)}`, "error");
           return false;
         }
-        const runId = record();
         updateTaskRun(runId, { ptyId: pty, researchId });
         updateMicroRuns((runs) =>
           withRun(runs, {
             ptyId: pty,
             runId,
+            attemptId,
+            attemptState: "running",
             taskId: def.id,
             label: runName,
             icon: def.icon,
@@ -3085,9 +3157,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ? undefined
           : fleet.route.profile,
       );
-      if (!id) return false;
+      if (!id) {
+        recordTaskEnd(durableRun.id, { status: "stopped" });
+        return false;
+      }
       patchTabRaw(id, {
-        micro: { taskId: def.id, runId: record() },
+        micro: { taskId: def.id, runId, attemptId },
       } as Partial<SubTab>);
       if (start.typePrompt)
         pendingTerminalPrompts.current.set(id, seed);
@@ -4430,6 +4505,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         const ptyId = tab?.ptyId ?? detached?.ptyId;
         if (ptyId == null) return;
         const runId = tab?.micro?.runId ?? detached?.runId;
+        const attemptId = tab?.micro?.attemptId ?? detached?.attemptId;
         // A run that never called canopy_name_task can still name itself here,
         // and one that did may have learnt something since.
         const named = taskIdentity(a);
@@ -4487,6 +4563,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
           via: "job_done",
         });
         if (a.status === "blocked") {
+          if (attemptId) {
+            void ipc
+              .taskAttemptWait(attemptId)
+              .then(() => {
+                if (detached)
+                  updateMicroRuns((runs) =>
+                    patchRun(runs, ptyId, { attemptState: "waiting" }),
+                  );
+              })
+              .catch(() => {});
+          }
           // Blocked is not an ending — the agent is waiting on the user and the
           // run continues. Keep what it said and mark that it asked, so that if
           // the user walks away instead of answering, the run settles as
@@ -10143,6 +10230,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     : undefined
                 }
                 env={tab.env}
+                runId={tab.micro?.runId}
+                attemptId={tab.micro?.attemptId}
                 onSpawned={(ptyId) => {
                   // A freshly spawned pty is alive by definition, so clear any
                   // stale exited/failed state. Restart kills the old pty and
@@ -10154,6 +10243,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     exited: false,
                     exitCode: undefined,
                   });
+                  if (tab.micro?.runId) updateTaskRun(tab.micro.runId, { ptyId });
                   const prompt = pendingTerminalPrompts.current.get(tab.id);
                   if (prompt == null) return;
                   pendingTerminalPrompts.current.delete(tab.id);

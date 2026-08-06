@@ -75,6 +75,7 @@ import {
 } from "../prReview";
 import {
   beginRound,
+  failRoundLaunch,
   findingKey,
   finishRound,
   isLandable,
@@ -91,6 +92,7 @@ import {
   takeUnnoticed,
   type PrLoop,
 } from "../prLoop";
+import { taskGet } from "../taskEnvelopes";
 import { Button } from "./ui";
 import { autoExpanded, AUTO_EXPAND_TOTAL, HIGHLIGHT_MAX } from "../patchBudget";
 import { basename } from "../paths";
@@ -165,6 +167,8 @@ interface PrViewProps {
     task: MicroTaskDef<P>,
     payload: P,
     query: string,
+    preferAgent?: string,
+    onReserved?: (ids: { runId: string; attemptId: string }) => void,
   ) => Promise<boolean>;
   /** Every session running now: id → its terminal, null for another window.
    *  What turns a recorded edge into "and it is still up". */
@@ -763,7 +767,12 @@ export function PrView({
 
   /** Every task launch on this tab goes through here. */
   const launch = useCallback(
-    <P,>(def: MicroTaskDef<P>, payload: P, query = "") => {
+    <P,>(
+      def: MicroTaskDef<P>,
+      payload: P,
+      query = "",
+      onReserved?: (ids: { runId: string; attemptId: string }) => void,
+    ) => {
       if (!onMicroTask) return undefined;
       setPending((p) => ({ ...p, [def.id]: Date.now() }));
       // A new run starts the rail empty and re-arms the staleness guard, so the
@@ -778,7 +787,7 @@ export function PrView({
       // button out of the busy state it entered on the way in. Left to the 30s
       // sweep below, the pill sat there reading "Resolving…" directly above the
       // toast explaining that nothing was resolving.
-      const starting = onMicroTask(def, payload, query);
+      const starting = onMicroTask(def, payload, query, undefined, onReserved);
       void starting.then((started) => {
         if (started) return;
         setPending((p) => {
@@ -972,10 +981,23 @@ export function PrView({
         onNotice(gate.reason ?? "Nothing to address right now.");
         return;
       }
-      launch(addressPrCommentsTask, { repo, pr });
-      persist({
-        ...beginRound(loop, gate.ids, conv?.head_sha ?? ""),
-        auto: armed || loop.auto,
+      const starting = launch(
+        addressPrCommentsTask,
+        { repo, pr },
+        "",
+        (task) =>
+          persist({
+            ...beginRound(loop, gate.ids, conv?.head_sha ?? "", task),
+            auto: armed || loop.auto,
+          }),
+      );
+      void starting?.then((started) => {
+        if (started) return;
+        setLoop((current) =>
+          current.status === "working"
+            ? saveLoop(failRoundLaunch(current, undefined))
+            : current,
+        );
       });
       onNotice(
         `Round ${loop.cycle + 1}: an agent is addressing ${gate.ids.length} ${
@@ -1091,9 +1113,11 @@ export function PrView({
       const action = (e as CustomEvent).detail?.action as
         ipc.AgentAction | undefined;
       if (!action || action.kind !== "job_done") return;
-      const mine =
-        action.url?.includes(`/pull/${pr.number}`) ||
-        action.route?.includes(`-wt-pr-${pr.number}`);
+      const currentRound = loop.rounds[loop.rounds.length - 1];
+      const mine = currentRound?.attemptId
+        ? action.attemptId === currentRound.attemptId
+        : action.url?.includes(`/pull/${pr.number}`) ||
+          action.route?.includes(`-wt-pr-${pr.number}`);
       if (!mine) return;
       // Whatever the round produced, the conversation and the head sha are the
       // evidence — refresh, then decide whether anything was actually pushed.
@@ -1124,7 +1148,37 @@ export function PrView({
     };
     window.addEventListener("canopy:agent-action", onAction);
     return () => window.removeEventListener("canopy:agent-action", onAction);
-  }, [pr.number, repo, refreshConv]);
+  }, [pr.number, repo, refreshConv, loop.rounds]);
+
+  // A tab-backed PTY can fail after the launcher returned true. The durable
+  // attempt is the authority: return the comments to the loop instead of
+  // waiting 45 minutes on a process that never existed.
+  useEffect(() => {
+    const reconcile = () => {
+      const round = loop.rounds[loop.rounds.length - 1];
+      if (loop.status !== "working" || !round?.attemptId) return;
+      const run = taskRuns().find(
+        (candidate) => candidate.attemptId === round.attemptId,
+      );
+      if (run?.status === "stopped")
+        void taskGet(round.runId ?? run.id).then((detail) => {
+          const attempt = detail?.attempts.find(
+            (candidate) => candidate.attemptId === round.attemptId,
+          );
+          if (attempt?.failureCode === "process-launch")
+            persist(
+              failRoundLaunch(
+                loop,
+                round.attemptId,
+                "the round's process did not start",
+              ),
+            );
+        });
+    };
+    reconcile();
+    window.addEventListener(TASK_HISTORY_EVENT, reconcile);
+    return () => window.removeEventListener(TASK_HISTORY_EVENT, reconcile);
+  }, [loop, persist]);
 
   // The watcher: while a round is waiting, look for a post-back. The trigger is
   // a comment id we've never handled — `updatedAt` moves on our own pushes too,
@@ -1175,8 +1229,18 @@ export function PrView({
       if (fresh.length && loop.auto) {
         const g = roundGate(livePr, c, loop);
         if (g.ok) {
-          launch(addressPrCommentsTask, { repo, pr });
-          persist(beginRound(loop, g.ids, c.head_sha));
+          const starting = launch(
+            addressPrCommentsTask,
+            { repo, pr },
+            "",
+            (task) => persist(beginRound(loop, g.ids, c.head_sha, task)),
+          );
+          void starting?.then((started) => {
+            if (!started)
+              setLoop((current) =>
+                saveLoop(failRoundLaunch(current, undefined)),
+              );
+          });
           onNotice(
             `#${pr.number} round ${loop.cycle + 1}: ${g.ids.length} new comment(s) came back — agent is on it.`,
             "info",
