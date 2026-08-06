@@ -1456,6 +1456,29 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   </div>
                 </Item>
                 <Item
+                  name="Skip permission prompts"
+                  desc="Start every agent in its CLI's own bypass mode, so it acts without stopping to ask."
+                >
+                  <Checkbox
+                    checked={s.dangerouslySkipPermissions}
+                    onChange={(v) => patch({ dangerouslySkipPermissions: v })}
+                    label="Dangerously skip permission checks for every agent"
+                    hint={
+                      "Each CLI gets its own flag — claude --dangerously-skip-permissions, " +
+                      "codex --dangerously-bypass-approvals-and-sandbox, opencode --auto, and so on. " +
+                      "A CLI with no such flag (Amp) launches unchanged. Applies to agents started from now on."
+                    }
+                  />
+                  {s.dangerouslySkipPermissions && (
+                    <div className="set-danger-note" role="alert">
+                      Agents will run commands, edit and delete files, and spend
+                      money without asking first — a mistaken or misled agent can
+                      do real damage anywhere it can reach. Keep this on only if
+                      you trust every repository and prompt you point agents at.
+                    </div>
+                  )}
+                </Item>
+                <Item
                   name="CLI commands"
                   desc="Leave blank unless yours was renamed or lives off your PATH."
                 >
