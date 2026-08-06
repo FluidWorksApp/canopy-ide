@@ -165,6 +165,8 @@ export interface AgentAction {
   cwd?: string;
   name?: string;
   command?: string;
+  componentId?: string;
+  runCommandId?: string;
   url?: string;
   /** The terminal the action is keyed to. For close_session it is the calling
    *  agent's own — the tool takes no id, so it can name no other session. */

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   adoptLegacyCustomTasks,
+  adoptProjectStructureIds,
   AGENT_CLIS,
   agentForBin,
   agentForPkg,
@@ -11,6 +12,7 @@ import {
   importFile,
   launchCommand,
   loadWorkspace,
+  normalizeProjectStructure,
   newCustomCliId,
   refreshAgentClis,
   remoteCliMetadata,
@@ -491,8 +493,20 @@ describe("project vibe serialization", () => {
     const project: Project = {
       id: "p-vibe",
       name: "Vibe app",
-      components: [{ label: "app", path: "/repo/app" }],
-      vibe: { enabled: true, component: "app", runCommand: "dev" },
+      components: [
+        {
+          id: "cmp-app",
+          label: "app",
+          path: "/repo/app",
+          commands: [{ id: "run-dev", name: "dev", command: "npm run dev" }],
+        },
+      ],
+      vibe: {
+        version: 1,
+        enabled: true,
+        componentId: "cmp-app",
+        runCommandId: "run-dev",
+      },
     };
 
     await exportProject("/tmp/vibe.canopy-project", project);
@@ -500,18 +514,213 @@ describe("project vibe serialization", () => {
     expect((await importFile("/tmp/vibe.canopy-project")).projects).toEqual([project]);
   });
 
-  it("loads a pre-vibe workspace without migration", async () => {
+  it("normalizes a legacy project import before exposing it", async () => {
+    mockCommands({
+      workspace_import: JSON.stringify({
+        kind: "canopy.project",
+        version: 1,
+        project: {
+          id: "imported",
+          name: "Imported",
+          components: [
+            {
+              label: "web",
+              path: "/imported/web",
+              commands: [{ name: "dev", command: "npm run dev" }],
+            },
+          ],
+          vibe: { enabled: true, component: "web", runCommand: "dev" },
+        },
+      }),
+    });
+
+    const [project] = (await importFile("/tmp/legacy.canopy-project")).projects;
+
+    expect(project.components[0].id).toMatch(/^cmp_/);
+    expect(project.components[0].commands?.[0].id).toMatch(/^run_/);
+    expect(project.vibe).toMatchObject({
+      version: 1,
+      componentId: project.components[0].id,
+      runCommandId: project.components[0].commands?.[0].id,
+    });
+  });
+
+  it("adopts deterministic IDs in a pre-vibe workspace without inventing vibe", async () => {
     mockCommands({
       store_load: JSON.stringify({
-        projects: [{ id: "old", name: "Old project", components: [] }],
+        projects: [
+          {
+            id: "old",
+            name: "Old project",
+            components: [
+              {
+                label: "app",
+                path: "/old/app",
+                commands: [{ name: "dev", command: "npm run dev" }],
+              },
+            ],
+          },
+        ],
         openIds: ["old"],
         activeId: "old",
       }),
     });
 
-    const state = await loadWorkspace();
+    const loaded = await loadWorkspace();
+    const state = adoptProjectStructureIds(loaded);
+    const again = adoptProjectStructureIds(state);
 
     expect(state.projects[0].vibe).toBeUndefined();
+    expect(state.projects[0].components[0].id).toMatch(/^cmp_/);
+    expect(state.projects[0].components[0].commands?.[0].id).toMatch(/^run_/);
+    expect(again).toBe(state);
+    expect(
+      adoptProjectStructureIds(await loadWorkspace()).projects,
+    ).toEqual(state.projects);
+  });
+
+  it("migrates unversioned label/name references only when both are unambiguous", () => {
+    const legacy = {
+      id: "legacy",
+      name: "Legacy",
+      components: [
+        {
+          label: "web",
+          path: "/repo/web",
+          commands: [{ name: "dev", command: "npm run dev" }],
+        },
+      ],
+      vibe: { enabled: true, component: "web", runCommand: "dev" },
+    } as unknown as Project;
+
+    const normalized = normalizeProjectStructure(legacy);
+
+    expect(normalized.vibe).toEqual({
+      version: 1,
+      enabled: true,
+      componentId: normalized.components[0].id,
+      runCommandId: normalized.components[0].commands?.[0].id,
+    });
+  });
+
+  it("leaves ambiguous legacy references in needs-setup shape", () => {
+    const legacy = {
+      id: "ambiguous",
+      name: "Ambiguous",
+      components: [
+        { label: "web", path: "/a", commands: [{ name: "dev", command: "a" }] },
+        { label: "web", path: "/b", commands: [{ name: "dev", command: "b" }] },
+      ],
+      vibe: { enabled: true, component: "web", runCommand: "dev" },
+    } as unknown as Project;
+
+    expect(normalizeProjectStructure(legacy).vibe).toEqual({
+      version: 1,
+      enabled: true,
+      componentId: undefined,
+      runCommandId: undefined,
+    });
+  });
+
+  it("does not choose the first duplicate legacy command name", () => {
+    const legacy = {
+      id: "ambiguous-command",
+      name: "Ambiguous command",
+      components: [
+        {
+          label: "web",
+          path: "/web",
+          commands: [
+            { name: "dev", command: "npm run dev:a" },
+            { name: "dev", command: "npm run dev:b" },
+          ],
+        },
+      ],
+      vibe: { enabled: true, component: "web", runCommand: "dev" },
+    } as unknown as Project;
+
+    const normalized = normalizeProjectStructure(legacy);
+
+    expect(normalized.vibe).toMatchObject({
+      version: 1,
+      componentId: normalized.components[0].id,
+      runCommandId: undefined,
+    });
+  });
+
+  it("preserves unique IDs and replaces duplicate IDs deterministically", () => {
+    const legacy = {
+      id: "mixed",
+      name: "Mixed",
+      components: [
+        {
+          id: "keep-component",
+          label: "one",
+          path: "/one",
+          commands: [{ id: "duplicate-run", name: "dev", command: "one" }],
+        },
+        {
+          id: "duplicate-component",
+          label: "two",
+          path: "/two",
+          commands: [{ id: "duplicate-run", name: "dev", command: "two" }],
+        },
+        { id: "duplicate-component", label: "three", path: "/three" },
+      ],
+    } as unknown as Project;
+
+    const normalized = normalizeProjectStructure(legacy);
+    const fresh = normalizeProjectStructure(
+      JSON.parse(JSON.stringify(legacy)) as Project,
+    );
+
+    expect(normalized.components[0].id).toBe("keep-component");
+    expect(new Set(normalized.components.map((component) => component.id)).size).toBe(3);
+    expect(
+      new Set(
+        normalized.components.flatMap((component) =>
+          (component.commands ?? []).map((command) => command.id),
+        ),
+      ).size,
+    ).toBe(2);
+    expect(fresh).toEqual(normalized);
+  });
+
+  it("keeps an unambiguous v1 target attached while replacing a duplicate command ID", () => {
+    const project = {
+      id: "v1-duplicate",
+      name: "V1 duplicate",
+      components: [
+        {
+          id: "cmp-web",
+          label: "web",
+          path: "/web",
+          commands: [{ id: "run-dev", name: "dev", command: "web" }],
+        },
+        {
+          id: "cmp-api",
+          label: "api",
+          path: "/api",
+          commands: [{ id: "run-dev", name: "dev", command: "api" }],
+        },
+      ],
+      vibe: {
+        version: 1,
+        enabled: true,
+        componentId: "cmp-web",
+        runCommandId: "run-dev",
+      },
+    } as Project;
+
+    const normalized = normalizeProjectStructure(project);
+
+    expect(normalized.vibe).toEqual({
+      version: 1,
+      enabled: true,
+      componentId: "cmp-web",
+      runCommandId: normalized.components[0].commands?.[0].id,
+    });
+    expect(normalized.vibe?.runCommandId).not.toBe("run-dev");
   });
 });
 

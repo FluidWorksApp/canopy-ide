@@ -27,7 +27,7 @@ interface ServersPanelProps {
   groups: ServerGroup[];
   /** Start a configured command that has no tab yet. */
   onStart: (path: string, entry: ServerEntry) => void;
-  onRestart: (tabId: string) => void;
+  onRestart: (tabId: string, entry: ServerEntry) => void;
   onStop: (ptyId: number) => void;
   /** Bring the run's terminal to the front — its output is the real detail view. */
   onOpenRun: (tabId: string) => void;
@@ -72,7 +72,7 @@ function RunRow({
   "onStart" | "onRestart" | "onStop" | "onOpenRun" | "onOpenPreview"
 >) {
   const running = e.state === "running";
-  const start = () => (e.tabId ? onRestart(e.tabId) : onStart(dir, e));
+  const start = () => (e.tabId ? onRestart(e.tabId, e) : onStart(dir, e));
   const { shown, rest } = splitPorts(e.ports);
   // Whether this row's demoted ports are open. Per row, not per panel: the
   // question is about one process.
@@ -152,7 +152,7 @@ function RunRow({
             <>
               <Button icon
                 title="Restart"
-                onClick={() => e.tabId && onRestart(e.tabId)}>
+                onClick={() => e.tabId && onRestart(e.tabId, e)}>
                 <RestartIcon size={14} />
               </Button>
               <Button icon variant="danger"

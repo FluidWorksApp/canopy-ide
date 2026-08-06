@@ -64,6 +64,24 @@ describe("terminal memory", () => {
       profile: "work",
     });
   });
+
+  it("round-trips configured run identity", () => {
+    rememberTerminals("p1", [
+      {
+        cwd: "/repo",
+        title: "Dev",
+        command: "npm run dev",
+        run: true,
+        componentId: "cmp-web",
+        runCommandId: "run-dev",
+      },
+    ]);
+
+    expect(rememberedTerminals("p1")[0]).toMatchObject({
+      componentId: "cmp-web",
+      runCommandId: "run-dev",
+    });
+  });
 });
 
 const restorable = (sessionId: string, cwd = "/repo"): Restorable => ({

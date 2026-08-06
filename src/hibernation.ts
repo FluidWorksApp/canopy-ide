@@ -37,6 +37,8 @@ export interface TerminalSnapshot {
   title: string;
   icon?: string;
   run?: boolean;
+  componentId?: string;
+  runCommandId?: string;
   /** Registry id of the CLI running in it, when it was an agent. */
   agentId?: string;
   /** The conversation that was live in it, for `<cli> --resume <id>`. */
@@ -142,6 +144,9 @@ export function snapshotTabs(
           title: t.customTitle ?? t.title,
           icon: t.icon,
           run: t.run,
+          ...(t.componentId && t.runCommandId
+            ? { componentId: t.componentId, runCommandId: t.runCommandId }
+            : {}),
           agentId,
           sessionId: agentId ? sessionId : undefined,
           profile: t.profile,
