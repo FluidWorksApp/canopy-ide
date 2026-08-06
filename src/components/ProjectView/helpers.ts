@@ -425,6 +425,8 @@ export interface ProjectViewProps {
   onPersistVibeTarget: (
     selection: import("../../vibeTargetInference").VibeTargetSelection,
   ) => Promise<boolean>;
+  /** Persist one complete agent-proposed setup atomically. */
+  onPersistVibeSetup: (project: Project) => Promise<boolean>;
   /** App-wide team relay — same handle in every project. */
   relay: RelayHandle;
   /** A hibernated workspace to rebuild, handed over when the user wakes the
@@ -447,7 +449,7 @@ export function resolveVibeTarget(project: Project): VibeTargetResolution {
   const vibe = project.vibe;
   if (
     !vibe ||
-    vibe.version !== 1 ||
+    (vibe.version !== 1 && vibe.version !== 2) ||
     !vibe.componentId ||
     !vibe.runCommandId
   ) {
@@ -460,7 +462,7 @@ export function resolveVibeTarget(project: Project): VibeTargetResolution {
   const commands = (components[0].commands ?? []).filter(
     (command) => command.id === vibe.runCommandId,
   );
-  if (commands.length !== 1 || !commands[0].command.trim()) {
+  if (commands.length !== 1 || (!commands[0].argv?.length && !commands[0].command.trim())) {
     return { kind: "needs-setup" };
   }
   return { kind: "ready", component: components[0], runCommand: commands[0] };
@@ -475,7 +477,7 @@ export function matchesVibeRun(
   component: Pick<Component, "id" | "path">,
   runCommand: RunCommand,
 ): boolean {
-  if (tab.exited || tab.cwd !== component.path) return false;
+  if (tab.exited || tab.cwd !== (runCommand.cwd ?? component.path)) return false;
   return tab.runCommandId
     ? tab.componentId === component.id && tab.runCommandId === runCommand.id
     : tab.command === runCommand.command;

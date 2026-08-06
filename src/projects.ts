@@ -12,6 +12,11 @@ export interface RunCommand {
   id: string;
   name: string;
   command: string;
+  /** Agent-proposed setup commands stay argv-native. `command` remains the
+   * legacy/display spelling until every old project has migrated. */
+  argv?: string[];
+  cwd?: string;
+  purpose?: "serve" | "check" | "worker" | "setup";
 }
 
 export interface Component {
@@ -23,10 +28,21 @@ export interface Component {
 }
 
 export interface VibeConfig {
-  version: 1;
+  version: 1 | 2;
   enabled: boolean;
   componentId?: string;
   runCommandId?: string;
+  setupRevision?: string;
+  requiredProcesses?: Array<{ componentId: string; runCommandId: string }>;
+  externalServices?: Array<{
+    id: string;
+    providerId: string | null;
+    label: string;
+    purpose: string;
+    requiredForPreview: boolean;
+    componentIds: string[];
+    requiredEnvNames: string[];
+  }>;
 }
 
 export interface Project {

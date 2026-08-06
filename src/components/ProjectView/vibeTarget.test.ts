@@ -82,7 +82,7 @@ describe("resolveVibeTarget", () => {
   it("does not interpret an unknown future config version", () => {
     const input = project({
       vibe: {
-        version: 2,
+        version: 3,
         enabled: true,
         componentId: "cmp-web",
         runCommandId: "run-dev",

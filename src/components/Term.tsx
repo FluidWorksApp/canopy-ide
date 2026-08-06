@@ -64,6 +64,8 @@ interface TermProps {
    *  its status (native, per-shell), rather than typing it in. Mutually
    *  exclusive with initialCommand. */
   runCommand?: string;
+  /** Agent-discovered configured runs bypass the shell entirely. */
+  runArgv?: string[];
   /** Stamped onto the child at spawn. A run inside a workspace carries that
    *  workspace's port lease here, which is what lets two checkouts of the same
    *  repo serve at once instead of losing the race for one hard-coded port. */
@@ -84,7 +86,7 @@ interface TermProps {
 }
 
 export const Term = forwardRef<TermHandle, TermProps>(function Term(
-  { cwd, active, initialCommand, runCommand, env, runId, attemptId, attachId, killAttachedOnClose, onSpawned, onExited, onTitle, onNotify },
+  { cwd, active, initialCommand, runCommand, runArgv, env, runId, attemptId, attachId, killAttachedOnClose, onSpawned, onExited, onTitle, onNotify },
   ref,
 ) {
   // Frozen once: a Term never switches between spawn and attach mid-life, and
@@ -482,8 +484,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       }
 
       try {
-        const result = await ipc.ptySpawn(
-          {
+        const spawnOpts = {
             // 0 tells Rust to fall back to 80x24; the first resize once the tab is
             // visible corrects it.
             cols: initial?.cols ?? 0,
@@ -494,8 +495,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             env,
             runId,
             attemptId,
-          },
-          (bytes) => {
+          };
+        const onData = (bytes: Uint8Array) => {
             // Feed xterm's own write buffer and ack once it has consumed the
             // chunk — this drives the Rust-side backpressure window. Never
             // accumulate output in JS. (Read the ref inside the callback: early
@@ -505,8 +506,10 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
                 void ipc.ptyAck(ptyIdRef.current, bytes.length);
               }
             });
-          },
-        );
+          };
+        const result = runArgv?.length
+          ? await ipc.ptySpawnAttachedArgv({ ...spawnOpts, argv: runArgv }, onData)
+          : await ipc.ptySpawn(spawnOpts, onData);
         if (disposed) {
           void ipc.ptyKill(result.id);
           return;

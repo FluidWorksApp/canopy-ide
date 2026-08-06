@@ -416,12 +416,9 @@ import {
   createVibeBuilderSession,
   type VibeServerIncidentInput,
 } from "../../vibeBuilderSession";
-import {
-  createVibeTargetQuestionSession,
-  createVibeTargetStatusSession,
-  inferVibeTarget,
-  type VibePackageFacts,
-} from "../../vibeTargetInference";
+import type { VibePackageFacts } from "../../vibeTargetInference";
+import { createVibeTargetStatusSession } from "../../vibeTargetInference";
+import { createVibeProjectSetupSession } from "../../vibeProjectSetup";
 import { loadVibePackageFacts } from "../../vibePackageScripts";
 import { inferVibeCheck } from "../../vibeCheckInference";
 import { TabSwitcher } from "../TabSwitcher";
@@ -649,7 +646,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   onNotice: onNoticeRaw,
   onShareContext,
   onSaveCustomTasks,
-  onPersistVibeTarget,
+  onPersistVibeSetup,
   relay,
   restore,
   onRestoreStep,
@@ -732,117 +729,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
     key: string;
     facts: VibePackageFacts;
   }>({ key: "", facts: {} });
-  const vibeInference = useMemo(
-    () =>
-      vibeTarget.kind === "ready" || project.vibe?.version !== 1
-        ? null
-        : inferVibeTarget(
-            project.components,
-            vibePackageState.key === vibePackageKey
-              ? vibePackageState.facts
-              : {},
-          ),
-    [
-      vibeTarget.kind,
-      project.vibe?.version,
-      project.components,
-      vibePackageKey,
-      vibePackageState,
-    ],
-  );
-  const vibePackageIds =
-    vibeInference?.kind === "needs-package-facts"
-      ? vibeInference.componentIds.join("|")
-      : "";
   useEffect(() => {
-    if (!vibe || !vibePackageIds) return;
+    if (!vibe || vibeTarget.kind !== "ready") return;
     let cancelled = false;
     void loadVibePackageFacts(
       project.components,
-      vibePackageIds.split("|"),
+      project.components.map((component) => component.id),
     ).then((facts) => {
       if (!cancelled) setVibePackageState({ key: vibePackageKey, facts });
     });
     return () => {
       cancelled = true;
     };
-  }, [vibe, vibePackageIds, vibePackageKey, project.components]);
-  const inferredSelection =
-    vibeInference?.kind === "persist" ? vibeInference.selection : null;
-  const inferredSelectionKey = inferredSelection
-    ? `${inferredSelection.componentId}:${inferredSelection.runCommandId}`
-    : "";
-  const persistedInference = useRef<string | null>(null);
-  const inferenceFailures = useRef<{ key: string; count: number }>({
-    key: "",
-    count: 0,
-  });
-  const [inferenceRetry, setInferenceRetry] = useState(0);
-  useEffect(() => {
-    if (!inferredSelection || !inferredSelectionKey) {
-      persistedInference.current = null;
-      return;
-    }
-    if (!vibe) return;
-    if (persistedInference.current === inferredSelectionKey) return;
-    persistedInference.current = inferredSelectionKey;
-    let cancelled = false;
-    let retry: number | undefined;
-    void onPersistVibeTarget(inferredSelection).then((saved) => {
-      if (cancelled) return;
-      if (saved) {
-        inferenceFailures.current = { key: "", count: 0 };
-        return;
-      }
-      persistedInference.current = null;
-      const previous = inferenceFailures.current;
-      const count = previous.key === inferredSelectionKey ? previous.count + 1 : 1;
-      inferenceFailures.current = { key: inferredSelectionKey, count };
-      if (count < 3) {
-        retry = window.setTimeout(
-          () => setInferenceRetry((value) => value + 1),
-          count * 500,
-        );
-      }
-    });
-    return () => {
-      cancelled = true;
-      if (retry !== undefined) window.clearTimeout(retry);
-    };
-  }, [
-    vibe,
-    inferredSelection,
-    inferredSelectionKey,
-    inferenceRetry,
-    onPersistVibeTarget,
-  ]);
-  const vibeTargetQuestionSession = useMemo(
-    () =>
-      vibeInference?.kind === "ask"
-        ? createVibeTargetQuestionSession(vibeInference, onPersistVibeTarget)
-        : null,
-    [vibeInference, onPersistVibeTarget],
+  }, [vibe, vibeTarget.kind, vibePackageKey, project.components]);
+  const vibeProjectSetupSession = useMemo(
+    () => vibe && vibeTarget.kind === "needs-setup"
+      ? createVibeProjectSetupSession(project, onPersistVibeSetup)
+      : null,
+    [vibe, vibeTarget.kind, project, onPersistVibeSetup],
   );
-  const vibeTargetStatus =
-    project.components.length === 0
-      ? "Add an app component in Engineer mode first."
-      : project.vibe?.version !== 1
-        ? "This Build configuration needs a newer version of Canopy."
-        : vibeInference?.kind === "unavailable"
-          ? "I couldn't find a dev or start script in the project."
-          : "I'm finding the app and starting it for you.";
-  const retryInferredTarget = useCallback(() => {
-    persistedInference.current = null;
-    inferenceFailures.current = { key: "", count: 0 };
-    setInferenceRetry((value) => value + 1);
-  }, []);
-  const vibeTargetStatusSession = useMemo(
-    () =>
-      createVibeTargetStatusSession(
-        vibeTargetStatus,
-        inferredSelection ? retryInferredTarget : undefined,
-      ),
-    [vibeTargetStatus, inferredSelection, retryInferredTarget],
+  useEffect(() => () => void vibeProjectSetupSession?.stop(), [vibeProjectSetupSession]);
+  const vibeWaitingSession = useMemo(
+    () => createVibeTargetStatusSession("I'm getting your project ready."),
+    [],
   );
   const sideOpen = !zen && !vibe && (pinned || peeking);
 
@@ -8802,8 +8711,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // row to the user's configured commands as a side effect of opening the
   // project — a config write nobody asked for. If that row is wanted it should
   // be its own decision, taken where the target's own addCommand is persisted.
-  const vibeCheckCommand =
-    vibeCheckInference?.kind === "check" ? vibeCheckInference.command : null;
+  const configuredSetupCheck = project.vibe?.version === 2
+    ? vibeComponent?.commands?.find((command) => command.purpose === "check")
+    : null;
+  const vibeCheckCommand = configuredSetupCheck?.argv ??
+    (vibeCheckInference?.kind === "check" ? vibeCheckInference.command : null);
   // Both a chosen check's caveat ("I'm checking with X, not Y") and a gap's
   // ("there's no check I can run") reach the session the same way: it is the
   // only thing that can say either out loud, and a caveat nobody says is the
@@ -8987,29 +8899,40 @@ const ProjectViewBody = memo(function ProjectViewBody({
     });
   };
 
-  const autoStartedVibeRun = useRef<string | null>(null);
+  const vibeRequiredRuns = useMemo(() => {
+    const configured = project.vibe?.version === 2
+      ? project.vibe.requiredProcesses ?? []
+      : vibeComponent && vibeRun
+        ? [{ componentId: vibeComponent.id, runCommandId: vibeRun.id }]
+        : [];
+    return configured.flatMap((identity) => {
+      const component = project.components.find((candidate) => candidate.id === identity.componentId);
+      const command = component?.commands?.find((candidate) => candidate.id === identity.runCommandId);
+      return component && command ? [{ component, command }] : [];
+    });
+  }, [project.vibe, project.components, vibeComponent, vibeRun]);
+  const autoStartedVibeRuns = useRef(new Set<string>());
   useEffect(() => {
-    if (!visible || !vibe || !vibeComponent || !vibeRun) return;
-    const key = `${vibeComponent.path}:${vibeComponent.id}:${vibeRun.id}`;
-    const running = runTabs.some((tab) =>
-      matchesVibeRun(tab, vibeComponent, vibeRun),
-    );
-    if (!running && autoStartedVibeRun.current !== key) {
-      autoStartedVibeRun.current = key;
+    if (!visible || !vibe) return;
+    for (const { component, command } of vibeRequiredRuns) {
+      const key = `${component.path}:${component.id}:${command.id}`;
+      const running = runTabs.some((tab) => matchesVibeRun(tab, component, command));
+      if (running || autoStartedVibeRuns.current.has(key)) continue;
+      autoStartedVibeRuns.current.add(key);
       addTerminal(
-        vibeComponent.path,
-        vibeRun.command,
-        vibeRun.name,
+        command.cwd ?? component.path,
+        command.command,
+        command.name,
         "▶",
         true,
         undefined,
         undefined,
         true,
         undefined,
-        { componentId: vibeComponent.id, runCommandId: vibeRun.id },
+        { componentId: component.id, runCommandId: command.id },
       );
     }
-  }, [visible, vibe, vibeComponent, vibeRun, runTabs, addTerminal]);
+  }, [visible, vibe, vibeRequiredRuns, runTabs, addTerminal]);
 
   useEffect(() => {
     if (
@@ -10619,6 +10542,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     ? tab.command
                     : undefined
                 }
+                runArgv={
+                  tab.run && tab.componentId && tab.runCommandId
+                    ? componentsRef.current
+                        .find((component) => component.id === tab.componentId)
+                        ?.commands?.find((command) => command.id === tab.runCommandId)
+                        ?.argv
+                    : undefined
+                }
                 env={tab.env}
                 runId={tab.micro?.runId}
                 attemptId={tab.micro?.attemptId}
@@ -11782,8 +11713,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <VibeBuilderPane
             session={
               vibeSession ??
-              vibeTargetQuestionSession ??
-              vibeTargetStatusSession
+              vibeProjectSetupSession ??
+              vibeWaitingSession
             }
           />
         </aside>

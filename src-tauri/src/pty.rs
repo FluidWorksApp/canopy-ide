@@ -652,6 +652,43 @@ pub fn pty_spawn_argv(
     finish_task_spawn(&state, &tasks, binding.as_ref(), result)
 }
 
+/// Spawn an argv-native run whose output is owned by a visible terminal tab.
+/// Kept separate from `pty_spawn`: callers cannot accidentally supply both a
+/// shell command and argv, and argv is never re-parsed into text.
+#[tauri::command]
+pub fn pty_spawn_attached_argv(
+    app: AppHandle,
+    state: State<'_, PtyManager>,
+    tasks: State<'_, crate::tasks::TaskStore>,
+    cols: u16,
+    rows: u16,
+    cwd: Option<String>,
+    high_water: Option<usize>,
+    argv: Vec<String>,
+    env: Option<Vec<(String, String)>>,
+    run_id: Option<String>,
+    attempt_id: Option<String>,
+    on_data: Channel<InvokeResponseBody>,
+) -> Result<SpawnResult, String> {
+    if argv.first().map(|p| p.trim().is_empty()).unwrap_or(true) {
+        return Err("argv must name a program".into());
+    }
+    let binding = tasks.spawn_binding(run_id.as_deref(), attempt_id.as_deref())?;
+    let result = state.spawn(
+        app,
+        cols,
+        rows,
+        cwd,
+        None,
+        high_water,
+        Some(RunSpec::Argv(argv)),
+        Some(on_data),
+        env,
+        binding.clone(),
+    );
+    finish_task_spawn(&state, &tasks, binding.as_ref(), result)
+}
+
 fn finish_task_spawn(
     ptys: &PtyManager,
     tasks: &crate::tasks::TaskStore,

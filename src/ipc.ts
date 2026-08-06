@@ -104,6 +104,27 @@ export const ptySpawnArgv = (opts: {
   attemptId?: string;
 }) => invoke<SpawnResult>("pty_spawn_argv", opts);
 
+/** An argv-native process whose output is streamed into a visible terminal. */
+export async function ptySpawnAttachedArgv(
+  opts: {
+    cols: number;
+    rows: number;
+    cwd?: string;
+    highWater?: number;
+    argv: string[];
+    env?: [string, string][];
+    runId?: string;
+    attemptId?: string;
+  },
+  onData: (bytes: Uint8Array) => void,
+): Promise<SpawnResult> {
+  const channel = new Channel<ArrayBuffer | number[]>();
+  channel.onmessage = (data) => onData(
+    data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data),
+  );
+  return invoke<SpawnResult>("pty_spawn_attached_argv", { ...opts, onData: channel });
+}
+
 /** Spawn a PTY with no tab attached to it: a micro-task's agent, which runs its
  *  one job and reports through canopy_job_done. Nothing is announced, so no tab
  *  opens; the Tasks panel watches it by pty id, and `ptyAttach` is how the user

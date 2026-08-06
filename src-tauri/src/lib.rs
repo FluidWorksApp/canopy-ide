@@ -553,6 +553,7 @@ pub fn run() {
             pty::pty_spawn,
             pty::pty_spawn_detached,
             pty::pty_spawn_argv,
+            pty::pty_spawn_attached_argv,
             pty::pty_output,
             pty::pty_attach,
             pty::pty_write,

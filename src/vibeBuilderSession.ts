@@ -99,7 +99,7 @@ export interface VibeBuilderSessionOptions {
   componentPath: string;
   cliId: string;
   cliBin: string;
-  checkCommand?: string | null;
+  checkCommand?: string | string[] | null;
   /** Why there is no check command, when there is none — the one sentence
    *  `inferVibeCheck` produces for a project a non-coder set up. Without it the
    *  turn records `check: unknown` forever and says nothing about why, which
@@ -181,7 +181,7 @@ export interface VibeBuilderSessionDeps {
   appendEvent: typeof appendTaskEvent;
   writeArtifact: typeof writeTaskArtifact;
   captureBaseline(cwd: string): Promise<TurnBaseline>;
-  runCheck(command: string | null, cwd: string, at: number): Promise<CheckRunResult>;
+  runCheck(command: string | string[] | null, cwd: string, at: number): Promise<CheckRunResult>;
   beginBrowserTurn(tabId: string | null): Promise<boolean>;
   inspectBrowser(
     tabId: string | null,
@@ -264,7 +264,7 @@ function nativeRunner(): ProjectRunnerController {
 }
 
 async function runDetachedCheck(
-  command: string | null,
+  command: string | string[] | null,
   cwd: string,
   at: number,
 ): Promise<CheckRunResult> {
@@ -291,7 +291,9 @@ async function runDetachedCheck(
     else if (event.id === target) finish(event);
   });
   try {
-    const spawned = await ipc.ptySpawnDetached({ cwd, command });
+    const spawned = Array.isArray(command)
+      ? await ipc.ptySpawnArgv({ cwd, argv: command })
+      : await ipc.ptySpawnDetached({ cwd, command });
     target = spawned.id;
     const already = early.find((event) => event.id === target);
     if (already) finish(already);
@@ -306,7 +308,7 @@ async function runDetachedCheck(
         observation: {
           kind: "check",
           verdict: "unknown",
-          note: `configured check timed out: ${command}`,
+          note: `configured check timed out: ${Array.isArray(command) ? command.join(" ") : command}`,
           at,
         },
         output,
@@ -318,8 +320,8 @@ async function runDetachedCheck(
         kind: "check",
         verdict: passed ? "pass" : "fail",
         note: passed
-          ? `configured check passed: ${command}`
-          : `configured check failed with exit ${result.exit_code ?? "signal"}: ${command}`,
+          ? `configured check passed: ${Array.isArray(command) ? command.join(" ") : command}`
+          : `configured check failed with exit ${result.exit_code ?? "signal"}: ${Array.isArray(command) ? command.join(" ") : command}`,
         at,
       },
       output,
