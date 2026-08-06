@@ -196,7 +196,9 @@ async function clearTheStage() {
   }
 }
 
-// ---------- pixel sanity (macOS, advisory) ----------
+// ---------- pixel sanity (advisory) ----------
+// Runs wherever webview_snapshot has an implementation — all three desktop
+// platforms since #211. A platform where it refuses is a note, not a red run.
 
 /** The colours the fixture page is made of, and white.
  *

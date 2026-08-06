@@ -51,7 +51,6 @@ import {
   type CaptureRect,
 } from "../pageCapture";
 import { getSettings, updateSettings } from "../settings";
-import { IS_MAC } from "../platform";
 import { registerBrowserTarget } from "../previewAgent";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
@@ -1166,25 +1165,21 @@ export function PreviewView({
           </Button>
         )}
         {/* One click takes the shot the way you took the last one; the caret is
-            for changing your mind. Same split shape as the agent launcher.
-            Absent off macOS rather than present and always failing: webview
-            capture has no implementation there (see snapshot.rs). */}
-        {IS_MAC && (
-          <span className="split-btn split-btn-mini">
-            <Button size="sm" className="split-btn-main"
-              title={`Screenshot — ${captureModeLabel(captureMode).toLowerCase()}`}
-              disabled={capturing}
-              onClick={() => runCapture(captureMode)}>
-              ▣ Screenshot{shots.length > 0 ? ` (${shots.length})` : ""}
-            </Button>
-            <Button size="sm" className="split-btn-caret"
-              title="Choose what to capture"
-              disabled={capturing}
-              onClick={openCaptureMenu}>
-              ▾
-            </Button>
-          </span>
-        )}
+            for changing your mind. Same split shape as the agent launcher. */}
+        <span className="split-btn split-btn-mini">
+          <Button size="sm" className="split-btn-main"
+            title={`Screenshot — ${captureModeLabel(captureMode).toLowerCase()}`}
+            disabled={capturing}
+            onClick={() => runCapture(captureMode)}>
+            ▣ Screenshot{shots.length > 0 ? ` (${shots.length})` : ""}
+          </Button>
+          <Button size="sm" className="split-btn-caret"
+            title="Choose what to capture"
+            disabled={capturing}
+            onClick={openCaptureMenu}>
+            ▾
+          </Button>
+        </span>
       </div>
       <div className="preview-body">
         {/* The emulated viewport scrolls inside this box, not in .preview-body:
