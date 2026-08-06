@@ -25,6 +25,9 @@ import { Dialog } from "./Dialog";
 import { ChevronIcon, IconFolder } from "./icons";
 import { WindowedList } from "./WindowedList";
 import { Button } from "./ui/Button";
+// This consumer WANTS the ignored rows - they paint the dimmed overlay - so it
+// classifies rather than filters. Nothing is filtered at the producer.
+import { classifyStatus } from "./gitStatus";
 
 export interface DirEntry {
   name: string;
@@ -306,8 +309,9 @@ export function FileTree({
       if (!status.is_repo) return;
       const info: GitInfo = { ignored: [], untracked: [], modified: new Set() };
       for (const e of status.entries) {
-        if (e.status === "!!") info.ignored.push(e.path);
-        else if (e.status === "??") info.untracked.push(e.path);
+        const kind = classifyStatus(e.status).kind;
+        if (kind === "ignored") info.ignored.push(e.path);
+        else if (kind === "untracked") info.untracked.push(e.path);
         else info.modified.add(e.path);
       }
       setGit((prev) => ({ ...prev, [root]: info }));
