@@ -1470,10 +1470,20 @@ export interface ClaudeSessionStats {
 export const claudeSessionStats = (transcriptPath: string) =>
   invoke<ClaudeSessionStats>("claude_session_stats", { transcriptPath });
 
+/** Per-session stats for a CLI whose usage lives in its own store rather than
+ *  a pollable transcript (opencode). `cost` is the CLI's own billed figure
+ *  when it records one — the only cost that exists for a custom provider
+ *  whose model the price table can't name. */
+export interface StoreSessionStats extends ClaudeSessionStats {
+  cost: number | null;
+}
+export const opencodeSessionStats = (sessionId: string) =>
+  invoke<StoreSessionStats | null>("opencode_session_stats", { sessionId });
+
 /** One agent session's token/cost usage, summed across its turns. `cost` is
- *  set only when the CLI records its own (omp); otherwise estimate from
- *  `model`. `supported` is false for CLIs whose usage Canopy can't read yet
- *  (amp/aider/opencode) — the row is returned so the CLI mix stays honest. */
+ *  set only when the CLI records its own (omp, opencode); otherwise estimate
+ *  from `model`. `supported` is false for CLIs whose usage Canopy can't read
+ *  yet (amp/aider) — the row is returned so the CLI mix stays honest. */
 export interface AgentSessionUsage {
   session_id: string;
   agent: string;
