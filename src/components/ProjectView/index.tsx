@@ -135,7 +135,7 @@ import {
   inspectFleetRoute,
   type FleetRouteSnapshot,
 } from "../../fleetSnapshot";
-import { startCommandParked } from "../../agentSeed";
+import { pickLaunchCli, startCommandParked } from "../../agentSeed";
 import {
   AGENT_CLIS,
   announceCliInstallsChanged,
@@ -2381,23 +2381,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
         onNotice("No git repository in this project.");
         return;
       }
-      // The chosen agent, else the preference if it is installed, else the
-      // first installed CLI. Never a hardcoded name, and never one that
-      // isn't on the machine.
-      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
-      const preferred = getSettings().defaultAgent;
-      const agent =
-        agentId ||
-        (
-          installedClis.find((c) => c.id === preferred) ??
-          installedClis[0] ??
-          AGENT_CLIS[0]
-        )?.id;
-      const cli = AGENT_CLIS.find((c) => c.id === agent);
+      // The chosen agent, else the user's default — one rule, shared with every
+      // other launcher, and never a hardcoded vendor name (see pickLaunchCli).
+      const installedHere = getInstalled();
+      const cli = pickLaunchCli(agentId, (bin) => Boolean(installedHere[bin]));
+      if (!cli) {
+        onNotice(`Unknown agent "${agentId}".`);
+        return;
+      }
+      const agent = cli.id;
       // Parked in `repo` rather than the workspace, which does not exist yet:
       // the pointer is an absolute path, so it reads the same from either.
       const start = await startCommandParked(agent, ticketContext(ticket), repo);
-      if (!cli || !start) {
+      if (!start) {
         onNotice(`Unknown agent "${agent}".`);
         return;
       }
@@ -2455,20 +2451,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
       pr: ipc.PrInfo,
       agentId?: string,
     ) => {
-      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
-      const preferred = getSettings().defaultAgent;
-      const agent =
-        agentId ||
-        (
-          installedClis.find((c) => c.id === preferred) ??
-          installedClis[0] ??
-          AGENT_CLIS[0]
-        )?.id;
-      const cli = AGENT_CLIS.find((c) => c.id === agent);
+      const installedHere = getInstalled();
+      const cli = pickLaunchCli(agentId, (bin) => Boolean(installedHere[bin]));
       if (!cli) {
-        onNotice(`Unknown agent "${agent}".`);
+        onNotice(`Unknown agent "${agentId}".`);
         return;
       }
+      const agent = cli.id;
       // The funnel reuses a workspace already holding this PR and otherwise
       // makes an ephemeral one at the PR's head — fork-safe, and without moving
       // the main checkout's branch. Only a workspace IT created is disposable,
@@ -2861,20 +2850,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const startAgentInDir = useCallback(
     async (dir: string, agentId: string | undefined, seed: string, title: string) => {
       const installed = await getInstalledForLaunch();
-      const installedClis = AGENT_CLIS.filter((c) => installed[c.bin]);
-      const preferred = getSettings().defaultAgent;
-      const agent =
-        agentId ||
-        (
-          installedClis.find((c) => c.id === preferred) ??
-          installedClis[0] ??
-          AGENT_CLIS[0]
-        )?.id;
-      const cli = AGENT_CLIS.find((c) => c.id === agent);
-      if (!cli || !agent) {
-        onNotice(`Unknown agent "${agent}".`);
+      const cli = pickLaunchCli(agentId, (bin) => Boolean(installed[bin]));
+      if (!cli) {
+        onNotice(`Unknown agent "${agentId}".`);
         return false;
       }
+      const agent = cli.id;
       const fleet = await gateManagedLaunch(cli, installed);
       if (!fleet.allowed) return false;
       const start = await startCommandParked(agent, seed, dir);
@@ -2926,8 +2907,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** Launch a micro-task: a one-shot agent seeded with the task's brief plus
    *  the completion protocol. CANOPY_MICRO_TASK reaches the MCP sidecar through
    *  PTY env inheritance and marks the session as one whose job_done must
-   *  always be honored. Prefers claude — the CLI Canopy registers the bridge
-   *  with by default — over the default agent.
+   *  always be honored. Runs on the user's default agent like every other
+   *  launcher — see pickLaunchCli, and the note there about the `claude` this
+   *  used to put ahead of it.
    *
    *  Where it runs depends on whether it can report back. An agent with the
    *  bridge runs detached: no tab, no window taken over, just a row in Tasks
@@ -2950,15 +2932,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       preferAgent?: string,
     ): Promise<boolean> => {
       const installed = await getInstalledForLaunch();
-      const installedClis = AGENT_CLIS.filter((c) => installed[c.bin]);
-      const preferred = getSettings().defaultAgent;
-      const cli = preferAgent
-        ? AGENT_CLIS.find((candidate) => candidate.id === preferAgent)
-        : installedClis.find((candidate) => candidate.id === "claude") ??
-          installedClis.find((candidate) => candidate.id === preferred) ??
-          installedClis[0] ??
-          AGENT_CLIS.find((candidate) => candidate.id === preferred) ??
-          AGENT_CLIS[0];
+      const cli = pickLaunchCli(preferAgent, (bin) => Boolean(installed[bin]));
       const agent = cli?.id;
       if (!cli || !agent) {
         onNotice(`No agent CLI installed to run "${def.label}".`);
