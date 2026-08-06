@@ -22,6 +22,7 @@ import {
   layoutSplit,
   leafIds,
   mapSplitTabIds,
+  paneDropZone,
   remapTerminalGroups,
   neighborPane,
   removeLeaf,
@@ -30,6 +31,7 @@ import {
   swapLeaves,
   updateSplitRatio,
   type PaneDirection,
+  type PaneDropZone,
   type SplitDivider,
   type SplitAxis,
   type TerminalGroup,
@@ -7782,9 +7784,113 @@ const ProjectViewBody = memo(function ProjectViewBody({
     (ids: string[]) => setTabs((prev) => applyOrder(prev, (t) => t.id, ids)),
     [],
   );
+  // Dragging a terminal tab past the strip and over the split surface offers
+  // post-facto multiplexing: the half of the hovered pane nearest the pointer
+  // lights up, and releasing there folds the dragged terminal into the visible
+  // group (or forms one) exactly where the preview showed it. Only a solo
+  // terminal can be dropped in — a grouped tab in the strip is the whole
+  // group's representative, and a run tab lives in the rail, not the mux.
+  const [paneDrop, setPaneDrop] = useState<PaneDropZone | null>(null);
+  const paneDropRef = useRef<PaneDropZone | null>(null);
+  const computePaneDrop = useCallback(
+    (id: string, x: number, y: number): PaneDropZone | null => {
+      const source = tabsRef.current.find(
+        (t): t is TermSubTab => t.id === id && t.type === "terminal",
+      );
+      if (!source || source.run) return null;
+      if (source.paneGroup && terminalGroupsRef.current[source.paneGroup])
+        return null;
+      const active = tabsRef.current.find(
+        (t): t is TermSubTab =>
+          t.id === activeTabIdRef.current && t.type === "terminal",
+      );
+      if (!active || active.run || active.id === source.id) return null;
+      const content = contentRef.current;
+      if (!content) return null;
+      const rect = content.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      const group = active.paneGroup
+        ? terminalGroupsRef.current[active.paneGroup]
+        : undefined;
+      const panes = group
+        ? layoutSplit(group.root, group.zoomedTabId).panes
+        : [{ tabId: active.id, left: 0, top: 0, width: 1, height: 1 }];
+      return paneDropZone(
+        panes,
+        (x - rect.left) / rect.width,
+        (y - rect.top) / rect.height,
+      );
+    },
+    [],
+  );
+  const onTabDragMove = useCallback(
+    (id: string, e: PointerEvent) => {
+      const zone = computePaneDrop(id, e.clientX, e.clientY);
+      const prev = paneDropRef.current;
+      if (
+        prev === zone ||
+        (prev &&
+          zone &&
+          prev.targetTabId === zone.targetTabId &&
+          prev.axis === zone.axis &&
+          prev.before === zone.before)
+      )
+        return;
+      paneDropRef.current = zone;
+      setPaneDrop(zone);
+    },
+    [computePaneDrop],
+  );
+  const onTabDrop = useCallback(
+    (id: string, e: PointerEvent | null) => {
+      paneDropRef.current = null;
+      setPaneDrop(null);
+      const zone = e ? computePaneDrop(id, e.clientX, e.clientY) : null;
+      if (!zone) return;
+      const source = tabsRef.current.find(
+        (t): t is TermSubTab => t.id === id && t.type === "terminal",
+      );
+      const target = tabsRef.current.find(
+        (t): t is TermSubTab =>
+          t.id === zone.targetTabId && t.type === "terminal",
+      );
+      if (!source || !target) return;
+      const current = target.paneGroup
+        ? terminalGroupsRef.current[target.paneGroup]
+        : undefined;
+      const groupId = current?.id ?? splitId();
+      const root = current?.root ?? { type: "leaf" as const, tabId: target.id };
+      // No zoomedTabId on the merged group: a pane dropped into a zoomed
+      // surface that stayed zoomed would vanish the moment it landed.
+      const next: TerminalGroup = {
+        id: groupId,
+        root: splitLeaf(root, target.id, source.id, zone.axis, zone.before),
+        activeTabId: source.id,
+      };
+      terminalGroupsRef.current = {
+        ...terminalGroupsRef.current,
+        [groupId]: next,
+      };
+      setTerminalGroups(terminalGroupsRef.current);
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === source.id || t.id === target.id
+            ? ({ ...t, paneGroup: groupId } as SubTab)
+            : t,
+        ),
+      );
+      setActiveTabId(source.id);
+      setTimeout(() => termHandles.current.get(source.id)?.focus(), 50);
+    },
+    [computePaneDrop],
+  );
   const stripDrag = useTabDragGroups(
     useMemo(() => tabGroups.map((g) => g.shown.map((t) => t.id)), [tabGroups]),
     reorderGroup,
+    useMemo(
+      () => ({ onDragMove: onTabDragMove, onDrop: onTabDrop }),
+      [onTabDragMove, onTabDrop],
+    ),
   );
   // Regrouping never touches which tab is open — every pane stays mounted and
   // `activeTabId` is untouched, so the view under a tab that goes idle is the
@@ -9898,6 +10004,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
               title="Drag to resize · double-click to equalize"
             />
           ))}
+        {paneDrop && (
+          <div
+            className="pane-drop-preview"
+            style={{
+              left: `${paneDrop.rect.left * 100}%`,
+              top: `${paneDrop.rect.top * 100}%`,
+              width: `${paneDrop.rect.width * 100}%`,
+              height: `${paneDrop.rect.height * 100}%`,
+            }}
+            aria-hidden
+          />
+        )}
         {/* Doc tabs, mounted for as long as they're open and shown by display
             like the terminals above — see docTabView. Each pane carries its own
             boundary: a view throwing (a PR diff, an editor, a ticket) must not

@@ -5301,6 +5301,25 @@ body.dragging-tab * {
   height: 2px;
 }
 
+/* The half-pane a dragged tab would land in. Above the pane heads (z 6) and
+   the dividers (z 12), under nothing — it is the drag's only feedback. Left/
+   top/width/height animate so the highlight glides between zones instead of
+   teleporting as the pointer crosses a midline. */
+.pane-drop-preview {
+  position: absolute;
+  z-index: 14;
+  pointer-events: none;
+  box-sizing: border-box;
+  border: 2px solid color-mix(in srgb, var(--accent) 75%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  transition:
+    left 120ms ease-out,
+    top 120ms ease-out,
+    width 120ms ease-out,
+    height 120ms ease-out;
+}
+
 .tab-multiplex-icon {
   color: var(--accent);
   font-size: 11px;
