@@ -51,6 +51,8 @@ export interface TermHandle {
    *  than ANSI on purpose: this is read back in the task-history pane, not
    *  replayed into a terminal, so escape sequences would only be noise. */
   captureText: (maxChars?: number) => string;
+  /** Wait for queued xterm writes before capturing a final process tail. */
+  captureTextSettled: (maxChars?: number) => Promise<string>;
 }
 
 interface TermProps {
@@ -75,7 +77,7 @@ interface TermProps {
   attachId?: number;
   killAttachedOnClose?: boolean;
   onSpawned: (ptyId: number) => void;
-  onExited: (exitCode: number | null) => void;
+  onExited: (event: ipc.PtyExit) => void;
   onTitle?: (title: string) => void;
   /** The program in this terminal asked for attention — see the OSC handlers. */
   onNotify?: (message: string) => void;
@@ -97,6 +99,38 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   // Mirrored so the mount-once drop listener can see the current value.
   const activeRef = useRef(active);
   activeRef.current = active;
+  const onExitedRef = useRef(onExited);
+  onExitedRef.current = onExited;
+
+  const captureText = (maxChars = 8000) => {
+    const term = termRef.current;
+    if (!term) return "";
+    // Whichever screen the CLI is actually on. For an inline agent (claude,
+    // which micro-tasks prefer) that's the normal buffer and this really is
+    // the tail of the run. For a full-TUI agent on the alternate screen there
+    // is no scrollback to have: that buffer is one screenful, so what gets
+    // stored is the final frame. Deliberately not falling back to
+    // `buffer.normal` there — it holds what was on screen *before* the CLI
+    // took over, which is the shell prompt, and that is worse than the frame.
+    const buf = term.buffer.active;
+    const lines: string[] = [];
+    // Walk backwards and stop once we have enough: the scrollback is up to
+    // `scrollback` rows (10k by default) and a finished task only needs its
+    // ending, so reading the whole buffer to throw most of it away would be
+    // the expensive way round.
+    let chars = 0;
+    for (let i = buf.length - 1; i >= 0 && chars < maxChars; i--) {
+      // `true` trims trailing whitespace — xterm pads every row to the full
+      // terminal width, so without it each line arrives with ~80 spaces.
+      const line = buf.getLine(i)?.translateToString(true) ?? "";
+      lines.push(line);
+      chars += line.length + 1;
+    }
+    // The tail of an agent's run is typically preceded by a screenful of
+    // blank rows; dropping them keeps the stored transcript to what was said.
+    while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+    return lines.reverse().join("\n").trimStart().slice(-maxChars);
+  };
 
   useImperativeHandle(ref, () => ({
     clearScrollback: () => termRef.current?.clear(),
@@ -115,34 +149,13 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       term.paste(text);
       term.focus();
     },
-    captureText: (maxChars = 8000) => {
+    captureText,
+    captureTextSettled: (maxChars = 8000) => {
       const term = termRef.current;
-      if (!term) return "";
-      // Whichever screen the CLI is actually on. For an inline agent (claude,
-      // which micro-tasks prefer) that's the normal buffer and this really is
-      // the tail of the run. For a full-TUI agent on the alternate screen there
-      // is no scrollback to have: that buffer is one screenful, so what gets
-      // stored is the final frame. Deliberately not falling back to
-      // `buffer.normal` there — it holds what was on screen *before* the CLI
-      // took over, which is the shell prompt, and that is worse than the frame.
-      const buf = term.buffer.active;
-      const lines: string[] = [];
-      // Walk backwards and stop once we have enough: the scrollback is up to
-      // `scrollback` rows (10k by default) and a finished task only needs its
-      // ending, so reading the whole buffer to throw most of it away would be
-      // the expensive way round.
-      let chars = 0;
-      for (let i = buf.length - 1; i >= 0 && chars < maxChars; i--) {
-        // `true` trims trailing whitespace — xterm pads every row to the full
-        // terminal width, so without it each line arrives with ~80 spaces.
-        const line = buf.getLine(i)?.translateToString(true) ?? "";
-        lines.push(line);
-        chars += line.length + 1;
-      }
-      // The tail of an agent's run is typically preceded by a screenful of
-      // blank rows; dropping them keeps the stored transcript to what was said.
-      while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-      return lines.reverse().join("\n").trimStart().slice(-maxChars);
+      if (!term) return Promise.resolve("");
+      return new Promise((resolve) => {
+        term.write("", () => resolve(captureText(maxChars)));
+      });
     },
   }));
 
@@ -423,38 +436,53 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     };
     window.addEventListener("focus", onFocus);
     let unlistenExit: (() => void) | undefined;
+    const earlyExits = new Map<number, ipc.PtyExit>();
 
-    // Once the pty (fresh or attached) is bound: adopt its grid, wire exit, and
-    // announce the id. Shared by both paths below so they stay in lock-step.
-    const bound = async (id: number, geom: { cols: number; rows: number }) => {
+    // Once the pty (fresh or attached) is bound: adopt its grid and announce
+    // the id. Exit listening is installed before either spawn path, so a
+    // command that fails immediately cannot disappear between spawn and listen.
+    const bound = (id: number, geom: { cols: number; rows: number }) => {
       ptyIdRef.current = id;
       applyGeometry(geom);
       onSpawned(id);
-      unlistenExit = await ipc.onPtyExit((e) => {
-        if (e.id === id) onExited(e.exit_code);
-      });
+      const early = earlyExits.get(id);
+      if (early) {
+        earlyExits.delete(id);
+        onExitedRef.current(early);
+      }
     };
 
-    if (attachIdRef.current != null) {
-      // Attach path: mirror a headless PTY the portal spawned. No ack — a
-      // headless session fans out over a lossy broadcast and never applies
-      // WebView backpressure — and no initial command (the portal already sent
-      // it). The scrollback snapshot arrives first, then the live tail.
-      const id = attachIdRef.current;
-      void ipc
-        .ptyAttach(id, (bytes) => {
-          if (!disposed) term.write(bytes);
-        })
-        .then((geom) => {
-          if (disposed) return; // detach only; never kill a remote-owned agent
-          void bound(id, geom);
-        })
-        .catch((err) => {
+    const start = async () => {
+      const off = await ipc.onPtyExit((event) => {
+        const id = ptyIdRef.current;
+        if (id == null) earlyExits.set(event.id, event);
+        else if (event.id === id) onExitedRef.current(event);
+      });
+      if (disposed) {
+        off();
+        return;
+      }
+      unlistenExit = off;
+
+      if (attachIdRef.current != null) {
+        // Attach path: mirror a headless PTY the portal spawned. No ack — a
+        // headless session fans out over a lossy broadcast and never applies
+        // WebView backpressure — and no initial command (the portal already sent
+        // it). The scrollback snapshot arrives first, then the live tail.
+        const id = attachIdRef.current;
+        try {
+          const geom = await ipc.ptyAttach(id, (bytes) => {
+            if (!disposed) term.write(bytes);
+          });
+          if (!disposed) bound(id, geom);
+        } catch (err) {
           term.writeln(`\r\n\x1b[31mfailed to attach: ${err}\x1b[0m`);
-        });
-    } else {
-      void ipc
-        .ptySpawn(
+        }
+        return;
+      }
+
+      try {
+        const result = await ipc.ptySpawn(
           {
             // 0 tells Rust to fall back to 80x24; the first resize once the tab is
             // visible corrects it.
@@ -478,26 +506,25 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
               }
             });
           },
-        )
-        .then(async (result) => {
-          if (disposed) {
-            void ipc.ptyKill(result.id);
-            return;
-          }
-          // Adopt whatever the pty opened at, including the 80x24 fallback when
-          // we proposed nothing — better a grid that matches the shell than one
-          // that looks right and wraps wrong.
-          await bound(result.id, result);
-          // A run tab's command was handed to the shell at spawn (runCommand),
-          // so it's already executing — only a typed initialCommand needs sending.
-          if (initialCommand && !runCommand) {
-            void ipc.ptyWrite(result.id, `${initialCommand}\r`);
-          }
-        })
-        .catch((err) => {
-          term.writeln(`\r\n\x1b[31mfailed to spawn shell: ${err}\x1b[0m`);
-        });
-    }
+        );
+        if (disposed) {
+          void ipc.ptyKill(result.id);
+          return;
+        }
+        // Adopt whatever the pty opened at, including the 80x24 fallback when
+        // we proposed nothing — better a grid that matches the shell than one
+        // that looks right and wraps wrong.
+        bound(result.id, result);
+        // A run tab's command was handed to the shell at spawn (runCommand),
+        // so it's already executing — only a typed initialCommand needs sending.
+        if (initialCommand && !runCommand) {
+          void ipc.ptyWrite(result.id, `${initialCommand}\r`);
+        }
+      } catch (err) {
+        term.writeln(`\r\n\x1b[31mfailed to spawn shell: ${err}\x1b[0m`);
+      }
+    };
+    void start();
 
     const dataSub = term.onData((data) => {
       if (ptyIdRef.current != null) void ipc.ptyWrite(ptyIdRef.current, data);
