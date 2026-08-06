@@ -640,9 +640,10 @@ async function nativeAbstractionContext(
   cwd: string,
   intent: VibeIntent,
 ): Promise<AbstractionContext> {
-  const [entries, status, pkg] = await Promise.all([
+  const [entries, status, worktrees, pkg] = await Promise.all([
     ipc.fsReadDir(cwd).then((list) => list.map((e) => e.name)),
     ipc.gitStatus(cwd).catch(() => null),
+    ipc.gitWorktrees(cwd).catch(() => []),
     ipc.fsReadFile(`${cwd}/package.json`)
       .then((bytes) => JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>)
       .catch(() => null),
@@ -679,8 +680,29 @@ async function nativeAbstractionContext(
     return providerById(intent.provider)?.envFile ?? null;
   };
   const envFile = envFileFor();
-  const envStatus = envFile
-    ? all.find((e) => e.path === envFile || e.path.endsWith(`/${envFile}`))
+
+  // Anchored to THIS component, not matched by name across the repo.
+  //
+  // An earlier version took the first entry whose path ended in the file's
+  // basename, which in a monorepo is the wrong file and fails open. Given
+  // /repo/.env.local gitignored (so present as `!!`) and
+  // /repo/apps/web/.env.local committed (so absent from status entirely), the
+  // suffix match found the root file, read "ignored, therefore safe", and the
+  // absence rule below — which would have refused — never ran. The user would
+  // have been told the file stays out of git while writing a key into one git
+  // carries.
+  //
+  // The component is the right anchor because it is the file the plan writes
+  // to: planLink's write-env step targets the provider's env file in the
+  // working directory, and no other copy is involved.
+  const repoRoot = worktreeFor(worktrees, cwd)?.path ?? cwd;
+  const absolute = (p: string) =>
+    /^(?:[A-Za-z]:\/|\/)/.test(normalized(p))
+      ? normalized(p)
+      : `${normalized(repoRoot)}/${normalized(p)}`;
+  const envPath = envFile ? `${normalized(cwd)}/${envFile}` : null;
+  const envStatus = envPath
+    ? all.find((e) => absolute(e.path) === envPath)
     : undefined;
   const envFileTracked = !envFile
     ? false
