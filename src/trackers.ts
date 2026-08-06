@@ -119,6 +119,13 @@ export function ticketContext(ticket: ipc.TicketInfo): string {
   );
 }
 
+/** The run label a ticket's one-shot task carries. It is the run's identity —
+ *  the launcher stamps it on the run and the ticket tab finds the live run by
+ *  it — so both sides must derive it here, never spell it out. */
+export function ticketTaskLabel(ticket: ipc.TicketInfo): string {
+  return `Ticket ${ticket.id}`;
+}
+
 /** The question a ticket becomes when it is forwarded to research instead of
  *  to an implementer. Carries the body (truncated) and not just the title —
  *  the body is where the actual question usually is. */

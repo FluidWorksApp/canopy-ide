@@ -186,6 +186,7 @@ import { followLink, type DeepLink } from "../../deepLinks";
 import {
   addressPrCommentsTask,
   adhocLabel,
+  ADHOC_TASK_ID,
   adhocTaskDef,
   customTaskDef,
   fixCiTask,
@@ -334,7 +335,7 @@ import { suppressBrowserViewsOver, useBrowserEngine } from "../../browserHost";
 import { OPEN_URL_EVENT, type OpenUrlDetail } from "../../links";
 import { resolveGitLink } from "../../gitLinks";
 import { previewAgentTarget, serverForUrl } from "../../preview";
-import { TRACKERS, ticketBranch, ticketContext, ticketResearchQuestion, ticketWorktree } from "../../trackers";
+import { TRACKERS, ticketBranch, ticketContext, ticketResearchQuestion, ticketTaskLabel, ticketWorktree } from "../../trackers";
 import { prConflictContext, prReviewContext } from "../../prs";
 import {
   fileDiffContext,
@@ -3418,7 +3419,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           `Leave the completed work in this worktree; do not commit or open a pull request ` +
           `unless the ticket explicitly asks for it.`;
         await startMicroTask(
-          adhocTaskDef(brief, `Ticket ${ticket.id}`),
+          adhocTaskDef(brief, ticketTaskLabel(ticket)),
           { dir },
           "",
         );
@@ -9269,7 +9270,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onStartNew={(agentId) =>
               void startTicketWork(tab.ticket, tab.repo ?? "", agentId)
             }
-            onStartTask={() => void startTicketTask(tab.ticket, tab.repo)}
+            onStartTask={() => startTicketTask(tab.ticket, tab.repo)}
+            // The run's identity is its label (one adhoc task looks like any
+            // other), so the live state the button shows is "a run with this
+            // ticket's label is still in flight".
+            taskRunning={microRuns.some(
+              (r) =>
+                r.taskId === ADHOC_TASK_ID &&
+                r.label === ticketTaskLabel(tab.ticket),
+            )}
+            onShowTasks={() => {
+              setPinned(true);
+              setSideTab("tasks");
+            }}
             onResearch={() => void researchTicket(tab.ticket)}
             onSendToAgent={(target) =>
               sendTicketToAgent(target, ticketContext(tab.ticket))
