@@ -2926,6 +2926,7 @@ export default function App() {
         onShareContext: (on: boolean) => void;
         onSaveCustomTasks: (tasks: CustomMicroTask[]) => void;
         onPersistVibeTarget: (selection: VibeTargetSelection) => Promise<boolean>;
+        onPersistVibeSetup: (project: Project) => Promise<boolean>;
       }
     >(),
   );
@@ -2979,6 +2980,27 @@ export default function App() {
             await saveWorkspaceStrict(wsRef.current);
           } catch {
             // The caller receives false and keeps the Ash setup state visible.
+          }
+          return false;
+        },
+        onPersistVibeSetup: async (configured) => {
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            const state = wsRef.current;
+            const current = state.projects.find((candidate) => candidate.id === id);
+            if (!current || configured.id !== id) return false;
+            // A setup proposal was validated against the component identities
+            // it observed. If they changed while persistence waited, discard it
+            // rather than overwrite newer project structure.
+            const observed = current.components.map((component) => `${component.id}:${component.path}`).join("|");
+            const proposedFrom = configured.components.map((component) => `${component.id}:${component.path}`).join("|");
+            if (observed !== proposedFrom && current.vibe?.setupRevision) return false;
+            const projects = state.projects.map((candidate) => candidate.id === id ? configured : candidate);
+            const candidate = { ...state, projects };
+            try { await saveWorkspaceStrict(candidate); } catch { return false; }
+            if (wsRef.current !== state) continue;
+            wsRef.current = candidate;
+            update({ projects });
+            return true;
           }
           return false;
         },
@@ -3094,6 +3116,7 @@ export default function App() {
               onShareContext={handlersFor(p.id).onShareContext}
               onSaveCustomTasks={handlersFor(p.id).onSaveCustomTasks}
               onPersistVibeTarget={handlersFor(p.id).onPersistVibeTarget}
+              onPersistVibeSetup={handlersFor(p.id).onPersistVibeSetup}
             />
           ))}
 
