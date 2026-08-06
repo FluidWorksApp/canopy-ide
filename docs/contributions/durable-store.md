@@ -37,7 +37,13 @@ src/components/<Store>*.tsx list/detail presentation
 src-tauri/src/spot.rs       optional derived indexing
 ```
 
-Use `notes.rs` and `research.rs` as references.
+Use `notes.rs` and `research.rs` as references. An authoritative SQLite store
+is appropriate when one mutation must maintain several related records or an
+append/query workload would repeatedly rewrite large files. Follow
+`tasks.rs`/`clipboard.rs`, never the rebuildable Spot index: set
+`PRAGMA user_version`, migrate forward transactionally, reject schemas written
+by a newer Canopy, use owner-only permissions, and keep large artifacts in
+separately capped files.
 
 ## Steps
 

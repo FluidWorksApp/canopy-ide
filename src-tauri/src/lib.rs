@@ -46,6 +46,7 @@ mod spot;
 mod stores;
 mod sync;
 mod sysaudio;
+mod tasks;
 mod tunnel;
 mod vault;
 mod vault_kdbx;
@@ -428,6 +429,7 @@ pub fn run() {
         .manage(vault::Vault::default())
         .manage(clipboard::Clipboard::default())
         .manage(companion::CompanionManager::default())
+        .manage(tasks::TaskStore::default())
         .manage(cli::pending_from_env())
         .manage(cli::pending_link_from_env())
         .setup(|app| {
@@ -518,6 +520,18 @@ pub fn run() {
             companion::companion_status,
             companion::companion_store_read,
             companion::companion_store_write,
+            tasks::task_reserve,
+            tasks::task_attempt_reserve,
+            tasks::task_attempt_start,
+            tasks::task_attempt_settle,
+            tasks::task_list,
+            tasks::task_get,
+            tasks::task_transcript_append,
+            tasks::task_transcript_list,
+            tasks::task_event_append,
+            tasks::task_event_list,
+            tasks::task_artifact_write,
+            tasks::task_artifact_read,
             pty::pty_spawn,
             pty::pty_spawn_detached,
             pty::pty_output,

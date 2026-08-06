@@ -12,6 +12,7 @@
  *  closes. */
 
 import * as ipc from "./ipc";
+import { taskStoreChanged } from "./taskEnvelopes";
 
 type Handler = (e: ipc.StoreChange) => void;
 
@@ -74,3 +75,8 @@ export function resetForTests(): void {
   if (timer !== undefined) window.clearTimeout(timer);
   timer = undefined;
 }
+
+// TaskEnvelope is infrastructure rather than a panel yet, so the central
+// router owns its module-scope registration until a permanent task surface
+// imports the projection directly.
+registerStore("tasks", taskStoreChanged);

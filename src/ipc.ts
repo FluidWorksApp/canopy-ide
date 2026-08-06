@@ -4,6 +4,18 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { ShortcutProfile } from "./shortcuts";
+import type {
+  TaskAttempt,
+  TaskAttemptReserveInput,
+  TaskAttemptSettlement,
+  TaskEnvelopeDetail,
+  TaskEnvelopeSummary,
+  TaskEvent,
+  TaskEventInput,
+  TaskReservation,
+  TaskReserveInput,
+} from "./taskEnvelope";
+import type { TaskTranscriptEntry, TaskTranscriptKind } from "./taskTranscript";
 
 // ---------- App shell ----------
 
@@ -1564,6 +1576,63 @@ export const onStoreChange = (
   cb: (e: StoreChange) => void,
 ): Promise<UnlistenFn> =>
   listen<StoreChange>("store:change", (event) => cb(event.payload));
+
+// ---------- Durable task envelopes ----------
+
+/** Atomically creates an envelope and its first attempt. This command is the
+ * pre-spawn boundary: callers receive durable ids before starting a process. */
+export const taskReserve = (input: TaskReserveInput) =>
+  invoke<TaskReservation>("task_reserve", { input });
+
+export const taskAttemptReserve = (input: TaskAttemptReserveInput) =>
+  invoke<TaskAttempt>("task_attempt_reserve", { input });
+
+export const taskAttemptStart = (attemptId: string) =>
+  invoke<TaskAttempt>("task_attempt_start", { attemptId });
+
+export const taskAttemptSettle = (input: TaskAttemptSettlement) =>
+  invoke<TaskAttempt>("task_attempt_settle", { input });
+
+export const taskList = (projectId: string, limit = 50) =>
+  invoke<TaskEnvelopeSummary[]>("task_list", { projectId, limit });
+
+export const taskGet = (runId: string) =>
+  invoke<TaskEnvelopeDetail | null>("task_get", { runId });
+
+export const taskTranscriptAppend = (args: {
+  runId: string;
+  attemptId?: string | null;
+  kind: TaskTranscriptKind;
+  body: string;
+}) => invoke<TaskTranscriptEntry>("task_transcript_append", args);
+
+export const taskTranscriptList = (runId: string, limit = 200) =>
+  invoke<TaskTranscriptEntry[]>("task_transcript_list", { runId, limit });
+
+export const taskEventAppend = (input: TaskEventInput) =>
+  invoke<TaskEvent>("task_event_append", { input });
+
+export const taskEventList = (runId: string, limit = 200) =>
+  invoke<TaskEvent[]>("task_event_list", { runId, limit });
+
+export interface TaskArtifact {
+  id: string;
+  runId: string;
+  attemptId?: string | null;
+  kind: string;
+  bytes: number;
+  createdAt: number;
+}
+
+export const taskArtifactWrite = (args: {
+  runId: string;
+  attemptId?: string | null;
+  kind: string;
+  content: string;
+}) => invoke<TaskArtifact>("task_artifact_write", args);
+
+export const taskArtifactRead = (id: string) =>
+  invoke<string>("task_artifact_read", { id });
 
 // ---------- Provenance (which session produced which PR) ----------
 

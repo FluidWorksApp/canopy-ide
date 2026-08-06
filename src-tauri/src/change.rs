@@ -33,6 +33,7 @@ pub enum Store {
     Notes,
     Provenance,
     Sessions,
+    Tasks,
 }
 
 impl Store {
@@ -41,6 +42,7 @@ impl Store {
             Store::Notes => "notes",
             Store::Provenance => "provenance",
             Store::Sessions => "sessions",
+            Store::Tasks => "tasks",
         }
     }
 
@@ -65,6 +67,9 @@ impl Store {
             // already batches on a 500ms poll. The settle only has to fold one
             // batch's worth of pulses into one event.
             Store::Sessions => Duration::from_millis(250),
+            // Attempt/transcript writes arrive in short structured-event
+            // bursts; one quarter-second event is enough for every open view.
+            Store::Tasks => Duration::from_millis(250),
         }
     }
 
