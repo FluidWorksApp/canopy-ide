@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { failoverDecision, rankRoutes, selectRoute, type RouteCandidate } from "./vibeFailover";
+import { failoverDecision, rankRoutes, type RouteCandidate } from "./vibeFailover";
 import type { FleetState } from "./fleetState";
 import type { AttemptOutcome } from "./failureClassifier";
 
@@ -32,13 +32,13 @@ describe("route selection", () => {
   });
 
   it("routes a build to each family's frontier model", () => {
-    expect(selectRoute([claude()], "build")).toMatchObject({
+    expect(rankRoutes([claude()], "build")[0]).toMatchObject({
       cli: "claude",
       requestedModel: "claude-fable-5",
       tier: "frontier",
       degradedTier: false,
     });
-    expect(selectRoute([codex()], "build")).toMatchObject({
+    expect(rankRoutes([codex()], "build")[0]).toMatchObject({
       requestedModel: "gpt-5.6-sol",
       tier: "frontier",
     });
@@ -56,7 +56,7 @@ describe("route selection", () => {
       ...claude(),
       choices: [{ id: "claude-haiku-4-5", label: "Haiku", hint: "" }],
     };
-    expect(selectRoute([haikuOnly], "build")).toMatchObject({
+    expect(rankRoutes([haikuOnly], "build")[0]).toMatchObject({
       tier: "fast",
       degradedTier: true,
     });
@@ -67,7 +67,7 @@ describe("route selection", () => {
       ...claude(),
       choices: [{ id: "some-internal-build", label: "?", hint: "" }],
     };
-    expect(selectRoute([unknownModels], "build")).toBeNull();
+    expect(rankRoutes([unknownModels], "build")).toEqual([]);
   });
 });
 
