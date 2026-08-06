@@ -52,6 +52,7 @@ mod tasks;
 mod tunnel;
 mod vault;
 mod vault_kdbx;
+mod watchdog;
 mod webview_keys;
 mod winproc;
 mod wsbridge;
@@ -428,6 +429,8 @@ pub fn run() {
         .manage(research::ResearchStore::default())
         .manage(notes::NotesStore::default())
         .manage(provenance::ProvenanceStore::default())
+        // Shared with the watchdog loop; see the comment on WatchdogState.
+        .manage(std::sync::Arc::new(watchdog::WatchdogState::default()))
         .manage(vault::Vault::default())
         .manage(clipboard::Clipboard::default())
         .manage(companion::CompanionManager::default())
@@ -494,6 +497,8 @@ pub fn run() {
             agents::start_hook_bridge(app.handle().clone());
             maintenance::start(app.handle().clone());
             context::start(app.handle().clone());
+            // Webview heartbeat + memory-pressure watchdogs (issue #488).
+            watchdog::start(app.handle().clone());
             // Only does anything when this launch asked to test itself.
             selftest::start(app.handle());
             let menu = build_menu(app.handle(), "canopy")?;
@@ -815,6 +820,8 @@ pub fn run() {
             dictation::dictation_stop,
             dictation::dictation_cancel,
             dictation::dictation_supported,
+            watchdog::watchdog_ack,
+            watchdog::memory_info,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
