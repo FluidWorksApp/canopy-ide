@@ -130,6 +130,11 @@ import {
   supportsProfiles,
   PROFILE_CHANGE_EVENT,
 } from "../../profiles";
+import { fleetGate, type FleetKind } from "../../fleetState";
+import {
+  inspectFleetRoute,
+  type FleetRouteSnapshot,
+} from "../../fleetSnapshot";
 import { startCommandParked } from "../../agentSeed";
 import {
   AGENT_CLIS,
@@ -785,10 +790,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [shareProjectMenuOpen, setShareProjectMenuOpen] = useState(false);
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
+  const [fleetLaunchNote, setFleetLaunchNote] = useState<{
+    kind: FleetKind;
+    text: string;
+  } | null>(null);
   const {
     installed,
     prereqs,
     getInstalled,
+    getInstalledForLaunch,
     cliUpdates,
     refreshInstalled,
     refreshUpdates,
@@ -2806,6 +2816,43 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setTimeout(() => termHandles.current.get(target.tabId)?.focus(), 50);
   }, []);
 
+  const gateManagedLaunch = useCallback(
+    async (
+      cli: AgentCli,
+      installed: Record<string, boolean>,
+    ): Promise<{
+      allowed: boolean;
+      route: FleetRouteSnapshot;
+      env: [string, string][];
+    }> => {
+      await primeLaunchEnv();
+      const env = launchEnvSync(cli.id);
+      const profile = launchProfile(cli.id) ?? DEFAULT_PROFILE;
+      const route = await inspectFleetRoute(cli, profile, installed);
+      const gate = fleetGate(route.state);
+      const profileName =
+        profile === DEFAULT_PROFILE
+          ? "default"
+          : (profilesRef.current.find((item) => item.id === profile)?.label ?? profile);
+      const label = `${cli.name} · ${profileName}`;
+      if (!gate.allowed) {
+        const text = `${label} can't start: ${gate.why ?? "route unavailable"}.`;
+        setFleetLaunchNote({ kind: "unusable", text });
+        onNotice(text, "error");
+        return { allowed: false, route, env };
+      }
+      if (gate.why) {
+        const text = `${label}: ${gate.why}. Launching anyway.`;
+        setFleetLaunchNote({ kind: route.state.kind, text });
+        onNotice(text, "warn");
+      } else {
+        setFleetLaunchNote(null);
+      }
+      return { allowed: true, route, env };
+    },
+    [onNotice],
+  );
+
   /** Start a fresh agent CLI in `dir`, seeded with `seed`. The diff surfaces
    *  (session changes, a file diff, a relay review) work on the working tree
    *  that's already there, so unlike a PR/ticket there's no worktree to make —
@@ -2813,7 +2860,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  shape as startTicketWork/startPrAgent. */
   const startAgentInDir = useCallback(
     async (dir: string, agentId: string | undefined, seed: string, title: string) => {
-      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
+      const installed = await getInstalledForLaunch();
+      const installedClis = AGENT_CLIS.filter((c) => installed[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
         agentId ||
@@ -2823,21 +2871,33 @@ const ProjectViewBody = memo(function ProjectViewBody({
           AGENT_CLIS[0]
         )?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
-      const start = agent ? await startCommandParked(agent, seed, dir) : null;
-      if (!cli || !start) {
+      if (!cli || !agent) {
         onNotice(`Unknown agent "${agent}".`);
-        return;
+        return false;
+      }
+      const fleet = await gateManagedLaunch(cli, installed);
+      if (!fleet.allowed) return false;
+      const start = await startCommandParked(agent, seed, dir);
+      if (!start) {
+        onNotice(`Unknown agent "${agent}".`);
+        return false;
       }
       const id = addTerminal(
         dir,
         start.command,
         `${title} · ${cli.name}`,
         cli.icon,
+        false,
+        fleet.env,
+        fleet.route.profile === DEFAULT_PROFILE
+          ? undefined
+          : fleet.route.profile,
       );
       if (id && start.typePrompt)
         pendingTerminalPrompts.current.set(id, seed);
+      return Boolean(id);
     },
-    [addTerminal, onNotice, getInstalled],
+    [addTerminal, onNotice, getInstalledForLaunch, gateManagedLaunch],
   );
 
   /** Micro-tasks running with no tab of their own. The Tasks panel is their
@@ -2862,21 +2922,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const tick = window.setInterval(() => setMicroClock(Date.now()), 5_000);
     return () => window.clearInterval(tick);
   }, [microRuns.length]);
-
-  /** Whether `agent` can report its own ending — i.e. Canopy's MCP bridge is
-   *  registered with it, so `canopy_job_done` exists to be called. That is the
-   *  whole condition for running a task with no terminal: an agent that cannot
-   *  say "done" would sit invisibly forever, and its tab is the only way it
-   *  would ever be seen. Unreadable registry, or an unregistered CLI, keeps the
-   *  tab it has always had. */
-  const canReportDone = useCallback(async (agent: string) => {
-    try {
-      const health = await ipc.agentIntegrationHealth();
-      return health.find((h) => h.agent === agent)?.mcp === "ours";
-    } catch {
-      return false;
-    }
-  }, []);
 
   /** Launch a micro-task: a one-shot agent seeded with the task's brief plus
    *  the completion protocol. CANOPY_MICRO_TASK reaches the MCP sidecar through
@@ -2904,25 +2949,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // one the user chose from its menu.
       preferAgent?: string,
     ): Promise<boolean> => {
-      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
-      if (installedClis.length === 0) {
-        onNotice(
-          "Running a task needs an agent CLI — install one in Settings → Agents.",
-        );
-        return false;
-      }
+      const installed = await getInstalledForLaunch();
+      const installedClis = AGENT_CLIS.filter((c) => installed[c.bin]);
       const preferred = getSettings().defaultAgent;
-      const agent = (
-        installedClis.find((c) => c.id === preferAgent) ??
-        installedClis.find((c) => c.id === "claude") ??
-        installedClis.find((c) => c.id === preferred) ??
-        installedClis[0]
-      )?.id;
-      const cli = AGENT_CLIS.find((c) => c.id === agent);
+      const cli = preferAgent
+        ? AGENT_CLIS.find((candidate) => candidate.id === preferAgent)
+        : installedClis.find((candidate) => candidate.id === "claude") ??
+          installedClis.find((candidate) => candidate.id === preferred) ??
+          installedClis[0] ??
+          AGENT_CLIS.find((candidate) => candidate.id === preferred) ??
+          AGENT_CLIS[0];
+      const agent = cli?.id;
       if (!cli || !agent) {
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return false;
       }
+      const fleet = await gateManagedLaunch(cli, installed);
+      if (!fleet.allowed) return false;
       // A task that edits files gets the PR's branch in a worktree of its own,
       // same deal as startPrAgent: reuse the worktree already holding it, else
       // make a throwaway the brief tells the agent to remove. If that fails we
@@ -3004,7 +3047,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // Spawns detached, bypassing addTerminal — so the account env is added
       // here. A micro-task spends the same quota as any other agent.
       const extraEnv: [string, string][] = [
-        ...launchEnvSync(agent),
+        ...fleet.env,
         ...(def.env?.(payload) ?? []),
       ];
       // Which research entry this run is for, taken from the env the task
@@ -3012,7 +3055,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // stays generic and any future task that binds an entry gets this free.
       const researchId = extraEnv.find(([k]) => k === "CANOPY_RESEARCH")?.[1];
 
-      if (await canReportDone(agent)) {
+      if (fleet.route.health?.mcp === "ours") {
         let pty: number;
         try {
           const res = await ipc.ptySpawnDetached({
@@ -3060,6 +3103,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         `${envPrefix} ${start.command}`,
         `${runName} · ${cli.name}`,
         def.icon,
+        false,
+        extraEnv,
+        fleet.route.profile === DEFAULT_PROFILE
+          ? undefined
+          : fleet.route.profile,
       );
       if (!id) return false;
       patchTabRaw(id, {
@@ -3074,8 +3122,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       patchTabRaw,
       onNotice,
       project.id,
-      getInstalled,
-      canReportDone,
+      getInstalledForLaunch,
+      gateManagedLaunch,
       updateMicroRuns,
       switchTo,
     ],
@@ -9422,9 +9470,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
               const dir = cwd ?? componentsRef.current[0]?.path;
               if (!dir) {
                 onNotice("No project directory to start the agent in.");
-                return;
+                return Promise.resolve(false);
               }
-              startAgentInDir(dir, agentId, text, "Preview feedback");
+              return startAgentInDir(dir, agentId, text, "Preview feedback");
             }}
             onRunOneOff={(brief, dir) =>
               // Named, so the Tasks list says what it is rather than opening
@@ -9449,9 +9497,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
               const dir = cwd ?? componentsRef.current[0]?.path;
               if (!dir) {
                 onNotice("No project directory to start the agent in.");
-                return;
+                return Promise.resolve(false);
               }
-              startAgentInDir(dir, agentId, text, "Device feedback");
+              return startAgentInDir(dir, agentId, text, "Device feedback");
             }}
             projects={components.map((c) => ({ label: c.label, path: c.path }))}
           />
@@ -9818,6 +9866,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
         onOpenAllTabs={onOpenAllTabs}
         activeTabElRef={activeTabElRef}
       />
+      {fleetLaunchNote && (
+        <div
+          className={`fleet-launch-note fleet-launch-note-${fleetLaunchNote.kind}`}
+          role={fleetLaunchNote.kind === "unusable" ? "alert" : "status"}
+        >
+          <span>{fleetLaunchNote.text}</span>
+          <button
+            type="button"
+            aria-label="Dismiss fleet launch note"
+            onClick={() => setFleetLaunchNote(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
       <div className="project-content" ref={contentRef}>
         {tabs
           .filter((t): t is TermSubTab => t.type === "terminal")

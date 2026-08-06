@@ -21,10 +21,22 @@ export function useCliLauncher() {
   // Re-probed whenever it could have changed: an install run finishing, or
   // the launcher opening. A one-shot probe at mount meant a finished install
   // still showed — and re-ran — the installer on every click.
-  const refreshInstalled = useCallback(() => {
-    void checkInstalledClis().then(setInstalled);
+  const refreshInstalled = useCallback(async () => {
+    const installedRead = checkInstalledClis();
     void checkInstalledPrereqs().then(setPrereqs);
+    const next = await installedRead;
+    setInstalled(next);
+    return next;
   }, []);
+  const getInstalledForLaunch = useCallback(async () => {
+    try {
+      // Launch-time truth wins over the render cache: PATH and external
+      // installers can change without emitting one of Canopy's events.
+      return await refreshInstalled();
+    } catch {
+      return installedRef.current;
+    }
+  }, [refreshInstalled]);
 
   // Version probing runs `<bin> --version` per CLI plus (at most 6-hourly) a
   // registry fetch — slower than which_check, so it rides in the background
@@ -61,5 +73,13 @@ export function useCliLauncher() {
     };
   }, [refreshInstalled, refreshUpdates]);
 
-  return { installed, prereqs, getInstalled, cliUpdates, refreshInstalled, refreshUpdates };
+  return {
+    installed,
+    prereqs,
+    getInstalled,
+    getInstalledForLaunch,
+    cliUpdates,
+    refreshInstalled,
+    refreshUpdates,
+  };
 }
