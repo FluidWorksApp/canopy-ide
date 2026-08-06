@@ -1,17 +1,16 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  COMPANION_RUNNERS,
   DEFAULT_SPOT,
   actionPolicy,
   clampSpot,
   companionCli,
   companionName,
+  companionRunnerLaunch,
   companionSessionId,
   companionSlug,
   forgetCompanionSession,
   panelPlacement,
   panelSize,
-  permissionArgs,
   pixelsToSpot,
   spotToPixels,
   tierFor,
@@ -19,8 +18,38 @@ import {
   toolLabel,
   PANEL,
   PANEL_BIG,
+  type CompanionAuthority,
+  type CompanionLaunch,
 } from "./companion";
 import { getSettings, updateSettings } from "./settings";
+import {
+  STRUCTURED_RUNNERS,
+  permissionArgs as runnerPermissionArgs,
+} from "./structuredRunners";
+
+const COMPANION_RUNNERS = Object.fromEntries(
+  Object.entries(STRUCTURED_RUNNERS).map(([id, runner]) => [
+    id,
+    {
+      tier: runner.tier,
+      args: (launch: CompanionLaunch) => runner.args(companionRunnerLaunch(launch)),
+      resumeArgs: (launch: CompanionLaunch) =>
+        runner.resumeArgs(companionRunnerLaunch(launch)),
+    },
+  ]),
+);
+
+const permissionArgs = (authority: CompanionAuthority) =>
+  runnerPermissionArgs(
+    companionRunnerLaunch({
+      bin: "claude",
+      sessionId: "id",
+      systemPrompt: "p",
+      roots: [],
+      model: "",
+      authority,
+    }).policy,
+  );
 
 beforeEach(() => localStorage.clear());
 

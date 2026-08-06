@@ -64,6 +64,14 @@ const STORES = [
     boundary: "start_hook_bridge",
     delete_boundaries: ["session_forget"],
   },
+  {
+    id: "tasks",
+    file: "tasks.rs",
+    variant: "Tasks",
+    module: "taskEnvelopes.ts",
+    boundary: "mutate",
+    delete_boundaries: [],
+  },
 ] as const;
 
 /** Rust comments are where the words "std::fs::write" appear most often in

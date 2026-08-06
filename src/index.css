@@ -1827,6 +1827,29 @@ body.resizing-side * {
   padding-top: 8px;
 }
 
+/* The panel is a couple of screens tall and opens bottom-anchored, so the
+   title is the first thing scrolling pushes out of reach. Pinned instead:
+   sticky offsets from the scrollport's visible edge, so the header cannot
+   end up beyond the viewport at any scroll position or window height. The
+   background layers the raised tint over the near-opaque overlay because
+   vitrine's --bg-raised alone is a 5% wash rows would show through. */
+.stats-panel > .ap-head:first-child {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: linear-gradient(var(--bg-raised), var(--bg-raised)),
+    var(--bg-overlay);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The pinned title's bottom rule already separates it from the section that
+   follows — a border-top there would double the line. */
+.stats-panel > .ap-head:first-child + .stats-section-head {
+  margin-top: 0;
+  border-top: 0;
+  padding-top: 6px;
+}
+
 /* Plan limits: one group per CLI, one bar per rolling window. */
 .plan-list {
   padding: 6px 12px 2px;

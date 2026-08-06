@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   OneshotTransport,
-  StructuredTransport,
   newText,
-  type CompanionEvent,
 } from "./companionTransport";
+import {
+  StructuredEventParser,
+  type StructuredRunnerEvent,
+} from "./structuredEvents";
 
 function collector() {
-  const events: CompanionEvent[] = [];
-  return { events, emit: (e: CompanionEvent) => void events.push(e) };
+  const events: StructuredRunnerEvent[] = [];
+  return { events, emit: (e: StructuredRunnerEvent) => void events.push(e) };
 }
 
 const line = (o: unknown) => JSON.stringify(o);
@@ -22,7 +24,7 @@ const delta = (text: string) =>
 describe("the streaming protocol", () => {
   it("streams token deltas in order", () => {
     const host = collector();
-    const t = new StructuredTransport(host);
+    const t = new StructuredEventParser(host);
     t.handleLine(delta("Three "));
     t.handleLine(delta("call sites"));
     expect(host.events).toEqual([
@@ -35,7 +37,7 @@ describe("the streaming protocol", () => {
     // The failure this exists for: `assistant` messages arrive as well as the
     // deltas that built them, so naively handling both doubles every reply.
     const host = collector();
-    const t = new StructuredTransport(host);
+    const t = new StructuredEventParser(host);
     t.handleLine(delta("Hello"));
     t.handleLine(
       line({ type: "assistant", message: { content: [{ type: "text", text: "Hello" }] } }),
@@ -47,7 +49,7 @@ describe("the streaming protocol", () => {
 
   it("falls back to the whole message when the CLI did not stream", () => {
     const host = collector();
-    const t = new StructuredTransport(host);
+    const t = new StructuredEventParser(host);
     t.handleLine(
       line({ type: "assistant", message: { content: [{ type: "text", text: "Whole" }] } }),
     );
@@ -56,7 +58,7 @@ describe("the streaming protocol", () => {
 
   it("surfaces tool calls with the field that says what they touched", () => {
     const host = collector();
-    const t = new StructuredTransport(host);
+    const t = new StructuredEventParser(host);
     t.handleLine(
       line({
         type: "assistant",
@@ -76,7 +78,7 @@ describe("the streaming protocol", () => {
 
   it("truncates a long tool detail rather than blowing out the chip", () => {
     const host = collector();
-    const t = new StructuredTransport(host);
+    const t = new StructuredEventParser(host);
     t.handleLine(
       line({
         type: "assistant",
@@ -93,12 +95,12 @@ describe("the streaming protocol", () => {
 
   it("ends the turn on a result, and reports one that failed", () => {
     const host = collector();
-    const t = new StructuredTransport(host);
+    const t = new StructuredEventParser(host);
     t.handleLine(line({ type: "result", subtype: "success" }));
     expect(host.events).toEqual([{ kind: "turnEnd" }]);
 
     const host2 = collector();
-    const t2 = new StructuredTransport(host2);
+    const t2 = new StructuredEventParser(host2);
     t2.handleLine(line({ type: "result", is_error: true, result: "ran out of budget" }));
     expect(host2.events).toEqual([
       { kind: "error", message: "ran out of budget" },
@@ -110,7 +112,7 @@ describe("the streaming protocol", () => {
     // Otherwise a turn that streamed silences the *next* turn's non-streamed
     // reply, and the chat goes blank after the first answer.
     const host = collector();
-    const t = new StructuredTransport(host);
+    const t = new StructuredEventParser(host);
     t.handleLine(delta("first"));
     t.handleLine(line({ type: "result" }));
     t.handleLine(
@@ -123,7 +125,7 @@ describe("the streaming protocol", () => {
     // A CLI adding a message type, or printing a version banner, must not
     // break the chat.
     const host = collector();
-    const t = new StructuredTransport(host);
+    const t = new StructuredEventParser(host);
     t.handleLine("Claude Code v2.1.0");
     t.handleLine("");
     t.handleLine(line({ type: "some_future_thing", payload: 1 }));
@@ -133,7 +135,7 @@ describe("the streaming protocol", () => {
 
   it("reports the session being ready", () => {
     const host = collector();
-    const t = new StructuredTransport(host);
+    const t = new StructuredEventParser(host);
     t.handleLine(line({ type: "system", subtype: "init" }));
     expect(host.events).toEqual([{ kind: "ready" }]);
   });
