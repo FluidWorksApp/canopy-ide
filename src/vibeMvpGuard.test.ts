@@ -55,6 +55,14 @@ describe("the vibe MVP wiring boundaries", () => {
     expect(buildChat).not.toContain("onEdit");
   });
 
+  it("never asks a Build user to configure or start a server", () => {
+    const preview = read("src/components/PreviewView.tsx");
+    expect(preview).not.toContain("Add a run command to a component");
+    expect(preview).not.toContain("project settings");
+    expect(preview).not.toContain("Once it's listening");
+    expect(preview).toContain("I'm getting your project ready.");
+  });
+
   it("persists inferred target data before publishing it to ProjectView", () => {
     const app = read("src/App.tsx");
     const start = app.indexOf("onPersistVibeTarget: async");
