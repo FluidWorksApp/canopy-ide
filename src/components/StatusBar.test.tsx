@@ -13,6 +13,7 @@ vi.mock("../ipc", () => ({
   gitBranches: vi.fn(),
   gitCheckout: vi.fn(),
   claudeSessionStats: vi.fn(),
+  opencodeSessionStats: vi.fn(),
   onAppStats: vi.fn(),
   onPtyStats: vi.fn(),
   agentUsage: vi.fn(),
@@ -82,6 +83,7 @@ beforeEach(() => {
     cache_creation_tokens: 0,
     turns: 1,
   } as never);
+  vi.mocked(ipc.opencodeSessionStats).mockResolvedValue(null);
 });
 
 const claudeEvent = (pty: number): AgentEventEntry =>
@@ -325,6 +327,75 @@ describe("the tray's model control", () => {
       <StatusBar {...base} events={[unstamped]} activePtyId={9} modelSwitch={null} />,
     );
     expect(await screen.findByText(/opus-5/)).toBeTruthy();
+  });
+});
+
+// An opencode terminal has no transcript to poll, so the tray used to show no
+// tokens and no cost at all — while opencode's own status line displayed both.
+// Its numbers come off the session row in opencode's store instead, billed
+// cost included, which for a custom provider (Azure) is the only cost there is.
+describe("the tray's numbers for a store-backed CLI", () => {
+  const ocEvent = (sessionId: string, pty = 9): AgentEventEntry =>
+    ({
+      ts: 1,
+      data: {
+        sessionId,
+        cwd: "/tmp/scratch-worktree", // deliberately outside the project roots
+        pty,
+        event: "Stop",
+        tool: "",
+        agent: "opencode",
+      },
+    }) satisfies AgentEventEntry;
+
+  it("shows the store's tokens and the CLI's own billed cost, unhedged", async () => {
+    vi.mocked(ipc.opencodeSessionStats).mockResolvedValue({
+      model: "gpt-5.6-sol",
+      input_tokens: 369,
+      output_tokens: 64310,
+      cache_read_tokens: 2500000,
+      cache_creation_tokens: 0,
+      turns: 130,
+      cost: 19.31,
+    });
+    render(
+      <StatusBar {...base} events={[ocEvent("ses_billed")]} activePtyId={9} modelSwitch={null} />,
+    );
+    const chip = await screen.findByText("$19.31");
+    // Billed, not estimated: no "~", and the tooltip says whose figure it is.
+    expect(chip.textContent).not.toContain("~");
+    expect(chip.getAttribute("title")).toBe("session cost, as billed by the CLI");
+    expect(screen.getByTitle(/130 turns/)).toBeTruthy();
+    expect(ipc.opencodeSessionStats).toHaveBeenCalledWith("ses_billed");
+    // No transcript was ever guessed at for it.
+    expect(ipc.claudeSessionStats).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the price-table estimate when the store has no cost", async () => {
+    // A subscription-billed model: opencode records 0, the reader sends null.
+    vi.mocked(ipc.opencodeSessionStats).mockResolvedValue({
+      model: "gpt-5.6-sol",
+      input_tokens: 1000000,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_creation_tokens: 0,
+      turns: 3,
+      cost: null,
+    });
+    render(
+      <StatusBar {...base} events={[ocEvent("ses_free")]} activePtyId={9} modelSwitch={null} />,
+    );
+    // $5/MTok input for the gpt-5.6 family, hedged as every estimate is.
+    const chip = await screen.findByText("~$5.00");
+    expect(chip.getAttribute("title")).toBe("estimated session cost");
+  });
+
+  it("never reads the store for a terminal that isn't opencode's", async () => {
+    render(
+      <StatusBar {...base} events={[claudeEvent(7)]} activePtyId={9} modelSwitch={null} />,
+    );
+    await screen.findByText(/main/);
+    expect(ipc.opencodeSessionStats).not.toHaveBeenCalled();
   });
 });
 

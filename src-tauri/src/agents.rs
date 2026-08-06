@@ -3353,6 +3353,57 @@ fn opencode_sessions(cfg: &str) -> Vec<Candidate> {
     out
 }
 
+/// The status tray's per-session stats for a CLI whose usage lives in its own
+/// store rather than a pollable transcript. Same fields the tray reads off
+/// `ClaudeSessionStats`, plus the CLI's own billed cost — which is the only
+/// figure that exists for a custom provider (an Azure deployment, say) whose
+/// model the frontend price table cannot name.
+#[derive(Serialize, Clone)]
+pub struct StoreSessionStats {
+    pub model: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub turns: u64,
+    pub cost: Option<f64>,
+}
+
+/// One opencode session's stats out of a profile root's store, riding the
+/// same cached read as `agent_usage`.
+fn opencode_stats_for(root: &str, session_id: &str) -> Option<StoreSessionStats> {
+    let c = opencode_sessions(root)
+        .into_iter()
+        .find(|c| c.session_id == session_id)?;
+    let u = c.usage?;
+    Some(StoreSessionStats {
+        model: u.model,
+        input_tokens: u.input,
+        output_tokens: u.output,
+        cache_read_tokens: u.cache_read,
+        cache_creation_tokens: u.cache_creation,
+        turns: u.turns,
+        cost: u.cost,
+    })
+}
+
+/// Stats for the one opencode session a status tray is watching, from
+/// whichever profile root's store holds it. `claude_session_stats` for a CLI
+/// with no transcript to poll: the store read behind it is stamp-cached, so
+/// the tray's 8s poll costs a metadata stat, not a query.
+#[tauri::command]
+pub async fn opencode_session_stats(
+    session_id: String,
+) -> Result<Option<StoreSessionStats>, String> {
+    let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
+    for (_, root) in crate::profiles::roots(&home) {
+        if let Some(s) = opencode_stats_for(&root.to_string_lossy(), &session_id) {
+            return Ok(Some(s));
+        }
+    }
+    Ok(None)
+}
+
 /// Keep the best candidate per (agent, session id): a resolved path beats none,
 /// then newer beats older. Lets a hook digest and a disk-store scan of the same
 /// session collapse to one row.
@@ -5776,5 +5827,27 @@ mod tests {
     fn opencode_reader_is_absent_not_empty_without_a_store() {
         let root = tmp_home("oc-none");
         assert!(super::opencode_sessions(root.to_str().unwrap()).is_empty());
+    }
+
+    // The status tray's lookup: one session out of the store, billed cost
+    // riding along. This is the whole path for a custom provider (Azure) —
+    // the frontend has no price row for it, so the CLI's own figure is the
+    // only cost that can ever show.
+    #[test]
+    fn opencode_tray_stats_carry_the_billed_cost() {
+        let root = opencode_db("tray");
+        let root = root.to_str().unwrap();
+        let s = super::opencode_stats_for(root, "ses_a").expect("session is in the store");
+        assert_eq!(s.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(s.input_tokens, 100);
+        assert_eq!(s.output_tokens, 250);
+        assert_eq!(s.cache_read_tokens, 9000);
+        assert_eq!(s.cache_creation_tokens, 300);
+        assert_eq!(s.turns, 2);
+        assert_eq!(s.cost, Some(0.25));
+        // Zero-cost rows stay None so the frontend estimate applies; a session
+        // the store has never heard of is None, not zeros.
+        assert_eq!(super::opencode_stats_for(root, "ses_b").unwrap().cost, None);
+        assert!(super::opencode_stats_for(root, "ses_zz").is_none());
     }
 }

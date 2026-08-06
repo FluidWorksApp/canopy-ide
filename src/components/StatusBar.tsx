@@ -85,6 +85,10 @@ function Nums({
  *  fresh poll runs, instead of carrying the previous tab's numbers. */
 const TRANSCRIPT_STATS = new Map<string, ipc.ClaudeSessionStats>();
 
+/** Same, per store-backed session id (opencode) — the tray for a CLI with no
+ *  transcript reads its numbers out of the CLI's own store instead. */
+const STORE_STATS = new Map<string, ipc.StoreSessionStats>();
+
 interface StatusBarProps {
   roots: string[];
   agents: { name: string; cpu: number }[];
@@ -356,6 +360,23 @@ export const StatusBar = memo(function StatusBar({
     return activePtyId != null && anyStamped ? null : projectLatest;
   }, [events, roots, activePtyId]);
 
+  // The store-backed counterpart to `transcript`: an opencode terminal has no
+  // transcript to poll, but its hook events name a session whose running
+  // totals — and billed cost — sit on a row in opencode's own store. Matching
+  // the pty is what pins it to the terminal in front; no cwd check, because an
+  // opencode session Canopy launched in a scratch worktree or temp dir is
+  // still this tab's session.
+  const storeSessionId = useMemo(() => {
+    if (activePtyId == null) return null;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const d = events[i].data;
+      if (d?.pty === activePtyId && d.agent === "opencode" && d.sessionId) {
+        return d.sessionId;
+      }
+    }
+    return null;
+  }, [events, activePtyId]);
+
   // OpenCode exposes the active provider/model on chat.message even though it
   // has no transcript path Canopy can incrementally poll. Keep this per-tab for
   // the same reason as transcript selection above: another agent in the project
@@ -566,8 +587,48 @@ export const StatusBar = memo(function StatusBar({
     };
   }, [transcript, visible]);
 
-  const cost = stats ? estimateCost(stats) : null;
-  const activeModel = stats?.model ?? eventModel;
+  // The same poll for a store-backed session, when the tab in front has no
+  // transcript. Rust serves it from a stamp-cached store read, so the tick
+  // costs a stat call, not a query.
+  const [storeStats, setStoreStats] = useState<ipc.StoreSessionStats | null>(
+    null,
+  );
+  useEffect(() => {
+    setStoreStats(
+      storeSessionId ? (STORE_STATS.get(storeSessionId) ?? null) : null,
+    );
+    if (!storeSessionId || !visible) return;
+    let cancelled = false;
+    const refresh = () => {
+      void ipc
+        .opencodeSessionStats(storeSessionId)
+        .then((s) => {
+          if (!s) return;
+          STORE_STATS.set(storeSessionId, s);
+          if (!cancelled) setStoreStats(s);
+        })
+        .catch(() => {});
+    };
+    refresh();
+    const timer = setInterval(refresh, 8_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [storeSessionId, visible]);
+
+  // Transcript first, store second: a tab has one or the other, never both.
+  // The store's `cost` is the CLI's own billed figure — for a custom provider
+  // (an Azure deployment, say) it is the only cost that exists, since the
+  // price table has no row to estimate such a model from.
+  const shown = stats ?? storeStats;
+  const billed = !stats && storeStats?.cost != null;
+  const cost = stats
+    ? estimateCost(stats)
+    : storeStats
+      ? sessionCost(storeStats)
+      : null;
+  const activeModel = stats?.model ?? eventModel ?? storeStats?.model;
   const modelLabel = activeModel
     ?.replace(/^claude-/, "")
     .replace(/^.*\//, "");
@@ -1116,21 +1177,25 @@ export const StatusBar = memo(function StatusBar({
           ]}
         />
       )}
-      {stats && (stats.input_tokens > 0 || stats.output_tokens > 0) && (
+      {shown && (shown.input_tokens > 0 || shown.output_tokens > 0) && (
         <span
           className="status-item"
-          title={`in ${stats.input_tokens.toLocaleString()} · out ${stats.output_tokens.toLocaleString()} · cache read ${stats.cache_read_tokens.toLocaleString()} · ${stats.turns} turns`}
+          title={`in ${shown.input_tokens.toLocaleString()} · out ${shown.output_tokens.toLocaleString()} · cache read ${shown.cache_read_tokens.toLocaleString()} · ${shown.turns} turns`}
         >
-          ↑{fmtTokens(stats.input_tokens + stats.cache_creation_tokens, true)} ↓
-          {fmtTokens(stats.output_tokens, true)}
+          ↑{fmtTokens(shown.input_tokens + shown.cache_creation_tokens, true)} ↓
+          {fmtTokens(shown.output_tokens, true)}
         </span>
       )}
       {cost != null && (
         <span
           className="status-item status-cost"
-          title="estimated session cost"
+          title={
+            billed
+              ? "session cost, as billed by the CLI"
+              : "estimated session cost"
+          }
         >
-          ~${cost.toFixed(2)}
+          {billed ? "" : "~"}${cost.toFixed(2)}
         </span>
       )}
       {/* Plan headroom, right of spend: the two answer different questions —
