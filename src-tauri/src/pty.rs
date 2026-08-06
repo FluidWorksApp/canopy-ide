@@ -326,7 +326,6 @@ impl PtyManager {
         Some(bytes[skip..].to_vec())
     }
 
-
     /// Stop every session; called on app exit so no child processes outlive us.
     ///
     /// Signals them all first and *then* waits once, rather than terminating them
@@ -1495,7 +1494,9 @@ mod tests {
                 // Prints, then stays up — an agent's shape, and the state the
                 // tail is read in: a session that has exited is already gone
                 // from the manager, scrollback and all.
-                Some(RunSpec::Shell("echo DETACHED_$CANOPY_MICRO_TASK; sleep 20".into())),
+                Some(RunSpec::Shell(
+                    "echo DETACHED_$CANOPY_MICRO_TASK; sleep 20".into(),
+                )),
                 None,
                 Some(vec![("CANOPY_MICRO_TASK".into(), "1".into())]),
                 None,
@@ -1526,7 +1527,9 @@ mod tests {
                 Some("/tmp".into()),
                 None,
                 None,
-                Some(RunSpec::Shell("echo TASK_${CANOPY_RUN_ID}_${CANOPY_ATTEMPT_ID}; sleep 20".into())),
+                Some(RunSpec::Shell(
+                    "echo TASK_${CANOPY_RUN_ID}_${CANOPY_ATTEMPT_ID}; sleep 20".into(),
+                )),
                 None,
                 Some(vec![
                     ("CANOPY_RUN_ID".into(), "invented".into()),
