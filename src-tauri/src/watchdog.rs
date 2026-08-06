@@ -137,8 +137,8 @@ fn start_webview_watchdog(app: AppHandle) {
                     log::info!("webview-watchdog: main window gone; stopping");
                     return;
                 };
-                let on_screen = main.is_visible().unwrap_or(true)
-                    && !main.is_minimized().unwrap_or(false);
+                let on_screen =
+                    main.is_visible().unwrap_or(true) && !main.is_minimized().unwrap_or(false);
                 if !on_screen {
                     // A hidden or minimized webview is throttled by WebKit and
                     // may legitimately not run JS — and its death is not
