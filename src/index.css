@@ -19267,10 +19267,37 @@ a.btn-sm {
   display: block;
 }
 
-/* ---- An agent's question (canopy_ask_user) ------------------------------- */
+/* ---- An agent's question (canopy_ask_user) -------------------------------
+
+   Everything here is one rule with one reason: an agent writes the contents
+   of this dialog, and nothing the app can do decides how long they are. A
+   question is a sentence or a paragraph; an option is "Yes" or a clause with
+   a worked example in it. So the box is sized by the window and the text
+   fits itself into it — never the other way round, which is how the options
+   ended up drawn *outside* the border, spilling across the terminal behind
+   with no way to read the ends of them. */
 .ask-dialog {
-  max-width: 460px;
+  /* A width, not just a cap. `.confirm` sets `width: min(420px, 92vw)`, and a
+     bare `max-width: 460px` above that is a no-op — 420 is already under it —
+     so this dialog had been rendering at the plain confirm width while
+     claiming to be wider. It earns the extra: these options are prose. */
+  width: min(560px, 94vw);
+  max-width: min(560px, 94vw);
+  /* Bounded by the window, so a long question cannot push the answer box and
+     Skip off the bottom of the screen. The body inside scrolls instead. */
+  max-height: min(80vh, 720px);
+  display: flex;
+  flex-direction: column;
   text-align: left;
+}
+
+/* The scrolling part: question + options. `min-height: 0` because a flex item
+   defaults to `min-height: auto` and would refuse to shrink below its content,
+   which is the vertical spelling of the same overflow. */
+.ask-body {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .ask-from {
@@ -19288,11 +19315,36 @@ a.btn-sm {
   margin-bottom: 10px;
 }
 
+/* Stacked, not a wrapping row of chips — the same call the branch-switch
+   dialog makes above and for the same reason: these are real alternatives that
+   each need a line to explain themselves, and side by side they were competing
+   for a width neither could have. */
 .ask-options {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: stretch;
   gap: 6px;
   margin-bottom: 10px;
+}
+
+/* An option is a sentence in a button. `.btn` is built for a label — one line,
+   `white-space: nowrap`, a fixed 28px height — and a flex item that refuses to
+   wrap cannot shrink below the width of its own text, so a long option pushed
+   straight through the side of the dialog instead of fitting inside it. Let it
+   wrap, let it grow downwards, and read it left to right like the prose it is. */
+.ask-option {
+  height: auto;
+  min-height: var(--ctl-h, 28px);
+  padding: 7px 12px;
+  justify-content: flex-start;
+  text-align: left;
+  white-space: normal;
+  line-height: 1.45;
+  /* `.confirm` sets `overflow-wrap: anywhere` for the paths and commands that
+     appear in these dialogs; a button is not a text container by default, so
+     say it here too — an unbroken 80-character token in an option is still an
+     option that has to fit. */
+  overflow-wrap: anywhere;
 }
 
 .ask-form {

@@ -21,16 +21,23 @@ export function AskDialog({
     <div className="confirm-backdrop">
       <div className="confirm ask-dialog" onMouseDown={(e) => e.stopPropagation()}>
         <p className="ask-from">An agent is asking</p>
-        <p className="ask-question">{question}</p>
-        {options.length > 0 && (
-          <div className="ask-options">
-            {options.map((option) => (
-              <Button className="ask-option" key={option}  onClick={() => onAnswer(option)}>
-                {option}
-              </Button>
-            ))}
-          </div>
-        )}
+        {/* The question and its options scroll together; the input and Skip
+            below stay put. An agent writes as much as it needs to — a question
+            with four one-line alternatives and one with a paragraph and four
+            sentence-long ones are both ordinary — and the way out has to stay
+            reachable in either. */}
+        <div className="ask-body">
+          <p className="ask-question">{question}</p>
+          {options.length > 0 && (
+            <div className="ask-options">
+              {options.map((option) => (
+                <Button className="ask-option" key={option} onClick={() => onAnswer(option)}>
+                  {option}
+                </Button>
+              ))}
+            </div>
+          )}
+        </div>
         <form
           className="ask-form"
           onSubmit={(e) => {
