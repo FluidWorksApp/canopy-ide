@@ -80,6 +80,14 @@ export interface NetworkSample {
   failed: boolean;
 }
 
+export interface CapturedNetworkRequest {
+  url?: string;
+  status?: number | null;
+  ms?: number;
+  bytes?: number;
+  error?: string;
+}
+
 export const PERF_LIMITS = { slowMs: 3_000, heavyBytes: 5_000_000 };
 
 export function networkObservation(
@@ -108,4 +116,24 @@ export function networkObservation(
     };
   }
   return { kind: "network", verdict: "pass", note: "no failed requests, no outliers", at };
+}
+
+/** Convert the preview page's fetch/XHR/resource log into independent network
+ * evidence. The document request itself is covered by the server observation. */
+export function capturedNetworkObservation(
+  requests: CapturedNetworkRequest[],
+  at: number,
+): VerificationObservation {
+  return networkObservation(
+    requests.map((request) => ({
+      url: request.url || "unknown request",
+      ms: Math.max(0, request.ms ?? 0),
+      bytes: Math.max(0, request.bytes ?? 0),
+      failed:
+        Boolean(request.error) ||
+        request.status === 0 ||
+        (typeof request.status === "number" && request.status >= 400),
+    })),
+    at,
+  );
 }
