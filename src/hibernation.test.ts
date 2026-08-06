@@ -80,6 +80,22 @@ describe("snapshotTabs", () => {
     expect(t).toMatchObject({ agentId: undefined, sessionId: undefined });
   });
 
+  it("keeps configured run identity across sleep", () => {
+    const [t] = snapshotTabs([
+      term({
+        command: "npm run dev",
+        run: true,
+        componentId: "cmp-web",
+        runCommandId: "run-dev",
+      }),
+    ]);
+
+    expect(t).toMatchObject({
+      componentId: "cmp-web",
+      runCommandId: "run-dev",
+    });
+  });
+
   it("prefers the user's own tab name over whatever the shell repainted", () => {
     const [t] = snapshotTabs([term({ title: "zsh", customTitle: "api server" })]);
     expect(t).toMatchObject({ title: "api server" });

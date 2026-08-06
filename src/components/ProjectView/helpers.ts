@@ -3,7 +3,7 @@ import type { AgentEventEntry, OpenFile, Notify, RelayHandle } from "../../types
 import type { ReviewPayload } from "../ReviewView";
 import type { PreviewAnnotation, PreviewShot } from "../../preview";
 import type { DeviceAnnotation } from "../../android";
-import type { Project } from "../../projects";
+import type { Component, Project, RunCommand } from "../../projects";
 import type { TabStatus } from "../../tabGroups";
 import { getSettings } from "../../settings";
 import { claimLabel } from "../../claims";
@@ -56,6 +56,10 @@ export interface TermSubTab {
   /** Launched from a component run command — lives in the run rail, not the
    *  terminal strip. */
   run?: boolean;
+  /** Stable configured-run identity. Legacy/restored tabs may omit these and
+   *  are matched by cwd + command text until they are launched again. */
+  componentId?: string;
+  runCommandId?: string;
   /** A run that is an errand rather than a service: installing a CLI, updating
    *  one, installing a prerequisite. It has one outcome worth knowing and the
    *  chip's ✓ carries it, so a successful one closes itself (see runReap.ts).
@@ -426,6 +430,36 @@ export interface ProjectViewProps {
   /** Progress of that rebuild, so the wake screen can tick the steps off. */
   onRestoreStep?: (done: number, total: number, label: string) => void;
   onRestored?: () => void;
+}
+
+export type VibeTargetResolution =
+  | { kind: "ready"; component: Component; runCommand: RunCommand }
+  | { kind: "needs-setup" };
+
+/** Resolve only explicit, versioned IDs. A one-component project is still not a
+ * configured Build target: guessing here would make later automation run in a
+ * different directory after a reorder or rename. */
+export function resolveVibeTarget(project: Project): VibeTargetResolution {
+  const vibe = project.vibe;
+  if (
+    !vibe ||
+    vibe.version !== 1 ||
+    !vibe.componentId ||
+    !vibe.runCommandId
+  ) {
+    return { kind: "needs-setup" };
+  }
+  const components = project.components.filter(
+    (component) => component.id === vibe.componentId,
+  );
+  if (components.length !== 1) return { kind: "needs-setup" };
+  const commands = (components[0].commands ?? []).filter(
+    (command) => command.id === vibe.runCommandId,
+  );
+  if (commands.length !== 1 || !commands[0].command.trim()) {
+    return { kind: "needs-setup" };
+  }
+  return { kind: "ready", component: components[0], runCommand: commands[0] };
 }
 
 /** One tab as canopy_editor_state describes it: enough for an agent to know

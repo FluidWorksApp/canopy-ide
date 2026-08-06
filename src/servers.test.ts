@@ -17,14 +17,20 @@ const term = (t: Partial<TermSubTab> & { id: string; cwd: string }): TermSubTab 
 });
 
 const web: ServerComponent = {
+  id: "cmp-web",
   label: "canopy-website",
   path: "/w/site",
   commands: [
-    { name: "server", command: "npm run dev" },
-    { name: "build", command: "npm run build" },
+    { id: "run-server", name: "server", command: "npm run dev" },
+    { id: "run-build", name: "build", command: "npm run build" },
   ],
 };
-const app: ServerComponent = { label: "canopy", path: "/w/app", commands: [] };
+const app: ServerComponent = {
+  id: "cmp-app",
+  label: "canopy",
+  path: "/w/app",
+  commands: [],
+};
 
 const noPorts = () => [];
 
@@ -45,9 +51,10 @@ describe("groupServers", () => {
 
   it("skips commands that are configured but blank", () => {
     const c: ServerComponent = {
+      id: "cmp-c",
       label: "c",
       path: "/w/c",
-      commands: [{ name: "empty", command: "   " }],
+      commands: [{ id: "run-empty", name: "empty", command: "   " }],
     };
     expect(groupServers([c], [], noPorts)).toEqual([]);
   });
@@ -89,7 +96,11 @@ describe("groupServers", () => {
   });
 
   it("gives the deepest matching component the run", () => {
-    const inner: ServerComponent = { label: "api", path: "/w/site/packages/api" };
+    const inner: ServerComponent = {
+      id: "cmp-api",
+      label: "api",
+      path: "/w/site/packages/api",
+    };
     const tabs = [term({ id: "t9", cwd: "/w/site/packages/api", command: "bun serve" })];
     const groups = groupServers([web, inner], tabs, noPorts);
     expect(groups.find((g) => g.entries.some((e) => e.adhoc))?.label).toBe("api");
@@ -111,17 +122,71 @@ describe("groupServers", () => {
 
   it("never lists one tab twice when two commands share a string", () => {
     const dup: ServerComponent = {
+      id: "cmp-duplicate",
       label: "d",
       path: "/w/d",
       commands: [
-        { name: "a", command: "npm run dev" },
-        { name: "b", command: "npm run dev" },
+        { id: "run-a", name: "a", command: "npm run dev" },
+        { id: "run-b", name: "a", command: "npm run dev" },
       ],
     };
     const tabs = [term({ id: "t1", cwd: "/w/d", command: "npm run dev" })];
     const [g] = groupServers([dup], tabs, noPorts);
     expect(g.entries.map((e) => e.state)).toEqual(["running", "stopped"]);
+    expect(g.entries.map((e) => e.key)).toEqual(["run-a", "run-b"]);
     expect(g.running).toBe(1);
+  });
+
+  it("keys configured rows by command ID, independent of names and command text", () => {
+    const [before] = groupServers([web], [], noPorts);
+    const renamed: ServerComponent = {
+      ...web,
+      commands: web.commands?.map((command) =>
+        command.id === "run-server"
+          ? { ...command, name: "frontend", command: "npm run dev:new" }
+          : command,
+      ),
+    };
+    const [after] = groupServers([renamed], [], noPorts);
+
+    expect(before.entries.map((entry) => entry.key)).toEqual([
+      "run-server",
+      "run-build",
+    ]);
+    expect(after.entries.map((entry) => entry.key)).toEqual([
+      "run-server",
+      "run-build",
+    ]);
+  });
+
+  it("uses run identity before cwd and command text, with text matching for legacy tabs", () => {
+    const renamed: ServerComponent = {
+      ...web,
+      commands: web.commands?.map((command) =>
+        command.id === "run-server"
+          ? { ...command, name: "frontend", command: "npm run dev:new" }
+          : command,
+      ),
+    };
+    const identified = term({
+      id: "identified",
+      cwd: "/w/site",
+      command: "npm run dev",
+      componentId: "cmp-web",
+      runCommandId: "run-server",
+    });
+    const legacy = term({
+      id: "legacy",
+      cwd: "/w/site",
+      command: "npm run build",
+    });
+
+    const [group] = groupServers([renamed], [identified, legacy], noPorts);
+
+    expect(group.entries.map((entry) => entry.tabId)).toEqual([
+      "identified",
+      "legacy",
+    ]);
   });
 
   it("ignores a run tab from a different component's directory", () => {

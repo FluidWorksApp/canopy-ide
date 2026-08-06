@@ -19,6 +19,8 @@ export interface RememberedTerminal {
   icon?: string;
   /** It lived in the RUNS rail rather than the terminal strip. */
   run?: boolean;
+  componentId?: string;
+  runCommandId?: string;
   /** Runtime identity used to reconnect this terminal to a remembered split. */
   tabId?: string;
   paneGroup?: string;

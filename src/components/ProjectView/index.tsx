@@ -439,6 +439,7 @@ import {
   type ProjectViewProps,
   sidebarPrefs,
   pickBrowserTab,
+  resolveVibeTarget,
 } from "./helpers";
 import { Button } from "../ui";
 export { tabDisplayLabel, previewLabel, deviceLabel };
@@ -681,6 +682,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT_W);
   const sideWidthRef = useRef(SIDE_DEFAULT_W);
   const vibe = project.vibe?.enabled === true;
+  const vibeTarget = resolveVibeTarget(project);
+  const vibeSetupSupported = project.vibe?.version === 1;
   const sideOpen = !zen && !vibe && (pinned || peeking);
 
   // The overlay peek slides over the pane, and a child webview cannot be drawn
@@ -1394,6 +1397,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       profile?: string,
       activate = true,
       paneGroup?: string,
+      runIdentity?: { componentId: string; runCommandId: string },
     ) => {
       const id = tabId();
       // Every terminal opened inside a workspace gets that workspace's port,
@@ -1428,6 +1432,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           run: run !== false,
           chore: run === "chore" || undefined,
           paneGroup,
+          componentId: runIdentity?.componentId,
+          runCommandId: runIdentity?.runCommandId,
         },
       ]);
       if (activate) setActiveTabId(id);
@@ -2092,6 +2098,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         title: t.customTitle ?? t.title,
         icon: t.icon,
         run: t.run,
+        componentId: t.componentId,
+        runCommandId: t.runCommandId,
         tabId: t.id,
         paneGroup: t.paneGroup,
         sessionId:
@@ -2136,6 +2144,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         undefined,
         undefined,
         activate,
+        undefined,
+        t.componentId && t.runCommandId
+          ? { componentId: t.componentId, runCommandId: t.runCommandId }
+          : undefined,
       );
       return id;
     },
@@ -3728,9 +3740,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   /** Re-run a run tab's command in place, reusing the tab (and its position in
    *  the rail) rather than spawning a new one. */
-  const restartRun = useCallback((id: string) => {
+  const restartRun = useCallback((
+    id: string,
+    configured?: Pick<
+      ServerEntry,
+      "command" | "name" | "componentId" | "runCommandId"
+    >,
+  ) => {
     const tab = tabsRef.current.find((t) => t.id === id);
     if (tab?.type !== "terminal") return;
+    const component = tab.componentId
+      ? componentsRef.current.find((item) => item.id === tab.componentId)
+      : undefined;
+    const command = tab.runCommandId
+      ? component?.commands?.find((item) => item.id === tab.runCommandId)
+      : undefined;
+    const current =
+      component && command
+        ? {
+            command: command.command,
+            name: command.name || command.command,
+            componentId: component.id,
+            runCommandId: command.id,
+          }
+        : undefined;
+    const nextConfigured = configured ?? current;
     if (tab.ptyId != null) void ipc.ptyKill(tab.ptyId);
     // Remount Term with a fresh key by clearing the pty and exit state; the
     // effect below respawns it.
@@ -3743,6 +3777,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
               exited: false,
               exitCode: undefined,
               epoch: (t as TermSubTab).epoch ?? 0,
+              ...(nextConfigured
+                ? {
+                    command: nextConfigured.command,
+                    title: nextConfigured.name,
+                    componentId: nextConfigured.componentId ?? undefined,
+                    runCommandId: nextConfigured.runCommandId ?? undefined,
+                  }
+                : {}),
             } as SubTab)
           : t,
       ),
@@ -4474,12 +4516,26 @@ const ProjectViewBody = memo(function ProjectViewBody({
             t.type === "terminal" &&
             Boolean(t.run) &&
             t.cwd === a.dir &&
-            t.command === a.command,
+            (a.componentId &&
+              a.runCommandId &&
+              t.componentId &&
+              t.runCommandId
+              ? t.componentId === a.componentId && t.runCommandId === a.runCommandId
+              : t.command === a.command),
         );
+        const configured =
+          a.componentId && a.runCommandId
+            ? {
+                command: a.command,
+                name: a.name || a.command,
+                componentId: a.componentId,
+                runCommandId: a.runCommandId,
+              }
+            : undefined;
         if (existing && !existing.exited) {
           if (getSettings().agentAskForAttention) setActiveTabId(existing.id);
         }
-        else if (existing) restartRun(existing.id);
+        else if (existing) restartRun(existing.id, configured);
         else
           addTerminal(
             a.dir,
@@ -4490,6 +4546,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             undefined,
             undefined,
             getSettings().agentAskForAttention,
+            undefined,
+            configured,
           );
       } else if ((a.kind === "open_file" || a.kind === "show_diff") && a.path) {
         // "Look at line 340" — put the file in front of the user and land on
@@ -6163,6 +6221,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
               attachId: t.attachId,
               icon: t.icon ?? "📱",
               paneGroup: t.paneGroup,
+              componentId: t.componentId,
+              runCommandId: t.runCommandId,
             });
           }
           const { command } = terminalLaunch(t);
@@ -6182,6 +6242,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
             env.length ? t.profile : undefined,
             true,
             t.paneGroup,
+            t.componentId && t.runCommandId
+              ? { componentId: t.componentId, runCommandId: t.runCommandId }
+              : undefined,
           );
         }
         case "file": {
@@ -8253,7 +8316,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  files panel's run rows make, so both surfaces drive one tab. */
   const startServer = useCallback(
     (path: string, entry: ServerEntry) => {
-      addTerminal(path, entry.command, entry.name, "▶", true);
+      addTerminal(
+        path,
+        entry.command,
+        entry.name,
+        "▶",
+        true,
+        undefined,
+        undefined,
+        true,
+        undefined,
+        entry.componentId && entry.runCommandId
+          ? {
+              componentId: entry.componentId,
+              runCommandId: entry.runCommandId,
+            }
+          : undefined,
+      );
     },
     [addTerminal],
   );
@@ -8293,6 +8372,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         id: project.id,
         name: project.name,
         components: components.map((c) => ({
+          id: c.id,
           label: c.label,
           path: c.path,
           commands: c.commands ?? [],
@@ -10377,7 +10457,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             </div>
           )}
           {components.map((c) => (
-            <div key={c.path} className="component-section">
+            <div key={`${c.id}:${c.path}`} className="component-section">
               <div
                 className="component-header"
                 onClick={() =>
@@ -10418,7 +10498,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                               t.type === "terminal" &&
                               Boolean(t.run) &&
                               t.cwd === c.path &&
-                              t.command === cmd.command,
+                              (t.runCommandId
+                                ? t.componentId === c.id && t.runCommandId === cmd.id
+                                : t.command === cmd.command),
                           );
                           // An open-but-finished tab isn't running: one-shot
                           // commands end on their own and must say so.
@@ -10426,18 +10508,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
                           const finished = tab?.exited ? tab : undefined;
                           const start = () =>
                             tab
-                              ? restartRun(tab.id)
+                              ? restartRun(tab.id, {
+                                  command: cmd.command,
+                                  name: cmd.name || cmd.command,
+                                  componentId: c.id,
+                                  runCommandId: cmd.id,
+                                })
                               : addTerminal(
                                   c.path,
                                   cmd.command,
                                   cmd.name || cmd.command,
                                   "▶",
                                   true,
+                                  undefined,
+                                  undefined,
+                                  true,
+                                  undefined,
+                                  { componentId: c.id, runCommandId: cmd.id },
                                 );
                           const ok = finished?.exitCode === 0;
                           return (
                             <div
-                              key={cmd.name + cmd.command}
+                              key={cmd.id}
                               className={`command-run-row ${running ? "command-running" : ""} ${
                                 finished
                                   ? ok
@@ -10878,8 +10970,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
           />
         )}
         <aside className="vibe-chat-placeholder" aria-label="Build chat placeholder">
-          <div className="vibe-chat-placeholder-title">Build chat</div>
-          <div className="vibe-chat-placeholder-note">Structured chat arrives in S4.</div>
+          <div className="vibe-chat-placeholder-title">
+            {vibeTarget.kind === "ready" ? "Build chat" : "Build needs setup"}
+          </div>
+          <div className="vibe-chat-placeholder-note">
+            {vibeTarget.kind === "ready"
+              ? "Structured chat arrives in S4."
+              : vibeSetupSupported
+                ? "Choose the component and run command Build mode should use."
+                : "This Build configuration needs a newer version of Canopy."}
+          </div>
+          {vibeTarget.kind === "needs-setup" && vibeSetupSupported && (
+            <Button size="sm" onClick={onEdit}>
+              Set up Build mode
+            </Button>
+          )}
         </aside>
         {/* The PanelGroup renders in every mode on purpose. Swapping mainArea
             between a bare child and a <Panel> changes its element type, which

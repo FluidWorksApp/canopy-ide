@@ -2042,7 +2042,7 @@ async fn action(
             // the exact command string to run — and an unknown one is rejected
             // now, with the valid list, instead of silently doing nothing.
             match resolve_command(&snaps, dir, command) {
-                Ok(cmdline) => {
+                Ok((cmdline, component_id, run_command_id)) => {
                     let _ = app.emit(
                         "agent:action",
                         serde_json::json!({
@@ -2051,6 +2051,8 @@ async fn action(
                             "dir": dir,
                             "name": command,
                             "command": cmdline,
+                            "componentId": component_id,
+                            "runCommandId": run_command_id,
                         }),
                     );
                     format!("Starting \"{command}\" in {dir}. Give it a few seconds, then call canopy_project to see it listening and canopy_server_output for its logs.")
@@ -3455,9 +3457,13 @@ fn origin_of(url: &str) -> Option<String> {
 }
 
 /// Look up a component's run command by name in the published snapshots,
-/// returning its command line. Errs (with the available names) when the
+/// returning its command line and stable project IDs. Errs (with the available names) when the
 /// directory isn't a known component or the name isn't one of its commands.
-fn resolve_command(bridge: &ContextBridge, dir: &str, name: &str) -> Result<String, String> {
+fn resolve_command(
+    bridge: &ContextBridge,
+    dir: &str,
+    name: &str,
+) -> Result<(String, Option<String>, Option<String>), String> {
     let snaps = bridge.snapshots.lock().unwrap();
     for project in snaps.values() {
         let Some(components) = project.get("components").and_then(|c| c.as_array()) else {
@@ -3478,10 +3484,20 @@ fn resolve_command(bridge: &ContextBridge, dir: &str, name: &str) -> Result<Stri
                 .and_then(|c| c.as_array())
                 .into_iter()
                 .flatten()
-                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
-                .and_then(|c| c.get("command").and_then(|v| v.as_str()));
+                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name));
             return match found {
-                Some(cmd) => Ok(cmd.to_string()),
+                Some(cmd) => match cmd.get("command").and_then(|v| v.as_str()) {
+                    Some(line) => Ok((
+                        line.to_string(),
+                        comp.get("id")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                        cmd.get("id")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                    )),
+                    None => Err(format!("\"{name}\" has no command line in {dir}")),
+                },
                 None => Err(format!(
                     "\"{name}\" isn't a run command of {dir}. Configured commands: {}",
                     if names.is_empty() {
@@ -3787,6 +3803,34 @@ fn strip_ansi(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_server_resolution_carries_stable_ids() {
+        let bridge = ContextBridge::default();
+        bridge.snapshots.lock().unwrap().insert(
+            "p1".into(),
+            serde_json::json!({
+                "components": [{
+                    "id": "cmp-web",
+                    "path": "/repo/web",
+                    "commands": [{
+                        "id": "run-dev",
+                        "name": "dev",
+                        "command": "npm run dev"
+                    }]
+                }]
+            }),
+        );
+
+        assert_eq!(
+            resolve_command(&bridge, "/repo/web", "dev"),
+            Ok((
+                "npm run dev".into(),
+                Some("cmp-web".into()),
+                Some("run-dev".into())
+            ))
+        );
+    }
 
     #[test]
     fn strip_ansi_drops_csi_osc_and_cr() {

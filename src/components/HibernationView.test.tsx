@@ -8,7 +8,7 @@ import type { SubTab } from "./ProjectView/helpers";
 const project: Project = {
   id: "p1",
   name: "canopy",
-  components: [{ label: "app", path: "/repo" }],
+  components: [{ id: "cmp-app", label: "app", path: "/repo" }],
 };
 
 const tabs: SubTab[] = [
