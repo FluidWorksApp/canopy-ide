@@ -112,6 +112,16 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
         label: "Message agent",
         note: "Type into another session, or into whoever raised a PR",
       },
+      {
+        name: "canopy_mesh_send",
+        label: "Mesh send",
+        note: "A kept message with files attached; the target gets a one-line notice",
+      },
+      {
+        name: "canopy_mesh",
+        label: "Mesh history",
+        note: "Its own sent and received messages, by id",
+      },
       { name: "canopy_tickets", label: "Tickets", note: "Issues from connected trackers" },
       { name: "canopy_reviews", label: "Reviews", note: "Relay review requests and open PRs" },
     ],

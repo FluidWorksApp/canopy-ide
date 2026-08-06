@@ -137,6 +137,7 @@ export const MUTATING_TOOLS: string[] = [
   "canopy_stop_server",
   "canopy_restart_server",
   "canopy_message_agent",
+  "canopy_mesh_send",
   "canopy_claim",
   "canopy_notes_write",
   "canopy_research_write",
