@@ -21,11 +21,16 @@ import {
   newComponentId,
   newProjectId,
   saveWorkspace,
+  saveWorkspaceStrict,
   type Project,
   type WorkspaceState,
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, Notify, RelayHandle } from "./types";
 import type { CustomMicroTask } from "./microTasks";
+import {
+  applyVibeTargetSelection,
+  type VibeTargetSelection,
+} from "./vibeTargetInference";
 import {
   derivePending,
   parseAgentEvent,
@@ -2906,6 +2911,7 @@ export default function App() {
         onEdit: () => void;
         onShareContext: (on: boolean) => void;
         onSaveCustomTasks: (tasks: CustomMicroTask[]) => void;
+        onPersistVibeTarget: (selection: VibeTargetSelection) => Promise<boolean>;
       }
     >(),
   );
@@ -2928,6 +2934,39 @@ export default function App() {
         onSaveCustomTasks: (tasks) => {
           const p = find();
           if (p) void saveProject({ ...p, customTasks: tasks });
+        },
+        onPersistVibeTarget: async (selection) => {
+          // Re-read after every awaited write. A teammate/project event may
+          // update the workspace while inference persists; never overwrite it
+          // with the snapshot from before the disk round trip.
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            const state = wsRef.current;
+            const project = state.projects.find((candidate) => candidate.id === id);
+            if (!project) return false;
+            const next = applyVibeTargetSelection(project, selection);
+            if (!next) return false;
+            const projects = state.projects.map((candidate) =>
+              candidate.id === id ? next : candidate,
+            );
+            const candidate = { ...state, projects };
+            try {
+              await saveWorkspaceStrict(candidate);
+            } catch {
+              return false;
+            }
+            if (wsRef.current !== state) continue;
+            wsRef.current = candidate;
+            update({ projects });
+            return true;
+          }
+          // A continuously changing workspace won the race. Leave disk aligned
+          // with the latest in-memory state rather than with our last candidate.
+          try {
+            await saveWorkspaceStrict(wsRef.current);
+          } catch {
+            // The caller receives false and keeps the Ash setup state visible.
+          }
+          return false;
         },
       };
       projectHandlers.current.set(id, h);
@@ -3040,6 +3079,7 @@ export default function App() {
               onNotice={notify}
               onShareContext={handlersFor(p.id).onShareContext}
               onSaveCustomTasks={handlersFor(p.id).onSaveCustomTasks}
+              onPersistVibeTarget={handlersFor(p.id).onPersistVibeTarget}
             />
           ))}
 

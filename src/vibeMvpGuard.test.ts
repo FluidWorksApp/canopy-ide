@@ -45,6 +45,27 @@ describe("the vibe MVP wiring boundaries", () => {
     expect(projectView).toContain("{mainArea}");
   });
 
+  it("never sends Build mode to the target setup modal", () => {
+    const projectView = read("src/components/ProjectView/index.tsx");
+    const chat = projectView.indexOf('<aside className="vibe-chat-placeholder"');
+    const panels = projectView.indexOf('<PanelGroup direction="horizontal">', chat);
+    const buildChat = projectView.slice(chat, panels);
+    expect(buildChat).not.toContain("Build needs setup");
+    expect(buildChat).not.toContain("Set up Build mode");
+    expect(buildChat).not.toContain("onEdit");
+  });
+
+  it("persists inferred target data before publishing it to ProjectView", () => {
+    const app = read("src/App.tsx");
+    const start = app.indexOf("onPersistVibeTarget: async");
+    const end = app.indexOf("onSaveCustomTasks:", start + 1);
+    const handler = app.slice(start, end);
+    expect(handler.indexOf("await saveWorkspaceStrict(candidate)")).toBeGreaterThan(-1);
+    expect(handler.indexOf("await saveWorkspaceStrict(candidate)")).toBeLessThan(
+      handler.indexOf("update({ projects })"),
+    );
+  });
+
   it("hides only Companion's renderer in Build while attention keeps rendering", () => {
     const app = read("src/App.tsx");
     expect(app).toContain("personaBinding(");

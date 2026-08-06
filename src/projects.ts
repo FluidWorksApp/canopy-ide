@@ -268,9 +268,22 @@ export function adoptLegacyCustomTasks(state: WorkspaceState): WorkspaceState {
   return { ...state, projects };
 }
 
+let workspaceSaveQueue: Promise<void> = Promise.resolve();
+
+export function saveWorkspaceStrict(state: WorkspaceState): Promise<void> {
+  const data = JSON.stringify(state, null, 2);
+  const write = workspaceSaveQueue.then(() =>
+    invoke<void>("store_save", { data }),
+  );
+  // Keep the queue alive after a failed strict caller; that caller still gets
+  // the rejection, while the next autosave is allowed to repair the store.
+  workspaceSaveQueue = write.catch(() => {});
+  return write;
+}
+
 export async function saveWorkspace(state: WorkspaceState): Promise<void> {
   try {
-    await invoke("store_save", { data: JSON.stringify(state, null, 2) });
+    await saveWorkspaceStrict(state);
   } catch (err) {
     console.warn("workspace save failed", err);
   }

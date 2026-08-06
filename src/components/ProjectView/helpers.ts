@@ -421,6 +421,10 @@ export interface ProjectViewProps {
   /** Persist this project's custom tasks — they live on the project record, so
    *  writing one is a workspace save. */
   onSaveCustomTasks: (tasks: import("../../microTasks").CustomMicroTask[]) => void;
+  /** Persist an inferred Build target without opening or closing Engineer UI. */
+  onPersistVibeTarget: (
+    selection: import("../../vibeTargetInference").VibeTargetSelection,
+  ) => Promise<boolean>;
   /** App-wide team relay — same handle in every project. */
   relay: RelayHandle;
   /** A hibernated workspace to rebuild, handed over when the user wakes the
@@ -460,6 +464,21 @@ export function resolveVibeTarget(project: Project): VibeTargetResolution {
     return { kind: "needs-setup" };
   }
   return { kind: "ready", component: components[0], runCommand: commands[0] };
+}
+
+/** Stable run IDs identify the configured command; cwd identifies its checkout. */
+export function matchesVibeRun(
+  tab: Pick<
+    TermSubTab,
+    "cwd" | "command" | "componentId" | "runCommandId" | "exited"
+  >,
+  component: Pick<Component, "id" | "path">,
+  runCommand: RunCommand,
+): boolean {
+  if (tab.exited || tab.cwd !== component.path) return false;
+  return tab.runCommandId
+    ? tab.componentId === component.id && tab.runCommandId === runCommand.id
+    : tab.command === runCommand.command;
 }
 
 /** One tab as canopy_editor_state describes it: enough for an agent to know

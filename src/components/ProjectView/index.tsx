@@ -402,6 +402,13 @@ import { ActivityRail } from "../ActivityRail";
 import { PaneBar } from "../PaneBar";
 import { VibeBuilderPane } from "../VibeBuilderPane";
 import { createVibeBuilderSession } from "../../vibeBuilderSession";
+import {
+  createVibeTargetQuestionSession,
+  createVibeTargetStatusSession,
+  inferVibeTarget,
+  type VibePackageFacts,
+} from "../../vibeTargetInference";
+import { loadVibePackageFacts } from "../../vibePackageScripts";
 import { TabSwitcher } from "../TabSwitcher";
 import { switchRowKey, tabKind } from "../../tabKind";
 
@@ -456,6 +463,7 @@ import {
   type RailChip,
   type ProjectViewProps,
   sidebarPrefs,
+  matchesVibeRun,
   pickBrowserTab,
   resolveVibeTarget,
 } from "./helpers";
@@ -626,6 +634,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   onNotice: onNoticeRaw,
   onShareContext,
   onSaveCustomTasks,
+  onPersistVibeTarget,
   relay,
   restore,
   onRestoreStep,
@@ -701,7 +710,125 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const sideWidthRef = useRef(SIDE_DEFAULT_W);
   const vibe = project.vibe?.enabled === true;
   const vibeTarget = resolveVibeTarget(project);
-  const vibeSetupSupported = project.vibe?.version === 1;
+  const vibePackageKey = project.components
+    .map((component) => `${component.id}:${component.path}`)
+    .join("|");
+  const [vibePackageState, setVibePackageState] = useState<{
+    key: string;
+    facts: VibePackageFacts;
+  }>({ key: "", facts: {} });
+  const vibeInference = useMemo(
+    () =>
+      vibeTarget.kind === "ready" || project.vibe?.version !== 1
+        ? null
+        : inferVibeTarget(
+            project.components,
+            vibePackageState.key === vibePackageKey
+              ? vibePackageState.facts
+              : {},
+          ),
+    [
+      vibeTarget.kind,
+      project.vibe?.version,
+      project.components,
+      vibePackageKey,
+      vibePackageState,
+    ],
+  );
+  const vibePackageIds =
+    vibeInference?.kind === "needs-package-facts"
+      ? vibeInference.componentIds.join("|")
+      : "";
+  useEffect(() => {
+    if (!vibe || !vibePackageIds) return;
+    let cancelled = false;
+    void loadVibePackageFacts(
+      project.components,
+      vibePackageIds.split("|"),
+    ).then((facts) => {
+      if (!cancelled) setVibePackageState({ key: vibePackageKey, facts });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [vibe, vibePackageIds, vibePackageKey, project.components]);
+  const inferredSelection =
+    vibeInference?.kind === "persist" ? vibeInference.selection : null;
+  const inferredSelectionKey = inferredSelection
+    ? `${inferredSelection.componentId}:${inferredSelection.runCommandId}`
+    : "";
+  const persistedInference = useRef<string | null>(null);
+  const inferenceFailures = useRef<{ key: string; count: number }>({
+    key: "",
+    count: 0,
+  });
+  const [inferenceRetry, setInferenceRetry] = useState(0);
+  useEffect(() => {
+    if (!inferredSelection || !inferredSelectionKey) {
+      persistedInference.current = null;
+      return;
+    }
+    if (!vibe) return;
+    if (persistedInference.current === inferredSelectionKey) return;
+    persistedInference.current = inferredSelectionKey;
+    let cancelled = false;
+    let retry: number | undefined;
+    void onPersistVibeTarget(inferredSelection).then((saved) => {
+      if (cancelled) return;
+      if (saved) {
+        inferenceFailures.current = { key: "", count: 0 };
+        return;
+      }
+      persistedInference.current = null;
+      const previous = inferenceFailures.current;
+      const count = previous.key === inferredSelectionKey ? previous.count + 1 : 1;
+      inferenceFailures.current = { key: inferredSelectionKey, count };
+      if (count < 3) {
+        retry = window.setTimeout(
+          () => setInferenceRetry((value) => value + 1),
+          count * 500,
+        );
+      }
+    });
+    return () => {
+      cancelled = true;
+      if (retry !== undefined) window.clearTimeout(retry);
+    };
+  }, [
+    vibe,
+    inferredSelection,
+    inferredSelectionKey,
+    inferenceRetry,
+    onPersistVibeTarget,
+  ]);
+  const vibeTargetQuestionSession = useMemo(
+    () =>
+      vibeInference?.kind === "ask"
+        ? createVibeTargetQuestionSession(vibeInference, onPersistVibeTarget)
+        : null,
+    [vibeInference, onPersistVibeTarget],
+  );
+  const vibeTargetStatus =
+    project.components.length === 0
+      ? "Add an app component in Engineer mode first."
+      : project.vibe?.version !== 1
+        ? "This Build configuration needs a newer version of Canopy."
+        : vibeInference?.kind === "unavailable"
+          ? "I couldn't find a dev or start script in the project."
+          : "I'm finding the app and starting it for you.";
+  const retryInferredTarget = useCallback(() => {
+    persistedInference.current = null;
+    inferenceFailures.current = { key: "", count: 0 };
+    setInferenceRetry((value) => value + 1);
+  }, []);
+  const vibeTargetStatusSession = useMemo(
+    () =>
+      createVibeTargetStatusSession(
+        vibeTargetStatus,
+        inferredSelection ? retryInferredTarget : undefined,
+      ),
+    [vibeTargetStatus, inferredSelection, retryInferredTarget],
+  );
   const sideOpen = !zen && !vibe && (pinned || peeking);
 
   // The overlay peek slides over the pane, and a child webview cannot be drawn
@@ -8635,12 +8762,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const autoStartedVibeRun = useRef<string | null>(null);
   useEffect(() => {
     if (!visible || !vibe || !vibeComponent || !vibeRun) return;
-    const key = `${vibeComponent.path}\n${vibeRun.command}`;
-    const running = runTabs.some(
-      (tab) =>
-        !tab.exited &&
-        tab.cwd === vibeComponent.path &&
-        tab.command === vibeRun.command,
+    const key = `${vibeComponent.path}:${vibeComponent.id}:${vibeRun.id}`;
+    const running = runTabs.some((tab) =>
+      matchesVibeRun(tab, vibeComponent, vibeRun),
     );
     if (!running && autoStartedVibeRun.current !== key) {
       autoStartedVibeRun.current = key;
@@ -8690,11 +8814,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (!visible || !vibe || !vibeComponent || !vibeRun || !vibePreview || vibePreview.url) {
       return;
     }
-    const running = runTabs.find(
-      (tab) =>
-        !tab.exited &&
-        tab.cwd === vibeComponent.path &&
-        tab.command === vibeRun.command,
+    const running = runTabs.find((tab) =>
+      matchesVibeRun(tab, vibeComponent, vibeRun),
     );
     const port = running?.ptyId == null
       ? null
@@ -11388,23 +11509,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
           />
         )}
         <aside className="vibe-chat-placeholder" aria-label="Build chat">
-          {vibeSession ? (
-            <VibeBuilderPane session={vibeSession} />
-          ) : (
-            <>
-              <div className="vibe-chat-placeholder-title">Build needs setup</div>
-              <div className="vibe-chat-placeholder-note">
-                {vibeSetupSupported
-                  ? "Choose the component and run command Build mode should use."
-                  : "This Build configuration needs a newer version of Canopy."}
-              </div>
-              {vibeSetupSupported && (
-                <Button size="sm" onClick={onEdit}>
-                  Set up Build mode
-                </Button>
-              )}
-            </>
-          )}
+          <VibeBuilderPane
+            session={
+              vibeSession ??
+              vibeTargetQuestionSession ??
+              vibeTargetStatusSession
+            }
+          />
         </aside>
         {/* The PanelGroup renders in every mode on purpose. Swapping mainArea
             between a bare child and a <Panel> changes its element type, which
