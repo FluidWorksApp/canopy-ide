@@ -293,6 +293,92 @@ describe("VibeBuilderSession", () => {
     );
   });
 
+  it("correlates a retried incident to the attempt that was live when it crashed", async () => {
+    // The crash is observed during one turn but only persists during a later
+    // one. What the bundle has to say is which attempt was running when the
+    // server died, so the correlation is captured once and carried through the
+    // retry rather than re-read from whatever attempt is current by then.
+    let turns = 0;
+    const reserve = vi.fn(
+      async (request: Parameters<VibeBuilderSessionDeps["reserve"]>[0]) => {
+        const base = reservation();
+        if (request.kind === "vibe-server-health") {
+          return {
+            envelope: { ...base.envelope, runId: "server-run" },
+            attempt: {
+              ...base.attempt,
+              runId: "server-run",
+              attemptId: "server-attempt",
+            },
+          };
+        }
+        turns += 1;
+        return {
+          envelope: { ...base.envelope, runId: `run-${turns}` },
+          attempt: {
+            ...base.attempt,
+            runId: `run-${turns}`,
+            attemptId: `attempt-${turns}`,
+          },
+        };
+      },
+    );
+    let writable = false;
+    const h = harness({
+      reserve,
+      writeArtifact: vi.fn(async ({ kind }) => {
+        if (!writable) throw new Error("disk busy");
+        return {
+          id: `artifact-${kind}`,
+          runId: "server-run",
+          attemptId: "server-attempt",
+          kind,
+          bytes: 10,
+          createdAt: 1,
+        };
+      }),
+    });
+    await h.session.send("Make the button blue");
+    const incident = {
+      key: "server-drift",
+      componentId: "app",
+      runCommandId: "dev",
+      exitCode: 1,
+      crashTimes: [1, 2, 3],
+      automaticRestarts: 2,
+      ports: [] as number[],
+      outputBytes: null,
+      totalCpu: null,
+      totalMemBytes: null,
+      logTail: "server exploded",
+    };
+    await expect(h.session.reportServerIncident(incident)).resolves.toBe(
+      "failed",
+    );
+    expect(h.events).not.toContainEqual(
+      expect.objectContaining({ kind: "watchdog-incident" }),
+    );
+
+    // A fresh attempt takes over before the retry lands.
+    h.emit({ kind: "exit" });
+    await h.session.send("Try again");
+    expect(h.deps.startAttempt).toHaveBeenCalledWith("attempt-2");
+
+    writable = true;
+    await expect(h.session.reportServerIncident(incident)).resolves.toBe(
+      "recorded",
+    );
+    expect(h.events).toContainEqual(
+      expect.objectContaining({
+        kind: "watchdog-incident",
+        metadata: expect.objectContaining({
+          activeRunId: "run-1",
+          activeAttemptId: "attempt-1",
+        }),
+      }),
+    );
+  });
+
   it("creates a dedicated durable incident attempt before the first Build turn", async () => {
     const h = harness();
     const result = await h.session.reportServerIncident({

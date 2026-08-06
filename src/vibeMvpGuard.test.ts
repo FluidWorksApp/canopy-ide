@@ -78,7 +78,13 @@ describe("the vibe MVP wiring boundaries", () => {
   it("judges independent observations and fails unknown checkpoint inputs closed", () => {
     const session = read("src/vibeBuilderSession.ts");
     expect(session).toContain("judgeVerification(contract, observations)");
-    expect(session).toContain("checkpointDecision(review.context)");
+    // The review is awaited, so an incident opened while it ran must still
+    // close the checkpoint: the decision reads the rechecked context, never
+    // the one the reviewer captured before it went away.
+    expect(session).toContain("checkpointDecision(safeReview.context)");
+    expect(session).toContain(
+      "noOpenIncident: review.context.noOpenIncident && !this.incidentOpen",
+    );
     expect(session).toContain('verdict: "unknown"');
     expect(session).toContain("secretScanClean: false");
     expect(session).toContain('kind: "turn-diff"');

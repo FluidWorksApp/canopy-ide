@@ -820,11 +820,11 @@ export class VibeBuilderSession implements BuilderSession {
       for (let attempt = 0; attempt < 3 && !recorded; attempt += 1) {
         try {
           const artifact = await this.deps.writeArtifact({
-              runId,
-              attemptId,
-              kind: "vibe-server-log-tail",
-              content: logTail,
-            });
+            runId,
+            attemptId,
+            kind: "vibe-server-log-tail",
+            content: logTail,
+          });
           await this.deps.appendEvent({
             runId,
             attemptId,

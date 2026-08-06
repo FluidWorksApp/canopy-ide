@@ -7,6 +7,22 @@ const ROOT = process.cwd();
 const read = (path: string) => readFileSync(join(ROOT, path), "utf8");
 
 describe("vibe server health wiring", () => {
+  it("starts the configured dev command itself, once, as a run tab", () => {
+    const view = read("src/components/ProjectView/index.tsx");
+    const start = view.indexOf("const autoStartedVibeRun");
+    const effect = view.indexOf("useEffect(", start);
+    const autoStart = view.slice(start, view.indexOf("useEffect(", effect + 1));
+    // The command comes from the vibe target the config resolved, not from
+    // anything the user typed, and the run tab carries the stable ids so the
+    // watcher below can recognise its exit.
+    expect(autoStart).toContain("vibeRun.command");
+    expect(autoStart).toContain(
+      "{ componentId: vibeComponent.id, runCommandId: vibeRun.id }",
+    );
+    expect(autoStart).toContain("matchesVibeRun(tab, vibeComponent, vibeRun)");
+    expect(autoStart).toContain("autoStartedVibeRun.current !== key");
+  });
+
   it("distinguishes explicit shutdown from a process crash", () => {
     const rust = read("src-tauri/src/pty.rs");
     expect(rust).toContain("requested: session.shutdown.load(Ordering::SeqCst)");
