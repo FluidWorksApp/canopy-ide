@@ -84,6 +84,42 @@ describe("TicketView", () => {
     }));
   });
 
+  it("walks the start-work button through starting and running", async () => {
+    let release!: () => void;
+    const start = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+    const showTasks = vi.fn();
+    mockCommands({ gh_issue_detail: detail });
+    const props = {
+      ticket,
+      source: "github",
+      repo: "/work/app",
+      worktree: undefined,
+      agentTargets: [],
+      installed: {},
+      onStartNew: vi.fn(),
+      onStartTask: start,
+      onShowTasks: showTasks,
+      onSendToAgent: vi.fn(),
+    };
+    const { rerender } = render(<TicketView {...props} />);
+    await screen.findByText("opened by octocat");
+
+    await userEvent.click(screen.getByTitle("Start this ticket as a one-shot task"));
+    expect(start).toHaveBeenCalledTimes(1);
+    // Mid-submit the button says so and cannot fire a second copy.
+    expect(screen.getByText("Starting…").closest("button")).toBeDisabled();
+
+    release();
+    rerender(<TicketView {...props} taskRunning />);
+    // Once the run is live, the primary click shows it in Tasks instead of
+    // launching again.
+    await userEvent.click(
+      await screen.findByTitle("This is running as a task — click to watch it in Tasks"),
+    );
+    expect(showTasks).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
   it("loads Linear details and changes its workflow state", async () => {
     updateSettings({ trackerKeys: { linear: "lin_test" } });
     const linearDetail = {

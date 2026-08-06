@@ -119,6 +119,13 @@ export function ticketContext(ticket: ipc.TicketInfo): string {
   );
 }
 
+/** The run label a ticket's one-shot task carries. It is the run's identity —
+ *  the launcher stamps it on the run and the ticket tab finds the live run by
+ *  it — so both sides must derive it here, never spell it out. */
+export function ticketTaskLabel(ticket: ipc.TicketInfo): string {
+  return `Ticket ${ticket.id}`;
+}
+
 // Starting an agent on a ticket lives in projects.ts (startCommand) so every
 // registered CLI can do it — this module used to hardcode `claude`.
 

@@ -31,8 +31,15 @@ interface TicketViewProps {
   installed: Record<string, boolean>;
   /** Start a fresh agent on this ticket in its worktree. */
   onStartNew: (agentId: string) => void;
-  /** Run the ticket as a one-shot task in its worktree. */
-  onStartTask: () => void;
+  /** Run the ticket as a one-shot task in its worktree. The promise settles
+   *  when the launch has been accepted or refused — it is what keeps the
+   *  button honest about being mid-submit. */
+  onStartTask: () => void | Promise<unknown>;
+  /** A task for this ticket is running right now — the button reflects it
+   *  instead of offering to start a second one. */
+  taskRunning?: boolean;
+  /** Open the Tasks panel, where the running task reports. */
+  onShowTasks?: () => void;
   onSendToAgent: (target: AgentTarget) => void;
 }
 
@@ -45,6 +52,8 @@ export function TicketView({
   installed,
   onStartNew,
   onStartTask,
+  taskRunning,
+  onShowTasks,
   onSendToAgent,
 }: TicketViewProps) {
   const trackerName = TRACKERS.find((t) => t.id === source)?.name ?? source;
@@ -57,6 +66,15 @@ export function TicketView({
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Submitting a task means a worktree switch and a spawn — seconds during
+  // which a stateless button reads as a dead click.
+  const [startingTask, setStartingTask] = useState(false);
+  const taskState = startingTask ? "starting" as const : taskRunning ? "running" as const : undefined;
+  const startTask = () => {
+    if (startingTask) return;
+    setStartingTask(true);
+    void Promise.resolve(onStartTask()).finally(() => setStartingTask(false));
+  };
 
   const loadDetail = async () => {
     if (!canManage) return;
@@ -229,6 +247,15 @@ export function TicketView({
       </div>
 
       <div className="ticket-view-actions">
+        {/* Explainer on the left, actions pushed to the right edge — the same
+            shape as the header row above and every dialog footer. */}
+        <span className="ticket-view-note">
+          {taskState === "running"
+            ? "Working on this ticket in the background — it reports back in Tasks."
+            : taskState === "starting"
+              ? "Preparing the worktree and starting the agent…"
+              : "Runs in the background and reports back in Tasks. No commit, no PR — that stays yours to do."}
+        </span>
         {canManage && (
           github ? (
             <Button disabled={busy || !detail} onClick={() => void setOpen(detail?.state === "closed")}>
@@ -269,13 +296,11 @@ export function TicketView({
           onSend={onSendToAgent}
           primaryTask={{
             title: "Start this ticket as a one-shot task",
-            onRun: onStartTask,
+            onRun: startTask,
+            state: taskState,
+            onShow: onShowTasks,
           }}
         />
-        <span className="ticket-view-note">
-          Runs in the background and reports back in Tasks. No commit, no PR —
-          that stays yours to do.
-        </span>
       </div>
     </div>
   );
