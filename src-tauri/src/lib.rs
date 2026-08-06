@@ -795,6 +795,7 @@ pub fn run() {
             context::context_tools,
             context::context_claims,
             context::context_claim_history,
+            context::context_claim_history_for_path,
             context::context_release_claim,
             context::context_messages,
             context::browser_result,

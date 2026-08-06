@@ -382,6 +382,7 @@ export interface AgentClaimRefusal {
   paths: string[];
   note: string | null;
   at_ms: number;
+  attempt_id?: string | null;
 }
 
 /** Advisory file claims agents have taken, for the Agents panel. Ended ones
@@ -403,6 +404,10 @@ export interface AgentClaim {
   /** The app launch that owns `pty_id` — pty ids restart at 1 every run, so a
    *  claim from another launch must not resolve against our terminals. */
   instance: string | null;
+  process_id?: number | null;
+  process_started_at?: number | null;
+  run_id?: string | null;
+  attempt_id?: string | null;
   note: string | null;
   at_ms: number;
   /** Null while the claim is still held. */
@@ -416,6 +421,8 @@ export const contextClaims = () => invoke<AgentClaim[]>("context_claims");
 /** Held and ended together, newest first, for a claim's detail tab. */
 export const contextClaimHistory = () =>
   invoke<AgentClaim[]>("context_claim_history");
+export const contextClaimHistoryForPath = (path: string) =>
+  invoke<AgentClaim[]>("context_claim_history_for_path", { path });
 export const contextReleaseClaim = (ownerKey: string) =>
   invoke<void>("context_release_claim", { ownerKey });
 export const onAgentClaims = (cb: () => void): Promise<UnlistenFn> =>

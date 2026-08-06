@@ -24,6 +24,7 @@ pub enum StructuredRunnerOut {
 struct Running {
     stdin: ChildStdin,
     child: Child,
+    process_group: Option<u32>,
     control_token: String,
     terminate_on_drop: bool,
 }
@@ -34,7 +35,7 @@ impl Drop for Running {
             return;
         }
         #[cfg(unix)]
-        if let Some(pid) = self.child.id() {
+        if let Some(pid) = self.process_group {
             // The child starts its own process group below. Killing the group
             // keeps hooks and MCP descendants from surviving Canopy's exit.
             unsafe {
@@ -81,7 +82,7 @@ pub async fn structured_runner_spawn(
     if !dir.is_dir() {
         return Err(format!("structured runner cwd does not exist: {cwd}"));
     }
-    tasks.authorize_structured_attempt(&attempt_id, dir)?;
+    let binding = tasks.authorize_structured_attempt(&attempt_id, dir)?;
 
     let mut held = state.running.lock().await;
     if held.contains_key(&attempt_id) {
@@ -107,14 +108,14 @@ pub async fn structured_runner_spawn(
     }
     cmd.env("CANOPY", "1");
     if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
-        let mut bridge = ctx.env();
+        let mut bridge = ctx.mint_attempt(&cwd, &binding);
         let mut waited = std::time::Duration::ZERO;
         const STEP: std::time::Duration = std::time::Duration::from_millis(50);
         const CEILING: std::time::Duration = std::time::Duration::from_secs(5);
         while bridge.is_none() && waited < CEILING {
             tokio::time::sleep(STEP).await;
             waited += STEP;
-            bridge = ctx.env();
+            bridge = ctx.mint_attempt(&cwd, &binding);
         }
         if let Some((port, token)) = bridge {
             cmd.env("CANOPY_CTX_PORT", port.to_string());
@@ -125,25 +126,32 @@ pub async fn structured_runner_spawn(
         cmd.env(key, value);
     }
 
-    let mut child = cmd.spawn().map_err(|error| {
-        format!(
-            "could not start `{command}`: {error}{}",
-            if resolved == command {
-                " — Canopy could not find it on this machine's PATH"
-            } else {
-                ""
-            }
-        )
-    })?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or("the structured runner has no stdin")?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("the structured runner has no stdout")?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = crate::context::release_claims_for_attempt(&app, &attempt_id, "launch-failed");
+            return Err(format!(
+                "could not start `{command}`: {error}{}",
+                if resolved == command {
+                    " — Canopy could not find it on this machine's PATH"
+                } else {
+                    ""
+                }
+            ));
+        }
+    };
+    let Some(stdin) = child.stdin.take() else {
+        let _ = child.start_kill();
+        let _ = crate::context::release_claims_for_attempt(&app, &attempt_id, "launch-failed");
+        return Err("the structured runner has no stdin".into());
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.start_kill();
+        let _ = crate::context::release_claims_for_attempt(&app, &attempt_id, "launch-failed");
+        return Err("the structured runner has no stdout".into());
+    };
     let stderr = child.stderr.take();
+    let process_group = child.id();
 
     {
         let sink = on_data.clone();
@@ -176,6 +184,7 @@ pub async fn structured_runner_spawn(
         Running {
             stdin,
             child,
+            process_group,
             control_token,
             terminate_on_drop: true,
         },
@@ -203,12 +212,11 @@ pub async fn structured_runner_spawn(
                 }
             };
             let Some(code) = exit else { continue };
-            if let Some(running) = held.get_mut(&watch_attempt) {
-                running.terminate_on_drop = false;
-            }
-            held.remove(&watch_attempt);
+            let running = held.remove(&watch_attempt);
             drop(held);
+            drop(running);
             let _ = sink.send(StructuredRunnerOut::Exit { code });
+            let _ = crate::context::release_claims_for_attempt(&watch_app, &watch_attempt, "death");
             return;
         }
     });
@@ -245,6 +253,7 @@ pub async fn structured_runner_write(
 
 #[tauri::command]
 pub async fn structured_runner_kill(
+    app: tauri::AppHandle,
     state: tauri::State<'_, StructuredRunnerManager>,
     attempt_id: String,
     control_token: String,
@@ -259,7 +268,11 @@ pub async fn structured_runner_kill(
     let mut running = held
         .remove(&attempt_id)
         .expect("structured runner was checked above");
+    drop(held);
     let _ = running.child.start_kill();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), running.child.wait()).await;
+    drop(running);
+    let _ = crate::context::release_claims_for_attempt(&app, &attempt_id, "death");
     Ok(())
 }
 
