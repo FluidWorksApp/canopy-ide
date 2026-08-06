@@ -7,6 +7,25 @@ const entry = (payload: Record<string, unknown>): AgentEventEntry => ({
 });
 
 describe("cross-connector event projection", () => {
+  it("keeps the durable task binding stamped by the PTY", () => {
+    const projected = entry({
+      session_id: "claude-1",
+      cwd: "/repo",
+      canopy_pty: 7,
+      canopy_run_id: "run_reserved",
+      canopy_attempt_id: "attempt_reserved",
+      hook_event_name: "PermissionRequest",
+    });
+    expect(projected.data).toMatchObject({
+      runId: "run_reserved",
+      attemptId: "attempt_reserved",
+    });
+    expect(derivePending([projected])[0]).toMatchObject({
+      runId: "run_reserved",
+      attemptId: "attempt_reserved",
+    });
+  });
+
   it("reads the native Codex stop message field", () => {
     const data = entry({
       session_id: "thr-1",

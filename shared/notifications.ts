@@ -34,6 +34,10 @@ export interface AgentEventData {
   cwd: string;
   /** canopy_pty stamp; null when the agent's hooks can't carry it (codex). */
   pty: number | null;
+  /** Durable task identity stamped by the PTY after reservation. Both are null
+   * for an ordinary terminal and never inferred from cwd/session text. */
+  runId?: string | null;
+  attemptId?: string | null;
   /** hook_event_name, falling back to codex's `type`. */
   event: string;
   tool: string;
@@ -72,6 +76,8 @@ export interface PendingItem {
   /** The terminal that raised it (canopy_pty stamp) — lets the UI clear items
    *  for a terminal the user is already looking at. Null when unstamped. */
   pty: number | null;
+  runId?: string | null;
+  attemptId?: string | null;
   ts: number;
   message?: string;
   questions?: PendingQuestion[];
@@ -92,6 +98,12 @@ export function parseAgentEvent(raw: string): AgentEventData | null {
     sessionId: String(parsed.session_id ?? parsed["conversation-id"] ?? ""),
     cwd: String(parsed.cwd ?? ""),
     pty: typeof parsed.canopy_pty === "number" ? parsed.canopy_pty : null,
+    runId:
+      typeof parsed.canopy_run_id === "string" ? parsed.canopy_run_id : null,
+    attemptId:
+      typeof parsed.canopy_attempt_id === "string"
+        ? parsed.canopy_attempt_id
+        : null,
     event,
     tool,
     // The helper stamps `agent` for every non-claude CLI it fronts; bare
@@ -155,7 +167,7 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
     if (!d) continue;
     const sessionId = d.sessionId;
     if (!sessionId) continue;
-    const { cwd, pty, event, tool } = d;
+    const { cwd, pty, runId, attemptId, event, tool } = d;
     const agent = d.agent || "claude";
 
     if (event === "PreToolUse" && tool === "AskUserQuestion") {
@@ -174,6 +186,8 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
           sessionId,
           cwd,
           pty,
+          runId,
+          attemptId,
           ts: entry.ts,
           questions: d.questions ?? [],
         },
@@ -211,6 +225,8 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
             sessionId,
             cwd,
             pty,
+            runId,
+            attemptId,
             ts: entry.ts,
             message,
           },
@@ -228,6 +244,8 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
             sessionId,
             cwd,
             pty,
+            runId,
+            attemptId,
             ts: entry.ts,
             message,
           },
@@ -250,6 +268,8 @@ export function derivePending(events: AgentEventEntry[]): PendingItem[] {
           sessionId,
           cwd,
           pty,
+          runId,
+          attemptId,
           ts: entry.ts,
           message: last ? last.slice(0, 140) : "Finished — waiting for you",
         },

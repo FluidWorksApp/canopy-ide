@@ -158,8 +158,11 @@ pub async fn dispatch(
             crate::pty::pty_spawn_detached(
                 app.clone(),
                 app.state::<PtyManager>(),
+                app.state::<crate::tasks::TaskStore>(),
                 cwd,
                 command,
+                None,
+                None,
                 None,
             )
             .and_then(|r| serde_json::to_value(r).map_err(|e| e.to_string()))
