@@ -71,12 +71,17 @@ export function stalenessText(plan: PlanUsage, now = Date.now()): string | null 
 export function planLabel(plan: PlanUsage): string | null {
   const raw = plan.plan;
   if (!raw) return null;
+  // The default_claude_* spelling re-verified against live statusline
+  // captures (~/.canopy/plan-usage) on 2026-08-06. The bare max_* rows cover
+  // CLI builds observed in the wild reporting the slug without its prefix.
   const known: Record<string, string> = {
     default_claude_max_20x: "Max (20x)",
     default_claude_max_5x: "Max (5x)",
     default_claude_pro: "Pro",
     claude_max_20x: "Max (20x)",
     claude_max_5x: "Max (5x)",
+    max_20x: "Max (20x)",
+    max_5x: "Max (5x)",
     free: "Free",
     plus: "Plus",
     pro: "Pro",
