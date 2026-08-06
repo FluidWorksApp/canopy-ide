@@ -131,6 +131,41 @@ export function scanDiffForSecrets(diff: string): SecretScanResult {
   return { clean: findings.length === 0, findings, scope: SCOPE };
 }
 
+export const REDACTION = "[redacted by Canopy]";
+
+/** Replace credential-shaped spans with a marker, keeping the surrounding diff
+ *  readable.
+ *
+ *  A refused turn persists its diff as an artifact so the user can see what
+ *  was refused — which would otherwise write the credential to disk under
+ *  `~/.canopy`, the same leak the finding rules exist to prevent, through a
+ *  door nobody was watching. The scanner already knows the matching spans, so
+ *  redacting is available rather than aspirational.
+ *
+ *  Deliberately redacts on every line, added or not: an artifact is stored
+ *  text, not a change proposal, and a secret sitting in a context line is
+ *  still a secret sitting on disk. */
+export function redactSecrets(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      let out = line;
+      for (const rule of RULES) {
+        out = out.replace(new RegExp(rule.test.source, "g"), REDACTION);
+      }
+      const assigned = ASSIGNMENT.exec(out);
+      if (
+        assigned &&
+        !PLACEHOLDER.test(assigned[2]) &&
+        entropy(assigned[2]) >= ENTROPY_FLOOR
+      ) {
+        out = out.replace(assigned[2], REDACTION);
+      }
+      return out;
+    })
+    .join("\n");
+}
+
 /** What Ash says when the scan is why a turn was not saved. Names the rule and
  *  the place, never the value. */
 export function describeSecretFindings(findings: readonly SecretFinding[]): string {

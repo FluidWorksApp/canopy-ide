@@ -19,6 +19,7 @@ import type { TaskReservation } from "./taskEnvelope";
 import type { TaskAttemptSettlement } from "./taskEnvelope";
 import { appendTranscript } from "./taskTranscript";
 import { fleetGate } from "./fleetState";
+import { redactSecrets } from "./vibeSecretScan";
 import { inspectFleetRoute } from "./fleetSnapshot";
 import { choicesFor } from "./modelCatalog";
 import { AGENT_CLIS, checkCliUpdates, checkInstalledClis } from "./projects";
@@ -1276,7 +1277,16 @@ export class VibeBuilderSession implements BuilderSession {
     } else if (!decision.checkpoint && review.paths.length > 0) {
       this.pendingCheckpoint = { review: safeReview, verification: verdict.outcome };
       const artifact = await this.deps
-        .writeArtifact({ runId, attemptId, kind: "turn-diff", content: review.diff })
+        // Redacted before it reaches disk: this artifact exists so a refused
+        // turn can be inspected, and the commonest reason to refuse one is a
+        // credential in the diff. Persisting it verbatim would leak through a
+        // door the finding rules do not cover.
+        .writeArtifact({
+          runId,
+          attemptId,
+          kind: "turn-diff",
+          content: redactSecrets(review.diff),
+        })
         .catch(() => null);
       await this.deps.appendEvent({
         runId,
