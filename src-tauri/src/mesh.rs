@@ -21,13 +21,16 @@
 //     under ~/.canopy/mesh, outside every repo, exactly as notes and research
 //     do and for the same reasons.
 
+use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
 /// How many messages the log keeps, in memory and on disk. Old traffic ages
 /// out of the front as new traffic lands, and the file is rewritten to match.
 const MAX_KEPT: usize = 500;
+const MAX_CLAIM_HISTORY: usize = 200;
 
 /// How long a message stays even under the count cap. Pty ids only mean
 /// anything within the app run that minted them, so week-old traffic names
@@ -162,6 +165,19 @@ fn store_path() -> Option<PathBuf> {
             .join(".canopy")
             .join("mesh")
             .join("messages.jsonl"),
+    )
+}
+
+fn claim_store_path() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("CANOPY_MESH_HOME") {
+        return Some(PathBuf::from(dir).join("claims.sqlite"));
+    }
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        PathBuf::from(home)
+            .join(".canopy")
+            .join("mesh")
+            .join("claims.sqlite"),
     )
 }
 
@@ -317,6 +333,287 @@ impl Inner {
     }
 }
 
+/// Durable claim history. Held rows from a previous app run are ended at load:
+/// no process from that run can still own them, so keeping them live would wedge
+/// paths after a crash.
+pub struct ClaimStore {
+    db: Mutex<Connection>,
+    instance: String,
+    available: bool,
+    open_error: Option<String>,
+}
+
+impl Default for ClaimStore {
+    fn default() -> Self {
+        Self::load()
+    }
+}
+
+impl ClaimStore {
+    pub fn load() -> Self {
+        Self::open(
+            claim_store_path(),
+            crate::pty::instance_token().to_string(),
+            true,
+        )
+    }
+
+    #[cfg(test)]
+    pub fn at(path: Option<PathBuf>) -> Self {
+        Self::open(path, format!("test-{}", std::process::id()), false)
+    }
+
+    #[cfg(test)]
+    fn at_with_instance(path: Option<PathBuf>, instance: String) -> Self {
+        Self::open(path, instance, false)
+    }
+
+    fn open(path: Option<PathBuf>, instance: String, require_disk: bool) -> Self {
+        let had_path = path.is_some();
+        let opened = path.and_then(|path| {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok()?;
+            }
+            Connection::open(path).ok()
+        });
+        let mut available = opened.is_some() || !require_disk;
+        let mut open_error = if require_disk && !had_path {
+            Some("claim history has no durable home directory".into())
+        } else if require_disk && opened.is_none() {
+            Some("claim history database could not be opened".into())
+        } else {
+            None
+        };
+        let db = opened
+            .or_else(|| Connection::open_in_memory().ok())
+            .expect("SQLite in-memory claim store opens");
+        if let Err(error) = db.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA busy_timeout = 5000;
+             CREATE TABLE IF NOT EXISTS claims (
+                 id TEXT PRIMARY KEY,
+                 body TEXT NOT NULL,
+                 released_at_ms INTEGER,
+                 process_id INTEGER,
+                 instance TEXT,
+                 at_ms INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS claims_released ON claims(released_at_ms);
+             CREATE TABLE IF NOT EXISTS claim_sequence (value INTEGER NOT NULL);
+             INSERT INTO claim_sequence(value)
+                 SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM claim_sequence);",
+        ) {
+            available = false;
+            open_error = Some(format!("claim history schema failed: {error}"));
+        }
+        let store = Self {
+            db: Mutex::new(db),
+            instance,
+            available,
+            open_error,
+        };
+        if store.available {
+            let _ = store.reconcile_stale();
+        }
+        store
+    }
+
+    fn ensure_available(&self) -> Result<(), String> {
+        if self.available {
+            Ok(())
+        } else {
+            Err(self
+                .open_error
+                .clone()
+                .unwrap_or_else(|| "claim history store is unavailable".into()))
+        }
+    }
+
+    pub fn next_id(&self) -> Result<String, String> {
+        self.ensure_available()?;
+        let mut db = self.db.lock().map_err(|_| "claim store lock poisoned")?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let value: u64 = tx
+            .query_row("SELECT value FROM claim_sequence", [], |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        tx.execute("UPDATE claim_sequence SET value = value + 1", [])
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(format!("c{value}"))
+    }
+
+    pub fn mutate<T>(
+        &self,
+        f: impl FnOnce(&mut Vec<crate::context::Claim>) -> (T, bool),
+    ) -> Result<(T, bool), String> {
+        self.ensure_available()?;
+        self.reconcile_stale()?;
+        let mut db = self.db.lock().map_err(|_| "claim store lock poisoned")?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let mut claims = read_claims(&tx)?;
+        let (out, changed) = f(&mut claims);
+        if changed {
+            tx.execute("DELETE FROM claims", [])
+                .map_err(|error| error.to_string())?;
+            for claim in &claims {
+                insert_claim(&tx, claim)?;
+            }
+        }
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok((out, changed))
+    }
+
+    pub fn held(&self) -> Result<Vec<crate::context::Claim>, String> {
+        self.ensure_available()?;
+        self.reconcile_stale()?;
+        let db = self.db.lock().map_err(|_| "claim store lock poisoned")?;
+        Ok(read_claims(&db)?
+            .into_iter()
+            .filter(|claim| claim.released_at_ms.is_none())
+            .collect())
+    }
+
+    pub fn all_newest(&self) -> Result<Vec<crate::context::Claim>, String> {
+        self.ensure_available()?;
+        self.reconcile_stale()?;
+        let db = self.db.lock().map_err(|_| "claim store lock poisoned")?;
+        let mut claims = read_claims(&db)?;
+        claims.reverse();
+        Ok(claims)
+    }
+
+    pub fn history_for_path(&self, path: &str) -> Result<Vec<crate::context::Claim>, String> {
+        Ok(self
+            .all_newest()?
+            .into_iter()
+            .filter(|claim| {
+                claim
+                    .paths
+                    .iter()
+                    .any(|claimed| claim_paths_overlap(claimed, path))
+            })
+            .collect())
+    }
+
+    fn reconcile_stale(&self) -> Result<(), String> {
+        let mut db = self.db.lock().map_err(|_| "claim store lock poisoned")?;
+        let tx = db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let claims = read_claims(&tx)?;
+        let now = claim_now_ms();
+        let mut changed = false;
+        for mut claim in claims
+            .into_iter()
+            .filter(|claim| claim.released_at_ms.is_none())
+        {
+            let stale = match claim.process_id {
+                Some(pid) if pid == std::process::id() => {
+                    claim.instance.as_deref() != Some(&self.instance)
+                        || !process_matches(pid, claim.process_started_at)
+                }
+                Some(pid) => !process_matches(pid, claim.process_started_at),
+                None => claim.instance.as_deref() != Some(&self.instance),
+            };
+            if !stale {
+                continue;
+            }
+            claim.released_at_ms = Some(now);
+            claim.released_by = Some("death".into());
+            tx.execute(
+                "UPDATE claims SET body = ?1, released_at_ms = ?2 WHERE id = ?3",
+                params![
+                    serde_json::to_string(&claim).map_err(|error| error.to_string())?,
+                    now,
+                    claim.id
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+            changed = true;
+        }
+        if changed {
+            prune_claim_rows(&tx)?;
+        }
+        tx.commit().map_err(|error| error.to_string())
+    }
+}
+
+fn read_claims(db: &Connection) -> Result<Vec<crate::context::Claim>, String> {
+    let mut statement = db
+        .prepare("SELECT body FROM claims ORDER BY at_ms, rowid")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    rows.map(|row| {
+        let body = row.map_err(|error| error.to_string())?;
+        serde_json::from_str(&body).map_err(|error| error.to_string())
+    })
+    .collect()
+}
+
+fn insert_claim(db: &Connection, claim: &crate::context::Claim) -> Result<(), String> {
+    db.execute(
+        "INSERT INTO claims(id, body, released_at_ms, process_id, instance, at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            claim.id,
+            serde_json::to_string(claim).map_err(|error| error.to_string())?,
+            claim.released_at_ms,
+            claim.process_id,
+            claim.instance,
+            claim.at_ms
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn prune_claim_rows(db: &Connection) -> Result<(), String> {
+    db.execute(
+        "DELETE FROM claims WHERE id IN (
+             SELECT id FROM claims WHERE released_at_ms IS NOT NULL
+             ORDER BY at_ms DESC LIMIT -1 OFFSET ?1
+         )",
+        [MAX_CLAIM_HISTORY as i64],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn claim_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn process_matches(pid: u32, started_at: Option<u64>) -> bool {
+    let mut system = System::new();
+    let pid = Pid::from_u32(pid);
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    system
+        .process(pid)
+        .is_some_and(|process| started_at.is_none_or(|expected| process.start_time() == expected))
+}
+
+pub(crate) fn current_process_started_at() -> Option<u64> {
+    let mut system = System::new();
+    let pid = Pid::from_u32(std::process::id());
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    system.process(pid).map(|process| process.start_time())
+}
+
+fn claim_paths_overlap(a: &str, b: &str) -> bool {
+    let a = a.trim_end_matches('/');
+    let b = b.trim_end_matches('/');
+    a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,6 +642,118 @@ mod tests {
             std::env::temp_dir().join(format!("canopy-mesh-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("messages.jsonl")
+    }
+
+    fn claim(id: &str, path: &str, attempt_id: Option<&str>) -> crate::context::Claim {
+        crate::context::Claim {
+            id: id.into(),
+            paths: vec![path.into()],
+            owner: "agent (/repo)".into(),
+            owner_key: "pty:test:1".into(),
+            pty_id: Some(1),
+            instance: Some("test".into()),
+            process_id: Some(std::process::id()),
+            process_started_at: current_process_started_at(),
+            run_id: attempt_id.map(|_| "run_1".into()),
+            attempt_id: attempt_id.map(str::to_string),
+            note: None,
+            at_ms: 1,
+            released_at_ms: None,
+            released_by: None,
+            refusals: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn claim_history_survives_restart_and_stale_holders_die() {
+        let path = tmp_store("claim-restart").with_file_name("claims.sqlite");
+        let store = ClaimStore::at_with_instance(Some(path.clone()), "first".into());
+        store
+            .mutate(|claims| {
+                let mut held = claim("c1", "/repo/src", Some("attempt_1"));
+                held.instance = Some("first".into());
+                held.process_id = Some(u32::MAX);
+                claims.push(held);
+                ((), true)
+            })
+            .unwrap();
+        drop(store);
+
+        let reopened = ClaimStore::at_with_instance(Some(path.clone()), "second".into());
+        assert!(reopened.held().unwrap().is_empty());
+        let history = reopened.history_for_path("/repo/src/auth.ts").unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].attempt_id.as_deref(), Some("attempt_1"));
+        assert_eq!(history[0].released_by.as_deref(), Some("death"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn live_instances_share_claims_and_never_reuse_ids() {
+        let path = tmp_store("claim-concurrent").with_file_name("claims.sqlite");
+        let first = ClaimStore::at_with_instance(Some(path.clone()), "shared-test".into());
+        let second = ClaimStore::at_with_instance(Some(path.clone()), "shared-test".into());
+        let id = first.next_id().unwrap();
+        first
+            .mutate(|claims| {
+                let mut held = claim(&id, "/repo/src", Some("attempt_1"));
+                held.instance = Some("shared-test".into());
+                claims.push(held);
+                ((), true)
+            })
+            .unwrap();
+        assert_eq!(second.held().unwrap().len(), 1);
+        assert_eq!(second.next_id().unwrap(), "c2");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn durable_store_failure_refuses_claim_mutations() {
+        let root = tmp_store("claim-unavailable");
+        let blocker = root.parent().unwrap().join("not-a-directory");
+        std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+        std::fs::write(&blocker, "file").unwrap();
+        let store = ClaimStore::open(Some(blocker.join("claims.sqlite")), "test".into(), true);
+        assert!(store.next_id().is_err());
+        assert!(store
+            .mutate(|claims| {
+                claims.push(claim("c1", "/repo", None));
+                ((), true)
+            })
+            .is_err());
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn process_start_time_detects_pid_reuse() {
+        let pid = std::process::id();
+        let started = current_process_started_at().unwrap();
+        assert!(process_matches(pid, Some(started)));
+        assert!(!process_matches(pid, Some(started.saturating_add(1))));
+    }
+
+    #[test]
+    fn path_history_returns_only_overlapping_claims_newest_first() {
+        let store = ClaimStore::at(None);
+        store
+            .mutate(|claims| {
+                let mut first = claim("c1", "/repo/src", Some("attempt_1"));
+                first.released_at_ms = Some(2);
+                first.released_by = Some("settled".into());
+                claims.push(first);
+                claims.push(claim("c2", "/repo/docs", Some("attempt_2")));
+                claims.push(claim("c3", "/repo/src/auth.ts", Some("attempt_3")));
+                ((), true)
+            })
+            .unwrap();
+        let history = store.history_for_path("/repo/src/auth.ts").unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .map(|claim| claim.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c3", "c1"]
+        );
     }
 
     #[test]

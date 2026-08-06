@@ -3268,11 +3268,11 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_claim",
-            "description": "Claim the files you're about to work on so other agents in this checkout see it, and are told (with your note) if they try to take the same ones. Advisory: it doesn't block writes, it stops the collision being invisible. `action: release` when done — that releases your own claims and only yours. A directory claim covers what's under it, and paths are resolved against your working directory, so a relative path and an absolute one for the same file do collide.\n\nClaims live for as long as Canopy is running and no longer: they are forgotten on restart, and yours are released automatically if your terminal dies. If a claim is refused, pick different files or ask that agent to release them — retrying the same claim in a loop tells nobody anything new.",
+            "description": "Claim the files you're about to work on so other agents in this checkout see it, and are told (with your note) if they try to take the same ones. Advisory: it doesn't block writes, it stops the collision being invisible. `action: release` drops your own claims; `history` returns the durable claim history overlapping exactly one path. A directory claim covers what's under it, and paths are resolved against your working directory, so relative and absolute spellings collide. Managed-task claims are linked to their attempt and release automatically when it settles or its process dies.",
             "inputSchema": { "type": "object", "properties": {
                 "paths": { "type": "array", "items": { "type": "string" }, "description": "Absolute file or directory paths you're taking" },
                 "note": { "type": "string", "description": "What you're doing to them — the other agent reads this" },
-                "action": { "type": "string", "enum": ["claim", "release"], "description": "Default claim; release drops everything you hold" }
+                "action": { "type": "string", "enum": ["claim", "release", "history"], "description": "Default claim; release drops your claims; history queries one path" }
             }, "additionalProperties": false }
         },
         {
@@ -4081,7 +4081,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                         .collect()
                 })
                 .unwrap_or_default();
-            if action == "claim" && paths.is_empty() {
+            if (action == "claim" || action == "history") && paths.is_empty() {
                 return Err("claim needs paths — the files you're about to work on".into());
             }
             text(ctx_request(

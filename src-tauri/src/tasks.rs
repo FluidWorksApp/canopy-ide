@@ -295,15 +295,15 @@ impl TaskStore {
         &self,
         attempt_id: &str,
         cwd: &std::path::Path,
-    ) -> Result<(), String> {
+    ) -> Result<AttemptBinding, String> {
         validate_id(attempt_id, "attempt id")?;
-        let (state, reserved): (String, String) = self.with_conn(|conn| {
+        let (state, reserved, run_id): (String, String, String) = self.with_conn(|conn| {
             conn.query_row(
-                "SELECT a.state, e.worktree_path FROM task_attempts a
+                "SELECT a.state, e.worktree_path, a.run_id FROM task_attempts a
                  JOIN task_envelopes e ON e.run_id = a.run_id
                  WHERE a.attempt_id = ?1",
                 [attempt_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|_| "task attempt not found".to_string())
         })?;
@@ -319,7 +319,25 @@ impl TaskStore {
         if actual != expected {
             return Err("structured runner cwd does not match its reserved task workspace".into());
         }
-        Ok(())
+        Ok(AttemptBinding {
+            run_id,
+            attempt_id: attempt_id.to_string(),
+        })
+    }
+
+    pub(crate) fn claim_attempt_active(&self, attempt_id: &str) -> Result<bool, String> {
+        validate_id(attempt_id, "attempt id")?;
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT state IN ('reserved', 'launching', 'running', 'waiting')
+                 FROM task_attempts WHERE attempt_id = ?1",
+                [attempt_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|active| active.unwrap_or(false))
+            .map_err(|error| error.to_string())
+        })
     }
 
     /// The one mutation boundary. Every successful transaction returns the
@@ -722,6 +740,11 @@ impl TaskStore {
                     },
                 )
                 .map_err(|_| "task attempt not found".to_string())?;
+            if current == input.state {
+                let attempt = read_attempt(&tx, &input.attempt_id)?;
+                tx.commit().map_err(|error| error.to_string())?;
+                return Ok((project_id, run_id, attempt));
+            }
             if !matches!(
                 current.as_str(),
                 "reserved" | "launching" | "running" | "waiting"
@@ -1959,10 +1982,14 @@ pub fn task_attempt_start(
 
 #[tauri::command]
 pub fn task_attempt_settle(
+    app: tauri::AppHandle,
     input: TaskAttemptSettlement,
     store: State<'_, TaskStore>,
 ) -> Result<TaskAttempt, String> {
-    store.settle_attempt(input)
+    let attempt_id = input.attempt_id.clone();
+    let attempt = store.settle_attempt(input)?;
+    crate::context::release_claims_for_attempt(&app, &attempt_id, "settled")?;
+    Ok(attempt)
 }
 
 #[tauri::command]
@@ -2213,6 +2240,31 @@ mod tests {
     }
 
     #[test]
+    fn settled_attempts_cannot_take_new_claims() {
+        let root = root();
+        let store = TaskStore::at(root.clone());
+        let reservation = store.reserve(input()).unwrap();
+        store
+            .start_attempt(&reservation.attempt.attempt_id)
+            .unwrap();
+        assert!(store
+            .claim_attempt_active(&reservation.attempt.attempt_id)
+            .unwrap());
+        store
+            .settle_attempt(TaskAttemptSettlement {
+                attempt_id: reservation.attempt.attempt_id.clone(),
+                state: "completed".into(),
+                failure_class: None,
+                failure_code: None,
+            })
+            .unwrap();
+        assert!(!store
+            .claim_attempt_active(&reservation.attempt.attempt_id)
+            .unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn enforces_attempt_cap_and_recovery_parent() {
         let root = root();
         let store = TaskStore::at(root.clone());
@@ -2257,7 +2309,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_settlement_is_idempotently_rejected() {
+    fn terminal_settlement_is_idempotently_accepted() {
         let root = root();
         let store = TaskStore::at(root.clone());
         let reserved = store.reserve(input()).unwrap();
@@ -2272,10 +2324,7 @@ mod tests {
             store.settle_attempt(settlement.clone()).unwrap().state,
             "completed"
         );
-        assert!(store
-            .settle_attempt(settlement)
-            .unwrap_err()
-            .contains("already"));
+        assert_eq!(store.settle_attempt(settlement).unwrap().state, "completed");
         let _ = std::fs::remove_dir_all(root);
     }
 
