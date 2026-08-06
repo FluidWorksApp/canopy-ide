@@ -76,7 +76,19 @@ import {
   type Life,
   type LifeState,
 } from "../../../shared/agentLife";
-import { lifeFor, signalFor, useAttentionMemory, useFirstSeen } from "../../agentLifeStore";
+import {
+  lifeFor,
+  signalFor,
+  useAttentionMemory,
+  useFirstSeen,
+  useStableViews,
+  type AgentLifeView,
+} from "../../agentLifeStore";
+import {
+  clearAgentWatchdogAttention,
+  tickAgentWatchdogAttention,
+  type AgentWatchdogTarget,
+} from "../../agentWatchdogAttention";
 import { DIGEST_FALLBACK_MS, subscribeSessionDigests } from "../../sessionDigests";
 
 /** The one CPU floor. There used to be four numbers answering this question in
@@ -263,7 +275,11 @@ import { BranchSwitchProvider, useBranchSwitch } from "../../useBranchSwitch";
 import { askDialog } from "../../branchSwitch";
 import { useTabDragGroups, applyOrder } from "../../tabDrag";
 import { agentIdForCommand, identifyAgent } from "../../agentIdentity";
-import { tabNamesByPty, shellTitle } from "../../agentDisplayName";
+import {
+  agentDisplayName,
+  tabNamesByPty,
+  shellTitle,
+} from "../../agentDisplayName";
 import {
   modelCommandLine,
   modelSwitchFor,
@@ -7378,6 +7394,51 @@ const ProjectViewBody = memo(function ProjectViewBody({
       });
     },
     [statsByPty, liveSessionByPty, wsDigests, firstSeen, lifeClock],
+  );
+  const watchdogViews = useStableViews(() => {
+    const views: AgentLifeView[] = [];
+    for (const tab of tabs) {
+      if (tab.type !== "terminal" || tab.ptyId == null || !isAgentTab(tab)) continue;
+      const life = lifeForPty(tab.ptyId);
+      views.push({
+        ptyId: tab.ptyId,
+        sessionId: liveSessionByPty.get(tab.ptyId) ?? null,
+        life,
+        attention: attentionFor(tab.ptyId),
+      });
+    }
+    return views;
+  }, [attentionFor, isAgentTab, lifeForPty, liveSessionByPty, tabs]);
+  const watchdogTargets = useMemo(() => {
+    const targets = new Map<number, AgentWatchdogTarget>();
+    const lives = new Map(watchdogViews.map((view) => [view.ptyId, view.life]));
+    for (const tab of tabs) {
+      if (tab.type !== "terminal" || tab.ptyId == null || !lives.has(tab.ptyId))
+        continue;
+      const life = lives.get(tab.ptyId)!;
+      targets.set(tab.ptyId, {
+        tabId: tab.id,
+        label: agentDisplayName({
+          tab,
+          agentLabel: life.agent ?? undefined,
+        }),
+        path: tab.cwd,
+      });
+    }
+    return targets;
+  }, [tabs, watchdogViews]);
+  useEffect(() => {
+    tickAgentWatchdogAttention({
+      views: watchdogViews,
+      targets: watchdogTargets,
+      projectId: project.id,
+      projectName: project.name,
+      at: lifeClock,
+    });
+  }, [lifeClock, project.id, project.name, watchdogTargets, watchdogViews]);
+  useEffect(
+    () => () => clearAgentWatchdogAttention(project.id),
+    [project.id],
   );
   const tabLife = useCallback(
     (t: TermSubTab): Life => {
