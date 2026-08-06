@@ -81,6 +81,17 @@ fn jobs() -> Vec<Job> {
             eager: false,
             run: compact_agent_events,
         },
+        // Bounded but immortal: mesh/messages.jsonl self-caps by count
+        // (mesh.rs MAX_KEPT), so it can never grow past ~500 lines — but the
+        // count cap keeps week-old traffic forever on a quiet machine, and a
+        // stale message names pty ids from app runs that no longer exist.
+        // This ages those out; the window and the persist live in mesh.rs.
+        Job {
+            id: "mesh-messages-prune",
+            every_ms: 24 * 60 * 60 * 1000,
+            eager: false,
+            run: prune_mesh_messages,
+        },
         // The other unbounded file: SpotSearch's transcript index, seen at
         // 1.36GB. Retention deletes rows but FTS5 keeps the pages, so the
         // file only ever grows; past its cap it is cheaper to re-ingest than
@@ -256,6 +267,20 @@ fn compact_agent_events(_app: &AppHandle) -> Result<(), String> {
     };
     if let Some(freed) = compact_file(&dir.join("agent-events.jsonl"), EVENTS_CAP_BYTES)? {
         log::info!("maintenance: truncated agent-events.jsonl, freed {freed} bytes");
+    }
+    Ok(())
+}
+
+/// Age out mesh messages past mesh.rs's retention window, through the
+/// bridge's own door — the store's policy and file layout stay in mesh.rs;
+/// this is only the clock.
+fn prune_mesh_messages(app: &AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let dropped = app
+        .state::<crate::context::ContextBridge>()
+        .prune_mesh_messages(now_ms());
+    if dropped > 0 {
+        log::info!("maintenance: pruned {dropped} stale mesh messages");
     }
     Ok(())
 }

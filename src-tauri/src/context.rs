@@ -225,6 +225,12 @@ fn random_token() -> String {
 }
 
 impl ContextBridge {
+    /// Age out stale mesh messages — the maintenance scheduler's door to a
+    /// store that is otherwise private to this bridge.
+    pub fn prune_mesh_messages(&self, now_ms: u64) -> usize {
+        self.mesh.prune_stale(now_ms)
+    }
+
     /// What Canopy's own non-terminal children export (the companion). Names
     /// nobody on purpose — see `token`.
     pub fn env(&self) -> Option<(u16, String)> {
