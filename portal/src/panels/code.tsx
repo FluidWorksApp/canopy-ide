@@ -155,6 +155,23 @@ export function isStaged(code: string): boolean {
   return x !== ' ' && x !== '?'
 }
 
+/**
+ * The entries that are actually changes.
+ *
+ * `git_status` (fsx.rs) runs `git status --porcelain --ignored`, so every
+ * ignored path — `node_modules/`, `dist/`, `.env` — arrives here coded `!!`.
+ * Those are not changes: they are not in HEAD, never will be, and git will not
+ * carry them. Counting or listing them makes every real project look
+ * permanently modified. Worse for the list below, `isStaged('!!')` is true
+ * (`!` is neither a space nor a `?`), so unfiltered they land under "Staged".
+ *
+ * Same spelling as the desktop's StatusBar and shared FileTree use, on purpose:
+ * `!!` is the only code git emits for an ignored path.
+ */
+export function trackedChanges<T extends { status: string }>(entries: T[]): T[] {
+  return entries.filter((e) => e.status !== '!!')
+}
+
 export const changesPanel: PanelDef = {
   id: 'changes',
   title: 'Changes',
@@ -173,7 +190,7 @@ export const changesPanel: PanelDef = {
     return (
       <AsyncBody state={state} empty="Working tree is clean.">
         {(status) => {
-          const entries = status.entries ?? []
+          const entries = trackedChanges(status.entries ?? [])
           if (!status.is_repo) return <div className="panel-empty">Not a git repo.</div>
           if (!entries.length) return <div className="panel-empty">Working tree is clean.</div>
           const staged = entries.filter((e) => isStaged(e.status))
