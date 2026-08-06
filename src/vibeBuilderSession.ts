@@ -77,7 +77,13 @@ import type {
 } from "./vibeBuilderSessionTypes";
 // The one place a git porcelain code is read. See shared/gitStatus.ts for why
 // "absent from status" is not an answer about a file.
-import { isWithin, resolveEntryPath, trackedChanges } from "../shared/gitStatus";
+import {
+  isWithin,
+  resolveEntryPath,
+  trackedChanges,
+  trackedGivenExistence,
+  trackingFromStatus,
+} from "../shared/gitStatus";
 
 const SAVE_CHECKPOINT = "Save this version";
 /** Sentinels a question's own buttons send back. Deliberately not words anyone
@@ -687,9 +693,7 @@ async function nativeAbstractionContext(
   // as `!!`. Counting those as changes would report every real project as
   // permanently dirty and refuse every publish.
   const all = status?.entries ?? [];
-  const ignored = (s: string) => s.includes("!");
-  const untracked = (s: string) => s.includes("?");
-  const changed = all.filter((e) => !ignored(e.status));
+  const changed = trackedChanges(all);
 
   // A tree we could not read is not a clean tree. `dirty` guards production
   // publishes, so the unreadable case must refuse rather than wave through:
@@ -703,9 +707,11 @@ async function nativeAbstractionContext(
   //
   // git status alone cannot answer it: a tracked file with no local edits does
   // not appear in the output at all, so "absent from status" would read as
-  // untracked — the fail-OPEN direction, and the one that leaks. So absence is
-  // only safe when the file does not exist yet, which the directory listing
-  // says. Everything else defaults to tracked.
+  // untracked — the fail-OPEN direction, and the one that leaks. That is why
+  // `trackingFromStatus` cannot return a boolean: for an absent path it says
+  // `proven: false`, and `trackedGivenExistence` settles it with the one piece
+  // of evidence that can — the directory listing. Absent from status but on
+  // disk means tracked and unmodified, so refuse.
   const envFileFor = (): string | null => {
     if (intent.kind !== "link") return null;
     return providerById(intent.provider)?.envFile ?? null;
@@ -719,31 +725,22 @@ async function nativeAbstractionContext(
   // /repo/.env.local gitignored (so present as `!!`) and
   // /repo/apps/web/.env.local committed (so absent from status entirely), the
   // suffix match found the root file, read "ignored, therefore safe", and the
-  // absence rule below — which would have refused — never ran. The user would
-  // have been told the file stays out of git while writing a key into one git
-  // carries.
+  // absence rule — which would have refused — never ran. The user would have
+  // been told the file stays out of git while writing a key into one git
+  // carries. So the lookup is by full path, resolved against the worktree
+  // root; the shared classifier takes a whole path for exactly this reason and
+  // offers no way to ask by name.
   //
   // The component is the right anchor because it is the file the plan writes
   // to: planLink's write-env step targets the provider's env file in the
   // working directory, and no other copy is involved.
   const repoRoot = worktreeFor(worktrees, cwd)?.path ?? cwd;
-  const absolute = (p: string) =>
-    /^(?:[A-Za-z]:\/|\/)/.test(normalized(p))
-      ? normalized(p)
-      : `${normalized(repoRoot)}/${normalized(p)}`;
-  const envPath = envFile ? `${normalized(cwd)}/${envFile}` : null;
-  const envStatus = envPath
-    ? all.find((e) => absolute(e.path) === envPath)
-    : undefined;
-  const envFileTracked = !envFile
-    ? false
-    : envStatus
-      ? // Ignored or untracked are the two states that mean "git will not
-        // carry this". Any other status means git already knows the file.
-        !(ignored(envStatus.status) || untracked(envStatus.status))
-      : // Not in status: safe only if it does not exist. If it exists and git
-        // is silent about it, it is tracked and unmodified — refuse.
-        entries.includes(envFile);
+  const envFileTracked = envFile
+    ? trackedGivenExistence(
+        trackingFromStatus(all, `${normalized(cwd)}/${envFile}`, repoRoot),
+        entries.includes(envFile),
+      )
+    : false;
 
   // Which CLI matters depends on what was asked, so only that one is probed —
   // and only when the answer can change the plan. An unprobed CLI reads as
