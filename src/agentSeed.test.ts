@@ -14,8 +14,11 @@ import {
   byteLength,
   briefPointer,
   fitsOnOneLine,
+  pickLaunchCli,
   startCommandParked,
 } from "./agentSeed";
+import { AGENT_CLIS } from "./projects";
+import { updateSettings } from "./settings";
 
 beforeEach(() => {
   spotSaveContextText.mockClear();
@@ -125,5 +128,53 @@ describe("startCommandParked", () => {
 
   it("says nothing about an agent it does not know", async () => {
     expect(await startCommandParked("not-an-agent", long, "/repo")).toBeNull();
+  });
+});
+
+describe("pickLaunchCli", () => {
+  // The registry is the real one, so these ids are the ones a user sees in
+  // Settings. `installed` is the only thing stubbed, because "is it on this
+  // machine" is the one input a test cannot have an opinion about.
+  const only = (...bins: string[]) => (bin: string) => bins.includes(bin);
+  const idOf = (bin: string) => AGENT_CLIS.find((c) => c.bin === bin)?.id;
+
+  it("runs on the default agent, not on claude", () => {
+    // The regression this exists for: Settings said OpenCode and every task and
+    // every review still started Claude, because the micro-task launcher put
+    // the name `claude` ahead of the setting.
+    updateSettings({ defaultAgent: "opencode" });
+    expect(pickLaunchCli(undefined, only("claude", "opencode"))?.id).toBe("opencode");
+  });
+
+  it("still picks claude when claude IS the default", () => {
+    updateSettings({ defaultAgent: "claude" });
+    expect(pickLaunchCli(undefined, only("claude", "opencode"))?.id).toBe("claude");
+  });
+
+  it("falls back to an installed CLI when the default isn't on this machine", () => {
+    // A preference carried over from another machine must not launch nothing.
+    updateSettings({ defaultAgent: "opencode" });
+    expect(pickLaunchCli(undefined, only("codex"))?.id).toBe(idOf("codex"));
+  });
+
+  it("names the default even when nothing is detected on PATH", () => {
+    // Detection lags a fresh install; endorsing the registry's first entry
+    // there would put claude back in front of a setting that says otherwise.
+    updateSettings({ defaultAgent: "amp" });
+    expect(pickLaunchCli(undefined, () => false)?.id).toBe("amp");
+  });
+
+  it("lets an explicitly chosen CLI beat the default", () => {
+    // What the split-button menus pass: the agent the user picked for this one
+    // run, which is a stronger statement than the standing preference.
+    updateSettings({ defaultAgent: "opencode" });
+    expect(pickLaunchCli("codex", only("claude", "opencode", "codex"))?.id).toBe("codex");
+  });
+
+  it("returns nothing for a CLI the registry has never heard of", () => {
+    // The callers turn this into "Unknown agent" rather than silently running
+    // something else in its place.
+    updateSettings({ defaultAgent: "claude" });
+    expect(pickLaunchCli("not-an-agent", only("claude"))).toBeUndefined();
   });
 });
