@@ -3315,7 +3315,7 @@ export const cleanupDisk = (roots: string[]) =>
 
 /** One thing the companion's CLI said. `line` is a raw stdout line — expected
  *  to be JSON, deliberately unparsed in Rust so the protocol stays owned by
- *  companionTransport.ts (see companion.rs). */
+ *  structuredEvents.ts (see companion.rs). */
 export type CompanionOut =
   | { kind: "line"; text: string }
   | { kind: "stderr"; text: string }
