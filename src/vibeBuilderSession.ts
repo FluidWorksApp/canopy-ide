@@ -36,6 +36,15 @@ import {
   type SelectedRoute,
 } from "./vibeFailover";
 import {
+  autoCheckpointObserved,
+  recordAutoCheckpointObserved,
+} from "./vibeAutoCheckpoint";
+import {
+  describeSecretFindings,
+  scanDiffForSecrets,
+  type SecretScanResult,
+} from "./vibeSecretScan";
+import {
   checkpointDecision,
   type CheckpointContext,
 } from "./vibeCheckpoints";
@@ -72,6 +81,12 @@ export interface VibeBuilderSessionOptions {
   cliId: string;
   cliBin: string;
   checkCommand?: string | null;
+  /** Why there is no check command, when there is none — the one sentence
+   *  `inferVibeCheck` produces for a project a non-coder set up. Without it the
+   *  turn records `check: unknown` forever and says nothing about why, which
+   *  leaves a permanently `incomplete` turn looking like a Canopy fault rather
+   *  than a missing script the user can add in one line. */
+  checkCaveat?: string | null;
   previewTabId(): string | null;
 }
 
@@ -115,6 +130,9 @@ export interface CheckpointReview {
   repoRoot: string;
   paths: string[];
   diff: string;
+  /** What the credential scan found in that diff, so the refusal can name the
+   *  rule and the place. Never the matched value — see vibeSecretScan. */
+  secrets?: SecretScanResult;
 }
 
 export interface VibeBuilderSessionDeps {
@@ -141,6 +159,15 @@ export interface VibeBuilderSessionDeps {
     noOpenIncident: boolean;
   }): Promise<CheckpointReview>;
   commit(cwd: string, paths: string[], message: string): Promise<string>;
+  /** Has a checkpoint commit ever been observed to work on this machine? See
+   *  vibeAutoCheckpoint: until one has, the automatic commit is proposed
+   *  instead of made, however green the policy. */
+  autoCheckpointObserved(): boolean;
+  /** Called only after a checkpoint commit actually returned. */
+  recordAutoCheckpointObserved(): void;
+  /** Replace the run's surface metadata, so a settled turn can carry its own
+   *  verification summary into the task panels. */
+  updateMetadata(runId: string, metadata: unknown): Promise<unknown>;
   reserveAttempt: typeof reserveAttempt;
   /** Every route Canopy could launch this turn on, with its fleet state. */
   listRoutes(): Promise<RouteCandidate[]>;
@@ -506,6 +533,13 @@ async function reviewGitCheckpoint(args: {
       return `# ${entry.status} ${entry.path}\n${patch || "(content is not available in the diff yet)"}`;
     }),
   );
+  const diff = patches.join("\n\n");
+  // The scan is over the diff about to be committed, and it throws nothing: a
+  // scanner that could fail would make "clean" mean "did not crash". Any
+  // failure to *produce* a result is still unknown, and unknown fails closed —
+  // which is why the result is computed here and read once, rather than being
+  // recomputed by whoever needs the boolean.
+  const secrets = scanDiffForSecrets(diff);
   return {
     context: {
       isolatedOrGreenfield: args.baseline.isolated,
@@ -513,14 +547,14 @@ async function reviewGitCheckpoint(args: {
       lineageUnchanged:
         args.baseline.head != null && tree?.head === args.baseline.head,
       pathsExclusive,
-      // No in-app secret scanner exists yet. Unknown must fail closed.
-      secretScanClean: false,
+      secretScanClean: secrets.clean,
       noOpenIncident: args.noOpenIncident,
       verification: args.verification,
     },
     repoRoot,
     paths,
-    diff: patches.join("\n\n"),
+    diff,
+    secrets,
   };
 }
 
@@ -576,6 +610,9 @@ export const DEFAULT_VIBE_BUILDER_DEPS: VibeBuilderSessionDeps = {
   reviewCheckpoint: reviewGitCheckpoint,
   commit: (cwd, paths, message) =>
     paths.length === 0 ? Promise.resolve("") : ipc.gitCommitPaths(cwd, message, paths),
+  autoCheckpointObserved,
+  recordAutoCheckpointObserved,
+  updateMetadata: ipc.taskUpdateMetadata,
   reserveAttempt,
   listRoutes: listNativeRoutes,
   cliVersion: nativeCliVersion,
@@ -600,6 +637,7 @@ function verificationSummary(
   contract: VerificationContract,
   observations: VerificationObservation[],
   outcome: VerificationOutcome,
+  checkCaveat: string | null,
 ): string {
   const unknown = contract.required.filter(
     (kind) => observations.find((observation) => observation.kind === kind)?.verdict !== "pass",
@@ -607,7 +645,12 @@ function verificationSummary(
   if (outcome === "verified") return "I checked the configured command and local preview — all required evidence passed.";
   const failed = observations.filter((observation) => observation.verdict === "fail");
   if (failed.length) return `Verification found a problem: ${failed.map((item) => item.note).join("; ")}`;
-  return `Verification is incomplete: ${unknown.join(", ")} ${unknown.length === 1 ? "is" : "are"} still unknown.`;
+  // The caveat rides on every incomplete turn, not just the first. A project
+  // with no check script is permanently incomplete, and being told once, in a
+  // message that scrolled away, is how a permanent state reads as a glitch.
+  return `Verification is incomplete: ${unknown.join(", ")} ${unknown.length === 1 ? "is" : "are"} still unknown.${
+    checkCaveat ? ` ${checkCaveat}` : ""
+  }`;
 }
 
 const refusalText: Record<string, string> = {
@@ -615,10 +658,17 @@ const refusalText: Record<string, string> = {
   "dirty-at-start": "the checkout already had changes when the turn began",
   "lineage-moved": "the branch moved during the turn",
   "paths-contested": "another session claims one of the changed paths",
-  "secrets-flagged": "an independent secret scan is not available yet",
+  "secrets-flagged": "the changed lines look like they contain a credential",
   "incident-open": "a safety incident is still open",
   "not-verified": "the required verification is not fully green",
 };
+
+/** What the reader is told when the policy said yes and the gate still held.
+ *  Deliberately about Canopy, not about their change: nothing is wrong with the
+ *  turn, and a message that implied otherwise would train someone to distrust a
+ *  verified result. */
+const FIRST_CHECKPOINT_DETAIL =
+  "everything required passed, but Canopy has never saved a version automatically on this computer — the first one is yours to confirm, and after that verified turns save themselves";
 
 export class VibeBuilderSession implements BuilderSession {
   private snapshot: BuilderSessionState = { persona: { kind: "idle" }, question: null };
@@ -655,6 +705,10 @@ export class VibeBuilderSession implements BuilderSession {
   private lastRunnerError = "";
   /** The message being worked on, replayed verbatim onto a reseeded attempt. */
   private currentGoal: string | null = null;
+  /** The surface metadata this run was reserved with. Held whole because
+   *  `taskUpdateMetadata` replaces the blob rather than patching it, so the
+   *  summary can only be added by rewriting what was there. */
+  private turnMetadata: Record<string, unknown> | null = null;
   private attemptsUsed = 0;
   private options: VibeBuilderSessionOptions;
   private deps: VibeBuilderSessionDeps;
@@ -714,6 +768,34 @@ export class VibeBuilderSession implements BuilderSession {
     );
   }
 
+  /** What the task panels need to show this turn at all.
+   *
+   *  `history: true` is the gate: TasksPanel and TaskHistoryView both filter on
+   *  it (SQL `json_extract(metadata_json,'$.history') = 1` in tasks.rs, and
+   *  `if (!metadata?.history) return null` in taskHistory.ts), and the vibe
+   *  reserve passed no metadata at all — so a Build turn recorded a complete
+   *  evidence ledger and then could not appear anywhere a person looks.
+   *
+   *  The rest is `TaskRun`'s shape. `label` is what the turn was launched as
+   *  and `title` is what it was about, which is the same split every other row
+   *  uses. `appInstance` is deliberately absent: a Build attempt still running
+   *  when Canopy quits SHOULD be swept to `interrupted` by the startup sweep,
+   *  and claiming an instance would exempt it from exactly that. */
+  private historyMetadata(goal: string, cli: string): Record<string, unknown> {
+    return {
+      history: true,
+      taskId: "vibe-turn",
+      label: "Build turn",
+      icon: "◆",
+      title: goal.slice(0, 100),
+      agent: cli,
+      cwd: this.options.componentPath,
+      projectId: this.options.projectId,
+      projectName: this.options.projectName,
+      brief: goal,
+    };
+  }
+
   /** The one place a route comes from. Before the first launch this is the
    *  unresolved route — a server incident can be recorded before any turn, and
    *  it must not claim a route nobody selected. */
@@ -761,6 +843,7 @@ export class VibeBuilderSession implements BuilderSession {
       const chosen = await this.resolveRouteForLaunch();
       const contract = contractFor(goal);
       const route = this.routeSnapshot();
+      this.turnMetadata = this.historyMetadata(goal, chosen.cli);
       const reservation = await this.deps.reserve({
         kind: "vibe-turn",
         projectId: this.options.projectId,
@@ -781,6 +864,7 @@ export class VibeBuilderSession implements BuilderSession {
         failoverPolicy: { automatic: false },
         attemptCap: 1,
         title: goal.slice(0, 100),
+        metadata: this.turnMetadata,
         route,
       });
       this.reservation = reservation;
@@ -1184,6 +1268,14 @@ export class VibeBuilderSession implements BuilderSession {
       this.options.componentPath,
       at,
     );
+    // With no command to run, the default note ("no configured check command is
+    // available") describes Canopy's state rather than the user's: it never
+    // says the turn stays unverified until a check script exists, which is the
+    // only part they can act on. Recorded on the observation, so the durable
+    // ledger carries the reason and not just the absence.
+    if (!this.options.checkCommand && this.options.checkCaveat) {
+      check.observation.note = this.options.checkCaveat;
+    }
     if (check.output) {
       const artifact = await this.deps
         .writeArtifact({ runId, attemptId, kind: "check-output", content: check.output })
@@ -1254,10 +1346,23 @@ export class VibeBuilderSession implements BuilderSession {
       },
     };
     const decision = checkpointDecision(safeReview.context);
-    let summary = verificationSummary(contract, observations, verdict.outcome);
+    // The policy is one gate; whether the unattended commit has ever run here
+    // is another. "Never executed" and "unverified" are the same state — see
+    // vibeAutoCheckpoint — so until a checkpoint has actually happened on this
+    // machine the commit is PROPOSED rather than made. The decision, the paths,
+    // the baseline and the reasons are recorded either way: this holds the git
+    // write, it does not weaken the evidence.
+    const armed = this.deps.autoCheckpointObserved();
+    const held = decision.checkpoint && !armed;
+    let summary = verificationSummary(
+      contract,
+      observations,
+      verdict.outcome,
+      this.options.checkCommand ? null : (this.options.checkCaveat ?? null),
+    );
     this.pendingCheckpoint = null;
 
-    if (decision.checkpoint && review.paths.length > 0) {
+    if (decision.checkpoint && armed && review.paths.length > 0) {
       const commit = await this.deps.commit(
         review.repoRoot,
         review.paths,
@@ -1274,7 +1379,7 @@ export class VibeBuilderSession implements BuilderSession {
       });
       summary += " Saved this verified version automatically.";
       this.present({ kind: "checkpoint-saved" }, null);
-    } else if (!decision.checkpoint && review.paths.length > 0) {
+    } else if (review.paths.length > 0) {
       this.pendingCheckpoint = { review: safeReview, verification: verdict.outcome };
       const artifact = await this.deps
         // Redacted before it reaches disk: this artifact exists so a refused
@@ -1288,30 +1393,59 @@ export class VibeBuilderSession implements BuilderSession {
           content: redactSecrets(review.diff),
         })
         .catch(() => null);
+      const reasons = decision.checkpoint ? [] : decision.reasons;
       await this.deps.appendEvent({
         runId,
         attemptId,
-        kind: "checkpoint.refused",
-        code: decision.reasons[0] ?? "policy",
+        // A held checkpoint is not a refused one: the policy said yes. Recording
+        // it as `refused` would put a reason in the ledger that nothing found.
+        kind: held ? "checkpoint.held" : "checkpoint.refused",
+        code: held ? "auto-checkpoint-never-observed" : (reasons[0] ?? "policy"),
         source: "canopy",
         confidence: "independent",
         metadata: {
-          reasons: decision.reasons,
+          reasons,
           artifactId: artifact?.id ?? null,
-          secretScan: "unknown",
+          secretScan: review.secrets
+            ? review.secrets.clean
+              ? "clean"
+              : "flagged"
+            : "unknown",
+          // Never the matched text — findings name a rule and a place only.
+          secretFindings: review.secrets?.findings ?? [],
+          // The full decision inputs, so a held checkpoint is as auditable as
+          // an automatic one would have been.
+          context: safeReview.context,
+          baselineHead: baseline.head,
+          repoRoot: review.repoRoot,
+          paths: review.paths,
         },
       });
+      const secretDetail =
+        !decision.checkpoint && review.secrets && !review.secrets.clean
+          ? describeSecretFindings(review.secrets.findings)
+          : "";
       this.present(
         verdict.outcome === "failed" ? { kind: "verify-failed" } : { kind: "verify-passed" },
         {
           id: `checkpoint-${attemptId}-${this.deps.now()}`,
           kind: "confirm",
-          prompt: "This turn was not auto-saved.",
-          detail: decision.reasons.map((reason) => refusalText[reason] ?? reason).join("; "),
+          prompt: held
+            ? "This is the first version I'd save here."
+            : "This turn was not auto-saved.",
+          detail: held
+            ? FIRST_CHECKPOINT_DETAIL
+            : [
+                reasons.map((reason) => refusalText[reason] ?? reason).join("; "),
+                secretDetail,
+              ]
+                .filter(Boolean)
+                .join(" "),
           diff: review.diff,
           actions: [{ label: "Save this version", response: SAVE_CHECKPOINT }],
         },
       );
+      if (held) summary += ` I haven't saved it — ${FIRST_CHECKPOINT_DETAIL}.`;
     } else {
       this.present(
         verdict.outcome === "verified"
@@ -1327,6 +1461,9 @@ export class VibeBuilderSession implements BuilderSession {
       kind: "system",
       body: summary,
     });
+    // The task panels show a run by its summary line; without this a Build turn
+    // reads "No summary reported." next to a full evidence ledger.
+    await this.recordTurnSummary(runId, summary);
     this.publish({ kind: "reply", text: summary });
     this.publish({ kind: "turnEnd" });
     await this.finishAttempt(
@@ -1512,6 +1649,19 @@ export class VibeBuilderSession implements BuilderSession {
     await this.settle(state, failureClass, failureCode);
   }
 
+  /** Put the turn's verification summary on the run's history row. Rewrites the
+   *  whole blob because `taskUpdateMetadata` replaces rather than patches, and
+   *  fails quietly: a row that reads "No summary reported." is a worse surface,
+   *  not a broken turn, and the durable transcript still holds the sentence. */
+  private async recordTurnSummary(runId: string, summary: string): Promise<void> {
+    const metadata = this.turnMetadata;
+    if (!metadata) return;
+    this.turnMetadata = { ...metadata, summary };
+    await this.deps
+      .updateMetadata(runId, this.turnMetadata)
+      .catch(() => {});
+  }
+
   private async saveCheckpoint(): Promise<void> {
     const reservation = this.reservation;
     const pending = this.pendingCheckpoint;
@@ -1549,6 +1699,12 @@ export class VibeBuilderSession implements BuilderSession {
         refreshed.paths,
         `vibe: ${(reservation.envelope.title ?? "saved version").slice(0, 72)}`,
       );
+      // The commit returned, so the checkpoint path has now been observed
+      // working on this machine — the live observation, and the only thing
+      // allowed to arm the automatic one. Recorded after `commit` resolves and
+      // never before: an arm on the attempt would be the same untested claim
+      // the gate exists to refuse.
+      this.deps.recordAutoCheckpointObserved();
       await this.deps.appendEvent({
         runId: reservation.envelope.runId,
         attemptId: reservation.attempt.attemptId,

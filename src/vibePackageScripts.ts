@@ -1,4 +1,5 @@
 import * as ipc from "./ipc";
+import type { VibeCheckScript } from "./vibeCheckInference";
 import type { Component } from "./projects";
 import type { VibePackageFact, VibePackageFacts } from "./vibeTargetInference";
 
@@ -6,6 +7,24 @@ const join = (root: string, name: string) => {
   const separator = root.includes("\\") && !root.includes("/") ? "\\" : "/";
   return `${root.replace(/[\\/]+$/, "")}${separator}${name}`;
 };
+
+/** Every script key a fact carries. `dev` and `start` answer "what runs this
+ *  app?" for `inferVibeTarget`; the rest answer "what proves the change is
+ *  sound?" for `inferVibeCheck`. Narrowing to the first two — which this did —
+ *  meant a fact could never carry a check, so `verified` was unreachable for a
+ *  project whose only check lives in package.json, which is every project
+ *  Canopy set up from nothing. */
+type VibeScriptKey = "dev" | "start" | VibeCheckScript;
+
+const SCRIPT_KEYS: readonly VibeScriptKey[] = [
+  "dev",
+  "start",
+  "check",
+  "typecheck",
+  "tsc",
+  "test",
+  "build",
+];
 
 export function parseVibePackageFact(raw: string): VibePackageFact {
   try {
@@ -17,7 +36,7 @@ export function parseVibePackageFact(raw: string): VibePackageFact {
       parsed.scripts && typeof parsed.scripts === "object"
         ? (parsed.scripts as Record<string, unknown>)
         : {};
-    const text = (key: "dev" | "start") =>
+    const text = (key: VibeScriptKey) =>
       typeof scripts[key] === "string" && scripts[key].trim()
         ? scripts[key].trim()
         : undefined;
@@ -30,7 +49,15 @@ export function parseVibePackageFact(raw: string): VibePackageFact {
       : "npm";
     return {
       status: "loaded",
-      scripts: { dev: text("dev"), start: text("start") },
+      // Only the keys that are present: an explicit `undefined` for every
+      // absent script would make `"typecheck" in fact.scripts` true, and the
+      // check inference reads presence as well as value.
+      scripts: Object.fromEntries(
+        SCRIPT_KEYS.flatMap((key) => {
+          const value = text(key);
+          return value ? [[key, value] as const] : [];
+        }),
+      ),
       runner,
     };
   } catch {

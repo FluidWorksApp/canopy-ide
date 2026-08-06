@@ -7908,6 +7908,226 @@ body.dragging-tab * {
   font-size: var(--fs-xs);
 }
 
+/* ---------------------------------------------------------------- evidence
+
+   What Canopy independently observed, under the row that shows what the agent
+   said. One block per ATTEMPT — a failover is two attempts on two models, and
+   the whole point of the layout is that the switch is visible as a switch. */
+.task-evidence {
+  gap: 10px;
+}
+.task-evidence-attempt {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-left: 2px solid color-mix(in srgb, var(--cyan) 55%, var(--border));
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  background: var(--bg-alt);
+}
+.task-evidence-attempt-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--fs-xs);
+}
+.task-evidence-ordinal {
+  color: var(--text);
+  font-weight: 600;
+}
+.task-evidence-state,
+.task-evidence-recovery,
+.task-evidence-failure {
+  color: var(--text-dim);
+}
+.task-evidence-state.st-failed,
+.task-evidence-failure {
+  color: var(--danger);
+}
+.task-evidence-recovery {
+  font-style: italic;
+}
+
+/* A degraded tier or a fleet caveat is what a reader would most want to know
+   and least think to ask for, so it sits above the facts rather than inside
+   them, where a row of version strings would swallow it. */
+.task-evidence-alert {
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--text);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+.task-evidence-route {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 4px 14px;
+  margin: 0;
+}
+.task-evidence-fact {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--fs-xs);
+}
+.task-evidence-fact > dt {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+.task-evidence-fact > dd {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-family: var(--font-mono, monospace);
+  font-size: 10.5px;
+}
+/* Drawn, never hidden. "not observed" is a finding — the record says nobody
+   ever measured this — and a field that vanished when empty would leave the
+   reader believing every line on screen was measured. */
+.task-evidence-fact > dd.is-absent {
+  color: var(--text-faint);
+  font-style: italic;
+  font-family: inherit;
+  font-size: var(--fs-xs);
+}
+
+.task-evidence-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.task-evidence-observations {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.task-evidence-observations > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 7px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+.task-evidence-dot {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+.task-evidence-dot.is-pass {
+  background: var(--ok);
+}
+.task-evidence-dot.is-fail {
+  background: var(--danger);
+}
+/* Hollow, because unknown is not a soft pass: nothing was observed, and the
+   verdict logic treats it as a hard stop. */
+.task-evidence-dot.is-unknown {
+  background: transparent;
+  border: 1px solid var(--text-dim);
+}
+.task-evidence-kind {
+  color: var(--text);
+  font-weight: 600;
+}
+.task-evidence-verdict {
+  color: var(--text-dim);
+}
+.task-evidence-verdict.is-pass,
+.task-evidence-verdict.is-verified {
+  color: var(--ok);
+}
+.task-evidence-verdict.is-fail,
+.task-evidence-verdict.is-failed {
+  color: var(--danger);
+}
+.task-evidence-verdict.is-unknown,
+.task-evidence-verdict.is-incomplete {
+  color: var(--warn);
+}
+.task-evidence-note {
+  flex: 1 1 220px;
+  min-width: 0;
+  word-break: break-word;
+}
+.task-evidence-at {
+  color: var(--text-faint);
+}
+
+.task-evidence-artifact {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.task-evidence-artifact-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.task-evidence-artifact-toggle:hover {
+  color: var(--text-dim);
+}
+.task-evidence-artifact-toggle[aria-expanded="true"] .task-history-caret {
+  transform: rotate(90deg);
+}
+.task-evidence-shot {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+}
+
+.task-evidence-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow: auto;
+  list-style: none;
+}
+.task-evidence-lines > li {
+  display: flex;
+  gap: 8px;
+  font-size: var(--fs-xs);
+}
+.task-evidence-body {
+  min-width: 0;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* A list that just stops halfway down a tall window looks like it failed to
    load the rest. One hairline and a count say it didn't. */
 .task-history-end {

@@ -423,6 +423,7 @@ import {
   type VibePackageFacts,
 } from "../../vibeTargetInference";
 import { loadVibePackageFacts } from "../../vibePackageScripts";
+import { inferVibeCheck } from "../../vibeCheckInference";
 import { TabSwitcher } from "../TabSwitcher";
 import { switchRowKey, tabKind } from "../../tabKind";
 
@@ -8759,11 +8760,61 @@ const ProjectViewBody = memo(function ProjectViewBody({
           (command) => command.id === vibeTarget.runCommand.id,
         ) ?? null
       : null;
-  const vibeCheck = vibeComponent?.commands?.find(
-    (command) =>
-      command.name !== vibeRun?.name &&
-      /^(check|typecheck|test|build)$/i.test(command.name),
+  // What proves a Build turn is sound. Name-matching the component's
+  // *configured* commands — which is all this used to do — finds nothing in a
+  // project Canopy set up from nothing, so `check` was `unknown` on every turn,
+  // the turn was permanently `incomplete`, and `verified` was unreachable for
+  // exactly the users who did the least setup. `inferVibeCheck` keeps that
+  // configured-command pick (byte-identical regex, same array order) and falls
+  // back to a package.json script, and when neither exists it returns a
+  // sentence saying so rather than a silent null.
+  const vibeCheckInference = useMemo(
+    () =>
+      vibeComponent
+        ? inferVibeCheck(
+            components,
+            { componentId: vibeComponent.id, runCommandId: vibeRun?.id ?? null },
+            vibePackageState.key === vibePackageKey ? vibePackageState.facts : {},
+          )
+        : null,
+    [vibeComponent, vibeRun?.id, components, vibePackageState, vibePackageKey],
   );
+  const vibeCheckPackageIds =
+    vibeCheckInference?.kind === "needs-package-facts"
+      ? vibeCheckInference.componentIds.join("|")
+      : "";
+  useEffect(() => {
+    if (!vibe || !vibeCheckPackageIds) return;
+    let cancelled = false;
+    void loadVibePackageFacts(
+      project.components,
+      vibeCheckPackageIds.split("|"),
+    ).then((facts) => {
+      if (!cancelled) setVibePackageState({ key: vibePackageKey, facts });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [vibe, vibeCheckPackageIds, vibePackageKey, project.components]);
+  // The literal text, not the synthesised RunCommand. `selection.addCommand` is
+  // deliberately NOT persisted into the project's components here: the session
+  // spawns the command text directly, so persisting would only add a "Typecheck"
+  // row to the user's configured commands as a side effect of opening the
+  // project — a config write nobody asked for. If that row is wanted it should
+  // be its own decision, taken where the target's own addCommand is persisted.
+  const vibeCheckCommand =
+    vibeCheckInference?.kind === "check" ? vibeCheckInference.command : null;
+  // Both a chosen check's caveat ("I'm checking with X, not Y") and a gap's
+  // ("there's no check I can run") reach the session the same way: it is the
+  // only thing that can say either out loud, and a caveat nobody says is the
+  // same as no caveat. `needs-package-facts` says nothing — it is a transient
+  // state while package.json is being read, not an answer.
+  const vibeCheckCaveat =
+    vibeCheckInference?.kind === "check"
+      ? (vibeCheckInference.caveat ?? null)
+      : vibeCheckInference?.kind === "none"
+        ? vibeCheckInference.caveat
+        : null;
   const vibeOwnedPreviewId = useRef<string | null>(null);
   const vibePreview =
     tabs.find(
@@ -8787,7 +8838,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             componentPath: vibeComponentPath,
             cliId: "claude",
             cliBin: claudeBin,
-            checkCommand: vibeCheck?.command ?? null,
+            checkCommand: vibeCheckCommand,
+            checkCaveat: vibeCheckCaveat,
             previewTabId: () => vibePreviewIdRef.current,
           })
         : null,
@@ -8797,7 +8849,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       vibeComponentId,
       vibeComponentLabel,
       vibeComponentPath,
-      vibeCheck?.command,
+      vibeCheckCommand,
+      vibeCheckCaveat,
       claudeBin,
     ],
   );

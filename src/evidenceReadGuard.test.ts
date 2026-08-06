@@ -164,14 +164,15 @@ const READ_APIS = [
 ] as const;
 
 describe("durable verification evidence has a reader", () => {
-  // THESE ARE SKIPPED BECAUSE THEY FAIL, AND THEY FAIL BECAUSE THEY ARE RIGHT.
-  // Neither symbol has a consumer today. Remove the `.skip` in the same commit
-  // that lands the Engineer read surfaces — the turn-history / evidence view
-  // that calls `taskEvents` and `listTranscript`. Do not weaken the assertion
-  // to make them green: an assertion relaxed until it passes is the exact
-  // failure mode this file was written to catch.
+  // Enabled. Both symbols are now bound and used by `src/taskEvidence.ts`, the
+  // projection behind the evidence panel in TaskHistoryView — not by a test, a
+  // re-export, or a mention in a comment, which is why the scan above walks
+  // import declarations rather than grepping for the name.
+  //
+  // The assertion is untouched from when it was skipped. If it ever goes red
+  // again, the fix is a reader, not a smaller expectation.
   for (const api of READ_APIS) {
-    it.skip(`${api.symbol} has at least one consumer`, () => {
+    it(`${api.symbol} has at least one consumer`, () => {
       const consumers = consumersOf(join(SRC, api.module), api.symbol);
       expect(
         consumers.length,

@@ -36,6 +36,7 @@ import {
   TrashIcon,
 } from "./icons";
 import { Button, Segmented, TextInput } from "./ui";
+import { TaskEvidenceFold } from "./TaskEvidence";
 import { basename } from "../paths";
 
 const PER_PAGE = 25;
@@ -587,6 +588,14 @@ export function TaskHistoryView({
                               most recent runs hold on to theirs.
                             </div>
                           )}
+
+                          {/* The terminal tail above is what the agent SAID.
+                              This is what Canopy independently observed: the
+                              route each attempt actually ran on, what was
+                              checked, what the verdict was, and the artifacts
+                              kept to back it up. All of it was being written
+                              and none of it was being read. */}
+                          <TaskEvidenceFold runId={run.id} />
                         </div>
                       )}
                     </div>

@@ -75,6 +75,26 @@ describe("the vibe MVP wiring boundaries", () => {
     expect(binding).toContain("attentionFallbackVisible: !companionVisible");
   });
 
+  // Textual, and knowingly weak — ProjectView is 12k lines with no render
+  // harness, so this is what is available at this seam. The parts that can be
+  // exercised for real are: `parseVibePackageFact` -> `inferVibeCheck` in
+  // vibePackageScripts.test.ts, and the caveat reaching the ledger and the user
+  // in vibeBuilderSession.test.ts. This covers only the wire between them.
+  it("derives the Build check from inference, and passes the gap along with it", () => {
+    const projectView = read("src/components/ProjectView/index.tsx");
+    expect(projectView).toContain("inferVibeCheck(");
+    // Name-matching the component's configured commands finds nothing in a
+    // project Canopy set up from nothing, which is what made `verified`
+    // unreachable for the users who did the least setup.
+    expect(projectView).not.toMatch(
+      /const vibeCheck = vibeComponent\?\.commands\?\.find/,
+    );
+    expect(projectView).toContain("checkCommand: vibeCheckCommand");
+    // A gap with no way to say why leaves a permanently incomplete turn looking
+    // like a Canopy fault instead of a missing script.
+    expect(projectView).toContain("checkCaveat: vibeCheckCaveat");
+  });
+
   it("judges independent observations and fails unknown checkpoint inputs closed", () => {
     const session = read("src/vibeBuilderSession.ts");
     expect(session).toContain("judgeVerification(contract, observations)");
@@ -86,7 +106,17 @@ describe("the vibe MVP wiring boundaries", () => {
       "noOpenIncident: review.context.noOpenIncident && !this.incidentOpen",
     );
     expect(session).toContain('verdict: "unknown"');
-    expect(session).toContain("secretScanClean: false");
+    // Was `secretScanClean: false` — a hardcoded literal that made
+    // auto-checkpoint dead code. The scan is real now, so the invariant worth
+    // holding is that the boolean comes FROM the scan of the diff about to be
+    // committed and from nothing else; a literal either way would be a claim
+    // rather than a result. The behavioural half of this lives in
+    // vibeBuilderSession.test.ts ("blocks a checkpoint when the diff about to
+    // be committed carries a credential"), which is the test that can actually
+    // fail if the wiring is wrong.
+    expect(session).toContain("const secrets = scanDiffForSecrets(diff)");
+    expect(session).toContain("secretScanClean: secrets.clean");
+    expect(session).not.toMatch(/secretScanClean:\s*(true|false)/);
     expect(session).toContain('kind: "turn-diff"');
     expect(session).toContain('response: SAVE_CHECKPOINT');
   });

@@ -1,4 +1,5 @@
 import type { StructuredRunnerEvent } from "./structuredEvents";
+import type { VibeCheckScript } from "./vibeCheckInference";
 import type { BuilderSession } from "./vibeBuilderSessionTypes";
 import type { Component, Project, RunCommand } from "./projects";
 
@@ -7,7 +8,10 @@ const DEVISH = /dev|start|serve/i;
 export type VibePackageFact =
   | {
       status: "loaded";
-      scripts: { dev?: string; start?: string };
+      /** Dev/start are what this module reads; the check-ish keys ride along
+       *  for `inferVibeCheck`, which is scoped to the component this one
+       *  chooses and would otherwise need a second read of the same file. */
+      scripts: Partial<Record<"dev" | "start" | VibeCheckScript, string>>;
       runner: "npm" | "pnpm" | "yarn" | "bun";
     }
   | { status: "missing" | "invalid" | "error" };
