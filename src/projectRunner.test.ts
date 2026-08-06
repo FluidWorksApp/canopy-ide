@@ -18,6 +18,11 @@ function launch(
     policy: {
       systemPromptAppend: "Build only in this project.",
       permissionMode: "bypassPermissions",
+      allowedTools: [
+        "mcp__canopy__canopy_project",
+        "mcp__canopy__canopy_start_server",
+        "mcp__canopy__canopy_server_output",
+      ],
       disallowedTools: ["Bash", "KillShell"],
       model: "sonnet",
       sessionId: "session-1",
@@ -92,5 +97,10 @@ describe("the project runner controller", () => {
     expect(args).not.toContain("Write");
     expect(args).toContain("Bash");
     expect(args).toContain("KillShell");
+    expect(args).toContain("--allowedTools");
+    expect(args).toContain("mcp__canopy__canopy_project");
+    expect(args).toContain("mcp__canopy__canopy_start_server");
+    expect(args).toContain("mcp__canopy__canopy_server_output");
+    expect(args).not.toContain("--dangerously-skip-permissions");
   });
 });

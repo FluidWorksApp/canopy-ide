@@ -8712,9 +8712,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // row to the user's configured commands as a side effect of opening the
   // project — a config write nobody asked for. If that row is wanted it should
   // be its own decision, taken where the target's own addCommand is persisted.
-  const configuredSetupCheck = project.vibe?.version === 2
-    ? vibeComponent?.commands?.find((command) => command.purpose === "check")
-    : null;
+  const configuredSetupCheck = vibeComponent?.commands?.find(
+    (command) => command.purpose === "check",
+  );
   const vibeCheckCommand = configuredSetupCheck?.argv ??
     (vibeCheckInference?.kind === "check" ? vibeCheckInference.command : null);
   // Both a chosen check's caveat ("I'm checking with X, not Y") and a gap's
@@ -8901,8 +8901,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   };
 
   const vibeRequiredRuns = useMemo(() => {
-    const configured = project.vibe?.version === 2
-      ? project.vibe.requiredProcesses ?? []
+    const configured = project.vibe?.requiredProcesses?.length
+      ? project.vibe.requiredProcesses
       : vibeComponent && vibeRun
         ? [{ componentId: vibeComponent.id, runCommandId: vibeRun.id }]
         : [];

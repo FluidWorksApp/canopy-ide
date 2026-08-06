@@ -28,7 +28,7 @@ export interface Component {
 }
 
 export interface VibeConfig {
-  version: 1 | 2;
+  version: 1;
   enabled: boolean;
   componentId?: string;
   runCommandId?: string;

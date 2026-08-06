@@ -449,7 +449,10 @@ export function resolveVibeTarget(project: Project): VibeTargetResolution {
   const vibe = project.vibe;
   if (
     !vibe ||
-    (vibe.version !== 1 && vibe.version !== 2) ||
+    vibe.version !== 1 ||
+    !vibe.setupRevision ||
+    !vibe.requiredProcesses?.length ||
+    !Array.isArray(vibe.externalServices) ||
     !vibe.componentId ||
     !vibe.runCommandId
   ) {
