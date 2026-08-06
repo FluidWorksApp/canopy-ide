@@ -646,6 +646,41 @@ body,
   border-color: var(--border-strong);
 }
 
+.project-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 2px 5px;
+  color: var(--text-dim);
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  font: 600 var(--fs-xs) / 1 var(--font-sans);
+  cursor: pointer;
+}
+
+.project-mode-toggle:hover {
+  border-color: var(--border-strong);
+}
+
+.project-mode-toggle > span:not(.project-mode-arrow) {
+  padding: 4px 6px;
+  border-radius: calc(var(--r-xs) - 2px);
+  corner-shape: squircle;
+}
+
+.project-mode-toggle > .active {
+  color: var(--text);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-1);
+}
+
+.project-mode-arrow {
+  color: var(--text-faint);
+}
+
 /* ---------- project manager (CRUD modal) ---------- */
 
 .project-manager {
@@ -753,6 +788,40 @@ body,
   flex: 1;
   min-height: 0;
   position: relative;
+}
+
+.vibe-chat-placeholder {
+  display: none;
+}
+
+.project-view-vibe .vibe-chat-placeholder {
+  display: flex;
+  flex: 0 0 clamp(300px, 28vw, 380px);
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 22px;
+  background: var(--bg-alt);
+  border-right: 1px solid var(--border);
+}
+
+.app.zen .vibe-chat-placeholder {
+  display: none;
+}
+
+.vibe-chat-placeholder-title {
+  color: var(--text);
+  font-size: var(--fs-lg);
+  font-weight: 650;
+}
+
+.vibe-chat-placeholder-note {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.project-view-vibe .project-main > .pane-bar {
+  display: none;
 }
 
 /* One status dot per agent tab, replacing the per-agent glyph. Gray steady =

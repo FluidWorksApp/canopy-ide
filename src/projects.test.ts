@@ -7,7 +7,10 @@ import {
   agentIdTaken,
   BUILTIN_AGENT_CLIS,
   customCliIssue,
+  exportProject,
+  importFile,
   launchCommand,
+  loadWorkspace,
   newCustomCliId,
   refreshAgentClis,
   remoteCliMetadata,
@@ -21,6 +24,7 @@ import {
 import { getSettings, updateSettings } from "./settings";
 import type { CustomMicroTask } from "./microTasks";
 import type { CustomAgentCli, Project, WorkspaceState } from "./projects";
+import { mockCommands } from "./test/setup";
 
 /** Point a registry entry at a different binary, as Settings → Agents does. */
 const rebind = (bins: Record<string, string>) => {
@@ -472,6 +476,42 @@ describe("SHELL_PATTERN", () => {
   it("does not match a non-shell", () => {
     expect(SHELL_PATTERN.test("node")).toBe(false);
     expect(SHELL_PATTERN.test("zshfoo")).toBe(false);
+  });
+});
+
+describe("project vibe serialization", () => {
+  it("round-trips the portable config through project export and import", async () => {
+    let exported = "";
+    mockCommands({
+      workspace_export: ({ data }: Record<string, unknown>) => {
+        exported = String(data);
+      },
+      workspace_import: () => exported,
+    });
+    const project: Project = {
+      id: "p-vibe",
+      name: "Vibe app",
+      components: [{ label: "app", path: "/repo/app" }],
+      vibe: { enabled: true, component: "app", runCommand: "dev" },
+    };
+
+    await exportProject("/tmp/vibe.canopy-project", project);
+
+    expect((await importFile("/tmp/vibe.canopy-project")).projects).toEqual([project]);
+  });
+
+  it("loads a pre-vibe workspace without migration", async () => {
+    mockCommands({
+      store_load: JSON.stringify({
+        projects: [{ id: "old", name: "Old project", components: [] }],
+        openIds: ["old"],
+        activeId: "old",
+      }),
+    });
+
+    const state = await loadWorkspace();
+
+    expect(state.projects[0].vibe).toBeUndefined();
   });
 });
 

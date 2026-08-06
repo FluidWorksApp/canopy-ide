@@ -2300,6 +2300,17 @@ export default function App() {
     (p: Project) => setDialog({ mode: "edit", project: p }),
     [],
   );
+  const toggleVibe = useCallback(
+    (id: string) => {
+      const project = wsRef.current.projects.find((p) => p.id === id);
+      if (!project) return;
+      void saveProject({
+        ...project,
+        vibe: { ...project.vibe, enabled: project.vibe?.enabled !== true },
+      });
+    },
+    [saveProject],
+  );
   const openManager = useCallback(() => setManager(true), []);
 
   // Update-toast handlers.
@@ -2901,6 +2912,7 @@ export default function App() {
         onCloseProject={handleCloseProject}
         onHibernateProject={hibernateProject}
         onWakeProject={wakeProject}
+        onToggleVibe={toggleVibe}
         onEditProject={editProject}
         onStopCollab={stopCollab}
         onNewProject={newProject}

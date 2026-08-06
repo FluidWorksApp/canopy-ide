@@ -20,6 +20,12 @@ export interface Component {
   commands?: RunCommand[];
 }
 
+export interface VibeConfig {
+  enabled: boolean;
+  component?: string;
+  runCommand?: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -34,6 +40,8 @@ export interface Project {
    *  offering a job that doesn't apply there. Lives on the project so it
    *  travels with an exported project file. */
   customTasks?: CustomMicroTask[];
+  /** Portable, non-secret configuration for the project's Build lens. */
+  vibe?: VibeConfig;
 }
 
 export interface WorkspaceState {
