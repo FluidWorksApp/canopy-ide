@@ -124,9 +124,32 @@
 
   var net = []; // {method, url, status, ms, from, ts}
   var NET_CAP = 300;
+  var netGeneration = 0;
+  var netPending = 0;
+  var netTotal = 0;
+  var netSince = 0;
+  var netLastAt = Date.now();
+  var resourceState = new WeakMap();
+  var RESOURCE_SELECTOR =
+    'img[src]:not([loading="lazy"]),script[src],link[rel="stylesheet"][href],' +
+    'iframe[src]:not([loading="lazy"]),video[src]:not([preload="none"]),' +
+    'audio[src]:not([preload="none"])';
 
   function netPush(entry) {
+    var replacing = false;
+    for (var i = net.length - 1; i >= 0; i--) {
+      var held = net[i];
+      if (held.url !== entry.url || Math.abs((held.ts || 0) - (entry.ts || 0)) > 2000) continue;
+      if (held.error) return;
+      if (entry.error) {
+        net.splice(i, 1);
+        replacing = true;
+      }
+      break;
+    }
     net.push(entry);
+    if (!replacing) netTotal += 1;
+    netLastAt = Date.now();
     if (net.length > NET_CAP) net.splice(0, net.length - NET_CAP);
   }
 
@@ -138,26 +161,85 @@
     }
   }
 
+  function resourceComplete(el) {
+    if (el.localName === "img") return !!el.complete;
+    if (el.localName === "link") return !!el.sheet;
+    if (el.localName === "iframe") {
+      try {
+        return !!(el.contentDocument && el.contentDocument.readyState === "complete");
+      } catch (_) {
+        return false;
+      }
+    }
+    if (el.localName === "video" || el.localName === "audio") return el.readyState >= 1;
+    return false;
+  }
+  function markResource(el, changed) {
+    if (!el || !el.matches || !el.matches(RESOURCE_SELECTOR)) return;
+    var held = resourceState.get(el);
+    if (held && held.generation === netGeneration && (!changed || held.pending)) return;
+    var state = { generation: netGeneration, pending: !resourceComplete(el) };
+    resourceState.set(el, state);
+    if (!state.pending) return;
+    netPending += 1;
+    var finish = function () {
+      if (!state.pending) return;
+      state.pending = false;
+      if (state.generation === netGeneration) netPending = Math.max(0, netPending - 1);
+    };
+    el.addEventListener("load", finish, { once: true });
+    el.addEventListener("error", finish, { once: true });
+    if (el.localName === "video" || el.localName === "audio") {
+      el.addEventListener("loadeddata", finish, { once: true });
+      el.addEventListener("canplay", finish, { once: true });
+    }
+  }
+  document
+    .querySelectorAll(RESOURCE_SELECTOR)
+    .forEach(function (el) { markResource(el, false); });
+  try {
+    new MutationObserver(function (records) {
+      records.forEach(function (record) {
+        markResource(record.target, record.type === "attributes");
+        Array.prototype.forEach.call(record.addedNodes || [], function (node) {
+          markResource(node, false);
+          if (node.querySelectorAll)
+            node
+              .querySelectorAll(RESOURCE_SELECTOR)
+              .forEach(function (el) { markResource(el, false); });
+        });
+      });
+    }).observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["src", "href", "srcset"],
+    });
+  } catch (_) {}
+
   var origFetch = window.fetch;
   if (typeof origFetch === "function") {
     window.fetch = function (input, init) {
       var started = Date.now();
+      var generation = netGeneration;
+      netPending += 1;
       var url = absolute(input && input.url ? input.url : input);
       var method = ((init && init.method) || (input && input.method) || "GET").toUpperCase();
       return origFetch.apply(this, arguments).then(
         function (res) {
-          netPush({
+          if (generation === netGeneration) netPush({
             method: method,
             url: url,
             status: res.status,
             ms: Date.now() - started,
+            bytes: Number(res.headers && res.headers.get("content-length")) || 0,
             from: "fetch",
             ts: started,
           });
           return res;
         },
         function (err) {
-          netPush({
+          if (generation === netGeneration) netPush({
             method: method,
             url: url,
             status: 0,
@@ -168,7 +250,9 @@
           });
           throw err;
         },
-      );
+      ).finally(function () {
+        if (generation === netGeneration) netPending = Math.max(0, netPending - 1);
+      });
     };
   }
 
@@ -184,16 +268,20 @@
       var meta = this.__canopyNet;
       if (meta) {
         var started = Date.now();
+        var generation = netGeneration;
+        netPending += 1;
         var xhr = this;
         this.addEventListener("loadend", function () {
-          netPush({
+          if (generation === netGeneration) netPush({
             method: meta.method,
             url: meta.url,
             status: xhr.status,
             ms: Date.now() - started,
+            bytes: Number(xhr.getResponseHeader("content-length")) || 0,
             from: "xhr",
             ts: started,
           });
+          if (generation === netGeneration) netPending = Math.max(0, netPending - 1);
         });
       }
       return origSend.apply(this, arguments);
@@ -203,6 +291,7 @@
   try {
     new PerformanceObserver(function (list) {
       list.getEntries().forEach(function (e) {
+        if (e.startTime < netSince) return;
         // fetch/XHR arrive here too, with worse detail than the wrappers above.
         if (e.initiatorType === "fetch" || e.initiatorType === "xmlhttprequest") return;
         netPush({
@@ -210,12 +299,31 @@
           url: e.name,
           status: e.responseStatus || null,
           ms: Math.round(e.duration),
+          bytes: Number(e.transferSize || e.encodedBodySize) || 0,
           from: e.initiatorType || "resource",
           ts: Math.round(performance.timeOrigin + e.startTime),
         });
       });
     }).observe({ type: "resource", buffered: true });
   } catch (_) {}
+  addEventListener("error", function (e) {
+    var target = e.target;
+    if (!target || target === window) return;
+    var state = resourceState.get(target);
+    if (!state || state.generation !== netGeneration) return;
+    var url = target.currentSrc || target.src || target.href;
+    if (!url) return;
+    netPush({
+      method: "GET",
+      url: absolute(url),
+      status: 0,
+      error: "resource failed to load",
+      ms: 0,
+      bytes: 0,
+      from: String(target.localName || "resource"),
+      ts: Date.now(),
+    });
+  }, true);
 
   // ---------- overlay chrome ----------
 
@@ -1201,9 +1309,20 @@
       }
       case "network": {
         var m = Math.min(Number(d.lines) || 100, NET_CAP);
+        var requests = net.slice(-m);
+        if (d.clear) {
+          net.length = 0;
+          netGeneration += 1;
+          netPending = 0;
+          netTotal = 0;
+          netSince = performance.now();
+          netLastAt = Date.now();
+        }
         return agentReply(d.id, true, {
-          requests: net.slice(-m),
-          total: net.length,
+          requests: requests,
+          total: netTotal,
+          pending: netPending,
+          lastActivityAt: netLastAt,
           note: "Captured in the page (fetch, XHR and subresources). The document request itself happened before this script ran, so it isn't listed.",
         });
       }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  capturedNetworkObservation,
   judgeVerification,
   networkObservation,
   PERF_LIMITS,
@@ -85,5 +86,20 @@ describe("networkObservation", () => {
 
   it("a clean sample set passes quietly", () => {
     expect(networkObservation([s({})], T).note).toContain("no failed");
+  });
+
+  it("converts page-capture requests into independent evidence", () => {
+    expect(
+      capturedNetworkObservation(
+        [{ url: "/api/orders", status: 200, ms: 20, bytes: 1200 }],
+        T,
+      ),
+    ).toMatchObject({ kind: "network", verdict: "pass" });
+    expect(
+      capturedNetworkObservation(
+        [{ url: "/api/orders", status: 500, ms: 20, bytes: 100 }],
+        T,
+      ),
+    ).toMatchObject({ kind: "network", verdict: "fail" });
   });
 });

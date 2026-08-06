@@ -171,6 +171,78 @@ describe("preview picker: deep traversal", () => {
     layOut();
   });
 
+  it("captures failed resources and clears the completed turn atomically", async () => {
+    const image = document.createElement("img");
+    image.src = "/missing.png";
+    document.body.appendChild(image);
+    await Promise.resolve();
+    const loading = await op<{ pending: number }>({ op: "network", lines: 300 });
+    expect(loading.pending).toBe(1);
+    image.dispatchEvent(new Event("error"));
+
+    const before = await op<{
+      requests: { status: number; error?: string }[];
+      total: number;
+      pending: number;
+    }>({ op: "network", lines: 300 });
+    expect(before.requests).toContainEqual(
+      expect.objectContaining({ status: 0, error: "resource failed to load" }),
+    );
+    expect(before.pending).toBe(0);
+
+    const cleared = await op<{
+      requests: unknown[];
+      total: number;
+      pending: number;
+    }>({ op: "network", lines: 300, clear: true });
+    expect(cleared.requests).toHaveLength(1);
+    expect(cleared.total).toBe(0);
+    expect(cleared.pending).toBe(0);
+
+    const after = await op<{ requests: unknown[]; total: number }>({
+      op: "network",
+      lines: 300,
+    });
+    expect(after).toMatchObject({ requests: [], total: 0 });
+  });
+
+  it("reports when the network ring dropped earlier evidence", async () => {
+    const images: HTMLImageElement[] = [];
+    for (let i = 0; i < 301; i += 1) {
+      const image = document.createElement("img");
+      image.src = `/missing-${i}.png`;
+      document.body.appendChild(image);
+      images.push(image);
+    }
+    await Promise.resolve();
+    for (const image of images) image.dispatchEvent(new Event("error"));
+    const capture = await op<{ requests: unknown[]; total: number }>({
+      op: "network",
+      lines: 300,
+    });
+    expect(capture.requests).toHaveLength(300);
+    expect(capture.total).toBe(301);
+  });
+
+  it("does not count inline, metadata-only, or deferred resources as in flight", async () => {
+    const script = document.createElement("script");
+    script.textContent = "window.__inlineRan = true";
+    const canonical = document.createElement("link");
+    canonical.rel = "canonical";
+    canonical.href = "/page";
+    const lazy = document.createElement("img");
+    lazy.setAttribute("loading", "lazy");
+    lazy.src = "/below-fold.png";
+    const media = document.createElement("video");
+    media.setAttribute("preload", "none");
+    media.src = "/optional.mp4";
+    document.head.append(script, canonical);
+    document.body.append(lazy, media);
+    await Promise.resolve();
+    const capture = await op<{ pending: number }>({ op: "network", lines: 300 });
+    expect(capture.pending).toBe(0);
+  });
+
   it("finds controls inside an open shadow root", async () => {
     document.body.innerHTML = `<button>top</button><my-widget></my-widget>`;
     shadow(document.querySelector("my-widget")!, `<button>inside</button>`);

@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as ipc from "./ipc";
 import type { ProjectRunnerController } from "./projectRunner";
 import type { StructuredRunnerHost } from "./structuredEvents";
 import type { TaskReservation } from "./taskEnvelope";
 import {
   createVibeBuilderSession,
+  DEFAULT_VIBE_BUILDER_DEPS,
   scopedGitEntries,
   type CheckpointReview,
   type VibeBuilderSessionDeps,
@@ -116,7 +118,7 @@ function harness(over: Partial<VibeBuilderSessionDeps> = {}) {
       observation: observation("check"),
       output: "checks passed",
     })),
-    beginBrowserTurn: vi.fn(async () => {}),
+    beginBrowserTurn: vi.fn(async () => true),
     inspectBrowser: vi.fn(async () => ({
       observations: [
         observation("server"),
@@ -158,6 +160,59 @@ function harness(over: Partial<VibeBuilderSessionDeps> = {}) {
 beforeEach(() => vi.clearAllMocks());
 
 describe("VibeBuilderSession", () => {
+  it("collects turn-scoped network evidence through the production dependency", async () => {
+    vi.spyOn(ipc, "browserHere").mockResolvedValue({
+      url: "http://localhost:5173/",
+      title: "App",
+    });
+    vi.spyOn(ipc, "browserNavigate").mockResolvedValue();
+    vi.spyOn(ipc, "browserPainted").mockResolvedValue(true);
+    let evalCalls = 0;
+    const op = vi.spyOn(ipc, "browserRunOp").mockImplementation(async (_tab, request) => {
+      if (request.op === "console")
+        return { done: true, ok: true, data: { messages: [] } };
+      if (request.op === "network")
+        return {
+          done: true,
+          ok: true,
+          data: {
+            requests: [{ url: "/api/orders", status: 200, ms: 12, bytes: 800 }],
+            total: 1,
+            pending: 0,
+            lastActivityAt: 0,
+          },
+        };
+      if (request.op === "eval")
+        return {
+          done: true,
+          ok: true,
+          data: {
+            result:
+              evalCalls++ === 0
+                ? 100
+                : { ready: "complete", origin: 200 },
+          },
+        };
+      return null;
+    });
+
+    await DEFAULT_VIBE_BUILDER_DEPS.beginBrowserTurn("preview-1");
+    const inspection = await DEFAULT_VIBE_BUILDER_DEPS.inspectBrowser(
+      "preview-1",
+      false,
+      10,
+      true,
+    );
+
+    expect(op).toHaveBeenCalledWith(
+      "preview-1",
+      expect.objectContaining({ op: "network", clear: true }),
+    );
+    expect(inspection.observations).toContainEqual(
+      expect.objectContaining({ kind: "network", verdict: "pass" }),
+    );
+  });
+
   it("scopes absolute git-status paths for root and nested components", () => {
     const entries = [
       { status: "!!", path: "/repo/node_modules/" },

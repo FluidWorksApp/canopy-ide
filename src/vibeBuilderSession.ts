@@ -21,6 +21,7 @@ import {
   type CheckpointContext,
 } from "./vibeCheckpoints";
 import {
+  capturedNetworkObservation,
   judgeVerification,
   type ObservationKind,
   type VerificationContract,
@@ -82,11 +83,12 @@ export interface VibeBuilderSessionDeps {
   writeArtifact: typeof writeTaskArtifact;
   captureBaseline(cwd: string): Promise<TurnBaseline>;
   runCheck(command: string | null, cwd: string, at: number): Promise<CheckRunResult>;
-  beginBrowserTurn(tabId: string | null): Promise<void>;
+  beginBrowserTurn(tabId: string | null): Promise<boolean>;
   inspectBrowser(
     tabId: string | null,
     visual: boolean,
     at: number,
+    networkScoped: boolean,
   ): Promise<BrowserInspection>;
   reviewCheckpoint(args: {
     cwd: string;
@@ -209,11 +211,25 @@ async function inspectNativeBrowser(
   tabId: string | null,
   visual: boolean,
   at: number,
+  networkScoped: boolean,
 ): Promise<BrowserInspection> {
   if (!tabId) return unknownBrowser(at, visual, "no project preview is available");
   const before = await ipc.browserHere(tabId).catch(() => null);
   if (!before?.url) return unknownBrowser(at, visual, "the project preview has not loaded a route");
-  await ipc.browserNavigate(tabId, null, "reload").catch(() => {});
+  const turnNetwork = networkScoped
+    ? await ipc.browserRunOp(tabId, { op: "network", lines: 300 }).catch(() => null)
+    : null;
+  const beforeDocument = await ipc
+    .browserRunOp(tabId, { op: "eval", code: "performance.timeOrigin" })
+    .catch(() => null);
+  const beforeOrigin = (beforeDocument?.data as { result?: number } | undefined)
+    ?.result;
+  const reloaded = await ipc.browserNavigate(tabId, null, "reload").then(
+    () => true,
+    () => false,
+  );
+  if (!reloaded)
+    return unknownBrowser(at, visual, "the project preview could not be reloaded");
   let here: { url: string; title: string } | null = null;
   let painted = false;
   for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -226,6 +242,45 @@ async function inspectNativeBrowser(
   }
   if (!here?.url || !painted) {
     return unknownBrowser(at, visual, "the project preview did not paint after a fresh reload");
+  }
+
+  // Paint can precede fetch/XHR completion. Wait for the reloaded document to
+  // be complete and for the in-page request counter to go quiet before reading
+  // the evidence; an empty log while work is still in flight is not a pass.
+  let reloadNetwork: Awaited<ReturnType<typeof ipc.browserRunOp>> = null;
+  let reloadSettled = false;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 150));
+    const [ready, network] = await Promise.all([
+      ipc
+        .browserRunOp(tabId, {
+          op: "eval",
+          code: "({ready:document.readyState, origin:performance.timeOrigin})",
+        })
+        .catch(() => null),
+      ipc.browserRunOp(tabId, { op: "network", lines: 300 }).catch(() => null),
+    ]);
+    reloadNetwork = network;
+    const data = network?.data as
+      | { pending?: number; lastActivityAt?: number }
+      | undefined;
+    const readyData = ready?.data as
+      | { result?: { ready?: string; origin?: number } }
+      | undefined;
+    if (
+      ready?.done &&
+      ready.ok &&
+      readyData?.result?.ready === "complete" &&
+      typeof beforeOrigin === "number" &&
+      readyData.result.origin !== beforeOrigin &&
+      network?.done &&
+      network.ok &&
+      data?.pending === 0 &&
+      Date.now() - (data.lastActivityAt ?? Date.now()) >= 300
+    ) {
+      reloadSettled = true;
+      break;
+    }
   }
 
   const observations: VerificationObservation[] = [
@@ -263,12 +318,43 @@ async function inspectNativeBrowser(
     });
   }
 
-  observations.push({
-    kind: "network",
-    verdict: "unknown",
-    note: "network capture is page-lifetime, so this turn cannot claim it as independent evidence yet",
-    at,
+  const captures = [turnNetwork, reloadNetwork].map((ack) => {
+    const data = ack?.data as
+      | {
+          requests?: Parameters<typeof capturedNetworkObservation>[0];
+          total?: number;
+          pending?: number;
+        }
+      | undefined;
+    return { ack, data };
   });
+  const networkComplete =
+    networkScoped &&
+    reloadSettled &&
+    captures.every(
+      ({ ack, data }) =>
+        ack?.done &&
+        ack.ok &&
+        Array.isArray(data?.requests) &&
+        Number.isInteger(data?.pending) &&
+        data!.pending === 0 &&
+        Number.isInteger(data?.total) &&
+        data!.total! >= 0 &&
+        data!.total! <= data!.requests!.length,
+    );
+  const requests = captures.flatMap(({ data }) => data?.requests ?? []);
+  observations.push(
+    networkComplete
+      ? capturedNetworkObservation(requests, at)
+      : {
+          kind: "network",
+          verdict: "unknown",
+          note: networkScoped
+            ? "the preview network log was incomplete, truncated, or still active"
+            : "the preview network log could not be scoped to this turn",
+          at,
+        },
+  );
 
   let screenshot: string | null = null;
   if (visual) {
@@ -399,8 +485,12 @@ export const DEFAULT_VIBE_BUILDER_DEPS: VibeBuilderSessionDeps = {
   captureBaseline: captureGitBaseline,
   runCheck: runDetachedCheck,
   beginBrowserTurn: async (tabId) => {
-    if (!tabId) return;
-    await ipc.browserRunOp(tabId, { op: "console", lines: 1, clear: true }).catch(() => null);
+    if (!tabId) return false;
+    const [, network] = await Promise.all([
+      ipc.browserRunOp(tabId, { op: "console", lines: 1, clear: true }).catch(() => null),
+      ipc.browserRunOp(tabId, { op: "network", lines: 1, clear: true }).catch(() => null),
+    ]);
+    return Boolean(network?.done && network.ok);
   },
   inspectBrowser: inspectNativeBrowser,
   reviewCheckpoint: reviewGitCheckpoint,
@@ -468,6 +558,7 @@ export class VibeBuilderSession implements BuilderSession {
     verification: VerificationOutcome;
   } | null = null;
   private persistQueue: Promise<void> = Promise.resolve();
+  private networkScoped = false;
   private options: VibeBuilderSessionOptions;
   private deps: VibeBuilderSessionDeps;
 
@@ -674,7 +765,9 @@ export class VibeBuilderSession implements BuilderSession {
         );
         throw error;
       }
-      await this.deps.beginBrowserTurn(this.options.previewTabId());
+      this.networkScoped = await this.deps.beginBrowserTurn(
+        this.options.previewTabId(),
+      );
       const completed = new Promise<void>((resolve) => {
         this.finishTurn = resolve;
       });
@@ -820,6 +913,7 @@ export class VibeBuilderSession implements BuilderSession {
       this.options.previewTabId(),
       visualTask(goal),
       at,
+      this.networkScoped,
     );
     if (browser.screenshot) {
       const screenshot = await this.deps
