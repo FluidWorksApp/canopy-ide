@@ -149,6 +149,75 @@ describe("the consumer scan itself", () => {
   });
 });
 
+// The function that JUSTIFIES a module, and what its absence costs. Sharing
+// the scanner above rather than living in its own file, because the mechanism
+// is identical — only the question differs. "Does this module have a caller?"
+// is the wrong question: `vibeSecretScan` had one (`redactSecrets`, added by
+// the artifact-redaction fix) while the function the module exists for,
+// `scanDiffForSecrets`, was wired to nothing and the checkpoint gate still read
+// a hardcoded literal. A later fix can hide an earlier hole by satisfying the
+// shallow check, so the guard has to name the specific function.
+const JUSTIFYING_FUNCTIONS = [
+  {
+    module: "vibeSecretScan.ts",
+    symbol: "scanDiffForSecrets",
+    enabled: true,
+    cost: "the checkpoint gate reads a hardcoded secretScanClean instead of a real scan, so auto-checkpoint is dead code that looks alive",
+  },
+  {
+    module: "vibePackages.ts",
+    symbol: "planInstall",
+    enabled: false,
+    cost: "managed package installs are unreachable — nothing can ask for one",
+  },
+  {
+    module: "vibeServices.ts",
+    symbol: "planLink",
+    enabled: false,
+    cost: "managed service linking is unreachable — nothing can ask for one",
+  },
+  {
+    module: "vibeServices.ts",
+    symbol: "detectRunner",
+    enabled: false,
+    cost: "the runner behind a service link is never detected, because nothing calls the detector",
+  },
+  {
+    module: "vibeDeploy.ts",
+    symbol: "planDeploy",
+    enabled: false,
+    cost: "managed deploys are unreachable — nothing can ask for one",
+  },
+  {
+    module: "vibeDeploy.ts",
+    symbol: "detectDeployProvider",
+    enabled: false,
+    cost: "the deploy provider is never detected, because nothing calls the detector",
+  },
+] as const;
+
+describe("a module's justifying function has a caller", () => {
+  // The five disabled cases are dormant cores: built, tested, and reachable by
+  // nobody — not by an agent (the tool policy denies everything but Edit,
+  // Write, Read, Grep and Glob) and not by a user. They are recorded here
+  // rather than in a transcript so that wiring them turns a guard green
+  // instead of relying on someone remembering.
+  //
+  // To enable one: flip `enabled` in the same commit that wires it. Never
+  // weaken the assertion — a red guard here means the feature does not exist
+  // yet, whatever its tests say.
+  for (const fn of JUSTIFYING_FUNCTIONS) {
+    const run = fn.enabled ? it : it.skip;
+    run(`${fn.symbol} has at least one consumer`, () => {
+      const consumers = consumersOf(join(SRC, fn.module), fn.symbol);
+      expect(
+        consumers.length,
+        `${fn.symbol} has no consumer: ${fn.cost}. It is exported by src/${fn.module} and imported by nothing outside its own file and the tests. Wire it, or delete it — do not relax this guard.`,
+      ).toBeGreaterThan(0);
+    });
+  }
+});
+
 // Each durable read API, and what its absence costs the user.
 const READ_APIS = [
   {
