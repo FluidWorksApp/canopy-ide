@@ -35,6 +35,10 @@ export interface RoundRecord {
   headSha?: string;
   /** How many comments this round took on. */
   took: number;
+  ids?: string[];
+  /** Exact durable execution identity. Absent only on legacy rounds. */
+  runId?: string;
+  attemptId?: string;
 }
 
 export interface PrLoop {
@@ -90,7 +94,12 @@ export function emptyLoop(repo: string, number: number): PrLoop {
 
 /** Start a round on `ids`, which are marked handled up front: an agent that
  *  crashes mid-round must not cause the same comments to be re-addressed. */
-export function beginRound(loop: PrLoop, ids: string[], headSha: string): PrLoop {
+export function beginRound(
+  loop: PrLoop,
+  ids: string[],
+  headSha: string,
+  task?: { runId: string; attemptId: string },
+): PrLoop {
   const n = loop.cycle + 1;
   return {
     ...loop,
@@ -99,9 +108,46 @@ export function beginRound(loop: PrLoop, ids: string[], headSha: string): PrLoop
     handled: Array.from(new Set([...loop.handled, ...ids])),
     rounds: [
       ...loop.rounds,
-      { n, startedAt: Date.now(), status: "working", headSha, took: ids.length },
+      {
+        n,
+        startedAt: Date.now(),
+        status: "working",
+        headSha,
+        took: ids.length,
+        ids,
+        ...task,
+      },
     ],
     blockedReason: undefined,
+    updatedAt: Date.now(),
+  };
+}
+
+/** A reserved round whose process never started. Keep the stopped attempt for
+ * evidence, but hand its comment ids back so the next launch may retry them. */
+export function failRoundLaunch(
+  loop: PrLoop,
+  attemptId: string | undefined,
+  summary = "the round could not start",
+): PrLoop {
+  const current = loop.rounds[loop.rounds.length - 1];
+  if (
+    loop.status !== "working" ||
+    !current ||
+    current.status !== "working" ||
+    (attemptId && current.attemptId && current.attemptId !== attemptId)
+  )
+    return loop;
+  const returned = new Set(current.ids ?? []);
+  return {
+    ...loop,
+    status: "waiting",
+    handled: loop.handled.filter((id) => !returned.has(id)),
+    rounds: loop.rounds.map((round, index) =>
+      index === loop.rounds.length - 1
+        ? { ...round, status: "stopped", endedAt: Date.now(), summary }
+        : round,
+    ),
     updatedAt: Date.now(),
   };
 }

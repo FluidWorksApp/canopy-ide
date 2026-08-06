@@ -80,7 +80,7 @@ export interface TermSubTab {
    *  agent calls canopy_job_done (or the user closes it). Never restored.
    *  `runId` keys this run's entry in the task history — the record outlives
    *  the tab, which is the point. */
-  micro?: { taskId: string; runId?: string };
+  micro?: { taskId: string; runId?: string; attemptId?: string };
   /** Visual-only grouping. Every member remains a normal terminal tab with its
    * own PTY; ProjectView lays members of the same group into one split surface. */
   paneGroup?: string;

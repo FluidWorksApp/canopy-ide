@@ -3,6 +3,7 @@ import {
   MAX_ROUNDS,
   ROUND_STALE_MS,
   beginRound,
+  failRoundLaunch,
   emptyLoop,
   finishRound,
   forgetLoop,
@@ -86,12 +87,33 @@ describe("rounds", () => {
   it("marks comments handled the moment a round starts", () => {
     // Up front, not on completion: an agent that dies mid-round must not cause
     // the same comments to be addressed twice.
-    const l = beginRound(emptyLoop("/repo", 7), ["T_1", "C_2"], "head1");
+    const l = beginRound(
+      emptyLoop("/repo", 7),
+      ["T_1", "C_2"],
+      "head1",
+      { runId: "run-1", attemptId: "attempt-1" },
+    );
     expect(l.status).toBe("working");
     expect(l.cycle).toBe(1);
     expect(l.handled).toEqual(["T_1", "C_2"]);
     expect(l.rounds).toHaveLength(1);
     expect(l.rounds[0].headSha).toBe("head1");
+    expect(l.rounds[0]).toMatchObject({
+      runId: "run-1",
+      attemptId: "attempt-1",
+      ids: ["T_1", "C_2"],
+    });
+  });
+
+  it("returns comments when a reserved round never launches", () => {
+    const running = beginRound(emptyLoop("/repo", 7), ["T_1"], "head1", {
+      runId: "run-1",
+      attemptId: "attempt-1",
+    });
+    const next = failRoundLaunch(running, "attempt-1");
+    expect(next.status).toBe("waiting");
+    expect(next.handled).toEqual([]);
+    expect(next.rounds[0].status).toBe("stopped");
   });
 
   it("goes back to waiting when a round pushes", () => {

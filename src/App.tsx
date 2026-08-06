@@ -117,7 +117,11 @@ import { startSpotIndexJob } from "./spotIndexJob";
 import { useNoteReminders } from "./useNoteReminders";
 import { loadZoom, setZoom, applyZoom, STEP } from "./zoom";
 import { stopWorkspaceServers } from "./lsp/client";
-import { sweepStaleRuns, taskRuns } from "./taskHistory";
+import {
+  hydrateTaskHistory,
+  sweepStaleRuns,
+  taskRuns,
+} from "./taskHistory";
 import {
   digitFromEvent,
   hintModifierOnly,
@@ -322,7 +326,9 @@ export default function App() {
   // Settle those before anything new is recorded, or they stay "running"
   // forever: hidden from the history tab, still holding one of its slots.
   useEffect(() => {
-    sweepStaleRuns();
+    void Promise.all([hydrateTaskHistory(), ipc.instanceId()]).then(
+      ([, instance]) => sweepStaleRuns(instance),
+    );
     // Its question goes with it, and so does every other question that was
     // waiting on a process rather than on a fact. A micro-task's pty and an
     // agent's session both died with the last launch, so nothing can answer
@@ -1864,9 +1870,16 @@ export default function App() {
           const ok = a.status === "done";
           const summary = a.summary ?? "A micro-task finished.";
           const taskKey = a.ptyId != null ? `task:${a.ptyId}` : undefined;
-          const run = a.ptyId == null
-            ? undefined
-            : taskRuns().find((candidate) => candidate.ptyId === a.ptyId);
+          const run = a.runId
+            ? taskRuns().find((candidate) => candidate.id === a.runId)
+            : a.ptyId == null
+              ? undefined
+              : taskRuns().find((candidate) => candidate.ptyId === a.ptyId);
+          const attributed = {
+            ...a,
+            runId: a.runId ?? run?.id,
+            attemptId: a.attemptId ?? run?.attemptId,
+          };
           // Which project this is about. The run is asked first, because it is
           // the only one that *knows*: `projectId` is stamped on it when the
           // task is launched, from the project it was launched from. `a.route`
@@ -1923,7 +1936,7 @@ export default function App() {
           });
           window.dispatchEvent(
             new CustomEvent("canopy:agent-action", {
-              detail: { projectId: null, action: a },
+              detail: { projectId: null, action: attributed },
             }),
           );
           return;

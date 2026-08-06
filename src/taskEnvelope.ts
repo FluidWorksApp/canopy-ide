@@ -8,6 +8,7 @@ export type TaskAttemptState =
   | "reserved"
   | "launching"
   | "running"
+  | "waiting"
   | "completed"
   | "failed"
   | "blocked"
@@ -39,6 +40,9 @@ export interface TaskEnvelopeSummary {
   attemptCount: number;
   createdAt: number;
   updatedAt: number;
+  /** Surface-owned presentation metadata. It is bounded and never consulted
+   * for routing, settlement, or scorecard truth. */
+  metadata?: unknown;
 }
 
 export interface TaskAttempt {
@@ -95,6 +99,7 @@ export interface TaskReserveInput {
   deadlineAt?: number | null;
   attemptCap?: number;
   title?: string | null;
+  metadata?: unknown;
   route: TaskRouteSnapshot;
 }
 
