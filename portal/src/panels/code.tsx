@@ -8,6 +8,11 @@ import { IconDiff, IconFile, IconFolder, IconSearch } from '@shared/icons'
 import { FileTree, type DirEntry } from '@shared/FileTree'
 import '@shared/fileTree.css'
 import { basename } from '@shared/model'
+// `git_status` runs with --ignored, so `node_modules/`, `dist/` and `.env`
+// arrive coded `!!` and are not changes. The filter and the staged test live in
+// shared/gitStatus.ts so this panel and the desktop cannot drift apart — the
+// portal previously had its own spelling, and its own bug with it.
+import { classifyStatus, isStaged, trackedChanges } from '@shared/gitStatus'
 import { useAsync } from '../useAsync'
 import { AsyncBody, Pill, Row, SubHead } from './ui'
 import { repoOf, type PanelCtx, type PanelDef } from './types'
@@ -138,38 +143,17 @@ function selectedPathOf(ctx: PanelCtx): string | null {
  * X is the index, Y is the working tree. The pair is precise and unreadable; a
  * phone row has space for one word, so this picks the one that describes what
  * changed and lets the section heading carry staged-vs-not.
+ *
+ * What KIND of entry it is comes from the shared classifier; only the wording
+ * is the portal's business.
  */
 export function statusWord(code: string): { word: string; tone: string } {
+  if (classifyStatus(code).kind === 'untracked') return { word: 'new', tone: 'ok' }
   const c = code.trim()
-  if (c.startsWith('?')) return { word: 'new', tone: 'ok' }
   if (c.includes('D')) return { word: 'deleted', tone: 'danger' }
   if (c.includes('R')) return { word: 'renamed', tone: '' }
   if (c.includes('A')) return { word: 'added', tone: 'ok' }
   return { word: 'modified', tone: 'warn' }
-}
-
-/** True when the index column says this file has something staged. `??` is
- *  untracked, not staged, even though its first column is not a space. */
-export function isStaged(code: string): boolean {
-  const x = code[0] ?? ' '
-  return x !== ' ' && x !== '?'
-}
-
-/**
- * The entries that are actually changes.
- *
- * `git_status` (fsx.rs) runs `git status --porcelain --ignored`, so every
- * ignored path — `node_modules/`, `dist/`, `.env` — arrives here coded `!!`.
- * Those are not changes: they are not in HEAD, never will be, and git will not
- * carry them. Counting or listing them makes every real project look
- * permanently modified. Worse for the list below, `isStaged('!!')` is true
- * (`!` is neither a space nor a `?`), so unfiltered they land under "Staged".
- *
- * Same spelling as the desktop's StatusBar and shared FileTree use, on purpose:
- * `!!` is the only code git emits for an ignored path.
- */
-export function trackedChanges<T extends { status: string }>(entries: T[]): T[] {
-  return entries.filter((e) => e.status !== '!!')
 }
 
 export const changesPanel: PanelDef = {

@@ -10,7 +10,8 @@
 
 import { render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
-import { changesPanel, trackedChanges } from './code'
+import { changesPanel } from './code'
+import { trackedChanges } from '@shared/gitStatus'
 import type { PanelCtx } from './types'
 
 interface Entry {

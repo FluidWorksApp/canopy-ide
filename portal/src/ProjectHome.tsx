@@ -9,7 +9,7 @@ import {
 import { restorableSessions, type RestorableSession } from '@shared/restorable'
 import { IconClose, IconFolder, IconPlus, IconTerminal } from '@shared/icons'
 import type { PanelCtx } from './panels/types'
-import { trackedChanges } from './panels/code'
+import { trackedChanges } from '@shared/gitStatus'
 import { useAsync } from './useAsync'
 
 const FORGOTTEN_KEY = 'canopy:remote:forgotten-sessions'
