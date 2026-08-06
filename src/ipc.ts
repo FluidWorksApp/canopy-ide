@@ -1866,6 +1866,37 @@ export interface AppStats {
 export const onAppStats = (cb: (s: AppStats) => void): Promise<UnlistenFn> =>
   listen<AppStats>("app:stats", (e) => cb(e.payload));
 
+// ---------- Resident watchdogs ----------
+
+/** Host memory pressure. `level` 0 = fine, 1 = warning, 2 = critical — the
+ *  Rust side only emits on a level *change* (see `memory_info` for the
+ *  on-mount snapshot). */
+export interface MemoryPressure {
+  level: 0 | 1 | 2;
+  total_bytes: number;
+  available_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+}
+
+/** The webview heartbeat: answer immediately. The Rust watchdog reloads the
+ *  window if these stop being answered (a jetsam-killed WebKit renderer
+ *  otherwise leaves the app blank with no crash report). */
+export const onWatchdogPing = (cb: () => void): Promise<UnlistenFn> =>
+  listen("watchdog:ping", () => cb());
+
+export const watchdogAck = () => invoke<void>("watchdog_ack").catch(() => {});
+
+export const onMemoryPressure = (
+  cb: (p: MemoryPressure) => void,
+): Promise<UnlistenFn> =>
+  listen<MemoryPressure>("memory:pressure", (e) => cb(e.payload));
+
+/** On-demand pressure snapshot, for painting the banner the moment the UI
+ *  mounts rather than waiting for the first level change. */
+export const memoryInfo = () =>
+  invoke<MemoryPressure | null>("memory_info").catch(() => null);
+
 export const killProcess = (pid: number) =>
   invoke<void>("kill_process", { pid });
 export const hookBridgePath = () => invoke<string | null>("hook_bridge_path");

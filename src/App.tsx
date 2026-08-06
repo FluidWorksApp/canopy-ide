@@ -9,6 +9,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import * as ipc from "./ipc";
+import { fmtBytes } from "./cleanup";
 import {
   adoptLegacyCustomTasks,
   adoptProjectStructureIds,
@@ -239,6 +240,9 @@ export default function App() {
   // Transient "110%" chip shown for ~1s after a zoom change, then cleared.
   const [zoomPct, setZoomPct] = useState<number | null>(null);
   const zoomHideTimer = useRef<number | null>(null);
+  // Host memory pressure (0 fine / 1 warn / 2 critical). Non-null while the
+  // user should shed load — cleared by Dismiss or an "ok" reading.
+  const [memPressure, setMemPressure] = useState<ipc.MemoryPressure | null>(null);
   // Everything that has asked for the user's attention (attention.ts). One
   // queue, one urgency model, one rule for when something leaves the app for
   // the OS — replacing a single-slot toast that the next caller overwrote, and
@@ -2239,6 +2243,33 @@ export default function App() {
     return () => un?.();
   }, [projectIdentity]);
 
+  // The watchdog pings this webview to confirm it is alive; the Rust loop
+  // reloads the window if the answers stop (a jetsam-killed renderer leaves
+  // the app blank with no crash report otherwise — issue #488). Answer the
+  // pings, and surface host memory pressure so the user can shed load before
+  // the system takes the renderer itself.
+  useEffect(() => {
+    let unPing: (() => void) | undefined;
+    let unMem: (() => void) | undefined;
+    void ipc
+      .onWatchdogPing(() => void ipc.watchdogAck())
+      .then((u) => {
+        unPing = u;
+      });
+    void ipc
+      .onMemoryPressure((p) => setMemPressure(p.level > 0 ? p : null))
+      .then((u) => {
+        unMem = u;
+      });
+    void ipc
+      .memoryInfo()
+      .then((p) => p && p.level > 0 && setMemPressure(p));
+    return () => {
+      unPing?.();
+      unMem?.();
+    };
+  }, []);
+
   const saveProject = useCallback(
     async (project: Project) => {
       const state = wsRef.current;
@@ -2920,6 +2951,18 @@ export default function App() {
       {zen && <div className="zen-hotzone" />}
       {/* Transient zoom level, shown ~1s after Cmd +/-/0. */}
       {zoomPct !== null && <div className="zoom-indicator">{zoomPct}%</div>}
+      {memPressure && (
+        <div
+          className={`mem-banner ${memPressure.level === 2 ? "critical" : "warning"}`}
+        >
+          <span>
+            Your Mac is low on memory — {fmtBytes(memPressure.free_bytes)} of{" "}
+            {fmtBytes(memPressure.total_bytes)} free. Close preview tabs or
+            agent terminals before the system force-quits this app.
+          </span>
+          <button onClick={() => setMemPressure(null)}>Dismiss</button>
+        </div>
+      )}
       <TitleBar
         openProjects={openProjects}
         activeId={ws.activeId}
