@@ -58,6 +58,7 @@ import { runUiOp, type CompanionOps, type WorkspaceProject } from "./agentOps";
 import { workspaceAgents, workspaceGit, workspaceSearch } from "./companionWorkspace";
 import { companionName, summonCompanion } from "./companion";
 import type { CompanionProposal } from "./companionSession";
+import { personaBinding } from "./personaBinding";
 import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
 import { readRemoteThemeTokens } from "./remoteTheme";
 import { useTabDrag } from "./tabDrag";
@@ -2533,6 +2534,12 @@ export default function App() {
     () => getSettings().companionEnabled,
     () => false,
   );
+  const activeBuildMode =
+    ws.projects.find((project) => project.id === ws.activeId)?.vibe?.enabled === true;
+  const { companionVisible, attentionFallbackVisible } = personaBinding(
+    companionOn,
+    activeBuildMode,
+  );
   const companionProjectsRef = useRef(companionProjects);
   companionProjectsRef.current = companionProjects;
   /** A proposal waiting on the user, rendered as a chip in the companion's
@@ -3030,7 +3037,7 @@ export default function App() {
           whether something reaches the OS are still decided in attention.ts,
           and a question is still outstanding until it is answered rather than
           until its card is closed. */}
-      {toasts.length > 0 && !companionOn && (
+      {toasts.length > 0 && attentionFallbackVisible && (
         <div className="notice-stack">
           {toasts.map((t) => (
             <NoticeToast
@@ -3043,7 +3050,7 @@ export default function App() {
         </div>
       )}
 
-      {companionOn && (
+      {companionVisible && (
         <Companion
           notices={toasts}
           onDismissNotice={dismissToast}

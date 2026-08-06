@@ -275,6 +275,39 @@ impl TaskStore {
         f(guard.as_mut().expect("task database was initialized"))
     }
 
+    /** The native structured runner may start only the current running attempt
+     *  in the workspace A2 reserved for it. */
+    pub(crate) fn authorize_structured_attempt(
+        &self,
+        attempt_id: &str,
+        cwd: &std::path::Path,
+    ) -> Result<(), String> {
+        validate_id(attempt_id, "attempt id")?;
+        let (state, reserved): (String, String) = self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT a.state, e.worktree_path FROM task_attempts a
+                 JOIN task_envelopes e ON e.run_id = a.run_id
+                 WHERE a.attempt_id = ?1",
+                [attempt_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| "task attempt not found".to_string())
+        })?;
+        if state != "running" {
+            return Err(format!("structured runner attempt is {state}, not running"));
+        }
+        let actual = cwd
+            .canonicalize()
+            .map_err(|error| format!("structured runner cwd is invalid: {error}"))?;
+        let expected = std::path::Path::new(&reserved)
+            .canonicalize()
+            .map_err(|error| format!("reserved task workspace is invalid: {error}"))?;
+        if actual != expected {
+            return Err("structured runner cwd does not match its reserved task workspace".into());
+        }
+        Ok(())
+    }
+
     /// The one mutation boundary. Every successful transaction returns the
     /// stored project/run ids it changed; the pulse cannot be forgotten by a
     /// new caller because callers never announce changes themselves.
@@ -1731,6 +1764,34 @@ mod tests {
             detail.attempts[0].attempt_id,
             reservation.attempt.attempt_id
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn structured_runner_authority_binds_running_attempt_to_reserved_workspace() {
+        let root = root();
+        let workspace = root.join("workspace");
+        let other = root.join("other");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let store = TaskStore::at(root.clone());
+        let mut reserve = input();
+        reserve.worktree_path = workspace.to_string_lossy().to_string();
+        let reservation = store.reserve(reserve).unwrap();
+        assert!(store
+            .authorize_structured_attempt(&reservation.attempt.attempt_id, &workspace)
+            .unwrap_err()
+            .contains("not running"));
+        store
+            .start_attempt(&reservation.attempt.attempt_id)
+            .unwrap();
+        store
+            .authorize_structured_attempt(&reservation.attempt.attempt_id, &workspace)
+            .unwrap();
+        assert!(store
+            .authorize_structured_attempt(&reservation.attempt.attempt_id, &other)
+            .unwrap_err()
+            .contains("does not match"));
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -15,9 +15,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StructuredRunnerEvent } from "../structuredEvents";
 import {
   VibeBuilderPane,
-  type BuilderSession,
-  type BuilderSessionState,
 } from "./VibeBuilderPane";
+import type {
+  BuilderSession,
+  BuilderSessionState,
+} from "../vibeBuilderSessionTypes";
 
 vi.mock("./Markdown", () => ({
   Markdown: ({ text }: { text: string }) => <p>{text}</p>,
@@ -155,6 +157,7 @@ describe("VibeBuilderPane", () => {
         kind: "confirm",
         prompt: "Apply the database migration?",
         detail: "Adds an orders table; existing data is unchanged.",
+        diff: "+ create table orders",
         actions: [
           { label: "Apply it", response: "approve" },
           { label: "Not now", response: "decline" },
@@ -167,6 +170,7 @@ describe("VibeBuilderPane", () => {
       name: "Confirm: Apply the database migration?",
     });
     expect(within(confirm).getByText(/Adds an orders table/)).toBeTruthy();
+    expect(within(confirm).getByText("+ create table orders")).toBeTruthy();
     const apply = within(confirm).getByRole("button", { name: "Apply it" });
     fireEvent.click(apply);
     expect(h.send).toHaveBeenCalledWith("approve");
@@ -301,9 +305,7 @@ describe("the builder pane boundary", () => {
   );
 
   it("takes events, send and state without owning runner or envelope machinery", () => {
-    expect(source).toContain("interface BuilderSession");
-    expect(source).toContain("events$");
-    expect(source).toContain("send(text: string)");
+    expect(source).toContain("vibeBuilderSessionTypes");
     for (const forbidden of [
       "projectRunner",
       "structuredRunners",

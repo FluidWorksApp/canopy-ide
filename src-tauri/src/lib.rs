@@ -45,6 +45,7 @@ mod shortcuts;
 mod snapshot;
 mod spot;
 mod stores;
+mod structured_runner;
 mod sync;
 mod sysaudio;
 mod tasks;
@@ -430,6 +431,7 @@ pub fn run() {
         .manage(vault::Vault::default())
         .manage(clipboard::Clipboard::default())
         .manage(companion::CompanionManager::default())
+        .manage(structured_runner::StructuredRunnerManager::default())
         .manage(tasks::TaskStore::default())
         .manage(cli::pending_from_env())
         .manage(cli::pending_link_from_env())
@@ -521,6 +523,9 @@ pub fn run() {
             companion::companion_status,
             companion::companion_store_read,
             companion::companion_store_write,
+            structured_runner::structured_runner_spawn,
+            structured_runner::structured_runner_write,
+            structured_runner::structured_runner_kill,
             tasks::task_reserve,
             tasks::task_attempt_reserve,
             tasks::task_attempt_start,
@@ -655,6 +660,7 @@ pub fn run() {
             git::git_unstage,
             git::git_discard,
             git::git_commit,
+            git::git_commit_paths,
             git::git_fetch,
             git::git_pull,
             git::git_push,
