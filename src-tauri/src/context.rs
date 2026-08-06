@@ -1552,10 +1552,7 @@ fn mesh_concerns(m: &crate::mesh::MeshMessage, who: &Caller) -> bool {
     let Some(a) = who.agent() else {
         return true;
     };
-    let same_instance = m
-        .instance
-        .as_deref()
-        .map_or(true, |i| i == a.instance);
+    let same_instance = m.instance.as_deref().map_or(true, |i| i == a.instance);
     if same_instance && (m.from_pty_id == Some(a.pty_id) || m.to_pty_id == a.pty_id) {
         return true;
     }
@@ -1840,9 +1837,7 @@ fn new_message(
 /// Check the items a mesh send shares: real files, by absolute path, few
 /// enough to be a handoff. The kind is inferred from the extension when the
 /// sender doesn't say.
-fn validate_items(
-    items: Option<Vec<MeshItemReq>>,
-) -> Result<Vec<crate::mesh::MeshItem>, String> {
+fn validate_items(items: Option<Vec<MeshItemReq>>) -> Result<Vec<crate::mesh::MeshItem>, String> {
     let items = items.unwrap_or_default();
     if items.len() > MAX_MESH_ITEMS {
         return Err(format!(
@@ -2473,8 +2468,7 @@ async fn action(
                     "mesh_send needs ptyId — a terminal id from canopy_agents".into(),
                 );
             };
-            let Some(text) = act.text.as_deref().map(str::trim).filter(|t| !t.is_empty())
-            else {
+            let Some(text) = act.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
                 return (StatusCode::BAD_REQUEST, "mesh_send needs text".into());
             };
             if text.len() > MAX_MESH_TEXT {
@@ -2535,7 +2529,12 @@ async fn action(
             let notice = format!(
                 "{} {}",
                 sender_tag(&who),
-                mesh_notice(&record.id, record.reply_to.as_deref(), text, record.items.len())
+                mesh_notice(
+                    &record.id,
+                    record.reply_to.as_deref(),
+                    text,
+                    record.items.len()
+                )
             );
             snaps.mesh.note_delivery(&record.id, &notice);
             if let Err(e) = deliver_line(&app, id, target_cwd, record.id.clone(), &notice) {
@@ -4441,7 +4440,12 @@ mod tests {
         assert!(pick_project(&projects, "/").is_none());
     }
 
-    fn mesh_msg(from: Option<u32>, from_cwd: &str, to: u32, to_cwd: &str) -> crate::mesh::MeshMessage {
+    fn mesh_msg(
+        from: Option<u32>,
+        from_cwd: &str,
+        to: u32,
+        to_cwd: &str,
+    ) -> crate::mesh::MeshMessage {
         crate::mesh::MeshMessage {
             id: "m1".into(),
             from_pty_id: from,
@@ -4481,7 +4485,10 @@ mod tests {
         assert!(mesh_concerns(&msg, &agent_caller(3, "run-1", "/elsewhere")));
         assert!(mesh_concerns(&msg, &agent_caller(7, "run-1", "/elsewhere")));
         // A pty id from another app run names a different terminal now.
-        assert!(!mesh_concerns(&msg, &agent_caller(3, "run-2", "/elsewhere")));
+        assert!(!mesh_concerns(
+            &msg,
+            &agent_caller(3, "run-2", "/elsewhere")
+        ));
         // But the tree still answers: a relaunched agent working where the old
         // one was reads the old one's traffic.
         assert!(mesh_concerns(&msg, &agent_caller(9, "run-2", "/w/app")));

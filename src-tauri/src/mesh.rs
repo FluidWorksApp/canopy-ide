@@ -93,11 +93,7 @@ pub struct MeshMessage {
     /// The message this answers, by id — what turns a log into threads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
-    #[serde(
-        rename = "ref",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<MeshRef>,
     /// The app run that delivered it. Pty ids restart at 1 every launch, so
     /// without this a message from a previous run appears to involve whatever
@@ -326,10 +322,8 @@ mod tests {
     }
 
     fn tmp_store(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "canopy-mesh-test-{}-{name}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("canopy-mesh-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("messages.jsonl")
     }
