@@ -70,13 +70,12 @@ pub struct ContextBridge {
     /// Tools the user switched off in Settings → Agents. `None` until the
     /// frontend publishes, which is the same as "everything is on".
     disabled_tools: Mutex<Option<Vec<String>>>,
-    /// Every message one agent has typed into another's terminal this run,
-    /// newest last. A message used to leave no trace anywhere: it arrived in
+    /// Every message one agent has sent another, durable across app runs —
+    /// see mesh.rs. A message used to leave no trace anywhere: it arrived in
     /// the target's composer looking exactly like something the user had typed,
     /// so neither the user nor the receiving agent could tell that another
     /// agent had reached in.
-    messages: Mutex<Vec<MeshMessage>>,
-    next_message: AtomicU64,
+    mesh: crate::mesh::MeshStore,
 }
 
 /// Who is on the other end of a bridge request, established from the
@@ -118,31 +117,6 @@ impl Caller {
         }
     }
 }
-
-/// One agent-to-agent message, as delivered.
-#[derive(Clone, serde::Serialize)]
-pub struct MeshMessage {
-    pub id: String,
-    /// The terminal that sent it, when the sender was an agent. `None` is the
-    /// companion or another root-token caller.
-    pub from_pty_id: Option<u32>,
-    pub from_cwd: Option<String>,
-    pub to_pty_id: u32,
-    /// What was actually written into the target — after flattening and
-    /// sanitising, not what the sender passed. The record is of the delivery.
-    pub text: String,
-    pub at_ms: u64,
-    /// False when the terminal died before the return that submits it could be
-    /// written, which leaves the message sitting unsent in the target's
-    /// composer. Previously this failure was discarded and nobody ever learned
-    /// the message had not landed.
-    pub submitted: bool,
-}
-
-/// How many delivered messages the log keeps. Same reasoning as
-/// MAX_ENDED_CLAIMS: it is worth having while the agents involved are alive,
-/// and they all die with the app.
-const MAX_MESSAGES: usize = 200;
 
 /// One agent's advisory claim over a set of paths, and everything that has
 /// happened to it since.
@@ -235,8 +209,7 @@ impl Default for ContextBridge {
             claims: Mutex::new(Vec::new()),
             next_claim: AtomicU64::new(1),
             disabled_tools: Mutex::new(None),
-            messages: Mutex::new(Vec::new()),
-            next_message: AtomicU64::new(1),
+            mesh: crate::mesh::MeshStore::load(),
         }
     }
 }
@@ -348,6 +321,7 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/ui", post(ui_op))
             .route("/ctx/wait", get(wait))
             .route("/ctx/claims", get(claims_list).post(claims_post))
+            .route("/ctx/mesh", post(mesh_op))
             .route("/ctx/research", post(research_op))
             .route("/ctx/notes", post(notes_op))
             .route("/ctx/tools", get(tools))
@@ -418,11 +392,11 @@ pub fn context_release_claim(app: tauri::AppHandle, owner_key: String) {
     });
 }
 
-/// Every message one agent has typed into another this run, newest last — the
-/// evidence that used to exist nowhere.
+/// Every kept agent-to-agent message, oldest first — the evidence that used to
+/// exist nowhere, and now outlives the app run (see mesh.rs).
 #[tauri::command]
-pub fn context_messages(state: tauri::State<'_, ContextBridge>) -> Vec<MeshMessage> {
-    state.messages.lock().unwrap().clone()
+pub fn context_messages(state: tauri::State<'_, ContextBridge>) -> Vec<crate::mesh::MeshMessage> {
+    state.mesh.all()
 }
 
 /// The frontend's answer to a browser-control op: `data` is a JSON document
@@ -1551,6 +1525,125 @@ fn paths_overlap(a: &str, b: &str) -> bool {
     a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
 }
 
+/// What the mesh read tool asks. One POST body rather than query params, the
+/// same shape notes and research use, so nothing here needs URL-encoding.
+#[derive(serde::Deserialize)]
+struct MeshQuery {
+    /// history | get
+    action: String,
+    id: Option<String>,
+    #[serde(rename = "withPtyId")]
+    with_pty_id: Option<u32>,
+    #[serde(rename = "refKind")]
+    ref_kind: Option<String>,
+    #[serde(rename = "refId")]
+    ref_id: Option<String>,
+    limit: Option<usize>,
+    since: Option<String>,
+}
+
+/// Which messages a caller may read: its own traffic, or traffic either end of
+/// which lives in its tree. The tree test is what keeps history readable
+/// across restarts — a relaunched agent is a new pty, but it is still working
+/// where the old one was — and it is the same posture claims take: a shared
+/// checkout is one trust domain. Root (the companion) asks for the user and
+/// sees everything.
+fn mesh_concerns(m: &crate::mesh::MeshMessage, who: &Caller) -> bool {
+    let Some(a) = who.agent() else {
+        return true;
+    };
+    let same_instance = m.instance.as_deref().map_or(true, |i| i == a.instance);
+    if same_instance && (m.from_pty_id == Some(a.pty_id) || m.to_pty_id == a.pty_id) {
+        return true;
+    }
+    [&m.from_cwd, &m.to_cwd]
+        .iter()
+        .any(|c| c.as_deref().is_some_and(|c| paths_overlap(c, &a.cwd)))
+}
+
+/// The numeric half of a mesh id, for `since` comparisons. A malformed id
+/// compares as 0, which reads as "from the beginning" — the harmless reading.
+fn mesh_seq(id: &str) -> u64 {
+    id.strip_prefix('m')
+        .and_then(|n| n.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// The mesh's read side: an agent's own message history, and one message in
+/// full. Read-only by construction — the only write door is the action
+/// handler's record calls.
+async fn mesh_op(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(q): Json<MeshQuery>,
+) -> (StatusCode, String) {
+    let Some(who) = caller(&app, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    };
+    let bridge = app.state::<ContextBridge>();
+    match q.action.as_str() {
+        "get" => {
+            let Some(id) = q.id.as_deref() else {
+                return (StatusCode::BAD_REQUEST, "get needs id, e.g. m12".into());
+            };
+            match bridge.mesh.get(id).filter(|m| mesh_concerns(m, &who)) {
+                Some(m) => (
+                    StatusCode::OK,
+                    serde_json::json!({ "message": m }).to_string(),
+                ),
+                // One answer for absent and not-yours: a 404 that
+                // distinguishes them confirms the id exists.
+                None => (
+                    StatusCode::NOT_FOUND,
+                    format!("No mesh message {id} in your history (see canopy_mesh history)"),
+                ),
+            }
+        }
+        "history" => {
+            let limit = q.limit.unwrap_or(50).clamp(1, 200);
+            let since = q.since.as_deref().map(mesh_seq).unwrap_or(0);
+            let mut messages: Vec<crate::mesh::MeshMessage> = bridge
+                .mesh
+                .all()
+                .into_iter()
+                .filter(|m| mesh_concerns(m, &who))
+                .filter(|m| since == 0 || mesh_seq(&m.id) > since)
+                .filter(|m| {
+                    q.with_pty_id.is_none()
+                        || m.from_pty_id == q.with_pty_id
+                        || Some(m.to_pty_id) == q.with_pty_id
+                })
+                .filter(|m| match (&q.ref_kind, &q.ref_id) {
+                    (None, None) => true,
+                    _ => m.reference.as_ref().is_some_and(|r| {
+                        q.ref_kind.as_deref().map_or(true, |k| r.kind == k)
+                            && q.ref_id.as_deref().map_or(true, |i| r.id == i)
+                    }),
+                })
+                .collect();
+            let total = messages.len();
+            if messages.len() > limit {
+                let excess = messages.len() - limit;
+                messages.drain(0..excess);
+            }
+            (
+                StatusCode::OK,
+                serde_json::json!({
+                    "messages": messages,
+                    "total": total,
+                    // Ids ascend with time; poll with your newest seen id.
+                    "note": "oldest first; pass since=<last id> to fetch only what's new",
+                })
+                .to_string(),
+            )
+        }
+        other => (
+            StatusCode::BAD_REQUEST,
+            format!("canopy_mesh has no action \"{other}\" — use history or get"),
+        ),
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1669,6 +1762,187 @@ fn sanitize_message(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// Longest mesh message body the store takes. Generous — a real handoff with
+/// context fits — but bounded, so the log cannot be owned by one paste.
+const MAX_MESH_TEXT: usize = 32 * 1024;
+
+/// Most items one message can share. Eight files is a handoff; more is a
+/// directory, which the receiver can list itself from one path.
+const MAX_MESH_ITEMS: usize = 8;
+
+/// How much of a mesh body the typed notice carries before pointing at the
+/// store instead.
+const MESH_NOTICE_CHARS: usize = 200;
+
+/// What the published snapshots know about the agent in a terminal: which CLI
+/// it is, and the run's title — "what it is working on" as its tab shows it.
+/// Both `None` for a terminal no snapshot names, which is not an error: the
+/// message still records the pty and cwd it can prove.
+fn agent_meta(app: &tauri::AppHandle, pty_id: u32) -> (Option<String>, Option<String>) {
+    let bridge = app.state::<ContextBridge>();
+    let snaps = bridge.snapshots.lock().unwrap();
+    for project in snaps.values() {
+        let Some(agents) = project.get("agents").and_then(|a| a.as_array()) else {
+            continue;
+        };
+        for a in agents {
+            if a.get("ptyId").and_then(|v| v.as_u64()) == Some(pty_id as u64) {
+                return (
+                    a.get("agent").and_then(|v| v.as_str()).map(str::to_string),
+                    a.get("title").and_then(|v| v.as_str()).map(str::to_string),
+                );
+            }
+        }
+    }
+    (None, None)
+}
+
+/// Assemble a mesh record from what the bridge can prove: the sender from the
+/// credential (never the body), both ends enriched with what the snapshots say
+/// they are and are working on.
+#[allow(clippy::too_many_arguments)]
+fn new_message(
+    app: &tauri::AppHandle,
+    who: &Caller,
+    to_pty_id: u32,
+    to_cwd: String,
+    text: String,
+    items: Vec<crate::mesh::MeshItem>,
+    reply_to: Option<String>,
+    reference: Option<crate::mesh::MeshRef>,
+) -> crate::mesh::NewMessage {
+    let (from_agent, from_task) = who
+        .agent()
+        .map(|a| agent_meta(app, a.pty_id))
+        .unwrap_or((None, None));
+    let (to_agent, to_task) = agent_meta(app, to_pty_id);
+    crate::mesh::NewMessage {
+        from_pty_id: who.agent().map(|a| a.pty_id),
+        from_cwd: who.agent().map(|a| a.cwd.clone()),
+        from_agent,
+        from_task,
+        to_pty_id,
+        to_cwd: Some(to_cwd),
+        to_agent,
+        to_task,
+        text,
+        items,
+        reply_to,
+        reference,
+        instance: Some(crate::pty::instance_token().to_string()),
+        at_ms: now_ms(),
+    }
+}
+
+/// Check the items a mesh send shares: real files, by absolute path, few
+/// enough to be a handoff. The kind is inferred from the extension when the
+/// sender doesn't say.
+fn validate_items(items: Option<Vec<MeshItemReq>>) -> Result<Vec<crate::mesh::MeshItem>, String> {
+    let items = items.unwrap_or_default();
+    if items.len() > MAX_MESH_ITEMS {
+        return Err(format!(
+            "a mesh message shares at most {MAX_MESH_ITEMS} items — share a directory path in \
+             the text instead"
+        ));
+    }
+    items
+        .into_iter()
+        .map(|item| {
+            let path = item.path.trim().to_string();
+            if !std::path::Path::new(&path).is_absolute() {
+                return Err(format!(
+                    "item path {path} isn't absolute — the receiver resolves nothing"
+                ));
+            }
+            if !std::path::Path::new(&path).is_file() {
+                return Err(format!("{path} isn't a file on this machine"));
+            }
+            Ok(crate::mesh::MeshItem {
+                kind: item.kind.unwrap_or_else(|| item_kind(&path)),
+                path,
+                note: item.note,
+            })
+        })
+        .collect()
+}
+
+fn item_kind(path: &str) -> String {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" => "image".into(),
+        _ => "file".into(),
+    }
+}
+
+/// The one-line notice a mesh send types into its target: the id first (it is
+/// the part that must survive), a preview of the body, and a pointer at the
+/// store whenever the preview isn't the whole message.
+fn mesh_notice(id: &str, reply_to: Option<&str>, text: &str, items: usize) -> String {
+    let flat = sanitize_message(text);
+    let preview: String = flat.chars().take(MESH_NOTICE_CHARS).collect();
+    let clipped = flat.chars().count() > MESH_NOTICE_CHARS || text.contains('\n');
+    let reply = reply_to
+        .map(|r| format!(", replying to {r}"))
+        .unwrap_or_default();
+    let mut notice = format!("[mesh {id}{reply}] {preview}");
+    if clipped || items > 0 {
+        notice.push_str(&format!(" … full message via canopy_mesh get {id}"));
+        if items > 0 {
+            notice.push_str(&format!(" ({items} shared item(s))"));
+        }
+    }
+    notice
+}
+
+/// Type a line into a terminal, then — a beat later, as its own write — the
+/// return that submits it, updating the mesh record and telling the user
+/// either way. Shared by message_agent and mesh_send: the delivery mechanics
+/// are identical, only what the line says differs.
+///
+/// The split matters: an agent TUI reads a burst that ends in CR as a paste
+/// and keeps the whole thing in its composer, so a message sent as one write
+/// sat in the other agent's prompt box until the user pressed enter. And the
+/// second write's result is re-checked because 250ms is long enough for the
+/// terminal to have gone — discarded, a message sitting unsent in a dead
+/// composer looks exactly like a delivered one.
+fn deliver_line(
+    app: &tauri::AppHandle,
+    id: u32,
+    target_cwd: String,
+    msg_id: String,
+    line: &str,
+) -> Result<(), String> {
+    app.state::<crate::pty::PtyManager>().write(id, line)?;
+    let send = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(SUBMIT_DELAY).await;
+        let submitted = send
+            .state::<crate::pty::PtyManager>()
+            .write(id, "\r")
+            .is_ok();
+        if submitted {
+            send.state::<ContextBridge>().mesh.mark_submitted(&msg_id);
+        }
+        // The user is told either way: an agent reaching into another agent's
+        // session is exactly the "something happened over here" the attention
+        // channel exists for, and it used to happen entirely in silence.
+        let _ = send.emit(
+            "agent:message",
+            serde_json::json!({
+                "id": msg_id,
+                "toPtyId": id,
+                "toCwd": target_cwd,
+                "submitted": submitted,
+            }),
+        );
+    });
+    Ok(())
+}
+
 /// A write the frontend has to perform (start a run command, open a preview
 /// tab, restart a server): validated here against the published snapshots, then
 /// handed to the UI over the app event bus. Kept an event (not a direct call)
@@ -1728,6 +2002,22 @@ struct Action {
     /// CANOPY_INSTANCE), so a pty id recycled across an app restart can't
     /// close an unrelated tab.
     instance: Option<String>,
+    /// mesh_send: files shared with the message, the message it replies to,
+    /// and a typed reference ({kind, id}) the history can be queried by.
+    items: Option<Vec<MeshItemReq>>,
+    #[serde(rename = "replyTo")]
+    reply_to: Option<String>,
+    #[serde(rename = "ref")]
+    mesh_ref: Option<crate::mesh::MeshRef>,
+}
+
+/// One shared item as the sender passes it: only the path is required, and the
+/// kind is inferred from the extension when absent.
+#[derive(serde::Deserialize)]
+struct MeshItemReq {
+    path: String,
+    kind: Option<String>,
+    note: Option<String>,
 }
 
 async fn action(
@@ -2141,80 +2431,126 @@ async fn action(
                     "message_agent needs text with something in it".into(),
                 );
             }
+            let record = snaps.mesh.record(new_message(
+                &app,
+                &who,
+                id,
+                target_cwd.clone(),
+                // What was actually delivered — after flattening and
+                // sanitising, not what the sender passed. The record is of
+                // the delivery.
+                body.clone(),
+                Vec::new(),
+                None,
+                None,
+            ));
             // The receiving agent is told where this came from. Without it a
             // message is indistinguishable from the user typing, so "another
             // agent asked me to do this" was not a thing the target could
             // establish — and anything carried in the message inherited the
             // user's authority by default.
             let line = format!("{} {body}", sender_tag(&who));
-            if let Err(e) = manager.write(id, &line) {
+            if let Err(e) = deliver_line(&app, id, target_cwd, record.id.clone(), &line) {
                 return (StatusCode::BAD_REQUEST, e);
             }
-            let msg_id = format!("m{}", snaps.next_message.fetch_add(1, Ordering::Relaxed));
-            {
-                let mut log = snaps.messages.lock().unwrap();
-                log.push(MeshMessage {
-                    id: msg_id.clone(),
-                    from_pty_id: who.agent().map(|a| a.pty_id),
-                    from_cwd: who.agent().map(|a| a.cwd.clone()),
-                    to_pty_id: id,
-                    text: body.clone(),
-                    at_ms: now_ms(),
-                    // Not yet: the return that submits it is still to come.
-                    submitted: false,
-                });
-                if log.len() > MAX_MESSAGES {
-                    let excess = log.len() - MAX_MESSAGES;
-                    log.drain(0..excess);
+            format!(
+                "Sent to terminal {id} as mesh message {rid}, tagged as coming from you. It \
+                 answers in its own session — read its reply with canopy_server_output({id}). \
+                 The send is on the mesh: canopy_mesh keeps it, and a reply can name it via \
+                 replyTo.",
+                rid = record.id
+            )
+        }
+        "mesh_send" => {
+            let Some(id) = act.pty_id else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "mesh_send needs ptyId — a terminal id from canopy_agents".into(),
+                );
+            };
+            let Some(text) = act.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+                return (StatusCode::BAD_REQUEST, "mesh_send needs text".into());
+            };
+            if text.len() > MAX_MESH_TEXT {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "mesh_send text is capped at {} KB — share the rest as a file item",
+                        MAX_MESH_TEXT / 1024
+                    ),
+                );
+            }
+            let manager = app.state::<crate::pty::PtyManager>();
+            let Some(target) = manager.get(id) else {
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!("No running Canopy terminal with id {id} (see canopy_agents)"),
+                );
+            };
+            let target_cwd = target.cwd.clone();
+            // The same bar as message_agent, because the notice arrives the
+            // same way: typed into the target. A shell would run it.
+            if let Err(e) = may_message_terminal(id, terminal_role(&app, id)) {
+                return (StatusCode::FORBIDDEN, e);
+            }
+            if who.agent().is_some_and(|a| a.pty_id == id) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "That's your own terminal — say it to the user instead.".into(),
+                );
+            }
+            let items = match validate_items(act.items) {
+                Ok(items) => items,
+                Err(e) => return (StatusCode::BAD_REQUEST, e),
+            };
+            // A reply must name a message that exists: a dangling replyTo is a
+            // typo now, not a thread later.
+            if let Some(r) = act.reply_to.as_deref() {
+                if snaps.mesh.get(r).is_none() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("replyTo \"{r}\" names no mesh message (see canopy_mesh)"),
+                    );
                 }
             }
-            // The return has to arrive as its own write, a beat later. An agent
-            // TUI reads a burst that ends in CR as a paste and keeps the whole
-            // thing in its composer — which is exactly what this did: the
-            // message appeared in the other agent's prompt box and sat there
-            // unsent until the user pressed enter. Every send from the desktop
-            // has always split the two; only this one didn't.
-            let send = app.clone();
-            let sent_id = msg_id.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(SUBMIT_DELAY).await;
-                // Re-checked, because 250ms is long enough for the terminal to
-                // have gone. The result of this write used to be discarded, so
-                // a message left sitting unsent in a dead composer looked
-                // exactly like a delivered one.
-                let bridge = send.state::<ContextBridge>();
-                let submitted = send
-                    .state::<crate::pty::PtyManager>()
-                    .write(id, "\r")
-                    .is_ok();
-                if submitted {
-                    if let Some(m) = bridge
-                        .messages
-                        .lock()
-                        .unwrap()
-                        .iter_mut()
-                        .find(|m| m.id == sent_id)
-                    {
-                        m.submitted = true;
-                    }
-                }
-                // The user is told either way: an agent reaching into another
-                // agent's session is exactly the "something happened over here"
-                // the attention channel exists for, and it used to happen
-                // entirely in silence.
-                let _ = send.emit(
-                    "agent:message",
-                    serde_json::json!({
-                        "id": sent_id,
-                        "toPtyId": id,
-                        "toCwd": target_cwd,
-                        "submitted": submitted,
-                    }),
-                );
-            });
+            let record = snaps.mesh.record(new_message(
+                &app,
+                &who,
+                id,
+                target_cwd.clone(),
+                text.to_string(),
+                items,
+                act.reply_to.clone(),
+                act.mesh_ref.clone(),
+            ));
+            // The full body lives on the mesh; what lands in the terminal is a
+            // one-line notice carrying the id, so the target knows to look —
+            // and a 40-line handoff stops arriving as 40 keystroke lines.
+            let notice = format!(
+                "{} {}",
+                sender_tag(&who),
+                mesh_notice(
+                    &record.id,
+                    record.reply_to.as_deref(),
+                    text,
+                    record.items.len()
+                )
+            );
+            snaps.mesh.note_delivery(&record.id, &notice);
+            if let Err(e) = deliver_line(&app, id, target_cwd, record.id.clone(), &notice) {
+                return (StatusCode::BAD_REQUEST, e);
+            }
             format!(
-                "Sent to terminal {id}, tagged as coming from you. It answers in its own \
-                 session — read its reply with canopy_server_output({id})."
+                "Sent mesh message {rid} to terminal {id}: a one-line notice with the id was \
+                 typed into its session, and the full message ({}between you on the mesh). It \
+                 can read it with canopy_mesh get {rid} and reply with canopy_mesh_send \
+                 replyTo \"{rid}\".",
+                if record.items.is_empty() {
+                    "kept "
+                } else {
+                    "with its shared items, kept "
+                },
+                rid = record.id,
             )
         }
         other => return (StatusCode::BAD_REQUEST, format!("unknown action: {other}")),
@@ -4102,5 +4438,99 @@ mod tests {
         assert!(pick_project(&projects, "/Users/dev/app").is_none());
         // An empty root must not match every directory on the machine.
         assert!(pick_project(&projects, "/").is_none());
+    }
+
+    fn mesh_msg(
+        from: Option<u32>,
+        from_cwd: &str,
+        to: u32,
+        to_cwd: &str,
+    ) -> crate::mesh::MeshMessage {
+        crate::mesh::MeshMessage {
+            id: "m1".into(),
+            from_pty_id: from,
+            from_cwd: (!from_cwd.is_empty()).then(|| from_cwd.to_string()),
+            from_agent: None,
+            from_task: None,
+            to_pty_id: to,
+            to_cwd: (!to_cwd.is_empty()).then(|| to_cwd.to_string()),
+            to_agent: None,
+            to_task: None,
+            text: "x".into(),
+            delivered: None,
+            items: Vec::new(),
+            reply_to: None,
+            reference: None,
+            instance: Some("run-1".into()),
+            at_ms: 0,
+            submitted: true,
+        }
+    }
+
+    fn agent_caller(pty_id: u32, instance: &str, cwd: &str) -> Caller {
+        Caller::Agent(AgentIdentity {
+            pty_id,
+            instance: instance.into(),
+            cwd: cwd.into(),
+        })
+    }
+
+    /// The mesh's read scoping: your own traffic, or traffic in your tree —
+    /// and never another project's. Same posture as claims, and the tree arm
+    /// is what keeps history readable after a restart hands out new pty ids.
+    #[test]
+    fn mesh_history_is_scoped_like_claims() {
+        let msg = mesh_msg(Some(3), "/w/app", 7, "/w/app/.claude/worktrees/x");
+        // Sender and receiver both see it, by credential.
+        assert!(mesh_concerns(&msg, &agent_caller(3, "run-1", "/elsewhere")));
+        assert!(mesh_concerns(&msg, &agent_caller(7, "run-1", "/elsewhere")));
+        // A pty id from another app run names a different terminal now.
+        assert!(!mesh_concerns(
+            &msg,
+            &agent_caller(3, "run-2", "/elsewhere")
+        ));
+        // But the tree still answers: a relaunched agent working where the old
+        // one was reads the old one's traffic.
+        assert!(mesh_concerns(&msg, &agent_caller(9, "run-2", "/w/app")));
+        assert!(mesh_concerns(&msg, &agent_caller(9, "run-2", "/w/app/src")));
+        // A different project sees nothing.
+        assert!(!mesh_concerns(&msg, &agent_caller(9, "run-2", "/w/other")));
+        // The companion asks for the user and sees everything.
+        assert!(mesh_concerns(&msg, &Caller::Root));
+    }
+
+    #[test]
+    fn a_mesh_notice_carries_the_id_and_points_at_the_store_when_clipped() {
+        // Short, single line, no items: the notice IS the message.
+        let n = mesh_notice("m7", None, "take src/auth.ts", 0);
+        assert_eq!(n, "[mesh m7] take src/auth.ts");
+        // A reply names its thread.
+        let n = mesh_notice("m8", Some("m7"), "done", 0);
+        assert!(n.starts_with("[mesh m8, replying to m7] done"), "got: {n}");
+        // Multi-line: flattened preview plus the pointer, because the real
+        // body is on the mesh, not in the keystrokes.
+        let n = mesh_notice("m9", None, "line one\nline two", 0);
+        assert!(n.contains("line one line two"), "got: {n}");
+        assert!(n.contains("canopy_mesh get m9"), "got: {n}");
+        // Long: clipped at the char budget, never mid-character.
+        let long = "é".repeat(MESH_NOTICE_CHARS + 50);
+        let n = mesh_notice("m10", None, &long, 0);
+        assert!(n.contains("canopy_mesh get m10"), "got: {n}");
+        // Items always earn the pointer, and are counted.
+        let n = mesh_notice("m11", None, "see attached", 2);
+        assert!(n.contains("(2 shared item(s))"), "got: {n}");
+    }
+
+    #[test]
+    fn mesh_ids_order_by_their_sequence() {
+        assert!(mesh_seq("m10") > mesh_seq("m9"));
+        assert_eq!(mesh_seq("not-an-id"), 0);
+    }
+
+    #[test]
+    fn shared_items_are_typed_by_what_they_are() {
+        assert_eq!(item_kind("/w/shot.PNG"), "image");
+        assert_eq!(item_kind("/w/build.log"), "file");
+        assert_eq!(item_kind("/w/noext"), "file");
     }
 }

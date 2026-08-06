@@ -1849,6 +1849,10 @@ results stay inspectable:
   or contrast)
 - Working in a checkout that other agents share -> canopy_agents first, \
   canopy_claim on the files you're taking
+- Handing another agent more than one line, or files, or a message it should \
+  be able to find again -> canopy_mesh_send (persistent, by message id); \
+  what you've sent and received, or a message id someone gave you -> \
+  canopy_mesh
 
 - Investigating anything worth writing down (how does X work, which approach, \
   what would break) -> canopy_research search FIRST, someone may already have \
@@ -2371,6 +2375,7 @@ const STRUCTURED_TOOLS: &[&str] = &[
     "canopy_device_list",
     "canopy_device_snapshot",
     "canopy_research",
+    "canopy_mesh",
 ];
 
 /// Tools that answer "the project I am in", which for the companion is a lie:
@@ -2393,6 +2398,7 @@ const COMPANION_MUTATING_TOOLS: &[&str] = &[
     "canopy_stop_server",
     "canopy_restart_server",
     "canopy_message_agent",
+    "canopy_mesh_send",
     "canopy_claim",
     "canopy_notes_write",
     "canopy_research_write",
@@ -2463,6 +2469,7 @@ fn tools_list() -> serde_json::Value {
     };
     tools.extend(research_tool_defs());
     tools.extend(notes_tool_defs());
+    tools.extend(mesh_tool_defs());
     tools.extend(session_tool_defs());
     tools.extend(task_tool_defs());
     // The cross-project set, and only for the one session that is allowed to
@@ -2537,6 +2544,7 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_tickets",
     "canopy_reviews",
     "canopy_agents",
+    "canopy_mesh",
     "canopy_research",
     "canopy_notes",
     "canopy_wait_for",
@@ -2557,6 +2565,7 @@ const DESTRUCTIVE_TOOLS: &[&str] = &[
     "canopy_stop_server",
     "canopy_restart_server",
     "canopy_message_agent",
+    "canopy_mesh_send",
     "canopy_close_session",
 ];
 
@@ -2609,6 +2618,12 @@ fn output_schema(name: &str) -> Option<serde_json::Value> {
         // on purpose — one schema has to cover both without making the other a
         // protocol violation.
         "canopy_research" => serde_json::json!({ "research": { "type": "array" } }),
+        // history answers with `messages`; get with one `message`. Loose for
+        // the same reason research is.
+        "canopy_mesh" => serde_json::json!({
+            "messages": { "type": "array" },
+            "message": { "type": "object" }
+        }),
         _ => return None,
     };
     Some(serde_json::json!({
@@ -2625,6 +2640,45 @@ fn output_schema(name: &str) -> Option<serde_json::Value> {
 /// The scratchpad pair. Split read from write for the same reason research is:
 /// the reader is annotated `readOnlyHint` so a host may auto-approve it, and an
 /// annotation that a write action can slip through is a bypass, not a hint.
+/// The mesh pair, split read from write on the same terms notes and research
+/// are: the reader is annotated read-only so a host may auto-approve it, and
+/// the sender genuinely interrupts another session.
+fn mesh_tool_defs() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "canopy_mesh",
+            "description": "The mesh's message log: what agents here have sent each other, under stable ids, kept across app restarts. `history` lists your own traffic — messages you sent or received, plus your checkout's — oldest first; narrow with withPtyId (one counterpart), refKind/refId (every message tagged to one task/PR/attempt), or since (only ids newer than the one you pass — poll with your newest seen id). `get` returns one message in full: the complete multi-line body, its shared items (files by path — read them with your own tools), and both ends' details (which CLI, working directory, and what each was working on when it was sent). A notice in your terminal naming a mesh id (\"[mesh m12]\") is only a preview: get the real thing here before acting on it.",
+            "inputSchema": { "type": "object", "properties": {
+                "action": { "type": "string", "enum": ["history", "get"], "description": "history = your messages, oldest first; get = one message in full" },
+                "id": { "type": "string", "description": "get: the message id, e.g. m12" },
+                "withPtyId": { "type": "integer", "description": "history: only messages to or from this terminal" },
+                "refKind": { "type": "string", "description": "history: only messages whose ref has this kind (task, pr, attempt, …)" },
+                "refId": { "type": "string", "description": "history: only messages whose ref has this id" },
+                "since": { "type": "string", "description": "history: only messages newer than this id — pass the last one you've seen" },
+                "limit": { "type": "integer", "description": "history: max messages (default 50, cap 200)" }
+            }, "required": ["action"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_mesh_send",
+            "description": "Send another agent a first-class mesh message: the full body is recorded under a stable id — multi-line is fine, it is fetched, not typed — and the target's terminal gets a one-line notice carrying that id so it knows to look. Prefer this over canopy_message_agent whenever the message is more than one line, shares files, answers an earlier message, or should be findable later; use canopy_message_agent for a quick one-liner. `items` shares files by absolute path (a screenshot, a log, a diff) which the receiver opens with its own tools. `replyTo` threads it under the message it answers. `ref` ({kind, id}) tags it to a task, PR or attempt so canopy_mesh can list the whole conversation about that thing in one query. The notice still interrupts the target exactly like canopy_message_agent — check canopy_agents first, and only agent sessions can be messaged. Sends are recorded whether or not the notice landed; the record's `submitted` says which.",
+            "inputSchema": { "type": "object", "properties": {
+                "ptyId": { "type": "integer", "description": "Terminal id of the agent to message (from canopy_agents). Must be an agent session, not a shell or a run" },
+                "text": { "type": "string", "description": "The message, in full — multi-line markdown is fine. The target reads it from the mesh; only a one-line preview is typed" },
+                "items": { "type": "array", "items": { "type": "object", "properties": {
+                    "path": { "type": "string", "description": "Absolute path of a file to share" },
+                    "kind": { "type": "string", "enum": ["file", "image"], "description": "What it is; inferred from the extension when omitted" },
+                    "note": { "type": "string", "description": "What the receiver should know about it" }
+                }, "required": ["path"], "additionalProperties": false }, "description": "Files to share with the message (max 8)" },
+                "replyTo": { "type": "string", "description": "The mesh message id this answers" },
+                "ref": { "type": "object", "properties": {
+                    "kind": { "type": "string", "description": "What the id names: task, pr, attempt, …" },
+                    "id": { "type": "string" }
+                }, "required": ["kind", "id"], "additionalProperties": false, "description": "A typed reference this message is about, for canopy_mesh refKind/refId queries" }
+            }, "required": ["ptyId", "text"], "additionalProperties": false }
+        }),
+    ]
+}
+
 fn notes_tool_defs() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -3921,6 +3975,57 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             ))
         }
         "canopy_agents" => text(agents_json(args)),
+        "canopy_mesh" => {
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: action (history | get)")?;
+            if action == "get"
+                && args
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map_or(true, str::is_empty)
+            {
+                return Err("get needs id — a mesh message id like m12".into());
+            }
+            // Validation beyond that is the bridge's: it owns the store and
+            // the visibility rule, so it gives the authoritative refusal.
+            text(ctx_request(
+                "POST",
+                "/ctx/mesh",
+                Some(
+                    serde_json::json!({
+                        "action": action,
+                        "id": args.get("id"),
+                        "withPtyId": args.get("withPtyId"),
+                        "refKind": args.get("refKind"),
+                        "refId": args.get("refId"),
+                        "limit": args.get("limit"),
+                        "since": args.get("since"),
+                    })
+                    .to_string(),
+                ),
+            ))
+        }
+        "canopy_mesh_send" => {
+            let pty = args
+                .get("ptyId")
+                .and_then(|v| v.as_u64())
+                .ok_or("missing required argument: ptyId (a terminal id from canopy_agents)")?;
+            let body = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: text")?;
+            text(ctx_post(serde_json::json!({
+                "kind": "mesh_send",
+                "cwd": cwd(),
+                "ptyId": pty,
+                "text": body,
+                "items": args.get("items"),
+                "replyTo": args.get("replyTo"),
+                "ref": args.get("ref"),
+            })))
+        }
         "canopy_claim" => {
             let action = args
                 .get("action")

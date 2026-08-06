@@ -75,6 +75,7 @@ interface TitleBarProps {
   onCloseProject: (id: string) => void;
   onHibernateProject: (id: string) => void;
   onWakeProject: (id: string) => void;
+  onToggleVibe: (id: string) => void;
   onEditProject: (p: Project) => void;
   onStopCollab: () => void;
   onNewProject: () => void;
@@ -101,6 +102,7 @@ function TitleBarImpl({
   onCloseProject,
   onHibernateProject,
   onWakeProject,
+  onToggleVibe,
   onEditProject,
   onStopCollab,
   onNewProject,
@@ -108,6 +110,8 @@ function TitleBarImpl({
 }: TitleBarProps) {
   const fullscreen = useMacFullscreen();
   const menu = useContextMenu();
+  const activeProject = openProjects.find((project) => project.id === activeId);
+  const buildMode = activeProject?.vibe?.enabled === true;
   return (
     // data-tauri-drag-region makes the bar background draggable (like grabbing
     // a native titlebar). Tauri checks the mousedown target, so interactive
@@ -196,6 +200,22 @@ function TitleBarImpl({
         </Button>
       </div>
       <div className="titlebar-spacer" data-tauri-drag-region />
+      {activeProject && !(activeProject.id in hibernated) && (
+        <button
+          type="button"
+          className="project-mode-toggle"
+          aria-label={`Switch to ${buildMode ? "Engineer" : "Build"} mode`}
+          aria-pressed={buildMode}
+          title={`Switch ${activeProject.name} to ${buildMode ? "Engineer" : "Build"} mode`}
+          onClick={() => onToggleVibe(activeProject.id)}
+        >
+          <span className={buildMode ? "active" : ""}>Build</span>
+          <span className="project-mode-arrow" aria-hidden>
+            ⇄
+          </span>
+          <span className={buildMode ? "" : "active"}>Engineer</span>
+        </button>
+      )}
       {collabActive && (
         <div
           className="collab-live"

@@ -20,6 +20,12 @@ export interface Component {
   commands?: RunCommand[];
 }
 
+export interface VibeConfig {
+  enabled: boolean;
+  component?: string;
+  runCommand?: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -34,6 +40,8 @@ export interface Project {
    *  offering a job that doesn't apply there. Lives on the project so it
    *  travels with an exported project file. */
   customTasks?: CustomMicroTask[];
+  /** Portable, non-secret configuration for the project's Build lens. */
+  vibe?: VibeConfig;
 }
 
 export interface WorkspaceState {
@@ -264,6 +272,18 @@ export interface AgentCli {
    * curl installer vs npm), whereas the self-updater updates in place.
    */
   update?: string;
+
+  /**
+   * The CLI's own "never stop to ask permission" flag, when it has one.
+   * Appended to every launch — fresh, prompted, and resumed — while
+   * Settings → Agents → "Skip permission prompts" is on.
+   *
+   * Same rule as `resume`: only syntax verified against the CLI's own --help
+   * goes in here, because a guessed flag either refuses to launch or silently
+   * means something else. Absent means the CLI simply launches as it always
+   * did and keeps asking (amp: its help names no such flag).
+   */
+  skipPermissions?: string;
 }
 
 /**
@@ -316,6 +336,8 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // Verified: claude takes the opening prompt as a positional argument and
     // stays interactive.
     prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
+    // Verified: `--dangerously-skip-permissions  Bypass all permission checks.`
+    skipPermissions: "--dangerously-skip-permissions",
   },
   {
     id: "codex",
@@ -331,6 +353,10 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // Verified: codex takes a positional prompt and stays interactive.
     // (`codex exec` is the headless one — deliberately not that.)
     prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
+    // Verified: `--dangerously-bypass-approvals-and-sandbox  Skip all
+    // confirmation prompts and execute commands without sandboxing`, and
+    // `codex resume --help` lists the same flag, so resumes carry it too.
+    skipPermissions: "--dangerously-bypass-approvals-and-sandbox",
   },
   {
     id: "amp",
@@ -344,18 +370,26 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     update: "amp update",
     // Verified: `amp threads continue <threadId>`; thread ids look like T-<uuid>.
     resume: (id, bin) => `${bin} threads continue ${id}`,
+    // No skipPermissions, verified against the owner's manual: today's Amp
+    // does not ask before running tools unless permissions are configured
+    // (settings-driven — amp.permissions / amp.dangerouslyAllowAll). The old
+    // --dangerously-allow-all flag is gone, so there is nothing to append —
+    // and a removed flag would refuse to launch.
   },
   {
     id: "aider",
     name: "Aider",
     bin: "aider",
     icon: "a",
-    // `-U` makes this the update command too.
-    install: "python3 -m pip install -U aider-chat",
+    // `-U` makes this the update command too; only-if-needed keeps a global
+    // env's shared deps unbumped (the form aider's own docs use, 2026-08-06).
+    install: "python3 -m pip install -U --upgrade-strategy only-if-needed aider-chat",
     // The console script imports `aider`; `aider-chat` is only the
     // distribution name, which nothing on disk states.
     pkgs: ["py:aider"],
     latestUrl: "https://pypi.org/pypi/aider-chat/json",
+    // Verified: `--yes-always  Always say yes to every confirmation`.
+    skipPermissions: "--yes-always",
   },
   // Gemini CLI is gone from this list on purpose: Google killed its "Login
   // with Google" path for individuals (2026-06-18, "migrate to the Antigravity
@@ -375,6 +409,9 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // Verified: `--conversation <uuid>` resumes by id (`-c` takes the most
     // recent). It is NOT `--resume`.
     resume: (id, bin) => `${bin} --conversation ${id}`,
+    // Verified: `--dangerously-skip-permissions  Auto-approve all tool
+    // permission requests without prompting` — same spelling as claude's.
+    skipPermissions: "--dangerously-skip-permissions",
   },
   {
     id: "opencode",
@@ -389,6 +426,10 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // Verified: `-s, --session <id>` = "session id to continue". Treat the id as
     // opaque — enumerate via `opencode session list --format json`.
     resume: (id, bin) => `${bin} --session ${id}`,
+    // Verified: `--auto  auto-approve permissions that are not explicitly
+    // denied (dangerous!)` — a flag of the default TUI command, so it rides
+    // along with `--session` resumes as well.
+    skipPermissions: "--auto",
   },
   // oh-my-pi. NB: the bare `omp` npm package is an unrelated squat — the
   // official installer is the omp.sh script.
@@ -402,6 +443,10 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     pkgs: ["brew:omp", "npm:@oh-my-pi/pi-coding-agent"],
     // Verified: `-r, --resume=<value>  Resume a session (by ID prefix, path...)`.
     resume: (id, bin) => `${bin} --resume ${id}`,
+    // Verified: `--auto-approve  Auto-approve all tool calls (skip approval
+    // prompts)`. NOT `--approval-mode=yolo`: --auto-approve is the standalone
+    // spelling its help gives for exactly this.
+    skipPermissions: "--auto-approve",
   },
 ];
 
@@ -609,8 +654,11 @@ export function remoteCliMetadata(installed: Record<string, boolean>): RemoteCli
   return AGENT_CLIS.map((cli) => ({
     id: cli.id,
     name: cli.name,
-    command: shellBin(cli.bin),
-    resumeTemplate: cli.resume?.(SESSION_ID_TOKEN),
+    // Through launchCommand/withSkipPermissions, so an agent started from the
+    // remote portal honours the skip-permissions setting like a local one —
+    // re-sent on each metadata push, which is when the setting is re-read.
+    command: launchCommand(cli),
+    resumeTemplate: cli.resume && withSkipPermissions(cli.resume(SESSION_ID_TOKEN), cli),
     available: !!installed[cli.bin],
     custom: cli.custom,
   }));
@@ -889,6 +937,31 @@ export const updateCommand = (cli: AgentCli) => cli.update ?? cli.install;
  * than being excluded from the feature (which is what hardcoding one CLI
  * amounted to).
  */
+/** `command` with `cli`'s skip-permissions flag appended — only while the
+ *  dangerouslySkipPermissions setting is on and the CLI has a verified flag.
+ *
+ *  Read at command-build time rather than resolved into the registry, so
+ *  flipping the setting reaches the very next launch without a refresh —
+ *  and a session already running keeps the permission mode it started with,
+ *  which is the only honest thing a launch flag can promise.
+ *
+ *  Appended, never inserted: every verified flag is a root-level option of
+ *  its CLI's interactive command, legal after positionals (claude, codex) and
+ *  after other options (agy, opencode, omp) — whereas inserting before a
+ *  subcommand is exactly the unverified-syntax gamble these entries ban. */
+function withSkipPermissions(command: string, cli: AgentCli | undefined): string {
+  const flag = cli?.skipPermissions;
+  return flag && getSettings().dangerouslySkipPermissions ? `${command} ${flag}` : command;
+}
+
+/** The command that launches `cli` bare — the resolved binary plus, while the
+ *  setting is on, its skip-permissions flag. Launch sites read this instead of
+ *  shellBin(cli.bin) so "skip permissions" reaches every way an agent starts,
+ *  not just the ones with a prompt in hand. */
+export function launchCommand(cli: AgentCli): string {
+  return withSkipPermissions(shellBin(cli.bin), cli);
+}
+
 export function startCommand(
   agentId: string,
   text: string,
@@ -896,14 +969,16 @@ export function startCommand(
   const cli = AGENT_CLIS.find((c) => c.id === agentId);
   if (!cli) return null;
   return cli.prompt
-    ? { command: cli.prompt(text), typePrompt: false }
-    : { command: shellBin(cli.bin), typePrompt: true };
+    ? { command: withSkipPermissions(cli.prompt(text), cli), typePrompt: false }
+    : { command: launchCommand(cli), typePrompt: true };
 }
 
 export function restoreCommand(agentId: string, sessionId: string): string | null {
   const id = sessionId.trim();
   if (!id) return null;
-  return AGENT_CLIS.find((c) => c.id === agentId)?.resume?.(id) ?? null;
+  const cli = AGENT_CLIS.find((c) => c.id === agentId);
+  const cmd = cli?.resume?.(id);
+  return cmd ? withSkipPermissions(cmd, cli) : null;
 }
 
 /** The session id a terminal's command carries when it was launched to resume a
@@ -925,9 +1000,14 @@ export function resumeSessionId(command: string | null | undefined): string | nu
     // Each spelling as written *and* as quoted: a path with a space in it goes
     // to the shell quoted, so that is the form a remembered resume command
     // carries — while an id from before the override is still bare.
-    return [...new Set([...bins].flatMap((bin) => [bin, shellBin(bin)]))].map((bin) =>
-      d.resume?.(SENTINEL, bin),
-    );
+    return [...new Set([...bins].flatMap((bin) => [bin, shellBin(bin)]))].flatMap((bin) => {
+      const tmpl = d.resume?.(SENTINEL, bin);
+      // The flagged spelling is tried unconditionally, not only while the
+      // setting is on: a command remembered from a skip-permissions launch
+      // must still yield its session id after the setting is switched off,
+      // or every such session stops being resumable the moment it's disabled.
+      return tmpl && d.skipPermissions ? [tmpl, `${tmpl} ${d.skipPermissions}`] : [tmpl];
+    });
   });
   for (const tmpl of templates) {
     if (!tmpl) continue;

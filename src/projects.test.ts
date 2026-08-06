@@ -7,6 +7,10 @@ import {
   agentIdTaken,
   BUILTIN_AGENT_CLIS,
   customCliIssue,
+  exportProject,
+  importFile,
+  launchCommand,
+  loadWorkspace,
   newCustomCliId,
   refreshAgentClis,
   remoteCliMetadata,
@@ -20,6 +24,7 @@ import {
 import { getSettings, updateSettings } from "./settings";
 import type { CustomMicroTask } from "./microTasks";
 import type { CustomAgentCli, Project, WorkspaceState } from "./projects";
+import { mockCommands } from "./test/setup";
 
 /** Point a registry entry at a different binary, as Settings → Agents does. */
 const rebind = (bins: Record<string, string>) => {
@@ -130,6 +135,77 @@ describe("resumeSessionId (inverse of restoreCommand)", () => {
     expect(resumeSessionId(null)).toBeNull();
     expect(resumeSessionId(undefined)).toBeNull();
     expect(resumeSessionId("")).toBeNull();
+  });
+});
+
+describe("dangerouslySkipPermissions", () => {
+  const skipping = (on: boolean) => updateSettings({ dangerouslySkipPermissions: on });
+  afterEach(() => skipping(false));
+
+  it("changes nothing while off — the default", () => {
+    expect(startCommand("claude", "hi")?.command).toBe("claude 'hi'");
+    expect(restoreCommand("claude", "abc")).toBe("claude --resume abc");
+    expect(launchCommand(AGENT_CLIS.find((c) => c.id === "codex")!)).toBe("codex");
+  });
+
+  it("appends each CLI's own verified flag to fresh starts", () => {
+    skipping(true);
+    expect(startCommand("claude", "hi")?.command).toBe(
+      "claude 'hi' --dangerously-skip-permissions",
+    );
+    expect(startCommand("codex", "hi")?.command).toBe(
+      "codex 'hi' --dangerously-bypass-approvals-and-sandbox",
+    );
+    // No prompt builder: the flag still reaches the bare launch.
+    expect(startCommand("opencode", "hi")).toEqual({
+      command: "opencode --auto",
+      typePrompt: true,
+    });
+    expect(launchCommand(AGENT_CLIS.find((c) => c.id === "omp")!)).toBe("omp --auto-approve");
+  });
+
+  it("appends to resume commands, and resumeSessionId still inverts them", () => {
+    skipping(true);
+    expect(restoreCommand("claude", "abc")).toBe(
+      "claude --resume abc --dangerously-skip-permissions",
+    );
+    // Verified against `codex resume --help`: resume takes the same flag.
+    expect(restoreCommand("codex", "s-1")).toBe(
+      "codex resume s-1 --dangerously-bypass-approvals-and-sandbox",
+    );
+    for (const cli of AGENT_CLIS) {
+      const cmd = restoreCommand(cli.id, "SID42");
+      if (cmd) expect(resumeSessionId(cmd)).toBe("SID42");
+    }
+  });
+
+  it("still inverts a flagged resume command after the setting is turned off", () => {
+    skipping(true);
+    const cmd = restoreCommand("claude", "abc123")!;
+    skipping(false);
+    expect(resumeSessionId(cmd)).toBe("abc123");
+  });
+
+  it("leaves a CLI with no verified flag alone (amp)", () => {
+    skipping(true);
+    expect(startCommand("amp", "x")).toEqual({ command: "amp", typePrompt: true });
+    expect(restoreCommand("amp", "T-9")).toBe("amp threads continue T-9");
+  });
+
+  it("leaves custom CLIs alone — we know nothing about their flags", () => {
+    skipping(true);
+    addClis([{ id: "acme", name: "Acme", bin: "acme", promptArgs: "go {prompt}" }]);
+    expect(startCommand("acme", "hi")?.command).toBe("acme go 'hi'");
+  });
+
+  it("reaches agents started from the remote portal", () => {
+    skipping(true);
+    const rows = remoteCliMetadata({ claude: true });
+    expect(rows.find((row) => row.id === "claude")).toMatchObject({
+      command: "claude --dangerously-skip-permissions",
+      resumeTemplate:
+        "claude --resume __CANOPY_SESSION_ID__ --dangerously-skip-permissions",
+    });
   });
 });
 
@@ -400,6 +476,42 @@ describe("SHELL_PATTERN", () => {
   it("does not match a non-shell", () => {
     expect(SHELL_PATTERN.test("node")).toBe(false);
     expect(SHELL_PATTERN.test("zshfoo")).toBe(false);
+  });
+});
+
+describe("project vibe serialization", () => {
+  it("round-trips the portable config through project export and import", async () => {
+    let exported = "";
+    mockCommands({
+      workspace_export: ({ data }: Record<string, unknown>) => {
+        exported = String(data);
+      },
+      workspace_import: () => exported,
+    });
+    const project: Project = {
+      id: "p-vibe",
+      name: "Vibe app",
+      components: [{ label: "app", path: "/repo/app" }],
+      vibe: { enabled: true, component: "app", runCommand: "dev" },
+    };
+
+    await exportProject("/tmp/vibe.canopy-project", project);
+
+    expect((await importFile("/tmp/vibe.canopy-project")).projects).toEqual([project]);
+  });
+
+  it("loads a pre-vibe workspace without migration", async () => {
+    mockCommands({
+      store_load: JSON.stringify({
+        projects: [{ id: "old", name: "Old project", components: [] }],
+        openIds: ["old"],
+        activeId: "old",
+      }),
+    });
+
+    const state = await loadWorkspace();
+
+    expect(state.projects[0].vibe).toBeUndefined();
   });
 });
 

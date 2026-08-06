@@ -646,6 +646,41 @@ body,
   border-color: var(--border-strong);
 }
 
+.project-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 2px 5px;
+  color: var(--text-dim);
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  corner-shape: squircle;
+  font: 600 var(--fs-xs) / 1 var(--font-sans);
+  cursor: pointer;
+}
+
+.project-mode-toggle:hover {
+  border-color: var(--border-strong);
+}
+
+.project-mode-toggle > span:not(.project-mode-arrow) {
+  padding: 4px 6px;
+  border-radius: calc(var(--r-xs) - 2px);
+  corner-shape: squircle;
+}
+
+.project-mode-toggle > .active {
+  color: var(--text);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-1);
+}
+
+.project-mode-arrow {
+  color: var(--text-faint);
+}
+
 /* ---------- project manager (CRUD modal) ---------- */
 
 .project-manager {
@@ -753,6 +788,40 @@ body,
   flex: 1;
   min-height: 0;
   position: relative;
+}
+
+.vibe-chat-placeholder {
+  display: none;
+}
+
+.project-view-vibe .vibe-chat-placeholder {
+  display: flex;
+  flex: 0 0 clamp(300px, 28vw, 380px);
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 22px;
+  background: var(--bg-alt);
+  border-right: 1px solid var(--border);
+}
+
+.app.zen .vibe-chat-placeholder {
+  display: none;
+}
+
+.vibe-chat-placeholder-title {
+  color: var(--text);
+  font-size: var(--fs-lg);
+  font-weight: 650;
+}
+
+.vibe-chat-placeholder-note {
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+}
+
+.project-view-vibe .project-main > .pane-bar {
+  display: none;
 }
 
 /* One status dot per agent tab, replacing the per-agent glyph. Gray steady =
@@ -1825,6 +1894,29 @@ body.resizing-side * {
   margin-top: 4px;
   border-top: 1px solid var(--border);
   padding-top: 8px;
+}
+
+/* The panel is a couple of screens tall and opens bottom-anchored, so the
+   title is the first thing scrolling pushes out of reach. Pinned instead:
+   sticky offsets from the scrollport's visible edge, so the header cannot
+   end up beyond the viewport at any scroll position or window height. The
+   background layers the raised tint over the near-opaque overlay because
+   vitrine's --bg-raised alone is a 5% wash rows would show through. */
+.stats-panel > .ap-head:first-child {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: linear-gradient(var(--bg-raised), var(--bg-raised)),
+    var(--bg-overlay);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The pinned title's bottom rule already separates it from the section that
+   follows — a border-top there would double the line. */
+.stats-panel > .ap-head:first-child + .stats-section-head {
+  margin-top: 0;
+  border-top: 0;
+  padding-top: 6px;
 }
 
 /* Plan limits: one group per CLI, one bar per rolling window. */
@@ -8808,6 +8900,21 @@ body.dragging-tab * {
   align-items: center;
   gap: 5px;
   font-size: 12px;
+}
+
+/* The warning under a switch that disarms a safety. Bordered in the danger
+   colour rather than filled with it: it has to read as a standing condition
+   the user agreed to, not a transient error toast. */
+.set-danger-note {
+  margin-top: 8px;
+  padding: 8px 10px;
+  max-width: 60ch;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
 }
 
 /* A stack of switches that each need a line of explanation: the box stays on
