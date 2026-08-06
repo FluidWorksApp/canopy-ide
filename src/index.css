@@ -790,6 +790,36 @@ body,
   position: relative;
 }
 
+.fleet-launch-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  padding: 6px 10px 6px 12px;
+  color: var(--text);
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-xs);
+}
+
+.fleet-launch-note-degraded {
+  border-bottom-color: color-mix(in srgb, var(--warn) 50%, var(--border));
+}
+
+.fleet-launch-note-unusable {
+  border-bottom-color: color-mix(in srgb, var(--danger) 60%, var(--border));
+}
+
+.fleet-launch-note button {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
 .vibe-chat-placeholder {
   display: none;
 }
@@ -5337,6 +5367,25 @@ body.dragging-tab * {
   top: 3px;
   width: 100%;
   height: 2px;
+}
+
+/* The half-pane a dragged tab would land in. Above the pane heads (z 6) and
+   the dividers (z 12), under nothing — it is the drag's only feedback. Left/
+   top/width/height animate so the highlight glides between zones instead of
+   teleporting as the pointer crosses a midline. */
+.pane-drop-preview {
+  position: absolute;
+  z-index: 14;
+  pointer-events: none;
+  box-sizing: border-box;
+  border: 2px solid color-mix(in srgb, var(--accent) 75%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  transition:
+    left 120ms ease-out,
+    top 120ms ease-out,
+    width 120ms ease-out,
+    height 120ms ease-out;
 }
 
 .tab-multiplex-icon {
@@ -14050,6 +14099,9 @@ textarea,
 .ticket-view-actions {
   display: flex;
   align-items: center;
+  /* Actions live on the right edge, like the header row above and every
+     dialog footer; flex-end keeps them there even when the note wraps away. */
+  justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
   padding: 10px 18px;
@@ -14069,6 +14121,14 @@ textarea,
 .ticket-view-note {
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* The footer's explainer takes the slack so the buttons sit at the right
+   edge; it may shrink and wrap, the controls never do. */
+.ticket-view-actions .ticket-view-note {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
 }
 
 .tab-ticket-icon {
@@ -18571,6 +18631,89 @@ a.btn-sm {
 .agent-chip-active {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
+}
+
+.fleet-readout {
+  position: relative;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
+.fleet-readout table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-xs);
+}
+
+.fleet-readout th,
+.fleet-readout td {
+  padding: 7px 9px;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--border);
+}
+
+.fleet-readout tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.fleet-readout th {
+  color: var(--text-dim);
+  background: var(--bg-alt);
+  font-weight: 600;
+}
+
+.fleet-route-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.fleet-route-profile {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-faint);
+}
+
+.fleet-state {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--text-dim);
+  background: var(--bg-raised);
+}
+
+.fleet-state-ready {
+  color: var(--ok);
+}
+
+.fleet-state-degraded {
+  color: var(--warn);
+}
+
+.fleet-state-unusable {
+  color: var(--danger);
+}
+
+.fleet-reasons {
+  color: var(--text-dim);
+}
+
+.fleet-readout-loading {
+  padding: 8px 9px;
+  color: var(--text-faint);
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-xs);
+}
+
+.fleet-readout-error {
+  padding: 8px 9px;
+  color: var(--danger);
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-xs);
 }
 
 .cli-bins {
@@ -24275,4 +24418,10 @@ a.btn-sm {
   flex: none;
   color: var(--warn);
   font-size: 10px;
+}
+.mesh-msg-when {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 10px;
+  white-space: nowrap;
 }

@@ -1412,6 +1412,11 @@ export function AgentWorkspaceView({
         )}
       </div>
 
+      {/* Everything below the banner scrolls as one column, banner pinned —
+          without this container the view is as tall as its diff and the
+          overlay can't scroll at all. */}
+      <div className="ticket-view-scroll">
+
       {/* States the git join can't paper over, said plainly instead of
           rendered as an empty diff. */}
       {(!repo || wsErr) && (
@@ -1813,6 +1818,7 @@ export function AgentWorkspaceView({
             thing.
           </div>
         )}
+      </div>
       </div>
     </div>
   );

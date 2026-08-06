@@ -4,6 +4,7 @@ import {
   layoutSplit,
   leafIds,
   mapSplitTabIds,
+  paneDropZone,
   remapTerminalGroups,
   neighborPane,
   removeLeaf,
@@ -106,5 +107,65 @@ describe("terminal split trees", () => {
   it("swaps pane contents without changing the layout", () => {
     const tree = splitLeaf(leaf("a"), "a", "b", "horizontal");
     expect(leafIds(swapLeaves(tree, "a", "b"))).toEqual(["b", "a"]);
+  });
+
+  it("places the new leaf before the target when asked", () => {
+    const tree = splitLeaf(leaf("a"), "a", "b", "horizontal", true);
+    expect(leafIds(tree)).toEqual(["b", "a"]);
+    expect(layoutSplit(tree).panes).toMatchObject([
+      { tabId: "b", left: 0, width: 0.5 },
+      { tabId: "a", left: 0.5, width: 0.5 },
+    ]);
+  });
+});
+
+describe("pane drop zones", () => {
+  const whole = [{ tabId: "a", left: 0, top: 0, width: 1, height: 1 }];
+
+  it("picks the half nearest the pointer", () => {
+    expect(paneDropZone(whole, 0.1, 0.5)).toEqual({
+      targetTabId: "a",
+      axis: "horizontal",
+      before: true,
+      rect: { left: 0, top: 0, width: 0.5, height: 1 },
+    });
+    expect(paneDropZone(whole, 0.9, 0.5)).toMatchObject({
+      axis: "horizontal",
+      before: false,
+      rect: { left: 0.5, width: 0.5 },
+    });
+    expect(paneDropZone(whole, 0.5, 0.05)).toMatchObject({
+      axis: "vertical",
+      before: true,
+      rect: { top: 0, height: 0.5 },
+    });
+    expect(paneDropZone(whole, 0.5, 0.95)).toMatchObject({
+      axis: "vertical",
+      before: false,
+      rect: { top: 0.5, height: 0.5 },
+    });
+  });
+
+  it("targets the hovered pane of an existing split", () => {
+    const tree = splitLeaf(leaf("a"), "a", "b", "horizontal");
+    const panes = layoutSplit(tree).panes;
+    expect(paneDropZone(panes, 0.75, 0.9)).toEqual({
+      targetTabId: "b",
+      axis: "vertical",
+      before: false,
+      rect: { left: 0.5, top: 0.5, width: 0.5, height: 0.5 },
+    });
+    expect(paneDropZone(panes, 0.05, 0.5)).toMatchObject({
+      targetTabId: "a",
+      axis: "horizontal",
+      before: true,
+      rect: { left: 0, width: 0.25 },
+    });
+  });
+
+  it("resolves nothing outside the surface", () => {
+    expect(paneDropZone(whole, -0.1, 0.5)).toBeNull();
+    expect(paneDropZone(whole, 0.5, 1.2)).toBeNull();
+    expect(paneDropZone([], 0.5, 0.5)).toBeNull();
   });
 });

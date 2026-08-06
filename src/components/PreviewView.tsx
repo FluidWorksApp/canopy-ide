@@ -51,7 +51,6 @@ import {
   type CaptureRect,
 } from "../pageCapture";
 import { getSettings, updateSettings } from "../settings";
-import { IS_MAC } from "../platform";
 import { registerBrowserTarget } from "../previewAgent";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
@@ -108,7 +107,11 @@ interface PreviewViewProps {
   installed: Record<string, boolean>;
   onSendToAgent: (target: AgentTarget, text: string) => void;
   /** `cwd` is the serving component's directory when the URL is linked to one. */
-  onStartNew: (agentId: string, text: string, cwd: string | null) => void;
+  onStartNew: (
+    agentId: string,
+    text: string,
+    cwd: string | null,
+  ) => Promise<boolean>;
   /** Run a one-off task on this brief, now. The preview knows which component
    *  serves the page, so there is nothing left to ask: opening a composer
    *  pre-filled with the brief and a directory the tab already knows made the
@@ -961,13 +964,28 @@ export function PreviewView({
   const shotBrief = () =>
     previewShotContext(urlRef.current, shotsRef.current, serverForUrl(urlRef.current, servers));
 
-  const markAnnotationsSent = () =>
+  const annotationVersion = (annotation: PreviewAnnotation) =>
+    JSON.stringify({ ...annotation, sent: undefined });
+  const shotVersion = (shot: PreviewShot) =>
+    JSON.stringify({ ...shot, sent: undefined });
+
+  const markAnnotationsSent = (versions?: Set<string>) =>
     onPatch({
-      annotations: annotationsRef.current.map((a) => (a.sent ? a : { ...a, sent: true })),
+      annotations: annotationsRef.current.map((annotation) =>
+        annotation.sent || (versions && !versions.has(annotationVersion(annotation)))
+          ? annotation
+          : { ...annotation, sent: true },
+      ),
     });
 
-  const markShotsSent = () =>
-    onPatch({ shots: shotsRef.current.map((s) => (s.sent ? s : { ...s, sent: true })) });
+  const markShotsSent = (versions?: Set<string>) =>
+    onPatch({
+      shots: shotsRef.current.map((shot) =>
+        shot.sent || (versions && !versions.has(shotVersion(shot)))
+          ? shot
+          : { ...shot, sent: true },
+      ),
+    });
 
   const sendFeedback = (target: AgentTarget) => {
     onSendToAgent(target, feedback());
@@ -975,9 +993,13 @@ export function PreviewView({
     markAnnotationsSent();
   };
 
-  const startFeedback = (agentId: string) => {
-    onStartNew(agentId, feedback(), linked?.componentPath ?? null);
-    markAnnotationsSent();
+  const startFeedback = async (agentId: string) => {
+    const versions = new Set(
+      annotationsRef.current.filter((item) => !item.sent).map(annotationVersion),
+    );
+    const brief = feedback();
+    if (await onStartNew(agentId, brief, linked?.componentPath ?? null))
+      markAnnotationsSent(versions);
   };
 
   const sendShots = (target: AgentTarget) => {
@@ -986,9 +1008,13 @@ export function PreviewView({
     markShotsSent();
   };
 
-  const startShots = (agentId: string) => {
-    onStartNew(agentId, shotBrief(), linked?.componentPath ?? null);
-    markShotsSent();
+  const startShots = async (agentId: string) => {
+    const versions = new Set(
+      shotsRef.current.filter((item) => !item.sent).map(shotVersion),
+    );
+    const brief = shotBrief();
+    if (await onStartNew(agentId, brief, linked?.componentPath ?? null))
+      markShotsSent(versions);
   };
 
   const runShotsOneOff = () => {
@@ -1166,25 +1192,21 @@ export function PreviewView({
           </Button>
         )}
         {/* One click takes the shot the way you took the last one; the caret is
-            for changing your mind. Same split shape as the agent launcher.
-            Absent off macOS rather than present and always failing: webview
-            capture has no implementation there (see snapshot.rs). */}
-        {IS_MAC && (
-          <span className="split-btn split-btn-mini">
-            <Button size="sm" className="split-btn-main"
-              title={`Screenshot — ${captureModeLabel(captureMode).toLowerCase()}`}
-              disabled={capturing}
-              onClick={() => runCapture(captureMode)}>
-              ▣ Screenshot{shots.length > 0 ? ` (${shots.length})` : ""}
-            </Button>
-            <Button size="sm" className="split-btn-caret"
-              title="Choose what to capture"
-              disabled={capturing}
-              onClick={openCaptureMenu}>
-              ▾
-            </Button>
-          </span>
-        )}
+            for changing your mind. Same split shape as the agent launcher. */}
+        <span className="split-btn split-btn-mini">
+          <Button size="sm" className="split-btn-main"
+            title={`Screenshot — ${captureModeLabel(captureMode).toLowerCase()}`}
+            disabled={capturing}
+            onClick={() => runCapture(captureMode)}>
+            ▣ Screenshot{shots.length > 0 ? ` (${shots.length})` : ""}
+          </Button>
+          <Button size="sm" className="split-btn-caret"
+            title="Choose what to capture"
+            disabled={capturing}
+            onClick={openCaptureMenu}>
+            ▾
+          </Button>
+        </span>
       </div>
       <div className="preview-body">
         {/* The emulated viewport scrolls inside this box, not in .preview-body:

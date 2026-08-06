@@ -11,11 +11,13 @@ import {
 import * as ipc from "./ipc";
 import {
   adoptLegacyCustomTasks,
+  adoptProjectStructureIds,
   emptyWorkspace,
   exportProject,
   exportWorkspace,
   importFile,
   loadWorkspace,
+  newComponentId,
   newProjectId,
   saveWorkspace,
   type Project,
@@ -561,7 +563,7 @@ export default function App() {
     await saveProjectRef.current({
       id: newProjectId(),
       name,
-      components: [{ label: name, path: dir, commands: [] }],
+      components: [{ id: newComponentId(), label: name, path: dir, commands: [] }],
     });
   }, []);
 
@@ -662,9 +664,10 @@ export default function App() {
   // sleeping project watches nothing, so it registers nothing until it wakes.
   useEffect(() => {
     void loadWorkspace().then(async (loadedState) => {
-      // Custom tasks moved from settings onto the project; anything left in the
-      // old app-wide home is adopted here, once, before anything reads it.
-      const state = adoptLegacyCustomTasks(loadedState);
+      // Give legacy project structure stable identity, then move old app-wide
+      // custom tasks onto their project. Both are one-shot, persisted before
+      // anything reads the workspace.
+      const state = adoptLegacyCustomTasks(adoptProjectStructureIds(loadedState));
       if (state !== loadedState) await saveWorkspace(state);
       // State first. Registering the watchers is a recursive walk per
       // component, and awaiting them one after another before the first
@@ -2307,7 +2310,9 @@ export default function App() {
       if (!project) return;
       void saveProject({
         ...project,
-        vibe: { ...project.vibe, enabled: project.vibe?.enabled !== true },
+        vibe: project.vibe
+          ? { ...project.vibe, enabled: project.vibe.enabled !== true }
+          : { version: 1, enabled: true },
       });
     },
     [saveProject],

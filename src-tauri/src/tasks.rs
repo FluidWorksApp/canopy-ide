@@ -48,6 +48,15 @@ pub struct TaskStore {
     root: Option<PathBuf>,
 }
 
+/// A task identity already proven against the authoritative store. Only this
+/// type may cross into a process spawn; strings from a WebView request cannot
+/// become CANOPY_RUN_ID/CANOPY_ATTEMPT_ID without passing `spawn_binding`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AttemptBinding {
+    pub run_id: String,
+    pub attempt_id: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskRouteSnapshot {
@@ -406,6 +415,75 @@ impl TaskStore {
         })
     }
 
+    /// Validate the optional identity on a managed spawn. Both ids or neither:
+    /// accepting one alone creates an identity no durable row can represent.
+    pub(crate) fn spawn_binding(
+        &self,
+        run_id: Option<&str>,
+        attempt_id: Option<&str>,
+    ) -> Result<Option<AttemptBinding>, String> {
+        let (run_id, attempt_id) = match (run_id, attempt_id) {
+            (None, None) => return Ok(None),
+            (Some(run_id), Some(attempt_id)) => (run_id, attempt_id),
+            _ => return Err("a task spawn needs both runId and attemptId".into()),
+        };
+        validate_id(run_id, "run id")?;
+        validate_id(attempt_id, "attempt id")?;
+        let run_id = run_id.to_string();
+        let attempt_id = attempt_id.to_string();
+        self.mutate(move |conn| {
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| e.to_string())?;
+            let project_id: Option<String> = tx
+                .query_row(
+                    "SELECT e.project_id FROM task_attempts a
+                     JOIN task_envelopes e ON e.run_id = a.run_id
+                     WHERE a.run_id = ?1 AND a.attempt_id = ?2
+                       AND a.state = 'reserved'
+                       AND a.ordinal = e.attempt_count
+                       AND e.status = 'running'",
+                    params![run_id, attempt_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let Some(project_id) = project_id else {
+                return Err("task attempt is not the current reserved attempt".into());
+            };
+            let changed = tx
+                .execute(
+                    "UPDATE task_attempts SET state = 'launching'
+                     WHERE run_id = ?1 AND attempt_id = ?2 AND state = 'reserved'",
+                    params![run_id, attempt_id],
+                )
+                .map_err(|e| e.to_string())?;
+            if changed != 1 {
+                return Err("task attempt was claimed by another launch".into());
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            let binding = AttemptBinding {
+                run_id: run_id.clone(),
+                attempt_id,
+            };
+            Ok((project_id, run_id, Some(binding)))
+        })
+    }
+
+    pub(crate) fn mark_spawned(&self, binding: &AttemptBinding) -> Result<(), String> {
+        self.start_attempt(&binding.attempt_id).map(|_| ())
+    }
+
+    pub(crate) fn mark_launch_failed(&self, binding: &AttemptBinding) -> Result<(), String> {
+        self.settle_attempt(TaskAttemptSettlement {
+            attempt_id: binding.attempt_id.clone(),
+            state: "failed".into(),
+            failure_class: Some("route".into()),
+            failure_code: Some("process-launch".into()),
+        })
+        .map(|_| ())
+    }
+
     fn reserve_attempt(&self, input: TaskAttemptReserveInput) -> Result<TaskAttempt, String> {
         validate_id(&input.run_id, "run id")?;
         validate_route(&input.route)?;
@@ -436,7 +514,7 @@ impl TaskStore {
             let active: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM task_attempts
-                     WHERE run_id = ?1 AND state IN ('reserved','running'))",
+                     WHERE run_id = ?1 AND state IN ('reserved','launching','running'))",
                     [&input.run_id],
                     |row| row.get(0),
                 )
@@ -522,7 +600,7 @@ impl TaskStore {
                     },
                 )
                 .map_err(|_| "task attempt not found".to_string())?;
-            if state != "reserved" {
+            if !matches!(state.as_str(), "reserved" | "launching") {
                 return Err(format!("cannot start an attempt in state {state}"));
             }
             if ordinal != current_ordinal {
@@ -593,7 +671,7 @@ impl TaskStore {
                     },
                 )
                 .map_err(|_| "task attempt not found".to_string())?;
-            if !matches!(current.as_str(), "reserved" | "running") {
+            if !matches!(current.as_str(), "reserved" | "launching" | "running") {
                 return Err(format!("attempt is already {current}"));
             }
             if ordinal != count {
@@ -1756,6 +1834,37 @@ mod tests {
         assert_eq!(reservation.attempt.state, "reserved");
         assert!(reservation.attempt.started_at.is_none());
         assert_eq!(store.list("p1", 50).unwrap().len(), 1);
+        let binding = store
+            .spawn_binding(
+                Some(&reservation.envelope.run_id),
+                Some(&reservation.attempt.attempt_id),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            binding,
+            AttemptBinding {
+                run_id: reservation.envelope.run_id.clone(),
+                attempt_id: reservation.attempt.attempt_id.clone(),
+            }
+        );
+        assert!(store
+            .spawn_binding(
+                Some(&reservation.envelope.run_id),
+                Some(&reservation.attempt.attempt_id)
+            )
+            .unwrap_err()
+            .contains("not the current reserved attempt"));
+        store.mark_spawned(&binding).unwrap();
+        assert_eq!(
+            store
+                .get(&reservation.envelope.run_id)
+                .unwrap()
+                .unwrap()
+                .attempts[0]
+                .state,
+            "running"
+        );
         drop(store);
 
         let reopened = TaskStore::at(root.clone());
@@ -1859,6 +1968,36 @@ mod tests {
             .settle_attempt(settlement)
             .unwrap_err()
             .contains("already"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn launch_failure_settles_the_reserved_attempt() {
+        let root = root();
+        let store = TaskStore::at(root.clone());
+        let reserved = store.reserve(input()).unwrap();
+        let binding = store
+            .spawn_binding(
+                Some(&reserved.envelope.run_id),
+                Some(&reserved.attempt.attempt_id),
+            )
+            .unwrap()
+            .unwrap();
+        store.mark_launch_failed(&binding).unwrap();
+        let detail = store.get(&binding.run_id).unwrap().unwrap();
+        assert_eq!(detail.attempts[0].state, "failed");
+        assert_eq!(
+            detail.attempts[0].failure_code.as_deref(),
+            Some("process-launch")
+        );
+        assert!(store
+            .spawn_binding(Some(&binding.run_id), Some(&binding.attempt_id))
+            .unwrap_err()
+            .contains("not the current reserved attempt"));
+        assert!(store
+            .spawn_binding(Some(&binding.run_id), None)
+            .unwrap_err()
+            .contains("both runId and attemptId"));
         let _ = std::fs::remove_dir_all(root);
     }
 

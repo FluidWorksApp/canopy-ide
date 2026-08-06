@@ -5,10 +5,16 @@
 //! dark background — which is most of what a user complains about. This gives
 //! an agent the pixels.
 //!
-//! Captured through the webview's OWN snapshot API (WKWebView
-//! `takeSnapshotWithConfiguration:`), not a screen grab: a screen grab of one's
-//! own window still needs macOS Screen Recording permission, and asking a
-//! developer for that to see their own preview is not a trade worth making.
+//! Captured through the webview's OWN snapshot API, not a screen grab: a
+//! screen grab of one's own window still needs macOS Screen Recording
+//! permission, and asking a developer for that to see their own preview is not
+//! a trade worth making. Each platform has that API — WKWebView
+//! `takeSnapshotWithConfiguration:` on macOS, `ICoreWebView2::CapturePreview`
+//! on Windows, `webkit_web_view_get_snapshot` on Linux — with one difference
+//! worth naming: only WKWebView takes a rect. The other two hand back a frame
+//! of the whole view, so the asked-for rect is cropped out of the frame here,
+//! and the width cap applied in the same pass. Same contract either way:
+//! base64 of PNG or JPEG bytes.
 //!
 //! Which webview gets snapshotted depends on the browser engine. Under the
 //! proxy the page is an iframe inside the main window, so the caller passes the
@@ -285,10 +291,305 @@ fn encode(tiff: &[u8], encoding: Encoding) -> Result<Vec<u8>, String> {
         .ok_or_else(|| "could not encode the snapshot".to_string())
 }
 
-// Windows' CoreWebView2 (CapturePreview) and WebKitGTK (snapshot) both offer an
-// equivalent; neither is wired up yet, and a clear "not here" beats an agent
+/// What a platform's snapshot call hands back before the shared crop-and-encode
+/// pass: CapturePreview encodes the frame itself, WebKitGTK gives raw pixels.
+#[cfg(any(windows, target_os = "linux"))]
+enum Frame {
+    /// CapturePreview's own PNG of the whole view.
+    #[cfg(windows)]
+    Png(Vec<u8>),
+    /// A cairo image surface's pixels: native-endian (x)RGB32 rows, `stride`
+    /// bytes apart, premultiplied where `alpha` says there is any.
+    #[cfg(target_os = "linux")]
+    Raster {
+        data: Vec<u8>,
+        width: u32,
+        height: u32,
+        stride: usize,
+        alpha: bool,
+    },
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+async fn capture(
+    view: tauri::webview::Webview,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    max_width: f64,
+    encoding: Encoding,
+) -> Result<String, String> {
+    use base64::Engine;
+
+    if width <= 0.0 || height <= 0.0 {
+        return Err("nothing to capture: the preview has no size on screen".into());
+    }
+    // The frame comes back covering the whole webview; the rect is cropped out
+    // of it afterwards, so the view's size in CSS pixels is what maps the
+    // caller's rect onto frame pixels — measured here because the frame's own
+    // pixel size depends on a device scale the caller never sees.
+    let size = view
+        .size()
+        .map_err(|e| format!("cannot measure the webview: {e}"))?;
+    let scale = view
+        .window()
+        .scale_factor()
+        .map_err(|e| format!("cannot measure the webview: {e}"))?;
+    let view_css = (
+        f64::from(size.width) / scale,
+        f64::from(size.height) / scale,
+    );
+
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Frame, String>>();
+    request_frame(view, tx)?;
+
+    let bytes = tokio::task::spawn_blocking(move || {
+        // Same shape as the macOS branch: the platform callback runs on the UI
+        // thread and only ships bytes; decode, crop, scale and encode all
+        // happen here, on the blocking thread already parked for the answer.
+        let frame = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|_| Err("the webview didn't answer in time".into()))?;
+        finish(frame, view_css, (x, y, width, height), max_width, encoding)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Ask CoreWebView2 for a PNG of the view, into a COM memory stream. The
+/// completion handler fires on the UI thread — same thread this closure runs
+/// on — and ships the drained stream over the channel.
+#[cfg(windows)]
+fn request_frame(
+    view: tauri::webview::Webview,
+    tx: std::sync::mpsc::Sender<Result<Frame, String>>,
+) -> Result<(), String> {
+    use webview2_com::CapturePreviewCompletedHandler;
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG;
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
+
+    view.with_webview(move |webview| {
+        let asked = (|| -> Result<(), String> {
+            let core = unsafe { webview.controller().CoreWebView2() }
+                .map_err(|e| format!("no CoreWebView2 to capture: {e}"))?;
+            let stream = unsafe { CreateStreamOnHGlobal(HGLOBAL(std::ptr::null_mut()), true) }
+                .map_err(|e| format!("could not allocate a capture stream: {e}"))?;
+            let written = stream.clone();
+            let answer = tx.clone();
+            let handler = CapturePreviewCompletedHandler::create(Box::new(move |result| {
+                let png = result
+                    .map_err(|e| format!("the webview refused to capture: {e}"))
+                    .and_then(|()| drain(&written));
+                let _ = answer.send(png.map(Frame::Png));
+                Ok(())
+            }));
+            unsafe {
+                core.CapturePreview(
+                    COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG,
+                    &stream,
+                    &handler,
+                )
+            }
+            .map_err(|e| format!("the webview refused to capture: {e}"))
+        })();
+        if let Err(e) = asked {
+            let _ = tx.send(Err(e));
+        }
+    })
+    .map_err(|e| format!("cannot reach the webview: {e}"))
+}
+
+/// Everything CapturePreview wrote, from the top.
+#[cfg(windows)]
+fn drain(stream: &windows::Win32::System::Com::IStream) -> Result<Vec<u8>, String> {
+    use windows::Win32::System::Com::STREAM_SEEK_SET;
+
+    unsafe { stream.Seek(0, STREAM_SEEK_SET, None) }
+        .map_err(|e| format!("could not rewind the capture stream: {e}"))?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let mut read = 0u32;
+        let hr = unsafe {
+            stream.Read(
+                chunk.as_mut_ptr().cast(),
+                chunk.len() as u32,
+                Some(&mut read),
+            )
+        };
+        if read > 0 {
+            bytes.extend_from_slice(&chunk[..read as usize]);
+        }
+        if hr.is_err() || read == 0 {
+            break;
+        }
+    }
+    if bytes.is_empty() {
+        return Err("the capture stream came back empty".into());
+    }
+    Ok(bytes)
+}
+
+/// Ask WebKitGTK for a snapshot of the visible region. Runs — and answers — on
+/// the GTK main thread, and ships the surface's pixels over the channel.
+#[cfg(target_os = "linux")]
+fn request_frame(
+    view: tauri::webview::Webview,
+    tx: std::sync::mpsc::Sender<Result<Frame, String>>,
+) -> Result<(), String> {
+    use webkit2gtk::{SnapshotOptions, SnapshotRegion, WebViewExt};
+
+    view.with_webview(move |webview| {
+        webview.inner().snapshot(
+            SnapshotRegion::Visible,
+            SnapshotOptions::NONE,
+            None::<&webkit2gtk::gio::Cancellable>,
+            move |result| {
+                let _ = tx.send(
+                    result
+                        .map_err(|e| format!("the webview refused to snapshot: {e}"))
+                        .and_then(rasterize),
+                );
+            },
+        );
+    })
+    .map_err(|e| format!("cannot reach the webview: {e}"))
+}
+
+/// A snapshot surface's pixels, copied out on the GTK thread — only the copy
+/// happens there, like the macOS branch's bitmap copy.
+#[cfg(target_os = "linux")]
+fn rasterize(surface: cairo::Surface) -> Result<Frame, String> {
+    let mut image = cairo::ImageSurface::try_from(surface)
+        .map_err(|_| "the snapshot was not an image surface".to_string())?;
+    let alpha = match image.format() {
+        cairo::Format::ARgb32 => true,
+        cairo::Format::Rgb24 => false,
+        other => return Err(format!("unexpected snapshot pixel format {other:?}")),
+    };
+    let (width, height, stride) = (image.width(), image.height(), image.stride());
+    if width <= 0 || height <= 0 {
+        return Err("the snapshot came back empty".into());
+    }
+    image.flush();
+    let data = image
+        .data()
+        .map_err(|e| format!("could not read the snapshot's pixels: {e}"))?;
+    Ok(Frame::Raster {
+        data: data.to_vec(),
+        width: width as u32,
+        height: height as u32,
+        stride: stride as usize,
+        alpha,
+    })
+}
+
+/// A frame's pixels as RGBA, whichever way the platform delivered them.
+#[cfg(any(windows, target_os = "linux"))]
+fn to_rgba(frame: Frame) -> Result<image::RgbaImage, String> {
+    match frame {
+        #[cfg(windows)]
+        Frame::Png(bytes) => image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .map(image::DynamicImage::into_rgba8)
+            .map_err(|e| format!("could not decode the capture: {e}")),
+        #[cfg(target_os = "linux")]
+        Frame::Raster {
+            data,
+            width,
+            height,
+            stride,
+            alpha,
+        } => {
+            let mut out = image::RgbaImage::new(width, height);
+            for (y, row) in data.chunks_exact(stride).take(height as usize).enumerate() {
+                for x in 0..width as usize {
+                    // Cairo packs each pixel as a native-endian ARGB u32, and
+                    // premultiplies where there is an alpha channel.
+                    let px = u32::from_ne_bytes(row[x * 4..x * 4 + 4].try_into().unwrap());
+                    let a = if alpha { (px >> 24) as u8 } else { 255 };
+                    let un = |c: u32| -> u8 {
+                        let c = (c & 0xff) as u8;
+                        match a {
+                            0 => 0,
+                            255 => c,
+                            _ => ((u32::from(c) * 255) / u32::from(a)).min(255) as u8,
+                        }
+                    };
+                    let pixel = image::Rgba([un(px >> 16), un(px >> 8), un(px), a]);
+                    out.put_pixel(x as u32, y as u32, pixel);
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// The shared tail: crop the caller's rect out of the whole-view frame, cap the
+/// width the way the macOS branch does (never wider than the rect itself, never
+/// wider than `max_width`), and encode.
+#[cfg(any(windows, target_os = "linux"))]
+fn finish(
+    frame: Frame,
+    view_css: (f64, f64),
+    rect: (f64, f64, f64, f64),
+    max_width: f64,
+    encoding: Encoding,
+) -> Result<Vec<u8>, String> {
+    let img = to_rgba(frame)?;
+    let (img_w, img_h) = img.dimensions();
+    if img_w == 0 || img_h == 0 || view_css.0 <= 0.0 || view_css.1 <= 0.0 {
+        return Err("the capture came back empty".into());
+    }
+    // The rect is CSS pixels; the frame is device pixels of the same view. The
+    // ratio between the two IS the effective scale, whatever the platform says
+    // the scale factor is, so the mapping is proportional rather than trusting
+    // the two measurements to agree.
+    let sx = f64::from(img_w) / view_css.0;
+    let sy = f64::from(img_h) / view_css.1;
+    let (x, y, w, h) = rect;
+    let cx = ((x * sx).round().max(0.0) as u32).min(img_w - 1);
+    let cy = ((y * sy).round().max(0.0) as u32).min(img_h - 1);
+    let cw = ((w * sx).round().max(1.0) as u32).min(img_w - cx);
+    let ch = ((h * sy).round().max(1.0) as u32).min(img_h - cy);
+    let cropped = image::imageops::crop_imm(&img, cx, cy, cw, ch).to_image();
+
+    let target_w = w.min(max_width).round().max(1.0) as u32;
+    let scaled = if cropped.width() > target_w {
+        let target_h = ((f64::from(target_w) / f64::from(cropped.width()))
+            * f64::from(cropped.height()))
+        .round()
+        .max(1.0) as u32;
+        image::imageops::resize(
+            &cropped,
+            target_w,
+            target_h,
+            image::imageops::FilterType::CatmullRom,
+        )
+    } else {
+        cropped
+    };
+
+    let mut out = Vec::new();
+    match encoding {
+        Encoding::Png => scaled
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .map_err(|e| format!("could not encode the snapshot: {e}"))?,
+        // Same 0.72 the macOS branch passes NSImageCompressionFactor. JPEG has
+        // no alpha channel, and neither does the frame: both platform paths
+        // paint an opaque background.
+        Encoding::Jpeg => image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 72)
+            .encode_image(&image::DynamicImage::ImageRgba8(scaled).into_rgb8())
+            .map_err(|e| format!("could not encode the snapshot: {e}"))?,
+    }
+    Ok(out)
+}
+
+// Mobile has no preview pane to photograph; a clear "not here" beats an agent
 // wondering why its picture is blank.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 async fn capture(
     _view: tauri::webview::Webview,
     _x: f64,
@@ -299,7 +600,7 @@ async fn capture(
     _encoding: Encoding,
 ) -> Result<String, String> {
     Err(
-        "Screenshots of the preview are only available on macOS so far — use \
+        "Screenshots of the preview are not available on this platform — use \
          canopy_browser_snapshot for the page's structure and text."
             .into(),
     )

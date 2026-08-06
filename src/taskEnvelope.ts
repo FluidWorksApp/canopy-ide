@@ -6,6 +6,7 @@ export type TaskEnvelopeStatus =
 
 export type TaskAttemptState =
   | "reserved"
+  | "launching"
   | "running"
   | "completed"
   | "failed"

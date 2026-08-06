@@ -69,6 +69,24 @@ describe("AgentLaunchButton", () => {
     expect(screen.getByText("Origin agent")).toBeInTheDocument();
   });
 
+  it("reflects the task's live state instead of relaunching it", () => {
+    const p = props();
+    const run = vi.fn();
+    const show = vi.fn();
+    const task = { title: "Run this as a task", onRun: run, onShow: show };
+    const { rerender } = render(
+      <AgentLaunchButton {...p} primaryTask={{ ...task, state: "starting" }} />,
+    );
+    expect(screen.getByText("Starting…").closest("button")).toBeDisabled();
+
+    rerender(
+      <AgentLaunchButton {...p} primaryTask={{ ...task, state: "running" }} />,
+    );
+    fireEvent.click(screen.getByText("Running").closest("button")!);
+    expect(show).toHaveBeenCalledTimes(1);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("keeps other running agents in the caret menu", () => {
     const p = { ...props(), agentTargets: [origin, other] };
     render(<AgentLaunchButton {...p} primaryTarget={origin} />);

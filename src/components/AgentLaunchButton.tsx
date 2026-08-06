@@ -30,8 +30,17 @@ interface AgentLaunchButtonProps {
    *  instead of starting a new agent. The caret still offers every target. */
   primaryTarget?: AgentTarget;
   /** A non-session primary action. Ticket work defaults to a one-shot Task;
-   *  the caret still contains every running/new-agent destination. */
-  primaryTask?: { title: string; onRun: () => void };
+   *  the caret still contains every running/new-agent destination. `state`
+   *  is the run's live state on this surface: "starting" while the submit is
+   *  in flight (the click is disabled — worktree setup takes a beat), and
+   *  "running" once the task is detached — then the primary click opens it
+   *  via `onShow` instead of silently launching a second copy. */
+  primaryTask?: {
+    title: string;
+    onRun: () => void;
+    state?: "starting" | "running";
+    onShow?: () => void;
+  };
   /** "split" — the accent primary + caret used in a footer (ticket tab).
    *  "mini" — a single btn-mini dropdown that sits in a header row of small
    *  buttons (PR header), next to Merge ▾ / Request review ▾. */
@@ -100,25 +109,37 @@ export function AgentLaunchButton({
           <Button variant="accent" className="split-btn-main"
             // The agent is named in the tooltip and the caret menu, not the
             // label: the button is the verb, not an endorsement of one CLI.
+            disabled={primaryTask?.state === "starting"}
             onClick={() =>
               primaryTask
-                ? primaryTask.onRun()
+                ? primaryTask.state === "running"
+                  ? primaryTask.onShow?.()
+                  : primaryTask.onRun()
                 : primaryTarget
                   ? onSend(primaryTarget)
                   : onStart(preferredCli.id)
             }
             title={
               primaryTask
-                ? primaryTask.title
+                ? primaryTask.state === "starting"
+                  ? "Starting the task…"
+                  : primaryTask.state === "running"
+                    ? "This is running as a task — click to watch it in Tasks"
+                    : primaryTask.title
                 : primaryTarget
                 ? `Send this back to ${primaryTarget.title}`
                 : primaryTitle?.(preferredCli.name)
             }>
-            ▶ {label}
+            {primaryTask?.state === "starting"
+              ? "Starting…"
+              : primaryTask?.state === "running"
+                ? "Running"
+                : <>▶ {label}</>}
             <span className="split-btn-agent">
               {primaryTask ? (
                 <>
-                  <TasksIcon size={11} /> Task
+                  <TasksIcon size={11} />{" "}
+                  {primaryTask.state === "running" ? "In Tasks" : "Task"}
                 </>
               ) : (
                 primaryTarget?.title ?? preferredCli.name

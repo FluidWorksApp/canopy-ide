@@ -50,6 +50,10 @@ export async function ptySpawn(
     /** Stamped onto the child. A run inside a workspace carries that
      *  workspace's port lease here, so two checkouts can serve at once. */
     env?: [string, string][];
+    /** Reserved together by taskReserve. Rust refuses a partial or unknown
+     * binding before starting the child. */
+    runId?: string;
+    attemptId?: string;
   },
   onData: (bytes: Uint8Array) => void,
 ): Promise<SpawnResult> {
@@ -94,6 +98,8 @@ export const ptySpawnDetached = (opts: {
   cwd?: string;
   command: string;
   env?: [string, string][];
+  runId?: string;
+  attemptId?: string;
 }) => invoke<SpawnResult>("pty_spawn_detached", opts);
 
 /** The tail of a PTY's raw output, escape sequences and all — the transcript of
@@ -165,6 +171,8 @@ export interface AgentAction {
   cwd?: string;
   name?: string;
   command?: string;
+  componentId?: string;
+  runCommandId?: string;
   url?: string;
   /** The terminal the action is keyed to. For close_session it is the calling
    *  agent's own — the tool takes no id, so it can name no other session. */
@@ -1470,10 +1478,20 @@ export interface ClaudeSessionStats {
 export const claudeSessionStats = (transcriptPath: string) =>
   invoke<ClaudeSessionStats>("claude_session_stats", { transcriptPath });
 
+/** Per-session stats for a CLI whose usage lives in its own store rather than
+ *  a pollable transcript (opencode). `cost` is the CLI's own billed figure
+ *  when it records one — the only cost that exists for a custom provider
+ *  whose model the price table can't name. */
+export interface StoreSessionStats extends ClaudeSessionStats {
+  cost: number | null;
+}
+export const opencodeSessionStats = (sessionId: string) =>
+  invoke<StoreSessionStats | null>("opencode_session_stats", { sessionId });
+
 /** One agent session's token/cost usage, summed across its turns. `cost` is
- *  set only when the CLI records its own (omp); otherwise estimate from
- *  `model`. `supported` is false for CLIs whose usage Canopy can't read yet
- *  (amp/aider/opencode) — the row is returned so the CLI mix stays honest. */
+ *  set only when the CLI records its own (omp, opencode); otherwise estimate
+ *  from `model`. `supported` is false for CLIs whose usage Canopy can't read
+ *  yet (amp/aider) — the row is returned so the CLI mix stays honest. */
 export interface AgentSessionUsage {
   session_id: string;
   agent: string;
@@ -2790,6 +2808,9 @@ export interface SessionDigest {
    *  a digest to a live terminal must also match this. Absent for pre-upgrade
    *  digests. */
   instance?: string;
+  /** Durable task binding inherited from CANOPY_RUN_ID/CANOPY_ATTEMPT_ID. */
+  run_id?: string;
+  attempt_id?: string;
   /** Directory the agent's resume must run in — claude files a conversation
    *  under its project root, not the directory the agent ran in. Derived in
    *  agents.rs; may differ from `cwd`. */

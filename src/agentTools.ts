@@ -72,7 +72,7 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
       { name: "canopy_browser_eval", label: "Eval", note: "Run JavaScript in the page" },
       { name: "canopy_browser_console", label: "Console", note: "The page's console output" },
       { name: "canopy_browser_network", label: "Network", note: "Requests the page made" },
-      { name: "canopy_screenshot", label: "Screenshot", note: "A picture of the page (macOS)" },
+      { name: "canopy_screenshot", label: "Screenshot", note: "A picture of the page" },
     ],
   },
   {

@@ -62,6 +62,7 @@ const ELECTIONS = {
   "MPL-2.0 OR Apache-2.0": "Apache-2.0",
   "Apache-2.0 OR BSL-1.0": "Apache-2.0",
   "BSD-2-Clause OR Apache-2.0": "BSD-2-Clause",
+  "BSD-3-Clause OR Apache-2.0": "BSD-3-Clause", // moxcms, pxfm (via image)
   // Not elections — normalisations of non-SPDX or compound strings.
   "Apache-2.0 AND MIT": "Apache-2.0 AND MIT",
   "Apache-2.0 AND ISC": "Apache-2.0 AND ISC",

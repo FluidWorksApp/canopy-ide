@@ -126,6 +126,16 @@ interface AgentsPanelProps {
   attentionFor?: (ptyId: number) => Attention;
 }
 
+/** How many agent messages the panel shows before "View all". The store keeps
+ *  up to 500; a sidebar list that long buries the recent traffic it exists
+ *  to surface. */
+const MESH_TOP_N = 8;
+
+/** One end of a message's route: the CLI's name when the hook captured it,
+ *  else the bare terminal id. */
+const meshEnd = (pty: number | null | undefined, agent?: string | null) =>
+  pty == null ? "companion" : agent ? `${agent} ${pty}` : `terminal ${pty}`;
+
 /** Compact relative age; the panel is narrow and "3h" beats a timestamp. */
 const ago = (secs?: number) => {
   if (!secs) return "";
@@ -361,6 +371,7 @@ export function AgentsPanel({
     setHintDismissed(true);
   };
   const [showShared, setShowShared] = useState(false);
+  const [showAllMessages, setShowAllMessages] = useState(false);
   const settings = getSettings();
 
   // What is running, what can come back, and who has claimed what — the same
@@ -993,23 +1004,34 @@ export function AgentsPanel({
       {/* Messages agents have typed into each other (canopy_message_agent).
           One arrives in its target's composer indistinguishable from the user
           typing, so without this the only trace of one agent reaching into
-          another was a toast that had already gone. Newest first, and the ones
-          that never got their return are the ones worth seeing. */}
+          another was a toast that had already gone. Newest first and capped to
+          the recent few — a busy mesh writes hundreds, and the rest are one
+          click away rather than one scroll. */}
       {messages.length > 0 && (
         <Section title="Agent messages" count={messages.length} tone="quiet">
           <div className="mesh-msg-list">
-            {[...messages].reverse().map((m) => (
+            {[...messages]
+              .reverse()
+              .slice(0, showAllMessages ? messages.length : MESH_TOP_N)
+              .map((m) => (
               <div
                 key={m.id}
                 className={`mesh-msg ${m.submitted ? "" : "mesh-msg-unsent"}`}
-                title={`${m.from_cwd ?? "the Canopy companion"} → terminal ${m.to_pty_id}\n\n${m.text}`}
+                title={[
+                  `${m.from_cwd ?? "the Canopy companion"} → terminal ${m.to_pty_id}`,
+                  m.from_task ? `from: ${m.from_task}` : null,
+                  m.to_task ? `to: ${m.to_task}` : null,
+                  new Date(m.at_ms).toLocaleString(),
+                  "",
+                  m.text,
+                ]
+                  .filter((l) => l != null)
+                  .join("\n")}
               >
                 <span className="mesh-msg-route">
-                  {m.from_pty_id == null
-                    ? "companion"
-                    : `terminal ${m.from_pty_id}`}
+                  {meshEnd(m.from_pty_id, m.from_agent)}
                   {" → "}
-                  {`terminal ${m.to_pty_id}`}
+                  {meshEnd(m.to_pty_id, m.to_agent)}
                 </span>
                 <span className="mesh-msg-text">{m.text}</span>
                 {!m.submitted && (
@@ -1020,9 +1042,20 @@ export function AgentsPanel({
                     unsent
                   </span>
                 )}
+                <span className="mesh-msg-when">{ago(m.at_ms / 1000)}</span>
               </div>
             ))}
           </div>
+          {messages.length > MESH_TOP_N && (
+            <button
+              className="research-more"
+              onClick={() => setShowAllMessages((v) => !v)}
+            >
+              {showAllMessages
+                ? "Show recent only"
+                : `View all ${messages.length} messages`}
+            </button>
+          )}
         </Section>
       )}
 

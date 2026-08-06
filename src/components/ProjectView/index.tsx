@@ -22,6 +22,7 @@ import {
   layoutSplit,
   leafIds,
   mapSplitTabIds,
+  paneDropZone,
   remapTerminalGroups,
   neighborPane,
   removeLeaf,
@@ -30,6 +31,7 @@ import {
   swapLeaves,
   updateSplitRatio,
   type PaneDirection,
+  type PaneDropZone,
   type SplitDivider,
   type SplitAxis,
   type TerminalGroup,
@@ -112,6 +114,7 @@ import { CollabView } from "../CollabView";
 import { SharedProjectView } from "../SharedProjectView";
 import type { AgentCli } from "../../projects";
 import {
+  envReachesProfile,
   reloadPlan,
   reloading,
   reloadSummary,
@@ -119,6 +122,7 @@ import {
 } from "../../accountSwitch";
 import {
   activeProfile,
+  DEFAULT_PROFILE,
   launchEnv,
   launchEnvSync,
   launchProfile,
@@ -126,6 +130,11 @@ import {
   supportsProfiles,
   PROFILE_CHANGE_EVENT,
 } from "../../profiles";
+import { fleetGate, type FleetKind } from "../../fleetState";
+import {
+  inspectFleetRoute,
+  type FleetRouteSnapshot,
+} from "../../fleetSnapshot";
 import { startCommandParked } from "../../agentSeed";
 import {
   AGENT_CLIS,
@@ -184,6 +193,7 @@ import { followLink, type DeepLink } from "../../deepLinks";
 import {
   addressPrCommentsTask,
   adhocLabel,
+  ADHOC_TASK_ID,
   adhocTaskDef,
   customTaskDef,
   fixCiTask,
@@ -332,7 +342,7 @@ import { suppressBrowserViewsOver, useBrowserEngine } from "../../browserHost";
 import { OPEN_URL_EVENT, type OpenUrlDetail } from "../../links";
 import { resolveGitLink } from "../../gitLinks";
 import { previewAgentTarget, serverForUrl } from "../../preview";
-import { TRACKERS, ticketBranch, ticketContext, ticketWorktree } from "../../trackers";
+import { TRACKERS, ticketBranch, ticketContext, ticketResearchQuestion, ticketTaskLabel, ticketWorktree } from "../../trackers";
 import { prConflictContext, prReviewContext } from "../../prs";
 import {
   fileDiffContext,
@@ -441,6 +451,7 @@ import {
   type ProjectViewProps,
   sidebarPrefs,
   pickBrowserTab,
+  resolveVibeTarget,
 } from "./helpers";
 import { Button } from "../ui";
 export { tabDisplayLabel, previewLabel, deviceLabel };
@@ -683,6 +694,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT_W);
   const sideWidthRef = useRef(SIDE_DEFAULT_W);
   const vibe = project.vibe?.enabled === true;
+  const vibeTarget = resolveVibeTarget(project);
+  const vibeSetupSupported = project.vibe?.version === 1;
   const sideOpen = !zen && !vibe && (pinned || peeking);
 
   // The overlay peek slides over the pane, and a child webview cannot be drawn
@@ -779,10 +792,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [shareProjectMenuOpen, setShareProjectMenuOpen] = useState(false);
   const [shellMenuOpen, setShellMenuOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
+  const [fleetLaunchNote, setFleetLaunchNote] = useState<{
+    kind: FleetKind;
+    text: string;
+  } | null>(null);
   const {
     installed,
     prereqs,
     getInstalled,
+    getInstalledForLaunch,
     cliUpdates,
     refreshInstalled,
     refreshUpdates,
@@ -1396,6 +1414,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       profile?: string,
       activate = true,
       paneGroup?: string,
+      runIdentity?: { componentId: string; runCommandId: string },
     ) => {
       const id = tabId();
       // Every terminal opened inside a workspace gets that workspace's port,
@@ -1430,6 +1449,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           run: run !== false,
           chore: run === "chore" || undefined,
           paneGroup,
+          componentId: runIdentity?.componentId,
+          runCommandId: runIdentity?.runCommandId,
         },
       ]);
       if (activate) setActiveTabId(id);
@@ -2094,6 +2115,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         title: t.customTitle ?? t.title,
         icon: t.icon,
         run: t.run,
+        componentId: t.componentId,
+        runCommandId: t.runCommandId,
         tabId: t.id,
         paneGroup: t.paneGroup,
         sessionId:
@@ -2138,6 +2161,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         undefined,
         undefined,
         activate,
+        undefined,
+        t.componentId && t.runCommandId
+          ? { componentId: t.componentId, runCommandId: t.runCommandId }
+          : undefined,
       );
       return id;
     },
@@ -2253,8 +2280,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!cli || !item.action) continue;
       const env = launchEnvSync(cli.id);
       // No env means the account could not be resolved after all; leaving the
-      // agent where it is beats moving it somewhere we cannot name.
-      if (env.length === 0) continue;
+      // agent where it is beats moving it somewhere we cannot name. The default
+      // account is the exception: it carries no env by design.
+      if (!envReachesProfile(ask.profile, env)) continue;
       closeTabRef.current(item.agent.tabId);
       if (item.action.kind === "resume") markRestored(item.action.sessionId);
       addTerminal(
@@ -2264,7 +2292,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         cli.icon,
         false,
         env,
-        ask.profile,
+        ask.profile === DEFAULT_PROFILE ? undefined : ask.profile,
       );
     }
   }, [addTerminal]);
@@ -2790,6 +2818,43 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setTimeout(() => termHandles.current.get(target.tabId)?.focus(), 50);
   }, []);
 
+  const gateManagedLaunch = useCallback(
+    async (
+      cli: AgentCli,
+      installed: Record<string, boolean>,
+    ): Promise<{
+      allowed: boolean;
+      route: FleetRouteSnapshot;
+      env: [string, string][];
+    }> => {
+      await primeLaunchEnv();
+      const env = launchEnvSync(cli.id);
+      const profile = launchProfile(cli.id) ?? DEFAULT_PROFILE;
+      const route = await inspectFleetRoute(cli, profile, installed);
+      const gate = fleetGate(route.state);
+      const profileName =
+        profile === DEFAULT_PROFILE
+          ? "default"
+          : (profilesRef.current.find((item) => item.id === profile)?.label ?? profile);
+      const label = `${cli.name} · ${profileName}`;
+      if (!gate.allowed) {
+        const text = `${label} can't start: ${gate.why ?? "route unavailable"}.`;
+        setFleetLaunchNote({ kind: "unusable", text });
+        onNotice(text, "error");
+        return { allowed: false, route, env };
+      }
+      if (gate.why) {
+        const text = `${label}: ${gate.why}. Launching anyway.`;
+        setFleetLaunchNote({ kind: route.state.kind, text });
+        onNotice(text, "warn");
+      } else {
+        setFleetLaunchNote(null);
+      }
+      return { allowed: true, route, env };
+    },
+    [onNotice],
+  );
+
   /** Start a fresh agent CLI in `dir`, seeded with `seed`. The diff surfaces
    *  (session changes, a file diff, a relay review) work on the working tree
    *  that's already there, so unlike a PR/ticket there's no worktree to make —
@@ -2797,7 +2862,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  shape as startTicketWork/startPrAgent. */
   const startAgentInDir = useCallback(
     async (dir: string, agentId: string | undefined, seed: string, title: string) => {
-      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
+      const installed = await getInstalledForLaunch();
+      const installedClis = AGENT_CLIS.filter((c) => installed[c.bin]);
       const preferred = getSettings().defaultAgent;
       const agent =
         agentId ||
@@ -2807,21 +2873,33 @@ const ProjectViewBody = memo(function ProjectViewBody({
           AGENT_CLIS[0]
         )?.id;
       const cli = AGENT_CLIS.find((c) => c.id === agent);
-      const start = agent ? await startCommandParked(agent, seed, dir) : null;
-      if (!cli || !start) {
+      if (!cli || !agent) {
         onNotice(`Unknown agent "${agent}".`);
-        return;
+        return false;
+      }
+      const fleet = await gateManagedLaunch(cli, installed);
+      if (!fleet.allowed) return false;
+      const start = await startCommandParked(agent, seed, dir);
+      if (!start) {
+        onNotice(`Unknown agent "${agent}".`);
+        return false;
       }
       const id = addTerminal(
         dir,
         start.command,
         `${title} · ${cli.name}`,
         cli.icon,
+        false,
+        fleet.env,
+        fleet.route.profile === DEFAULT_PROFILE
+          ? undefined
+          : fleet.route.profile,
       );
       if (id && start.typePrompt)
         pendingTerminalPrompts.current.set(id, seed);
+      return Boolean(id);
     },
-    [addTerminal, onNotice, getInstalled],
+    [addTerminal, onNotice, getInstalledForLaunch, gateManagedLaunch],
   );
 
   /** Micro-tasks running with no tab of their own. The Tasks panel is their
@@ -2846,21 +2924,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const tick = window.setInterval(() => setMicroClock(Date.now()), 5_000);
     return () => window.clearInterval(tick);
   }, [microRuns.length]);
-
-  /** Whether `agent` can report its own ending — i.e. Canopy's MCP bridge is
-   *  registered with it, so `canopy_job_done` exists to be called. That is the
-   *  whole condition for running a task with no terminal: an agent that cannot
-   *  say "done" would sit invisibly forever, and its tab is the only way it
-   *  would ever be seen. Unreadable registry, or an unregistered CLI, keeps the
-   *  tab it has always had. */
-  const canReportDone = useCallback(async (agent: string) => {
-    try {
-      const health = await ipc.agentIntegrationHealth();
-      return health.find((h) => h.agent === agent)?.mcp === "ours";
-    } catch {
-      return false;
-    }
-  }, []);
 
   /** Launch a micro-task: a one-shot agent seeded with the task's brief plus
    *  the completion protocol. CANOPY_MICRO_TASK reaches the MCP sidecar through
@@ -2888,25 +2951,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // one the user chose from its menu.
       preferAgent?: string,
     ): Promise<boolean> => {
-      const installedClis = AGENT_CLIS.filter((c) => getInstalled()[c.bin]);
-      if (installedClis.length === 0) {
-        onNotice(
-          "Running a task needs an agent CLI — install one in Settings → Agents.",
-        );
-        return false;
-      }
+      const installed = await getInstalledForLaunch();
+      const installedClis = AGENT_CLIS.filter((c) => installed[c.bin]);
       const preferred = getSettings().defaultAgent;
-      const agent = (
-        installedClis.find((c) => c.id === preferAgent) ??
-        installedClis.find((c) => c.id === "claude") ??
-        installedClis.find((c) => c.id === preferred) ??
-        installedClis[0]
-      )?.id;
-      const cli = AGENT_CLIS.find((c) => c.id === agent);
+      const cli = preferAgent
+        ? AGENT_CLIS.find((candidate) => candidate.id === preferAgent)
+        : installedClis.find((candidate) => candidate.id === "claude") ??
+          installedClis.find((candidate) => candidate.id === preferred) ??
+          installedClis[0] ??
+          AGENT_CLIS.find((candidate) => candidate.id === preferred) ??
+          AGENT_CLIS[0];
+      const agent = cli?.id;
       if (!cli || !agent) {
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return false;
       }
+      const fleet = await gateManagedLaunch(cli, installed);
+      if (!fleet.allowed) return false;
       // A task that edits files gets the PR's branch in a worktree of its own,
       // same deal as startPrAgent: reuse the worktree already holding it, else
       // make a throwaway the brief tells the agent to remove. If that fails we
@@ -2988,7 +3049,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // Spawns detached, bypassing addTerminal — so the account env is added
       // here. A micro-task spends the same quota as any other agent.
       const extraEnv: [string, string][] = [
-        ...launchEnvSync(agent),
+        ...fleet.env,
         ...(def.env?.(payload) ?? []),
       ];
       // Which research entry this run is for, taken from the env the task
@@ -2996,7 +3057,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // stays generic and any future task that binds an entry gets this free.
       const researchId = extraEnv.find(([k]) => k === "CANOPY_RESEARCH")?.[1];
 
-      if (await canReportDone(agent)) {
+      if (fleet.route.health?.mcp === "ours") {
         let pty: number;
         try {
           const res = await ipc.ptySpawnDetached({
@@ -3044,6 +3105,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         `${envPrefix} ${start.command}`,
         `${runName} · ${cli.name}`,
         def.icon,
+        false,
+        extraEnv,
+        fleet.route.profile === DEFAULT_PROFILE
+          ? undefined
+          : fleet.route.profile,
       );
       if (!id) return false;
       patchTabRaw(id, {
@@ -3058,8 +3124,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       patchTabRaw,
       onNotice,
       project.id,
-      getInstalled,
-      canReportDone,
+      getInstalledForLaunch,
+      gateManagedLaunch,
       updateMicroRuns,
       switchTo,
     ],
@@ -3178,7 +3244,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
 
   const startResearch = useCallback(
-    async (question: string, userQuery = "") => {
+    async (question: string, userQuery = "", ticket?: ipc.ResearchTicketLink) => {
       const q = question.trim();
       if (!q) return;
       // The title is the question, shortened — an entry is cited by number
@@ -3194,6 +3260,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           question: q,
           cwd: roots[0],
         });
+        // Link before opening the tab, so the entry carries the ticket it
+        // came from the first time anyone looks at it.
+        if (ticket)
+          await researchLinkEntry({ projectId: project.id, id: entry.id, ticket });
         const entryDir = await ipc.researchDir(project.id, entry.id);
         const ok = await startMicroTask(
           researchTask,
@@ -3227,6 +3297,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
     },
     [project.id, project.name, roots, startMicroTask, openResearch, onNotice],
+  );
+
+  /** Forward a ticket to research instead of to an implementer: the same
+   *  startResearch path — harness, stage rail, blocked-on-failure — with the
+   *  question composed from the ticket and the entry linked back to it.
+   *  Nothing is written to the tracker; Canopy stays a reader of it. */
+  const researchTicket = useCallback(
+    async (ticket: ipc.TicketInfo) => {
+      await startResearch(ticketResearchQuestion(ticket), "", {
+        id: ticket.id,
+        title: ticket.title,
+        url: ticket.url,
+      });
+    },
+    [startResearch],
   );
 
   /** Put an agent back on an entry that already exists.
@@ -3387,7 +3472,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           `Leave the completed work in this worktree; do not commit or open a pull request ` +
           `unless the ticket explicitly asks for it.`;
         await startMicroTask(
-          adhocTaskDef(brief, `Ticket ${ticket.id}`),
+          adhocTaskDef(brief, ticketTaskLabel(ticket)),
           { dir },
           "",
         );
@@ -3730,9 +3815,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   /** Re-run a run tab's command in place, reusing the tab (and its position in
    *  the rail) rather than spawning a new one. */
-  const restartRun = useCallback((id: string) => {
+  const restartRun = useCallback((
+    id: string,
+    configured?: Pick<
+      ServerEntry,
+      "command" | "name" | "componentId" | "runCommandId"
+    >,
+  ) => {
     const tab = tabsRef.current.find((t) => t.id === id);
     if (tab?.type !== "terminal") return;
+    const component = tab.componentId
+      ? componentsRef.current.find((item) => item.id === tab.componentId)
+      : undefined;
+    const command = tab.runCommandId
+      ? component?.commands?.find((item) => item.id === tab.runCommandId)
+      : undefined;
+    const current =
+      component && command
+        ? {
+            command: command.command,
+            name: command.name || command.command,
+            componentId: component.id,
+            runCommandId: command.id,
+          }
+        : undefined;
+    const nextConfigured = configured ?? current;
     if (tab.ptyId != null) void ipc.ptyKill(tab.ptyId);
     // Remount Term with a fresh key by clearing the pty and exit state; the
     // effect below respawns it.
@@ -3745,6 +3852,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
               exited: false,
               exitCode: undefined,
               epoch: (t as TermSubTab).epoch ?? 0,
+              ...(nextConfigured
+                ? {
+                    command: nextConfigured.command,
+                    title: nextConfigured.name,
+                    componentId: nextConfigured.componentId ?? undefined,
+                    runCommandId: nextConfigured.runCommandId ?? undefined,
+                  }
+                : {}),
             } as SubTab)
           : t,
       ),
@@ -4476,12 +4591,26 @@ const ProjectViewBody = memo(function ProjectViewBody({
             t.type === "terminal" &&
             Boolean(t.run) &&
             t.cwd === a.dir &&
-            t.command === a.command,
+            (a.componentId &&
+              a.runCommandId &&
+              t.componentId &&
+              t.runCommandId
+              ? t.componentId === a.componentId && t.runCommandId === a.runCommandId
+              : t.command === a.command),
         );
+        const configured =
+          a.componentId && a.runCommandId
+            ? {
+                command: a.command,
+                name: a.name || a.command,
+                componentId: a.componentId,
+                runCommandId: a.runCommandId,
+              }
+            : undefined;
         if (existing && !existing.exited) {
           if (getSettings().agentAskForAttention) setActiveTabId(existing.id);
         }
-        else if (existing) restartRun(existing.id);
+        else if (existing) restartRun(existing.id, configured);
         else
           addTerminal(
             a.dir,
@@ -4492,6 +4621,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             undefined,
             undefined,
             getSettings().agentAskForAttention,
+            undefined,
+            configured,
           );
       } else if ((a.kind === "open_file" || a.kind === "show_diff") && a.path) {
         // "Look at line 340" — put the file in front of the user and land on
@@ -6165,6 +6296,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
               attachId: t.attachId,
               icon: t.icon ?? "📱",
               paneGroup: t.paneGroup,
+              componentId: t.componentId,
+              runCommandId: t.runCommandId,
             });
           }
           const { command } = terminalLaunch(t);
@@ -6184,6 +6317,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
             env.length ? t.profile : undefined,
             true,
             t.paneGroup,
+            t.componentId && t.runCommandId
+              ? { componentId: t.componentId, runCommandId: t.runCommandId }
+              : undefined,
           );
         }
         case "file": {
@@ -7784,9 +7920,113 @@ const ProjectViewBody = memo(function ProjectViewBody({
     (ids: string[]) => setTabs((prev) => applyOrder(prev, (t) => t.id, ids)),
     [],
   );
+  // Dragging a terminal tab past the strip and over the split surface offers
+  // post-facto multiplexing: the half of the hovered pane nearest the pointer
+  // lights up, and releasing there folds the dragged terminal into the visible
+  // group (or forms one) exactly where the preview showed it. Only a solo
+  // terminal can be dropped in — a grouped tab in the strip is the whole
+  // group's representative, and a run tab lives in the rail, not the mux.
+  const [paneDrop, setPaneDrop] = useState<PaneDropZone | null>(null);
+  const paneDropRef = useRef<PaneDropZone | null>(null);
+  const computePaneDrop = useCallback(
+    (id: string, x: number, y: number): PaneDropZone | null => {
+      const source = tabsRef.current.find(
+        (t): t is TermSubTab => t.id === id && t.type === "terminal",
+      );
+      if (!source || source.run) return null;
+      if (source.paneGroup && terminalGroupsRef.current[source.paneGroup])
+        return null;
+      const active = tabsRef.current.find(
+        (t): t is TermSubTab =>
+          t.id === activeTabIdRef.current && t.type === "terminal",
+      );
+      if (!active || active.run || active.id === source.id) return null;
+      const content = contentRef.current;
+      if (!content) return null;
+      const rect = content.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      const group = active.paneGroup
+        ? terminalGroupsRef.current[active.paneGroup]
+        : undefined;
+      const panes = group
+        ? layoutSplit(group.root, group.zoomedTabId).panes
+        : [{ tabId: active.id, left: 0, top: 0, width: 1, height: 1 }];
+      return paneDropZone(
+        panes,
+        (x - rect.left) / rect.width,
+        (y - rect.top) / rect.height,
+      );
+    },
+    [],
+  );
+  const onTabDragMove = useCallback(
+    (id: string, e: PointerEvent) => {
+      const zone = computePaneDrop(id, e.clientX, e.clientY);
+      const prev = paneDropRef.current;
+      if (
+        prev === zone ||
+        (prev &&
+          zone &&
+          prev.targetTabId === zone.targetTabId &&
+          prev.axis === zone.axis &&
+          prev.before === zone.before)
+      )
+        return;
+      paneDropRef.current = zone;
+      setPaneDrop(zone);
+    },
+    [computePaneDrop],
+  );
+  const onTabDrop = useCallback(
+    (id: string, e: PointerEvent | null) => {
+      paneDropRef.current = null;
+      setPaneDrop(null);
+      const zone = e ? computePaneDrop(id, e.clientX, e.clientY) : null;
+      if (!zone) return;
+      const source = tabsRef.current.find(
+        (t): t is TermSubTab => t.id === id && t.type === "terminal",
+      );
+      const target = tabsRef.current.find(
+        (t): t is TermSubTab =>
+          t.id === zone.targetTabId && t.type === "terminal",
+      );
+      if (!source || !target) return;
+      const current = target.paneGroup
+        ? terminalGroupsRef.current[target.paneGroup]
+        : undefined;
+      const groupId = current?.id ?? splitId();
+      const root = current?.root ?? { type: "leaf" as const, tabId: target.id };
+      // No zoomedTabId on the merged group: a pane dropped into a zoomed
+      // surface that stayed zoomed would vanish the moment it landed.
+      const next: TerminalGroup = {
+        id: groupId,
+        root: splitLeaf(root, target.id, source.id, zone.axis, zone.before),
+        activeTabId: source.id,
+      };
+      terminalGroupsRef.current = {
+        ...terminalGroupsRef.current,
+        [groupId]: next,
+      };
+      setTerminalGroups(terminalGroupsRef.current);
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === source.id || t.id === target.id
+            ? ({ ...t, paneGroup: groupId } as SubTab)
+            : t,
+        ),
+      );
+      setActiveTabId(source.id);
+      setTimeout(() => termHandles.current.get(source.id)?.focus(), 50);
+    },
+    [computePaneDrop],
+  );
   const stripDrag = useTabDragGroups(
     useMemo(() => tabGroups.map((g) => g.shown.map((t) => t.id)), [tabGroups]),
     reorderGroup,
+    useMemo(
+      () => ({ onDragMove: onTabDragMove, onDrop: onTabDrop }),
+      [onTabDragMove, onTabDrop],
+    ),
   );
   // Regrouping never touches which tab is open — every pane stays mounted and
   // `activeTabId` is untouched, so the view under a tab that goes idle is the
@@ -8255,22 +8495,37 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  files panel's run rows make, so both surfaces drive one tab. */
   const startServer = useCallback(
     (path: string, entry: ServerEntry) => {
-      addTerminal(path, entry.command, entry.name, "▶", true);
+      addTerminal(
+        path,
+        entry.command,
+        entry.name,
+        "▶",
+        true,
+        undefined,
+        undefined,
+        true,
+        undefined,
+        entry.componentId && entry.runCommandId
+          ? {
+              componentId: entry.componentId,
+              runCommandId: entry.runCommandId,
+            }
+          : undefined,
+      );
     },
     [addTerminal],
   );
 
-  const configuredVibeComponent = project.vibe?.component;
-  const vibeComponent = configuredVibeComponent
-    ? components.find(
-        (component) =>
-          component.label === configuredVibeComponent ||
-          component.path === configuredVibeComponent,
-      ) ?? null
-    : null;
-  const vibeRun = vibeComponent?.commands?.find(
-    (command) => command.name === project.vibe?.runCommand,
-  );
+  const vibeComponent =
+    vibeTarget.kind === "ready"
+      ? components.find((component) => component.id === vibeTarget.component.id) ?? null
+      : null;
+  const vibeRun =
+    vibeTarget.kind === "ready"
+      ? vibeComponent?.commands?.find(
+          (command) => command.id === vibeTarget.runCommand.id,
+        ) ?? null
+      : null;
   const vibeCheck = vibeComponent?.commands?.find(
     (command) =>
       command.name !== vibeRun?.name &&
@@ -8324,7 +8579,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
     );
     if (!running && autoStartedVibeRun.current !== key) {
       autoStartedVibeRun.current = key;
-      addTerminal(vibeComponent.path, vibeRun.command, vibeRun.name, "▶", true);
+      addTerminal(
+        vibeComponent.path,
+        vibeRun.command,
+        vibeRun.name,
+        "▶",
+        true,
+        undefined,
+        undefined,
+        true,
+        undefined,
+        { componentId: vibeComponent.id, runCommandId: vibeRun.id },
+      );
     }
   }, [visible, vibe, vibeComponent, vibeRun, runTabs, addTerminal]);
 
@@ -8415,6 +8681,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         id: project.id,
         name: project.name,
         components: components.map((c) => ({
+          id: c.id,
           label: c.label,
           path: c.path,
           commands: c.commands ?? [],
@@ -9186,7 +9453,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onStartNew={(agentId) =>
               void startTicketWork(tab.ticket, tab.repo ?? "", agentId)
             }
-            onStartTask={() => void startTicketTask(tab.ticket, tab.repo)}
+            onStartTask={() => startTicketTask(tab.ticket, tab.repo)}
+            // The run's identity is its label (one adhoc task looks like any
+            // other), so the live state the button shows is "a run with this
+            // ticket's label is still in flight".
+            taskRunning={microRuns.some(
+              (r) =>
+                r.taskId === ADHOC_TASK_ID &&
+                r.label === ticketTaskLabel(tab.ticket),
+            )}
+            onShowTasks={() => {
+              setPinned(true);
+              setSideTab("tasks");
+            }}
+            onResearch={() => void researchTicket(tab.ticket)}
             onSendToAgent={(target) =>
               sendTicketToAgent(target, ticketContext(tab.ticket))
             }
@@ -9322,9 +9602,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
               const dir = cwd ?? componentsRef.current[0]?.path;
               if (!dir) {
                 onNotice("No project directory to start the agent in.");
-                return;
+                return Promise.resolve(false);
               }
-              startAgentInDir(dir, agentId, text, "Preview feedback");
+              return startAgentInDir(dir, agentId, text, "Preview feedback");
             }}
             onRunOneOff={(brief, dir) =>
               // Named, so the Tasks list says what it is rather than opening
@@ -9349,9 +9629,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
               const dir = cwd ?? componentsRef.current[0]?.path;
               if (!dir) {
                 onNotice("No project directory to start the agent in.");
-                return;
+                return Promise.resolve(false);
               }
-              startAgentInDir(dir, agentId, text, "Device feedback");
+              return startAgentInDir(dir, agentId, text, "Device feedback");
             }}
             projects={components.map((c) => ({ label: c.label, path: c.path }))}
           />
@@ -9404,7 +9684,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       case "issues-list":
         return (
-          <TicketsPanel page components={project.components.map((c) => ({ label: c.label, path: c.path }))} agentTargets={agentTargets} installed={installed} onStartWork={startTicketWork} onSendToAgent={sendTicketToAgent} onOpenTicket={openTicket} onOpenIntegrations={() => window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "integrations" } }))} />
+          <TicketsPanel page components={project.components.map((c) => ({ label: c.label, path: c.path }))} agentTargets={agentTargets} installed={installed} onStartWork={startTicketWork} onSendToAgent={sendTicketToAgent} onResearch={(t) => void researchTicket(t)} onOpenTicket={openTicket} onOpenIntegrations={() => window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "integrations" } }))} />
         );
       case "task-history":
         return (
@@ -9718,6 +9998,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
         onOpenAllTabs={onOpenAllTabs}
         activeTabElRef={activeTabElRef}
       />
+      {fleetLaunchNote && (
+        <div
+          className={`fleet-launch-note fleet-launch-note-${fleetLaunchNote.kind}`}
+          role={fleetLaunchNote.kind === "unusable" ? "alert" : "status"}
+        >
+          <span>{fleetLaunchNote.text}</span>
+          <button
+            type="button"
+            aria-label="Dismiss fleet launch note"
+            onClick={() => setFleetLaunchNote(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
       <div className="project-content" ref={contentRef}>
         {tabs
           .filter((t): t is TermSubTab => t.type === "terminal")
@@ -10020,6 +10315,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
               title="Drag to resize · double-click to equalize"
             />
           ))}
+        {paneDrop && (
+          <div
+            className="pane-drop-preview"
+            style={{
+              left: `${paneDrop.rect.left * 100}%`,
+              top: `${paneDrop.rect.top * 100}%`,
+              width: `${paneDrop.rect.width * 100}%`,
+              height: `${paneDrop.rect.height * 100}%`,
+            }}
+            aria-hidden
+          />
+        )}
         {/* Doc tabs, mounted for as long as they're open and shown by display
             like the terminals above — see docTabView. Each pane carries its own
             boundary: a view throwing (a PR diff, an editor, a ticket) must not
@@ -10499,7 +10806,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             </div>
           )}
           {components.map((c) => (
-            <div key={c.path} className="component-section">
+            <div key={`${c.id}:${c.path}`} className="component-section">
               <div
                 className="component-header"
                 onClick={() =>
@@ -10540,7 +10847,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                               t.type === "terminal" &&
                               Boolean(t.run) &&
                               t.cwd === c.path &&
-                              t.command === cmd.command,
+                              (t.runCommandId
+                                ? t.componentId === c.id && t.runCommandId === cmd.id
+                                : t.command === cmd.command),
                           );
                           // An open-but-finished tab isn't running: one-shot
                           // commands end on their own and must say so.
@@ -10548,18 +10857,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
                           const finished = tab?.exited ? tab : undefined;
                           const start = () =>
                             tab
-                              ? restartRun(tab.id)
+                              ? restartRun(tab.id, {
+                                  command: cmd.command,
+                                  name: cmd.name || cmd.command,
+                                  componentId: c.id,
+                                  runCommandId: cmd.id,
+                                })
                               : addTerminal(
                                   c.path,
                                   cmd.command,
                                   cmd.name || cmd.command,
                                   "▶",
                                   true,
+                                  undefined,
+                                  undefined,
+                                  true,
+                                  undefined,
+                                  { componentId: c.id, runCommandId: cmd.id },
                                 );
                           const ok = finished?.exitCode === 0;
                           return (
                             <div
-                              key={cmd.name + cmd.command}
+                              key={cmd.id}
                               className={`command-run-row ${running ? "command-running" : ""} ${
                                 finished
                                   ? ok
@@ -10814,6 +11133,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           installed={installed}
           onStartWork={startTicketWork}
           onSendToAgent={sendTicketToAgent}
+          onResearch={(t) => void researchTicket(t)}
           onOpenTicket={openTicket}
           onOpenIntegrations={() => {
             window.dispatchEvent(
@@ -11003,9 +11323,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
           {vibeSession ? (
             <VibeBuilderPane session={vibeSession} />
           ) : (
-            <div className="vibe-chat-placeholder-note">
-              Choose the Build component in project settings before starting.
-            </div>
+            <>
+              <div className="vibe-chat-placeholder-title">Build needs setup</div>
+              <div className="vibe-chat-placeholder-note">
+                {vibeSetupSupported
+                  ? "Choose the component and run command Build mode should use."
+                  : "This Build configuration needs a newer version of Canopy."}
+              </div>
+              {vibeSetupSupported && (
+                <Button size="sm" onClick={onEdit}>
+                  Set up Build mode
+                </Button>
+              )}
+            </>
           )}
         </aside>
         {/* The PanelGroup renders in every mode on purpose. Swapping mainArea

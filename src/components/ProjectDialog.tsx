@@ -4,7 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as ipc from "../ipc";
 import { basename } from "../paths";
 import type { Component, Project } from "../projects";
-import { newProjectId } from "../projects";
+import { newComponentId, newProjectId, newRunCommandId } from "../projects";
 import { useEscape } from "../useEscape";
 import { FilesIcon } from "./icons";
 import { Button } from "./ui";
@@ -20,6 +20,13 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
   const [components, setComponents] = useState<Component[]>(
     existing?.components ?? [],
   );
+  const knownVibe = existing?.vibe?.version === 1 ? existing.vibe : undefined;
+  const [vibeComponentId, setVibeComponentId] = useState(
+    knownVibe?.componentId ?? "",
+  );
+  const [vibeRunCommandId, setVibeRunCommandId] = useState(
+    knownVibe?.runCommandId ?? "",
+  );
   const [cloneOpen, setCloneOpen] = useState(false);
   const [cloneUrl, setCloneUrl] = useState("");
   const [cloning, setCloning] = useState(false);
@@ -30,7 +37,7 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
     const paths = Array.isArray(selection) ? selection : selection ? [selection] : [];
     const additions = paths
       .filter((p) => !components.some((c) => c.path === p))
-      .map((p) => ({ path: p, label: basename(p) || p }));
+      .map((p) => ({ id: newComponentId(), path: p, label: basename(p) || p }));
     if (additions.length) {
       setComponents((prev) => [...prev, ...additions]);
       if (!name && additions[0]) setName(additions[0].label);
@@ -57,7 +64,10 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
         setCloneError("That folder is already part of this project.");
         return;
       }
-      setComponents((prev) => [...prev, { path: res.path, label: res.name }]);
+      setComponents((prev) => [
+        ...prev,
+        { id: newComponentId(), path: res.path, label: res.name },
+      ]);
       if (!name) setName(res.name);
       setCloneUrl("");
     } catch (e) {
@@ -88,7 +98,13 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
     setComponents((prev) =>
       prev.map((c, j) =>
         j === i
-          ? { ...c, commands: [...(c.commands ?? []), { name: "", command: "" }] }
+          ? {
+              ...c,
+              commands: [
+                ...(c.commands ?? []),
+                { id: newRunCommandId(), name: "", command: "" },
+              ],
+            }
           : c,
       ),
     );
@@ -103,6 +119,10 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
     );
 
   const valid = name.trim().length > 0 && components.length > 0;
+  const vibeComponent = components.find((component) => component.id === vibeComponentId);
+  const vibeCommand = vibeComponent?.commands?.find(
+    (command) => command.id === vibeRunCommandId,
+  );
 
   useEscape(onCancel);
 
@@ -134,7 +154,7 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
             </small>
           </div>
           {components.map((c, i) => (
-            <div key={c.path} className="pd-dir-card">
+            <div key={c.id} className="pd-dir-card">
               <div className="pd-dir-head">
                 <FilesIcon size={16} className="pd-dir-glyph" />
                 <div className="pd-dir-title">
@@ -165,7 +185,7 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
                   </small>
                 </div>
                 {(c.commands ?? []).map((cmd, k) => (
-                  <div key={k} className="pd-cmd-row">
+                  <div key={cmd.id} className="pd-cmd-row">
                     <span className="pd-cmd-play">▶</span>
                     <input
                       className="pd-cmd-name"
@@ -246,6 +266,51 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
             <div className="pd-clone-hint">Cloning — this can take a moment for large repos…</div>
           )}
         </div>
+        {knownVibe && (
+          <div className="pd-section">
+            <div className="pd-section-head">
+              <span>Build target</span>
+              <small>
+                Build mode uses this exact directory and run command. Missing or
+                removed selections stay in needs setup instead of guessing.
+              </small>
+            </div>
+            <label className="field">
+              <span>Component</span>
+              <select
+                value={vibeComponent ? vibeComponentId : ""}
+                onChange={(event) => {
+                  setVibeComponentId(event.target.value);
+                  setVibeRunCommandId("");
+                }}
+              >
+                <option value="">Needs setup</option>
+                {components.map((component) => (
+                  <option key={component.id} value={component.id}>
+                    {component.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>Run command</span>
+              <select
+                value={vibeCommand ? vibeRunCommandId : ""}
+                disabled={!vibeComponent}
+                onChange={(event) => setVibeRunCommandId(event.target.value)}
+              >
+                <option value="">Needs setup</option>
+                {(vibeComponent?.commands ?? [])
+                  .filter((command) => command.command.trim())
+                  .map((command) => (
+                    <option key={command.id} value={command.id}>
+                      {command.name || command.command}
+                    </option>
+                  ))}
+              </select>
+            </label>
+          </div>
+        )}
         <div className="modal-actions">
           <Button onClick={onCancel}>
             Cancel
@@ -262,6 +327,15 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
                 id: existing?.id ?? newProjectId(),
                 name: name.trim(),
                 components,
+                ...(knownVibe
+                  ? {
+                      vibe: {
+                        ...knownVibe,
+                        componentId: vibeComponentId || undefined,
+                        runCommandId: vibeRunCommandId || undefined,
+                      },
+                    }
+                  : {}),
               })
             }>
             {existing ? "Save" : "Create & open"}

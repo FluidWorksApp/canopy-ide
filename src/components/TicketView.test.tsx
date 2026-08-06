@@ -35,7 +35,7 @@ const detail = {
   }],
 };
 
-const view = (commands: Record<string, unknown> = {}) => {
+const view = (commands: Record<string, unknown> = {}, onResearch = vi.fn()) => {
   mockCommands({ gh_issue_detail: detail, ...commands });
   return render(
     <TicketView
@@ -47,6 +47,7 @@ const view = (commands: Record<string, unknown> = {}) => {
       installed={{}}
       onStartNew={vi.fn()}
       onStartTask={vi.fn()}
+      onResearch={onResearch}
       onSendToAgent={vi.fn()}
     />,
   );
@@ -60,6 +61,13 @@ describe("TicketView", () => {
     expect(await screen.findByText("opened by octocat")).toBeInTheDocument();
     expect(screen.getByText("Please ship this.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Close issue" })).toBeInTheDocument();
+  });
+
+  it("forwards the ticket to research", async () => {
+    const onResearch = vi.fn();
+    view({}, onResearch);
+    await userEvent.click(screen.getByRole("button", { name: "Research this" }));
+    expect(onResearch).toHaveBeenCalledTimes(1);
   });
 
   it("closes an issue and posts a comment", async () => {
@@ -82,6 +90,43 @@ describe("TicketView", () => {
       number: 42,
       body: "Looks good",
     }));
+  });
+
+  it("walks the start-work button through starting and running", async () => {
+    let release!: () => void;
+    const start = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+    const showTasks = vi.fn();
+    mockCommands({ gh_issue_detail: detail });
+    const props = {
+      ticket,
+      source: "github",
+      repo: "/work/app",
+      worktree: undefined,
+      agentTargets: [],
+      installed: {},
+      onStartNew: vi.fn(),
+      onStartTask: start,
+      onShowTasks: showTasks,
+      onResearch: vi.fn(),
+      onSendToAgent: vi.fn(),
+    };
+    const { rerender } = render(<TicketView {...props} />);
+    await screen.findByText("opened by octocat");
+
+    await userEvent.click(screen.getByTitle("Start this ticket as a one-shot task"));
+    expect(start).toHaveBeenCalledTimes(1);
+    // Mid-submit the button says so and cannot fire a second copy.
+    expect(screen.getByText("Starting…").closest("button")).toBeDisabled();
+
+    release();
+    rerender(<TicketView {...props} taskRunning />);
+    // Once the run is live, the primary click shows it in Tasks instead of
+    // launching again.
+    await userEvent.click(
+      await screen.findByTitle("This is running as a task — click to watch it in Tasks"),
+    );
+    expect(showTasks).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(1);
   });
 
   it("loads Linear details and changes its workflow state", async () => {
@@ -115,6 +160,7 @@ describe("TicketView", () => {
         installed={{}}
         onStartNew={vi.fn()}
         onStartTask={vi.fn()}
+        onResearch={vi.fn()}
         onSendToAgent={vi.fn()}
       />,
     );

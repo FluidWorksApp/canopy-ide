@@ -58,6 +58,16 @@ function flipAnimate(before: Map<string, number>, dragId: string, stripIds: Set<
   });
 }
 
+/** Optional drop-target hooks: reordering stays the strip's business, but a
+ *  consumer can also watch the pointer while a tab is in hand (to light up a
+ *  drop zone elsewhere) and claim the release. `onDrop` gets the release event,
+ *  or null when the drag was cancelled — either way it is the last call of a
+ *  drag, so clearing any preview belongs there. */
+export interface TabDragTarget {
+  onDragMove?: (id: string, e: PointerEvent) => void;
+  onDrop?: (id: string, e: PointerEvent | null) => void;
+}
+
 export function useTabDrag(ids: string[], reorder: (ids: string[]) => void): TabDrag {
   return useTabDragGroups([ids], reorder);
 }
@@ -71,9 +81,12 @@ export function useTabDrag(ids: string[], reorder: (ids: string[]) => void): Tab
 export function useTabDragGroups(
   groups: string[][],
   reorder: (ids: string[]) => void,
+  target?: TabDragTarget,
 ): TabDrag {
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragOffsetX, setDragOffsetX] = useState(0);
+  const targetRef = useRef(target);
+  targetRef.current = target;
   // The list the drag is confined to, resolved once at pointerdown: which
   // group a tab belongs to can change mid-drag (an agent finishing a turn
   // restacks it), and a tab that changed lists underneath the pointer would
@@ -108,6 +121,7 @@ export function useTabDragGroups(
       }
       // Track pixel offset so the tab translates with the pointer.
       setDragOffsetX(e.clientX - st.startX);
+      targetRef.current?.onDragMove?.(st.id, e);
       // The dragged tab is pointer-events:none while dragging, so this hits the
       // tab underneath rather than the one in hand.
       const over = (
@@ -135,7 +149,7 @@ export function useTabDragGroups(
       next.splice(to, 0, st.id);
       reorderRef.current(next);
     };
-    const up = () => {
+    const finish = (e: PointerEvent | null) => {
       const st = drag.current;
       drag.current = null;
       if (!st?.moved) return;
@@ -148,6 +162,7 @@ export function useTabDragGroups(
         el.style.transition = "";
         el.style.transform = "";
       });
+      targetRef.current?.onDrop?.(st.id, e);
       // Releasing lands a click on whatever tab is now under the cursor —
       // swallow it so a drag never doubles as "switch to that tab".
       const swallow = (ev: MouseEvent) => {
@@ -157,14 +172,16 @@ export function useTabDragGroups(
       window.addEventListener("click", swallow, true);
       window.setTimeout(() => window.removeEventListener("click", swallow, true), 0);
     };
+    const up = (e: PointerEvent) => finish(e);
+    const cancel = () => finish(null);
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
-    window.addEventListener("pointercancel", up);
+    window.addEventListener("pointercancel", cancel);
     return () => {
       if (drag.current?.moved) document.body.classList.remove("dragging-tab");
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
-      window.removeEventListener("pointercancel", up);
+      window.removeEventListener("pointercancel", cancel);
     };
   }, []);
 

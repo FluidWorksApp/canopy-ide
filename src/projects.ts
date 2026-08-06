@@ -9,11 +9,13 @@ import { currentPlatform, type Platform } from "./shortcuts";
 import { SESSION_ID_TOKEN, type RemoteCli } from "../shared/model";
 
 export interface RunCommand {
+  id: string;
   name: string;
   command: string;
 }
 
 export interface Component {
+  id: string;
   label: string;
   path: string;
   /** Named run commands (dev server, worker, ...) launched in this dir. */
@@ -21,9 +23,10 @@ export interface Component {
 }
 
 export interface VibeConfig {
+  version: 1;
   enabled: boolean;
-  component?: string;
-  runCommand?: string;
+  componentId?: string;
+  runCommandId?: string;
 }
 
 export interface Project {
@@ -55,6 +58,175 @@ export const emptyWorkspace: WorkspaceState = {
   openIds: [],
   activeId: null,
 };
+
+type LegacyVibeConfig = {
+  version?: unknown;
+  enabled?: unknown;
+  component?: unknown;
+  runCommand?: unknown;
+  componentId?: unknown;
+  runCommandId?: unknown;
+};
+
+const nonBlankId = (value: unknown): string | null =>
+  typeof value === "string" && value.trim() ? value : null;
+
+/** A small stable hash for IDs adopted from legacy array entries. These IDs are
+ * persisted on the same load, but determinism also makes an interrupted first
+ * migration produce exactly the same project structure next time. */
+function legacyId(prefix: string, seed: string, reserved: Set<string>): string {
+  let attempt = 0;
+  while (true) {
+    const input = attempt === 0 ? seed : `${seed}\0${attempt}`;
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < input.length; i += 1) {
+      hash = Math.imul(hash ^ input.charCodeAt(i), 0x01000193);
+    }
+    const id = `${prefix}_${(hash >>> 0).toString(36)}`;
+    if (!reserved.has(id)) {
+      reserved.add(id);
+      return id;
+    }
+    attempt += 1;
+  }
+}
+
+const idCounts = (values: unknown[]): Map<string, number> => {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    const id = nonBlankId(value);
+    if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return counts;
+};
+
+/** Give old project structures durable identity exactly once. Existing unique
+ * IDs survive unchanged; missing or duplicate IDs get deterministic replacements.
+ * Legacy vibe labels/names migrate only when both matches are unambiguous. */
+export function normalizeProjectStructure(project: Project): Project {
+  const rawComponents = project.components ?? [];
+  const componentCounts = idCounts(rawComponents.map((component) => component.id));
+  const commandCounts = idCounts(
+    rawComponents.flatMap((component) =>
+      (component.commands ?? []).map((command) => command.id),
+    ),
+  );
+  // Reserve duplicate spellings too. They are all replaced, but a generated ID
+  // must not accidentally revive an ambiguous reference to the old spelling.
+  const reservedComponentIds = new Set(componentCounts.keys());
+  const reservedCommandIds = new Set(commandCounts.keys());
+  let changed = false;
+
+  const components = rawComponents.map((component, componentIndex) => {
+    const existingComponentId = nonBlankId(component.id);
+    const id =
+      existingComponentId && componentCounts.get(existingComponentId) === 1
+        ? existingComponentId
+        : legacyId(
+            "cmp",
+            `${project.id}\0${componentIndex}\0${component.path}`,
+            reservedComponentIds,
+          );
+    if (id !== component.id) changed = true;
+
+    let commandsChanged = false;
+    const commands = component.commands?.map((command, commandIndex) => {
+      const existingCommandId = nonBlankId(command.id);
+      const commandId =
+        existingCommandId && commandCounts.get(existingCommandId) === 1
+          ? existingCommandId
+          : legacyId(
+              "run",
+              `${project.id}\0${id}\0${commandIndex}\0${command.name}\0${command.command}`,
+              reservedCommandIds,
+            );
+      if (commandId === command.id) return command;
+      commandsChanged = true;
+      changed = true;
+      return { ...command, id: commandId };
+    });
+    if (!commandsChanged && id === component.id) return component;
+    return { ...component, id, commands };
+  });
+
+  const rawVibe = project.vibe as LegacyVibeConfig | undefined;
+  let vibe = project.vibe;
+  if (rawVibe?.version === 1) {
+    // Duplicate command IDs in different components are globally invalid, but
+    // an existing v1 pair can still name one exact command. Carry that pair to
+    // its replacement ID rather than orphaning a previously usable config.
+    const componentId = nonBlankId(rawVibe.componentId);
+    const componentIndexes = componentId
+      ? rawComponents.flatMap((component, index) =>
+          component.id === componentId ? [index] : [],
+        )
+      : [];
+    const componentIndex = componentIndexes.length === 1 ? componentIndexes[0] : null;
+    const runCommandId = nonBlankId(rawVibe.runCommandId);
+    const commandIndexes =
+      componentIndex != null && runCommandId
+        ? (rawComponents[componentIndex].commands ?? []).flatMap((command, index) =>
+            command.id === runCommandId ? [index] : [],
+          )
+        : [];
+    const commandIndex = commandIndexes.length === 1 ? commandIndexes[0] : null;
+    if (componentIndex != null && commandIndex != null) {
+      const nextComponentId = components[componentIndex].id;
+      const nextRunCommandId = components[componentIndex].commands?.[commandIndex].id;
+      if (
+        nextRunCommandId &&
+        (nextComponentId !== componentId || nextRunCommandId !== runCommandId)
+      ) {
+        vibe = {
+          ...(project.vibe ?? {}),
+          version: 1,
+          enabled: project.vibe?.enabled === true,
+          componentId: nextComponentId,
+          runCommandId: nextRunCommandId,
+        };
+        changed = true;
+      }
+    }
+  } else if (rawVibe && rawVibe.version == null) {
+    const componentLabel =
+      typeof rawVibe.component === "string" ? rawVibe.component : null;
+    const componentMatches = componentLabel
+      ? components.filter((component) => component.label === componentLabel)
+      : [];
+    const selectedComponent =
+      componentMatches.length === 1 ? componentMatches[0] : undefined;
+    const commandName =
+      typeof rawVibe.runCommand === "string" ? rawVibe.runCommand : null;
+    const commandMatches =
+      selectedComponent && commandName
+        ? (selectedComponent.commands ?? []).filter(
+            (command) => command.name === commandName,
+          )
+        : [];
+    const selectedCommand = commandMatches.length === 1 ? commandMatches[0] : undefined;
+    vibe = {
+      version: 1,
+      enabled: rawVibe.enabled === true,
+      componentId: selectedComponent?.id,
+      runCommandId: selectedCommand?.id,
+    };
+    changed = true;
+  }
+
+  return changed ? { ...project, components, vibe } : project;
+}
+
+/** State-level migration seam, mirroring adoptLegacyCustomTasks: unchanged
+ * workspaces keep identity; a legacy workspace is saved once by App. */
+export function adoptProjectStructureIds(state: WorkspaceState): WorkspaceState {
+  let changed = false;
+  const projects = state.projects.map((project) => {
+    const normalized = normalizeProjectStructure(project);
+    if (normalized !== project) changed = true;
+    return normalized;
+  });
+  return changed ? { ...state, projects } : state;
+}
 
 export async function loadWorkspace(): Promise<WorkspaceState> {
   try {
@@ -169,11 +341,12 @@ export async function importFile(
     openIds?: string[];
   };
   if (obj?.kind === "canopy.project" && obj.project) {
-    return { projects: [obj.project], openIds: [obj.project.id] };
+    const project = normalizeProjectStructure(obj.project);
+    return { projects: [project], openIds: [project.id] };
   }
   if (obj?.kind === "canopy.workspace" && Array.isArray(obj.projects)) {
     return {
-      projects: obj.projects,
+      projects: obj.projects.map(normalizeProjectStructure),
       openIds: Array.isArray(obj.openIds) ? obj.openIds : [],
     };
   }
@@ -182,6 +355,12 @@ export async function importFile(
 
 export const newProjectId = () =>
   `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+export const newComponentId = () =>
+  `cmp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+export const newRunCommandId = () =>
+  `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
 // ---------- Agent CLI launcher registry ----------
 

@@ -10,7 +10,7 @@
 // renamed in project settings, is still a process you need to be able to stop.
 import { basename } from "./paths";
 import type { TermSubTab } from "./components/ProjectView/helpers";
-import type { RunCommand } from "./projects";
+import type { Component, RunCommand } from "./projects";
 import type { AgentRef } from "./workspaces";
 
 export type ServerState = "running" | "stopped" | "done" | "failed";
@@ -23,6 +23,8 @@ export interface ServerEntry {
   state: ServerState;
   /** The run tab backing this entry; null when it has never been started. */
   tabId: string | null;
+  componentId: string | null;
+  runCommandId: string | null;
   ptyId: number | null;
   exitCode: number | null;
   /** TCP ports this run is listening on, from the stats poller. */
@@ -75,10 +77,7 @@ export interface ComponentWorkspace {
   agents: AgentRef[];
 }
 
-export interface ServerComponent {
-  label: string;
-  path: string;
-  commands?: RunCommand[];
+export interface ServerComponent extends Component {
   /** This component as it exists in each workspace. Empty for a project with
    *  no workspaces, which is the shape this panel had before them. */
   workspaces?: ComponentWorkspace[];
@@ -142,17 +141,28 @@ export function groupServers(
 
   /** One command as it stands in one directory. The same join for the main
    *  checkout and for a workspace — the only thing that differs is where. */
-  const entryFor = (cmd: RunCommand, dir: string): ServerEntry => {
+  const entryFor = (
+    componentId: string,
+    cmd: RunCommand,
+    dir: string,
+  ): ServerEntry => {
     const tab = runTabs.find(
-      (t) => !claimed.has(t.id) && t.cwd === dir && t.command === cmd.command,
+      (t) =>
+        !claimed.has(t.id) &&
+        t.cwd === dir &&
+        (t.runCommandId
+          ? t.componentId === componentId && t.runCommandId === cmd.id
+          : t.command === cmd.command),
     );
     if (tab) claimed.add(tab.id);
     return {
-      key: `${cmd.name} ${cmd.command}`,
+      key: cmd.id,
       name: cmd.name || cmd.command,
       command: cmd.command,
       state: stateOf(tab),
       tabId: tab?.id ?? null,
+      componentId,
+      runCommandId: cmd.id,
       ptyId: tab?.ptyId ?? null,
       exitCode: tab?.exitCode ?? null,
       ports: portsOf(tab?.ptyId ?? null),
@@ -164,13 +174,13 @@ export function groupServers(
     const commands = (c.commands ?? []).filter((cmd) => cmd.command.trim());
     if (!commands.length) continue;
     const g = group(c.label, c.path);
-    for (const cmd of commands) g.entries.push(entryFor(cmd, c.path));
+    for (const cmd of commands) g.entries.push(entryFor(c.id, cmd, c.path));
 
     // Workspaces are matched before the ad-hoc pass runs, so a dev server
     // started on a branch lands under that branch rather than becoming an
     // orphan group named after a directory.
     for (const w of c.workspaces ?? []) {
-      const entries = commands.map((cmd) => entryFor(cmd, w.path));
+      const entries = commands.map((cmd) => entryFor(c.id, cmd, w.path));
       g.workspaces.push({
         label: w.label,
         path: w.path,
@@ -193,6 +203,8 @@ export function groupServers(
       command: t.command ?? "",
       state: stateOf(t),
       tabId: t.id,
+      componentId: null,
+      runCommandId: null,
       ptyId: t.ptyId,
       exitCode: t.exitCode ?? null,
       ports: portsOf(t.ptyId),

@@ -486,6 +486,7 @@ impl Session {
 pub fn pty_spawn(
     app: AppHandle,
     state: State<'_, PtyManager>,
+    tasks: State<'_, crate::tasks::TaskStore>,
     cols: u16,
     rows: u16,
     cwd: Option<String>,
@@ -496,9 +497,12 @@ pub fn pty_spawn(
     // several checkouts of the same repo can serve at once instead of fighting
     // over one hard-coded port.
     env: Option<Vec<(String, String)>>,
+    run_id: Option<String>,
+    attempt_id: Option<String>,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<SpawnResult, String> {
-    state.spawn(
+    let binding = tasks.spawn_binding(run_id.as_deref(), attempt_id.as_deref())?;
+    let result = state.spawn(
         app,
         cols,
         rows,
@@ -508,7 +512,9 @@ pub fn pty_spawn(
         run_command,
         Some(on_data),
         env,
-    )
+        binding.clone(),
+    );
+    finish_task_spawn(&state, &tasks, binding.as_ref(), result)
 }
 
 /// Spawn a PTY that no tab owns, for a micro-task: the agent runs its one job in
@@ -525,11 +531,57 @@ pub fn pty_spawn(
 pub fn pty_spawn_detached(
     app: AppHandle,
     state: State<'_, PtyManager>,
+    tasks: State<'_, crate::tasks::TaskStore>,
     cwd: Option<String>,
     command: String,
     env: Option<Vec<(String, String)>>,
+    run_id: Option<String>,
+    attempt_id: Option<String>,
 ) -> Result<SpawnResult, String> {
-    state.spawn(app, 120, 40, cwd, None, None, Some(command), None, env)
+    let binding = tasks.spawn_binding(run_id.as_deref(), attempt_id.as_deref())?;
+    let result = state.spawn(
+        app,
+        120,
+        40,
+        cwd,
+        None,
+        None,
+        Some(command),
+        None,
+        env,
+        binding.clone(),
+    );
+    finish_task_spawn(&state, &tasks, binding.as_ref(), result)
+}
+
+fn finish_task_spawn(
+    ptys: &PtyManager,
+    tasks: &crate::tasks::TaskStore,
+    binding: Option<&crate::tasks::AttemptBinding>,
+    result: Result<SpawnResult, String>,
+) -> Result<SpawnResult, String> {
+    match result {
+        Err(error) => {
+            if let Some(binding) = binding {
+                tasks.mark_launch_failed(binding).map_err(|record_error| {
+                    format!("{error}; failed to record task launch failure: {record_error}")
+                })?;
+            }
+            Err(error)
+        }
+        Ok(spawned) => {
+            if let Some(binding) = binding {
+                if let Err(error) = tasks.mark_spawned(binding) {
+                    let _ = ptys.kill(spawned.id);
+                    let _ = tasks.mark_launch_failed(binding);
+                    return Err(format!(
+                        "spawned PTY but could not start task attempt: {error}"
+                    ));
+                }
+            }
+            Ok(spawned)
+        }
+    }
 }
 
 /// The tail of a PTY's output, for a run nobody is watching: a micro-task's
@@ -563,7 +615,18 @@ impl PtyManager {
                 .map(|(home, cmd)| crate::profiles::env_for_command(&home, cmd))
                 .filter(|e| !e.is_empty())
         });
-        let res = self.spawn(app.clone(), 120, 32, cwd, None, None, None, None, account)?;
+        let res = self.spawn(
+            app.clone(),
+            120,
+            32,
+            cwd,
+            None,
+            None,
+            None,
+            None,
+            account,
+            None,
+        )?;
         if let Some(cmd) = command {
             let cmd = cmd.trim();
             if !cmd.is_empty() {
@@ -606,6 +669,7 @@ impl PtyManager {
         run_command: Option<String>,
         on_data: Option<Channel<InvokeResponseBody>>,
         extra_env: Option<Vec<(String, String)>>,
+        task_identity: Option<crate::tasks::AttemptBinding>,
     ) -> Result<SpawnResult, String> {
         let state = self;
         // Clamp for the same reason pty_resize does: a terminal spawned into a
@@ -651,6 +715,9 @@ impl PtyManager {
         // The caller's own variables go on first, so Canopy's identity vars below
         // always win however a caller spells them.
         for (k, v) in extra_env.unwrap_or_default() {
+            if matches!(k.as_str(), "CANOPY_RUN_ID" | "CANOPY_ATTEMPT_ID") {
+                continue;
+            }
             cmd.env(k, v);
         }
         cmd.env("TERM", "xterm-256color");
@@ -664,6 +731,12 @@ impl PtyManager {
         // #5" from another's — which silently binds one agent's digest to another's
         // terminal in the panel. This tag makes the pairing unambiguous.
         cmd.env("CANOPY_INSTANCE", instance_token());
+        if let Some(task) = &task_identity {
+            // Reserved identity is stamped after caller env, alongside the
+            // PTY/instance stamps. A surface cannot override or invent it.
+            cmd.env("CANOPY_RUN_ID", &task.run_id);
+            cmd.env("CANOPY_ATTEMPT_ID", &task.attempt_id);
+        }
         let cwd = cwd
             .or_else(|| dirs_home())
             .unwrap_or_else(|| "/".to_string());
@@ -676,7 +749,7 @@ impl PtyManager {
         // used to carry the same one, which left "who is asking" answerable
         // only from body fields the caller filled in itself.
         if let Some(ctx) = app.try_state::<crate::context::ContextBridge>() {
-            if let Some((port, token)) = ctx.mint_agent(id, &cwd) {
+            if let Some((port, token)) = ctx.mint_agent(id, &cwd, task_identity.as_ref()) {
                 cmd.env("CANOPY_CTX_PORT", port.to_string());
                 cmd.env("CANOPY_CTX_TOKEN", token);
             }
@@ -694,7 +767,7 @@ impl PtyManager {
                 ctx.retire_agent(id);
             }
         };
-        let child = match pair.slave.spawn_command(cmd) {
+        let mut child = match pair.slave.spawn_command(cmd) {
             Ok(child) => child,
             Err(e) => {
                 retire();
@@ -711,6 +784,11 @@ impl PtyManager {
             Ok(pair) => pair,
             Err(e) => {
                 retire();
+                // The command already exists and holds the task environment.
+                // Returning a launch failure without terminating it would leave
+                // real work running under an attempt recorded as failed.
+                let _ = child.kill();
+                let _ = child.wait();
                 return Err(e.to_string());
             }
         };
@@ -1160,6 +1238,7 @@ mod tests {
                 Some("echo DETACHED_$CANOPY_MICRO_TASK; sleep 20".into()),
                 None,
                 Some(vec![("CANOPY_MICRO_TASK".into(), "1".into())]),
+                None,
             )
             .expect("spawn");
         let seen = wait_for(&pm, res.id, "DETACHED_1", Duration::from_secs(8));
@@ -1173,6 +1252,40 @@ mod tests {
             "detached PTY never ran its command with the given env"
         );
         assert!(tail.contains("DETACHED_1"), "tail was: {tail}");
+    }
+
+    #[test]
+    fn reserved_task_identity_overrides_caller_env() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let res = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some("echo TASK_${CANOPY_RUN_ID}_${CANOPY_ATTEMPT_ID}; sleep 20".into()),
+                None,
+                Some(vec![
+                    ("CANOPY_RUN_ID".into(), "invented".into()),
+                    ("CANOPY_ATTEMPT_ID".into(), "invented".into()),
+                ]),
+                Some(crate::tasks::AttemptBinding {
+                    run_id: "run_reserved".into(),
+                    attempt_id: "attempt_reserved".into(),
+                }),
+            )
+            .expect("spawn");
+        let seen = wait_for(
+            &pm,
+            res.id,
+            "TASK_run_reserved_attempt_reserved",
+            Duration::from_secs(8),
+        );
+        let _ = pm.kill(res.id);
+        assert!(seen, "the reserved identity did not win over caller env");
     }
 
     // The question detaching a micro-task raises: an agent nobody is watching
@@ -1207,6 +1320,7 @@ mod tests {
                 ),
                 None,
                 Some(vec![("CANOPY_MICRO_TASK".into(), "1".into())]),
+                None,
             )
             .expect("spawn");
 

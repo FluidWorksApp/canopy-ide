@@ -741,6 +741,7 @@ pub fn run() {
             mcp_client::mcp_disconnect,
             mcp_client::mcp_connected,
             agents::claude_session_stats,
+            agents::opencode_session_stats,
             agents::agent_usage,
             agents::plan_usage,
             agents::hook_bridge_path,

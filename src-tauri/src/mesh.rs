@@ -25,10 +25,15 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-/// How many messages the log keeps, in memory and on disk. The cap is the
-/// whole retention policy: old traffic ages out of the front as new traffic
-/// lands, and the file is rewritten to match.
+/// How many messages the log keeps, in memory and on disk. Old traffic ages
+/// out of the front as new traffic lands, and the file is rewritten to match.
 const MAX_KEPT: usize = 500;
+
+/// How long a message stays even under the count cap. Pty ids only mean
+/// anything within the app run that minted them, so week-old traffic names
+/// terminals that no longer exist. Applied by `prune_stale`, which the
+/// maintenance scheduler calls (maintenance.rs) — never the write path.
+pub const MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 /// One shared item riding on a message: a file on this machine, by absolute
 /// path. "Multimodal" here means the receiver opens it with its own tools —
@@ -268,6 +273,20 @@ impl MeshStore {
     pub fn all(&self) -> Vec<MeshMessage> {
         self.inner.lock().unwrap().messages.clone()
     }
+
+    /// Drop messages older than `MAX_AGE_MS` and persist the survivors.
+    /// Returns how many went. Not a second write door — it only removes.
+    pub fn prune_stale(&self, now_ms: u64) -> usize {
+        let cutoff = now_ms.saturating_sub(MAX_AGE_MS);
+        let mut inner = self.inner.lock().unwrap();
+        let before = inner.messages.len();
+        inner.messages.retain(|m| m.at_ms >= cutoff);
+        let dropped = before - inner.messages.len();
+        if dropped > 0 {
+            inner.persist();
+        }
+        dropped
+    }
 }
 
 impl Inner {
@@ -416,6 +435,26 @@ mod tests {
         let reopened = MeshStore::at(Some(path.clone()));
         assert_eq!(reopened.all().len(), 1);
         assert_eq!(reopened.all()[0].text, "good");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn stale_messages_age_out_and_the_file_agrees() {
+        let path = tmp_store("prune");
+        let store = MeshStore::at(Some(path.clone()));
+        let old = store.record(new_msg("ancient", 7)); // at_ms 42
+        let mut recent = new_msg("fresh", 7);
+        recent.at_ms = MAX_AGE_MS + 1_000;
+        let kept = store.record(recent);
+
+        assert_eq!(store.prune_stale(MAX_AGE_MS + 2_000), 1);
+        assert!(store.get(&old.id).is_none());
+        assert!(store.get(&kept.id).is_some());
+        // The file agrees, and a second prune finds nothing to do.
+        let reopened = MeshStore::at(Some(path.clone()));
+        assert_eq!(reopened.all().len(), 1);
+        assert_eq!(reopened.all()[0].text, "fresh");
+        assert_eq!(reopened.prune_stale(MAX_AGE_MS + 2_000), 0);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

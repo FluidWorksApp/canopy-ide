@@ -184,6 +184,23 @@ libc = "0.2"
 # Tauri already builds on Windows.
 webview2-com = "0.38"
 windows-core = "0.61"
+# snapshot.rs: CapturePreview writes its PNG into a COM memory stream; these
+# features name the stream constructor and IStream itself. Same windows 0.61
+# webview2-com-sys already resolves to, so again names, not weight.
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage"] }
+# The capture comes back as a whole-view frame; cropping the asked-for rect out
+# of it, capping the width and re-encoding all happen in Rust because neither
+# CapturePreview nor WebKitGTK's snapshot takes a rect the way WKWebView does.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# snapshot.rs: webkit_web_view_get_snapshot on the WebKitWebView behind wry.
+# Version-pinned exactly as wry pins it, so this names the crate already in the
+# tree rather than resolving a second copy; cairo-rs is what the snapshot's
+# surface comes back as, at the 0.18 series webkit2gtk 2.0 depends on.
+webkit2gtk = "=2.0.2"
+cairo-rs = { version = "0.18", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # `exception` lets clipboard.rs contain an NSPasteboard exception at the FFI

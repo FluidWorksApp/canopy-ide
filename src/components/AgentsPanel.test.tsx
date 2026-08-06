@@ -293,4 +293,38 @@ describe("agent messages", () => {
     panel({ visible: true });
     expect(await screen.findByText("companion → terminal 7")).toBeTruthy();
   });
+
+  // A pty id stops meaning anything across app runs; the CLI's name never
+  // does, so when the hook captured one the route leads with it.
+  it("names the agents on each end when it knows them", async () => {
+    seams.messages = [msg({ from_agent: "claude", to_agent: "codex" })];
+    panel({ visible: true });
+    expect(await screen.findByText("claude 3 → codex 7")).toBeTruthy();
+  });
+
+  // The store keeps hundreds; the panel leads with the recent few and makes
+  // the rest a click, not a scroll past everything else the panel is for.
+  it("shows only the newest few until View all is asked for", async () => {
+    seams.messages = Array.from({ length: 12 }, (_, i) =>
+      msg({ id: `m${i + 1}`, text: `message ${i + 1}`, at_ms: i + 1 }),
+    );
+    panel({ visible: true });
+    // Newest first: m12 is visible, the oldest are cut.
+    expect(await screen.findByText("message 12")).toBeTruthy();
+    expect(screen.queryByText("message 1")).toBeNull();
+    expect(screen.getByText("message 5")).toBeTruthy();
+    expect(screen.queryByText("message 4")).toBeNull();
+
+    await userEvent.click(screen.getByText("View all 12 messages"));
+    expect(screen.getByText("message 1")).toBeTruthy();
+    await userEvent.click(screen.getByText("Show recent only"));
+    expect(screen.queryByText("message 1")).toBeNull();
+  });
+
+  it("offers no View all when everything already fits", async () => {
+    seams.messages = [msg()];
+    panel({ visible: true });
+    await screen.findByText("terminal 3 → terminal 7");
+    expect(screen.queryByText(/View all/)).toBeNull();
+  });
 });

@@ -46,6 +46,29 @@ pub struct Job {
 
 /// The manifest: every subscribed chore, in one place. A new chore is a new
 /// entry here — never a new thread in `lib.rs`.
+///
+/// What a purge job may ever touch is an explicit allowlist, never
+/// "everything in `~/.canopy` except…" — a deny-list deletes whatever the
+/// next feature stores there before anyone classifies it. The ledger, so the
+/// next candidate is judged deliberately:
+///
+///   Purgeable — derived or write-only, provably not read back:
+///     agent-events.jsonl            the event bus; tailed live, history dead
+///     spot-index.sqlite (+wal/shm)  FTS5 cache; rebuilt from source stores
+///
+///   Never purgeable, at any size:
+///     notes/ research/ sessions/    the user's work, and the session records
+///                                   `agents.rs` enumerates and reopens
+///     clipboard.sqlite              history that cannot be re-captured — the
+///                                   one non-rebuildable store (clipboard.rs)
+///     vault.enc relay-identity      credentials; profiles/ holds logins
+///     provenance.jsonl              the permanent session→PR record
+///     models/                       dictation models; re-downloadable, but
+///                                   deleting one is user-visible breakage —
+///                                   reclaim like that is `cleanup.rs`, with
+///                                   a dialog, never a background timer
+///     bin/ *.json plan-usage/       the app's own plumbing; small, and
+///     companion/                    deleting settings is never "maintenance"
 fn jobs() -> Vec<Job> {
     vec![
         // The chore this framework was built for. agent-events.jsonl is an
@@ -57,6 +80,28 @@ fn jobs() -> Vec<Job> {
             every_ms: 24 * 60 * 60 * 1000,
             eager: false,
             run: compact_agent_events,
+        },
+        // Bounded but immortal: mesh/messages.jsonl self-caps by count
+        // (mesh.rs MAX_KEPT), so it can never grow past ~500 lines — but the
+        // count cap keeps week-old traffic forever on a quiet machine, and a
+        // stale message names pty ids from app runs that no longer exist.
+        // This ages those out; the window and the persist live in mesh.rs.
+        Job {
+            id: "mesh-messages-prune",
+            every_ms: 24 * 60 * 60 * 1000,
+            eager: false,
+            run: prune_mesh_messages,
+        },
+        // The other unbounded file: SpotSearch's transcript index, seen at
+        // 1.36GB. Retention deletes rows but FTS5 keeps the pages, so the
+        // file only ever grows; past its cap it is cheaper to re-ingest than
+        // to vacuum. spot.rs owns the file layout and the live connection,
+        // so the how lives there.
+        Job {
+            id: "spot-index-purge",
+            every_ms: 24 * 60 * 60 * 1000,
+            eager: false,
+            run: purge_spot_index,
         },
     ]
 }
@@ -102,14 +147,18 @@ fn is_due(
     ran_this_session: bool,
 ) -> bool {
     let Some(r) = record else { return true };
-    let Some(last_run) = r.last_run else { return true };
+    let Some(last_run) = r.last_run else {
+        return true;
+    };
     if r.failures > 0 {
         return now_ms.saturating_sub(last_run) >= retry_delay_ms(r.failures, every_ms);
     }
     if eager && !ran_this_session {
         return true;
     }
-    let Some(last_ok) = r.last_ok else { return true };
+    let Some(last_ok) = r.last_ok else {
+        return true;
+    };
     // A record from the future means the clock moved back under us; running
     // resets the record to times that can age normally.
     if last_ok > now_ms {
@@ -218,6 +267,31 @@ fn compact_agent_events(_app: &AppHandle) -> Result<(), String> {
     };
     if let Some(freed) = compact_file(&dir.join("agent-events.jsonl"), EVENTS_CAP_BYTES)? {
         log::info!("maintenance: truncated agent-events.jsonl, freed {freed} bytes");
+    }
+    Ok(())
+}
+
+/// Age out mesh messages past mesh.rs's retention window, through the
+/// bridge's own door — the store's policy and file layout stay in mesh.rs;
+/// this is only the clock.
+fn prune_mesh_messages(app: &AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let dropped = app
+        .state::<crate::context::ContextBridge>()
+        .prune_mesh_messages(now_ms());
+    if dropped > 0 {
+        log::info!("maintenance: pruned {dropped} stale mesh messages");
+    }
+    Ok(())
+}
+
+/// Delete `~/.canopy/spot-index.sqlite` and its WAL sidecars once they
+/// outgrow spot.rs's cap. All policy is in `spot::purge_oversized_index`:
+/// it holds the index's own state lock and drops the live connection before
+/// touching the files, which this module has no business doing directly.
+fn purge_spot_index(app: &AppHandle) -> Result<(), String> {
+    if let Some(freed) = crate::spot::purge_oversized_index(app)? {
+        log::info!("maintenance: purged spot-index.sqlite, freed {freed} bytes");
     }
     Ok(())
 }

@@ -87,6 +87,10 @@ pub struct AgentIdentity {
     /// launch, so the id alone names a different terminal after a restart.
     pub instance: String,
     pub cwd: String,
+    /// Durable task binding proven by tasks.sqlite before this terminal was
+    /// spawned. Both are absent for an ordinary user-directed terminal.
+    pub run_id: Option<String>,
+    pub attempt_id: Option<String>,
 }
 
 impl AgentIdentity {
@@ -221,6 +225,12 @@ fn random_token() -> String {
 }
 
 impl ContextBridge {
+    /// Age out stale mesh messages — the maintenance scheduler's door to a
+    /// store that is otherwise private to this bridge.
+    pub fn prune_mesh_messages(&self, now_ms: u64) -> usize {
+        self.mesh.prune_stale(now_ms)
+    }
+
     /// What Canopy's own non-terminal children export (the companion). Names
     /// nobody on purpose — see `token`.
     pub fn env(&self) -> Option<(u16, String)> {
@@ -230,7 +240,12 @@ impl ContextBridge {
     /// Mint this terminal's own credential. Called once per spawn, before the
     /// child exists, so the token is in its environment from its first
     /// instruction and there is no window in which it holds someone else's.
-    pub fn mint_agent(&self, pty_id: u32, cwd: &str) -> Option<(u16, String)> {
+    pub fn mint_agent(
+        &self,
+        pty_id: u32,
+        cwd: &str,
+        task: Option<&crate::tasks::AttemptBinding>,
+    ) -> Option<(u16, String)> {
         let port = *self.port.get()?;
         let token = random_token();
         self.agents.lock().unwrap().insert(
@@ -239,6 +254,8 @@ impl ContextBridge {
                 pty_id,
                 instance: crate::pty::instance_token().to_string(),
                 cwd: cwd.to_string(),
+                run_id: task.map(|task| task.run_id.clone()),
+                attempt_id: task.map(|task| task.attempt_id.clone()),
             },
         );
         Some((port, token))
@@ -309,6 +326,7 @@ pub fn start(app: tauri::AppHandle) {
         let _ = app.state::<ContextBridge>().port.set(port);
         let router = Router::new()
             .route("/ctx/snapshot", get(snapshot))
+            .route("/ctx/identity", get(identity))
             .route("/ctx/server-output/:id", get(server_output))
             .route("/ctx/files", get(files))
             .route("/ctx/annotations", get(annotations))
@@ -428,6 +446,31 @@ fn caller(app: &tauri::AppHandle, headers: &HeaderMap) -> Option<Caller> {
 /// For handlers that only serve context back and so do not care who asked.
 fn authorized(app: &tauri::AppHandle, headers: &HeaderMap) -> bool {
     caller(app, headers).is_some()
+}
+
+/// The identity behind this credential. Hook events use this rather than their
+/// mutable process environment when attaching durable task ids.
+async fn identity(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
+    let Some(who) = caller(&app, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    };
+    let body = match who.agent() {
+        Some(agent) => serde_json::json!({
+            "ptyId": agent.pty_id,
+            "instance": &agent.instance,
+            "cwd": &agent.cwd,
+            "runId": agent.run_id.as_deref(),
+            "attemptId": agent.attempt_id.as_deref(),
+        }),
+        None => serde_json::json!({
+            "ptyId": null,
+            "instance": null,
+            "cwd": null,
+            "runId": null,
+            "attemptId": null,
+        }),
+    };
+    (StatusCode::OK, body.to_string())
 }
 
 async fn snapshot(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
@@ -2042,7 +2085,7 @@ async fn action(
             // the exact command string to run — and an unknown one is rejected
             // now, with the valid list, instead of silently doing nothing.
             match resolve_command(&snaps, dir, command) {
-                Ok(cmdline) => {
+                Ok((cmdline, component_id, run_command_id)) => {
                     let _ = app.emit(
                         "agent:action",
                         serde_json::json!({
@@ -2051,6 +2094,8 @@ async fn action(
                             "dir": dir,
                             "name": command,
                             "command": cmdline,
+                            "componentId": component_id,
+                            "runCommandId": run_command_id,
                         }),
                     );
                     format!("Starting \"{command}\" in {dir}. Give it a few seconds, then call canopy_project to see it listening and canopy_server_output for its logs.")
@@ -3455,9 +3500,13 @@ fn origin_of(url: &str) -> Option<String> {
 }
 
 /// Look up a component's run command by name in the published snapshots,
-/// returning its command line. Errs (with the available names) when the
+/// returning its command line and stable project IDs. Errs (with the available names) when the
 /// directory isn't a known component or the name isn't one of its commands.
-fn resolve_command(bridge: &ContextBridge, dir: &str, name: &str) -> Result<String, String> {
+fn resolve_command(
+    bridge: &ContextBridge,
+    dir: &str,
+    name: &str,
+) -> Result<(String, Option<String>, Option<String>), String> {
     let snaps = bridge.snapshots.lock().unwrap();
     for project in snaps.values() {
         let Some(components) = project.get("components").and_then(|c| c.as_array()) else {
@@ -3478,10 +3527,20 @@ fn resolve_command(bridge: &ContextBridge, dir: &str, name: &str) -> Result<Stri
                 .and_then(|c| c.as_array())
                 .into_iter()
                 .flatten()
-                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
-                .and_then(|c| c.get("command").and_then(|v| v.as_str()));
+                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name));
             return match found {
-                Some(cmd) => Ok(cmd.to_string()),
+                Some(cmd) => match cmd.get("command").and_then(|v| v.as_str()) {
+                    Some(line) => Ok((
+                        line.to_string(),
+                        comp.get("id")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                        cmd.get("id")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string),
+                    )),
+                    None => Err(format!("\"{name}\" has no command line in {dir}")),
+                },
                 None => Err(format!(
                     "\"{name}\" isn't a run command of {dir}. Configured commands: {}",
                     if names.is_empty() {
@@ -3787,6 +3846,34 @@ fn strip_ansi(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_server_resolution_carries_stable_ids() {
+        let bridge = ContextBridge::default();
+        bridge.snapshots.lock().unwrap().insert(
+            "p1".into(),
+            serde_json::json!({
+                "components": [{
+                    "id": "cmp-web",
+                    "path": "/repo/web",
+                    "commands": [{
+                        "id": "run-dev",
+                        "name": "dev",
+                        "command": "npm run dev"
+                    }]
+                }]
+            }),
+        );
+
+        assert_eq!(
+            resolve_command(&bridge, "/repo/web", "dev"),
+            Ok((
+                "npm run dev".into(),
+                Some("cmp-web".into()),
+                Some("run-dev".into())
+            ))
+        );
+    }
 
     #[test]
     fn strip_ansi_drops_csi_osc_and_cr() {
@@ -4158,16 +4245,22 @@ mod tests {
             pty_id: 1,
             instance: "run-a".into(),
             cwd: "/w".into(),
+            run_id: None,
+            attempt_id: None,
         };
         let b = AgentIdentity {
             pty_id: 2,
             instance: "run-a".into(),
             cwd: "/w".into(),
+            run_id: None,
+            attempt_id: None,
         };
         let recycled = AgentIdentity {
             pty_id: 1,
             instance: "run-b".into(),
             cwd: "/w".into(),
+            run_id: None,
+            attempt_id: None,
         };
         assert_ne!(a.key(), b.key());
         assert_ne!(a.key(), recycled.key());
@@ -4176,7 +4269,9 @@ mod tests {
             AgentIdentity {
                 pty_id: 1,
                 instance: "run-a".into(),
-                cwd: "/elsewhere".into()
+                cwd: "/elsewhere".into(),
+                run_id: Some("run_task".into()),
+                attempt_id: Some("attempt_task".into()),
             }
             .key()
         );
@@ -4190,13 +4285,21 @@ mod tests {
         let bridge = ContextBridge::default();
         let _ = bridge.port.set(4242);
 
-        let (port, token) = bridge.mint_agent(7, "/w/app").expect("port is set");
+        let task = crate::tasks::AttemptBinding {
+            run_id: "run_task".into(),
+            attempt_id: "attempt_task".into(),
+        };
+        let (port, token) = bridge
+            .mint_agent(7, "/w/app", Some(&task))
+            .expect("port is set");
         assert_eq!(port, 4242);
 
         match bridge.identify(&token) {
             Some(Caller::Agent(a)) => {
                 assert_eq!(a.pty_id, 7);
                 assert_eq!(a.cwd, "/w/app");
+                assert_eq!(a.run_id.as_deref(), Some("run_task"));
+                assert_eq!(a.attempt_id.as_deref(), Some("attempt_task"));
             }
             other => panic!("the minted token must name its terminal, got {other:?}"),
         }
@@ -4207,7 +4310,7 @@ mod tests {
 
         // Two terminals in one directory get two credentials and two
         // identities, which is the whole point.
-        let (_, second) = bridge.mint_agent(8, "/w/app").unwrap();
+        let (_, second) = bridge.mint_agent(8, "/w/app", None).unwrap();
         assert_ne!(token, second);
         let key_of = |t: &str| match bridge.identify(t) {
             Some(Caller::Agent(a)) => a.key(),
@@ -4232,7 +4335,7 @@ mod tests {
     fn one_agent_cannot_stop_anothers_session() {
         let bridge = ContextBridge::default();
         let _ = bridge.port.set(1);
-        let (_, mine) = bridge.mint_agent(1, "/w").unwrap();
+        let (_, mine) = bridge.mint_agent(1, "/w", None).unwrap();
         let me = bridge.identify(&mine).unwrap();
         use TerminalRole::{Agent, NotAgent};
 
@@ -4257,7 +4360,7 @@ mod tests {
     fn an_unclassified_terminal_is_protected_but_not_messaged() {
         let bridge = ContextBridge::default();
         let _ = bridge.port.set(1);
-        let (_, mine) = bridge.mint_agent(1, "/w").unwrap();
+        let (_, mine) = bridge.mint_agent(1, "/w", None).unwrap();
         let me = bridge.identify(&mine).unwrap();
 
         // Stopping: refused while we cannot tell, and the wording says why.
@@ -4472,6 +4575,8 @@ mod tests {
             pty_id,
             instance: instance.into(),
             cwd: cwd.into(),
+            run_id: None,
+            attempt_id: None,
         })
     }
 
