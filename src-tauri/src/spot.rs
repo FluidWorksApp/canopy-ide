@@ -935,6 +935,72 @@ pub async fn spot_save_context_text(
     Ok(path.to_string_lossy().to_string())
 }
 
+// ---------------------------------------------------------------------------
+// The index's disk footprint, for the maintenance scheduler.
+
+/// Combined db+WAL size past which maintenance deletes the index outright.
+/// A healthy index sits far below this; 1.36GB was observed in the field —
+/// FTS5 never returns pages to the OS, so retention drops and rebuilds leave
+/// the file at its high-water mark until something deletes it.
+const INDEX_CAP_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Delete the index once it outgrows [`INDEX_CAP_BYTES`]; `Ok(Some(bytes))`
+/// says how much was on disk, `Ok(None)` that it was left alone.
+///
+/// Deleting the whole file rather than `VACUUM`ing it: a vacuum rewrites the
+/// database — up to the same gigabyte of disk traffic — to keep rows that are
+/// all derived data, while `open_db` already treats a missing file as "create
+/// and re-ingest from source". The connection is dropped before the files go,
+/// and the state lock is held across the delete so a palette query cannot
+/// lazily reopen against a half-removed WAL set.
+pub fn purge_oversized_index(app: &tauri::AppHandle) -> Result<Option<u64>, String> {
+    use tauri::Manager;
+    let db = db_path()?;
+    let state = app.state::<SpotIndex>();
+    let mut guard = state.0.lock().unwrap();
+    if index_footprint(&db) <= INDEX_CAP_BYTES {
+        return Ok(None);
+    }
+    *guard = None;
+    // Closing may have checkpointed the WAL into the db; measure what is
+    // actually freed, then take all three files together.
+    let freed = index_footprint(&db);
+    delete_index_files(&db)?;
+    Ok(Some(freed))
+}
+
+/// What the index costs on disk: the database plus its WAL. The `-shm` file
+/// is a page of shared memory, noise next to the other two.
+fn index_footprint(db: &std::path::Path) -> u64 {
+    [db.to_path_buf(), sibling(db, "-wal")]
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// Remove the database and both sidecars. Missing files are fine — a partial
+/// earlier delete finishes here — but any other failure is reported so the
+/// scheduler retries rather than leaving a WAL orphaned beside a fresh db.
+fn delete_index_files(db: &std::path::Path) -> Result<(), String> {
+    for path in [db.to_path_buf(), sibling(db, "-wal"), sibling(db, "-shm")] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("delete {}: {e}", path.display())),
+        }
+    }
+    Ok(())
+}
+
+/// `spot-index.sqlite` → `spot-index.sqlite-wal`: SQLite appends, it does not
+/// swap extensions, so neither can we.
+fn sibling(db: &std::path::Path, suffix: &str) -> PathBuf {
+    let mut name = db.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
 /// `<prefix>-<stamp>.<ext>`, then `<prefix>-<stamp>-2.<ext>`, … until one is
 /// free. Bounded so a directory that cannot be written to fails at the write
 /// rather than here.
@@ -955,6 +1021,27 @@ fn free_path(dir: &std::path::Path, stamp: i64, prefix: &str, ext: &str) -> Path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn footprint_counts_db_plus_wal_and_delete_takes_the_whole_set() {
+        let dir = std::env::temp_dir().join(format!("canopy-spot-purge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("spot-index.sqlite");
+
+        assert_eq!(index_footprint(&db), 0); // nothing there yet
+        std::fs::write(&db, vec![b'x'; 300]).unwrap();
+        std::fs::write(sibling(&db, "-wal"), vec![b'x'; 50]).unwrap();
+        std::fs::write(sibling(&db, "-shm"), vec![b'x'; 7]).unwrap();
+        assert_eq!(index_footprint(&db), 350); // shm is deliberately not counted
+
+        // A full set goes together; a partial set (earlier delete interrupted)
+        // finishes without complaint.
+        delete_index_files(&db).unwrap();
+        assert_eq!(index_footprint(&db), 0);
+        assert!(!sibling(&db, "-shm").exists());
+        delete_index_files(&db).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The bug this replaced: the skip check compared the tail's *length*, and
     /// the ring is capped — so once a busy terminal filled it, the length was

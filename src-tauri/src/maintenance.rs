@@ -46,6 +46,29 @@ pub struct Job {
 
 /// The manifest: every subscribed chore, in one place. A new chore is a new
 /// entry here — never a new thread in `lib.rs`.
+///
+/// What a purge job may ever touch is an explicit allowlist, never
+/// "everything in `~/.canopy` except…" — a deny-list deletes whatever the
+/// next feature stores there before anyone classifies it. The ledger, so the
+/// next candidate is judged deliberately:
+///
+///   Purgeable — derived or write-only, provably not read back:
+///     agent-events.jsonl            the event bus; tailed live, history dead
+///     spot-index.sqlite (+wal/shm)  FTS5 cache; rebuilt from source stores
+///
+///   Never purgeable, at any size:
+///     notes/ research/ sessions/    the user's work, and the session records
+///                                   `agents.rs` enumerates and reopens
+///     clipboard.sqlite              history that cannot be re-captured — the
+///                                   one non-rebuildable store (clipboard.rs)
+///     vault.enc relay-identity      credentials; profiles/ holds logins
+///     provenance.jsonl              the permanent session→PR record
+///     models/                       dictation models; re-downloadable, but
+///                                   deleting one is user-visible breakage —
+///                                   reclaim like that is `cleanup.rs`, with
+///                                   a dialog, never a background timer
+///     bin/ *.json plan-usage/       the app's own plumbing; small, and
+///     companion/                    deleting settings is never "maintenance"
 fn jobs() -> Vec<Job> {
     vec![
         // The chore this framework was built for. agent-events.jsonl is an
@@ -57,6 +80,17 @@ fn jobs() -> Vec<Job> {
             every_ms: 24 * 60 * 60 * 1000,
             eager: false,
             run: compact_agent_events,
+        },
+        // The other unbounded file: SpotSearch's transcript index, seen at
+        // 1.36GB. Retention deletes rows but FTS5 keeps the pages, so the
+        // file only ever grows; past its cap it is cheaper to re-ingest than
+        // to vacuum. spot.rs owns the file layout and the live connection,
+        // so the how lives there.
+        Job {
+            id: "spot-index-purge",
+            every_ms: 24 * 60 * 60 * 1000,
+            eager: false,
+            run: purge_spot_index,
         },
     ]
 }
@@ -222,6 +256,17 @@ fn compact_agent_events(_app: &AppHandle) -> Result<(), String> {
     };
     if let Some(freed) = compact_file(&dir.join("agent-events.jsonl"), EVENTS_CAP_BYTES)? {
         log::info!("maintenance: truncated agent-events.jsonl, freed {freed} bytes");
+    }
+    Ok(())
+}
+
+/// Delete `~/.canopy/spot-index.sqlite` and its WAL sidecars once they
+/// outgrow spot.rs's cap. All policy is in `spot::purge_oversized_index`:
+/// it holds the index's own state lock and drops the live connection before
+/// touching the files, which this module has no business doing directly.
+fn purge_spot_index(app: &AppHandle) -> Result<(), String> {
+    if let Some(freed) = crate::spot::purge_oversized_index(app)? {
+        log::info!("maintenance: purged spot-index.sqlite, freed {freed} bytes");
     }
     Ok(())
 }
