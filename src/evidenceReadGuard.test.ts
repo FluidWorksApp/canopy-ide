@@ -188,31 +188,31 @@ const JUSTIFYING_FUNCTIONS = [
   {
     module: "vibePackages.ts",
     symbol: "planInstall",
-    enabled: false,
+    enabled: true,
     cost: "managed package installs are unreachable — nothing can ask for one",
   },
   {
     module: "vibeServices.ts",
     symbol: "planLink",
-    enabled: false,
+    enabled: true,
     cost: "managed service linking is unreachable — nothing can ask for one",
   },
   {
-    module: "vibeServices.ts",
+    module: "vibePackages.ts",
     symbol: "detectRunner",
-    enabled: false,
+    enabled: true,
     cost: "the runner behind a service link is never detected, because nothing calls the detector",
   },
   {
     module: "vibeDeploy.ts",
     symbol: "planDeploy",
-    enabled: false,
+    enabled: true,
     cost: "managed deploys are unreachable — nothing can ask for one",
   },
   {
     module: "vibeDeploy.ts",
     symbol: "detectDeployProvider",
-    enabled: false,
+    enabled: true,
     cost: "the deploy provider is never detected, because nothing calls the detector",
   },
 ] as const;

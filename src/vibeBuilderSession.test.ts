@@ -98,11 +98,9 @@ function harness(
         presentSecrets: [],
         envFileTracked: false,
       },
-      deploy: {
-        verification: "verified" as const,
-        dirty: false,
-        cliInstalled: true,
-      },
+      // No `verification` here on purpose — it is the session's observation,
+      // not the project's, and the type no longer allows it to be smuggled in.
+      deploy: { dirty: false, cliInstalled: true },
     })),
     runAbstraction: vi.fn(async (argv: string[], cwd: string) => {
       abstractionRuns.push({ argv, cwd });
@@ -1136,7 +1134,10 @@ describe("managed abstractions", () => {
    *  deploy request is refused for having nowhere to go, and a test written
    *  against that would pass without reaching the gate it claims to check. */
   const deployable = async (h: ReturnType<typeof harness>) => {
-    const base = await h.deps.abstractionContext("/w/app");
+    const base = await h.deps.abstractionContext("/w/app", {
+      kind: "deploy",
+      target: "preview",
+    });
     h.deps.abstractionContext = async (cwd: string) => ({
       ...base,
       cwd,
@@ -1144,16 +1145,67 @@ describe("managed abstractions", () => {
     });
   };
 
+  /** Drive a real turn to a real verdict. Production deploys are gated on what
+   *  the session actually observed, so a test that wants that gate open has to
+   *  earn it the way the product does rather than set a flag. */
+  const verified = async (h: ReturnType<typeof harness>) => {
+    await h.session.send("make the button blue");
+    h.emit({ kind: "turnEnd" });
+    await vi.waitFor(() =>
+      expect(h.events).toContainEqual(
+        expect.objectContaining({ kind: "verification.verdict", code: "verified" }),
+      ),
+    );
+  };
+
   it("refuses to publish work this session never verified", async () => {
     const h = harness();
     await deployable(h);
     // Nothing has been verified in this session, so `lastVerification` is
     // "incomplete" — and production must not go out on an unproven build, no
-    // matter what the project on disk looks like.
+    // matter what the project on disk claims.
     await h.session.send("deploy to production");
     expect(h.session.state.question?.kind).toBe("question");
-    await h.session.send("Publish to production");
     expect(h.abstractionRuns).toHaveLength(0);
+  });
+
+  it("requires the exact phrase once production is otherwise allowed", async () => {
+    const h = harness();
+    await deployable(h);
+    await verified(h);
+
+    await h.session.send("deploy to production");
+    const q = h.session.state.question;
+    expect(q?.kind).toBe("confirm");
+    // No button carries the confirm sentinel: the phrase must be typed, so a
+    // click on a card the user has scrolled past cannot publish anything.
+    expect(q?.actions?.some((a) => a.response === "vibe:abstraction:confirm")).toBe(false);
+
+    // A near miss is a miss. This must not run, and it must not run for the
+    // reason under test rather than because the proposal was already gone.
+    await h.session.send("publish to production");
+    expect(h.abstractionRuns).toHaveLength(0);
+  });
+
+  it("publishes on the exact phrase", async () => {
+    const h = harness();
+    await deployable(h);
+    await verified(h);
+    await h.session.send("deploy to production");
+    await h.session.send("Publish to production");
+    expect(h.abstractionRuns).toHaveLength(1);
+    expect(h.abstractionRuns[0].argv[0]).toBe("vercel");
+  });
+
+  it("carries on with a build request typed instead of an answer", async () => {
+    const h = harness();
+    await h.session.send("install stripe");
+    expect(h.session.state.question?.kind).toBe("confirm");
+    // Changing your mind mid-question is normal. The install must not run, and
+    // the thing actually asked for must not be swallowed by the card.
+    await h.session.send("add a login button");
+    expect(h.abstractionRuns).toHaveLength(0);
+    expect(h.order).toContain("spawn");
   });
 
   it("offers a preview without a typed phrase, and runs it on confirm", async () => {

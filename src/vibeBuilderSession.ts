@@ -30,7 +30,9 @@ import {
   type AbstractionRunResult,
 } from "./vibeAbstractionRunner";
 import { parseVibeIntent, type VibeIntent } from "./vibeIntent";
-import { PUBLISH_CONFIRMATION } from "./vibeDeploy";
+import { PUBLISH_CONFIRMATION, detectDeployProvider } from "./vibeDeploy";
+import { providerById } from "./vibeServices";
+import { probeCli, type CliProbeDeps } from "./vibeCliProbe";
 import { inspectFleetRoute } from "./fleetSnapshot";
 import { choicesFor } from "./modelCatalog";
 import { AGENT_CLIS, checkCliUpdates, checkInstalledClis } from "./projects";
@@ -194,7 +196,7 @@ export interface VibeBuilderSessionDeps {
    *  the lockfile situation, what is already installed, whether the env file is
    *  tracked, whether the tree is clean. Read fresh per proposal — a plan built
    *  from a stale tree could publish something the user has since changed. */
-  abstractionContext(cwd: string): Promise<AbstractionContext>;
+  abstractionContext(cwd: string, intent: VibeIntent): Promise<AbstractionContext>;
   /** Execute a planned argv. Argv-native by contract: no implementation may
    *  join these into a shell string. */
   runAbstraction(argv: string[], cwd: string): Promise<AbstractionRunResult>;
@@ -613,12 +615,31 @@ async function nativeCliVersion(cli: string): Promise<string | null> {
   return versions[bin]?.installed ?? null;
 }
 
+/** Probing runs a CLI, so it goes through the same argv-only path an
+ *  abstraction does. A single shared object because the probe cache is keyed on
+ *  deps identity: one instance means one process spends `vercel --version` once
+ *  per app run rather than once per message. */
+const nativeCliProbeDeps: CliProbeDeps = {
+  runArgv: ({ argv }) =>
+    runAbstractionPlan(argv, ".", {
+      ptySpawnDetached: (opts) => ipc.ptySpawnArgv(opts),
+      onPtyExit: (listener) =>
+        ipc.onPtyExit((e) => listener({ id: e.id, exit_code: e.exit_code ?? null })),
+      ptyOutput: ipc.ptyOutput,
+      ptyKill: ipc.ptyKill,
+      timeoutMs: 10_000,
+    }),
+};
+
 /** Read the project as the abstraction planners need to see it.
  *
  *  Everything here is observed, never assumed: a missing package.json means no
  *  dependencies rather than a guess, and an unreadable tree means the caller
  *  gets an error instead of a plan built on defaults. */
-async function nativeAbstractionContext(cwd: string): Promise<AbstractionContext> {
+async function nativeAbstractionContext(
+  cwd: string,
+  intent: VibeIntent,
+): Promise<AbstractionContext> {
   const [entries, status, pkg] = await Promise.all([
     ipc.fsReadDir(cwd).then((list) => list.map((e) => e.name)),
     ipc.gitStatus(cwd).catch(() => null),
@@ -629,14 +650,59 @@ async function nativeAbstractionContext(cwd: string): Promise<AbstractionContext
 
   const record = (value: unknown): Record<string, string> =>
     value && typeof value === "object" ? (value as Record<string, string>) : {};
-  const changed = status?.entries ?? [];
 
-  // "Tracked" is the question that matters for an env file, and an untracked
-  // file shows up in git status as `??`. Anything else means git knows about
-  // it, which is exactly what must not be true before secrets are written.
-  const envTracked = changed.some(
-    (e) => /(^|\/)\.env(\.|$)/.test(e.path) && !e.status.includes("?"),
-  );
+  // git_status runs with --ignored, so every node_modules entry arrives here
+  // as `!!`. Counting those as changes would report every real project as
+  // permanently dirty and refuse every publish.
+  const all = status?.entries ?? [];
+  const ignored = (s: string) => s.includes("!");
+  const untracked = (s: string) => s.includes("?");
+  const changed = all.filter((e) => !ignored(e.status));
+
+  // A tree we could not read is not a clean tree. `dirty` guards production
+  // publishes, so the unreadable case must refuse rather than wave through:
+  // git_status returns an empty default for a non-repo directory, which would
+  // otherwise read as "nothing changed, go ahead".
+  const dirty = !status?.is_repo || changed.length > 0;
+
+  // Whether the env file is TRACKED decides whether writing a service-role key
+  // into it would publish that key on the next commit. It has to be positively
+  // determined, and the failure mode has to be refusal.
+  //
+  // git status alone cannot answer it: a tracked file with no local edits does
+  // not appear in the output at all, so "absent from status" would read as
+  // untracked — the fail-OPEN direction, and the one that leaks. So absence is
+  // only safe when the file does not exist yet, which the directory listing
+  // says. Everything else defaults to tracked.
+  const envFileFor = (): string | null => {
+    if (intent.kind !== "link") return null;
+    return providerById(intent.provider)?.envFile ?? null;
+  };
+  const envFile = envFileFor();
+  const envStatus = envFile
+    ? all.find((e) => e.path === envFile || e.path.endsWith(`/${envFile}`))
+    : undefined;
+  const envFileTracked = !envFile
+    ? false
+    : envStatus
+      ? // Ignored or untracked are the two states that mean "git will not
+        // carry this". Any other status means git already knows the file.
+        !(ignored(envStatus.status) || untracked(envStatus.status))
+      : // Not in status: safe only if it does not exist. If it exists and git
+        // is silent about it, it is tracked and unmodified — refuse.
+        entries.includes(envFile);
+
+  // Which CLI matters depends on what was asked, so only that one is probed —
+  // and only when the answer can change the plan. An unprobed CLI reads as
+  // absent, because claiming one exists produces a plan whose first step fails
+  // for a reason the user cannot see.
+  const linkBin = intent.kind === "link" ? providerById(intent.provider)?.cli?.bin : undefined;
+  const deployBin =
+    intent.kind === "deploy" ? detectDeployProvider(entries)?.bin : undefined;
+  const [linkCliPresent, deployCliPresent] = await Promise.all([
+    linkBin ? probeCli(linkBin, nativeCliProbeDeps) : Promise.resolve(false),
+    deployBin ? probeCli(deployBin, nativeCliProbeDeps) : Promise.resolve(false),
+  ]);
 
   return {
     cwd,
@@ -646,21 +712,14 @@ async function nativeAbstractionContext(cwd: string): Promise<AbstractionContext
     dependencies: record(pkg?.dependencies),
     devDependencies: record(pkg?.devDependencies),
     link: {
-      // Probed at plan time by the planner's own steps rather than guessed
-      // here: claiming a CLI is present when it isn't produces a plan whose
-      // first step silently fails.
-      cliInstalled: false,
+      cliInstalled: linkCliPresent,
       authenticated: false,
       presentSecrets: [],
-      envFileTracked: envTracked,
+      envFileTracked,
     },
     deploy: {
-      dirty: changed.length > 0,
-      // Not probed: there is no headless `which` for a deploy CLI here yet, so
-      // a missing one surfaces as the spawn failing with its own message rather
-      // than as a refusal. Deliberately the only unobserved field, and it fails
-      // loudly rather than quietly doing the wrong thing.
-      cliInstalled: true,
+      dirty,
+      cliInstalled: deployCliPresent,
     },
   };
 }
@@ -1043,7 +1102,7 @@ export class VibeBuilderSession implements BuilderSession {
       // it supplies that verdict; the reader supplies the project.
       proposal = proposeAbstraction(
         intent,
-        await this.deps.abstractionContext(cwd),
+        await this.deps.abstractionContext(cwd, intent),
         this.lastVerification,
       );
     } catch {
@@ -1104,6 +1163,22 @@ export class VibeBuilderSession implements BuilderSession {
     );
   }
 
+  /** Carry a message on to whatever should have handled it, once a pending
+   *  question has declined to. A fresh intent gets a fresh proposal; anything
+   *  else is a build request and reaches the agent. */
+  private async reroute(message: string): Promise<void> {
+    const intent = parseVibeIntent(message);
+    if (intent) return this.proposeIntent(intent, message);
+    let sent!: () => void;
+    let failed!: (error: unknown) => void;
+    const accepted = new Promise<void>((resolve, reject) => {
+      sent = resolve;
+      failed = reject;
+    });
+    void this.runTurn(message, sent, failed);
+    return accepted;
+  }
+
   /** The user's answer to a pending proposal. This is the confirmation gate:
    *  anything that is not the required word runs nothing. */
   private async answerAbstraction(message: string): Promise<void> {
@@ -1125,6 +1200,11 @@ export class VibeBuilderSession implements BuilderSession {
           detail: why,
         },
       );
+      // Someone who changes their mind mid-question types the new thing they
+      // want, not a cancellation. Dropping that message would lose a real
+      // build request to a card they had already stopped reading, so anything
+      // that is not one of our own sentinels carries on as a request.
+      if (message !== ABSTRACTION_DECLINE) await this.reroute(message);
       return;
     }
 

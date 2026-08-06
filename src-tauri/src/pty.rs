@@ -583,7 +583,10 @@ pub fn pty_spawn_argv(
     run_id: Option<String>,
     attempt_id: Option<String>,
 ) -> Result<SpawnResult, String> {
-    if argv.is_empty() {
+    // An empty first element is as unusable as no first element, and it would
+    // otherwise reach CommandBuilder as a program named "" and surface as an
+    // opaque spawn failure instead of this.
+    if argv.first().map(|p| p.trim().is_empty()).unwrap_or(true) {
         return Err("argv must name a program".into());
     }
     let binding = tasks.spawn_binding(run_id.as_deref(), attempt_id.as_deref())?;
@@ -761,8 +764,13 @@ impl PtyManager {
             // No shell is involved at all: the program is the process, and each
             // argument stays one argument however it is spelled.
             Some(RunSpec::Argv(argv)) => {
+                // Guarded here rather than only in the command wrapper: this is
+                // the chokepoint every argv caller passes through, and a program
+                // name of "" would otherwise reach CommandBuilder and surface as
+                // an opaque spawn failure.
                 let (program, rest) = argv
                     .split_first()
+                    .filter(|(p, _)| !p.trim().is_empty())
                     .ok_or_else(|| "argv must name a program".to_string())?;
                 let mut cmd = CommandBuilder::new(program);
                 for a in rest {
@@ -1301,6 +1309,76 @@ mod tests {
     // readable afterwards from the session itself — that read is the only
     // transcript a task nobody watched ever gets.
     #[test]
+    fn argv_spawn_never_lets_the_shell_see_its_arguments() {
+        // The property the whole RunSpec::Argv branch exists for. A package name
+        // or version reaching this boundary may contain anything; as an argument
+        // it is inert, and as shell text `$HOME; whoami` would expand and then
+        // run a second command. Asserting the LITERAL comes back is the only way
+        // to tell those two apart from the outside.
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let hostile = "$HOME; whoami && echo pwned | tee /tmp/x";
+        let res = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Argv(vec![
+                    "echo".into(),
+                    format!("ARGV_{hostile}"),
+                ])),
+                None,
+                None,
+                None,
+            )
+            .expect("spawn");
+        let seen = wait_for(&pm, res.id, "ARGV_$HOME; whoami", Duration::from_secs(8));
+        let tail = pm
+            .scrollback_tail(res.id, 64 * 1024)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        let _ = pm.kill(res.id);
+        assert!(
+            seen,
+            "argv did not survive as literal text; shell expansion is the likely cause. tail: {tail}"
+        );
+        assert!(
+            !tail.contains("pwned"),
+            "the shell ran a second command out of an argument. tail: {tail}"
+        );
+    }
+
+    #[test]
+    fn argv_spawn_refuses_a_nameless_program() {
+        // Goes through the real branch rather than re-checking the condition:
+        // an assertion that restates the implementation proves only that it was
+        // copied correctly.
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        for argv in [Vec::<String>::new(), vec!["".into()]] {
+            let result = pm.spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Argv(argv.clone())),
+                None,
+                None,
+                None,
+            );
+            if let Ok(res) = result {
+                let _ = pm.kill(res.id);
+                panic!("argv {argv:?} spawned a process instead of being refused");
+            }
+        }
+    }
+
+    #[test]
     fn detached_spawn_carries_env_and_its_output_is_readable() {
         let app = tauri::test::mock_app();
         let pm = PtyManager::default();
@@ -1315,7 +1393,7 @@ mod tests {
                 // Prints, then stays up — an agent's shape, and the state the
                 // tail is read in: a session that has exited is already gone
                 // from the manager, scrollback and all.
-                Some("echo DETACHED_$CANOPY_MICRO_TASK; sleep 20".into()),
+                Some(RunSpec::Shell("echo DETACHED_$CANOPY_MICRO_TASK; sleep 20".into())),
                 None,
                 Some(vec![("CANOPY_MICRO_TASK".into(), "1".into())]),
                 None,
@@ -1346,7 +1424,7 @@ mod tests {
                 Some("/tmp".into()),
                 None,
                 None,
-                Some("echo TASK_${CANOPY_RUN_ID}_${CANOPY_ATTEMPT_ID}; sleep 20".into()),
+                Some(RunSpec::Shell("echo TASK_${CANOPY_RUN_ID}_${CANOPY_ATTEMPT_ID}; sleep 20".into())),
                 None,
                 Some(vec![
                     ("CANOPY_RUN_ID".into(), "invented".into()),
@@ -1392,12 +1470,12 @@ mod tests {
                 Some("/tmp".into()),
                 None,
                 None,
-                Some(
+                Some(RunSpec::Shell(
                     "i=0; while [ $i -lt 600 ]; do i=$((i+1)); \
                      printf 'LINE_%s_%s\\n' $i \"$(head -c 8000 < /dev/zero | tr '\\0' 'x')\"; \
                      sleep 0.1; done"
                         .into(),
-                ),
+                )),
                 None,
                 Some(vec![("CANOPY_MICRO_TASK".into(), "1".into())]),
                 None,
