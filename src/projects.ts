@@ -373,8 +373,9 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     name: "Aider",
     bin: "aider",
     icon: "a",
-    // `-U` makes this the update command too.
-    install: "python3 -m pip install -U aider-chat",
+    // `-U` makes this the update command too; only-if-needed keeps a global
+    // env's shared deps unbumped (the form aider's own docs use, 2026-08-06).
+    install: "python3 -m pip install -U --upgrade-strategy only-if-needed aider-chat",
     // The console script imports `aider`; `aider-chat` is only the
     // distribution name, which nothing on disk states.
     pkgs: ["py:aider"],
