@@ -513,7 +513,7 @@ pub fn pty_spawn(
         cwd,
         shell,
         high_water,
-        run_command,
+        run_command.map(RunSpec::Shell),
         Some(on_data),
         env,
         binding.clone(),
@@ -550,7 +550,51 @@ pub fn pty_spawn_detached(
         cwd,
         None,
         None,
-        Some(command),
+        Some(RunSpec::Shell(command)),
+        None,
+        env,
+        binding.clone(),
+    );
+    finish_task_spawn(&state, &tasks, binding.as_ref(), result)
+}
+
+/// Spawn a detached PTY from an argv array, never touching a shell.
+///
+/// This is the execution end of the managed abstractions — installing a
+/// package, linking a service, publishing a site. Those plans are assembled
+/// from things Canopy does not control: a package name a user typed, a version
+/// string, a provider id. The planners already refuse anything that looks like
+/// a flag or an illegal name, but refusing bad input is only half of it; the
+/// other half is that even accepted input must never be *parsed* again on the
+/// way to the process.
+///
+/// Deliberately a separate command from `pty_spawn_detached` rather than an
+/// optional `argv` field on it. One command taking either form would need a
+/// rule for what happens when both arrive, and every such rule eventually
+/// resolves to joining argv into text.
+#[tauri::command]
+pub fn pty_spawn_argv(
+    app: AppHandle,
+    state: State<'_, PtyManager>,
+    tasks: State<'_, crate::tasks::TaskStore>,
+    cwd: Option<String>,
+    argv: Vec<String>,
+    env: Option<Vec<(String, String)>>,
+    run_id: Option<String>,
+    attempt_id: Option<String>,
+) -> Result<SpawnResult, String> {
+    if argv.is_empty() {
+        return Err("argv must name a program".into());
+    }
+    let binding = tasks.spawn_binding(run_id.as_deref(), attempt_id.as_deref())?;
+    let result = state.spawn(
+        app,
+        120,
+        40,
+        cwd,
+        None,
+        None,
+        Some(RunSpec::Argv(argv)),
         None,
         env,
         binding.clone(),
@@ -597,6 +641,22 @@ pub fn pty_output(state: State<'_, PtyManager>, id: u32, max: Option<usize>) -> 
     state
         .scrollback_tail(id, max.unwrap_or(64 * 1024))
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// What a PTY should run.
+///
+/// The two forms are kept apart at the type level on purpose. `Shell` is text
+/// handed to the user's shell, which is what a terminal and a run tab want:
+/// `npm run dev -- --port 3000` should parse as the user wrote it. `Argv`
+/// bypasses the shell entirely — program and arguments cross as separate
+/// strings, so nothing inside them can be read as syntax.
+///
+/// A caller holding argv must never be able to reach the shell path by joining
+/// with spaces. That join is the whole vulnerability: a package name of
+/// `x; rm -rf ~` is inert as an argument and a catastrophe as shell text.
+pub enum RunSpec {
+    Shell(String),
+    Argv(Vec<String>),
 }
 
 impl PtyManager {
@@ -670,7 +730,7 @@ impl PtyManager {
         cwd: Option<String>,
         shell: Option<String>,
         high_water: Option<usize>,
-        run_command: Option<String>,
+        run: Option<RunSpec>,
         on_data: Option<Channel<InvokeResponseBody>>,
         extra_env: Option<Vec<(String, String)>>,
         task_identity: Option<crate::tasks::AttemptBinding>,
@@ -697,25 +757,40 @@ impl PtyManager {
         let id = state.next_id.fetch_add(1, Ordering::SeqCst) + 1;
 
         let shell = shell.unwrap_or_else(default_shell);
-        let mut cmd = CommandBuilder::new(&shell);
-        match run_command.as_deref() {
+        let mut cmd = match &run {
+            // No shell is involved at all: the program is the process, and each
+            // argument stays one argument however it is spelled.
+            Some(RunSpec::Argv(argv)) => {
+                let (program, rest) = argv
+                    .split_first()
+                    .ok_or_else(|| "argv must name a program".to_string())?;
+                let mut cmd = CommandBuilder::new(program);
+                for a in rest {
+                    cmd.arg(a);
+                }
+                cmd
+            }
             // A run tab: the shell runs one command and exits with the command's own
             // status, so a one-shot build/install reports truthfully instead of
             // sitting at a prompt looking "running" forever. Passed as shell args
             // (not typed into the shell) so it's correct on cmd.exe / PowerShell /
             // POSIX alike — no `; exit $?` idiom that only parses in a Bourne shell.
-            Some(command) => {
+            Some(RunSpec::Shell(command)) => {
+                let mut cmd = CommandBuilder::new(&shell);
                 for a in run_args(&shell, command) {
                     cmd.arg(a);
                 }
+                cmd
             }
             // A normal terminal: a login shell so the user's PATH / prompt setup
             // loads, matching a real terminal.
             None => {
+                let mut cmd = CommandBuilder::new(&shell);
                 #[cfg(unix)]
                 cmd.args(["-l"]);
+                cmd
             }
-        }
+        };
         // The caller's own variables go on first, so Canopy's identity vars below
         // always win however a caller spells them.
         for (k, v) in extra_env.unwrap_or_default() {

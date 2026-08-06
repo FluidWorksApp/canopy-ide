@@ -94,6 +94,18 @@ export const ptySetTitle = (id: number, title: string) =>
  *  opens; the Tasks panel watches it by pty id, and `ptyAttach` is how the user
  *  looks at it if they want to. `command` runs as the shell's argument, so the
  *  PTY exits when the agent does. */
+/** Spawn a detached PTY from an argv array, with no shell anywhere in the path.
+ *  `argv[0]` is the program; every later element stays exactly one argument,
+ *  whatever characters it contains. Used by the managed abstractions, whose
+ *  plans are built from names and versions Canopy did not author. */
+export const ptySpawnArgv = (opts: {
+  cwd?: string;
+  argv: string[];
+  env?: [string, string][];
+  runId?: string;
+  attemptId?: string;
+}) => invoke<SpawnResult>("pty_spawn_argv", opts);
+
 export const ptySpawnDetached = (opts: {
   cwd?: string;
   command: string;
