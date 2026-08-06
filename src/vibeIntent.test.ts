@@ -9,7 +9,14 @@ describe("silence is the default", () => {
       "make the primary button blue",
       "the checkout page is broken, please fix it",
       "connect the form to the existing handler",
+      // Reports about the world, not requests directed at the assistant.
+      // A bug report is the likeliest thing anyone types about deployment, so
+      // it is the case the parser must be most certain to ignore.
       "deploy is failing in CI, can you look at the config",
+      "the deploy is broken",
+      "our deploy takes ten minutes, can we speed it up",
+      "the publish step keeps timing out",
+      "that last deploy broke the header",
       "",
     ]) {
       expect(parseVibeIntent(message), message).toBeNull();
@@ -73,6 +80,12 @@ describe("linking", () => {
 });
 
 describe("deploying", () => {
+  it("is tuned toward silence, because the two errors are not symmetric", () => {
+    // Missing a request costs a retry. Misreading a report costs a deploy.
+    expect(parseVibeIntent("why is the deploy so slow")).toBeNull();
+    expect(parseVibeIntent("deploy this")).not.toBeNull();
+  });
+
   it("reads production as production", () => {
     for (const message of [
       "deploy to production",

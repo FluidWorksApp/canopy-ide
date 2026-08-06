@@ -39,11 +39,22 @@ const DEV = /\b(?:as\s+a\s+)?dev(?:\s+|-)?(?:dependency|dep)\b|--save-dev\b|\s-D
 const LINK =
   /\b(?:connect|link|set\s*up|hook\s+\w*\s*up|wire\s+\w*\s*up)\b[^.!?]{0,40}?\b(supabase|neon|firebase|stripe)\b/i;
 
-/** The verb must be a request, not a subject. "deploy is failing in CI" is
- *  someone describing a problem for the agent to look at, and reading it as an
- *  instruction to publish would be the worst possible misunderstanding. */
+/** The verb must be a request, not a subject.
+ *
+ *  The two ways this parser can be wrong are NOT symmetric, and the asymmetry
+ *  is deliberate rather than an accident of tuning — do not "improve" recall
+ *  here without reading this. Missing "hook this up to Neon" is a false
+ *  negative: the user repeats themselves once. Reading "deploy is failing in
+ *  CI" as an instruction is a false positive: something goes live. A bug report
+ *  is also the single most likely thing anyone types about deployment, so it is
+ *  the case the parser must be most certain to ignore.
+ *
+ *  Hence two filters. A determiner in front makes it a noun — "the deploy",
+ *  "our deploy", "that publish" are things, not requests. And a copula or a
+ *  failure word after it makes the sentence a report about the world rather
+ *  than a request directed at the assistant. */
 const DEPLOY_VERB =
-  /\b(?:deploy|publish|ship)\b(?!\s+(?:is|was|isn't|wasn't|has|had|failed|fails|failing|broke|broken))/i;
+  /(?<!\b(?:the|our|a|an|this|that|my|your|its|last|next|first|each|every)\s)\b(?:deploy|publish|ship)\b(?!\s+(?:is|was|isn't|wasn't|are|were|has|have|had|takes|took|keeps|kept|failed|fails|failing|broke|broken|works|worked))/i;
 const PRODUCTION = /\b(?:production|prod|live)\b/i;
 const GO_LIVE = /\bgo\s+live\b/i;
 
