@@ -25,7 +25,11 @@ function withStorage(storage: Partial<Storage>, run: () => void): void {
   try {
     run();
   } finally {
+    // Restore, or remove the stub outright if `localStorage` was not an own
+    // property to begin with. Leaving it behind would hand a throwing Storage
+    // to whatever runs next, which is a failure that surfaces far from here.
     if (real) Object.defineProperty(globalThis, "localStorage", real);
+    else delete (globalThis as { localStorage?: unknown }).localStorage;
   }
 }
 

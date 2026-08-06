@@ -165,6 +165,27 @@ const JUSTIFYING_FUNCTIONS = [
     cost: "the checkpoint gate reads a hardcoded secretScanClean instead of a real scan, so auto-checkpoint is dead code that looks alive",
   },
   {
+    module: "vibeSecretScan.ts",
+    symbol: "describeSecretFindings",
+    enabled: true,
+    cost: "the sentence explaining that a secret is why a turn was not saved is never said, so the refusal has no reason attached",
+  },
+  {
+    // Skipped, and NOT because a caller is missing. `CheckpointRecord` is never
+    // written in production either, so the two-phase intent/seal protocol is
+    // unimplemented rather than unreconciled — there is nothing to reconcile.
+    // The session commits first and appends `checkpoint.saved` second, so a
+    // crash between them loses the record and keeps the commit: the system
+    // understates what happened rather than claiming a checkpoint that does not
+    // exist. The safety property already holds; what is missing is a label.
+    // Enabling this guard is a design decision (implement two-phase, or delete
+    // the record type), not a bug fix.
+    module: "vibeCheckpoints.ts",
+    symbol: "reconcileCheckpoint",
+    enabled: false,
+    cost: "two-phase checkpoint record unimplemented; ordering is commit-then-event, which understates rather than overstates, so a crashed checkpoint leaves a commit nothing labels as one",
+  },
+  {
     module: "vibePackages.ts",
     symbol: "planInstall",
     enabled: false,
