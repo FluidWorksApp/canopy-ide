@@ -332,7 +332,7 @@ import { suppressBrowserViewsOver, useBrowserEngine } from "../../browserHost";
 import { OPEN_URL_EVENT, type OpenUrlDetail } from "../../links";
 import { resolveGitLink } from "../../gitLinks";
 import { previewAgentTarget, serverForUrl } from "../../preview";
-import { TRACKERS, ticketBranch, ticketContext, ticketWorktree } from "../../trackers";
+import { TRACKERS, ticketBranch, ticketContext, ticketResearchQuestion, ticketWorktree } from "../../trackers";
 import { prConflictContext, prReviewContext } from "../../prs";
 import {
   fileDiffContext,
@@ -3176,7 +3176,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
 
   const startResearch = useCallback(
-    async (question: string, userQuery = "") => {
+    async (question: string, userQuery = "", ticket?: ipc.ResearchTicketLink) => {
       const q = question.trim();
       if (!q) return;
       // The title is the question, shortened — an entry is cited by number
@@ -3192,6 +3192,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           question: q,
           cwd: roots[0],
         });
+        // Link before opening the tab, so the entry carries the ticket it
+        // came from the first time anyone looks at it.
+        if (ticket)
+          await researchLinkEntry({ projectId: project.id, id: entry.id, ticket });
         const entryDir = await ipc.researchDir(project.id, entry.id);
         const ok = await startMicroTask(
           researchTask,
@@ -3225,6 +3229,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
     },
     [project.id, project.name, roots, startMicroTask, openResearch, onNotice],
+  );
+
+  /** Forward a ticket to research instead of to an implementer: the same
+   *  startResearch path — harness, stage rail, blocked-on-failure — with the
+   *  question composed from the ticket and the entry linked back to it.
+   *  Nothing is written to the tracker; Canopy stays a reader of it. */
+  const researchTicket = useCallback(
+    async (ticket: ipc.TicketInfo) => {
+      await startResearch(ticketResearchQuestion(ticket), "", {
+        id: ticket.id,
+        title: ticket.title,
+        url: ticket.url,
+      });
+    },
+    [startResearch],
   );
 
   /** Put an agent back on an entry that already exists.
@@ -9065,6 +9084,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               void startTicketWork(tab.ticket, tab.repo ?? "", agentId)
             }
             onStartTask={() => void startTicketTask(tab.ticket, tab.repo)}
+            onResearch={() => void researchTicket(tab.ticket)}
             onSendToAgent={(target) =>
               sendTicketToAgent(target, ticketContext(tab.ticket))
             }
@@ -9282,7 +9302,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       case "issues-list":
         return (
-          <TicketsPanel page components={project.components.map((c) => ({ label: c.label, path: c.path }))} agentTargets={agentTargets} installed={installed} onStartWork={startTicketWork} onSendToAgent={sendTicketToAgent} onOpenTicket={openTicket} onOpenIntegrations={() => window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "integrations" } }))} />
+          <TicketsPanel page components={project.components.map((c) => ({ label: c.label, path: c.path }))} agentTargets={agentTargets} installed={installed} onStartWork={startTicketWork} onSendToAgent={sendTicketToAgent} onResearch={(t) => void researchTicket(t)} onOpenTicket={openTicket} onOpenIntegrations={() => window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "integrations" } }))} />
         );
       case "task-history":
         return (
@@ -10692,6 +10712,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           installed={installed}
           onStartWork={startTicketWork}
           onSendToAgent={sendTicketToAgent}
+          onResearch={(t) => void researchTicket(t)}
           onOpenTicket={openTicket}
           onOpenIntegrations={() => {
             window.dispatchEvent(

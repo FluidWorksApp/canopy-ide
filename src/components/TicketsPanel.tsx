@@ -46,6 +46,9 @@ interface TicketsPanelProps {
   installed: Record<string, boolean>;
   /** Type `text` into an already-running agent terminal and focus it. */
   onSendToAgent: (target: AgentTarget, text: string) => void;
+  /** Forward the ticket to research — an entry and an agent on the question,
+   *  no branch, no code. Owned by ProjectView, same as onStartWork. */
+  onResearch: (ticket: ipc.TicketInfo) => void;
   /** Open the ticket as a tab in the main area. */
   onOpenTicket: (ticket: ipc.TicketInfo, source: string, repo: string) => void;
   /** Jump to Settings → Integrations (where sources get connected). */
@@ -76,6 +79,7 @@ export function TicketsPanel({
   onStartWork,
   installed,
   onSendToAgent,
+  onResearch,
   onOpenTicket,
   onOpenIntegrations,
   page = false,
@@ -196,19 +200,25 @@ export function TicketsPanel({
     }
   };
 
-  /** ▶ opens the shared agent menu: running agents, then New agent ›. */
+  /** ▶ (and right-click on the row) opens the shared agent menu — running
+   *  agents, then New agent › — plus the other destination: research. */
   const openSendMenu = (e: React.MouseEvent, ticket: SourcedTicket) => {
     const wt = ticketWorktree(ticket, worktrees);
-    menu.open(
-      e,
-      agentMenuItems({
+    menu.open(e, [
+      ...agentMenuItems({
         targets: agentTargets,
         installed,
         newLabel: wt ? `New agent in ${wt.branch}` : `New agent in ${ticketBranch(ticket)}`,
         onSend: (t) => onSendToAgent(t, ticketContext(ticket)),
         onStart: (agentId) => void startNew(ticket, agentId),
       }),
-    );
+      { label: "", separator: true },
+      {
+        label: "Research this",
+        hint: "no branch, no code",
+        onClick: () => onResearch(ticket),
+      },
+    ]);
   };
 
   const q = query.trim().toLowerCase();
@@ -329,6 +339,10 @@ export function TicketsPanel({
                     wt ? `\nworkspace: ${wt.path}` : ""
                   }`}
                   onClick={() => repo && onOpenTicket(t, t.source, repo)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    openSendMenu(e, t);
+                  }}
                 >
                   <div className="ticket-main">
                     <TrackerIcon
@@ -371,7 +385,7 @@ export function TicketsPanel({
                       </span>
                     )}
                     <Button icon className="ticket-start"
-                      title="Send to an agent — an open one, or a new one in a worktree"
+                      title="Send to an agent — an open one, or a new one in a worktree — or forward it to research"
                       disabled={starting != null}
                       onClick={(e) => {
                         e.stopPropagation();
