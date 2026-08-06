@@ -490,9 +490,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = event["cwd"].as_str().unwrap_or("").to_string();
     let hook_event = event["hook_event_name"].as_str().unwrap_or("").to_string();
 
-    publish_to_bus(&raw, &event);
+    let task = authenticated_task_identity();
+    publish_to_bus(&raw, &event, task.as_ref());
     if safe_session_id(&session_id) {
-        let _ = update_digest(&session_id, &cwd, &event, &hook_event);
+        let _ = update_digest(&session_id, &cwd, &event, &hook_event, task.as_ref());
     }
 
     // Inside a research session, prose belongs in the entry and nowhere else.
@@ -716,7 +717,30 @@ fn normalize_event(event: &mut serde_json::Value, agent: &str) {
 
 /// Append the event to the bus the IDE tails, stamped with the terminal it came
 /// from so the UI can attribute it to a tab.
-fn publish_to_bus(raw: &str, event: &serde_json::Value) {
+fn authenticated_task_identity() -> Option<(String, String)> {
+    // Cheaply skip ordinary terminals. These values are only a hint that an
+    // authenticated lookup is worthwhile; they are never used as identity.
+    std::env::var("CANOPY_RUN_ID")
+        .ok()
+        .filter(|value| !value.is_empty())?;
+    std::env::var("CANOPY_ATTEMPT_ID")
+        .ok()
+        .filter(|value| !value.is_empty())?;
+    let body = ctx_request_with_timeout(
+        "GET",
+        "/ctx/identity",
+        None,
+        std::time::Duration::from_millis(250),
+    )
+    .ok()?;
+    let identity: serde_json::Value = serde_json::from_str(&body).ok()?;
+    Some((
+        identity["runId"].as_str()?.to_string(),
+        identity["attemptId"].as_str()?.to_string(),
+    ))
+}
+
+fn publish_to_bus(raw: &str, event: &serde_json::Value, task: Option<&(String, String)>) {
     use std::io::Write;
     let dir = format!("{}/.canopy", home());
     if std::fs::create_dir_all(&dir).is_err() {
@@ -728,6 +752,10 @@ fn publish_to_bus(raw: &str, event: &serde_json::Value) {
             if let Ok(n) = pty.parse::<u64>() {
                 map.insert("canopy_pty".into(), serde_json::json!(n));
             }
+        }
+        if let Some((run_id, attempt_id)) = task {
+            map.insert("canopy_run_id".into(), serde_json::json!(run_id));
+            map.insert("canopy_attempt_id".into(), serde_json::json!(attempt_id));
         }
     }
     let line = serde_json::to_string(&obj).unwrap_or_else(|_| raw.replace('\n', " "));
@@ -956,6 +984,7 @@ fn update_digest(
     cwd: &str,
     event: &serde_json::Value,
     hook_event: &str,
+    task: Option<&(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if is_companion_session() {
         return Ok(());
@@ -987,6 +1016,8 @@ fn update_digest(
                 // unique per launch, is what the panel pairs on so one instance's
                 // "term #5" digest can't bind to another's terminal.
                 "instance": std::env::var("CANOPY_INSTANCE").ok(),
+                "run_id": task.map(|(run_id, _)| run_id),
+                "attempt_id": task.map(|(_, attempt_id)| attempt_id),
                 // A one-shot task terminal, from the env its launch command
                 // carries. Recorded so "never offer this for restore" is a
                 // property of the session rather than a delete that has to win
@@ -1018,6 +1049,16 @@ fn update_digest(
     if let Some(pty) = std::env::var("CANOPY_PTY").ok().filter(|s| !s.is_empty()) {
         digest["surface"] = serde_json::json!(pty);
         digest["instance"] = serde_json::json!(std::env::var("CANOPY_INSTANCE").ok());
+    }
+    if let Some((run_id, attempt_id)) = task {
+        digest["run_id"] = serde_json::json!(run_id);
+        digest["attempt_id"] = serde_json::json!(attempt_id);
+    } else if let Some(map) = digest.as_object_mut() {
+        // A CLI-native session resumed outside its managed task is no longer an
+        // executor for that attempt. Keeping the old binding would misattribute
+        // every later bridge call and hook event.
+        map.remove("run_id");
+        map.remove("attempt_id");
     }
     // Which account owns this conversation: resuming has to relaunch against
     // the same config dir, or `--resume <id>` looks in the wrong store.
