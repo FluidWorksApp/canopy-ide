@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Project } from "./projects";
 import {
   materializeVibeSetup,
+  observeVibeSetupRepository,
   parseVibeSetupOutput,
   validateVibeSetupProposal,
   runVibeProjectSetupTask,
@@ -9,6 +10,7 @@ import {
   type VibeProjectSetupProposal,
   type VibeSetupValidationContext,
 } from "./vibeProjectSetup";
+import * as ipc from "./ipc";
 import type { RouteCandidate } from "./vibeFailover";
 import type { VibeProjectSetupTaskDeps } from "./vibeProjectSetup";
 
@@ -95,6 +97,48 @@ const context = (): VibeSetupValidationContext => ({
   ]),
   providerIds: new Set(["neon", "stripe"]),
   existingComponents: project().components,
+});
+
+describe("project setup repository observation", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("uses one bounded native snapshot and derives directories for validation", async () => {
+    const snapshot = vi.spyOn(ipc, "fsSnapshotFiles").mockResolvedValue([
+      { path: "/repo/apps/web/package.json", size: 42, modified_ms: 1_700_000 },
+      { path: "/repo/services/api/cmd/server/main.go", size: 84, modified_ms: 1_700_001 },
+    ]);
+
+    const observed = await observeVibeSetupRepository(project());
+
+    expect(snapshot).toHaveBeenCalledTimes(1);
+    expect(snapshot).toHaveBeenCalledWith(
+      ["/repo/apps/web", "/repo/services/api"],
+      20_000,
+    );
+    expect(observed.projectRoot).toBe("/repo");
+    expect(observed.paths).toEqual(new Set([
+      "/repo/apps/web",
+      "/repo/apps/web/package.json",
+      "/repo/services/api",
+      "/repo/services/api/cmd",
+      "/repo/services/api/cmd/server",
+      "/repo/services/api/cmd/server/main.go",
+    ]));
+    expect(observed.fingerprint).toMatch(/^fs-/);
+  });
+
+  it("changes the fingerprint when file metadata changes", async () => {
+    const snapshot = vi.spyOn(ipc, "fsSnapshotFiles");
+    snapshot.mockResolvedValueOnce([
+      { path: "/repo/apps/web/package.json", size: 42, modified_ms: 1 },
+    ]).mockResolvedValueOnce([
+      { path: "/repo/apps/web/package.json", size: 43, modified_ms: 2 },
+    ]);
+
+    const before = await observeVibeSetupRepository(project());
+    const after = await observeVibeSetupRepository(project());
+    expect(after.fingerprint).not.toBe(before.fingerprint);
+  });
 });
 
 describe("project setup structured output", () => {

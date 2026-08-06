@@ -681,6 +681,53 @@ pub async fn fs_list_files(
         .collect())
 }
 
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct FileSnapshot {
+    pub path: String,
+    pub size: u64,
+    pub modified_ms: Option<u64>,
+}
+
+fn snapshot_files(paths: Vec<PathBuf>) -> Vec<FileSnapshot> {
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let meta = std::fs::metadata(&path).ok()?;
+            Some(FileSnapshot {
+                path: path.to_string_lossy().to_string(),
+                size: meta.len(),
+                modified_ms: meta
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_millis() as u64),
+            })
+        })
+        .collect()
+}
+
+/// One bounded native walk with the metadata needed for a repository
+/// fingerprint. Project setup used to issue one renderer -> Rust round trip
+/// per directory and then another per file; a normal multi-repository project
+/// could still be in that preflight when the webview watchdog reloaded it.
+#[tauri::command]
+pub async fn fs_snapshot_files(
+    state: State<'_, WorkspaceManager>,
+    roots: Vec<String>,
+    limit: Option<usize>,
+) -> Result<Vec<FileSnapshot>, String> {
+    let limit = limit.unwrap_or(20_000).min(20_000);
+    let mut paths = Vec::new();
+    for root in roots {
+        let dir = check_scope(&state, Path::new(&root))?;
+        walk(&dir, &mut paths, limit);
+        if paths.len() >= limit {
+            break;
+        }
+    }
+    Ok(snapshot_files(paths))
+}
+
 #[derive(Serialize, Clone)]
 pub struct SearchHit {
     pub path: String,
@@ -1038,6 +1085,22 @@ mod tests {
             .map(|p| p.strip_prefix(&root).unwrap().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, vec!["index.js".to_string()]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn file_snapshots_carry_fingerprint_metadata_without_reading_contents() {
+        let root = std::env::temp_dir().join(format!("canopy-snapshot-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let file = root.join("src/main.ts");
+        write(&file, "export {};");
+
+        let snapshots = snapshot_files(vec![file.clone(), root.join("missing")]);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].path, file.to_string_lossy());
+        assert_eq!(snapshots[0].size, 10);
+        assert!(snapshots[0].modified_ms.is_some());
 
         std::fs::remove_dir_all(&root).ok();
     }

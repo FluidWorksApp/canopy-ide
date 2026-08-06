@@ -649,6 +649,7 @@ pub fn run() {
             fsx::fs_write_file,
             fsx::fs_stat,
             fsx::fs_list_files,
+            fsx::fs_snapshot_files,
             fsx::fs_search,
             fsx::fs_create_file,
             fsx::fs_create_dir,

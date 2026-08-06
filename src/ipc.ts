@@ -780,6 +780,16 @@ export interface SearchHit {
 export const fsListFiles = (roots: string[], limit?: number) =>
   invoke<string[]>("fs_list_files", { roots, limit });
 
+export interface FileSnapshot {
+  path: string;
+  size: number;
+  modified_ms: number | null;
+}
+
+/** A bounded file inventory and fingerprint metadata in one native walk. */
+export const fsSnapshotFiles = (roots: string[], limit?: number) =>
+  invoke<FileSnapshot[]>("fs_snapshot_files", { roots, limit });
+
 export const fsSearch = (roots: string[], query: string, limit?: number) =>
   invoke<SearchHit[]>("fs_search", { roots, query, limit });
 
