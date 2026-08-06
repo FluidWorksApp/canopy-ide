@@ -552,6 +552,7 @@ pub fn run() {
             tasks::task_artifact_read,
             pty::pty_spawn,
             pty::pty_spawn_detached,
+            pty::pty_spawn_argv,
             pty::pty_output,
             pty::pty_attach,
             pty::pty_write,

@@ -146,9 +146,48 @@ pub(crate) fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// How long an exited session's output stays readable, and how many such
+/// sessions are kept. Bounded on both axes because this is memory held for
+/// processes that are already gone: at SCROLLBACK_CAP each, the ceiling is
+/// REAPED_SESSIONS × 256 KB.
+const REAPED_TTL: Duration = Duration::from_secs(60);
+const REAPED_SESSIONS: usize = 8;
+
+type ReapedOutput = Arc<Mutex<VecDeque<(u32, Vec<u8>, std::time::Instant)>>>;
+
+/// Keep an exited session's output readable for a short while. Called once,
+/// immediately before the session leaves the live map.
+fn reap_output(reaped: &ReapedOutput, id: u32, session: &Session) {
+    let bytes: Vec<u8> = session.scrollback.lock().unwrap().iter().copied().collect();
+    let mut reaped = reaped.lock().unwrap();
+    reaped.push_back((id, bytes, std::time::Instant::now()));
+    let now = std::time::Instant::now();
+    while reaped
+        .front()
+        .is_some_and(|(_, _, at)| now.duration_since(*at) > REAPED_TTL)
+    {
+        reaped.pop_front();
+    }
+    while reaped.len() > REAPED_SESSIONS {
+        reaped.pop_front();
+    }
+}
+
 #[derive(Default)]
 pub struct PtyManager {
     sessions: Arc<Mutex<HashMap<u32, Arc<Session>>>>,
+    /// Output of sessions that have exited, kept briefly.
+    ///
+    /// Teardown removes the session and then emits `pty:exit`, so every
+    /// consumer that waits for the exit and *then* reads the output — which is
+    /// the only correct order, since output is not complete until the process
+    /// is — used to find the session already gone and get nothing. That is how
+    /// a one-shot check or a package install loses the very output it ran for.
+    ///
+    /// Emitting the event before the removal would only narrow the race, not
+    /// close it, and would briefly advertise a live session that is not. So the
+    /// bytes outlive the session instead.
+    reaped: Arc<Mutex<VecDeque<(u32, Vec<u8>, std::time::Instant)>>>,
     next_id: AtomicU32,
 }
 
@@ -273,10 +312,18 @@ impl PtyManager {
     /// The last `max` bytes of a session's scrollback ring, for the context
     /// bridge's server-output tool. None if the session is gone.
     pub fn scrollback_tail(&self, id: u32, max: usize) -> Option<Vec<u8>> {
-        let session = self.get(id)?;
-        let ring = session.scrollback.lock().unwrap();
-        let skip = ring.len().saturating_sub(max);
-        Some(ring.iter().skip(skip).copied().collect())
+        if let Some(session) = self.get(id) {
+            let ring = session.scrollback.lock().unwrap();
+            let skip = ring.len().saturating_sub(max);
+            return Some(ring.iter().skip(skip).copied().collect());
+        }
+        // Gone from the live map, but it may have only just exited — and a
+        // caller reading output *because* it exited is the expected order, not
+        // an error.
+        let reaped = self.reaped.lock().unwrap();
+        let bytes = &reaped.iter().find(|(sid, _, _)| *sid == id)?.1;
+        let skip = bytes.len().saturating_sub(max);
+        Some(bytes[skip..].to_vec())
     }
 
     /// Stop every session; called on app exit so no child processes outlive us.
@@ -513,7 +560,7 @@ pub fn pty_spawn(
         cwd,
         shell,
         high_water,
-        run_command,
+        run_command.map(RunSpec::Shell),
         Some(on_data),
         env,
         binding.clone(),
@@ -550,7 +597,54 @@ pub fn pty_spawn_detached(
         cwd,
         None,
         None,
-        Some(command),
+        Some(RunSpec::Shell(command)),
+        None,
+        env,
+        binding.clone(),
+    );
+    finish_task_spawn(&state, &tasks, binding.as_ref(), result)
+}
+
+/// Spawn a detached PTY from an argv array, never touching a shell.
+///
+/// This is the execution end of the managed abstractions — installing a
+/// package, linking a service, publishing a site. Those plans are assembled
+/// from things Canopy does not control: a package name a user typed, a version
+/// string, a provider id. The planners already refuse anything that looks like
+/// a flag or an illegal name, but refusing bad input is only half of it; the
+/// other half is that even accepted input must never be *parsed* again on the
+/// way to the process.
+///
+/// Deliberately a separate command from `pty_spawn_detached` rather than an
+/// optional `argv` field on it. One command taking either form would need a
+/// rule for what happens when both arrive, and every such rule eventually
+/// resolves to joining argv into text.
+#[tauri::command]
+pub fn pty_spawn_argv(
+    app: AppHandle,
+    state: State<'_, PtyManager>,
+    tasks: State<'_, crate::tasks::TaskStore>,
+    cwd: Option<String>,
+    argv: Vec<String>,
+    env: Option<Vec<(String, String)>>,
+    run_id: Option<String>,
+    attempt_id: Option<String>,
+) -> Result<SpawnResult, String> {
+    // An empty first element is as unusable as no first element, and it would
+    // otherwise reach CommandBuilder as a program named "" and surface as an
+    // opaque spawn failure instead of this.
+    if argv.first().map(|p| p.trim().is_empty()).unwrap_or(true) {
+        return Err("argv must name a program".into());
+    }
+    let binding = tasks.spawn_binding(run_id.as_deref(), attempt_id.as_deref())?;
+    let result = state.spawn(
+        app,
+        120,
+        40,
+        cwd,
+        None,
+        None,
+        Some(RunSpec::Argv(argv)),
         None,
         env,
         binding.clone(),
@@ -597,6 +691,22 @@ pub fn pty_output(state: State<'_, PtyManager>, id: u32, max: Option<usize>) -> 
     state
         .scrollback_tail(id, max.unwrap_or(64 * 1024))
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// What a PTY should run.
+///
+/// The two forms are kept apart at the type level on purpose. `Shell` is text
+/// handed to the user's shell, which is what a terminal and a run tab want:
+/// `npm run dev -- --port 3000` should parse as the user wrote it. `Argv`
+/// bypasses the shell entirely — program and arguments cross as separate
+/// strings, so nothing inside them can be read as syntax.
+///
+/// A caller holding argv must never be able to reach the shell path by joining
+/// with spaces. That join is the whole vulnerability: a package name of
+/// `x; rm -rf ~` is inert as an argument and a catastrophe as shell text.
+pub enum RunSpec {
+    Shell(String),
+    Argv(Vec<String>),
 }
 
 impl PtyManager {
@@ -670,7 +780,7 @@ impl PtyManager {
         cwd: Option<String>,
         shell: Option<String>,
         high_water: Option<usize>,
-        run_command: Option<String>,
+        run: Option<RunSpec>,
         on_data: Option<Channel<InvokeResponseBody>>,
         extra_env: Option<Vec<(String, String)>>,
         task_identity: Option<crate::tasks::AttemptBinding>,
@@ -697,25 +807,45 @@ impl PtyManager {
         let id = state.next_id.fetch_add(1, Ordering::SeqCst) + 1;
 
         let shell = shell.unwrap_or_else(default_shell);
-        let mut cmd = CommandBuilder::new(&shell);
-        match run_command.as_deref() {
+        let mut cmd = match &run {
+            // No shell is involved at all: the program is the process, and each
+            // argument stays one argument however it is spelled.
+            Some(RunSpec::Argv(argv)) => {
+                // Guarded here rather than only in the command wrapper: this is
+                // the chokepoint every argv caller passes through, and a program
+                // name of "" would otherwise reach CommandBuilder and surface as
+                // an opaque spawn failure.
+                let (program, rest) = argv
+                    .split_first()
+                    .filter(|(p, _)| !p.trim().is_empty())
+                    .ok_or_else(|| "argv must name a program".to_string())?;
+                let mut cmd = CommandBuilder::new(program);
+                for a in rest {
+                    cmd.arg(a);
+                }
+                cmd
+            }
             // A run tab: the shell runs one command and exits with the command's own
             // status, so a one-shot build/install reports truthfully instead of
             // sitting at a prompt looking "running" forever. Passed as shell args
             // (not typed into the shell) so it's correct on cmd.exe / PowerShell /
             // POSIX alike — no `; exit $?` idiom that only parses in a Bourne shell.
-            Some(command) => {
+            Some(RunSpec::Shell(command)) => {
+                let mut cmd = CommandBuilder::new(&shell);
                 for a in run_args(&shell, command) {
                     cmd.arg(a);
                 }
+                cmd
             }
             // A normal terminal: a login shell so the user's PATH / prompt setup
             // loads, matching a real terminal.
             None => {
+                let mut cmd = CommandBuilder::new(&shell);
                 #[cfg(unix)]
                 cmd.args(["-l"]);
+                cmd
             }
-        }
+        };
         // The caller's own variables go on first, so Canopy's identity vars below
         // always win however a caller spells them.
         for (k, v) in extra_env.unwrap_or_default() {
@@ -902,6 +1032,7 @@ impl PtyManager {
         {
             let session = session.clone();
             let sessions = state.sessions.clone();
+            let reaped = state.reaped.clone();
             thread::Builder::new()
                 .name(format!("pty-flush-{id}"))
                 .spawn(move || {
@@ -970,6 +1101,9 @@ impl PtyManager {
                             });
                         }
                     }
+                    // Before the session leaves the map, so that a consumer
+                    // woken by the pty:exit below can still read what ran.
+                    reap_output(&reaped, session.id, &session);
                     sessions.lock().unwrap().remove(&session.id);
                     // The terminal's bridge credential dies with it, and so do
                     // the advisory claims it was holding. Nothing used to watch
@@ -1226,6 +1360,126 @@ mod tests {
     // readable afterwards from the session itself — that read is the only
     // transcript a task nobody watched ever gets.
     #[test]
+    fn output_of_an_exited_session_is_still_readable() {
+        // The order every one-shot consumer must use: wait for the process to
+        // end, THEN read its output, because output is not complete until the
+        // process is. Teardown removes the session before emitting pty:exit, so
+        // that read used to land after the session was gone and return nothing
+        // — a check or an install losing the output it ran for.
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let res = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Argv(vec!["echo".into(), "REAPED_MARKER".into()])),
+                None,
+                None,
+                None,
+            )
+            .expect("spawn");
+
+        // Wait for the session to actually leave the live map, which is the
+        // state the bug needed: reading while it is still alive proves nothing.
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while pm.get(res.id).is_some() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(pm.get(res.id).is_none(), "session never exited");
+
+        let tail = pm
+            .scrollback_tail(res.id, 64 * 1024)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        assert!(
+            tail.contains("REAPED_MARKER"),
+            "output was lost when the session was reaped. tail: {tail:?}"
+        );
+    }
+
+    #[test]
+    fn argv_spawn_never_lets_the_shell_see_its_arguments() {
+        // The property the whole RunSpec::Argv branch exists for. A package name
+        // or version reaching this boundary may contain anything; as an argument
+        // it is inert, and as shell text `$HOME; whoami` would expand and then
+        // run a second command. Asserting the LITERAL comes back is the only way
+        // to tell those two apart from the outside.
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let hostile = "$HOME; whoami && echo pwned | tee /tmp/x";
+        let res = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Argv(vec![
+                    "echo".into(),
+                    format!("ARGV_{hostile}"),
+                ])),
+                None,
+                None,
+                None,
+            )
+            .expect("spawn");
+        // `echo` exits immediately, so read after it has gone rather than
+        // racing it — the retained output above is what makes that possible.
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while pm.get(res.id).is_some() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let tail = pm
+            .scrollback_tail(res.id, 64 * 1024)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        let _ = pm.kill(res.id);
+        // Exact equality, not `contains`. The hostile string necessarily
+        // includes the word a shell would have printed, so "does pwned appear"
+        // cannot distinguish the literal from an execution — it appears either
+        // way. What DOES distinguish them is that a shell would have produced
+        // MORE than this: `whoami`'s output, or a second echo. One line, equal
+        // to the argument as written, is the whole property.
+        assert_eq!(
+            tail.trim_end_matches(['\r', '\n']),
+            format!("ARGV_{hostile}"),
+            "argv did not reach the process as one literal argument"
+        );
+    }
+
+    #[test]
+    fn argv_spawn_refuses_a_nameless_program() {
+        // Goes through the real branch rather than re-checking the condition:
+        // an assertion that restates the implementation proves only that it was
+        // copied correctly.
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        for argv in [Vec::<String>::new(), vec!["".into()]] {
+            let result = pm.spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Argv(argv.clone())),
+                None,
+                None,
+                None,
+            );
+            if let Ok(res) = result {
+                let _ = pm.kill(res.id);
+                panic!("argv {argv:?} spawned a process instead of being refused");
+            }
+        }
+    }
+
+    #[test]
     fn detached_spawn_carries_env_and_its_output_is_readable() {
         let app = tauri::test::mock_app();
         let pm = PtyManager::default();
@@ -1240,7 +1494,9 @@ mod tests {
                 // Prints, then stays up — an agent's shape, and the state the
                 // tail is read in: a session that has exited is already gone
                 // from the manager, scrollback and all.
-                Some("echo DETACHED_$CANOPY_MICRO_TASK; sleep 20".into()),
+                Some(RunSpec::Shell(
+                    "echo DETACHED_$CANOPY_MICRO_TASK; sleep 20".into(),
+                )),
                 None,
                 Some(vec![("CANOPY_MICRO_TASK".into(), "1".into())]),
                 None,
@@ -1271,7 +1527,9 @@ mod tests {
                 Some("/tmp".into()),
                 None,
                 None,
-                Some("echo TASK_${CANOPY_RUN_ID}_${CANOPY_ATTEMPT_ID}; sleep 20".into()),
+                Some(RunSpec::Shell(
+                    "echo TASK_${CANOPY_RUN_ID}_${CANOPY_ATTEMPT_ID}; sleep 20".into(),
+                )),
                 None,
                 Some(vec![
                     ("CANOPY_RUN_ID".into(), "invented".into()),
@@ -1317,12 +1575,12 @@ mod tests {
                 Some("/tmp".into()),
                 None,
                 None,
-                Some(
+                Some(RunSpec::Shell(
                     "i=0; while [ $i -lt 600 ]; do i=$((i+1)); \
                      printf 'LINE_%s_%s\\n' $i \"$(head -c 8000 < /dev/zero | tr '\\0' 'x')\"; \
                      sleep 0.1; done"
                         .into(),
-                ),
+                )),
                 None,
                 Some(vec![("CANOPY_MICRO_TASK".into(), "1".into())]),
                 None,

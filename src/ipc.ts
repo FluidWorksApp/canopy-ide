@@ -89,6 +89,21 @@ export const ptyKillAll = () => invoke<void>("pty_kill_all");
 export const ptySetTitle = (id: number, title: string) =>
   gone(invoke<void>("pty_set_title", { id, title }));
 
+/** Spawn a detached PTY from an argv array, with no shell anywhere in the path.
+ *  `argv[0]` is the program; every later element stays exactly one argument,
+ *  whatever characters it contains. Used by the managed abstractions, whose
+ *  plans are built from names and versions Canopy did not author.
+ *
+ *  Contrast `ptySpawnDetached` below, which hands its command to the user's
+ *  shell. Never reach for that one to run a planned argv. */
+export const ptySpawnArgv = (opts: {
+  cwd?: string;
+  argv: string[];
+  env?: [string, string][];
+  runId?: string;
+  attemptId?: string;
+}) => invoke<SpawnResult>("pty_spawn_argv", opts);
+
 /** Spawn a PTY with no tab attached to it: a micro-task's agent, which runs its
  *  one job and reports through canopy_job_done. Nothing is announced, so no tab
  *  opens; the Tasks panel watches it by pty id, and `ptyAttach` is how the user

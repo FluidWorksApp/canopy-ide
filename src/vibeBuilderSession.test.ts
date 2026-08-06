@@ -84,7 +84,28 @@ function harness(
   };
   const transcripts: { kind: string; body: string }[] = [];
   const events: { kind: string; code?: string | null; metadata?: unknown }[] = [];
+  const abstractionRuns: { argv: string[]; cwd: string }[] = [];
   const deps: VibeBuilderSessionDeps = {
+    abstractionContext: vi.fn(async (cwd: string) => ({
+      cwd,
+      entries: ["package.json", "package-lock.json"],
+      packageManagerField: null,
+      dependencies: {},
+      devDependencies: {},
+      link: {
+        cliInstalled: true,
+        authenticated: true,
+        presentSecrets: [],
+        envFileTracked: false,
+      },
+      // No `verification` here on purpose — it is the session's observation,
+      // not the project's, and the type no longer allows it to be smuggled in.
+      deploy: { dirty: false, cliInstalled: true },
+    })),
+    runAbstraction: vi.fn(async (argv: string[], cwd: string) => {
+      abstractionRuns.push({ argv, cwd });
+      return { ok: true, exitCode: 0, output: "added 1 package", timedOut: false };
+    }),
     runner,
     reserve: vi.fn(async () => {
       order.push("reserve");
@@ -192,6 +213,7 @@ function harness(
     transcripts,
     events,
     transport,
+    abstractionRuns,
     emit: (event: Parameters<StructuredRunnerHost["emit"]>[0]) => host?.emit(event),
   };
 }
@@ -1072,5 +1094,136 @@ describe("VibeBuilderSession", () => {
         expect.objectContaining({ kind: "assistant", body: "Partly done" }),
       );
     });
+  });
+});
+
+describe("managed abstractions", () => {
+  it("proposes an install instead of running it, and never sends it to the agent", async () => {
+    const h = harness();
+    await h.session.send("install stripe");
+    // The agent must not see this. Its tool policy has no shell, so a forwarded
+    // install is a request it cannot carry out — and Canopy would be asking an
+    // agent to do the one job it kept for itself.
+    expect(h.order).not.toContain("spawn");
+    expect(h.abstractionRuns).toHaveLength(0);
+    expect(h.session.state.question?.kind).toBe("confirm");
+    expect(h.session.state.question?.diff).toContain("stripe");
+  });
+
+  it("runs only after the user confirms", async () => {
+    const h = harness();
+    await h.session.send("install stripe");
+    const confirm = h.session.state.question?.actions?.[0];
+    expect(confirm).toBeTruthy();
+    await h.session.send(confirm!.response);
+    expect(h.abstractionRuns).toHaveLength(1);
+    expect(h.abstractionRuns[0].argv[0]).toBe("npm");
+    // Argv, never one string — the property this whole path exists to keep.
+    expect(h.abstractionRuns[0].argv).toContain("stripe");
+  });
+
+  it("runs nothing when the user declines", async () => {
+    const h = harness();
+    await h.session.send("install stripe");
+    const decline = h.session.state.question!.actions!.at(-1)!;
+    await h.session.send(decline.response);
+    expect(h.abstractionRuns).toHaveLength(0);
+  });
+
+  /** A project with somewhere to deploy to. Without a provider marker every
+   *  deploy request is refused for having nowhere to go, and a test written
+   *  against that would pass without reaching the gate it claims to check. */
+  const deployable = async (h: ReturnType<typeof harness>) => {
+    const base = await h.deps.abstractionContext("/w/app", {
+      kind: "deploy",
+      target: "preview",
+    });
+    h.deps.abstractionContext = async (cwd: string) => ({
+      ...base,
+      cwd,
+      entries: [...base.entries, "vercel.json"],
+    });
+  };
+
+  /** Drive a real turn to a real verdict. Production deploys are gated on what
+   *  the session actually observed, so a test that wants that gate open has to
+   *  earn it the way the product does rather than set a flag. */
+  const verified = async (h: ReturnType<typeof harness>) => {
+    await h.session.send("make the button blue");
+    h.emit({ kind: "turnEnd" });
+    await vi.waitFor(() =>
+      expect(h.events).toContainEqual(
+        expect.objectContaining({ kind: "verification.verdict", code: "verified" }),
+      ),
+    );
+  };
+
+  it("refuses to publish work this session never verified", async () => {
+    const h = harness();
+    await deployable(h);
+    // Nothing has been verified in this session, so `lastVerification` is
+    // "incomplete" — and production must not go out on an unproven build, no
+    // matter what the project on disk claims.
+    await h.session.send("deploy to production");
+    expect(h.session.state.question?.kind).toBe("question");
+    expect(h.abstractionRuns).toHaveLength(0);
+  });
+
+  it("requires the exact phrase once production is otherwise allowed", async () => {
+    const h = harness();
+    await deployable(h);
+    await verified(h);
+
+    await h.session.send("deploy to production");
+    const q = h.session.state.question;
+    expect(q?.kind).toBe("confirm");
+    // No button carries the confirm sentinel: the phrase must be typed, so a
+    // click on a card the user has scrolled past cannot publish anything.
+    expect(q?.actions?.some((a) => a.response === "vibe:abstraction:confirm")).toBe(false);
+
+    // A near miss is a miss. This must not run, and it must not run for the
+    // reason under test rather than because the proposal was already gone.
+    await h.session.send("publish to production");
+    expect(h.abstractionRuns).toHaveLength(0);
+  });
+
+  it("publishes on the exact phrase", async () => {
+    const h = harness();
+    await deployable(h);
+    await verified(h);
+    await h.session.send("deploy to production");
+    await h.session.send("Publish to production");
+    expect(h.abstractionRuns).toHaveLength(1);
+    expect(h.abstractionRuns[0].argv[0]).toBe("vercel");
+  });
+
+  it("carries on with a build request typed instead of an answer", async () => {
+    const h = harness();
+    await h.session.send("install stripe");
+    expect(h.session.state.question?.kind).toBe("confirm");
+    // Changing your mind mid-question is normal. The install must not run, and
+    // the thing actually asked for must not be swallowed by the card.
+    await h.session.send("add a login button");
+    expect(h.abstractionRuns).toHaveLength(0);
+    expect(h.order).toContain("spawn");
+  });
+
+  it("offers a preview without a typed phrase, and runs it on confirm", async () => {
+    const h = harness();
+    await deployable(h);
+    await h.session.send("deploy this");
+    const q = h.session.state.question;
+    expect(q?.kind).toBe("confirm");
+    const confirm = q!.actions![0];
+    await h.session.send(confirm.response);
+    expect(h.abstractionRuns).toHaveLength(1);
+    expect(h.abstractionRuns[0].argv[0]).toBe("vercel");
+  });
+
+  it("leaves an ordinary build request alone", async () => {
+    const h = harness();
+    await h.session.send("add a login button");
+    expect(h.order).toContain("spawn");
+    expect(h.abstractionRuns).toHaveLength(0);
   });
 });

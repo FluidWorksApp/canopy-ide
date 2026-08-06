@@ -20,6 +20,19 @@ import type { TaskAttemptSettlement } from "./taskEnvelope";
 import { appendTranscript } from "./taskTranscript";
 import { fleetGate } from "./fleetState";
 import { redactSecrets } from "./vibeSecretScan";
+import {
+  proposeAbstraction,
+  type AbstractionContext,
+  type AbstractionProposal,
+} from "./vibeAbstractions";
+import {
+  runAbstractionPlan,
+  type AbstractionRunResult,
+} from "./vibeAbstractionRunner";
+import { parseVibeIntent, type VibeIntent } from "./vibeIntent";
+import { PUBLISH_CONFIRMATION, detectDeployProvider } from "./vibeDeploy";
+import { providerById } from "./vibeServices";
+import { probeCli, type CliProbeDeps } from "./vibeCliProbe";
 import { inspectFleetRoute } from "./fleetSnapshot";
 import { choicesFor } from "./modelCatalog";
 import { AGENT_CLIS, checkCliUpdates, checkInstalledClis } from "./projects";
@@ -58,11 +71,17 @@ import {
 } from "./vibeVerification";
 import type {
   BuilderQuestion,
+  BuilderQuestionAction,
   BuilderSession,
   BuilderSessionState,
 } from "./vibeBuilderSessionTypes";
 
 const SAVE_CHECKPOINT = "Save this version";
+/** Sentinels a question's own buttons send back. Deliberately not words anyone
+ *  would type, so a coincidental "yes" in a build request can never be read as
+ *  approval for something the user has scrolled past. */
+const ABSTRACTION_CONFIRM = "vibe:abstraction:confirm";
+const ABSTRACTION_DECLINE = "vibe:abstraction:decline";
 const HARNESS_VERSION = "vibe-mvp-1";
 const PROMPT_VERSION = "vibe-builder-1";
 const TOOL_POLICY_VERSION = "workspace-write-no-shell-1";
@@ -173,6 +192,14 @@ export interface VibeBuilderSessionDeps {
   listRoutes(): Promise<RouteCandidate[]>;
   /** Installed version of a CLI, or null when it cannot be probed. */
   cliVersion(cli: string): Promise<string | null>;
+  /** Everything the managed-abstraction planners need to judge a request:
+   *  the lockfile situation, what is already installed, whether the env file is
+   *  tracked, whether the tree is clean. Read fresh per proposal — a plan built
+   *  from a stale tree could publish something the user has since changed. */
+  abstractionContext(cwd: string, intent: VibeIntent): Promise<AbstractionContext>;
+  /** Execute a planned argv. Argv-native by contract: no implementation may
+   *  join these into a shell string. */
+  runAbstraction(argv: string[], cwd: string): Promise<AbstractionRunResult>;
   now(): number;
   sessionId(): string;
   sleep(ms: number): Promise<void>;
@@ -588,7 +615,126 @@ async function nativeCliVersion(cli: string): Promise<string | null> {
   return versions[bin]?.installed ?? null;
 }
 
+/** Probing runs a CLI, so it goes through the same argv-only path an
+ *  abstraction does. A single shared object because the probe cache is keyed on
+ *  deps identity: one instance means one process spends `vercel --version` once
+ *  per app run rather than once per message. */
+const nativeCliProbeDeps: CliProbeDeps = {
+  runArgv: ({ argv }) =>
+    runAbstractionPlan(argv, ".", {
+      ptySpawnDetached: (opts) => ipc.ptySpawnArgv(opts),
+      onPtyExit: (listener) =>
+        ipc.onPtyExit((e) => listener({ id: e.id, exit_code: e.exit_code ?? null })),
+      ptyOutput: ipc.ptyOutput,
+      ptyKill: ipc.ptyKill,
+      timeoutMs: 10_000,
+    }),
+};
+
+/** Read the project as the abstraction planners need to see it.
+ *
+ *  Everything here is observed, never assumed: a missing package.json means no
+ *  dependencies rather than a guess, and an unreadable tree means the caller
+ *  gets an error instead of a plan built on defaults. */
+async function nativeAbstractionContext(
+  cwd: string,
+  intent: VibeIntent,
+): Promise<AbstractionContext> {
+  const [entries, status, pkg] = await Promise.all([
+    ipc.fsReadDir(cwd).then((list) => list.map((e) => e.name)),
+    ipc.gitStatus(cwd).catch(() => null),
+    ipc.fsReadFile(`${cwd}/package.json`)
+      .then((bytes) => JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>)
+      .catch(() => null),
+  ]);
+
+  const record = (value: unknown): Record<string, string> =>
+    value && typeof value === "object" ? (value as Record<string, string>) : {};
+
+  // git_status runs with --ignored, so every node_modules entry arrives here
+  // as `!!`. Counting those as changes would report every real project as
+  // permanently dirty and refuse every publish.
+  const all = status?.entries ?? [];
+  const ignored = (s: string) => s.includes("!");
+  const untracked = (s: string) => s.includes("?");
+  const changed = all.filter((e) => !ignored(e.status));
+
+  // A tree we could not read is not a clean tree. `dirty` guards production
+  // publishes, so the unreadable case must refuse rather than wave through:
+  // git_status returns an empty default for a non-repo directory, which would
+  // otherwise read as "nothing changed, go ahead".
+  const dirty = !status?.is_repo || changed.length > 0;
+
+  // Whether the env file is TRACKED decides whether writing a service-role key
+  // into it would publish that key on the next commit. It has to be positively
+  // determined, and the failure mode has to be refusal.
+  //
+  // git status alone cannot answer it: a tracked file with no local edits does
+  // not appear in the output at all, so "absent from status" would read as
+  // untracked — the fail-OPEN direction, and the one that leaks. So absence is
+  // only safe when the file does not exist yet, which the directory listing
+  // says. Everything else defaults to tracked.
+  const envFileFor = (): string | null => {
+    if (intent.kind !== "link") return null;
+    return providerById(intent.provider)?.envFile ?? null;
+  };
+  const envFile = envFileFor();
+  const envStatus = envFile
+    ? all.find((e) => e.path === envFile || e.path.endsWith(`/${envFile}`))
+    : undefined;
+  const envFileTracked = !envFile
+    ? false
+    : envStatus
+      ? // Ignored or untracked are the two states that mean "git will not
+        // carry this". Any other status means git already knows the file.
+        !(ignored(envStatus.status) || untracked(envStatus.status))
+      : // Not in status: safe only if it does not exist. If it exists and git
+        // is silent about it, it is tracked and unmodified — refuse.
+        entries.includes(envFile);
+
+  // Which CLI matters depends on what was asked, so only that one is probed —
+  // and only when the answer can change the plan. An unprobed CLI reads as
+  // absent, because claiming one exists produces a plan whose first step fails
+  // for a reason the user cannot see.
+  const linkBin = intent.kind === "link" ? providerById(intent.provider)?.cli?.bin : undefined;
+  const deployBin =
+    intent.kind === "deploy" ? detectDeployProvider(entries)?.bin : undefined;
+  const [linkCliPresent, deployCliPresent] = await Promise.all([
+    linkBin ? probeCli(linkBin, nativeCliProbeDeps) : Promise.resolve(false),
+    deployBin ? probeCli(deployBin, nativeCliProbeDeps) : Promise.resolve(false),
+  ]);
+
+  return {
+    cwd,
+    entries,
+    packageManagerField:
+      typeof pkg?.packageManager === "string" ? pkg.packageManager : null,
+    dependencies: record(pkg?.dependencies),
+    devDependencies: record(pkg?.devDependencies),
+    link: {
+      cliInstalled: linkCliPresent,
+      authenticated: false,
+      presentSecrets: [],
+      envFileTracked,
+    },
+    deploy: {
+      dirty,
+      cliInstalled: deployCliPresent,
+    },
+  };
+}
+
 export const DEFAULT_VIBE_BUILDER_DEPS: VibeBuilderSessionDeps = {
+  abstractionContext: nativeAbstractionContext,
+  runAbstraction: (argv, cwd) =>
+    runAbstractionPlan(argv, cwd, {
+      // Argv crosses to Rust as an array and is spawned without a shell.
+      ptySpawnDetached: (opts) => ipc.ptySpawnArgv(opts),
+      onPtyExit: (listener) =>
+        ipc.onPtyExit((e) => listener({ id: e.id, exit_code: e.exit_code ?? null })),
+      ptyOutput: ipc.ptyOutput,
+      ptyKill: ipc.ptyKill,
+    }),
   runner: nativeRunner(),
   reserve: reserveTask,
   startAttempt,
@@ -671,6 +817,13 @@ const FIRST_CHECKPOINT_DETAIL =
   "everything required passed, but Canopy has never saved a version automatically on this computer — the first one is yours to confirm, and after that verified turns save themselves";
 
 export class VibeBuilderSession implements BuilderSession {
+  private pendingAbstraction: {
+    proposal: Extract<AbstractionProposal, { kind: "run" }>;
+    /** Exactly what the user must say. For production this is the publish
+     *  phrase, which is why it is compared and never offered as a button. */
+    confirm: string;
+    requiresTypedPhrase: boolean;
+  } | null = null;
   private snapshot: BuilderSessionState = { persona: { kind: "idle" }, question: null };
   private listeners = new Set<(event: StructuredRunnerEvent) => void>();
   private reservation: TaskReservation | null = null;
@@ -703,6 +856,10 @@ export class VibeBuilderSession implements BuilderSession {
   private attemptHistory: AttemptOutcomeRecord[] = [];
   /** The last thing the runner complained about, as failure evidence. */
   private lastRunnerError = "";
+  /** The most recent verification outcome this session actually reached.
+   *  Starts "incomplete" because nothing has been checked yet — which is the
+   *  truth, and which refuses a production publish until something has. */
+  private lastVerification: VerificationOutcome = "incomplete";
   /** The message being worked on, replayed verbatim onto a reseeded attempt. */
   private currentGoal: string | null = null;
   /** The surface metadata this run was reserved with. Held whole because
@@ -915,6 +1072,15 @@ export class VibeBuilderSession implements BuilderSession {
     if (message === SAVE_CHECKPOINT && this.pendingCheckpoint) {
       return this.sendQueue.then(() => this.saveCheckpoint());
     }
+    // An abstraction awaiting an answer owns the next message, so "yes" is read
+    // as the answer to what was asked rather than as a new build request.
+    if (this.pendingAbstraction) {
+      return this.sendQueue.then(() => this.answerAbstraction(message));
+    }
+    const intent = parseVibeIntent(message);
+    if (intent) {
+      return this.sendQueue.then(() => this.proposeIntent(intent, message));
+    }
     let sent!: () => void;
     let failed!: (error: unknown) => void;
     const accepted = new Promise<void>((resolve, reject) => {
@@ -924,6 +1090,142 @@ export class VibeBuilderSession implements BuilderSession {
     const queued = this.sendQueue.then(() => this.runTurn(message, sent, failed));
     this.sendQueue = queued.catch(() => {});
     return accepted;
+  }
+
+  /** Turn a recognised request into something the user can say yes or no to.
+   *  Nothing runs here — this only ever asks. */
+  private async proposeIntent(intent: VibeIntent, message: string): Promise<void> {
+    const cwd = this.options.componentPath;
+    let proposal: AbstractionProposal;
+    try {
+      // The session is the only party that watched anything get verified, so
+      // it supplies that verdict; the reader supplies the project.
+      proposal = proposeAbstraction(
+        intent,
+        await this.deps.abstractionContext(cwd, intent),
+        this.lastVerification,
+      );
+    } catch {
+      // If the project can't be read, the honest answer is to stop, not to
+      // guess a plan from defaults and ask the user to approve it.
+      this.present(
+        { kind: "idle" },
+        {
+          id: `vibe-abstraction-${this.deps.now()}`,
+          kind: "question",
+          prompt: "I couldn't read enough about this project to plan that.",
+          detail: `Nothing has changed. You asked: "${message}"`,
+        },
+      );
+      return;
+    }
+
+    if (proposal.kind !== "run") {
+      this.pendingAbstraction = null;
+      this.present(
+        { kind: "idle" },
+        {
+          id: `vibe-abstraction-${this.deps.now()}`,
+          kind: "question",
+          prompt: proposal.title,
+          detail: proposal.detail,
+        },
+      );
+      return;
+    }
+
+    // A production publish must be typed out, so the confirmation cannot be
+    // collected by a stray click. Everything else gets a button.
+    const requiresTypedPhrase = proposal.confirmLabel === PUBLISH_CONFIRMATION;
+    const actions: BuilderQuestionAction[] = requiresTypedPhrase
+      ? [{ label: "Cancel", response: ABSTRACTION_DECLINE }]
+      : [
+          { label: proposal.confirmLabel, response: ABSTRACTION_CONFIRM },
+          { label: "Not now", response: ABSTRACTION_DECLINE },
+        ];
+
+    this.pendingAbstraction = {
+      proposal,
+      confirm: requiresTypedPhrase ? PUBLISH_CONFIRMATION : ABSTRACTION_CONFIRM,
+      requiresTypedPhrase,
+    };
+    this.present(
+      { kind: "idle" },
+      {
+        id: `vibe-abstraction-${this.deps.now()}`,
+        kind: "confirm",
+        prompt: proposal.title,
+        detail: [proposal.detail, proposal.caveat].filter(Boolean).join("\n"),
+        // The exact command, as argv, so what is approved is what runs.
+        diff: proposal.argv.join(" "),
+        actions,
+      },
+    );
+  }
+
+  /** Carry a message on to whatever should have handled it, once a pending
+   *  question has declined to. A fresh intent gets a fresh proposal; anything
+   *  else is a build request and reaches the agent. */
+  private async reroute(message: string): Promise<void> {
+    const intent = parseVibeIntent(message);
+    if (intent) return this.proposeIntent(intent, message);
+    let sent!: () => void;
+    let failed!: (error: unknown) => void;
+    const accepted = new Promise<void>((resolve, reject) => {
+      sent = resolve;
+      failed = reject;
+    });
+    void this.runTurn(message, sent, failed);
+    return accepted;
+  }
+
+  /** The user's answer to a pending proposal. This is the confirmation gate:
+   *  anything that is not the required word runs nothing. */
+  private async answerAbstraction(message: string): Promise<void> {
+    const pending = this.pendingAbstraction;
+    if (!pending) return;
+    this.pendingAbstraction = null;
+
+    if (message !== pending.confirm) {
+      const why =
+        pending.requiresTypedPhrase && message !== ABSTRACTION_DECLINE
+          ? `I need exactly "${PUBLISH_CONFIRMATION}" before publishing, so I've left it alone.`
+          : "Left it alone.";
+      this.present(
+        { kind: "idle" },
+        {
+          id: `vibe-abstraction-declined-${this.deps.now()}`,
+          kind: "question",
+          prompt: "Nothing ran.",
+          detail: why,
+        },
+      );
+      // Someone who changes their mind mid-question types the new thing they
+      // want, not a cancellation. Dropping that message would lose a real
+      // build request to a card they had already stopped reading, so anything
+      // that is not one of our own sentinels carries on as a request.
+      if (message !== ABSTRACTION_DECLINE) await this.reroute(message);
+      return;
+    }
+
+    const { proposal } = pending;
+    this.present({ kind: "turn-progress" }, null);
+    const result = await this.deps.runAbstraction(proposal.argv, proposal.cwd);
+    this.present(
+      { kind: "idle" },
+      {
+        id: `vibe-abstraction-done-${this.deps.now()}`,
+        kind: "question",
+        prompt: result.ok
+          ? proposal.title
+          : result.timedOut
+            ? "That took too long, so I stopped it."
+            : "That didn't work.",
+        // Output has already been through redactSecrets in the runner; a deploy
+        // in particular prints tokens and URLs on success as readily as failure.
+        detail: result.output || (result.ok ? "Done." : "No output."),
+      },
+    );
   }
 
   async reportServerIncident(
@@ -1321,6 +1623,10 @@ export class VibeBuilderSession implements BuilderSession {
       });
     }
     const verdict = judgeVerification(contract, observations);
+    // Held so a later "deploy this" is judged against evidence that actually
+    // exists. Without it the deploy planner is handed a constant, and a
+    // constant is a claim nothing observed.
+    this.lastVerification = verdict.outcome;
     await this.deps.appendEvent({
       runId,
       attemptId,

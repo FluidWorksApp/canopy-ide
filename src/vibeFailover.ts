@@ -82,13 +82,6 @@ export function rankRoutes(
   });
 }
 
-export function selectRoute(
-  candidates: RouteCandidate[],
-  task: TaskClass,
-): SelectedRoute | null {
-  return rankRoutes(candidates, task)[0] ?? null;
-}
-
 /** Which model family a coding CLI speaks. Only the three that route today —
  *  an agent absent here has no family we can name, and naming one anyway is
  *  how a route tuple starts lying. */
