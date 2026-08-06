@@ -1372,6 +1372,33 @@ pub async fn git_commit(
     Ok(out.lines().next().unwrap_or("committed").to_string())
 }
 
+/// Commit only the paths the user reviewed, preserving unrelated index state.
+#[tauri::command]
+pub async fn git_commit_paths(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    message: String,
+    paths: Vec<String>,
+) -> Result<String, String> {
+    if message.trim().is_empty() {
+        return Err("commit message is empty".into());
+    }
+    if paths.is_empty() {
+        return Err("no paths were selected for the checkpoint".into());
+    }
+    let top = repo_path(&state, &repo)?;
+    let mut stage = git(&top);
+    stage.args(["add", "--"]);
+    stage.args(&paths);
+    run(&mut stage)?;
+
+    let mut commit = git(&top);
+    commit.args(["commit", "--only", "-m", &message, "--"]);
+    commit.args(&paths);
+    let out = run(&mut commit)?;
+    Ok(out.lines().next().unwrap_or("committed").to_string())
+}
+
 // ---------- remotes ----------
 
 pub(crate) fn run_net(cmd: &mut Command) -> Result<String, String> {

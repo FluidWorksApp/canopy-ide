@@ -850,6 +850,44 @@ body,
   font-size: var(--fs-sm);
 }
 
+.project-view-vibe .vibe-builder-pane {
+  flex: 1;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.vibe-builder-head {
+  align-items: flex-start;
+}
+
+.vibe-builder-identity {
+  flex: 1;
+  min-width: 0;
+  padding-top: 5px;
+  font-size: var(--fs-sm);
+}
+
+.vibe-builder-aside {
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+
+.vibe-builder-question-diff {
+  max-height: 180px;
+  margin: 6px 0 2px;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-deep);
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
 .project-view-vibe .project-main > .pane-bar {
   display: none;
 }

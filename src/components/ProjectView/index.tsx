@@ -394,6 +394,8 @@ import { Coachmark } from "../Coachmark";
 import { shouldShowTip, markTipSeen, type CoachTip } from "../../coachmarks";
 import { ActivityRail } from "../ActivityRail";
 import { PaneBar } from "../PaneBar";
+import { VibeBuilderPane } from "../VibeBuilderPane";
+import { createVibeBuilderSession } from "../../vibeBuilderSession";
 import { TabSwitcher } from "../TabSwitcher";
 import { switchRowKey, tabKind } from "../../tabKind";
 
@@ -8514,6 +8516,136 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [addTerminal],
   );
 
+  const vibeComponent =
+    vibeTarget.kind === "ready"
+      ? components.find((component) => component.id === vibeTarget.component.id) ?? null
+      : null;
+  const vibeRun =
+    vibeTarget.kind === "ready"
+      ? vibeComponent?.commands?.find(
+          (command) => command.id === vibeTarget.runCommand.id,
+        ) ?? null
+      : null;
+  const vibeCheck = vibeComponent?.commands?.find(
+    (command) =>
+      command.name !== vibeRun?.name &&
+      /^(check|typecheck|test|build)$/i.test(command.name),
+  );
+  const vibeOwnedPreviewId = useRef<string | null>(null);
+  const vibePreview =
+    tabs.find(
+      (tab): tab is PreviewSubTab =>
+        tab.type === "preview" && tab.id === vibeOwnedPreviewId.current,
+    ) ?? null;
+  if (vibeOwnedPreviewId.current && !vibePreview) vibeOwnedPreviewId.current = null;
+  const vibePreviewIdRef = useRef<string | null>(null);
+  vibePreviewIdRef.current = vibePreview?.id ?? null;
+  const claudeBin = AGENT_CLIS.find((cli) => cli.id === "claude")?.bin ?? "claude";
+  const vibeComponentLabel = vibeComponent?.label ?? null;
+  const vibeComponentPath = vibeComponent?.path ?? null;
+  const vibeSession = useMemo(
+    () =>
+      vibeComponentLabel && vibeComponentPath
+        ? createVibeBuilderSession({
+            projectId: project.id,
+            projectName: project.name,
+            componentId: vibeComponentLabel,
+            componentPath: vibeComponentPath,
+            cliBin: claudeBin,
+            checkCommand: vibeCheck?.command ?? null,
+            previewTabId: () => vibePreviewIdRef.current,
+          })
+        : null,
+    [
+      project.id,
+      project.name,
+      vibeComponentLabel,
+      vibeComponentPath,
+      vibeCheck?.command,
+      claudeBin,
+    ],
+  );
+  useEffect(() => () => void vibeSession?.stop(), [vibeSession]);
+
+  const autoStartedVibeRun = useRef<string | null>(null);
+  useEffect(() => {
+    if (!visible || !vibe || !vibeComponent || !vibeRun) return;
+    const key = `${vibeComponent.path}\n${vibeRun.command}`;
+    const running = runTabs.some(
+      (tab) =>
+        !tab.exited &&
+        tab.cwd === vibeComponent.path &&
+        tab.command === vibeRun.command,
+    );
+    if (!running && autoStartedVibeRun.current !== key) {
+      autoStartedVibeRun.current = key;
+      addTerminal(
+        vibeComponent.path,
+        vibeRun.command,
+        vibeRun.name,
+        "▶",
+        true,
+        undefined,
+        undefined,
+        true,
+        undefined,
+        { componentId: vibeComponent.id, runCommandId: vibeRun.id },
+      );
+    }
+  }, [visible, vibe, vibeComponent, vibeRun, runTabs, addTerminal]);
+
+  const engineerTabBeforeVibe = useRef<string | null>(null);
+  const vibeWasVisible = useRef(false);
+  useEffect(() => {
+    if (!visible) return;
+    if (vibe) {
+      if (!vibeWasVisible.current) {
+        engineerTabBeforeVibe.current = activeTabIdRef.current;
+      }
+      const preview = tabsRef.current.find(
+        (tab): tab is PreviewSubTab =>
+          tab.type === "preview" && tab.id === vibeOwnedPreviewId.current,
+      );
+      if (preview) {
+        if (!vibeWasVisible.current) setActiveTabId(preview.id);
+      } else {
+        vibeOwnedPreviewId.current = openPreview();
+      }
+    } else if (!vibe && vibeWasVisible.current) {
+      const restore = engineerTabBeforeVibe.current;
+      if (restore && tabsRef.current.some((tab) => tab.id === restore)) {
+        setActiveTabId(restore);
+      }
+      engineerTabBeforeVibe.current = null;
+    }
+    vibeWasVisible.current = vibe;
+  }, [visible, vibe, vibePreview?.id, openPreview]);
+
+  useEffect(() => {
+    if (!visible || !vibe || !vibeComponent || !vibeRun || !vibePreview || vibePreview.url) {
+      return;
+    }
+    const running = runTabs.find(
+      (tab) =>
+        !tab.exited &&
+        tab.cwd === vibeComponent.path &&
+        tab.command === vibeRun.command,
+    );
+    const port = running?.ptyId == null
+      ? null
+      : projectStats.find((stat) => stat.id === running.ptyId)?.ports[0];
+    if (port) patchTabRaw(vibePreview.id, { url: `http://localhost:${port}` });
+  }, [
+    visible,
+    vibe,
+    vibeComponent,
+    vibeRun,
+    vibePreview,
+    runTabs,
+    projectStats,
+    patchTabRaw,
+  ]);
+
   // Mirror this project's live shape — components, run servers, agents — into
   // the Rust context bridge, where `canopy-hook --mcp` serves it to agents as
   // the canopy_* tools. Runs every render, but the stringify diff means a
@@ -11187,21 +11319,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onMouseLeave={() => schedulePeekClose()}
           />
         )}
-        <aside className="vibe-chat-placeholder" aria-label="Build chat placeholder">
-          <div className="vibe-chat-placeholder-title">
-            {vibeTarget.kind === "ready" ? "Build chat" : "Build needs setup"}
-          </div>
-          <div className="vibe-chat-placeholder-note">
-            {vibeTarget.kind === "ready"
-              ? "Structured chat arrives in S4."
-              : vibeSetupSupported
-                ? "Choose the component and run command Build mode should use."
-                : "This Build configuration needs a newer version of Canopy."}
-          </div>
-          {vibeTarget.kind === "needs-setup" && vibeSetupSupported && (
-            <Button size="sm" onClick={onEdit}>
-              Set up Build mode
-            </Button>
+        <aside className="vibe-chat-placeholder" aria-label="Build chat">
+          {vibeSession ? (
+            <VibeBuilderPane session={vibeSession} />
+          ) : (
+            <>
+              <div className="vibe-chat-placeholder-title">Build needs setup</div>
+              <div className="vibe-chat-placeholder-note">
+                {vibeSetupSupported
+                  ? "Choose the component and run command Build mode should use."
+                  : "This Build configuration needs a newer version of Canopy."}
+              </div>
+              {vibeSetupSupported && (
+                <Button size="sm" onClick={onEdit}>
+                  Set up Build mode
+                </Button>
+              )}
+            </>
           )}
         </aside>
         {/* The PanelGroup renders in every mode on purpose. Swapping mainArea

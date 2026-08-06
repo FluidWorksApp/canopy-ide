@@ -2,40 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import {
   INITIAL_PERSONA,
   reducePersona,
-  type PersonaInput,
   type PersonaState,
 } from "../personaBridge";
-import type { StructuredRunnerEvent } from "../structuredEvents";
+import type {
+  BuilderQuestion,
+  BuilderSession,
+  BuilderSessionState,
+} from "../vibeBuilderSessionTypes";
 import { mascotDef } from "../mascots";
 import { Markdown } from "./Markdown";
 import { Mascot } from "./Mascot";
-
-export interface BuilderQuestionAction {
-  label: string;
-  response: string;
-}
-
-export interface BuilderQuestion {
-  id: string;
-  kind: "question" | "confirm";
-  prompt: string;
-  detail?: string;
-  actions?: readonly BuilderQuestionAction[];
-}
-
-export interface BuilderSessionState {
-  persona: PersonaInput;
-  question?: BuilderQuestion | null;
-}
-
-export interface BuilderSession {
-  events$: {
-    subscribe(listener: (event: StructuredRunnerEvent) => void): () => void;
-  };
-  send(text: string): void | Promise<void>;
-  /** Replace this snapshot when presentation state changes. */
-  readonly state: BuilderSessionState;
-}
 
 type BuilderItem =
   | { id: string; kind: "you"; text: string }
@@ -362,6 +338,9 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
           <div className="companion-ask-what">{question.prompt}</div>
           {question.detail && (
             <div className="companion-ask-detail">{question.detail}</div>
+          )}
+          {question.diff && (
+            <pre className="vibe-builder-question-diff">{question.diff}</pre>
           )}
           {(question.actions ?? []).length > 0 ? (
             <div className="companion-ask-buttons">

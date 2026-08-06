@@ -2215,6 +2215,9 @@ export const gitDiscard = (
 ) => invoke<void>("git_discard", { repo, tracked, untracked });
 export const gitCommit = (repo: string, message: string, amend = false) =>
   invoke<string>("git_commit", { repo, message, amend });
+/** Commit only reviewed paths, leaving every unrelated staged hunk untouched. */
+export const gitCommitPaths = (repo: string, message: string, paths: string[]) =>
+  invoke<string>("git_commit_paths", { repo, message, paths });
 export const gitFetch = (repo: string) => invoke<string>("git_fetch", { repo });
 export const gitPull = (repo: string) => invoke<string>("git_pull", { repo });
 export const gitPush = (repo: string, setUpstream = false) =>
@@ -3423,6 +3426,45 @@ export interface DiskUsage {
  *  the usage panel can poll it like it polls plan limits. */
 export const cleanupDisk = (roots: string[]) =>
   invoke<DiskUsage[]>("cleanup_disk", { roots });
+
+// ------------------------------------------------------ structured task runner
+
+export type StructuredRunnerOut =
+  | { kind: "line"; text: string }
+  | { kind: "stderr"; text: string }
+  | { kind: "exit"; code: number | null };
+
+export async function structuredRunnerSpawn(
+  attemptId: string,
+  controlToken: string,
+  opts: {
+    command: string;
+    args: string[];
+    cwd?: string;
+    env?: [string, string][];
+  },
+  onData: (out: StructuredRunnerOut) => void,
+): Promise<void> {
+  if (!opts.cwd) throw new Error("A project runner requires a cwd");
+  const channel = new Channel<StructuredRunnerOut>();
+  channel.onmessage = onData;
+  return invoke("structured_runner_spawn", {
+    attemptId,
+    controlToken,
+    ...opts,
+    cwd: opts.cwd,
+    onData: channel,
+  });
+}
+
+export const structuredRunnerWrite = (
+  attemptId: string,
+  controlToken: string,
+  line: string,
+) => invoke<void>("structured_runner_write", { attemptId, controlToken, line });
+
+export const structuredRunnerKill = (attemptId: string, controlToken: string) =>
+  invoke<void>("structured_runner_kill", { attemptId, controlToken });
 
 // ---------------------------------------------------------------- companion
 

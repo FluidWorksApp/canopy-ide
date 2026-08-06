@@ -1,0 +1,66 @@
+/// <reference types="node" />
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+
+const read = (path: string) => readFileSync(join(process.cwd(), path), "utf8");
+
+describe("the vibe MVP wiring boundaries", () => {
+  it("reserves the A2 attempt before starting the keyed project runner", () => {
+    const session = read("src/vibeBuilderSession.ts");
+    const reserve = session.indexOf("this.deps.reserve({");
+    const startAttempt = session.indexOf("this.deps.startAttempt(", reserve);
+    const spawn = session.indexOf("this.deps.runner.start(", startAttempt);
+    expect(reserve).toBeGreaterThan(-1);
+    expect(startAttempt).toBeGreaterThan(reserve);
+    expect(spawn).toBeGreaterThan(startAttempt);
+    expect(session).not.toContain("companionSpawn");
+    expect(session).not.toContain("companionSession");
+  });
+
+  it("keeps the native task process map attempt-keyed and Companion-free", () => {
+    const rust = read("src-tauri/src/structured_runner.rs");
+    expect(rust).toContain("HashMap<String, Running>");
+    expect(rust).toContain("attempt_id: String");
+    expect(rust).toContain("kill_on_drop(true)");
+    expect(rust).not.toContain("CompanionManager");
+    expect(rust).not.toContain("pty_id");
+
+    const ipc = read("src/ipc.ts");
+    const structured = ipc.slice(
+      ipc.indexOf("// ------------------------------------------------------ structured task runner"),
+      ipc.indexOf("// ---------------------------------------------------------------- companion"),
+    );
+    expect(structured).toContain("structured_runner_spawn");
+    expect(structured).not.toContain("companion_");
+  });
+
+  it("mounts Build chat without replacing the stable PanelGroup runtime", () => {
+    const projectView = read("src/components/ProjectView/index.tsx");
+    const chat = projectView.indexOf('<aside className="vibe-chat-placeholder"');
+    const panels = projectView.indexOf('<PanelGroup direction="horizontal">', chat);
+    expect(chat).toBeGreaterThan(-1);
+    expect(projectView.slice(chat, panels)).toContain("<VibeBuilderPane");
+    expect(panels).toBeGreaterThan(chat);
+    expect(projectView).toContain("{mainArea}");
+  });
+
+  it("hides only Companion's renderer in Build while attention keeps rendering", () => {
+    const app = read("src/App.tsx");
+    expect(app).toContain("personaBinding(");
+    expect(app).toContain("toasts.length > 0 && attentionFallbackVisible");
+    expect(app).toContain("companionVisible && (");
+    const binding = read("src/personaBinding.ts");
+    expect(binding).toContain("attentionFallbackVisible: !companionVisible");
+  });
+
+  it("judges independent observations and fails unknown checkpoint inputs closed", () => {
+    const session = read("src/vibeBuilderSession.ts");
+    expect(session).toContain("judgeVerification(contract, observations)");
+    expect(session).toContain("checkpointDecision(review.context)");
+    expect(session).toContain('verdict: "unknown"');
+    expect(session).toContain("secretScanClean: false");
+    expect(session).toContain('kind: "turn-diff"');
+    expect(session).toContain('response: SAVE_CHECKPOINT');
+  });
+});
