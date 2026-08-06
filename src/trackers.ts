@@ -119,6 +119,20 @@ export function ticketContext(ticket: ipc.TicketInfo): string {
   );
 }
 
+/** The question a ticket becomes when it is forwarded to research instead of
+ *  to an implementer. Carries the body (truncated) and not just the title —
+ *  the body is where the actual question usually is. */
+export function ticketResearchQuestion(ticket: ipc.TicketInfo): string {
+  const body = ticket.body.trim();
+  const excerpt = body.length > 2000 ? `${body.slice(0, 2000).trimEnd()}…` : body;
+  return (
+    `Research ticket ${ticket.id}: "${ticket.title}" (${ticket.url}). ` +
+    `Work out whether and how this should be done — the deliverable is a ` +
+    `finding, not code.` +
+    (excerpt ? `\n\nThe ticket says:\n\n${excerpt}` : "")
+  );
+}
+
 // Starting an agent on a ticket lives in projects.ts (startCommand) so every
 // registered CLI can do it — this module used to hardcode `claude`.
 

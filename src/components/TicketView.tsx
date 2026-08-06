@@ -33,6 +33,8 @@ interface TicketViewProps {
   onStartNew: (agentId: string) => void;
   /** Run the ticket as a one-shot task in its worktree. */
   onStartTask: () => void;
+  /** Forward the ticket to research — an entry and an agent on the question. */
+  onResearch: () => void;
   onSendToAgent: (target: AgentTarget) => void;
 }
 
@@ -45,6 +47,7 @@ export function TicketView({
   installed,
   onStartNew,
   onStartTask,
+  onResearch,
   onSendToAgent,
 }: TicketViewProps) {
   const trackerName = TRACKERS.find((t) => t.id === source)?.name ?? source;
@@ -275,6 +278,14 @@ export function TicketView({
         <span className="ticket-view-note">
           Runs in the background and reports back in Tasks. No commit, no PR —
           that stays yours to do.
+        </span>
+        {/* The other destination: not every issue is a decision yet. This one
+            opens a research entry linked back to the ticket instead of a
+            worktree — same shape as the palette's "Research…". */}
+        <Button onClick={onResearch}>Research this</Button>
+        <span className="ticket-view-note">
+          Opens a research entry and puts an agent on the question. No branch,
+          no code.
         </span>
       </div>
     </div>
