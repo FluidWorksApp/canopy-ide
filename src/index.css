@@ -24268,3 +24268,9 @@ a.btn-sm {
   color: var(--warn);
   font-size: 10px;
 }
+.mesh-msg-when {
+  flex: none;
+  color: var(--text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+}
