@@ -77,14 +77,31 @@ fn scratch_root() -> PathBuf {
     std::env::temp_dir().join(format!("canopy-selftest-{}", std::process::id()))
 }
 
-/// A throwaway directory to open as a project. Real enough to be a project (it
-/// has a file in it), empty enough to open instantly.
+/// A throwaway directory to open as a project. It is deliberately a tiny real
+/// npm app: the vibe-exit scenario must exercise zero-setup target inference,
+/// a check command and an automatically started server without the network.
 fn scratch_project() -> std::io::Result<PathBuf> {
     let dir = scratch_root().join("project");
     std::fs::create_dir_all(&dir)?;
     std::fs::write(
         dir.join("README.md"),
         "Scratch project for `canopy --selftest`. Safe to delete.\n",
+    )?;
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"canopy-selftest","private":true,"scripts":{"dev":"node server.js","check":"node check.js"}}"#,
+    )?;
+    std::fs::write(
+        dir.join("server.js"),
+        r#"const http=require('http'),fs=require('fs');const port=Number(process.env.PORT||4173);http.createServer((_,r)=>{r.setHeader('content-type','text/html');r.end(fs.readFileSync('index.html'))}).listen(port,'127.0.0.1',()=>console.log('selftest server listening '+port));"#,
+    )?;
+    std::fs::write(
+        dir.join("check.js"),
+        "require('fs').accessSync('index.html')\n",
+    )?;
+    std::fs::write(
+        dir.join("index.html"),
+        "<!doctype html><button id=primary>Primary</button>\n",
     )?;
     Ok(dir)
 }
@@ -250,6 +267,34 @@ pub fn selftest_finish(app: tauri::AppHandle, report: serde_json::Value) {
     app.exit(if ok { 0 } else { 1 });
 }
 
+/// Whether the disposable Canopy store contains a byte sequence. Available
+/// only during a selftest: scanning the user's real store would cross the
+/// isolation boundary this harness exists to protect.
+#[tauri::command]
+pub fn selftest_store_contains(needle: String) -> Result<bool, String> {
+    let root = store_dir().ok_or_else(|| "selftest store is not active".to_string())?;
+    if needle.is_empty() {
+        return Err("needle must not be empty".into());
+    }
+    store_contains(root, needle.as_bytes()).map_err(|e| format!("scan selftest store: {e}"))
+}
+
+fn store_contains(dir: &std::path::Path, needle: &[u8]) -> std::io::Result<bool> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            if store_contains(&path, needle)? {
+                return Ok(true);
+            }
+        } else if let Ok(bytes) = std::fs::read(&path) {
+            if bytes.windows(needle.len()).any(|window| window == needle) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +327,21 @@ mod tests {
             requested(vec!["canopy".to_string(), "--selftest=".to_string()], None),
             None
         );
+    }
+
+    #[test]
+    fn store_scan_finds_only_the_raw_value_it_was_given() {
+        let root =
+            std::env::temp_dir().join(format!("canopy-selftest-scan-{}", std::process::id()));
+        let nested = root.join("tasks");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("artifact"),
+            b"before [REDACTED:aws-access-key] after",
+        )
+        .unwrap();
+        assert!(store_contains(&root, b"[REDACTED:aws-access-key]").unwrap());
+        assert!(!store_contains(&root, b"raw-secret-value").unwrap());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

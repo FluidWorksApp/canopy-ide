@@ -834,6 +834,17 @@ export const DEFAULT_VIBE_BUILDER_DEPS: VibeBuilderSessionDeps = {
   sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
 };
 
+// Set only by a short-lived `--selftest=vibe-exit` launch before its scratch
+// project opens. This replaces external vendor/fleet observations, never the
+// task store, evidence writer, checkpoint policy or presentation path. An
+// ordinary launch cannot reach the setter because the selftest driver is a
+// dynamic import.
+let selftestDeps: VibeBuilderSessionDeps | null = null;
+
+export function setVibeBuilderSelftestDeps(deps: VibeBuilderSessionDeps | null): void {
+  selftestDeps = deps;
+}
+
 function visualTask(goal: string): boolean {
   return /\b(visual|layout|style|colour|color|page|screen|button|form|responsive|mobile|desktop|pixel|design)\b/i.test(
     goal,
@@ -2227,7 +2238,7 @@ export class VibeBuilderSession implements BuilderSession {
 
 export function createVibeBuilderSession(
   options: VibeBuilderSessionOptions,
-  deps: VibeBuilderSessionDeps = DEFAULT_VIBE_BUILDER_DEPS,
+  deps: VibeBuilderSessionDeps = selftestDeps ?? DEFAULT_VIBE_BUILDER_DEPS,
 ): VibeBuilderSession {
   return new VibeBuilderSession(options, deps);
 }

@@ -1234,16 +1234,24 @@ export default function App() {
     void ipc.selftestConfig().then((cfg) => {
       if (!cfg || cancelled) return;
       setSelftestMode(cfg.scenario);
-      void import("./selftest/browserSelftest")
-        .then((m) =>
-          m.runBrowserSelftest(cfg, {
+      const scenario = cfg.scenario === "browser"
+        ? import("./selftest/browserSelftest").then((m) => m.runBrowserSelftest(cfg, {
             openDirAsProject,
             projectIdFor: (dir) =>
               wsRef.current.projects.find((p) =>
                 p.components.some((c) => c.path === dir),
               )?.id,
-          }),
-        )
+          }))
+        : cfg.scenario === "vibe-exit"
+          ? import("./selftest/vibeExitSelftest").then((m) => m.runVibeExitSelftest(cfg, {
+              openDirAsProject,
+              projectIdFor: (dir) =>
+                wsRef.current.projects.find((p) =>
+                  p.components.some((c) => c.path === dir),
+                )?.id,
+            }))
+          : Promise.reject(new Error(`unknown selftest scenario: ${cfg.scenario}`));
+      void scenario
         // A scenario that cannot even start must still report, or the run ends
         // as a timeout that says nothing about why.
         .catch((err) =>

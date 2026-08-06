@@ -543,6 +543,10 @@ export const selftestConfig = () =>
 export const selftestFinish = (report: unknown) =>
   invoke<void>("selftest_finish", { report }).catch(() => {});
 
+/** Search only the disposable store of a selftest launch. */
+export const selftestStoreContains = (needle: string) =>
+  invoke<boolean>("selftest_store_contains", { needle });
+
 /** One browser view (base64) — the whole child webview, no cropping, because
  *  it is its own view — with the size in logical points it was taken at. The
  *  size comes back from the view because a background tab's placeholder is
