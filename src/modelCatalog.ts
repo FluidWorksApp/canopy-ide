@@ -55,11 +55,14 @@ export const SEEDS: Record<ModelFamily, ModelChoice[]> = {
     { id: "sonnet", label: "Sonnet", hint: "efficient for routine work" },
     { id: "haiku", label: "Haiku", hint: "fastest" },
   ],
+  // Verified against openai.com/index/gpt-5-6 on 2026-08-06: the 5.6 family is
+  // sol/terra/luna, bare `gpt-5.6` aliases to sol, and 5.4 + 5.4-mini retire
+  // from Codex on 2026-08-31 — which is why the older rows are gone.
   openai: [
-    { id: "gpt-5.5", label: "GPT-5.5", hint: "latest" },
-    { id: "gpt-5.4", label: "GPT-5.4", hint: "previous" },
-    { id: "gpt-5.2-codex", label: "GPT-5.2 Codex", hint: "coding-tuned" },
-    { id: "gpt-5.4-mini", label: "GPT-5.4 mini", hint: "fast, cheaper" },
+    { id: "gpt-5.6", label: "GPT-5.6 Sol", hint: "most capable" },
+    { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "balanced" },
+    { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", hint: "fastest, cheapest" },
+    { id: "gpt-5.5", label: "GPT-5.5", hint: "previous" },
   ],
   google: [
     { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", hint: "most capable" },
@@ -230,8 +233,11 @@ const TIERS: Record<ModelFamily, Tier[]> = {
     // so offering it to everyone produces a menu entry most accounts cannot use.
   ],
   openai: [
+    { test: /^gpt-[\d.]+-sol$/, label: "GPT Sol", hint: "most capable" },
     { test: /^gpt-[\d.]+-codex(-max)?$/, label: "Codex", hint: "coding-tuned" },
+    { test: /^gpt-[\d.]+-terra$/, label: "GPT Terra", hint: "balanced" },
     { test: /^gpt-[\d.]+$/, label: "GPT", hint: "latest" },
+    { test: /^gpt-[\d.]+-luna$/, label: "GPT Luna", hint: "fast, cheaper" },
     { test: /^gpt-[\d.]+-mini$/, label: "GPT mini", hint: "fast, cheaper" },
     { test: /^gpt-[\d.]+-nano$/, label: "GPT nano", hint: "cheapest" },
   ],
