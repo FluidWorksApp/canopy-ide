@@ -281,8 +281,23 @@ export interface MaterializedVibeSetup {
 }
 
 /** Canopy assigns identity. Agent keys are references within one proposal and
- * never become authority by themselves. Existing canonical roots and identical
- * argv commands keep their IDs; labels may change without moving automation. */
+ * never become authority by themselves.
+ *
+ * Setup may only ADD to what the person already configured. It ran against
+ * this repository and rewrote all three components: "canopy-website" became
+ * "server" (the run command's name), and the Local Instance command —
+ * `cd … && ORT_DYLIB_PATH=… && pnpm tauri dev` — became `"pnpm" "tauri" "dev"`,
+ * silently dropping the environment variable the app needs, under a new id
+ * that no longer matched the run already on the rail. The relay component's
+ * command was deleted outright for not appearing in the proposal.
+ *
+ * None of that is the survey being wrong: it is asked to describe how the
+ * project runs, and it did. It is this function treating a description as a
+ * replacement. The brief tells the agent the labels are the person's own
+ * words and to treat them as given; the merge has to honour the same promise.
+ * So: an existing component keeps its label, an existing command keeps its
+ * id, name and exact spelling and only gains the `purpose` the survey
+ * established, and a configured command the proposal never mentioned stays. */
 export function materializeVibeSetup(project: Project, proposal: VibeProjectSetupProposal, projectRoot = ""): MaterializedVibeSetup {
   const usedComponents = new Set(project.components.map((item) => item.id));
   const usedCommands = new Set(project.components.flatMap((item) => item.commands?.map((command) => command.id) ?? []));
@@ -301,15 +316,38 @@ export function materializeVibeSetup(project: Project, proposal: VibeProjectSetu
     const existing = project.components.find((item) => normalized(item.path) === candidateRoot);
     const id = existing?.id ?? allocate("cmp", candidateRoot, usedComponents);
     componentIds[candidate.key] = id;
+    const claimed = new Set<string>();
     const commands: RunCommand[] = candidate.commands.map((command) => {
-      const same = existing?.commands?.find((item) =>
-        item.purpose === command.purpose && JSON.stringify(item.argv) === JSON.stringify(command.argv) && normalized(item.cwd ?? existing.path) === (projectRoot ? resolvePath(projectRoot, command.cwd) : normalized(command.cwd)));
       const commandCwd = projectRoot ? resolvePath(projectRoot, command.cwd) : normalized(command.cwd);
+      // What the command RUNS, not how the survey spelled it. Matching on argv
+      // alone never recognised a command configured by hand — those have no
+      // argv and no purpose — so every setup allocated a new id for a command
+      // the person already had, and the old entry disappeared with it.
+      const invocation = command.argv.join(" ");
+      const same = existing?.commands?.find((item) => {
+        if (claimed.has(item.id)) return false;
+        if (normalized(item.cwd ?? existing.path) !== commandCwd) return false;
+        return item.argv?.length
+          ? JSON.stringify(item.argv) === JSON.stringify(command.argv)
+          : item.command.includes(invocation);
+      });
+      if (same) claimed.add(same.id);
       const commandId = same?.id ?? allocate("run", `${id}\0${command.purpose}\0${JSON.stringify(command.argv)}\0${commandCwd}`, usedCommands);
       commandIds[`${candidate.key}:${command.key}`] = commandId;
-      return { id: commandId, name: command.label, command: displayArgv(command.argv), argv: command.argv, cwd: commandCwd, purpose: command.purpose };
+      // Their spelling wins. `cd … && ORT_DYLIB_PATH=… && pnpm tauri dev` is a
+      // working invocation whose argv form is not: the env assignment is not
+      // an argument, so adopting argv here is how it got dropped. Only the
+      // purpose is taken, because that is what the survey actually adds.
+      return same
+        ? { ...same, purpose: command.purpose }
+        : { id: commandId, name: command.label, command: displayArgv(command.argv), argv: command.argv, cwd: commandCwd, purpose: command.purpose };
     });
-    return { id, label: candidate.label, path: candidateRoot, commands, role: candidate.role };
+    // A configured command the proposal did not mention is still the person's
+    // command. Silence about it is not a finding that it should go.
+    for (const item of existing?.commands ?? []) {
+      if (!claimed.has(item.id)) commands.push(item);
+    }
+    return { id, label: existing?.label ?? candidate.label, path: candidateRoot, commands, role: candidate.role };
   });
   const previewComponentId = componentIds[proposal.preview.componentKey];
   const previewRunCommandId = commandIds[`${proposal.preview.componentKey}:${proposal.preview.commandKey}`];

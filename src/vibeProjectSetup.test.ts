@@ -268,6 +268,45 @@ describe("setup identity materialization", () => {
     expect(result.project.components.map((item) => item.role)).toEqual(["web", "api"]);
   });
 
+  it("never overwrites what the person configured themselves", () => {
+    // What setup did to this repository: "canopy-website" was renamed to
+    // "server" after its run command, and the Local Instance command —
+    // `cd … && ORT_DYLIB_PATH=… && pnpm tauri dev` — was replaced by the argv
+    // spelling, dropping the environment variable the app needs and taking a
+    // new id that no longer matched the run already on the rail.
+    const configured: Project = {
+      ...project(),
+      components: [
+        {
+          id: "cmp-web",
+          label: "canopy-website",
+          path: "/repo/apps/web",
+          commands: [
+            {
+              id: "run-hand-written",
+              name: "Local Instance",
+              command: 'cd /repo/apps/web && ORT_DYLIB_PATH="$PWD/lib.dylib" && pnpm dev',
+            },
+            { id: "run-untouched", name: "relay", command: "pnpm run relay" },
+          ],
+        },
+        { id: "cmp-api", label: "API", path: "/repo/services/api", commands: [] },
+      ],
+    };
+    const web = materializeVibeSetup(configured, proposal()).project.components[0];
+
+    expect(web.label).toBe("canopy-website");
+    const kept = web.commands?.find((command) => command.id === "run-hand-written");
+    expect(kept?.name).toBe("Local Instance");
+    expect(kept?.command).toContain("ORT_DYLIB_PATH");
+    // The one thing the survey does add.
+    expect(kept?.purpose).toBe("serve");
+    // Silence about a configured command is not a finding that it should go.
+    expect(web.commands?.some((command) => command.id === "run-untouched")).toBe(true);
+    // And the role the survey established still lands.
+    expect(web.role).toBe("web");
+  });
+
   it("keeps ids stable across label-only changes", () => {
     const first = materializeVibeSetup(project(), proposal()).project;
     const renamed = proposal();
