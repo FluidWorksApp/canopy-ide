@@ -544,6 +544,11 @@ export function badgeFor(items: AttentionItem[]): {
   return { count: unread.length, urgency };
 }
 
+/** Build mode is a product surface, not an activity feed. Only something the
+ * person must answer, or an error they can act on, belongs behind its bell. */
+export const buildAttentionItems = (items: AttentionItem[]): AttentionItem[] =>
+  items.filter((item) => item.kind === "question" || item.tone === "error");
+
 /** The same badge, for one project. What a project tab shows: its own waiting
  *  work, not the workspace's. */
 export const forProject = (

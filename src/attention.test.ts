@@ -4,6 +4,7 @@ import {
   ashStateFor,
   attentionItems,
   badgeFor,
+  buildAttentionItems,
   clearAttentionHistory,
   dismissToast,
   forProject,
@@ -58,6 +59,23 @@ describe("urgency", () => {
     // The whole point: no tone can talk a question down the scale.
     expect(urgencyOf(item({ kind: "question", tone: "info" }))).toBe("high");
     expect(urgencyOf(item({ kind: "question", tone: "success" }))).toBe("high");
+  });
+});
+
+describe("Build attention", () => {
+  it("keeps only questions and actionable errors", () => {
+    const items = [
+      item({ id: "info", kind: "fyi", tone: "info" }),
+      item({ id: "success", kind: "fyi", tone: "success" }),
+      item({ id: "warn", kind: "fyi", tone: "warn" }),
+      item({ id: "error", kind: "fyi", tone: "error" }),
+      item({ id: "question", kind: "question", tone: "info" }),
+    ];
+
+    expect(buildAttentionItems(items).map((entry) => entry.id)).toEqual([
+      "error",
+      "question",
+    ]);
   });
 });
 

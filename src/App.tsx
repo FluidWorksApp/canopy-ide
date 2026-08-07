@@ -45,6 +45,7 @@ import {
 import {
   attentionItems,
   badgeFor,
+  buildAttentionItems,
   dismissToast,
   forProject,
   isOutstanding,
@@ -2396,7 +2397,13 @@ export default function App() {
     [followDeepLink],
   );
   const [notifOpen, setNotifOpen] = useState(false);
-  const notifBadge = useMemo(() => badgeFor(attention), [attention]);
+  const activeBuildMode =
+    ws.projects.find((project) => project.id === ws.activeId)?.vibe?.enabled === true;
+  const visibleAttention = useMemo(
+    () => (activeBuildMode ? buildAttentionItems(attention) : attention),
+    [activeBuildMode, attention],
+  );
+  const notifBadge = useMemo(() => badgeFor(visibleAttention), [visibleAttention]);
   // Stable, so TitleBar's memo isn't defeated by a fresh closure every tick.
   const openNotifications = useCallback(() => setNotifOpen(true), []);
 
@@ -2573,8 +2580,6 @@ export default function App() {
     () => getSettings().companionEnabled,
     () => false,
   );
-  const activeBuildMode =
-    ws.projects.find((project) => project.id === ws.activeId)?.vibe?.enabled === true;
   const { companionVisible, attentionFallbackVisible } = personaBinding(
     companionOn,
     activeBuildMode,
@@ -3039,6 +3044,7 @@ export default function App() {
         </div>
       )}
       <TitleBar
+        projects={ws.projects}
         openProjects={openProjects}
         activeId={ws.activeId}
         pendingCount={pendingCount}
@@ -3051,6 +3057,7 @@ export default function App() {
         notifCount={notifBadge.count}
         notifUrgency={notifBadge.urgency}
         onOpenNotifications={openNotifications}
+        onOpenProject={(id) => void openProject(id)}
         onSelectProject={selectProject}
         onCloseProject={handleCloseProject}
         onHibernateProject={hibernateProject}
@@ -3147,7 +3154,7 @@ export default function App() {
         })}
       </div>
 
-      {updateAvail && (
+      {!activeBuildMode && updateAvail && (
         <UpdateToast
           update={updateAvail}
           progress={updateProgress}
@@ -3157,7 +3164,7 @@ export default function App() {
           onDismiss={dismissUpdate}
         />
       )}
-      {releaseNotes && !updateAvail && (
+      {!activeBuildMode && releaseNotes && !updateAvail && (
         <ReleaseNotesToast
           release={releaseNotes}
           onOpen={() => openReleaseNotes(releaseNotes)}
@@ -3212,7 +3219,7 @@ export default function App() {
 
       {notifOpen && (
         <NotificationCenter
-          items={attention}
+          items={visibleAttention}
           onFollow={(item) => void followAttention(item)}
           onClose={() => setNotifOpen(false)}
         />

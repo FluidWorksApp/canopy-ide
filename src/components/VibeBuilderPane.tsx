@@ -15,7 +15,12 @@ import { Markdown } from "./Markdown";
 import { Mascot } from "./Mascot";
 
 type BuilderItem =
-  | { id: string; kind: "you"; text: string }
+  | {
+      id: string;
+      kind: "you";
+      text: string;
+      delivery: "active" | "queued" | "done" | "failed";
+    }
   | { id: string; kind: "ash"; text: string }
   | {
       id: string;
@@ -380,13 +385,17 @@ export function VibeBuilderPane({
     if (log) log.scrollTop = log.scrollHeight;
   }, [transcriptOpen, view.items]);
 
-  const reportSendError = (error: unknown, version: number) => {
+  const reportSendError = (error: unknown, version: number, itemId?: string) => {
     if (version !== sessionVersion.current) return;
     setAnsweringQuestion(null);
     setView((current) => ({
       ...current,
       items: [
-        ...current.items,
+        ...current.items.map((item) =>
+          item.id === itemId && item.kind === "you"
+            ? { ...item, delivery: "failed" as const }
+            : item,
+        ),
         { id: nextId(), kind: "error", text: `Could not send: ${String(error)}` },
       ],
       openReplyId: null,
@@ -396,6 +405,7 @@ export function VibeBuilderPane({
   const send = (text: string) => {
     const message = text.trim();
     if (!message) return;
+    const itemId = nextId();
     setHasSpoken(true);
     if (projectId) {
       const held = projectConversations.get(projectId);
@@ -404,22 +414,51 @@ export function VibeBuilderPane({
         hasSpoken: true,
       });
     }
-    setView((current) => ({
-      ...current,
-      items: [...current.items, { id: nextId(), kind: "you", text: message }],
-      persona: reducePersona(current.persona, { kind: "turn-started" }),
-      openReplyId: null,
-    }));
+    setView((current) => {
+      const working =
+        current.persona.state === "thinking" ||
+        current.persona.state === "explaining";
+      const delivery = working ? "queued" : "active";
+      return {
+        ...current,
+        items: [
+          ...current.items.map((item) =>
+            delivery === "active" && item.kind === "you" && item.delivery === "active"
+              ? { ...item, delivery: "done" as const }
+              : item,
+          ),
+          { id: itemId, kind: "you", text: message, delivery },
+        ],
+        persona: reducePersona(current.persona, { kind: "turn-started" }),
+        openReplyId: null,
+      };
+    });
     setDraft("");
     setComposerFocused(false);
     composer.current?.blur();
     const version = sessionVersion.current;
+    const markAccepted = () => {
+      if (version !== sessionVersion.current) return;
+      setView((current) => ({
+        ...current,
+        items: current.items.map((item) => {
+          if (item.kind !== "you") return item;
+          if (item.id === itemId && item.delivery === "queued") {
+            return { ...item, delivery: "active" };
+          }
+          if (item.id !== itemId && item.delivery === "active") {
+            return { ...item, delivery: "done" };
+          }
+          return item;
+        }),
+      }));
+    };
     try {
-      void Promise.resolve(session.send(message)).catch((error) =>
-        reportSendError(error, version),
-      );
+      void Promise.resolve(session.send(message))
+        .then(markAccepted)
+        .catch((error) => reportSendError(error, version, itemId));
     } catch (error) {
-      reportSendError(error, version);
+      reportSendError(error, version, itemId);
     }
   };
 
@@ -449,6 +488,17 @@ export function VibeBuilderPane({
     .find(
       (item): item is Extract<BuilderItem, { kind: "you" }> => item.kind === "you",
     );
+  const activeUserRequest =
+    [...view.items]
+      .reverse()
+      .find(
+        (item): item is Extract<BuilderItem, { kind: "you" }> =>
+          item.kind === "you" && item.delivery === "active",
+      ) ?? latestUserRequest;
+  const queuedUserRequests = view.items.filter(
+    (item): item is Extract<BuilderItem, { kind: "you" }> =>
+      item.kind === "you" && item.delivery === "queued",
+  );
   const showWelcome = !hasSpoken && view.items.length === 0;
   const contextualCushion =
     Boolean(question) || (showWelcome && starterIdeas.length > 0);
@@ -461,7 +511,7 @@ export function VibeBuilderPane({
   // "Making your change" gives no clue which change is in flight and a
   // question looks detached from the words that caused it.
   const showTurnReceipt =
-    Boolean(latestUserRequest) &&
+    Boolean(activeUserRequest) &&
     !transcriptOpen &&
     (status.busy || Boolean(question) || status.signal === "blocked");
   useEffect(() => {
@@ -588,14 +638,27 @@ export function VibeBuilderPane({
       </div>
 
       <div className="vibe-builder-cushion">
-        {showTurnReceipt && latestUserRequest && (
+        {showTurnReceipt && activeUserRequest && (
           <div
             className="vibe-builder-turn-receipt"
             aria-label="Your latest request"
-            title={latestUserRequest.text}
+            title={activeUserRequest.text}
           >
             <span>You asked</span>
-            <p>{latestUserRequest.text}</p>
+            <p>{activeUserRequest.text}</p>
+          </div>
+        )}
+        {!transcriptOpen && queuedUserRequests.length > 0 && (
+          <div
+            className="vibe-builder-queue"
+            aria-label={`${queuedUserRequests.length} queued ${queuedUserRequests.length === 1 ? "request" : "requests"}`}
+          >
+            <span>Up next · {queuedUserRequests.length}</span>
+            <ol>
+              {queuedUserRequests.slice(0, 3).map((item) => (
+                <li key={item.id} title={item.text}>{item.text}</li>
+              ))}
+            </ol>
           </div>
         )}
         {cushionOpen && (

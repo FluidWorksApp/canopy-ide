@@ -164,12 +164,6 @@ const JUSTIFYING_FUNCTIONS = [
     enabled: true,
     cost: "the checkpoint gate reads a hardcoded secretScanClean instead of a real scan, so auto-checkpoint is dead code that looks alive",
   },
-  {
-    module: "vibeSecretScan.ts",
-    symbol: "describeSecretFindings",
-    enabled: true,
-    cost: "the sentence explaining that a secret is why a turn was not saved is never said, so the refusal has no reason attached",
-  },
   // The `reconcileCheckpoint` entry that stood here is gone with the function.
   // It was the one case this table could not decide, because the missing piece
   // was not a caller but the whole two-phase protocol; the design call was to

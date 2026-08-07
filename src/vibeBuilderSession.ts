@@ -57,7 +57,6 @@ import {
   recordAutoCheckpointObserved,
 } from "./vibeAutoCheckpoint";
 import {
-  describeSecretFindings,
   scanDiffForSecrets,
   type SecretScanResult,
 } from "./vibeSecretScan";
@@ -892,23 +891,6 @@ function verificationSummary(
     checkCaveat ? ` ${checkCaveat}` : ""
   }`;
 }
-
-const refusalText: Record<string, string> = {
-  "shared-or-converted-dirty": "this is not a dedicated isolated worktree",
-  "dirty-at-start": "the checkout already had changes when the turn began",
-  "lineage-moved": "the branch moved during the turn",
-  "paths-contested": "another session claims one of the changed paths",
-  "secrets-flagged": "the changed lines look like they contain a credential",
-  "incident-open": "a safety incident is still open",
-  "not-verified": "the required verification is not fully green",
-};
-
-/** What the reader is told when the policy said yes and the gate still held.
- *  Deliberately about Canopy, not about their change: nothing is wrong with the
- *  turn, and a message that implied otherwise would train someone to distrust a
- *  verified result. */
-const FIRST_CHECKPOINT_DETAIL =
-  "everything required passed, but Canopy has never saved a version automatically on this computer — the first one is yours to confirm, and after that verified turns save themselves";
 
 export class VibeBuilderSession implements BuilderSession {
   private pendingAbstraction: {
@@ -2092,14 +2074,6 @@ export class VibeBuilderSession implements BuilderSession {
       },
     };
     const decision = checkpointDecision(safeReview.context);
-    // The policy is one gate; whether the unattended commit has ever run here
-    // is another. "Never executed" and "unverified" are the same state — see
-    // vibeAutoCheckpoint — so until a checkpoint has actually happened on this
-    // machine the commit is PROPOSED rather than made. The decision, the paths,
-    // the baseline and the reasons are recorded either way: this holds the git
-    // write, it does not weaken the evidence.
-    const armed = this.deps.autoCheckpointObserved();
-    const held = decision.checkpoint && !armed;
     let summary = verificationSummary(
       contract,
       observations,
@@ -2108,7 +2082,11 @@ export class VibeBuilderSession implements BuilderSession {
     );
     this.pendingCheckpoint = null;
 
-    if (decision.checkpoint && armed && review.paths.length > 0) {
+    // A reversible checkpoint that passed every policy gate is Canopy's job,
+    // not a Git decision to delegate to someone in Build mode. The successful
+    // commit itself arms future observations; no first-run confirmation card
+    // is needed.
+    if (decision.checkpoint && review.paths.length > 0) {
       const commit = await this.deps.commit(
         review.repoRoot,
         review.paths,
@@ -2124,6 +2102,7 @@ export class VibeBuilderSession implements BuilderSession {
         confidence: "independent",
         metadata: { commit, paths: review.paths },
       });
+      this.deps.recordAutoCheckpointObserved();
       summary += " Saved this verified version automatically.";
       this.present({ kind: "checkpoint-saved" }, null);
     } else if (review.paths.length > 0) {
@@ -2144,10 +2123,8 @@ export class VibeBuilderSession implements BuilderSession {
       await this.deps.appendEvent({
         runId,
         attemptId,
-        // A held checkpoint is not a refused one: the policy said yes. Recording
-        // it as `refused` would put a reason in the ledger that nothing found.
-        kind: held ? "checkpoint.held" : "checkpoint.refused",
-        code: held ? "auto-checkpoint-never-observed" : (reasons[0] ?? "policy"),
+        kind: "checkpoint.refused",
+        code: reasons[0] ?? "policy",
         source: "canopy",
         confidence: "independent",
         metadata: {
@@ -2168,31 +2145,20 @@ export class VibeBuilderSession implements BuilderSession {
           paths: review.paths,
         },
       });
-      const secretDetail =
-        !decision.checkpoint && review.secrets && !review.secrets.clean
-          ? describeSecretFindings(review.secrets.findings)
-          : "";
+      const containsPossibleSecret = Boolean(
+        !decision.checkpoint && review.secrets && !review.secrets.clean,
+      );
       this.present(
         verdict.outcome === "failed" ? { kind: "verify-failed" } : { kind: "verify-passed" },
         {
           id: `checkpoint-${attemptId}-${this.deps.now()}`,
-          kind: "confirm",
-          prompt: held
-            ? "This is the first version I'd save here."
-            : "This turn was not auto-saved.",
-          detail: held
-            ? FIRST_CHECKPOINT_DETAIL
-            : [
-                reasons.map((reason) => refusalText[reason] ?? reason).join("; "),
-                secretDetail,
-              ]
-                .filter(Boolean)
-                .join(" "),
-          diff: review.diff,
-          actions: [{ label: "Save this version", response: SAVE_CHECKPOINT }],
+          kind: "notice",
+          prompt: "Your changes are still here.",
+          detail: containsPossibleSecret
+            ? "I found something that may be private, so I left this version unsaved. You can keep working."
+            : "I couldn't create a checkpoint for this turn. You can keep working; I'll try again after the next change.",
         },
       );
-      if (held) summary += ` I haven't saved it — ${FIRST_CHECKPOINT_DETAIL}.`;
     } else {
       this.present(
         verdict.outcome === "verified"
@@ -2545,11 +2511,9 @@ export class VibeBuilderSession implements BuilderSession {
         this.pendingCheckpoint = { review: refreshed, verification: pending.verification };
         this.present(this.snapshot.persona, {
           id: `checkpoint-changed-${reservation.attempt.attemptId}-${this.deps.now()}`,
-          kind: "confirm",
-          prompt: "The diff changed after you reviewed it.",
-          detail: "Review the updated diff, then choose Save this version again.",
-          diff: refreshed.diff,
-          actions: [{ label: "Save this version", response: SAVE_CHECKPOINT }],
+          kind: "notice",
+          prompt: "The project changed while I was saving it.",
+          detail: "I left everything as-is. Canopy will try the checkpoint again after the next change.",
         });
         return;
       }

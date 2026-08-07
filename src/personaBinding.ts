@@ -6,6 +6,8 @@ export function personaBinding(companionEnabled: boolean, buildMode: boolean): {
   const companionVisible = companionEnabled && !buildMode;
   return {
     companionVisible,
-    attentionFallbackVisible: !companionVisible,
+    // Build keeps attention behind its quiet bell. Toast panels belong to the
+    // richer Engineer shell and would cover the product being built.
+    attentionFallbackVisible: !companionVisible && !buildMode,
   };
 }

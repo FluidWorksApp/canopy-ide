@@ -219,6 +219,35 @@ describe("VibeBuilderPane", () => {
     );
   });
 
+  it("shows later messages as an ordered queue until the session accepts them", async () => {
+    const h = harness(idle());
+    let acceptSecond!: () => void;
+    h.send
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(
+        () => new Promise<void>((resolve) => { acceptSecond = resolve; }),
+      );
+    render(<VibeBuilderPane session={h.session} />);
+    const input = screen.getByRole("textbox", { name: "Message Ash" });
+
+    fireEvent.change(input, { target: { value: "Connect Supabase" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.change(input, { target: { value: "Then deploy it" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    const queue = screen.getByLabelText("1 queued request");
+    expect(within(queue).getByText("Then deploy it")).toBeTruthy();
+    expect(screen.getByLabelText("Your latest request").textContent).toContain(
+      "Connect Supabase",
+    );
+
+    acceptSecond();
+    await waitFor(() => expect(screen.queryByLabelText("1 queued request")).toBeNull());
+    expect(screen.getByLabelText("Your latest request").textContent).toContain(
+      "Then deploy it",
+    );
+  });
+
   it("minimizes a pending question independently from the composer", () => {
     const h = harness({
       persona: { kind: "question-asked" },

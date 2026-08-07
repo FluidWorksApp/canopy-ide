@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useState, type MouseEvent } from "react";
 import { BellIcon, CloseIcon, FrostIcon } from "./icons";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import type { Urgency } from "../attention";
@@ -48,6 +48,7 @@ function useMacFullscreen(): boolean {
 }
 
 interface TitleBarProps {
+  projects: Project[];
   openProjects: Project[];
   activeId: string | null;
   /** Count of agent items blocked on the user for a project — drives the pill badge. */
@@ -71,6 +72,7 @@ interface TitleBarProps {
   notifCount: number;
   notifUrgency: Urgency;
   onOpenNotifications: () => void;
+  onOpenProject: (id: string) => void;
   onSelectProject: (id: string) => void;
   onCloseProject: (id: string) => void;
   onHibernateProject: (id: string) => void;
@@ -86,6 +88,7 @@ interface TitleBarProps {
 // Projects menu. Memoized — it only re-renders when the project set, the
 // active id, or the collab state actually change, not on every App state tick.
 function TitleBarImpl({
+  projects,
   openProjects,
   activeId,
   pendingCount,
@@ -98,6 +101,7 @@ function TitleBarImpl({
   notifCount,
   notifUrgency,
   onOpenNotifications,
+  onOpenProject,
   onSelectProject,
   onCloseProject,
   onHibernateProject,
@@ -112,19 +116,40 @@ function TitleBarImpl({
   const menu = useContextMenu();
   const activeProject = openProjects.find((project) => project.id === activeId);
   const buildMode = activeProject?.vibe?.enabled === true;
+  const chooseProject = (id: string) =>
+    openProjects.some((project) => project.id === id)
+      ? onSelectProject(id)
+      : onOpenProject(id);
+  const openProjectMenu = (event: MouseEvent) =>
+    menu.open(event, [
+      ...projects.map((project) => ({
+        label: `${project.id === activeId ? "✓  " : ""}${project.name}`,
+        onClick: () => chooseProject(project.id),
+      })),
+      { separator: true },
+      { label: "New project…", icon: "+", onClick: onNewProject },
+      { label: "Manage projects…", icon: "⋯", onClick: onManageProjects },
+    ]);
   return (
     // data-tauri-drag-region makes the bar background draggable (like grabbing
     // a native titlebar). Tauri checks the mousedown target, so interactive
     // children (pills, buttons) — which are the target, not this div — still
     // register clicks normally without opting out.
     <div
-      className={`titlebar ${IS_MAC ? "titlebar-overlay" : ""} ${
+      className={`titlebar ${buildMode ? "titlebar-build" : ""} ${IS_MAC ? "titlebar-overlay" : ""} ${
         IS_MAC && fullscreen ? "titlebar-fullscreen" : ""
       }`}
       data-tauri-drag-region
     >
       {/* The strip around the pills is draggable too — the pills/badges/close
           are their own click targets, so they still work. */}
+      {buildMode ? (
+        <div className="build-browser-location" data-tauri-drag-region>
+          <span className="build-browser-dot" aria-hidden />
+          <span>Live preview</span>
+          <strong>{activeProject?.name}</strong>
+        </div>
+      ) : (
       <div className="project-tabs" data-tauri-drag-region>
         {openProjects.map((p, i) => {
           const asleep = p.id in hibernated;
@@ -199,6 +224,7 @@ function TitleBarImpl({
           ＋
         </Button>
       </div>
+      )}
       <div className="titlebar-spacer" data-tauri-drag-region />
       {activeProject && !(activeProject.id in hibernated) && (
         <button
@@ -216,7 +242,7 @@ function TitleBarImpl({
           <span className={buildMode ? "" : "active"}>Engineer</span>
         </button>
       )}
-      {collabActive && (
+      {collabActive && !buildMode && (
         <div
           className="collab-live"
           title="Live collaboration in progress — click ✕ to end every share and session"
@@ -237,7 +263,7 @@ function TitleBarImpl({
           a project you are NOT looking at is waiting on you. */}
       <button
         className={`notif-bell${
-          notifCount > 0 ? ` notif-bell-lit notif-bell-counted notif-bell-${notifUrgency}` : ""
+          notifCount > 0 ? ` notif-bell-lit notif-bell-counted notif-bell-${buildMode ? "low" : notifUrgency}` : ""
         }`}
         title={
           notifCount > 0
@@ -254,11 +280,23 @@ function TitleBarImpl({
           <span className="notif-bell-count">{notifCount > 99 ? "99+" : notifCount}</span>
         )}
       </button>
-      <Button className="project-manage-btn"
-        title="Manage projects — open, create, edit, delete"
-        onClick={onManageProjects}>
-        Projects ▾
-      </Button>
+      {buildMode ? (
+        <Button
+          className="build-project-menu"
+          title="Switch or create a project"
+          aria-label="Projects"
+          onClick={openProjectMenu}
+        >
+          <span>{activeProject?.name}</span>
+          <span aria-hidden>⌄</span>
+        </Button>
+      ) : (
+        <Button className="project-manage-btn"
+          title="Manage projects — open, create, edit, delete"
+          onClick={onManageProjects}>
+          Projects ▾
+        </Button>
+      )}
       {menu.menu && (
         <ContextMenu
           x={menu.menu.x}

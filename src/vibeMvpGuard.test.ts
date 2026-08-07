@@ -136,9 +136,13 @@ describe("the vibe MVP wiring boundaries", () => {
     const app = read("src/App.tsx");
     expect(app).toContain("personaBinding(");
     expect(app).toContain("toasts.length > 0 && attentionFallbackVisible");
+    expect(app).toContain("!activeBuildMode && updateAvail");
+    expect(app).toContain("!activeBuildMode && releaseNotes && !updateAvail");
     expect(app).toContain("companionVisible && (");
     const binding = read("src/personaBinding.ts");
-    expect(binding).toContain("attentionFallbackVisible: !companionVisible");
+    expect(binding).toContain(
+      "attentionFallbackVisible: !companionVisible && !buildMode",
+    );
   });
 
   // Textual, and knowingly weak — ProjectView is 12k lines with no render
@@ -184,6 +188,8 @@ describe("the vibe MVP wiring boundaries", () => {
     expect(session).toContain("secretScanClean: secrets.clean");
     expect(session).not.toMatch(/secretScanClean:\s*(true|false)/);
     expect(session).toContain('kind: "turn-diff"');
-    expect(session).toContain('response: SAVE_CHECKPOINT');
+    expect(session).toContain('prompt: "Your changes are still here."');
+    expect(session).not.toContain("diff: review.diff");
+    expect(session).not.toContain("response: SAVE_CHECKPOINT");
   });
 });

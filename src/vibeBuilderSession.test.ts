@@ -924,7 +924,7 @@ describe("VibeBuilderSession", () => {
     });
     finishReview(safeReview("verified"));
     await vi.waitFor(() => {
-      expect(h.session.state.question?.prompt).toBe("This turn was not auto-saved.");
+      expect(h.session.state.question?.prompt).toBe("Your changes are still here.");
     });
     expect(h.deps.commit).not.toHaveBeenCalled();
   });
@@ -986,7 +986,7 @@ describe("VibeBuilderSession", () => {
       .toHaveLength(5);
   });
 
-  it("records unknown evidence and offers the diff instead of inventing a pass", async () => {
+  it("records unknown evidence without exposing implementation details", async () => {
     const unknown = (kind: VerificationObservation["kind"]) =>
       observation(kind, "unknown");
     const review = safeReview("incomplete");
@@ -1007,10 +1007,11 @@ describe("VibeBuilderSession", () => {
     h.emit({ kind: "turnEnd" });
 
     await vi.waitFor(() => {
-      expect(h.session.state.question?.prompt).toBe("This turn was not auto-saved.");
+      expect(h.session.state.question?.prompt).toBe("Your changes are still here.");
     });
-    expect(h.session.state.question?.diff).toContain("diff --git");
-    expect(h.session.state.question?.actions?.[0]?.response).toBe("Save this version");
+    expect(h.session.state.question?.kind).toBe("notice");
+    expect(h.session.state.question?.diff).toBeUndefined();
+    expect(h.session.state.question?.actions).toBeUndefined();
     expect(h.events).toContainEqual(
       expect.objectContaining({ kind: "verification.verdict", code: "incomplete" }),
     );
@@ -1034,44 +1035,24 @@ describe("VibeBuilderSession", () => {
     );
   });
 
-  it("holds the first automatic checkpoint on a machine that has never made one", async () => {
+  it("saves the first safe checkpoint without asking the user", async () => {
     const h = harness();
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
 
-    await vi.waitFor(() => expect(h.session.state.question).not.toBeNull());
-    // No unattended git write along a path that has never executed here.
-    expect(h.deps.commit).not.toHaveBeenCalled();
-    expect(h.session.state.question?.prompt).toBe(
-      "This is the first version I'd save here.",
-    );
-    expect(h.session.state.question?.diff).toContain("diff --git");
-    // The evidence trail is intact: the decision, the paths, the baseline and
-    // an empty reason list, because the policy did not refuse anything.
-    const held = h.events.find((event) => event.kind === "checkpoint.held");
-    expect(held).toBeDefined();
-    expect(held?.code).toBe("auto-checkpoint-never-observed");
-    expect(held?.metadata).toMatchObject({
-      reasons: [],
-      paths: ["src/App.tsx"],
-      repoRoot: "/repo",
-      baselineHead: "abc",
-      secretScan: "unknown",
-      context: expect.objectContaining({ verification: "verified" }),
-    });
-    expect(h.events).not.toContainEqual(
-      expect.objectContaining({ kind: "checkpoint.refused" }),
+    await vi.waitFor(() => expect(h.deps.commit).toHaveBeenCalledTimes(1));
+    expect(h.session.state.question).toBeNull();
+    expect(h.deps.recordAutoCheckpointObserved).toHaveBeenCalledTimes(1);
+    expect(h.events).toContainEqual(
+      expect.objectContaining({ kind: "checkpoint.saved", code: "automatic" }),
     );
   });
 
-  it("arms automatic checkpointing only once a save has actually committed", async () => {
+  it("records automatic checkpoint support only after the commit succeeds", async () => {
     const h = harness();
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
-    await vi.waitFor(() => expect(h.session.state.question).not.toBeNull());
-    expect(h.deps.recordAutoCheckpointObserved).not.toHaveBeenCalled();
-
-    await h.session.send("Save this version");
+    await vi.waitFor(() => expect(h.deps.commit).toHaveBeenCalledTimes(1));
     expect(h.deps.commit).toHaveBeenCalledTimes(1);
     expect(h.deps.recordAutoCheckpointObserved).toHaveBeenCalledTimes(1);
   });
@@ -1084,9 +1065,7 @@ describe("VibeBuilderSession", () => {
     });
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
-    await vi.waitFor(() => expect(h.session.state.question).not.toBeNull());
-
-    await h.session.send("Save this version");
+    await vi.waitFor(() => expect(h.deps.commit).toHaveBeenCalledTimes(1));
     expect(h.deps.commit).toHaveBeenCalledTimes(1);
     expect(h.deps.recordAutoCheckpointObserved).not.toHaveBeenCalled();
   });
@@ -1124,7 +1103,7 @@ describe("VibeBuilderSession", () => {
 
     await h.session.send("Save this version");
     expect(h.deps.commit).not.toHaveBeenCalled();
-    expect(h.session.state.question?.prompt).toContain("diff changed");
+    expect(h.session.state.question?.prompt).toContain("changed while I was saving");
     await h.session.send("Save this version");
     expect(h.deps.commit).toHaveBeenCalledTimes(1);
   });
