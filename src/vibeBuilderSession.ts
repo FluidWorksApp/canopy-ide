@@ -40,7 +40,7 @@ import type { ComponentRole, RunCommand } from "./projects";
 import type { RepairProblem } from "./vibeRepair";
 import type { VibeRepairTaskInput, VibeRepairTaskResult } from "./vibeRepairSession";
 import { DEFAULT_PROFILE, launchEnvSync, launchProfile } from "./profiles";
-import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
+import { grantFor } from "./workspaceAuthority";
 import {
   FAMILY_FOR_CLI,
   failoverDecision,
@@ -110,6 +110,13 @@ export interface VibeBuilderSessionOptions {
    *  leaves a permanently `incomplete` turn looking like a Canopy fault rather
    *  than a missing script the user can add in one line. */
   checkCaveat?: string | null;
+  /** The project's other component directories. Writable alongside the
+   *  component's own root: a monorepo change that stops at one package is not
+   *  a change, and a project's own components are not "somewhere else". */
+  siblingPaths?: readonly string[];
+  /** Everything the survey established this component can run, so a repair
+   *  agent prefers the project's own commands over inventing its own. */
+  componentCommands?: readonly RunCommand[];
   previewTabId(): string | null;
 }
 
@@ -1958,7 +1965,42 @@ export class VibeBuilderSession implements BuilderSession {
         occurredAt: observation.at,
       });
     }
-    const verdict = judgeVerification(contract, observations);
+    let verdict = judgeVerification(contract, observations);
+    // A failed check is not a result to report. It is a problem to solve.
+    //
+    // This is the hole the person kept falling into: Canopy ran `pnpm run
+    // build`, it exited 1, the captured output said in plain English
+    // "node_modules missing, did you mean to install?" — and Canopy wrote that
+    // to an artifact and told them "Verification found a problem". It had the
+    // fault, the fix and the authority, and used none of them, because repair
+    // was wired only to a server crashing three times.
+    if (verdict.outcome === "failed" && check.observation.verdict === "fail" && check.output) {
+      const retried = await this.repairFailedCheck(check.output, at, turnEpoch);
+      if (turnEpoch !== this.turnEpoch || this.stopped) return;
+      if (retried) {
+        observations[0] = retried.observation;
+        if (retried.output) {
+          const artifact = await this.deps
+            .writeArtifact({ runId, attemptId, kind: "check-output", content: retried.output })
+            .catch(() => null);
+          if (artifact) retried.observation.evidence = artifact.id;
+        }
+        // The second observation is filed alongside the first rather than
+        // replacing it. Both happened, and a ledger that only kept the ending
+        // could not show that anything was repaired.
+        await this.deps.appendEvent({
+          runId,
+          attemptId,
+          kind: "verification.observation",
+          code: retried.observation.kind,
+          source: "canopy",
+          confidence: retried.observation.verdict,
+          metadata: retried.observation,
+          occurredAt: retried.observation.at,
+        });
+        verdict = judgeVerification(contract, observations);
+      }
+    }
     // Held so a later "deploy this" is judged against evidence that actually
     // exists. Without it the deploy planner is handed a constant, and a
     // constant is a claim nothing observed.
@@ -2115,6 +2157,92 @@ export class VibeBuilderSession implements BuilderSession {
     );
   }
 
+  /** Hand a failed check to a repair agent, and if it says it fixed something,
+   *  run the check again so the claim is tested rather than believed.
+   *
+   *  Returns the second check when one was run, or null when repair did not
+   *  happen or reported that it could not fix it. The caller re-judges; this
+   *  never decides the turn's verdict itself.
+   *
+   *  Nothing here is a retry of the same command in the hope of a different
+   *  answer — that is the pattern the person named as the whole problem
+   *  ("run the command, it fails three times, say it failed"). The command is
+   *  only run a second time because something in between actually changed. */
+  private async repairFailedCheck(
+    output: string,
+    at: number,
+    turnEpoch: number,
+  ): Promise<CheckRunResult | null> {
+    if (this.stopped || !this.deps.repair) return null;
+    this.present(
+      { kind: "incident" },
+      {
+        id: `vibe-check-repair-${this.deps.now()}`,
+        kind: "notice",
+        prompt: "That didn't work yet.",
+        detail: "I'm reading the error to find out why.",
+      },
+    );
+    const problem: RepairProblem = {
+      code: "setup-failed",
+      statement: `The project's own check command failed for ${this.options.projectName}.`,
+      projectId: this.options.projectId,
+      projectName: this.options.projectName,
+      component: {
+        id: this.options.componentId,
+        label: this.options.projectName,
+        path: this.options.componentPath,
+      },
+      commands: [...(this.options.componentCommands ?? [])],
+      evidence: {
+        logTail: output,
+        context: this.options.checkCommand
+          ? `The command was: ${
+              Array.isArray(this.options.checkCommand)
+                ? this.options.checkCommand.join(" ")
+                : this.options.checkCommand
+            }`
+          : undefined,
+      },
+    };
+    const result = await this.deps
+      .repair({ problem })
+      .catch(() => null);
+    if (this.stopped || turnEpoch !== this.turnEpoch) return null;
+    if (!result?.ok || !result.verdict.fixed) {
+      // Say what was learned even when it could not be fixed. "It failed" and
+      // "it failed, here is why, and here is what stopped me" are different
+      // messages to someone who cannot read the log themselves.
+      const verdictText = result?.ok
+        ? [result.verdict.diagnosis, result.verdict.blocker].filter(Boolean).join(" ")
+        : null;
+      if (verdictText) {
+        this.present(
+          { kind: "incident" },
+          {
+            id: `vibe-check-repair-blocked-${this.deps.now()}`,
+            kind: "question",
+            prompt: "I found what's wrong, and I need your help with one thing.",
+            detail: verdictText,
+          },
+        );
+      }
+      return null;
+    }
+    this.present(
+      { kind: "verify-running" },
+      {
+        id: `vibe-check-repair-fixed-${this.deps.now()}`,
+        kind: "notice",
+        prompt: "Fixed it — checking again.",
+        detail: result.verdict.diagnosis,
+      },
+    );
+    return this.deps
+      .runCheck(this.options.checkCommand ?? null, this.options.componentPath, at)
+      .catch(() => null);
+  }
+
   /** One launch spec for both the first attempt and any reseeded one, so a
    *  retry cannot quietly run under different rules than the attempt it
    *  replaces. */
@@ -2124,27 +2252,42 @@ export class VibeBuilderSession implements BuilderSession {
     model: string | null,
     cli: string,
   ): StructuredRunnerLaunch {
+    // Authority is not decided here any more — see workspaceAuthority.ts. It
+    // was, and the answer was wrong in a way that capped what Build could be:
+    // "do not use a shell" meant a turn could add a dependency to package.json
+    // and had no way on earth to install it, so the change it had just written
+    // could not run and the person was shown `node_modules missing, did you
+    // mean to install?`. Making something work is the job, and a job whose
+    // tools stop at editing text cannot do it.
+    const grant = grantFor("build", {
+      root: this.options.componentPath,
+      siblings: this.options.siblingPaths ?? [],
+    });
     return {
       bin: AGENT_CLIS.find((c) => c.id === cli)?.bin ?? this.options.cliBin,
       policy: {
         systemPromptAppend:
           `You are the Build-mode executor for ${this.options.projectName}. ` +
-          `Work only inside ${this.options.componentPath}. Use Edit, Write, Read, Grep and Glob; ` +
-          "do not use a shell. Explain outcomes in plain language. Canopy runs verification independently.",
-        permissionMode: "acceptEdits",
+          `Work inside ${this.options.componentPath}. Make the change and make it actually run: ` +
+          "install what it needs, build it, and check your own work. " +
+          "Explain outcomes in plain language — the person reading you does not read stack traces. " +
+          "Canopy runs verification independently.",
+        permissionMode: grant.permissionMode,
         // The whole sidecar, not the three tools someone thought of. Nobody is
         // sitting in this session to answer a prompt, and a Build turn reaches
         // well past starting a server — it waits on a port, restarts, opens the
         // preview and reads the console back. See agentTools.ts.
-        allowedTools: [CANOPY_MCP_ALLOWANCE],
-        disallowedTools: ["Bash", "KillShell", "NotebookEdit"],
+        allowedTools: grant.allowedTools,
+        disallowedTools: grant.disallowedTools,
+        network: grant.network,
+        writableRoots: grant.writableRoots,
         // The model the route asked for, actually applied — it becomes
         // `--model`/`-m` at launch. Recording a requestedModel we never passed
         // would make the attempt record fiction.
         model: model ?? "",
         sessionId: this.cliSessionId,
         cwd: this.options.componentPath,
-        authority: "workspace-write",
+        authority: grant.authority,
       },
       env: [
         // The route this attempt is recorded against names a profile
