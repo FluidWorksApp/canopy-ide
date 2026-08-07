@@ -20,25 +20,32 @@
 //! Location the iframe followed on its own would land on the real origin, where
 //! nothing is injected and the page can no longer be seen or driven.
 //!
-//! One proxy per target origin, bound to 127.0.0.1 on an ephemeral port,
-//! reused across tabs and torn down with the app.
+//! One proxy per project + target origin, bound on a stable persisted port and
+//! addressed through an opaque project-specific `*.localhost` hostname. The
+//! browser therefore owns both guarantees that matter: cookies from different
+//! projects never share a host, and Web Storage sees the same origin after an
+//! app restart.
 //!
-//! What the proxy does NOT carry across is the user's browser session: it holds
-//! no cookie jar of its own, so a remote page behind a login shows its logged-out
-//! self unless the iframe itself has cookies for the proxy origin.
+//! The proxy has no cookie jar of its own. The iframe's browser profile owns
+//! the session at the stable proxy origin; Set-Cookie is rewritten to that
+//! host, and the reserved reset document clears only that project's origin.
 
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use axum::Router;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::ToSocketAddrs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const PICKER_JS: &str = include_str!("preview_picker.js");
 /// Path the injected <script> tag loads from — reserved, never proxied.
 const PICKER_PATH: &str = "/__canopy__/picker.js";
+/// Loading this document clears browser-owned state for this proxy origin.
+pub const RESET_PATH: &str = "/__canopy__/reset";
 /// Request bodies are buffered to forward; cap so a runaway upload can't OOM.
 const MAX_BODY: usize = 64 * 1024 * 1024;
 
@@ -57,23 +64,47 @@ struct ProxyCtx {
     dial: String,
     /// https upstream: reqwest handles it, the raw WebSocket splice cannot.
     secure: bool,
+    /// Browser-facing host. Distinct per project; cookies ignore ports.
+    proxy_host: String,
     client: reqwest::Client,
     /// Rolling log of proxied requests — the proxy sees every request the page
     /// makes, so agents get a network tab without instrumenting the page.
     log: NetLog,
+    /// Cookie name + effective path observed in Set-Cookie. The reset document
+    /// expires each one, including HttpOnly cookies JavaScript cannot see.
+    cookies: Arc<Mutex<HashSet<CookieKey>>>,
 }
 
 struct RunningProxy {
+    project_id: String,
+    origin: String,
+    host: String,
     port: u16,
     shutdown: tokio::sync::watch::Sender<bool>,
     log: NetLog,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ProxyKey {
+    project_id: String,
+    origin: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CookieKey {
+    name: String,
+    path: String,
+}
+
 #[derive(Default)]
 pub struct PreviewManager {
-    /// Keyed by target origin so two tabs previewing the same server share one
-    /// proxy. Cheap enough to keep until app exit.
-    proxies: Mutex<HashMap<String, RunningProxy>>,
+    /// Two tabs in one project previewing the same server share one proxy. The
+    /// project is part of the key so another project gets another browser host.
+    proxies: Mutex<HashMap<ProxyKey, RunningProxy>>,
+    /// Port leases are read, bound and persisted as one operation. Holding a
+    /// std Mutex across async bind would make PreviewManager non-Send, so the
+    /// allocator has its own async gate.
+    allocating: tokio::sync::Mutex<()>,
 }
 
 impl PreviewManager {
@@ -88,18 +119,22 @@ impl PreviewManager {
     /// origin's. Serves the canopy_browser_network MCP tool.
     pub fn network_log(&self, origin: Option<&str>, limit: usize) -> Option<serde_json::Value> {
         let proxies = self.proxies.lock().unwrap();
-        let mut origins: Vec<(&String, &RunningProxy)> = match origin {
-            Some(o) => vec![proxies.get_key_value(o)?],
-            None => proxies.iter().collect(),
-        };
-        origins.sort_by(|a, b| a.0.cmp(b.0));
+        let mut origins: Vec<&RunningProxy> = proxies
+            .values()
+            .filter(|proxy| origin.is_none_or(|wanted| proxy.origin == wanted))
+            .collect();
+        if origins.is_empty() && origin.is_some() {
+            return None;
+        }
+        origins.sort_by(|a, b| (&a.origin, &a.project_id).cmp(&(&b.origin, &b.project_id)));
         let out: Vec<serde_json::Value> = origins
             .into_iter()
-            .map(|(origin, p)| {
+            .map(|p| {
                 let log = p.log.lock().unwrap();
                 let skip = log.len().saturating_sub(limit);
                 serde_json::json!({
-                    "origin": origin,
+                    "origin": p.origin,
+                    "projectId": p.project_id,
                     "requests": log.iter().skip(skip).collect::<Vec<_>>(),
                 })
             })
@@ -109,8 +144,15 @@ impl PreviewManager {
 
     /// The origins that currently have a proxy running — for error messages.
     pub fn origins(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.proxies.lock().unwrap().keys().cloned().collect();
+        let mut v: Vec<String> = self
+            .proxies
+            .lock()
+            .unwrap()
+            .values()
+            .map(|proxy| proxy.origin.clone())
+            .collect();
         v.sort();
+        v.dedup();
         v
     }
 }
@@ -118,7 +160,117 @@ impl PreviewManager {
 #[derive(serde::Serialize, Clone)]
 pub struct PreviewInfo {
     pub port: u16,
+    /// Browser-facing project-isolated hostname, without the port.
+    pub host: String,
+    /// Target origin, retained as the identity used by preview_stop/network.
     pub origin: String,
+}
+
+/// The project id is already opaque, but hashing it again keeps even its shape
+/// out of DNS and gives the label a fixed safe alphabet and length.
+fn isolated_host(project_id: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in project_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("p-{hash:016x}.localhost")
+}
+
+/// Resolve before advertising the hostname. RFC 6761 makes localhost special,
+/// but OS/runtime regressions must be visible: silently using 127.0.0.1 would
+/// put every project's cookies back on one host. The fallback keeps preview
+/// reachable while the error log makes the loss of isolation explicit.
+fn proxy_host(project_id: &str) -> String {
+    let candidate = isolated_host(project_id);
+    let resolution = (candidate.as_str(), 0).to_socket_addrs();
+    match resolution {
+        Ok(addrs) => {
+            if addrs.into_iter().any(|addr| addr.ip().is_loopback()) {
+                return candidate;
+            }
+            log::error!(
+                target: "preview",
+                "{candidate} did not resolve to loopback; falling back to 127.0.0.1 — preview cookies are no longer project-isolated"
+            );
+            "127.0.0.1".into()
+        }
+        Err(error) => {
+            log::error!(
+                target: "preview",
+                "{candidate} did not resolve ({error}); falling back to 127.0.0.1 — preview cookies are no longer project-isolated"
+            );
+            "127.0.0.1".into()
+        }
+    }
+}
+
+type PortLeases = HashMap<String, u16>;
+
+fn port_store_path() -> Result<PathBuf, String> {
+    // Match projects.json's selftest isolation: a selftest must never change a
+    // real project's stable preview origin.
+    if let Some(dir) = crate::selftest::store_dir() {
+        return Ok(dir.join("preview-ports.json"));
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "preview: no home directory for stable port leases".to_string())?;
+    let dir = PathBuf::from(home).join(".canopy");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("preview-ports.json"))
+}
+
+fn load_port_leases(path: &Path) -> Result<PortLeases, String> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("preview: read port leases: {e}"))?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("preview: parse port leases: {e}"))
+}
+
+fn save_port_leases(path: &Path, leases: &PortLeases) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(leases).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, bytes).map_err(|e| format!("preview: write port leases: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("preview: save port leases: {e}"))
+}
+
+fn port_lease_key(project_id: &str, origin: &str) -> String {
+    format!("{project_id}\0{origin}")
+}
+
+/// Bind the persisted port for this project+target. The TypeScript workspace
+/// allocator cannot be called from Rust, so the chosen port is leased beside
+/// projects.json instead: first use asks the OS for a free port, every later
+/// app run reuses it. If it is occupied we refuse to silently choose a new
+/// origin and wipe Web Storage.
+async fn bind_stable_port(
+    project_id: &str,
+    origin: &str,
+    store: &Path,
+) -> Result<tokio::net::TcpListener, String> {
+    let mut leases = load_port_leases(store)?;
+    let key = port_lease_key(project_id, origin);
+    if let Some(port) = leases.get(&key).copied() {
+        return tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .map_err(|e| {
+                format!(
+                    "preview: stable port {port} for this project is unavailable; refusing a new origin: {e}"
+                )
+            });
+    }
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(|e| format!("preview: cannot bind: {e}"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    leases.insert(key, port);
+    if let Err(error) = save_port_leases(store, &leases) {
+        drop(listener);
+        return Err(error);
+    }
+    Ok(listener)
 }
 
 /// `http[s]://host[:port][/...]` → (origin, authority). No url crate: the
@@ -158,14 +310,37 @@ fn dial_addr(origin: &str, authority: &str) -> String {
 #[tauri::command]
 pub async fn preview_start(
     state: tauri::State<'_, PreviewManager>,
+    project_id: String,
     target: String,
 ) -> Result<PreviewInfo, String> {
+    if project_id.trim().is_empty() {
+        return Err("preview: project id is required for an isolated origin".into());
+    }
     let (origin, authority) = parse_target(&target)?;
+    let key = ProxyKey {
+        project_id: project_id.clone(),
+        origin: origin.clone(),
+    };
     {
         let guard = state.proxies.lock().unwrap();
-        if let Some(p) = guard.get(&origin) {
+        if let Some(p) = guard.get(&key) {
             return Ok(PreviewInfo {
                 port: p.port,
+                host: p.host.clone(),
+                origin,
+            });
+        }
+    }
+
+    // A first start allocates and persists a port. Serialize that boundary so
+    // two tabs racing after startup cannot lease two origins to one key.
+    let _allocating = state.allocating.lock().await;
+    {
+        let guard = state.proxies.lock().unwrap();
+        if let Some(p) = guard.get(&key) {
+            return Ok(PreviewInfo {
+                port: p.port,
+                host: p.host.clone(),
                 origin,
             });
         }
@@ -176,19 +351,22 @@ pub async fn preview_start(
         .build()
         .map_err(|e| e.to_string())?;
     let log: NetLog = Arc::default();
+    let cookies: Arc<Mutex<HashSet<CookieKey>>> = Arc::default();
+    let host = proxy_host(&project_id);
     let ctx = Arc::new(ProxyCtx {
         dial: dial_addr(&origin, &authority),
         secure: origin.starts_with("https://"),
+        proxy_host: host.clone(),
         origin: origin.clone(),
         authority,
         client,
         log: log.clone(),
+        cookies: cookies.clone(),
     });
 
     let router = Router::new().fallback(proxy_handler).with_state(ctx);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .map_err(|e| format!("preview: cannot bind: {e}"))?;
+    let store = port_store_path()?;
+    let listener = bind_stable_port(&project_id, &origin, &store).await?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
     let (sd_tx, mut sd_rx) = tokio::sync::watch::channel(false);
@@ -206,31 +384,38 @@ pub async fn preview_start(
     });
 
     let mut guard = state.proxies.lock().unwrap();
-    // Two tabs racing to start the same origin: keep the first, drop ours.
-    if let Some(existing) = guard.get(&origin) {
+    // Defensive after the allocator gate: keep the first if a future caller
+    // inserts through another path.
+    if let Some(existing) = guard.get(&key) {
         let _ = sd_tx.send(true);
         return Ok(PreviewInfo {
             port: existing.port,
+            host: existing.host.clone(),
             origin,
         });
     }
     guard.insert(
-        origin.clone(),
+        key,
         RunningProxy {
+            project_id,
+            origin: origin.clone(),
+            host: host.clone(),
             port,
             shutdown: sd_tx,
             log,
         },
     );
-    Ok(PreviewInfo { port, origin })
+    Ok(PreviewInfo { port, host, origin })
 }
 
 #[tauri::command]
 pub async fn preview_stop(
     state: tauri::State<'_, PreviewManager>,
+    project_id: String,
     origin: String,
 ) -> Result<(), String> {
-    if let Some(p) = state.proxies.lock().unwrap().remove(&origin) {
+    let key = ProxyKey { project_id, origin };
+    if let Some(p) = state.proxies.lock().unwrap().remove(&key) {
         let _ = p.shutdown.send(true);
     }
     Ok(())
@@ -260,6 +445,9 @@ async fn proxy_handler(State(ctx): State<Arc<ProxyCtx>>, req: Request) -> Respon
             .body(Body::from(PICKER_JS))
             .unwrap();
     }
+    if req.uri().path() == RESET_PATH {
+        return reset_page(&ctx);
+    }
     let method = req.method().to_string();
     let path = req
         .uri()
@@ -285,6 +473,99 @@ async fn proxy_handler(State(ctx): State<Arc<ProxyCtx>>, req: Request) -> Respon
     });
     record_request(&ctx, &method, &path, &resp, started, false);
     resp
+}
+
+/// RFC 6265 default-path for a cookie without an explicit Path attribute.
+fn default_cookie_path(request_path: &str) -> String {
+    let path = request_path.split('?').next().unwrap_or("/");
+    if !path.starts_with('/') || path.matches('/').count() <= 1 {
+        return "/".into();
+    }
+    path.rsplit_once('/')
+        .map(|(directory, _)| if directory.is_empty() { "/" } else { directory })
+        .unwrap_or("/")
+        .to_string()
+}
+
+/// Scope an upstream cookie to this proxy host. Domain is stripped rather
+/// than replaced, producing the stricter host-only cookie; Secure is removed
+/// only because the browser-facing proxy transport is plaintext HTTP. Path,
+/// HttpOnly, SameSite, expiry and every unknown attribute survive verbatim.
+fn rewrite_set_cookie(value: &HeaderValue, request_path: &str) -> Option<(HeaderValue, CookieKey)> {
+    let raw = value.to_str().ok()?;
+    let mut parts = raw.split(';');
+    let pair = parts.next()?.trim();
+    let name = pair.split_once('=')?.0.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut path = None;
+    let mut kept = vec![pair.to_string()];
+    for raw_attribute in parts {
+        let attribute = raw_attribute.trim();
+        let lower = attribute.to_ascii_lowercase();
+        if lower.starts_with("domain=") || lower == "secure" {
+            continue;
+        }
+        if lower.starts_with("path=") {
+            path = attribute
+                .split_once('=')
+                .map(|(_, value)| value.trim().to_string());
+        }
+        kept.push(attribute.to_string());
+    }
+    let rewritten = HeaderValue::from_str(&kept.join("; ")).ok()?;
+    Some((
+        rewritten,
+        CookieKey {
+            name: name.to_string(),
+            path: path.unwrap_or_else(|| default_cookie_path(request_path)),
+        },
+    ))
+}
+
+/// A document at the project's own proxy origin is the only actor that can
+/// clear its Web Storage without touching another project. Response headers
+/// expire every cookie the proxy observed, including HttpOnly ones; the page
+/// clears script-visible storage, IndexedDB and Cache Storage, then reports to
+/// its parent. The parent may replace the iframe with its app URL afterwards.
+fn reset_page(ctx: &ProxyCtx) -> Response {
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        // Useful to the caller completing a reset, and keeps the response
+        // explicit about which isolated origin it acted on.
+        .header("x-canopy-preview-host", ctx.proxy_host.as_str());
+    let mut cookies: Vec<CookieKey> = ctx.cookies.lock().unwrap().iter().cloned().collect();
+    cookies.sort_by(|a, b| (&a.name, &a.path).cmp(&(&b.name, &b.path)));
+    for cookie in cookies {
+        let expired = format!(
+            "{}=; Path={}; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+            cookie.name, cookie.path
+        );
+        if let Ok(value) = HeaderValue::from_str(&expired) {
+            builder = builder.header(header::SET_COOKIE, value);
+        }
+    }
+    let html = r#"<!doctype html><meta charset="utf-8"><title>Resetting preview…</title>
+<script>
+(async () => {
+  localStorage.clear();
+  sessionStorage.clear();
+  if (self.caches) for (const name of await caches.keys()) await caches.delete(name);
+  if (indexedDB.databases) {
+    for (const db of await indexedDB.databases()) {
+      if (db.name) await new Promise(resolve => {
+        const request = indexedDB.deleteDatabase(db.name);
+        request.onsuccess = request.onerror = request.onblocked = resolve;
+      });
+    }
+  }
+  parent.postMessage({canopy: "preview-reset"}, "*");
+})().catch(error => parent.postMessage({canopy: "preview-reset-error", error: String(error)}, "*"));
+</script>"#;
+    builder.body(Body::from(html)).unwrap()
 }
 
 /// Append one request to the origin's rolling network log.
@@ -419,6 +700,16 @@ async fn forward_http(ctx: Arc<ProxyCtx>, req: Request) -> Result<Response, Stri
             || (is_html && n == "content-length")
             || (n == "location" && rewritten_location.is_some())
         {
+            continue;
+        }
+        if n == "set-cookie" {
+            // A Domain naming the upstream host cannot be accepted from the
+            // proxy host, and a Secure cookie cannot be set over this HTTP
+            // transport. Re-scope without weakening HttpOnly or SameSite.
+            if let Some((rewritten, cookie)) = rewrite_set_cookie(value, pq) {
+                ctx.cookies.lock().unwrap().insert(cookie);
+                builder = builder.header(header::SET_COOKIE, rewritten);
+            }
             continue;
         }
         builder = builder.header(name, value);
@@ -703,6 +994,151 @@ mod tests {
         assert!(!hop_by_hop("set-cookie"));
     }
 
+    #[test]
+    fn project_hosts_are_opaque_stable_and_distinct() {
+        let a = isolated_host("project-a");
+        assert_eq!(a, isolated_host("project-a"));
+        assert_ne!(a, isolated_host("project-b"));
+        assert!(a.starts_with("p-") && a.ends_with(".localhost"));
+        assert!(!a.contains("project"));
+    }
+
+    /// Environment diagnostic, deliberately ignored in ordinary CI because
+    /// production has a loud 127.0.0.1 fallback. Run on each embedded-engine
+    /// platform before relying on cookie isolation there.
+    #[test]
+    #[ignore = "diagnostic for the host OS resolver"]
+    fn wildcard_localhost_resolves_to_loopback() {
+        let host = isolated_host("resolver-probe");
+        let addresses: Vec<_> = (host.as_str(), 80)
+            .to_socket_addrs()
+            .expect("*.localhost did not resolve")
+            .collect();
+        assert!(addresses.iter().any(|address| address.ip().is_loopback()));
+    }
+
+    fn temp_port_store(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "canopy-preview-port-{name}-{}-{nonce}.json",
+            std::process::id()
+        ))
+    }
+
+    #[tokio::test]
+    async fn one_project_gets_the_same_origin_after_a_simulated_restart() {
+        let store = temp_port_store("restart");
+        let host = isolated_host("project-a");
+        let first = bind_stable_port("project-a", "http://localhost:5173", &store)
+            .await
+            .unwrap();
+        let port = first.local_addr().unwrap().port();
+        drop(first);
+
+        let second = bind_stable_port("project-a", "http://localhost:5173", &store)
+            .await
+            .unwrap();
+        assert_eq!(second.local_addr().unwrap().port(), port);
+        assert_eq!(
+            format!("http://{host}:{port}"),
+            format!("http://{}:{}", isolated_host("project-a"), port)
+        );
+        drop(second);
+        let _ = std::fs::remove_file(store);
+    }
+
+    #[test]
+    fn set_cookie_is_host_only_without_weakening_http_only_or_same_site() {
+        let raw = HeaderValue::from_static(
+            "session=abc; Domain=example.com; Path=/account; HttpOnly; SameSite=Lax; Secure",
+        );
+        let (rewritten, key) = rewrite_set_cookie(&raw, "/login").unwrap();
+        let value = rewritten.to_str().unwrap();
+
+        assert_eq!(value, "session=abc; Path=/account; HttpOnly; SameSite=Lax");
+        assert!(!value.to_ascii_lowercase().contains("domain="));
+        assert!(value.contains("HttpOnly"));
+        assert!(value.contains("SameSite=Lax"));
+        assert_eq!(
+            key,
+            CookieKey {
+                name: "session".into(),
+                path: "/account".into()
+            }
+        );
+    }
+
+    /// Browser cookie matching is host-first and ignores ports. Rewriting the
+    /// cookie to host-only means the browser has no cookie to attach when the
+    /// next request is for another project's proxy hostname.
+    #[test]
+    fn a_cookie_from_one_project_is_not_sent_to_another() {
+        let host_a = isolated_host("project-a");
+        let host_b = isolated_host("project-b");
+        let raw = HeaderValue::from_static("session=alpha; Domain=example.com; HttpOnly");
+        let (cookie, _) = rewrite_set_cookie(&raw, "/").unwrap();
+        let mut browser_jar: HashMap<String, String> = HashMap::new();
+        browser_jar.insert(host_a.clone(), cookie.to_str().unwrap().to_string());
+
+        assert!(browser_jar
+            .get(&host_a)
+            .unwrap()
+            .starts_with("session=alpha"));
+        assert!(browser_jar.get(&host_b).is_none());
+    }
+
+    fn test_ctx(host: &str, cookies: &[(&str, &str)]) -> ProxyCtx {
+        ProxyCtx {
+            origin: "http://127.0.0.1:3000".into(),
+            authority: "127.0.0.1:3000".into(),
+            dial: "127.0.0.1:3000".into(),
+            secure: false,
+            proxy_host: host.into(),
+            client: reqwest::Client::new(),
+            log: NetLog::default(),
+            cookies: Arc::new(Mutex::new(
+                cookies
+                    .iter()
+                    .map(|(name, path)| CookieKey {
+                        name: (*name).into(),
+                        path: (*path).into(),
+                    })
+                    .collect(),
+            )),
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_expires_only_one_projects_cookies_and_clears_its_storage() {
+        let project_a = test_ctx("p-a.localhost", &[("session_a", "/")]);
+        let project_b = test_ctx("p-b.localhost", &[("session_b", "/account")]);
+        let response = reset_page(&project_a);
+        let expired: Vec<_> = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(expired.len(), 1);
+        assert!(expired[0].starts_with("session_a=; Path=/;"));
+        assert!(!expired[0].contains("session_b"));
+        assert!(project_b.cookies.lock().unwrap().contains(&CookieKey {
+            name: "session_b".into(),
+            path: "/account".into(),
+        }));
+
+        let body = axum::body::to_bytes(response.into_body(), MAX_BODY)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("localStorage.clear()"));
+        assert!(html.contains("sessionStorage.clear()"));
+        assert!(html.contains("indexedDB.deleteDatabase"));
+    }
+
     /// Full loop: a real upstream server behind a real proxy router. HTML gets
     /// the picker injected and its frame-blocking headers dropped; non-HTML
     /// streams through untouched; the picker path serves the script itself.
@@ -734,8 +1170,10 @@ mod tests {
             authority: format!("127.0.0.1:{upstream_port}"),
             dial: format!("127.0.0.1:{upstream_port}"),
             secure: false,
+            proxy_host: "p-test.localhost".into(),
             client: reqwest::Client::new(),
             log: NetLog::default(),
+            cookies: Arc::default(),
         });
         let net_log = ctx.log.clone();
         let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -819,6 +1257,7 @@ mod tests {
         let ctx = Arc::new(ProxyCtx {
             dial: format!("127.0.0.1:{upstream_port}"),
             secure: false,
+            proxy_host: "p-test.localhost".into(),
             origin,
             authority: format!("127.0.0.1:{upstream_port}"),
             client: reqwest::Client::builder()
@@ -826,6 +1265,7 @@ mod tests {
                 .build()
                 .unwrap(),
             log: NetLog::default(),
+            cookies: Arc::default(),
         });
         let proxy = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
