@@ -1170,7 +1170,22 @@ function createVibeProjectSetupFlight(
       // invisible from the outside.
       const validation = validateVibeSetupProposal(task.output, await confirmCitedPaths(task.output, {
         projectRoot: after.projectRoot,
-        repositoryFingerprint: after.fingerprint,
+        // `before`, not `after`, and this is the whole point of the field: it
+        // asks "did the agent answer about the repository we handed it", which
+        // only the fingerprint it was given can answer. Compared against a
+        // fresh one it asks something else entirely — "did anything at all
+        // change during the run" — and that rejected every correct survey of
+        // an actively edited project. It is not an exotic case: setup runs
+        // while the person is in Build, and a Build turn edits files, so
+        // Canopy invalidated its own setup by working. Observed here as a
+        // survey rejected at 04:04 for a stylesheet saved at 04:03.
+        //
+        // Staleness is still checked, and precisely: every path the proposal
+        // cites is re-confirmed against `after` just below, so a component
+        // deleted mid-run is still caught. A command that went stale surfaces
+        // as a run that fails — which is now a repair agent's problem, and it
+        // has the log to work from.
+        repositoryFingerprint: before.fingerprint,
         existingPaths: after.paths,
         providerIds: deps.providerIds,
         existingComponents: activeProject.components,

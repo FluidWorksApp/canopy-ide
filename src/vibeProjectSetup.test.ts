@@ -538,6 +538,40 @@ describe("non-technical setup surface", () => {
     expect(configured[0].vibe?.version).toBe(1);
   });
 
+  it("keeps a correct survey when an unrelated file was saved while it ran", async () => {
+    // Setup runs while the person is in Build, and a Build turn edits files —
+    // so comparing the proposal's fingerprint against a FRESH observation made
+    // Canopy invalidate its own setup by working. Observed against this
+    // repository: a correct survey rejected for a stylesheet saved a minute
+    // earlier. The echo check must stay pinned to what the agent was handed.
+    const configured: Project[] = [];
+    let observations = 0;
+    const ready = new Promise<void>((resolve) => {
+      const session = createVibeProjectSetupSession(
+        project(),
+        async (next) => { configured.push(next); return true; },
+        {
+          observe: async () => ({
+            projectRoot: root,
+            componentRoots: ["/repo/apps/web", "/repo/services/api"],
+            // The second observation sees a changed tree, as it would after
+            // any save anywhere in the project.
+            fingerprint: (observations += 1) === 1 ? "tree-1" : "tree-2",
+            paths: context().existingPaths,
+          }),
+          run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
+          providerIds: context().providerIds,
+        },
+      );
+      session.events$.subscribe((event) => {
+        if (event.kind === "ready") resolve();
+      });
+    });
+    await ready;
+    expect(observations).toBe(2);
+    expect(configured).toHaveLength(1);
+  });
+
   it("does not buy a new model call every time a failed project is remounted", async () => {
     // A failure used to drop the flight, so the next mount started a fresh
     // run — and ProjectView remounts on every render pass, HMR update and
