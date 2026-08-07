@@ -478,6 +478,7 @@ import {
   matchesVibeRun,
   pickBrowserTab,
   resolveVibeTarget,
+  vibeSetupGate,
 } from "./helpers";
 import { Button } from "../ui";
 export { tabDisplayLabel, previewLabel, deviceLabel };
@@ -8925,12 +8926,50 @@ const ProjectViewBody = memo(function ProjectViewBody({
     });
   }, [project.vibe, project.components, vibeComponent, vibeRun]);
   const autoStartedVibeRuns = useRef(new Set<string>());
+  const surfacedVibeSetupFailures = useRef(new Set<string>());
   useEffect(() => {
     if (!visible || !vibe) return;
     for (const { component, command } of vibeRequiredRuns) {
       const key = `${component.path}:${component.id}:${command.id}`;
       const running = runTabs.some((tab) => matchesVibeRun(tab, component, command));
       if (running || autoStartedVibeRuns.current.has(key)) continue;
+      // Setup commands the survey found (`purpose: "setup"`) run to completion
+      // before the server does — see vibeSetupGate for the rules.
+      const gate = vibeSetupGate(command, component, runTabs, (setupId) =>
+        autoStartedVibeRuns.current.has(`${component.path}:${component.id}:${setupId}`),
+      );
+      for (const setup of gate.start) {
+        autoStartedVibeRuns.current.add(`${component.path}:${component.id}:${setup.id}`);
+        addTerminal(
+          setup.cwd ?? component.path,
+          setup.command,
+          setup.name,
+          "▶",
+          "chore",
+          undefined,
+          undefined,
+          false,
+          undefined,
+          { componentId: component.id, runCommandId: setup.id },
+        );
+      }
+      for (const setup of gate.failed) {
+        const setupKey = `${component.path}:${component.id}:${setup.id}`;
+        if (surfacedVibeSetupFailures.current.has(setupKey)) continue;
+        surfacedVibeSetupFailures.current.add(setupKey);
+        postAttention({
+          kind: "question",
+          tone: "error",
+          title: "Getting the project ready didn't finish",
+          body: `“${setup.name}” stopped with an error, so I haven't started ${component.label}. Its output is kept in the run.`,
+          source: "project",
+          projectId: project.id,
+          projectName: project.name,
+          where: { kind: "project", projectId: project.id, path: component.path },
+          dedupeKey: `vibe-setup-run:${project.id}:${component.id}:${setup.id}`,
+        });
+      }
+      if (!gate.ready) continue;
       autoStartedVibeRuns.current.add(key);
       addTerminal(
         command.cwd ?? component.path,
@@ -8947,7 +8986,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         { componentId: component.id, runCommandId: command.id },
       );
     }
-  }, [visible, vibe, vibeRequiredRuns, runTabs, addTerminal]);
+  }, [visible, vibe, vibeRequiredRuns, runTabs, addTerminal, project.id, project.name]);
 
   useEffect(() => {
     if (

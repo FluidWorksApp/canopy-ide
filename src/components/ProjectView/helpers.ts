@@ -486,6 +486,48 @@ export function matchesVibeRun(
     : tab.command === runCommand.command;
 }
 
+/** Whether a required Build run may start yet, given its component's setup
+ *  commands (`purpose: "setup"`) and the runs already on the rail.
+ *
+ *  Starting a server into a checkout its setup never prepared hands a
+ *  non-engineer a stack trace for a problem Canopy already knew how to
+ *  prevent — the survey found the install command; it has to run first.
+ *
+ *  `started` is the auto-start ledger: a setup with no tab whose start IS
+ *  recorded is a chore that succeeded and reaped itself, which counts as
+ *  done. One that exited non-zero blocks the server and is reported in
+ *  `failed` so the caller can say so (and, eventually, hand it to repair). */
+export function vibeSetupGate(
+  command: RunCommand,
+  component: Pick<Component, "id" | "commands">,
+  tabs: Pick<TermSubTab, "componentId" | "runCommandId" | "exited" | "exitCode">[],
+  started: (setupId: string) => boolean,
+): { ready: boolean; start: RunCommand[]; failed: RunCommand[] } {
+  const start: RunCommand[] = [];
+  const failed: RunCommand[] = [];
+  let ready = true;
+  if (command.purpose === "setup") return { ready, start, failed };
+  for (const setup of (component.commands ?? []).filter(
+    (candidate) => candidate.purpose === "setup" && candidate.id !== command.id,
+  )) {
+    const tab = tabs.find(
+      (candidate) =>
+        candidate.componentId === component.id &&
+        candidate.runCommandId === setup.id,
+    );
+    if (tab && !tab.exited) {
+      ready = false;
+    } else if (tab?.exited && tab.exitCode !== 0) {
+      ready = false;
+      failed.push(setup);
+    } else if (!tab && !started(setup.id)) {
+      ready = false;
+      start.push(setup);
+    }
+  }
+  return { ready, start, failed };
+}
+
 /** One tab as canopy_editor_state describes it: enough for an agent to know
  *  what the user has in front of them, without shipping the tab's contents. */
 export function describeTab(tab: SubTab | undefined) {
