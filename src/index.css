@@ -24267,6 +24267,7 @@ a.btn-sm {
 }
 
 .vibe-builder-cushion-body {
+  position: relative;
   display: flex;
   min-height: 0;
   flex-direction: column;
@@ -24280,14 +24281,14 @@ a.btn-sm {
   max-height: min(48vh, 430px);
   flex: 1;
   gap: 12px;
-  padding: 20px 22px 18px;
+  padding: 8px 22px 18px;
   overflow-y: auto;
   scrollbar-gutter: stable;
 }
 
 .project-view-vibe .vibe-builder-welcome {
   margin: 0;
-  padding: 19px 21px 18px;
+  padding: 7px 21px 18px;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -24306,7 +24307,7 @@ a.btn-sm {
 }
 
 .project-view-vibe .vibe-builder-question {
-  margin: 14px 18px 16px;
+  margin: 0 18px 16px;
 }
 
 .project-view-vibe .vibe-builder-compose {
@@ -24450,6 +24451,19 @@ a.btn-sm {
 .vibe-builder-collapse > svg {
   width: 20px;
   height: 20px;
+}
+
+.vibe-builder-cushion-controls {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 3px 8px 0;
+}
+
+.vibe-builder-collapse-panel {
+  width: 30px;
+  height: 30px;
 }
 
 .vibe-builder-stop {

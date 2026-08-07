@@ -456,8 +456,6 @@ export function VibeBuilderPane({
     if (cushionOpen) {
       setTranscriptOpen(false);
       setCushionDismissed(true);
-      setComposerFocused(false);
-      composer.current?.blur();
       return;
     }
     setCushionDismissed(false);
@@ -522,7 +520,7 @@ export function VibeBuilderPane({
     );
   });
 
-  const welcome = showWelcome && (
+  const welcome = showWelcome && !question && (
     <div className="vibe-builder-welcome">
       <span className="vibe-builder-welcome-kicker">Your idea, in motion</span>
       <strong>What should we make?</strong>
@@ -565,7 +563,30 @@ export function VibeBuilderPane({
 
       <div className="vibe-builder-cushion">
         {cushionOpen && (
-          <div className="vibe-builder-cushion-body">
+          <div className="vibe-builder-cushion-body" key="context">
+            {contextualCushion && (
+              <div className="vibe-builder-cushion-controls">
+                <button
+                  className="vibe-builder-collapse vibe-builder-collapse-panel"
+                  type="button"
+                  aria-expanded="true"
+                  aria-label={
+                    question ? "Collapse question" : "Collapse suggestions"
+                  }
+                  title="Show more of the product"
+                  onMouseDown={(event) => {
+                    if (document.activeElement === composer.current) {
+                      event.preventDefault();
+                    }
+                  }}
+                  onClick={toggleContextualCushion}
+                >
+                  <svg aria-hidden viewBox="0 0 24 24">
+                    <path d="M6 9l6 6 6-6" />
+                  </svg>
+                </button>
+              </div>
+            )}
             {transcriptOpen ? (
               <div
                 ref={transcript}
@@ -627,6 +648,7 @@ export function VibeBuilderPane({
 
         <form
           className="vibe-builder-compose companion-compose"
+          key="composer"
           onSubmit={(event) => {
             event.preventDefault();
             send(draft);
@@ -669,25 +691,19 @@ export function VibeBuilderPane({
             )}
           </div>
 
-          {contextualCushion && (
+          {contextualCushion && !cushionOpen && (
             <button
-              className="vibe-builder-collapse"
+              className="vibe-builder-collapse vibe-builder-collapse-restore"
               type="button"
-              aria-expanded={cushionOpen}
+              aria-expanded="false"
               aria-label={
-                cushionOpen
-                  ? question
-                    ? "Collapse question"
-                    : "Collapse suggestions"
-                  : question
-                    ? "Show pending question"
-                    : "Show suggestions"
+                question ? "Show pending question" : "Show suggestions"
               }
-              title={cushionOpen ? "Show more of the product" : "Show this again"}
+              title="Show this again"
               onClick={toggleContextualCushion}
             >
               <svg aria-hidden viewBox="0 0 24 24">
-                <path d={cushionOpen ? "M6 9l6 6 6-6" : "M6 15l6-6 6 6"} />
+                <path d="M6 15l6-6 6 6" />
               </svg>
             </button>
           )}

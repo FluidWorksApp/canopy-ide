@@ -212,7 +212,7 @@ describe("VibeBuilderPane", () => {
     expect(pane.classList.contains("is-collapsed")).toBe(true);
   });
 
-  it("minimizes a pending question without answering or losing it", () => {
+  it("minimizes a pending question independently from the composer", () => {
     const h = harness({
       persona: { kind: "question-asked" },
       question: {
@@ -224,17 +224,34 @@ describe("VibeBuilderPane", () => {
     });
     render(<VibeBuilderPane session={h.session} />);
     const pane = screen.getByRole("region", { name: "Ash builder" });
+    const input = screen.getByRole("textbox", { name: "Message Ash" });
 
     expect(screen.getByText("The app server keeps stopping.")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Collapse question" }));
+    expect(screen.queryByText("What should we make?")).toBeNull();
+    const collapse = screen.getByRole("button", { name: "Collapse question" });
+    expect(collapse.closest(".vibe-builder-cushion-body")).not.toBeNull();
+    expect(
+      collapse.parentElement?.classList.contains("vibe-builder-cushion-controls"),
+    ).toBe(true);
 
-    expect(pane.classList.contains("is-collapsed")).toBe(true);
+    input.focus();
+    expect(document.activeElement).toBe(input);
+    fireEvent.mouseDown(collapse);
+    fireEvent.click(collapse);
+
+    expect(document.activeElement).toBe(input);
+    expect(pane.classList.contains("is-composer-open")).toBe(true);
     expect(screen.queryByText("The app server keeps stopping.")).toBeNull();
     expect(h.send).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Show pending question" }));
+    const restore = screen.getByRole("button", { name: "Show pending question" });
+    expect(restore.closest("form")).not.toBeNull();
+    fireEvent.click(restore);
     expect(pane.classList.contains("is-cushion")).toBe(true);
     expect(screen.getByText("The app server keeps stopping.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse question" }));
+    expect(pane.classList.contains("is-collapsed")).toBe(true);
     expect(h.send).not.toHaveBeenCalled();
   });
 
