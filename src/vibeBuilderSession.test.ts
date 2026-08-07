@@ -16,6 +16,15 @@ import {
 import type { VerificationObservation } from "./vibeVerification";
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 
+const launchEnvSync = vi.fn(() => [] as [string, string][]);
+// Only launchEnvSync is faked. DEFAULT_PROFILE and launchProfile stay real, so
+// this cannot pass by accident on a mock that also hides a real drift in
+// those two.
+vi.mock("./profiles", async (orig) => ({
+  ...(await orig<typeof import("./profiles")>()),
+  launchEnvSync: (cliId: string) => launchEnvSync(cliId),
+}));
+
 const route = {
   cli: "claude",
   profileId: "default",
@@ -456,6 +465,31 @@ describe("VibeBuilderSession", () => {
       "claude",
       expect.objectContaining({
         policy: expect.objectContaining({ model: "claude-fable-5" }),
+      }),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("carries the active profile's env into the Build launch, without shadowing Canopy's own", async () => {
+    // The route this attempt is recorded against names a profile; without its
+    // env the process runs on the default login and the attempt record says
+    // an account the turn never used.
+    launchEnvSync.mockReturnValueOnce([["CLAUDE_CONFIG_DIR", "/tmp/profile/.claude"]]);
+    const h = harness();
+    await h.session.send("Make the button blue");
+    expect(h.deps.runner.start).toHaveBeenCalledWith(
+      expect.anything(),
+      "claude",
+      expect.objectContaining({
+        // Fixed and last, so the profile's entries can never shadow the ones
+        // the attempt is correlated by.
+        env: [
+          ["CLAUDE_CONFIG_DIR", "/tmp/profile/.claude"],
+          ["CANOPY_VIBE", "1"],
+          ["CANOPY_RUN_ID", "run-1"],
+          ["CANOPY_ATTEMPT_ID", "attempt-1"],
+        ],
       }),
       expect.anything(),
       expect.anything(),
