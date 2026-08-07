@@ -658,7 +658,20 @@ export async function runVibeProjectSetupTask(
   // single-component project; a real one (four components, sixty reads to
   // establish how each runs) does not finish, and the person is told the agent
   // could not understand their project rather than that it was cut off.
-  const timeoutMs = Math.max(1_000, Math.min(600_000, input.timeoutMs ?? 300_000));
+  // 300s was still short of what a real project needs: every observed run
+  // against a three-repository project expired at exactly 300s, and a
+  // two-component one began expiring too once the survey grew. The attempt cap
+  // then spends the whole budget again on a second route, so the person waits
+  // ten minutes to be told their project could not be understood, when it was
+  // only ever cut off mid-read.
+  //
+  // Raising it is the honest interim and not the fix. A survey of four
+  // components should not be one agent turn: split per component it would be
+  // bounded, partial results would survive, and one slow repository could not
+  // sink the whole run. Until that exists, this at least lets a correct survey
+  // finish. onActivity publishes each tool call, so the wait is narrated
+  // rather than silent.
+  const timeoutMs = Math.max(1_000, Math.min(1_200_000, input.timeoutMs ?? 900_000));
   // Setup reads its result off a JSON stream, so a CLI Canopy can only run
   // one-shot is not a slower route here — it is not a route at all. Ranking it
   // anyway spends the whole attempt budget on `has no verified streaming
