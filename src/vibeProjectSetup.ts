@@ -872,7 +872,7 @@ export async function runVibeProjectSetupTask(
     // reports "setup-agent-failed", which names the outcome and not the cause.
     void ipc.jsLog(
       "error",
-      `vibe-setup: attempt ${attemptsUsed} on ${chosen.cli} failed (timedOut=${result.timedOut}): ${result.text.slice(0, 600)}`,
+      `vibe-setup: attempt ${attemptsUsed} on ${chosen.cli} failed (kind=${result.kind} timedOut=${(result as { timedOut?: boolean }).timedOut}): ${result.text.slice(0, 600)}`,
     );
     await deps.settleAttempt({
       attemptId: attempt.attemptId,
