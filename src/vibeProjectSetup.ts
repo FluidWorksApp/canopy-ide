@@ -379,7 +379,57 @@ export function vibeSetupSystemPrompt(fingerprint: string, componentRoots: reado
   const scope = componentRoots.length
     ? ` The project consists solely of these directories: ${componentRoots.join(", ")}. Confine every search to them; sibling directories under the working directory belong to unrelated projects.`
     : "";
-  return `You are Canopy's project setup agent.${scope} Read the entire repository, including non-JavaScript components. Do not edit files. Discover every component, how each runs, the one page-serving preview target, every process required for that page to work, external services, and deployment evidence. Return exactly one JSON object with schemaVersion 1 and repositoryFingerprint ${JSON.stringify(fingerprint)}. Commands are argv arrays, never shell strings. Evidence fields contain repository paths. If you cannot determine a complete setup, return no proposal and explain the blocker plainly.`;
+  // The schema is spelled out because validateVibeSetupProposal rejects every
+  // unrecognised field, and prose is not a schema. Described rather than shown,
+  // the agent turned the sentence into field names — "the one page-serving
+  // preview target" came back as `pageServingPreviewTarget`, components carried
+  // `name`/`path`/`kind` instead of `label`/`root`/`role` — and a correct
+  // survey was thrown away for answering in the wrong shape. Any change to the
+  // interfaces above has to be made here too, or that returns.
+  return `You are Canopy's project setup agent.${scope} Read the entire repository, including non-JavaScript components. Do not edit files. Discover every component, how each runs, the one page-serving preview target, every process required for that page to work, external services, and deployment evidence.
+
+Return exactly one JSON object in this shape and no other. Field names are exact; any field not listed here is rejected, and so is any missing one:
+
+{
+  "schemaVersion": 1,
+  "repositoryFingerprint": ${JSON.stringify(fingerprint)},
+  "components": [{
+    "key": "short-id",                        // ^[a-z0-9][a-z0-9._-]{0,63}$, unique
+    "root": "<absolute directory path>",
+    "label": "<human name>",
+    "role": "web|api|worker|database|mobile|library|tooling|other",
+    "commands": [{
+      "key": "short-id",                      // unique within this component
+      "purpose": "serve|check|worker|setup",
+      "label": "<human name>",
+      "argv": ["pnpm", "dev"],                // argv array, never a shell string
+      "cwd": "<absolute path inside this component>",
+      "requiredEnvNames": ["API_URL"],        // NAMES only, never values
+      "readiness": { "kind": "http", "path": "/" }
+      // readiness is one of: {"kind":"http","path":"/..."} | {"kind":"port"}
+      //   | {"kind":"process-alive"} | {"kind":"one-shot","timeoutMs":120000}
+    }],
+    "nonRunnableReason": "<only if commands is empty>",
+    "evidence": ["<absolute path that exists>"]
+  }],
+  "preview": { "componentKey": "...", "commandKey": "..." },
+  "requiredProcesses": [
+    { "componentKey": "...", "commandKey": "...", "reason": "<why the page needs it>", "requiredFor": "preview" }
+  ],
+  "externalServices": [{
+    "key": "short-id",
+    "providerId": null,                       // or one of: supabase, neon, firebase, stripe, vercel, netlify, cloudflare, fly
+    "label": "<human name>",
+    "purpose": "<what it is for>",
+    "requiredForPreview": false,              // true requires a non-null providerId
+    "usedByComponentKeys": ["..."],
+    "requiredEnvNames": ["DATABASE_URL"],
+    "evidence": ["<absolute path that exists>"]
+  }],
+  "deployment": null                          // or { "providerId": "...", "componentKey": "...", "evidence": ["..."] }
+}
+
+Rules: every component directory you were given must appear. requiredProcesses must include the preview entry. Every path in root, cwd and evidence must be a real path you observed. Never include a secret value. If you cannot determine a complete setup, return no JSON object and explain the blocker plainly instead.`;
 }
 
 export interface VibeSetupRepositoryObservation {
@@ -669,7 +719,17 @@ export async function runVibeProjectSetupTask(
         }
         await deps.settleAttempt({ attemptId: attempt.attemptId, state: "completed" });
         return { ok: true, output: parsed, runId, attempts: attemptsUsed };
-      } catch {
+      } catch (parseError) {
+        // "invalid-output" is returned both when the JSON will not parse and
+        // when it parses but breaks a rule, and the two need opposite fixes:
+        // one is the agent not answering in the required shape, the other is
+        // the answer disagreeing with what Canopy observed. Say which, and
+        // show the head of what actually came back — a refusal, a preamble
+        // before the JSON, or an empty turn all land here identically.
+        void ipc.jsLog(
+          "error",
+          `vibe-setup: could not parse the agent's output (${String(parseError)}); it returned: ${result.text.slice(0, 500) || "(nothing)"}`,
+        );
         await deps.settleAttempt({ attemptId: attempt.attemptId, state: "blocked", failureClass: "task", failureCode: "invalid-structured-output" });
         return { ok: false, reason: "invalid-output", message: "I couldn't determine a safe complete setup for this project.", runId, attempts: attemptsUsed };
       }
@@ -745,7 +805,16 @@ export const DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS: VibeProjectSetupSessionDep
   observe: observeVibeSetupRepository,
   run: (input, validation) => runVibeProjectSetupTask({
     ...input,
-    validateOutput: (output) => validateVibeSetupProposal(output, validation).ok,
+    validateOutput: (output) => {
+      const result = validateVibeSetupProposal(output, validation);
+      // The rules that rejected it. Without them "invalid-output" says only
+      // that forty checks were run and at least one said no, which is the
+      // difference between a scope bug, a race with an edit, and the model.
+      if (!result.ok) {
+        void ipc.jsLog("error", `vibe-setup: proposal failed validation: ${result.errors.join("; ")}`);
+      }
+      return result.ok;
+    },
   }, DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS),
   providerIds: new Set(["supabase", "neon", "firebase", "stripe", "vercel", "netlify", "cloudflare", "fly"]),
 };
