@@ -476,7 +476,12 @@ Return exactly one JSON object in this shape and no other. Field names are exact
     "requiredEnvNames": ["DATABASE_URL"],
     "evidence": ["<absolute path that exists>"]
   }],
-  "deployment": null                          // or { "providerId": "...", "componentKey": "...", "evidence": ["..."] }
+  "deployment": null
+  // or { "providerId": "...", "componentKey": "...", "evidence": ["..."] } —
+  // providerId must be one of the same ids listed above. Anything else, and
+  // anything self-hosted, is null: null means "not one of these", not "no
+  // deployment", and a real deployment named here that is not on that list is
+  // rejected outright.
 }
 
 Work out what each component IS before deciding how it runs, from its manifest
@@ -1085,13 +1090,20 @@ function createVibeProjectSetupFlight(
         return;
       }
       const after = await deps.observe(activeProject);
-      const validation = validateVibeSetupProposal(task.output, {
+      // Cited paths are confirmed here too. This is the second of two
+      // validation passes — the task checks its own attempt, and this one
+      // re-checks against a fresh observation before anything is persisted —
+      // and fixing only the first left the real gate rejecting the same
+      // correct proposal for the same real file. Two passes over one ruleset
+      // means every rule has to be satisfied in both places or the fix is
+      // invisible from the outside.
+      const validation = validateVibeSetupProposal(task.output, await confirmCitedPaths(task.output, {
         projectRoot: after.projectRoot,
         repositoryFingerprint: after.fingerprint,
         existingPaths: after.paths,
         providerIds: deps.providerIds,
         existingComponents: activeProject.components,
-      });
+      }));
       if (!validation.ok) {
         // Which rule rejected it, not just that something did. A proposal is
         // refused for one of forty reasons and they are not interchangeable:
