@@ -581,7 +581,7 @@ export interface VibeProjectSetupTaskInput {
   timeoutMs?: number;
   /** Schema/repository validation owned by Canopy. A JSON object is not a
    * successful attempt merely because it parses. */
-  validateOutput?: (output: unknown) => boolean;
+  validateOutput?: (output: unknown) => boolean | Promise<boolean>;
   /** What the agent is doing right now, for the pane. Setup can run for
    *  minutes; without this it prints one line and then looks hung, which is
    *  indistinguishable from being hung. */
@@ -851,7 +851,7 @@ export async function runVibeProjectSetupTask(
         await deps.settleAttempt({ attemptId: attempt.attemptId, state: "blocked", failureClass: "task", failureCode: "invalid-structured-output" });
         return { ok: false, reason: "invalid-output", message: "I couldn't determine a safe complete setup for this project.", runId, attempts: attemptsUsed };
       }
-      if (input.validateOutput && !input.validateOutput(parsed)) {
+      if (input.validateOutput && !(await input.validateOutput(parsed))) {
         await deps.settleAttempt({ attemptId: attempt.attemptId, state: "blocked", failureClass: "task", failureCode: "invalid-setup-schema" });
         return { ok: false, reason: "invalid-output", message: "I couldn't determine a safe complete setup for this project.", runId, attempts: attemptsUsed };
       }
@@ -925,12 +925,58 @@ export interface VibeProjectSetupSessionDeps {
   providerIds: ReadonlySet<string>;
 }
 
+/** Absolute-looking strings anywhere in a proposal, capped. Walking the parsed
+ *  object rather than naming the fields keeps this from silently missing a
+ *  path when the schema gains one. */
+function citedPaths(value: unknown, found: Set<string> = new Set()): Set<string> {
+  if (found.size >= CONFIRMABLE_PATHS) return found;
+  if (typeof value === "string") {
+    if (absolute(value)) found.add(normalized(value));
+  } else if (Array.isArray(value)) {
+    for (const item of value) citedPaths(item, found);
+  } else if (value && typeof value === "object") {
+    for (const item of Object.values(value)) citedPaths(item, found);
+  }
+  return found;
+}
+const CONFIRMABLE_PATHS = 400;
+
+/** Confirm the paths a proposal names that the inventory does not already
+ *  hold, and add the ones that are really there.
+ *
+ *  The inventory comes from fsSnapshotFiles, which skips ignored files — so a
+ *  real file could be cited and rejected as unobserved. That is not
+ *  hypothetical: a correct survey of this repository was thrown away for citing
+ *  src-tauri/onnxruntime/libonnxruntime.dylib, 27MB, present on disk, listed in
+ *  .gitignore, and the very file ORT_DYLIB_PATH points at — the agent had
+ *  better grounds than the rule that rejected it.
+ *
+ *  The filesystem still decides, which is the point of existingPaths. A
+ *  proposal does not get to assert a path exists; it gets to have the claim
+ *  checked. Only paths inside the project are looked at, so this cannot be used
+ *  to probe the disk. */
+async function confirmCitedPaths(
+  output: unknown,
+  context: VibeSetupValidationContext,
+): Promise<VibeSetupValidationContext> {
+  const unconfirmed = [...citedPaths(output)].filter(
+    (path) => inside(context.projectRoot, path) && !context.existingPaths.has(path),
+  );
+  if (!unconfirmed.length) return context;
+  const confirmed = await Promise.all(
+    unconfirmed.map((path) => ipc.fsStat(path).then(() => path, () => null)),
+  );
+  const real = confirmed.filter((path): path is string => path !== null);
+  if (!real.length) return context;
+  return { ...context, existingPaths: new Set([...context.existingPaths, ...real]) };
+}
+
 export const DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS: VibeProjectSetupSessionDeps = {
   observe: observeVibeSetupRepository,
   run: (input, validation) => runVibeProjectSetupTask({
     ...input,
-    validateOutput: (output) => {
-      const result = validateVibeSetupProposal(output, validation);
+    validateOutput: async (output) => {
+      const result = validateVibeSetupProposal(output, await confirmCitedPaths(output, validation));
       // The rules that rejected it. Without them "invalid-output" says only
       // that forty checks were run and at least one said no, which is the
       // difference between a scope bug, a race with an edit, and the model.
