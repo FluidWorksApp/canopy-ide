@@ -24036,6 +24036,483 @@ a.btn-sm {
   -webkit-backdrop-filter: blur(22px) saturate(145%);
 }
 
+/* ── Immersive Build surface ────────────────────────────────────────────────
+   The product is the layout. Ash is one adaptive object floating above it,
+   not a permanent chat column that makes every preview smaller. The same
+   state drives the top signal rail, Ash and the compact status in the pill. */
+.project-view-vibe .project-body {
+  overflow: hidden;
+}
+
+.project-view-vibe > .status-bar {
+  display: none;
+}
+
+.project-view-vibe .vibe-chat-placeholder {
+  position: absolute;
+  z-index: 40;
+  inset: 0;
+  display: block;
+  width: auto;
+  min-width: 0;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  pointer-events: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.project-view-vibe .vibe-chat-placeholder::before,
+.project-view-vibe .vibe-chat-placeholder::after {
+  display: none;
+}
+
+.project-view-vibe .vibe-builder-pane {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0 clamp(14px, 3vw, 34px) clamp(18px, 3.4vh, 34px);
+  pointer-events: none;
+  --vibe-signal: var(--text-faint);
+  --vibe-signal-soft: color-mix(in srgb, var(--text-faint) 24%, transparent);
+}
+
+.vibe-builder-pane[data-signal="discovering"] {
+  --vibe-signal: var(--cyan);
+  --vibe-signal-soft: color-mix(in srgb, var(--cyan) 24%, transparent);
+}
+
+.vibe-builder-pane[data-signal="creating"] {
+  --vibe-signal: var(--accent);
+  --vibe-signal-soft: color-mix(in srgb, var(--accent) 27%, transparent);
+}
+
+.vibe-builder-pane[data-signal="checking"] {
+  --vibe-signal: var(--cyan);
+  --vibe-signal-soft: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.vibe-builder-pane[data-signal="waiting"] {
+  --vibe-signal: var(--warn);
+  --vibe-signal-soft: color-mix(in srgb, var(--warn) 25%, transparent);
+}
+
+.vibe-builder-pane[data-signal="blocked"] {
+  --vibe-signal: var(--danger);
+  --vibe-signal-soft: color-mix(in srgb, var(--danger) 26%, transparent);
+}
+
+.vibe-builder-pane[data-signal="complete"],
+.vibe-builder-pane[data-signal="published"] {
+  --vibe-signal: var(--ok);
+  --vibe-signal-soft: color-mix(in srgb, var(--ok) 25%, transparent);
+}
+
+.vibe-builder-signal {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 2px;
+  overflow: hidden;
+  background: var(--vibe-signal-soft);
+  pointer-events: none;
+}
+
+.vibe-builder-signal > span {
+  position: absolute;
+  inset-block: 0;
+  left: -28%;
+  width: 28%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--vibe-signal) 48%,
+    transparent
+  );
+  filter: drop-shadow(0 0 5px var(--vibe-signal));
+  opacity: 0;
+  will-change: transform, opacity;
+}
+
+.vibe-builder-pane[data-signal="discovering"] .vibe-builder-signal > span:first-child,
+.vibe-builder-pane[data-signal="creating"] .vibe-builder-signal > span:first-child {
+  opacity: 1;
+  animation: vibe-signal-flow 1.7s linear infinite;
+}
+
+.vibe-builder-pane[data-signal="checking"] .vibe-builder-signal > span {
+  opacity: 0.9;
+  animation: vibe-signal-flow 2.35s ease-in-out infinite;
+}
+
+.vibe-builder-pane[data-signal="checking"] .vibe-builder-signal > span:last-child {
+  animation-direction: reverse;
+  animation-delay: -1.15s;
+}
+
+.vibe-builder-pane[data-signal="waiting"] .vibe-builder-signal {
+  background: linear-gradient(
+    90deg,
+    var(--vibe-signal-soft),
+    color-mix(in srgb, var(--warn) 62%, transparent) 24%,
+    var(--vibe-signal-soft) 48%,
+    transparent 72%
+  );
+  animation: vibe-signal-breathe 1.9s ease-in-out infinite;
+}
+
+.vibe-builder-pane[data-signal="blocked"] .vibe-builder-signal {
+  background: repeating-linear-gradient(
+    90deg,
+    var(--danger) 0 18px,
+    transparent 18px 27px
+  );
+  animation: vibe-signal-breathe 1.35s ease-in-out infinite;
+}
+
+.vibe-builder-pane[data-signal="complete"] .vibe-builder-signal > span:first-child,
+.vibe-builder-pane[data-signal="published"] .vibe-builder-signal > span:first-child {
+  opacity: 1;
+  animation: vibe-signal-finish 920ms var(--ease-out) 1 both;
+}
+
+.vibe-builder-pane[data-signal="published"] .vibe-builder-signal {
+  background: linear-gradient(90deg, var(--accent), var(--cyan), var(--magenta));
+}
+
+@keyframes vibe-signal-flow {
+  from { transform: translateX(0); }
+  to { transform: translateX(460%); }
+}
+
+@keyframes vibe-signal-breathe {
+  0%, 100% { opacity: 0.38; }
+  50% { opacity: 1; }
+}
+
+@keyframes vibe-signal-finish {
+  from { transform: translateX(0); opacity: 0; }
+  18% { opacity: 1; }
+  to { transform: translateX(460%); opacity: 0; }
+}
+
+.vibe-builder-cushion {
+  display: flex;
+  width: min(760px, calc(100vw - 40px));
+  max-height: min(68vh, 620px);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 23%, var(--border));
+  border-radius: 29px;
+  corner-shape: squircle;
+  background: color-mix(in srgb, var(--bg-raised) 94%, var(--bg));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 8%, transparent),
+    0 16px 46px color-mix(in srgb, var(--bg-deep) 58%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 5%, transparent);
+  pointer-events: auto;
+  transform-origin: 50% 100%;
+  transition:
+    width 260ms var(--ease-out),
+    max-height 280ms var(--ease-out),
+    border-radius 260ms var(--ease-out),
+    box-shadow 260ms var(--ease-out);
+}
+
+.vibe-builder-pane.is-cushion .vibe-builder-cushion {
+  border-radius: 25px;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 8%, transparent),
+    0 24px 72px color-mix(in srgb, var(--bg-deep) 66%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 9%, transparent);
+  animation: vibe-cushion-open 280ms var(--ease-out) both;
+}
+
+@keyframes vibe-cushion-open {
+  from { opacity: 0.82; transform: translateY(7px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+.vibe-builder-cushion-body {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 14%, var(--border));
+}
+
+.project-view-vibe .vibe-builder-log {
+  display: flex;
+  min-height: 0;
+  max-height: min(48vh, 430px);
+  flex: 1;
+  gap: 12px;
+  padding: 20px 22px 18px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.project-view-vibe .vibe-builder-welcome {
+  margin: 0;
+  padding: 19px 21px 18px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.project-view-vibe .vibe-builder-starters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.project-view-vibe .vibe-builder-starters button {
+  align-items: flex-start;
+  min-height: 58px;
+  padding: 10px 11px;
+}
+
+.project-view-vibe .vibe-builder-question {
+  margin: 14px 18px 16px;
+}
+
+.project-view-vibe .vibe-builder-compose {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 70px;
+  padding: 8px 10px 8px 9px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.project-view-vibe .vibe-builder-compose:focus-within {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.project-view-vibe .vibe-builder-mascot-stage {
+  width: 50px;
+  height: 50px;
+  flex: 0 0 50px;
+}
+
+.project-view-vibe .vibe-builder-mascot-stage::before {
+  inset: 9px;
+  background: color-mix(in srgb, var(--vibe-signal) 18%, transparent);
+  opacity: 0.72;
+}
+
+.vibe-builder-input-shell {
+  justify-content: center;
+}
+
+.vibe-builder-status {
+  display: flex;
+  align-items: center;
+  min-height: 17px;
+  gap: 6px;
+  padding: 0 7px;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.018em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vibe-builder-status > span {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 5px;
+  border-radius: 50%;
+  background: var(--vibe-signal);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--vibe-signal) 62%, transparent);
+}
+
+.project-view-vibe .vibe-builder-input {
+  field-sizing: content;
+  min-height: 30px;
+  max-height: 112px;
+  padding: 4px 7px 2px;
+  overflow-y: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  line-height: 1.45;
+  resize: none;
+}
+
+.vibe-builder-transcript,
+.vibe-builder-stop,
+.project-view-vibe .vibe-builder-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-deep) 58%, var(--bg-raised));
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out);
+}
+
+.vibe-builder-transcript {
+  gap: 6px;
+  padding: 0 12px;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.vibe-builder-transcript > span {
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+
+.vibe-builder-transcript > em {
+  min-width: 17px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-raised));
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-style: normal;
+}
+
+.vibe-builder-stop {
+  width: 40px;
+  padding: 0;
+}
+
+.vibe-builder-stop > span {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.vibe-builder-stop:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 36%, var(--border));
+  color: var(--danger);
+}
+
+.vibe-builder-stop:disabled,
+.vibe-builder-transcript:disabled {
+  opacity: 0.34;
+  cursor: default;
+}
+
+.project-view-vibe .vibe-builder-send {
+  width: 42px;
+  min-width: 42px;
+  min-height: 40px;
+  padding: 0;
+  border-color: color-mix(in srgb, var(--accent) 62%, var(--border));
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 7px 18px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.vibe-builder-transcript:hover,
+.vibe-builder-stop:hover:not(:disabled),
+.project-view-vibe .vibe-builder-send:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+}
+
+.vibe-builder-transcript:focus-visible,
+.vibe-builder-stop:focus-visible,
+.project-view-vibe .vibe-builder-send:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.vibe-builder-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+:root[data-theme="pixel"] .vibe-builder-cushion {
+  border-width: 2px;
+  border-radius: 0;
+  box-shadow: 8px 8px 0 color-mix(in srgb, var(--accent) 22%, var(--bg-deep));
+}
+
+/* These selectors deliberately match the specificity of the legacy Build
+   sidebar skins above. Build is now an overlay, so its full-screen carrier
+   must stay invisible while the floating cushion keeps each theme's material. */
+:root[data-theme="pixel"] .project-view-vibe .vibe-chat-placeholder,
+:root[data-theme="vitrine"] .project-view-vibe .vibe-chat-placeholder {
+  border: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+:root[data-theme="vitrine"] .vibe-builder-cushion {
+  background: color-mix(in srgb, var(--bg-overlay) 72%, transparent);
+  backdrop-filter: blur(22px) saturate(145%);
+  -webkit-backdrop-filter: blur(22px) saturate(145%);
+}
+
+@media (max-width: 760px) {
+  .project-view-vibe .vibe-builder-pane {
+    padding-inline: 12px;
+    padding-bottom: 14px;
+  }
+
+  .vibe-builder-cushion {
+    width: calc(100vw - 24px);
+    max-height: 72vh;
+  }
+
+  .vibe-builder-transcript {
+    width: 40px;
+    padding: 0;
+    font-size: 0;
+  }
+
+  .vibe-builder-transcript > span {
+    font-size: 13px;
+  }
+
+  .vibe-builder-transcript > em {
+    display: none;
+  }
+
+  .project-view-vibe .vibe-builder-starters {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Build's empty preview is a promise of the product, not a browser diagnostic.
    Engineer mode keeps the server picker above; this canvas exists only when
    ProjectView explicitly marks the preview as Build mode. */
@@ -24290,6 +24767,10 @@ a.btn-sm {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .vibe-builder-signal,
+  .vibe-builder-signal > span,
+  .vibe-builder-cushion,
+  .vibe-builder-pane.is-cushion .vibe-builder-cushion,
   .project-view-vibe .vibe-chat-placeholder::before,
   .vibe-builder-welcome,
   .project-view-vibe .vibe-builder-pane .companion-msg,
@@ -24304,6 +24785,8 @@ a.btn-sm {
   }
 
   .vibe-builder-starters button,
+  .vibe-builder-transcript,
+  .vibe-builder-stop,
   .project-view-vibe .vibe-builder-send,
   .vibe-builder-send-arrow {
     transition: none;

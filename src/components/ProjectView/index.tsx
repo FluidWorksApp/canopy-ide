@@ -11801,6 +11801,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
         <aside className="vibe-chat-placeholder" aria-label="Build chat">
           <VibeBuilderPane
             project={project}
+            phase={
+              vibeSession
+                ? "build"
+                : vibeProjectSetupSession
+                  ? "discovering"
+                  : "waiting"
+            }
             session={
               vibeSession ??
               vibeProjectSetupSession ??

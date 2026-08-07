@@ -26,6 +26,9 @@ export interface BuilderSession {
     subscribe(listener: (event: StructuredRunnerEvent) => void): () => void;
   };
   send(text: string): void | Promise<void>;
+  /** Cancel only the work currently in flight. The session, preview and
+   * conversation remain available for the person's next request. */
+  cancelCurrentTurn?: () => void | Promise<void>;
   /** Replace this snapshot when presentation state changes. */
   readonly state: BuilderSessionState;
 }

@@ -4,6 +4,7 @@ import type { ProjectRunnerController } from "./projectRunner";
 import type { StructuredRunnerHost } from "./structuredEvents";
 import type { TaskReservation } from "./taskEnvelope";
 import type { AbstractionRunResult } from "./vibeAbstractionRunner";
+import type { VibeRepairTaskInput, VibeRepairTaskResult } from "./vibeRepairSession";
 import {
   createVibeBuilderSession,
   DEFAULT_VIBE_BUILDER_DEPS,
@@ -880,7 +881,15 @@ describe("VibeBuilderSession", () => {
     const review = new Promise<CheckpointReview>((resolve) => {
       finishReview = resolve;
     });
-    const h = harness({ reviewCheckpoint: vi.fn(() => review) });
+    const h = harness({
+      reviewCheckpoint: vi.fn(() => review),
+      // This test owns the review/incident race. Keep the separately tested
+      // background repair from replacing the checkpoint question after the
+      // assertion's subject has completed.
+      repair: vi.fn(
+        (_: VibeRepairTaskInput) => new Promise<VibeRepairTaskResult>(() => {}),
+      ),
+    });
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
     await vi.waitFor(() => expect(h.deps.reviewCheckpoint).toHaveBeenCalled());
@@ -1116,6 +1125,28 @@ describe("VibeBuilderSession", () => {
     await second;
     expect(h.transport.send).toHaveBeenCalledTimes(2);
     h.emit({ kind: "turnEnd" });
+  });
+
+  it("stops the current Build turn without closing the session", async () => {
+    const h = harness();
+    await h.session.send("Change the checkout");
+
+    await h.session.cancelCurrentTurn();
+
+    expect(h.transport.stop).toHaveBeenCalledTimes(1);
+    expect(h.deps.settleAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: "cancelled",
+        failureClass: "user",
+        failureCode: "user-stopped",
+      }),
+    );
+    expect(h.session.state).toEqual({
+      persona: { kind: "idle" },
+      question: null,
+    });
+    await expect(h.session.send("Change the header")).resolves.toBeUndefined();
+    expect(h.transport.send).toHaveBeenCalledTimes(2);
   });
 
   it("kills a process that finishes spawning after the session was stopped", async () => {

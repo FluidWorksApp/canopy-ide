@@ -53,9 +53,10 @@ describe("the vibe MVP wiring boundaries", () => {
       autoStartAt,
       projectView.indexOf("useEffect(", firstEffect + 1),
     );
+    const ownershipNote = autoStart.indexOf("Build owns a preview surface");
     const launch = autoStart.slice(
-      autoStart.indexOf("addTerminal("),
-      autoStart.indexOf("{ componentId:"),
+      autoStart.lastIndexOf("addTerminal(", ownershipNote),
+      autoStart.indexOf("{ componentId:", ownershipNote),
     );
     expect(launch).toContain("run mounted for Engineer");
     expect(launch.indexOf("false,")).toBeGreaterThan(

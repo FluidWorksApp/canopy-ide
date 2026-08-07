@@ -54,6 +54,7 @@ function harness(initial: BuilderSessionState) {
   let state = initial;
   const listeners = new Set<(event: StructuredRunnerEvent) => void>();
   const send = vi.fn<(text: string) => void | Promise<void>>();
+  const cancelCurrentTurn = vi.fn<() => void | Promise<void>>();
   const session: BuilderSession = {
     events$: {
       subscribe(listener) {
@@ -62,6 +63,7 @@ function harness(initial: BuilderSessionState) {
       },
     },
     send,
+    cancelCurrentTurn,
     get state() {
       return state;
     },
@@ -69,6 +71,7 @@ function harness(initial: BuilderSessionState) {
   return {
     session,
     send,
+    cancelCurrentTurn,
     setState(next: BuilderSessionState) {
       state = next;
     },
@@ -80,6 +83,8 @@ function harness(initial: BuilderSessionState) {
 }
 
 const idle = (): BuilderSessionState => ({ persona: { kind: "idle" } });
+const openTranscript = () =>
+  fireEvent.click(screen.getByRole("button", { name: /Transcript/ }));
 
 const discoveredProject = (
   id: string,
@@ -115,6 +120,7 @@ describe("VibeBuilderPane", () => {
   it("renders consecutive tool events as one latest-tool row with a count", () => {
     const h = harness(idle());
     render(<VibeBuilderPane session={h.session} />);
+    openTranscript();
 
     act(() => {
       h.setState({ persona: { kind: "turn-progress" } });
@@ -142,6 +148,7 @@ describe("VibeBuilderPane", () => {
   it("starts a new activity row after assistant prose resumes", () => {
     const h = harness(idle());
     render(<VibeBuilderPane session={h.session} />);
+    openTranscript();
     act(() => {
       h.emit({ kind: "tool", name: "Glob" });
       h.emit({ kind: "tool", name: "Grep" });
@@ -160,9 +167,42 @@ describe("VibeBuilderPane", () => {
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(h.send).toHaveBeenCalledWith("Make the button blue");
+    openTranscript();
     expect(screen.getByText("Make the button blue")).toBeTruthy();
     expect(screen.getByRole("img", { name: "Ash is thinking" })).toBeTruthy();
     expect((input as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("keeps the product unobstructed until Transcript morphs the pill into a cushion", () => {
+    const h = harness(idle());
+    render(<VibeBuilderPane session={h.session} />);
+    const pane = screen.getByRole("region", { name: "Ash builder" });
+    const transcript = screen.getByRole("button", { name: /Transcript/ });
+
+    expect(pane.classList.contains("is-pill")).toBe(true);
+    expect(transcript.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(transcript);
+    expect(pane.classList.contains("is-cushion")).toBe(true);
+    expect(transcript.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(transcript);
+    expect(pane.classList.contains("is-pill")).toBe(true);
+  });
+
+  it("shows the real discovery state and stops only the current turn", async () => {
+    const h = harness({ persona: { kind: "turn-progress" } });
+    render(
+      <VibeBuilderPane
+        session={h.session}
+        phase="discovering"
+      />,
+    );
+
+    const pane = screen.getByRole("region", { name: "Ash builder" });
+    expect(pane.getAttribute("data-signal")).toBe("discovering");
+    expect(screen.getByText("Understanding your project…")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Stop current change" }));
+    await waitFor(() => expect(h.cancelCurrentTurn).toHaveBeenCalledTimes(1));
+    expect(h.send).not.toHaveBeenCalled();
   });
 
   it("offers editable starting ideas that match the discovered project", async () => {
@@ -192,6 +232,7 @@ describe("VibeBuilderPane", () => {
     const h = harness(idle());
     render(<VibeBuilderPane session={h.session} project={project} />);
     expect(screen.queryByLabelText("Starting ideas")).toBeNull();
+    openTranscript();
     expect(screen.getByText(/learn the project before suggesting/i)).toBeTruthy();
   });
 
@@ -258,6 +299,7 @@ describe("VibeBuilderPane", () => {
   it("reacts to replaced state snapshots without erasing streamed prose", () => {
     const h = harness(idle());
     const mounted = render(<VibeBuilderPane session={h.session} />);
+    openTranscript();
     act(() => h.emit({ kind: "reply", text: "The preview is ready." }));
 
     h.setState({ persona: { kind: "verify-passed" } });
@@ -304,6 +346,7 @@ describe("VibeBuilderPane", () => {
       target: { value: "Try this change" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    openTranscript();
 
     await waitFor(() => {
       expect(screen.getByRole("alert").textContent).toContain("session stopped");
@@ -321,6 +364,7 @@ describe("VibeBuilderPane", () => {
       },
     });
     render(<VibeBuilderPane session={h.session} />);
+    openTranscript();
     const action = screen.getByRole("button", { name: "Try it" });
     fireEvent.click(action);
     expect(action.hasAttribute("disabled")).toBe(true);
@@ -356,6 +400,7 @@ describe("VibeBuilderPane", () => {
     });
 
     expect(screen.queryByRole("alert")).toBeNull();
+    openTranscript();
     expect(screen.getByText("Old session message")).toBeTruthy();
     expect(screen.queryByText("What should we make?")).toBeNull();
 
@@ -369,12 +414,14 @@ describe("VibeBuilderPane", () => {
 
     const returned = harness(idle());
     mounted.rerender(<VibeBuilderPane session={returned.session} project={project} />);
+    openTranscript();
     expect(screen.getByText("Old session message")).toBeTruthy();
     expect(screen.queryByText("What should we make?")).toBeNull();
 
     mounted.unmount();
     const third = harness(idle());
     render(<VibeBuilderPane session={third.session} project={project} />);
+    openTranscript();
     expect(screen.getByText("Old session message")).toBeTruthy();
     expect(screen.queryByText("What should we make?")).toBeNull();
   });
@@ -382,7 +429,7 @@ describe("VibeBuilderPane", () => {
   it("announces completed prose once the turn ends, not on every delta", () => {
     const h = harness(idle());
     render(<VibeBuilderPane session={h.session} />);
-    const status = screen.getByRole("status");
+    const status = document.querySelector(".vibe-builder-announcement")!;
 
     act(() => h.emit({ kind: "delta", text: "The page is ready." }));
     expect(status.textContent).toBe("");

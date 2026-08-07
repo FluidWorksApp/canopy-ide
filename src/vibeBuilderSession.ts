@@ -930,6 +930,10 @@ export class VibeBuilderSession implements BuilderSession {
   private runtimeIncidentOpen = false;
   private settled = false;
   private stopped = false;
+  /** Changes whenever a new turn starts or the current one is cancelled. Async
+   * verification and launch work must still belong to this value before they
+   * are allowed to present anything. */
+  private turnEpoch = 0;
   private closedAttempts = new Set<string>();
   private hasRun = false;
   private cliSessionId: string;
@@ -1689,8 +1693,13 @@ export class VibeBuilderSession implements BuilderSession {
     sent: () => void,
     failed: (error: unknown) => void,
   ): Promise<void> {
+    const turnEpoch = ++this.turnEpoch;
     try {
       if (this.verifying) await this.verifying;
+      if (turnEpoch !== this.turnEpoch) {
+        sent();
+        return;
+      }
       if (this.stopped) throw new Error("the builder session is closed");
       this.pendingCheckpoint = null;
       // Held so a reseeded attempt replays the same request verbatim. A
@@ -1701,6 +1710,10 @@ export class VibeBuilderSession implements BuilderSession {
       this.attemptHistory = [];
       this.lastRunnerError = "";
       const transport = await this.ensureStarted(message);
+      if (turnEpoch !== this.turnEpoch) {
+        sent();
+        return;
+      }
       if (this.stopped) throw new Error("the builder session is closed");
       const reservation = this.reservation;
       if (!reservation) throw new Error("the builder task was not reserved");
@@ -1736,6 +1749,10 @@ export class VibeBuilderSession implements BuilderSession {
     } catch (error) {
       this.finishTurn?.();
       this.finishTurn = null;
+      if (turnEpoch !== this.turnEpoch) {
+        sent();
+        return;
+      }
       failed(error);
       throw error;
     }
@@ -1825,8 +1842,11 @@ export class VibeBuilderSession implements BuilderSession {
         if (this.verifying) return;
         this.hasRun = true;
         this.publish(event);
-        this.verifying = this.verifyTurn()
+        const turnEpoch = this.turnEpoch;
+        let verification!: Promise<void>;
+        verification = this.verifyTurn(turnEpoch)
           .catch((error) => {
+            if (turnEpoch !== this.turnEpoch) return;
             this.runtimeIncidentOpen = true;
             this.incidentOpen = true;
             this.snapshot = {
@@ -1842,10 +1862,12 @@ export class VibeBuilderSession implements BuilderSession {
             void this.finishAttempt("failed", "verification", "verification-error");
           })
           .finally(() => {
-            this.verifying = null;
+            if (this.verifying === verification) this.verifying = null;
+            if (turnEpoch !== this.turnEpoch) return;
             this.finishTurn?.();
             this.finishTurn = null;
           });
+        this.verifying = verification;
         return;
       case "exit":
         this.transport = null;
@@ -1863,16 +1885,17 @@ export class VibeBuilderSession implements BuilderSession {
     this.publish(event);
   }
 
-  private async verifyTurn(): Promise<void> {
+  private async verifyTurn(turnEpoch: number): Promise<void> {
     const reservation = this.reservation;
     const baseline = this.baseline;
-    if (!reservation || !baseline || this.stopped) return;
+    if (!reservation || !baseline || this.stopped || turnEpoch !== this.turnEpoch) return;
     const runId = reservation.envelope.runId;
     const attemptId = reservation.attempt.attemptId;
     const goal = reservation.envelope.title ?? reservation.envelope.runId;
     const contract = contractFor(goal);
 
     await this.flushAssistant();
+    if (turnEpoch !== this.turnEpoch) return;
 
     this.present({ kind: "verify-running" }, null);
     const at = this.deps.now();
@@ -1881,6 +1904,7 @@ export class VibeBuilderSession implements BuilderSession {
       this.options.componentPath,
       at,
     );
+    if (turnEpoch !== this.turnEpoch) return;
     // With no command to run, the default note ("no configured check command is
     // available") describes Canopy's state rather than the user's: it never
     // says the turn stays unverified until a check script exists, which is the
@@ -1901,6 +1925,7 @@ export class VibeBuilderSession implements BuilderSession {
       at,
       this.networkScoped,
     );
+    if (turnEpoch !== this.turnEpoch) return;
     if (browser.screenshot) {
       const screenshot = await this.deps
         .writeArtifact({
@@ -1920,7 +1945,7 @@ export class VibeBuilderSession implements BuilderSession {
       }
     }
     const observations = [check.observation, ...browser.observations];
-    if (this.stopped) return;
+    if (this.stopped || turnEpoch !== this.turnEpoch) return;
     for (const observation of observations) {
       await this.deps.appendEvent({
         runId,
@@ -1954,7 +1979,7 @@ export class VibeBuilderSession implements BuilderSession {
       verification: verdict.outcome,
       noOpenIncident: !this.incidentOpen,
     });
-    if (this.stopped) return;
+    if (this.stopped || turnEpoch !== this.turnEpoch) return;
     const safeReview = {
       ...review,
       context: {
@@ -1985,6 +2010,7 @@ export class VibeBuilderSession implements BuilderSession {
         review.paths,
         `vibe: ${goal.slice(0, 72)}`,
       );
+      if (turnEpoch !== this.turnEpoch) return;
       await this.deps.appendEvent({
         runId,
         attemptId,
@@ -2078,6 +2104,7 @@ export class VibeBuilderSession implements BuilderSession {
       kind: "system",
       body: summary,
     });
+    if (turnEpoch !== this.turnEpoch) return;
     // The task panels show a run by its summary line; without this a Build turn
     // reads "No summary reported." next to a full evidence ledger.
     await this.recordTurnSummary(runId, summary);
@@ -2372,6 +2399,63 @@ export class VibeBuilderSession implements BuilderSession {
       .then(() => true)
       .catch(() => false);
     if (settled) this.settled = true;
+  }
+
+  async cancelCurrentTurn(): Promise<void> {
+    if (this.stopped) return;
+    const reservation = this.reservation;
+    const launching = this.launching;
+    const transport = this.transport;
+    const abstraction = this.runningAbstraction;
+    if (
+      !reservation &&
+      !launching &&
+      !transport &&
+      !abstraction &&
+      !this.finishTurn &&
+      !this.verifying
+    ) {
+      return;
+    }
+
+    // Invalidate first. A check, browser read or slow launch already past its
+    // cancellation boundary may still resolve, but it no longer owns the
+    // presentation and cannot turn a stopped request green afterwards.
+    this.turnEpoch += 1;
+    this.pendingAbstraction = null;
+    this.pendingCheckpoint = null;
+    this.currentGoal = null;
+    this.finishTurn?.();
+    this.finishTurn = null;
+    this.verifying = null;
+    if (reservation) this.closedAttempts.add(reservation.attempt.attemptId);
+
+    this.runningAbstraction = null;
+    if (abstraction) await abstraction.kill().catch(() => {});
+    const launched = launching ? await launching.catch(() => null) : null;
+    await (transport ?? launched)?.stop().catch(() => {});
+    if (this.transport === transport || this.transport === launched) {
+      this.transport = null;
+    }
+
+    if (reservation && this.reservation === reservation) {
+      await this.flushAssistant().catch(() => {});
+      await this.deps
+        .appendTranscript({
+          runId: reservation.envelope.runId,
+          attemptId: reservation.attempt.attemptId,
+          kind: "system",
+          body: "Stopped by the person in Build.",
+        })
+        .catch(() => {});
+      await this.settle("cancelled", "user", "user-stopped");
+      this.reservation = null;
+    }
+    this.baseline = null;
+    this.assistant = "";
+    this.snapshot = { persona: { kind: "idle" }, question: null };
+    this.publish({ kind: "reply", text: "Stopped." });
+    this.publish({ kind: "turnEnd" });
   }
 
   async stop(): Promise<void> {

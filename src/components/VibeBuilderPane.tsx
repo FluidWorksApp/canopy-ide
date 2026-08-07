@@ -35,6 +35,48 @@ interface BuilderView {
 }
 
 export type VibeBuilderProject = Pick<Project, "id" | "components" | "vibe">;
+export type VibeBuilderPhase = "build" | "discovering" | "waiting";
+export type VibeSignalState =
+  | "idle"
+  | "discovering"
+  | "creating"
+  | "checking"
+  | "waiting"
+  | "blocked"
+  | "complete"
+  | "published";
+
+export function vibeBuilderStatus(
+  persona: PersonaState,
+  phase: VibeBuilderPhase,
+): { label: string; signal: VibeSignalState; busy: boolean } {
+  if (persona.state === "thinking") {
+    return phase === "discovering"
+      ? { label: "Understanding your project…", signal: "discovering", busy: true }
+      : { label: "Making your change…", signal: "creating", busy: true };
+  }
+  if (persona.state === "explaining") {
+    return { label: "Checking the result…", signal: "checking", busy: true };
+  }
+  if (persona.state === "needs") {
+    return { label: "Waiting for you", signal: "waiting", busy: false };
+  }
+  if (persona.state === "blocked") {
+    return { label: "Needs your attention", signal: "blocked", busy: false };
+  }
+  if (persona.state === "done") {
+    return { label: "Ready", signal: "complete", busy: false };
+  }
+  if (persona.state === "celebrating") {
+    return { label: "It’s live", signal: "published", busy: false };
+  }
+  if (persona.state === "sleeping") {
+    return { label: "Paused", signal: "idle", busy: false };
+  }
+  return phase === "waiting"
+    ? { label: "Getting ready…", signal: "idle", busy: false }
+    : { label: "Ready", signal: "idle", busy: false };
+}
 
 /** Conversations are project-owned, while runner sessions are replaceable
  * implementation details. Setup, waiting and the live builder can hand off in
@@ -139,9 +181,11 @@ function applySessionState(
 export function VibeBuilderPane({
   session,
   project,
+  phase = "build",
 }: {
   session: BuilderSession;
   project?: VibeBuilderProject;
+  phase?: VibeBuilderPhase;
 }) {
   const nextId = () => `builder-${++builderItemSequence}`;
   const [view, setView] = useState(() => {
@@ -154,8 +198,11 @@ export function VibeBuilderPane({
   );
   const [draft, setDraft] = useState("");
   const [answeringQuestion, setAnsweringQuestion] = useState<string | null>(null);
+  const [transcriptOpen, setTranscriptOpen] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const questionCard = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const transcript = useRef<HTMLDivElement>(null);
   const projectId = project?.id ?? null;
   const projectIdRef = useRef(projectId);
   const sessionVersion = useRef(0);
@@ -165,8 +212,10 @@ export function VibeBuilderPane({
     sessionVersion.current += 1;
     setDraft("");
     setAnsweringQuestion(null);
+    setStopping(false);
     const switchedProject = projectIdRef.current !== projectId;
     projectIdRef.current = projectId;
+    if (switchedProject) setTranscriptOpen(false);
     const held = projectId ? projectConversations.get(projectId) : undefined;
     setHasSpoken(held?.hasSpoken ?? false);
     setView((current) => {
@@ -285,6 +334,12 @@ export function VibeBuilderPane({
     if (view.questionId) questionCard.current?.focus();
   }, [view.questionId]);
 
+  useEffect(() => {
+    if (!transcriptOpen) return;
+    const log = transcript.current;
+    if (log) log.scrollTop = log.scrollHeight;
+  }, [transcriptOpen, view.items]);
+
   const reportSendError = (error: unknown, version: number) => {
     if (version !== sessionVersion.current) return;
     setAnsweringQuestion(null);
@@ -346,129 +401,243 @@ export function VibeBuilderPane({
     requestAnimationFrame(() => composer.current?.focus());
   };
 
-  return (
-    <section
-      className="vibe-builder-pane"
-      aria-label={`${name} builder`}
-      style={{ display: "flex", minHeight: 0, flexDirection: "column" }}
-    >
-      <header className="vibe-builder-head companion-head">
-        <div className={`vibe-builder-mascot-stage is-${view.persona.state}`}>
-          <Mascot
-            state={view.persona.state}
-            tone={view.persona.tone}
-            size={46}
-            title={`${name} is ${view.persona.state}`}
-            className="vibe-builder-mascot"
-          />
-        </div>
-        <div className="vibe-builder-identity">
-          <div className="vibe-builder-name-row">
-            <strong>{name}</strong>
-            <span className="vibe-builder-mode">
-              <span aria-hidden /> Build mode
+  const status = vibeBuilderStatus(view.persona, phase);
+  const showWelcome = !hasSpoken && view.items.length === 0;
+  const cushionOpen =
+    transcriptOpen ||
+    Boolean(question) ||
+    (showWelcome && starterIdeas.length > 0);
+  const stopCurrentTurn = async () => {
+    if (!session.cancelCurrentTurn || stopping) return;
+    setStopping(true);
+    try {
+      await session.cancelCurrentTurn();
+    } finally {
+      setStopping(false);
+      requestAnimationFrame(() => composer.current?.focus());
+    }
+  };
+
+  const conversation = view.items.map((item) => {
+    if (item.kind === "activity") {
+      const latest = item.tools[item.tools.length - 1]!;
+      const before = item.tools.length - 1;
+      return (
+        <div className="vibe-builder-activity companion-trail" key={item.id}>
+          <button
+            className="companion-trail-row"
+            type="button"
+            aria-expanded={item.open}
+            onClick={() => toggleActivity(item.id)}
+          >
+            <span className="companion-trail-mark" aria-hidden>
+              {item.open ? "−" : "+"}
             </span>
-          </div>
-          {view.persona.utterance && (
-            <div className="vibe-builder-aside" aria-live="polite">
-              {view.persona.utterance}
+            <span className="companion-trail-name">{latest.name}</span>
+            {latest.detail && (
+              <span className="companion-trail-detail">{latest.detail}</span>
+            )}
+            {before > 0 && <span className="companion-trail-count">+{before}</span>}
+          </button>
+          {item.open && (
+            <div className="vibe-builder-activity-detail companion-trail-all">
+              {item.tools.map((tool, index) => (
+                <span className="companion-tool" key={`${tool.name}-${index}`}>
+                  {tool.name}
+                  {tool.detail && (
+                    <span className="companion-tool-detail">{tool.detail}</span>
+                  )}
+                </span>
+              ))}
             </div>
           )}
         </div>
-      </header>
+      );
+    }
+    if (item.kind === "error") {
+      return (
+        <div className="companion-error" role="alert" key={item.id}>
+          {item.text}
+        </div>
+      );
+    }
+    return (
+      <div className={`companion-msg companion-msg-${item.kind}`} key={item.id}>
+        <span className="companion-who">
+          {item.kind === "you" ? "you" : name.toLowerCase()}
+        </span>
+        <div className="companion-body">
+          {item.kind === "ash" ? (
+            <Markdown text={item.text} origin="external" />
+          ) : (
+            <span className="companion-said">{item.text}</span>
+          )}
+        </div>
+      </div>
+    );
+  });
 
-      <div
-        className="vibe-builder-log companion-log"
-        role="region"
-        aria-label="Builder conversation"
-      >
-        {!hasSpoken && view.items.length === 0 && (
-          <div className="vibe-builder-welcome">
-            <span className="vibe-builder-welcome-kicker">Your idea, in motion</span>
-            <strong>What should we make?</strong>
-            <p>
-              {starterIdeas.length > 0
-                ? "Choose a starting point, or describe the result you want."
-                : `${name} will learn the project before suggesting a direction. Tell it the result you want.`}
-            </p>
-            {starterIdeas.length > 0 && (
-              <div className="vibe-builder-starters" aria-label="Starting ideas">
-                {starterIdeas.map((idea) => (
-                  <button type="button" key={idea} onClick={() => chooseStarter(idea)}>
-                    <span aria-hidden>+</span>
-                    {idea}
-                  </button>
-                ))}
+  const welcome = showWelcome && (
+    <div className="vibe-builder-welcome">
+      <span className="vibe-builder-welcome-kicker">Your idea, in motion</span>
+      <strong>What should we make?</strong>
+      <p>
+        {starterIdeas.length > 0
+          ? "Choose a starting point, or describe the result you want."
+          : `${name} will learn the project before suggesting a direction. Tell it the result you want.`}
+      </p>
+      {starterIdeas.length > 0 && (
+        <div className="vibe-builder-starters" aria-label="Starting ideas">
+          {starterIdeas.map((idea) => (
+            <button type="button" key={idea} onClick={() => chooseStarter(idea)}>
+              <span aria-hidden>+</span>
+              {idea}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <section
+      className={`vibe-builder-pane ${cushionOpen ? "is-cushion" : "is-pill"}`}
+      data-signal={status.signal}
+      data-tone={view.persona.tone}
+      aria-label={`${name} builder`}
+    >
+      <div className="vibe-builder-signal" aria-hidden>
+        <span />
+        <span />
+      </div>
+
+      <div className="vibe-builder-cushion">
+        {cushionOpen && (
+          <div className="vibe-builder-cushion-body">
+            {transcriptOpen ? (
+              <div
+                ref={transcript}
+                className="vibe-builder-log companion-log"
+                role="region"
+                aria-label="Builder conversation"
+              >
+                {welcome}
+                {conversation}
+              </div>
+            ) : (
+              welcome
+            )}
+
+            {question && (
+              <div
+                ref={questionCard}
+                className={`vibe-builder-question vibe-builder-question-${question.kind} companion-ask`}
+                role="group"
+                tabIndex={-1}
+                aria-live="assertive"
+                aria-atomic="true"
+                aria-label={`${question.kind === "confirm" ? "Confirm" : "Question"}: ${question.prompt}`}
+              >
+                <div className="companion-ask-what">{question.prompt}</div>
+                {question.detail && (
+                  <div className="companion-ask-detail">{question.detail}</div>
+                )}
+                {question.diff && (
+                  <pre className="vibe-builder-question-diff">{question.diff}</pre>
+                )}
+                {(question.actions ?? []).length > 0 ? (
+                  <div className="companion-ask-buttons">
+                    {(question.actions ?? []).map((action) => (
+                      <button
+                        className="companion-needs-cta"
+                        type="button"
+                        key={action.response}
+                        disabled={answeringQuestion === question.id}
+                        onClick={() => {
+                          setAnsweringQuestion(question.id);
+                          send(action.response);
+                        }}
+                      >
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <span className="companion-ask-detail">Reply below.</span>
+                )}
               </div>
             )}
           </div>
         )}
-        {view.items.map((item) => {
-          if (item.kind === "activity") {
-            const latest = item.tools[item.tools.length - 1]!;
-            const before = item.tools.length - 1;
-            return (
-              <div className="vibe-builder-activity companion-trail" key={item.id}>
-                <button
-                  className="companion-trail-row"
-                  type="button"
-                  aria-expanded={item.open}
-                  onClick={() => toggleActivity(item.id)}
-                >
-                  <span className="companion-trail-mark" aria-hidden>
-                    {item.open ? "-" : "+"}
-                  </span>
-                  <span className="companion-trail-name">{latest.name}</span>
-                  {latest.detail && (
-                    <span className="companion-trail-detail">{latest.detail}</span>
-                  )}
-                  {before > 0 && (
-                    <span className="companion-trail-count">+{before}</span>
-                  )}
-                </button>
-                {item.open && (
-                  <div className="vibe-builder-activity-detail companion-trail-all">
-                    {item.tools.map((tool, index) => (
-                      <span
-                        className="companion-tool"
-                        key={`${tool.name}-${index}`}
-                      >
-                        {tool.name}
-                        {tool.detail && (
-                          <span className="companion-tool-detail">{tool.detail}</span>
-                        )}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          }
-          if (item.kind === "error") {
-            return (
-              <div className="companion-error" role="alert" key={item.id}>
-                {item.text}
-              </div>
-            );
-          }
-          return (
-            <div
-              className={`companion-msg companion-msg-${item.kind}`}
-              key={item.id}
-            >
-              <span className="companion-who">
-                {item.kind === "you" ? "you" : name.toLowerCase()}
-              </span>
-              <div className="companion-body">
-                {item.kind === "ash" ? (
-                  <Markdown text={item.text} origin="external" />
-                ) : (
-                  <span className="companion-said">{item.text}</span>
-                )}
-              </div>
+
+        <form
+          className="vibe-builder-compose companion-compose"
+          onSubmit={(event) => {
+            event.preventDefault();
+            send(draft);
+          }}
+        >
+          <div className={`vibe-builder-mascot-stage is-${view.persona.state}`}>
+            <Mascot
+              state={view.persona.state}
+              tone={view.persona.tone}
+              size={42}
+              title={`${name} is ${view.persona.state}`}
+              className="vibe-builder-mascot"
+            />
+          </div>
+
+          <div className="vibe-builder-input-shell">
+            <div className="vibe-builder-status" aria-live="polite">
+              <span aria-hidden />
+              {view.persona.utterance ?? status.label}
             </div>
-          );
-        })}
+            <textarea
+              ref={composer}
+              className="vibe-builder-input companion-input"
+              rows={1}
+              value={draft}
+              aria-label={`Message ${name}`}
+              placeholder={`Tell ${name} what you want`}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  send(draft);
+                }
+              }}
+            />
+          </div>
+
+          <button
+            className="vibe-builder-transcript"
+            type="button"
+            aria-expanded={transcriptOpen}
+            onClick={() => setTranscriptOpen((open) => !open)}
+          >
+            <span aria-hidden>{transcriptOpen ? "⌄" : "⌃"}</span>
+            Transcript
+            {view.items.length > 0 && <em>{view.items.length}</em>}
+          </button>
+          <button
+            className="vibe-builder-stop"
+            type="button"
+            disabled={!status.busy || !session.cancelCurrentTurn || stopping}
+            onClick={() => void stopCurrentTurn()}
+            aria-label="Stop current change"
+            title="Stop current change"
+          >
+            <span aria-hidden />
+          </button>
+          <button
+            className="vibe-builder-send companion-send"
+            type="submit"
+            disabled={!draft.trim() || stopping}
+            aria-label="Send"
+          >
+            <span className="vibe-builder-send-arrow" aria-hidden>↗</span>
+          </button>
+        </form>
       </div>
 
       <div
@@ -476,17 +645,6 @@ export function VibeBuilderPane({
         role="status"
         aria-live="polite"
         aria-atomic="true"
-        style={{
-          position: "absolute",
-          width: 1,
-          height: 1,
-          padding: 0,
-          margin: -1,
-          overflow: "hidden",
-          clip: "rect(0, 0, 0, 0)",
-          whiteSpace: "nowrap",
-          border: 0,
-        }}
       >
         {view.announcement && (
           <span key={view.announcement.sourceId}>
@@ -494,81 +652,6 @@ export function VibeBuilderPane({
           </span>
         )}
       </div>
-
-      {question && (
-        <div
-          ref={questionCard}
-          className={`vibe-builder-question vibe-builder-question-${question.kind} companion-ask`}
-          role="group"
-          tabIndex={-1}
-          aria-live="assertive"
-          aria-atomic="true"
-          aria-label={`${question.kind === "confirm" ? "Confirm" : "Question"}: ${question.prompt}`}
-        >
-          <div className="companion-ask-what">{question.prompt}</div>
-          {question.detail && (
-            <div className="companion-ask-detail">{question.detail}</div>
-          )}
-          {question.diff && (
-            <pre className="vibe-builder-question-diff">{question.diff}</pre>
-          )}
-          {(question.actions ?? []).length > 0 ? (
-            <div className="companion-ask-buttons">
-              {(question.actions ?? []).map((action) => (
-                <button
-                  className="companion-needs-cta"
-                  type="button"
-                  key={action.response}
-                  disabled={answeringQuestion === question.id}
-                  onClick={() => {
-                    setAnsweringQuestion(question.id);
-                    send(action.response);
-                  }}
-                >
-                  {action.label}
-                </button>
-              ))}
-            </div>
-          ) : (
-            <span className="companion-ask-detail">Reply below.</span>
-          )}
-        </div>
-      )}
-
-      <form
-        className="vibe-builder-compose companion-compose"
-        onSubmit={(event) => {
-          event.preventDefault();
-          send(draft);
-        }}
-      >
-        <div className="vibe-builder-input-shell">
-          <textarea
-            ref={composer}
-            className="vibe-builder-input companion-input"
-            rows={1}
-            value={draft}
-            aria-label={`Message ${name}`}
-            placeholder={`Tell ${name} what you want`}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                send(draft);
-              }
-            }}
-          />
-          <span className="vibe-builder-input-note">No technical steps needed</span>
-        </div>
-        <button
-          className="vibe-builder-send companion-send"
-          type="submit"
-          disabled={!draft.trim()}
-        >
-          <span>Send</span>
-          <span className="vibe-builder-send-arrow" aria-hidden>↗</span>
-        </button>
-      </form>
     </section>
   );
 }
