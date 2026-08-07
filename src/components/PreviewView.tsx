@@ -70,6 +70,9 @@ const SHOOT_WIDTH = 2400;
 interface PreviewViewProps {
   /** The owning SubTab's id — how agent browser ops address this view. */
   tabId: string;
+  /** Which project this page is being previewed for. The proxy origin is scoped
+   *  to it, so two projects previewing the same target never share cookies. */
+  projectId: string;
   url: string;
   annotations: PreviewAnnotation[];
   /** Screenshots taken of this page, awaiting a note and a destination. */
@@ -150,6 +153,7 @@ const normalize = (raw: string): string | null => {
 
 export function PreviewView({
   tabId,
+  projectId,
   url,
   annotations,
   shots,
@@ -168,7 +172,24 @@ export function PreviewView({
   onRunOneOff,
   onNotice,
 }: PreviewViewProps) {
-  const engine = useBrowserEngine();
+  const chosenEngine = useBrowserEngine();
+  // Build floats its composer over the page, and that decides the engine — it is
+  // not a preference here.
+  //
+  // A native webview is composited above the window: nothing in the DOM can be
+  // painted on top of it. browserHost's only answer is to hide the whole view
+  // the moment any element overlaps it (browserOcclusion.occludes — "covers any
+  // part of the view"), so the small glass island at the bottom blanked the
+  // entire preview, and because the island is present from the first render the
+  // view never painted a frame to fall back to. The person was shown a black
+  // rectangle where their app should be.
+  //
+  // The proxy engine is an iframe — ordinary DOM the island can genuinely float
+  // over while the page stays live and interactive. It was not safe to force
+  // until the proxy's origin became project-scoped and stable, because its
+  // cookies were host-shared and its port ephemeral; that is what preview.rs
+  // now provides.
+  const engine = buildMode && chosenEngine !== null ? "proxy" : chosenEngine;
   const native = engine === "webview";
   // What the placeholder stands in with while the native view is out of the
   // way: a still of the page, or the app's own background — never a white hole.
@@ -245,11 +266,11 @@ export function PreviewView({
     let stale = false;
     setProxyError(null);
     ipc
-      .previewStart(origin)
+      .previewStart(projectId, origin)
       .then((p) => {
         if (stale) return;
         setProxy(p);
-        setFrameSrc(`http://127.0.0.1:${p.port}${restOf(urlRef.current)}`);
+        setFrameSrc(`http://${p.host}:${p.port}${restOf(urlRef.current)}`);
       })
       .catch((err) => {
         if (!stale) setProxyError(String(err));
@@ -390,7 +411,7 @@ export function PreviewView({
     if (!p) return null;
     try {
       const u = new URL(pageUrl);
-      if (u.host !== `127.0.0.1:${p.port}`) return null;
+      if (u.host !== `${p.host}:${p.port}`) return null;
       return `${p.origin}${u.pathname}${u.search}${u.hash}`;
     } catch {
       return null;
@@ -400,7 +421,7 @@ export function PreviewView({
   unproxiedRef.current = unproxied;
 
   /** Answer one op, mapping the page's own idea of its address back to the real
-   *  one. Under the proxy the page knows itself as 127.0.0.1:<port>, and agents
+   *  one. Under the proxy the page knows itself as <project-host>:<port>, and agents
    *  must never be told that is where the server lives. */
   const answer = useCallback(
     (id: number, ok: boolean, data: unknown) => {
@@ -502,7 +523,7 @@ export function PreviewView({
       }
       const p = proxyRef.current;
       if (p && p.origin === originOf(target)) {
-        setFrameSrc(`http://127.0.0.1:${p.port}${restOf(target)}`);
+        setFrameSrc(`http://${p.host}:${p.port}${restOf(target)}`);
       }
       // A different origin re-runs the proxy effect via the `origin` dep.
     },

@@ -10048,6 +10048,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return (
           <PreviewView
             tabId={tab.id}
+            projectId={project.id}
             buildMode={vibe}
             url={tab.url}
             annotations={tab.annotations}

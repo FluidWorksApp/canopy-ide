@@ -508,14 +508,29 @@ describe("VibeBuilderSession", () => {
       "claude",
       expect.objectContaining({
         policy: expect.objectContaining({
-          allowedTools: [CANOPY_MCP_ALLOWANCE],
-          // Authority still comes from what is withheld, not from the allowance.
-          disallowedTools: expect.arrayContaining(["Bash", "KillShell"]),
+          // Bash is here on purpose, and it is the change that made Build able
+          // to finish a job. Withholding it meant a turn could add a dependency
+          // to package.json and had no way to install it, so the code it had
+          // just written could not run and the person was shown the error.
+          //
+          // Authority no longer comes from withholding tools — it comes from
+          // the workspace grant and is enforced by the sandbox, which confines
+          // writes to the component's own directories. See workspaceAuthority.
+          allowedTools: [CANOPY_MCP_ALLOWANCE, "Bash"],
+          disallowedTools: expect.arrayContaining(["KillShell", "NotebookEdit"]),
+          // The boundary, actually passed to the sandbox rather than described
+          // in a prompt.
+          authority: "workspace-write",
+          network: true,
+          writableRoots: expect.arrayContaining([expect.any(String)]),
         }),
       }),
       expect.anything(),
       expect.anything(),
     );
+    const policy = (h.deps.runner.start as ReturnType<typeof vi.fn>).mock
+      .calls[0][2].policy;
+    expect(policy.disallowedTools).not.toContain("Bash");
   });
 
   it("ends the attempt when a Canopy tool is refused, in Canopy's own words", async () => {

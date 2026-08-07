@@ -1828,13 +1828,25 @@ export const contextRemove = (projectId: string) =>
 
 export interface PreviewInfo {
   port: number;
+  /** Browser-facing project-isolated hostname, without the port. The iframe
+   *  must be pointed at THIS and not at 127.0.0.1: the host is what gives the
+   *  project its own cookie jar, and loading the same proxy through the loopback
+   *  literal would put every project back on one shared host. */
+  host: string;
+  /** Target origin, retained as the identity preview_stop and the network log
+   *  are keyed by. */
   origin: string;
 }
-/** Start (or reuse) the annotating reverse proxy for a target origin. */
-export const previewStart = (target: string) =>
-  invoke<PreviewInfo>("preview_start", { target });
-export const previewStop = (origin: string) =>
-  invoke<void>("preview_stop", { origin });
+/** Start (or reuse) the annotating reverse proxy for a target origin.
+ *
+ *  The project is required, not optional: the proxy's origin is scoped to it so
+ *  two projects previewing the same target get different hosts and cannot see
+ *  each other's cookies. Passing nothing here would put every project back on
+ *  one shared jar. The native side refuses an empty id rather than guessing. */
+export const previewStart = (projectId: string, target: string) =>
+  invoke<PreviewInfo>("preview_start", { projectId, target });
+export const previewStop = (projectId: string, origin: string) =>
+  invoke<void>("preview_stop", { projectId, origin });
 
 // ---------- LSP ----------
 
