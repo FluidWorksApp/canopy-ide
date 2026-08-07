@@ -22,7 +22,9 @@ pub enum StructuredRunnerOut {
 }
 
 struct Running {
-    stdin: ChildStdin,
+    /// None for a one-shot CLI, whose stdin was closed at spawn — see
+    /// `keep_stdin` on the spawn command.
+    stdin: Option<ChildStdin>,
     child: Child,
     process_group: Option<u32>,
     control_token: String,
@@ -59,6 +61,17 @@ fn valid_attempt_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
+/// Start one attempt's CLI on plain pipes.
+///
+/// `keep_stdin` is whether the child keeps a writable stdin for the whole
+/// session. True for a streaming CLI, whose next message is a line written to
+/// it. False for a one-shot CLI, and that is not a tidiness preference — it is
+/// the difference between the turn running and the turn hanging forever.
+/// `codex exec` reads stdin whenever stdin is a pipe, *even when the prompt was
+/// given as an argument* ("Reading additional input from stdin..."), and blocks
+/// until EOF. Held open it never gets one: verified against codex-cli 0.146.1,
+/// which produced no output at all and was still running after two minutes on a
+/// prompt that answers in under ten seconds.
 #[tauri::command]
 pub async fn structured_runner_spawn(
     app: tauri::AppHandle,
@@ -70,6 +83,7 @@ pub async fn structured_runner_spawn(
     args: Vec<String>,
     cwd: String,
     env: Option<Vec<(String, String)>>,
+    keep_stdin: Option<bool>,
     on_data: Channel<StructuredRunnerOut>,
 ) -> Result<(), String> {
     if !valid_attempt_id(&attempt_id) {
@@ -144,6 +158,14 @@ pub async fn structured_runner_spawn(
         let _ = child.start_kill();
         let _ = crate::context::release_claims_for_attempt(&app, &attempt_id, "launch-failed");
         return Err("the structured runner has no stdin".into());
+    };
+    // Dropping the handle is what sends EOF. Closing it here rather than
+    // spawning with Stdio::null() keeps one spawn path for both tiers.
+    let stdin = if keep_stdin.unwrap_or(true) {
+        Some(stdin)
+    } else {
+        drop(stdin);
+        None
     };
     let Some(stdout) = child.stdout.take() else {
         let _ = child.start_kill();
@@ -239,13 +261,18 @@ pub async fn structured_runner_write(
     }
     let mut body = line;
     body.push('\n');
-    running
-        .stdin
+    // A one-shot runner has no stdin to write to: its next message is a new
+    // process, not a line. Said plainly, because the alternative is a write that
+    // silently goes nowhere and a turn that waits for a reply to a question the
+    // CLI was never asked.
+    let stdin = running.stdin.as_mut().ok_or_else(|| {
+        format!("structured runner {attempt_id} takes its prompt at launch, not on stdin")
+    })?;
+    stdin
         .write_all(body.as_bytes())
         .await
         .map_err(|error| format!("could not reach structured runner {attempt_id}: {error}"))?;
-    running
-        .stdin
+    stdin
         .flush()
         .await
         .map_err(|error| format!("could not reach structured runner {attempt_id}: {error}"))

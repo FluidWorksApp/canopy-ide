@@ -1,3 +1,5 @@
+import type { StructuredDialect } from "./structuredEvents";
+
 export type StructuredRunnerAuthority = "read-only" | "workspace-write";
 
 /** Launch policy belongs to the caller, not to a global Companion setting. */
@@ -22,7 +24,22 @@ export interface StructuredRunnerLaunch {
 }
 
 export interface StructuredRunner {
+  /** How a turn reaches the CLI, which is a real difference in the CLIs and not
+   *  a quality ranking:
+   *
+   *  `structured` — the process outlives the turn and the next message is
+   *    written to its stdin (`claude -p --input-format stream-json`).
+   *
+   *  `oneshot` — the process IS the turn (`codex exec`). A follow-up means a
+   *    new process resuming the conversation by id. Both tiers stream the same
+   *    events off stdout; only the lifecycle differs.
+   *
+   *  Read by companion.ts to pick a transport, and by projectRunner.ts to
+   *  decide whether `send` writes a line or launches a process. */
   tier: "structured" | "oneshot";
+  /** Which JSON schema this CLI's stdout is written in. Not implied by the
+   *  tier: two CLIs could share a lifecycle and agree on nothing else. */
+  dialect: StructuredDialect;
   args(o: StructuredRunnerLaunch): string[];
   resumeArgs(o: StructuredRunnerLaunch): string[];
 }
@@ -43,13 +60,58 @@ export function permissionArgs(
   ];
 }
 
+const codexMode = (authority: StructuredRunnerAuthority): string =>
+  authority === "workspace-write" ? "workspace-write" : "read-only";
+
+/** Authority for `codex exec`, where it is a first-class flag.
+ *
+ *  `-s/--sandbox <read-only|workspace-write|danger-full-access>`, verified
+ *  against `codex exec --help` (0.146.1). Never the third value, and never
+ *  `--dangerously-bypass-approvals-and-sandbox`: a task Canopy launched
+ *  unattended is the last thing that should be running outside the sandbox. */
 export function codexSandbox(authority: StructuredRunnerAuthority): string[] {
-  const mode = authority === "workspace-write" ? "workspace-write" : "read-only";
-  return ["-c", `sandbox_mode="${mode}"`];
+  return ["-s", codexMode(authority)];
+}
+
+/** The same authority for `codex exec resume`, which does NOT take `-s`.
+ *
+ *  This is not a stylistic choice — `codex exec resume` is a different clap
+ *  command with a much smaller flag set, and it has no `-s`, no `-C/--cd` and
+ *  no `--add-dir`. Passing `-s` there is a hard launch failure:
+ *
+ *      error: unexpected argument '-s' found
+ *
+ *  which arrives on stderr with no JSON on stdout at all, so the turn presents
+ *  as the agent dying rather than as Canopy building the wrong argv. What it
+ *  does take is `-c key=value`, and the two config keys below were confirmed to
+ *  exist by probing with `--strict-config` (which rejects unknown keys — an
+ *  invented key was refused, these two were accepted).
+ *
+ *  `--strict-config` is deliberately NOT passed at launch: it would also reject
+ *  unrecognised fields in the user's own ~/.codex/config.toml, which Canopy
+ *  does not control and must not fail on. It is a probe, not a runtime flag. */
+export function codexResumeSandbox(
+  authority: StructuredRunnerAuthority,
+  writableRoots: readonly string[] = [],
+): string[] {
+  const mode = codexMode(authority);
+  return [
+    "-c",
+    `sandbox_mode="${mode}"`,
+    // Only meaningful when something may be written; a read-only turn that
+    // named writable roots would be describing an authority it does not have.
+    ...(mode === "workspace-write" && writableRoots.length
+      ? [
+          "-c",
+          `sandbox_workspace_write.writable_roots=${JSON.stringify([...writableRoots])}`,
+        ]
+      : []),
+  ];
 }
 
 const CLAUDE_RUNNER: StructuredRunner = {
   tier: "structured",
+  dialect: "claude",
   args: (o) => [
     "-p",
     "--input-format",
@@ -85,15 +147,37 @@ const CLAUDE_RUNNER: StructuredRunner = {
   ],
 };
 
+/** `codex exec`, verified against codex-cli 0.146.1.
+ *
+ *  No permission flags, and not for want of looking: Claude's `--allowedTools`
+ *  has no counterpart here. Codex draws the line with the sandbox instead of a
+ *  tool allowlist — inside `-s read-only` or `-s workspace-write` it simply
+ *  does not stop to ask, so a non-interactive run never blocks on an approval
+ *  nobody is there to answer. `disallowedTools` therefore cannot be enforced on
+ *  the argv the way it is for Claude; on this CLI the sandbox is the whole of
+ *  the enforcement, and it is enforced by the OS rather than by the model
+ *  agreeing to it.
+ *
+ *  The prompt is NOT here: it is a positional argument appended per turn by the
+ *  transport, because on this CLI the prompt is part of launching rather than
+ *  something written to a running process. */
 const CODEX_RUNNER: StructuredRunner = {
   tier: "oneshot",
+  dialect: "codex",
   args: (o) => [
     "exec",
     "--json",
     "--skip-git-repo-check",
+    ...(o.policy.cwd ? ["-C", o.policy.cwd] : []),
+    ...(o.additionalDirectories ?? []).flatMap((dir) => ["--add-dir", dir]),
     ...(o.policy.model ? ["-m", o.policy.model] : []),
     ...codexSandbox(o.policy.authority),
   ],
+  // `resume` takes the thread id positionally and accepts almost none of the
+  // flags above — see codexResumeSandbox. `-C` and `--add-dir` have no config
+  // equivalent that has been verified, so the working root here is the one the
+  // process is spawned in (policy.cwd is passed to the spawn either way) and
+  // the resumed session already carries the roots it was started with.
   resumeArgs: (o) => [
     "exec",
     "resume",
@@ -101,7 +185,7 @@ const CODEX_RUNNER: StructuredRunner = {
     "--json",
     "--skip-git-repo-check",
     ...(o.policy.model ? ["-m", o.policy.model] : []),
-    ...codexSandbox(o.policy.authority),
+    ...codexResumeSandbox(o.policy.authority, o.additionalDirectories ?? []),
   ],
 };
 
@@ -120,6 +204,17 @@ export const STRUCTURED_RUNNERS: Record<string, StructuredRunner> = {
  *  Callers that named `claude` directly were not choosing Claude — they were
  *  spelling "the one I know streams", and they broke the day a route resolved
  *  to anything else: `startStructured` throws before a process exists, and the
- *  task reports the agent failing rather than the launch being impossible. */
+ *  task reports the agent failing rather than the launch being impossible.
+ *
+ *  Membership, not tier. It used to require `tier === "structured"`, which
+ *  excluded codex — but the tier is the process LIFECYCLE, not whether events
+ *  can be read, and conflating the two is what made the user's chosen default
+ *  agent unable to run Build at all. A one-shot CLI streams the same events off
+ *  the same stdout; the project runner now owns the difference (it launches a
+ *  process per turn instead of writing a line), so having a verified runner at
+ *  all is the honest test. This stays the gate for the CLIs that have no runner
+ *  written for them, which is still most of the registry — an entry here is a
+ *  claim that the argv and the event schema were checked against the real
+ *  binary, and nothing else may be routed to Build. */
 export const streamsStructured = (cliId: string): boolean =>
-  STRUCTURED_RUNNERS[cliId]?.tier === "structured";
+  Boolean(STRUCTURED_RUNNERS[cliId]);

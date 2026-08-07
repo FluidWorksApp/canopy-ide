@@ -13,6 +13,7 @@ import {
 import * as ipc from "./ipc";
 import type { RouteCandidate } from "./vibeFailover";
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
+import { streamsStructured } from "./structuredRunners";
 import type {
   VibeProjectSetupSessionDeps,
   VibeProjectSetupTaskDeps,
@@ -369,22 +370,47 @@ describe("bounded setup agent task", () => {
   });
 
   it("never fails over to a CLI it cannot launch", async () => {
-    // This used to assert claude → codex, and passed because the fixture
-    // runner will start anything. Production cannot: setup reads its result
-    // off a JSON stream, and startStructured throws "has no verified streaming
-    // runner" for codex's one-shot tier before a process exists. Ranked anyway,
-    // both attempts died on that throw and Build reported it as the agent
-    // failing to understand the project — with no transcript, because no agent
-    // ever ran.
+    // The fixture runner will start anything; production cannot. Setup reads
+    // its result off a JSON stream, and startStructured throws "has no verified
+    // streaming runner" before a process exists for any CLI without one —
+    // ranked anyway, every attempt in the cap died on that throw and Build
+    // reported it as the agent failing to understand the project, with no
+    // transcript, because no agent ever ran.
+    //
+    // Asserted against the capability rather than a name on purpose. This test
+    // used to say "not codex", which was true only while codex had no runner —
+    // so the day it got one the test failed for the wrong reason and the real
+    // rule went unguarded. `amp` stands in for the CLIs that still have none.
     const deps = taskDeps([
       [{ kind: "error", message: "usage limit reached for your plan" }, { kind: "exit" }],
       [{ kind: "delta", text: JSON.stringify(proposal()) }, { kind: "turnEnd" }],
     ]);
+    deps.listRoutes = async () => [
+      ...routes(),
+      {
+        cli: "amp", profileId: "default", family: "anthropic",
+        state: { agent: "amp", profile: "default", kind: "ready", reasons: [] },
+        choices: [{ id: "claude-fable-5", label: "Fable", hint: "" }],
+      },
+    ];
     await runVibeProjectSetupTask(taskInput, deps);
-    expect(deps.launches.map((item) => item.cli)).not.toContain("codex");
-    // Claude is the only structured runner today, so a route failure has
-    // nowhere to go. Retrying it in place is honest; switching is not.
-    expect(new Set(deps.launches.map((item) => item.cli))).toEqual(new Set(["claude"]));
+    expect(deps.launches.length).toBeGreaterThan(0);
+    for (const { cli } of deps.launches) expect(streamsStructured(cli)).toBe(true);
+    expect(deps.launches.map((item) => item.cli)).not.toContain("amp");
+  });
+
+  it("fails over to codex, which now has a runner of its own", async () => {
+    // The point of the whole one-shot runner: a person whose default agent is
+    // codex, or whose claude route is rate-limited, gets a second place to go.
+    // Before it existed the only eligible CLI was claude, so a route failure
+    // had nowhere to go and retried the same exhausted account.
+    const deps = taskDeps([
+      [{ kind: "error", message: "usage limit reached for your plan" }, { kind: "exit" }],
+      [{ kind: "delta", text: JSON.stringify(proposal()) }, { kind: "turnEnd" }],
+    ]);
+    const result = await runVibeProjectSetupTask(taskInput, deps);
+    expect(deps.launches.map((item) => item.cli)).toEqual(["claude", "codex"]);
+    expect(result).toMatchObject({ ok: true });
   });
 
   it("kills a timed-out attempt and returns a plain-language failure", async () => {

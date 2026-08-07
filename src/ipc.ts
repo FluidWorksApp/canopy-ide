@@ -3552,6 +3552,8 @@ export async function structuredRunnerSpawn(
     args: string[];
     cwd?: string;
     env?: [string, string][];
+    /** Whether the child gets a writable stdin. See ProjectRunnerProcess. */
+    keepStdin?: boolean;
   },
   onData: (out: StructuredRunnerOut) => void,
 ): Promise<void> {
@@ -3563,6 +3565,7 @@ export async function structuredRunnerSpawn(
     controlToken,
     ...opts,
     cwd: opts.cwd,
+    keepStdin: opts.keepStdin !== false,
     onData: channel,
   });
 }
