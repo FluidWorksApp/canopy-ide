@@ -1571,7 +1571,20 @@ export class VibeBuilderSession implements BuilderSession {
             setup.DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS,
           );
         });
-      const result = await repair({ problem });
+      let result: VibeRepairTaskResult;
+      try {
+        result = await repair({ problem });
+      } catch {
+        // A runner rejection is a failed repair, not an unhandled rejection
+        // from this fire-and-forget path. Let the next crash try again.
+        this.serverIncidentKeys.delete(input.key);
+        result = {
+          ok: false,
+          reason: "agent-failed",
+          message: "I tried to fix it and couldn't finish.",
+          runId: null,
+        };
+      }
       if (this.stopped) return;
       if (result.ok && result.verdict.fixed) {
         this.serverIncidentOpen = false;

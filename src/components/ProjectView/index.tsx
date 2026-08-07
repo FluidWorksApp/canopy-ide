@@ -8852,6 +8852,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const log =
       termHandles.current.get(tabId)?.captureTextSettled() ??
       Promise.resolve("");
+    // What the survey already knows about the crashing component, handed
+    // along so the repair agent starts from the project's own commands —
+    // "run the setup command that was never run" is the most common fix,
+    // and it is only reachable if the command travels with the incident.
+    const crashedComponent = project.components.find(
+      (candidate) => candidate.id === watched.componentId,
+    );
+    const crashedCommand = crashedComponent?.commands?.find(
+      (candidate) => candidate.id === watched.runCommandId,
+    );
     const incident: VibeServerIncidentInput = {
       key: watched.targetKey,
       componentId: watched.componentId,
@@ -8864,6 +8874,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
       totalCpu: stats?.total_cpu ?? null,
       totalMemBytes: stats?.total_mem_bytes ?? null,
       logTail: log.then((text) => vibeServerLogTail(text)),
+      ...(crashedComponent
+        ? {
+            component: {
+              label: crashedComponent.label,
+              path: crashedComponent.path,
+              ...(crashedComponent.role ? { role: crashedComponent.role } : {}),
+            },
+            commands: crashedComponent.commands ?? [],
+          }
+        : {}),
+      ...(crashedCommand
+        ? { command: { name: crashedCommand.name, command: crashedCommand.command } }
+        : {}),
     };
     const repairSettlements = (
       session: ReturnType<typeof createVibeBuilderSession>,
