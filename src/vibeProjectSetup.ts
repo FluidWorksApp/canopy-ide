@@ -670,6 +670,17 @@ export async function runVibeProjectSetupTask(
       additionalDirectories: input.componentRoots ?? [],
       env: [...launchEnvSync(chosen.cli), ["CANOPY_VIBE_SETUP", "1"], ["CANOPY_RUN_ID", runId], ["CANOPY_ATTEMPT_ID", attempt.attemptId]],
     };
+    // What was actually spawned. A turn that ends having said nothing is the
+    // one failure the transcript cannot explain, because there is no
+    // transcript — and the launch is the only remaining suspect. Rebuilding it
+    // by hand from four files is how an afternoon goes.
+    void ipc.jsLog(
+      "error",
+      `vibe-setup: launching ${chosen.cli} bin=${deps.binFor(chosen.cli)} model=${chosen.requestedModel ?? "(none)"} ` +
+        `cwd=${input.projectRoot} addDirs=${(input.componentRoots ?? []).length} ` +
+        `promptChars=${vibeSetupSystemPrompt(input.repositoryFingerprint, input.componentRoots ?? []).length}+${vibeSetupUserMessage(input.componentRoots ?? [], input.inventory ?? []).length} ` +
+        `env=${JSON.stringify(launchEnvSync(chosen.cli).map(([name]) => name))}`,
+    );
     let transport: ProjectRunnerTransport;
     try {
       transport = await deps.runner.start(attempt.attemptId, chosen.cli, launch, {
@@ -692,7 +703,21 @@ export async function runVibeProjectSetupTask(
             void live?.stop().catch(() => {});
             finishEvent?.({ kind: "failed", text: error, timedOut: false });
           }
-          else if (event.kind === "turnEnd") finishEvent?.({ kind: "complete", text: output });
+          // A turn that ended having said nothing did not succeed at producing
+          // an empty proposal — it failed, and something already said why.
+          // `turn.failed` emits `error` and then `turnEnd`, so settling every
+          // turnEnd as complete discarded the reason a moment after receiving
+          // it: an API refusing the requested model ("The 'gpt-5.6' model is
+          // not supported when using Codex with a ChatGPT account") was
+          // reported to the user as the agent returning nothing, which sent us
+          // looking at the prompt, the schema and the launch for an hour. The
+          // error only wins an empty turn; a turn that produced output and a
+          // stray error line is still that output.
+          else if (event.kind === "turnEnd") {
+            finishEvent?.(output || !error
+              ? { kind: "complete", text: output }
+              : { kind: "failed", text: error, timedOut: false });
+          }
           else if (event.kind === "exit") finishEvent?.({ kind: "failed", text: error || output || "setup agent exited", timedOut: false });
         },
       }, { resume: false });

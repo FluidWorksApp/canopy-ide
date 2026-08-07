@@ -56,11 +56,24 @@ export const SEEDS: Record<ModelFamily, ModelChoice[]> = {
     { id: "haiku", label: "Haiku", hint: "fastest" },
   ],
   // Verified against openai.com/index/gpt-5-6 on 2026-08-06: the 5.6 family is
-  // sol/terra/luna and bare `gpt-5.6` serves sol. 5.4 + 5.4-mini retire from
-  // ChatGPT-authenticated Codex on 2026-08-31 (they stay on the API), which is
-  // reason enough to drop them from a Codex-facing menu.
+  // sol/terra/luna. 5.4 + 5.4-mini retire from ChatGPT-authenticated Codex on
+  // 2026-08-31 (they stay on the API), which is reason enough to drop them from
+  // a Codex-facing menu.
+  //
+  // Sol is named in full. The bare `gpt-5.6` alias does serve sol on the API,
+  // and this list previously carried it on that basis — but the list is typed
+  // into `codex -m`, and a ChatGPT-authenticated Codex rejects the alias:
+  //
+  //     400 The 'gpt-5.6' model is not supported when using Codex with a
+  //         ChatGPT account.
+  //
+  // Probed against codex-cli 0.146.1 on 2026-08-07: `-m gpt-5.6` fails, while
+  // -sol, -terra, -luna and gpt-5.5 all complete a turn. The failure surfaces
+  // only at the API, several seconds into a turn that then produces no reply,
+  // so it read as the agent returning nothing rather than as a bad flag. Ids
+  // here must be what the CLI accepts, not what the vendor catalogue lists.
   openai: [
-    { id: "gpt-5.6", label: "GPT-5.6 Sol", hint: "most capable" },
+    { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", hint: "most capable" },
     { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "balanced" },
     { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", hint: "fastest, cheapest" },
     { id: "gpt-5.5", label: "GPT-5.5", hint: "previous" },
