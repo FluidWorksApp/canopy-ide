@@ -499,6 +499,25 @@ non-runnable.
 Rules: every component directory you were given must appear. requiredProcesses must include the preview entry. Every path in root, cwd and evidence must be a real path you observed. Never include a secret value. If you cannot determine a complete setup, return no JSON object and explain the blocker plainly instead.`;
 }
 
+/** What the setup agent is doing, in the words of the person watching.
+ *
+ *  The runner's tool events carry the literal invocation — Codex reports a
+ *  command as `/bin/zsh -lc "sed -n '1,220p' /Users/…"` — and forwarding them
+ *  put chips reading `Shell /bin/zsh -lc "for f in …"` into a pane whose own
+ *  footer promises no technical steps. The activity line exists so a run that
+ *  takes minutes does not look hung; it was never meant to publish a
+ *  transcript. The detail is dropped rather than shortened, because a truncated
+ *  shell command is still a shell command.
+ *
+ *  Unknown tools return null and say nothing. A name we have no phrasing for is
+ *  more likely to be jargon than not, and silence beats leaking it. */
+export function plainSetupActivity(tool: string): string | null {
+  if (tool === "Shell") return "Looking through your project";
+  if (tool === "Read" || tool === "Grep" || tool === "Glob") return "Reading how your project is put together";
+  if (tool.startsWith("canopy_")) return "Checking what Canopy already knows";
+  return null;
+}
+
 export interface VibeSetupRepositoryObservation {
   projectRoot: string;
   fingerprint: string;
@@ -799,7 +818,10 @@ export async function runVibeProjectSetupTask(
           // Whatever it is doing, said out loud. A setup that runs for minutes
           // behind one unchanging line is indistinguishable from a hung one,
           // and the person has no way to tell which they are looking at.
-          if (event.kind === "tool") input.onActivity?.(event);
+          if (event.kind === "tool") {
+            const doing = plainSetupActivity(event.name);
+            if (doing) input.onActivity?.({ kind: "tool", name: doing });
+          }
           if (event.kind === "delta" || event.kind === "reply") output += event.text;
           else if (event.kind === "error") error = event.message;
           // A setup agent that cannot read the project cannot describe it. Left

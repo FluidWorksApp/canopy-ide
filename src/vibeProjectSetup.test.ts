@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Project } from "./projects";
 import {
   materializeVibeSetup,
+  plainSetupActivity,
   observeVibeSetupRepository,
   parseVibeSetupOutput,
   validateVibeSetupProposal,
@@ -665,5 +666,19 @@ describe("non-technical setup surface", () => {
     });
     await done;
     expect(replies.at(-1)).toBe("I couldn't determine a safe complete setup for this project.");
+  });
+});
+
+describe("what the person is told a setup run is doing", () => {
+  it("never puts a shell invocation in a pane that promises no technical steps", () => {
+    // Codex reports a command as its literal argv — /bin/zsh -lc "sed -n
+    // '1,220p' /Users/…" — and forwarding the tool event verbatim printed that
+    // as a chip in Build, directly above the words "No technical steps needed".
+    expect(plainSetupActivity("Shell")).toBe("Looking through your project");
+    expect(plainSetupActivity("canopy_project")).toBe("Checking what Canopy already knows");
+    // Silence for anything unnamed: a tool we have no phrasing for is more
+    // likely jargon than not, and saying nothing beats leaking it.
+    expect(plainSetupActivity("NotebookEdit")).toBeNull();
+    expect(plainSetupActivity("mcp__someone_elses__tool")).toBeNull();
   });
 });
