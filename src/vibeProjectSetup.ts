@@ -175,10 +175,21 @@ export function validateVibeSetupProposal(
     else roots.add(componentRoot);
     if (!text(component.label)) errors.push(`${at}.label is required`);
     if (!["web", "api", "worker", "database", "mobile", "library", "tooling", "other"].includes(String(component.role))) errors.push(`${at}.role is invalid`);
-    if (!strings(component.evidence) || component.evidence.length === 0 || component.evidence.some((path) => {
-      const resolved = resolvePath(context.projectRoot, path);
-      return !inside(context.projectRoot, resolved) || !context.existingPaths.has(resolved);
-    })) errors.push(`${at}.evidence must name observed project paths`);
+    // Name the paths that failed. "must name observed project paths" is true of
+    // an invented file and of a real one Canopy's inventory did not reach, and
+    // those want opposite fixes — one is the agent, the other is the cap on
+    // fsSnapshotFiles. Undifferentiated, the message sends you to the wrong one.
+    if (!strings(component.evidence) || component.evidence.length === 0) {
+      errors.push(`${at}.evidence must name observed project paths`);
+    } else {
+      const unobserved = component.evidence.filter((path) => {
+        const resolved = resolvePath(context.projectRoot, path);
+        return !inside(context.projectRoot, resolved) || !context.existingPaths.has(resolved);
+      });
+      if (unobserved.length) {
+        errors.push(`${at}.evidence names paths Canopy did not observe: ${unobserved.join(", ")}`);
+      }
+    }
     const commands = Array.isArray(component.commands) ? component.commands : [];
     if (!Array.isArray(component.commands) || commands.length > MAX_COMMANDS_PER_COMPONENT) errors.push(`${at}.commands is invalid`);
     if (commands.length === 0 && !text(component.nonRunnableReason)) errors.push(`${at} has neither a command nor a nonRunnableReason`);
@@ -818,14 +829,14 @@ export async function runVibeProjectSetupTask(
           userMessage,
         );
     if (result.kind === "complete") {
+      // Only the parse is guarded. Settling the attempt was inside this try
+      // too, so a lifecycle refusal — "attempt is already interrupted", raised
+      // when the project closed under a run — was reported as the agent's
+      // output failing to parse, with the agent's perfectly good JSON printed
+      // beneath it as the evidence. The catch must cover the thing it names.
+      let parsed: unknown;
       try {
-        const parsed = parseVibeSetupOutput(result.text);
-        if (input.validateOutput && !input.validateOutput(parsed)) {
-          await deps.settleAttempt({ attemptId: attempt.attemptId, state: "blocked", failureClass: "task", failureCode: "invalid-setup-schema" });
-          return { ok: false, reason: "invalid-output", message: "I couldn't determine a safe complete setup for this project.", runId, attempts: attemptsUsed };
-        }
-        await deps.settleAttempt({ attemptId: attempt.attemptId, state: "completed" });
-        return { ok: true, output: parsed, runId, attempts: attemptsUsed };
+        parsed = parseVibeSetupOutput(result.text);
       } catch (parseError) {
         // "invalid-output" is returned both when the JSON will not parse and
         // when it parses but breaks a rule, and the two need opposite fixes:
@@ -840,6 +851,12 @@ export async function runVibeProjectSetupTask(
         await deps.settleAttempt({ attemptId: attempt.attemptId, state: "blocked", failureClass: "task", failureCode: "invalid-structured-output" });
         return { ok: false, reason: "invalid-output", message: "I couldn't determine a safe complete setup for this project.", runId, attempts: attemptsUsed };
       }
+      if (input.validateOutput && !input.validateOutput(parsed)) {
+        await deps.settleAttempt({ attemptId: attempt.attemptId, state: "blocked", failureClass: "task", failureCode: "invalid-setup-schema" });
+        return { ok: false, reason: "invalid-output", message: "I couldn't determine a safe complete setup for this project.", runId, attempts: attemptsUsed };
+      }
+      await deps.settleAttempt({ attemptId: attempt.attemptId, state: "completed" });
+      return { ok: true, output: parsed, runId, attempts: attemptsUsed };
     }
     if (input.signal?.aborted) {
       await deps.settleAttempt({ attemptId: attempt.attemptId, state: "interrupted", failureClass: "lifecycle", failureCode: "project-closed" });
