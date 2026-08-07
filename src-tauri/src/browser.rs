@@ -123,6 +123,47 @@ impl BrowserManager {
         }
         self.views.lock().unwrap().clear();
     }
+
+    fn memory_pressure_targets(&self, include_visible: bool) -> Vec<(String, String)> {
+        self.views
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, state)| include_visible || !state.visible)
+            .map(|(tab_id, state)| (tab_id.clone(), state.label.clone()))
+            .collect()
+    }
+
+    /// Tear down the JavaScript heaps in preview renderers while the machine
+    /// is running out of memory. At warning pressure only hidden previews are
+    /// touched; at critical pressure the visible preview is refreshed too.
+    /// Reloading preserves the URL, cookies and the native view handle, so the
+    /// frontend does not end up pointing at a child view that was closed under
+    /// it. The page can lose ephemeral in-document state, but only after the
+    /// alternative has become WebKit terminating Canopy's main renderer.
+    pub fn reload_for_memory_pressure(
+        &self,
+        app: &tauri::AppHandle,
+        include_visible: bool,
+    ) -> Vec<String> {
+        // Do not hold the state mutex while dispatching work to WebKit's main
+        // thread. Besides needless contention, callbacks from a reload can
+        // immediately re-enter BrowserManager through the navigation hook.
+        let targets = self.memory_pressure_targets(include_visible);
+        let mut reloaded = Vec::new();
+        for (tab_id, label) in targets {
+            let Some(view) = app.get_webview(&label) else {
+                continue;
+            };
+            match view.reload() {
+                Ok(()) => reloaded.push(tab_id),
+                Err(error) => log::warn!(
+                    "memory-watchdog: couldn't reload preview {tab_id} ({label}): {error}"
+                ),
+            }
+        }
+        reloaded
+    }
 }
 
 /// The child webview behind a browser tab. Every caller resolves through here —
@@ -760,5 +801,39 @@ mod tests {
         app.handle().manage(BrowserManager::default());
         let err = webview(app.handle(), "tab-gone").unwrap_err();
         assert!(err.contains("tab-gone"), "{err}");
+    }
+
+    #[test]
+    fn memory_pressure_spares_the_visible_preview_until_critical() {
+        let manager = BrowserManager::default();
+        let mut views = manager.views.lock().unwrap();
+        for (tab_id, visible) in [("visible", true), ("hidden-a", false), ("hidden-b", false)] {
+            views.insert(
+                tab_id.into(),
+                ViewState {
+                    label: label_for(tab_id),
+                    visible,
+                    bounds: Rect::default(),
+                    repaint_tried: false,
+                },
+            );
+        }
+        drop(views);
+
+        let mut warning: Vec<String> = manager
+            .memory_pressure_targets(false)
+            .into_iter()
+            .map(|(tab_id, _)| tab_id)
+            .collect();
+        warning.sort();
+        assert_eq!(warning, ["hidden-a", "hidden-b"]);
+
+        let mut critical: Vec<String> = manager
+            .memory_pressure_targets(true)
+            .into_iter()
+            .map(|(tab_id, _)| tab_id)
+            .collect();
+        critical.sort();
+        assert_eq!(critical, ["hidden-a", "hidden-b", "visible"]);
     }
 }

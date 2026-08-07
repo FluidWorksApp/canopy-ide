@@ -385,6 +385,18 @@ pub fn run() {
     crash::install_panic_hook();
 
     let builder = tauri::Builder::default();
+    // Apple exposes an explicit renderer-termination notification. Use it for
+    // every WebKit view so an OS memory kill becomes an immediate refresh;
+    // the main-view heartbeat remains the cross-platform backstop for hangs
+    // and for terminations that do not produce this callback.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let builder = builder.on_web_content_process_terminate(|webview| {
+        let label = webview.label();
+        log::error!("webview renderer terminated ({label}); reloading");
+        if let Err(error) = webview.reload() {
+            log::error!("webview renderer reload failed ({label}): {error}");
+        }
+    });
     // Must be first: a second `canopy <dir>` invocation forwards its argv
     // here and exits, instead of starting an app that would fight this one
     // over the hook bridge and PTY ownership.
