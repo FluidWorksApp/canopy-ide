@@ -14,6 +14,12 @@ export interface StructuredRunnerPolicy {
   sessionId: string;
   cwd?: string;
   authority: StructuredRunnerAuthority;
+  /** Whether a workspace-write Codex sandbox may reach the network. Ignored
+   *  for read-only authority and by dialects without an OS sandbox flag. */
+  network?: boolean;
+  /** Every directory the workspace-write sandbox may change in addition to
+   *  its cwd. Ignored for read-only authority. */
+  writableRoots?: readonly string[];
 }
 
 export interface StructuredRunnerLaunch {
@@ -69,8 +75,53 @@ const codexMode = (authority: StructuredRunnerAuthority): string =>
  *  against `codex exec --help` (0.146.1). Never the third value, and never
  *  `--dangerously-bypass-approvals-and-sandbox`: a task Canopy launched
  *  unattended is the last thing that should be running outside the sandbox. */
-export function codexSandbox(authority: StructuredRunnerAuthority): string[] {
-  return ["-s", codexMode(authority)];
+type CodexSandboxPolicy = Pick<
+  StructuredRunnerPolicy,
+  "authority" | "network" | "writableRoots"
+>;
+
+const codexWorkspaceConfig = (
+  policy: CodexSandboxPolicy,
+  legacyWritableRoots: readonly string[] = [],
+): string[] => {
+  if (codexMode(policy.authority) !== "workspace-write") return [];
+  // An explicit empty list is meaningful: callers using the workspace grant
+  // have named the whole box. additionalDirectories remains a fallback for
+  // older callers until all launch sites carry writableRoots in policy.
+  const writableRoots = policy.writableRoots ?? legacyWritableRoots;
+  return [
+    ...(policy.network !== undefined
+      ? [
+          "-c",
+          `sandbox_workspace_write.network_access=${String(policy.network)}`,
+        ]
+      : []),
+    ...(writableRoots.length
+      ? [
+          "-c",
+          `sandbox_workspace_write.writable_roots=${JSON.stringify([...writableRoots])}`,
+        ]
+      : []),
+  ];
+};
+
+export function codexSandbox(authority: StructuredRunnerAuthority): string[];
+export function codexSandbox(
+  policy: CodexSandboxPolicy,
+  legacyWritableRoots?: readonly string[],
+): string[];
+export function codexSandbox(
+  policyOrAuthority: CodexSandboxPolicy | StructuredRunnerAuthority,
+  legacyWritableRoots: readonly string[] = [],
+): string[] {
+  const policy = typeof policyOrAuthority === "string"
+    ? { authority: policyOrAuthority }
+    : policyOrAuthority;
+  return [
+    "-s",
+    codexMode(policy.authority),
+    ...codexWorkspaceConfig(policy, legacyWritableRoots),
+  ];
 }
 
 /** The same authority for `codex exec resume`, which does NOT take `-s`.
@@ -92,23 +143,31 @@ export function codexSandbox(authority: StructuredRunnerAuthority): string[] {
  *  does not control and must not fail on. It is a probe, not a runtime flag. */
 export function codexResumeSandbox(
   authority: StructuredRunnerAuthority,
-  writableRoots: readonly string[] = [],
+  writableRoots?: readonly string[],
+): string[];
+export function codexResumeSandbox(
+  policy: CodexSandboxPolicy,
+  legacyWritableRoots?: readonly string[],
+): string[];
+export function codexResumeSandbox(
+  policyOrAuthority: CodexSandboxPolicy | StructuredRunnerAuthority,
+  legacyWritableRoots: readonly string[] = [],
 ): string[] {
-  const mode = codexMode(authority);
+  const policy = typeof policyOrAuthority === "string"
+    ? { authority: policyOrAuthority, writableRoots: legacyWritableRoots }
+    : policyOrAuthority;
+  const mode = codexMode(policy.authority);
   return [
     "-c",
     `sandbox_mode="${mode}"`,
-    // Only meaningful when something may be written; a read-only turn that
-    // named writable roots would be describing an authority it does not have.
-    ...(mode === "workspace-write" && writableRoots.length
-      ? [
-          "-c",
-          `sandbox_workspace_write.writable_roots=${JSON.stringify([...writableRoots])}`,
-        ]
-      : []),
+    ...codexWorkspaceConfig(policy, legacyWritableRoots),
   ];
 }
 
+/** Claude has no OS sandbox argv equivalent. Its filesystem containment is
+ *  enforced before tools run by canopy_hook.rs's proven PreToolUse
+ *  `permissionDecision: "deny"` response; permissionArgs describes which
+ *  tools may be attempted, but it is not the containment boundary. */
 const CLAUDE_RUNNER: StructuredRunner = {
   tier: "structured",
   dialect: "claude",
@@ -171,7 +230,7 @@ const CODEX_RUNNER: StructuredRunner = {
     ...(o.policy.cwd ? ["-C", o.policy.cwd] : []),
     ...(o.additionalDirectories ?? []).flatMap((dir) => ["--add-dir", dir]),
     ...(o.policy.model ? ["-m", o.policy.model] : []),
-    ...codexSandbox(o.policy.authority),
+    ...codexSandbox(o.policy, o.additionalDirectories ?? []),
   ],
   // `resume` takes the thread id positionally and accepts almost none of the
   // flags above — see codexResumeSandbox. `-C` and `--add-dir` have no config
@@ -185,7 +244,7 @@ const CODEX_RUNNER: StructuredRunner = {
     "--json",
     "--skip-git-repo-check",
     ...(o.policy.model ? ["-m", o.policy.model] : []),
-    ...codexResumeSandbox(o.policy.authority, o.additionalDirectories ?? []),
+    ...codexResumeSandbox(o.policy, o.additionalDirectories ?? []),
   ],
 };
 
