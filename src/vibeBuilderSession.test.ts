@@ -1260,10 +1260,22 @@ describe("finding the env file in a monorepo", () => {
     // It must refuse, and it must not claim the file is safely out of git.
     expect(said).not.toMatch(/untracked|stay out of git|out of git/i);
     expect(said).toMatch(/can't link|tracked/i);
+    expect(q?.kind).toBe("notice");
+    expect(h.order).not.toContain("spawn");
   });
 });
 
 describe("managed abstractions", () => {
+  it("sends a safe service-link request to the Build agent instead of showing its internal plan", async () => {
+    const h = harness();
+    await h.session.send("can we link supabase");
+
+    expect(h.order).toContain("spawn");
+    expect(h.transport.send).toHaveBeenCalledWith("can we link supabase");
+    expect(h.session.state.question).toBeNull();
+    expect(h.replies.join(" ")).not.toMatch(/Linking Supabase|SUPABASE_SERVICE_ROLE_KEY/);
+  });
+
   it("proposes an install instead of running it, and never sends it to the agent", async () => {
     const h = harness();
     await h.session.send("install stripe");
@@ -1331,7 +1343,7 @@ describe("managed abstractions", () => {
     // "incomplete" — and production must not go out on an unproven build, no
     // matter what the project on disk claims.
     await h.session.send("deploy to production");
-    expect(h.session.state.question?.kind).toBe("question");
+    expect(h.session.state.question?.kind).toBe("notice");
     expect(h.abstractionRuns).toHaveLength(0);
   });
 

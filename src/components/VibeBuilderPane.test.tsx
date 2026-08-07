@@ -167,7 +167,11 @@ describe("VibeBuilderPane", () => {
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(h.send).toHaveBeenCalledWith("Make the button blue");
+    const receipt = screen.getByLabelText("Your latest request");
+    expect(within(receipt).getByText("You asked")).toBeTruthy();
+    expect(within(receipt).getByText("Make the button blue")).toBeTruthy();
     openTranscript();
+    expect(screen.queryByLabelText("Your latest request")).toBeNull();
     expect(screen.getByText("Make the button blue")).toBeTruthy();
     expect(screen.getByRole("img", { name: "Ash is thinking" })).toBeTruthy();
     expect((input as HTMLTextAreaElement).value).toBe("");
@@ -210,6 +214,9 @@ describe("VibeBuilderPane", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     expect(h.send).toHaveBeenCalledWith("Keep the title short");
     expect(pane.classList.contains("is-collapsed")).toBe(true);
+    expect(screen.getByLabelText("Your latest request").textContent).toContain(
+      "Keep the title short",
+    );
   });
 
   it("minimizes a pending question independently from the composer", () => {
@@ -330,6 +337,8 @@ describe("VibeBuilderPane", () => {
     });
     expect(within(notice).getByText("I'm reading its output to find out why.")).toBeTruthy();
     expect(within(notice).queryByText("Reply below.")).toBeNull();
+    expect(screen.getByRole("img", { name: "Ash is thinking" })).toBeTruthy();
+    expect(screen.queryByText("Waiting for you")).toBeNull();
   });
 
   it("pins the persona to needs while a question is outstanding", () => {

@@ -179,16 +179,29 @@ function applySessionState(
   state: BuilderSessionState,
 ): Pick<BuilderView, "persona" | "question" | "questionId"> {
   const questionId = state.question?.id ?? null;
+  const asksForAnswer = Boolean(state.question && state.question.kind !== "notice");
   let base = current.persona;
-  if (questionId && !base.questionPending) {
+  if (asksForAnswer && !base.questionPending) {
     base = reducePersona(base, { kind: "question-asked" });
-  } else if (!questionId && base.questionPending) {
+  } else if (!asksForAnswer && base.questionPending) {
     base = reducePersona(base, { kind: "question-answered" });
   }
   let persona = reducePersona(base, state.persona);
+  if (state.question?.kind === "notice") {
+    // An incident input historically implied "needs" because every incident
+    // used to ask a question. A notice explicitly means Ash is already acting,
+    // so carrying that old implication forward produces the contradictory
+    // "Waiting for you" state beside copy that says "I'm handling it."
+    persona = {
+      ...persona,
+      state: persona.state === "needs" ? "thinking" : persona.state,
+      utterance: persona.state === "needs" ? null : persona.utterance,
+      questionPending: false,
+    };
+  }
   // The visible card is authoritative even if a stale state input says the
   // question was answered. Blocked still wins because it keeps pending true.
-  if (questionId && !persona.questionPending) {
+  if (asksForAnswer && !persona.questionPending) {
     persona = reducePersona(persona, { kind: "question-asked" });
   }
   return { persona, question: state.question ?? null, questionId };
@@ -431,6 +444,11 @@ export function VibeBuilderPane({
   };
 
   const status = vibeBuilderStatus(view.persona, phase);
+  const latestUserRequest = [...view.items]
+    .reverse()
+    .find(
+      (item): item is Extract<BuilderItem, { kind: "you" }> => item.kind === "you",
+    );
   const showWelcome = !hasSpoken && view.items.length === 0;
   const contextualCushion =
     Boolean(question) || (showWelcome && starterIdeas.length > 0);
@@ -438,6 +456,14 @@ export function VibeBuilderPane({
     transcriptOpen || (contextualCushion && !cushionDismissed);
   const composerOpen =
     !status.blocking && (composerFocused || Boolean(draft.trim()) || cushionOpen);
+  // Closing the transcript must not make the active turn anonymous. The
+  // request is the anchor for every status that follows it; without this row,
+  // "Making your change" gives no clue which change is in flight and a
+  // question looks detached from the words that caused it.
+  const showTurnReceipt =
+    Boolean(latestUserRequest) &&
+    !transcriptOpen &&
+    (status.busy || Boolean(question) || status.signal === "blocked");
   useEffect(() => {
     if (view.questionId && cushionOpen) questionCard.current?.focus();
   }, [cushionOpen, view.questionId]);
@@ -562,6 +588,16 @@ export function VibeBuilderPane({
       </div>
 
       <div className="vibe-builder-cushion">
+        {showTurnReceipt && latestUserRequest && (
+          <div
+            className="vibe-builder-turn-receipt"
+            aria-label="Your latest request"
+            title={latestUserRequest.text}
+          >
+            <span>You asked</span>
+            <p>{latestUserRequest.text}</p>
+          </div>
+        )}
         {cushionOpen && (
           <div className="vibe-builder-cushion-body" key="context">
             {contextualCushion && (

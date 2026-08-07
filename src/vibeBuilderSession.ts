@@ -1205,6 +1205,12 @@ export class VibeBuilderSession implements BuilderSession {
       return this.enqueue(() => this.answerAbstraction(message));
     }
     const intent = parseVibeIntent(message);
+    // Linking a service changes the application, so the Build agent owns the
+    // actual turn. Canopy still performs the secret-safety preflight below,
+    // but the old path stopped at a generated five-step guide and never sent
+    // the person's request anywhere. The guide then appeared as a question
+    // even though it contained no single thing a person could answer.
+    if (intent?.kind === "link") return this.sendLinkTurn(intent, message);
     if (intent) {
       return this.enqueue(() => this.proposeIntent(intent, message));
     }
@@ -1215,6 +1221,62 @@ export class VibeBuilderSession implements BuilderSession {
       failed = reject;
     });
     const queued = this.sendQueue.then(() => this.runTurn(message, sent, failed));
+    this.sendQueue = queued.catch(() => {});
+    return accepted;
+  }
+
+  /** Preflight a service link, then give the original request to the agent.
+   *
+   * A tracked env file remains a hard stop: the agent must not get a turn that
+   * can write credentials into git. A safe project continues as an ordinary
+   * Build turn instead of rendering the planner's internal checklist. */
+  private sendLinkTurn(intent: VibeIntent, message: string): Promise<void> {
+    let sent!: () => void;
+    let failed!: (error: unknown) => void;
+    const accepted = new Promise<void>((resolve, reject) => {
+      sent = resolve;
+      failed = reject;
+    });
+    const queued = this.sendQueue.then(async () => {
+      if (this.stopped) {
+        sent();
+        return;
+      }
+      let proposal: AbstractionProposal;
+      try {
+        proposal = proposeAbstraction(
+          intent,
+          await this.deps.abstractionContext(this.options.componentPath, intent),
+          this.lastVerification,
+        );
+      } catch {
+        this.present(
+          { kind: "idle" },
+          {
+            id: `vibe-link-preflight-${this.deps.now()}`,
+            kind: "notice",
+            prompt: "I couldn't check whether this project can store the connection safely.",
+            detail: `Nothing has changed. You asked: "${message}"`,
+          },
+        );
+        sent();
+        return;
+      }
+      if (proposal.kind === "refuse") {
+        this.present(
+          { kind: "idle" },
+          {
+            id: `vibe-link-refused-${this.deps.now()}`,
+            kind: "notice",
+            prompt: proposal.title,
+            detail: proposal.detail,
+          },
+        );
+        sent();
+        return;
+      }
+      await this.runTurn(message, sent, failed);
+    });
     this.sendQueue = queued.catch(() => {});
     return accepted;
   }
@@ -1244,7 +1306,7 @@ export class VibeBuilderSession implements BuilderSession {
         { kind: "idle" },
         {
           id: `vibe-abstraction-${this.deps.now()}`,
-          kind: "question",
+          kind: "notice",
           prompt: "I couldn't read enough about this project to plan that.",
           detail: `Nothing has changed. You asked: "${message}"`,
         },
@@ -1261,7 +1323,7 @@ export class VibeBuilderSession implements BuilderSession {
         { kind: "idle" },
         {
           id: `vibe-abstraction-${this.deps.now()}`,
-          kind: "question",
+          kind: "notice",
           prompt: proposal.title,
           detail: proposal.detail,
         },
