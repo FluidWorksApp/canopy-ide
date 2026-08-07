@@ -8948,6 +8948,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           "chore",
           undefined,
           undefined,
+          // Build owns a preview surface, not a process-output surface. Keep
+          // the run mounted for Engineer and for diagnostics without
+          // selecting it.
           false,
           undefined,
           { componentId: component.id, runCommandId: setup.id },

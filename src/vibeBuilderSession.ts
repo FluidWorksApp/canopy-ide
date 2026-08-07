@@ -36,6 +36,9 @@ import { probeCli, type CliProbeDeps } from "./vibeCliProbe";
 import { inspectFleetRoute } from "./fleetSnapshot";
 import { choicesFor } from "./modelCatalog";
 import { AGENT_CLIS, checkCliUpdates, checkInstalledClis } from "./projects";
+import type { ComponentRole, RunCommand } from "./projects";
+import type { RepairProblem } from "./vibeRepair";
+import type { VibeRepairTaskInput, VibeRepairTaskResult } from "./vibeRepairSession";
 import { DEFAULT_PROFILE, launchEnvSync, launchProfile } from "./profiles";
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 import {
@@ -143,6 +146,15 @@ export interface VibeServerIncidentInput {
   present?: boolean;
   /** Captured once at observation time and retained across persistence retries. */
   activeAttempt?: { runId: string; attemptId: string } | null;
+  /** What the caller knows about the crashing component, handed to repair so
+   *  the troubleshooter starts from facts rather than rediscovery. Optional:
+   *  an incident with no context still gets repaired, from the log alone. */
+  component?: { label: string; path: string; role?: ComponentRole };
+  /** Every command the survey attached to that component — the repair agent
+   *  must prefer these over inventing its own. */
+  commands?: RunCommand[];
+  /** The crashing command itself, by name and spelling. */
+  command?: { name: string; command: string };
 }
 
 export interface CheckpointReview {
@@ -209,6 +221,11 @@ export interface VibeBuilderSessionDeps {
   reserveAttempt: typeof reserveAttempt;
   /** Every route Canopy could launch this turn on, with its fleet state. */
   listRoutes(): Promise<RouteCandidate[]>;
+  /** Runs one repair task for a reported problem. Injectable so tests never
+   *  launch an agent; the default dynamic-imports the runtime, because a
+   *  static import of vibeRepairSession → vibeProjectSetup → this module
+   *  would close a cycle at init time. */
+  repair?(input: VibeRepairTaskInput): Promise<VibeRepairTaskResult>;
   /** Installed version of a CLI, or null when it cannot be probed. */
   cliVersion(cli: string): Promise<string | null>;
   /** Everything the managed-abstraction planners need to judge a request:
@@ -1391,7 +1408,7 @@ export class VibeBuilderSession implements BuilderSession {
           id: `vibe-server-${input.componentId}-${input.runCommandId}`,
           kind: "question",
           prompt: "The app server keeps stopping.",
-          detail: "I stopped restarting it. The failed run keeps the server output for inspection.",
+          detail: "I'm reading its output to find out why.",
         },
       );
     }
@@ -1479,6 +1496,11 @@ export class VibeBuilderSession implements BuilderSession {
         failureClass: "watchdog",
         failureCode: "vibe-server-crash-loop",
       });
+      // Recording is not the response — it is the evidence for one. The log
+      // tail now goes to a repair agent that reads it, acts inside the
+      // component, and asks before anything destructive. Not awaited: the
+      // incident is recorded either way, and repair reports through present().
+      if (input.present !== false) void this.repairServerCrash(input, logTail);
       if (input.present === false) this.serverIncidentKeys.delete(input.key);
       return settled ? "recorded" : "recorded-unsettled";
     } catch {
@@ -1492,6 +1514,106 @@ export class VibeBuilderSession implements BuilderSession {
         });
       }
       return "failed";
+    }
+  }
+
+  /** Keys with a repair underway, so a re-reported incident cannot stack a
+   *  second agent onto the same broken server. */
+  private repairsInFlight = new Set<string>();
+
+  /** The troubleshooter. Where reportServerIncident files evidence, this
+   *  spends it: a repair agent gets the log tail, the component, and every
+   *  command the survey found, diagnoses, acts inside the component, and asks
+   *  the person (canopy_ask_user) before anything destructive. Its verdict is
+   *  spoken in Build's own voice — never "the server keeps stopping" with
+   *  nothing behind it. */
+  private async repairServerCrash(
+    input: VibeServerIncidentInput,
+    logTail: string,
+  ): Promise<void> {
+    if (this.stopped || this.repairsInFlight.has(input.key)) return;
+    this.repairsInFlight.add(input.key);
+    try {
+      const component = {
+        id: input.componentId,
+        label: input.component?.label ?? this.options.projectName,
+        path: input.component?.path ?? this.options.componentPath,
+        ...(input.component?.role ? { role: input.component.role } : {}),
+      };
+      const problem: RepairProblem = {
+        code: "server-crash-loop",
+        statement: `The app server for ${component.label} keeps stopping moments after it starts.`,
+        projectId: this.options.projectId,
+        projectName: this.options.projectName,
+        component,
+        ...(input.command
+          ? { runCommand: { id: input.runCommandId, ...input.command } }
+          : {}),
+        commands: input.commands ?? [],
+        evidence: {
+          logTail,
+          exitCode: input.exitCode,
+          crashCount: input.crashTimes.length,
+        },
+      };
+      // The default is imported at call time, not module load: a static
+      // import of vibeRepairSession → vibeProjectSetup → this module would
+      // close a cycle at init.
+      const repair =
+        this.deps.repair ??
+        (async (repairInput: VibeRepairTaskInput): Promise<VibeRepairTaskResult> => {
+          const [runtime, setup] = await Promise.all([
+            import("./vibeRepairSession"),
+            import("./vibeProjectSetup"),
+          ]);
+          return runtime.runVibeRepairTask(
+            repairInput,
+            setup.DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS,
+          );
+        });
+      const result = await repair({ problem });
+      if (this.stopped) return;
+      if (result.ok && result.verdict.fixed) {
+        this.serverIncidentOpen = false;
+        this.incidentOpen = false;
+        this.resolveServerIncident(input.key);
+        this.present(
+          { kind: "idle" },
+          {
+            id: `vibe-repair-fixed-${input.componentId}-${this.deps.now()}`,
+            kind: "question",
+            prompt: "Found it and fixed it.",
+            detail: [
+              result.verdict.diagnosis,
+              ...result.verdict.actions.map((action) => action.did),
+            ].join(" "),
+          },
+        );
+      } else if (result.ok) {
+        this.present(
+          { kind: "incident" },
+          {
+            id: `vibe-repair-blocked-${input.componentId}-${this.deps.now()}`,
+            kind: "question",
+            prompt: "I found what's wrong, and I need your help with one thing.",
+            detail: [result.verdict.diagnosis, result.verdict.blocker]
+              .filter(Boolean)
+              .join(" "),
+          },
+        );
+      } else {
+        this.present(
+          { kind: "incident" },
+          {
+            id: `vibe-repair-failed-${input.componentId}-${this.deps.now()}`,
+            kind: "question",
+            prompt: "The app server keeps stopping.",
+            detail: `${result.message} The failed run keeps the server output for inspection.`,
+          },
+        );
+      }
+    } finally {
+      this.repairsInFlight.delete(input.key);
     }
   }
 

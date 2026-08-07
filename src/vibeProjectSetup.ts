@@ -1068,6 +1068,21 @@ const setupFlights = new WeakMap<
   Map<string, VibeProjectSetupFlight>
 >();
 
+/** Failure cooldowns, surviving hot module replacement.
+ *
+ *  The flight map above does not: editing any source file while the dev
+ *  instance is open replaces this module, and with it every held failed
+ *  flight — so each save re-armed setup for a project whose last attempt just
+ *  failed, and a session of active development relaunched a billed survey
+ *  every few seconds (observed: reject at 03:42:50, fresh launch at
+ *  03:42:51). Only the timestamps live here, keyed by project id, so all
+ *  code stays fresh after a reload and only the memory of recent failure
+ *  persists. Consulted solely for the default production deps: injected test
+ *  deps keep their isolated WeakMap world and never see cross-test state. */
+const FAILED_SETUPS = Symbol.for("canopy.vibeSetupFailedAt");
+const failedSetups = ((globalThis as Record<symbol, unknown>)[FAILED_SETUPS] ??=
+  new Map<string, number>()) as Map<string, number>;
+
 function flightsFor(deps: VibeProjectSetupSessionDeps): Map<string, VibeProjectSetupFlight> {
   let flights = setupFlights.get(deps);
   if (!flights) {
@@ -1100,6 +1115,9 @@ function createVibeProjectSetupFlight(
     flight.status = "failed";
     flight.failedAt = Date.now();
     flight.state = { persona: { kind: "incident" }, question: null };
+    if (deps === DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS) {
+      failedSetups.set(flight.project.id, flight.failedAt);
+    }
     publish({ kind: "reply", text: message });
     // The failed flight is KEPT. Dropping it here made the failure retryable
     // on the next mount, which sounds like resilience and is actually an
@@ -1174,6 +1192,7 @@ function createVibeProjectSetupFlight(
       flight.fingerprint = after.fingerprint;
       flight.status = "succeeded";
       flight.state = { persona: { kind: "question-answered" }, question: null };
+      failedSetups.delete(activeProject.id);
       publish({ kind: "ready" });
     } catch (error) {
       if (flight.abort.signal.aborted) return;
@@ -1231,6 +1250,22 @@ export function createVibeProjectSetupSession(
   ) {
     flights.delete(project.id);
     flight = undefined;
+  }
+  // No flight in this module's map does not mean no recent failure: HMR
+  // replaces the module and its maps, and the cooldown must not be lost with
+  // them — see failedSetups. Rebuild the held failed flight instead of
+  // starting a fresh billed run.
+  if (!flight && deps === DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS) {
+    const failedAt = failedSetups.get(project.id);
+    if (failedAt !== undefined && Date.now() - failedAt < SETUP_RETRY_COOLDOWN_MS) {
+      flight = createVibeProjectSetupFlight(project, persist, deps);
+      flight.status = "failed";
+      flight.failedAt = failedAt;
+      flight.state = { persona: { kind: "incident" }, question: null };
+      flights.set(project.id, flight);
+    } else if (failedAt !== undefined) {
+      failedSetups.delete(project.id);
+    }
   }
   if (!flight) {
     flight = createVibeProjectSetupFlight(project, persist, deps);
