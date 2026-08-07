@@ -369,7 +369,46 @@ export function vibeSetupUserMessage(
   );
 }
 
-export function vibeSetupSystemPrompt(fingerprint: string, componentRoots: readonly string[] = []): string {
+/** What Canopy can state about the project instead of making the agent infer
+ *  it. The person configured these components and named them; a survey that
+ *  begins by guessing at that is redoing settled work, and guessing differently
+ *  each run. */
+export interface VibeSetupProjectBrief {
+  name: string;
+  components: readonly Component[];
+}
+
+function briefSection(brief: VibeSetupProjectBrief | undefined): string {
+  if (!brief?.components.length) return "";
+  const lines = brief.components.map((component) => {
+    const commands = (component.commands ?? []).map((command) => {
+      const argv = command.argv?.length ? command.argv.join(" ") : command.command;
+      const purpose = command.purpose ? ` [${command.purpose}]` : "";
+      return `      - "${command.name}"${purpose}: ${argv}${command.cwd ? ` (in ${command.cwd})` : ""}`;
+    });
+    return (
+      `  - ${component.label} — ${normalized(component.path)}\n` +
+      (commands.length
+        ? `    already configured in Canopy:\n${commands.join("\n")}`
+        : "    no run command configured yet")
+    );
+  });
+  return (
+    `\n\nThis is the project "${brief.name}". Canopy already holds this much, ` +
+    `configured by the person who owns it:\n\n${lines.join("\n")}\n\n` +
+    "Treat that as given, not as a hypothesis to re-derive: the labels are the " +
+    "person's own words for these directories, and an already-configured " +
+    "command is one they have run. Confirm each against the repository and say " +
+    "so if one is now wrong, but do not rename what is already named, and do " +
+    "not omit a component because you found nothing interesting in it."
+  );
+}
+
+export function vibeSetupSystemPrompt(
+  fingerprint: string,
+  componentRoots: readonly string[] = [],
+  brief?: VibeSetupProjectBrief,
+): string {
   // The working directory is the components' common ancestor, which for two
   // sibling checkouts is whatever folder the person keeps repositories in —
   // here that was ~/Documents/GitHub, 106GB of unrelated projects. Told only
@@ -386,7 +425,7 @@ export function vibeSetupSystemPrompt(fingerprint: string, componentRoots: reado
   // `name`/`path`/`kind` instead of `label`/`root`/`role` — and a correct
   // survey was thrown away for answering in the wrong shape. Any change to the
   // interfaces above has to be made here too, or that returns.
-  return `You are Canopy's project setup agent.${scope} Read the entire repository, including non-JavaScript components. Do not edit files. Discover every component, how each runs, the one page-serving preview target, every process required for that page to work, external services, and deployment evidence.
+  return `You are Canopy's project setup agent.${scope} Read the entire repository, including non-JavaScript components. Do not edit files. Discover every component, how each runs, the one page-serving preview target, every process required for that page to work, external services, and deployment evidence.${briefSection(brief)}
 
 Return exactly one JSON object in this shape and no other. Field names are exact; any field not listed here is rejected, and so is any missing one:
 
@@ -428,6 +467,18 @@ Return exactly one JSON object in this shape and no other. Field names are exact
   }],
   "deployment": null                          // or { "providerId": "...", "componentKey": "...", "evidence": ["..."] }
 }
+
+Work out what each component IS before deciding how it runs, from its manifest
+rather than from the shape of the tree: package.json, go.mod, Cargo.toml,
+pyproject.toml/requirements.txt, Gemfile, pom.xml, build.gradle(.kts),
+*.xcodeproj/Package.swift, pubspec.yaml, composer.json, *.csproj, Dockerfile,
+Makefile. The run command is whatever that ecosystem's own is — gradlew
+assembleDebug, xcodebuild, go run, cargo run, uvicorn, rails s, mvn spring-boot:run,
+flutter run, dotnet run, make — and argv[0] must be a real executable, never a
+shell built-in and never a script you assume exists. A component that is an
+Android app, an iOS app, a Go service or a Rails API is not served by a
+JavaScript command, and "there is no package.json" is not a reason to call it
+non-runnable.
 
 Rules: every component directory you were given must appear. requiredProcesses must include the preview entry. Every path in root, cwd and evidence must be a real path you observed. Never include a secret value. If you cannot determine a complete setup, return no JSON object and explain the blocker plainly instead.`;
 }
@@ -506,6 +557,11 @@ export interface VibeProjectSetupTaskInput {
   /** Named to the agent so it searches the project rather than everything that
    *  happens to sit beside it under projectRoot. */
   componentRoots?: readonly string[];
+  /** What Canopy already knows: what each directory is called, and any run
+   *  command already attached to it. Withholding it asked the agent to
+   *  rediscover, from an unlabelled list of paths, facts the person had
+   *  already told Canopy — and to guess at names Canopy could simply state. */
+  components?: readonly Component[];
   /** Paths Canopy already observed, handed over so the agent reads rather than
    *  searches. */
   inventory?: readonly string[];
@@ -610,11 +666,17 @@ export async function runVibeProjectSetupTask(
   }
   const routeFor = async (route: SelectedRoute) =>
     resolveRoute(route, eligible, SETUP_ROUTE_VERSIONS, await deps.cliVersion(route.cli).catch(() => null));
+  // Where the agent actually runs. The task record and the launch have to name
+  // the same directory — the native side rejects a structured runner whose cwd
+  // is not its reserved workspace, which is the right check: an attempt filed
+  // against a directory the process never ran in is a record of something that
+  // did not happen.
+  const agentCwd = input.componentRoots?.[0] ?? input.projectRoot;
   let reservation = await deps.reserve({
     kind: "vibe-project-setup",
     projectId: input.projectId,
     componentId: "project-setup",
-    worktreePath: input.projectRoot,
+    worktreePath: agentCwd,
     goal: "Understand and configure this project for Build mode",
     acceptance: [
       "Return a validated structured description of every component.",
@@ -645,10 +707,21 @@ export async function runVibeProjectSetupTask(
     let error = "";
     let finishEvent: ((result: AttemptRun) => void) | null = null;
     let live: ProjectRunnerTransport | null = null;
+    // Built once and both sent and reported. Rebuilt for the log it would have
+    // been rebuilt with different arguments, and the number describing what was
+    // sent would quietly describe something else.
+    const systemPrompt = vibeSetupSystemPrompt(
+      input.repositoryFingerprint,
+      input.componentRoots ?? [],
+      input.components?.length
+        ? { name: input.projectName, components: input.components }
+        : undefined,
+    );
+    const userMessage = vibeSetupUserMessage(input.componentRoots ?? [], input.inventory ?? []);
     const launch: StructuredRunnerLaunch = {
       bin,
       policy: {
-        systemPromptAppend: vibeSetupSystemPrompt(input.repositoryFingerprint, input.componentRoots ?? []),
+        systemPromptAppend: systemPrompt,
         permissionMode: "plan",
         // The sidecar as a whole — nobody is here to answer a prompt for the
         // one reader that was left off the list. What this agent may do stays
@@ -658,7 +731,16 @@ export async function runVibeProjectSetupTask(
         disallowedTools: ["Bash", "Edit", "Write", "NotebookEdit", "KillShell"],
         model: chosen.requestedModel ?? "",
         sessionId: deps.sessionId(),
-        cwd: input.projectRoot,
+        // A component root, never projectRoot. projectRoot is only the
+        // components' common ancestor and has to stay that way — validation
+        // uses it as the containment boundary — but for two sibling checkouts
+        // it is whatever folder the person keeps repositories in. Here that
+        // was ~/Documents/GitHub: every repository on the machine, 106GB of
+        // it, as the agent's working directory. Every relative path it
+        // resolved and every listing it took to orient itself started from
+        // there. The other roots arrive as additionalDirectories, so landing
+        // in one costs nothing and reading the rest still works.
+        cwd: agentCwd,
         authority: "read-only",
       },
       // The attempt is recorded against a route that names a profile; without
@@ -677,8 +759,8 @@ export async function runVibeProjectSetupTask(
     void ipc.jsLog(
       "error",
       `vibe-setup: launching ${chosen.cli} bin=${deps.binFor(chosen.cli)} model=${chosen.requestedModel ?? "(none)"} ` +
-        `cwd=${input.projectRoot} addDirs=${(input.componentRoots ?? []).length} ` +
-        `promptChars=${vibeSetupSystemPrompt(input.repositoryFingerprint, input.componentRoots ?? []).length}+${vibeSetupUserMessage(input.componentRoots ?? [], input.inventory ?? []).length} ` +
+        `cwd=${agentCwd} addDirs=${(input.componentRoots ?? []).length} briefed=${input.components?.length ?? 0} ` +
+        `promptChars=${systemPrompt.length}+${userMessage.length} ` +
         `env=${JSON.stringify(launchEnvSync(chosen.cli).map(([name]) => name))}`,
     );
     let transport: ProjectRunnerTransport;
@@ -733,7 +815,7 @@ export async function runVibeProjectSetupTask(
           (finish) => { finishEvent = finish; },
           timeoutMs,
           input.signal,
-          vibeSetupUserMessage(input.componentRoots ?? [], input.inventory ?? []),
+          userMessage,
         );
     if (result.kind === "complete") {
       try {
@@ -921,6 +1003,7 @@ function createVibeProjectSetupFlight(
         projectName: activeProject.name,
         projectRoot: before.projectRoot,
         componentRoots: before.componentRoots,
+        components: activeProject.components,
         inventory: [...before.paths],
         repositoryFingerprint: before.fingerprint,
         onActivity: publish,
