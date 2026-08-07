@@ -188,6 +188,30 @@ describe("VibeBuilderPane", () => {
     expect(pane.classList.contains("is-pill")).toBe(true);
   });
 
+  it("collapses while working, then expands only for an engaged composer", () => {
+    const h = harness({ persona: { kind: "turn-progress" } });
+    render(<VibeBuilderPane session={h.session} />);
+    const pane = screen.getByRole("region", { name: "Ash builder" });
+    const input = screen.getByRole("textbox", { name: "Message Ash" });
+    const transcript = screen.getByRole("button", { name: "Open Transcript" });
+
+    expect(pane.classList.contains("is-collapsed")).toBe(true);
+    expect(input.getAttribute("aria-expanded")).toBe("false");
+    expect(transcript.textContent).toBe("");
+
+    fireEvent.focus(input);
+    expect(pane.classList.contains("is-composer-open")).toBe(true);
+    expect(input.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.change(input, { target: { value: "Keep the title short" } });
+    fireEvent.blur(input);
+    expect(pane.classList.contains("is-composer-open")).toBe(true);
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(h.send).toHaveBeenCalledWith("Keep the title short");
+    expect(pane.classList.contains("is-collapsed")).toBe(true);
+  });
+
   it("shows the real discovery state and stops only the current turn", async () => {
     const h = harness({ persona: { kind: "turn-progress" } });
     render(
@@ -199,7 +223,10 @@ describe("VibeBuilderPane", () => {
 
     const pane = screen.getByRole("region", { name: "Ash builder" });
     expect(pane.getAttribute("data-signal")).toBe("discovering");
+    expect(pane.getAttribute("data-blocking")).toBe("true");
     expect(screen.getByText("Understanding your project…")).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "Message Ash" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Stop current change" }));
     await waitFor(() => expect(h.cancelCurrentTurn).toHaveBeenCalledTimes(1));
     expect(h.send).not.toHaveBeenCalled();
@@ -488,6 +515,8 @@ describe("the builder pane boundary", () => {
     expect(build).toContain("var(--cyan)");
     expect(build).toContain(':root[data-theme="pixel"]');
     expect(build).toContain(':root[data-theme="vitrine"]');
+    expect(build).toContain("backdrop-filter: blur(");
+    expect(build).toContain("saturate(");
     expect(build).toContain("prefers-reduced-motion: reduce");
     expect(build).not.toMatch(/#[0-9a-f]{3,8}/i);
   });

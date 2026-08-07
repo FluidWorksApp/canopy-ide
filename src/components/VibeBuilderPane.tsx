@@ -49,33 +49,50 @@ export type VibeSignalState =
 export function vibeBuilderStatus(
   persona: PersonaState,
   phase: VibeBuilderPhase,
-): { label: string; signal: VibeSignalState; busy: boolean } {
+): { label: string; signal: VibeSignalState; busy: boolean; blocking: boolean } {
+  // Setup and handoff sessions intentionally cannot accept instructions. Keep
+  // that capability explicit instead of inferring it from a busy animation:
+  // an ordinary Build turn is busy but remains available for another request.
+  const blocking = phase !== "build";
   if (persona.state === "thinking") {
     return phase === "discovering"
-      ? { label: "Understanding your project…", signal: "discovering", busy: true }
-      : { label: "Making your change…", signal: "creating", busy: true };
+      ? {
+          label: "Understanding your project…",
+          signal: "discovering",
+          busy: true,
+          blocking,
+        }
+      : { label: "Making your change…", signal: "creating", busy: true, blocking };
   }
   if (persona.state === "explaining") {
-    return { label: "Checking the result…", signal: "checking", busy: true };
+    return { label: "Checking the result…", signal: "checking", busy: true, blocking };
   }
   if (persona.state === "needs") {
-    return { label: "Waiting for you", signal: "waiting", busy: false };
+    return { label: "Waiting for you", signal: "waiting", busy: false, blocking };
   }
   if (persona.state === "blocked") {
-    return { label: "Needs your attention", signal: "blocked", busy: false };
+    return { label: "Needs your attention", signal: "blocked", busy: false, blocking };
   }
   if (persona.state === "done") {
-    return { label: "Ready", signal: "complete", busy: false };
+    return { label: "Ready", signal: "complete", busy: false, blocking };
   }
   if (persona.state === "celebrating") {
-    return { label: "It’s live", signal: "published", busy: false };
+    return { label: "It’s live", signal: "published", busy: false, blocking };
   }
   if (persona.state === "sleeping") {
-    return { label: "Paused", signal: "idle", busy: false };
+    return { label: "Paused", signal: "idle", busy: false, blocking };
+  }
+  if (phase === "discovering") {
+    return {
+      label: "Understanding your project…",
+      signal: "discovering",
+      busy: true,
+      blocking,
+    };
   }
   return phase === "waiting"
-    ? { label: "Getting ready…", signal: "idle", busy: false }
-    : { label: "Ready", signal: "idle", busy: false };
+    ? { label: "Getting ready…", signal: "idle", busy: false, blocking }
+    : { label: "Ready", signal: "idle", busy: false, blocking };
 }
 
 /** Conversations are project-owned, while runner sessions are replaceable
@@ -199,6 +216,7 @@ export function VibeBuilderPane({
   const [draft, setDraft] = useState("");
   const [answeringQuestion, setAnsweringQuestion] = useState<string | null>(null);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
+  const [composerFocused, setComposerFocused] = useState(false);
   const [stopping, setStopping] = useState(false);
   const questionCard = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
@@ -212,6 +230,7 @@ export function VibeBuilderPane({
     sessionVersion.current += 1;
     setDraft("");
     setAnsweringQuestion(null);
+    setComposerFocused(false);
     setStopping(false);
     const switchedProject = projectIdRef.current !== projectId;
     projectIdRef.current = projectId;
@@ -371,6 +390,8 @@ export function VibeBuilderPane({
       openReplyId: null,
     }));
     setDraft("");
+    setComposerFocused(false);
+    composer.current?.blur();
     const version = sessionVersion.current;
     try {
       void Promise.resolve(session.send(message)).catch((error) =>
@@ -407,6 +428,8 @@ export function VibeBuilderPane({
     transcriptOpen ||
     Boolean(question) ||
     (showWelcome && starterIdeas.length > 0);
+  const composerOpen =
+    !status.blocking && (composerFocused || Boolean(draft.trim()) || cushionOpen);
   const stopCurrentTurn = async () => {
     if (!session.cancelCurrentTurn || stopping) return;
     setStopping(true);
@@ -414,7 +437,8 @@ export function VibeBuilderPane({
       await session.cancelCurrentTurn();
     } finally {
       setStopping(false);
-      requestAnimationFrame(() => composer.current?.focus());
+      setComposerFocused(false);
+      composer.current?.blur();
     }
   };
 
@@ -501,9 +525,16 @@ export function VibeBuilderPane({
 
   return (
     <section
-      className={`vibe-builder-pane ${cushionOpen ? "is-cushion" : "is-pill"}`}
+      className={`vibe-builder-pane ${
+        cushionOpen
+          ? "is-cushion"
+          : composerOpen
+            ? "is-composer-open"
+            : "is-pill is-collapsed"
+      } ${status.blocking ? "is-blocking" : "is-available"}`}
       data-signal={status.signal}
       data-tone={view.persona.tone}
+      data-blocking={status.blocking}
       aria-label={`${name} builder`}
     >
       <div className="vibe-builder-signal" aria-hidden>
@@ -592,51 +623,63 @@ export function VibeBuilderPane({
               <span aria-hidden />
               {view.persona.utterance ?? status.label}
             </div>
-            <textarea
-              ref={composer}
-              className="vibe-builder-input companion-input"
-              rows={1}
-              value={draft}
-              aria-label={`Message ${name}`}
-              placeholder={`Tell ${name} what you want`}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  send(draft);
-                }
-              }}
-            />
+            {!status.blocking && (
+              <textarea
+                ref={composer}
+                className="vibe-builder-input companion-input"
+                rows={1}
+                value={draft}
+                aria-label={`Message ${name}`}
+                aria-expanded={composerOpen}
+                placeholder={`Tell ${name} what you want`}
+                onFocus={() => setComposerFocused(true)}
+                onBlur={() => setComposerFocused(false)}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    send(draft);
+                  }
+                }}
+              />
+            )}
           </div>
 
           <button
             className="vibe-builder-transcript"
             type="button"
             aria-expanded={transcriptOpen}
+            aria-label={transcriptOpen ? "Close Transcript" : "Open Transcript"}
+            title={transcriptOpen ? "Close transcript" : "Open transcript"}
             onClick={() => setTranscriptOpen((open) => !open)}
           >
-            <span aria-hidden>{transcriptOpen ? "⌄" : "⌃"}</span>
-            Transcript
-            {view.items.length > 0 && <em>{view.items.length}</em>}
+            <svg aria-hidden viewBox="0 0 24 24">
+              <path d="M6 7h12M6 12h9M6 17h7" />
+            </svg>
           </button>
-          <button
-            className="vibe-builder-stop"
-            type="button"
-            disabled={!status.busy || !session.cancelCurrentTurn || stopping}
-            onClick={() => void stopCurrentTurn()}
-            aria-label="Stop current change"
-            title="Stop current change"
-          >
-            <span aria-hidden />
-          </button>
-          <button
-            className="vibe-builder-send companion-send"
-            type="submit"
-            disabled={!draft.trim() || stopping}
-            aria-label="Send"
-          >
-            <span className="vibe-builder-send-arrow" aria-hidden>↗</span>
-          </button>
+          {status.busy && session.cancelCurrentTurn && (
+            <button
+              className="vibe-builder-stop"
+              type="button"
+              disabled={stopping}
+              onClick={() => void stopCurrentTurn()}
+              aria-label="Stop current change"
+              title="Stop current change"
+            >
+              <span aria-hidden />
+            </button>
+          )}
+          {!status.blocking && (
+            <button
+              className="vibe-builder-send companion-send"
+              type="submit"
+              disabled={!draft.trim() || stopping}
+              aria-label="Send"
+              title="Send"
+            >
+              <span className="vibe-builder-send-arrow" aria-hidden />
+            </button>
+          )}
         </form>
       </div>
 
