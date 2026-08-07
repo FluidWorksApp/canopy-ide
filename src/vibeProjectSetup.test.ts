@@ -526,6 +526,50 @@ describe("non-technical setup surface", () => {
     expect(configured[0].vibe?.version).toBe(1);
   });
 
+  it("does not buy a new model call every time a failed project is remounted", async () => {
+    // A failure used to drop the flight, so the next mount started a fresh
+    // run — and ProjectView remounts on every render pass, HMR update and
+    // switch back. Against a project whose setup keeps failing that is an
+    // unbounded loop of billed model calls, each able to run the full timeout
+    // first. Sixty launches in twenty minutes were observed before this.
+    const deps: VibeProjectSetupSessionDeps = {
+      observe: vi.fn(async () => ({
+        projectRoot: root,
+        componentRoots: ["/repo/apps/web", "/repo/services/api"],
+        fingerprint: "tree-1",
+        paths: context().existingPaths,
+      })),
+      run: vi.fn(async () => ({
+        ok: false as const,
+        reason: "agent-failed" as const,
+        message: "I couldn't determine a safe complete setup for this project.",
+        runId: "setup-run",
+        attempts: 2,
+      })),
+      providerIds: context().providerIds,
+    };
+
+    const first = createVibeProjectSetupSession(project(), async () => true, deps);
+    const failed = new Promise<void>((resolve) => {
+      first.events$.subscribe((event) => {
+        if (event.kind === "reply" && event.text.includes("couldn't determine")) resolve();
+      });
+    });
+    await failed;
+    expect(deps.run).toHaveBeenCalledTimes(1);
+
+    // Three remounts inside the cooldown. Each one replays the incident; none
+    // of them spends anything.
+    await first.stop();
+    for (let mount = 0; mount < 3; mount += 1) {
+      const again = createVibeProjectSetupSession(project(), async () => true, deps);
+      again.events$.subscribe(() => {});
+      await Promise.resolve();
+      await again.stop();
+    }
+    expect(deps.run).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps one project-owned setup flight across view switches and an unchanged completed revision", async () => {
     let finishRun!: (result: VibeProjectSetupTaskResult) => void;
     const pendingRun = new Promise<VibeProjectSetupTaskResult>((resolve) => {

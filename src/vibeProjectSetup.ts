@@ -1004,9 +1004,24 @@ interface VibeProjectSetupFlight {
   state: BuilderSession["state"];
   status: SetupFlightStatus;
   fingerprint: string | null;
+  /** When this flight failed, so a remount does not immediately buy another
+   *  attempt. See SETUP_RETRY_COOLDOWN_MS. */
+  failedAt: number | null;
   abort: AbortController;
   start(): void;
 }
+
+/** How long a failed setup stays failed before a remount may try again.
+ *
+ *  A failure used to drop the flight outright, so the next mount started a
+ *  fresh run — and ProjectView mounts on every render pass, every HMR update
+ *  and every switch back to the project. Against a project whose setup keeps
+ *  failing that is an unbounded loop of model calls, each one able to run the
+ *  full timeout before it fails again; roughly sixty launches in twenty
+ *  minutes were observed here, most of them 300-second turns, all of them
+ *  billed. Retrying is right. Retrying on every render is not, and the person
+ *  paying for it has no way to see it happening. */
+const SETUP_RETRY_COOLDOWN_MS = 300_000;
 
 /** A setup task belongs to the project and dependency lifetime, not to one
  * React render. ProjectView is intentionally mounted and cleaned up more than
@@ -1040,6 +1055,7 @@ function createVibeProjectSetupFlight(
     state: { persona: { kind: "turn-progress" }, question: null },
     status: "idle",
     fingerprint: null,
+    failedAt: null,
     abort: new AbortController(),
     start() {},
   };
@@ -1048,11 +1064,14 @@ function createVibeProjectSetupFlight(
   };
   const fail = (message: string) => {
     flight.status = "failed";
+    flight.failedAt = Date.now();
     flight.state = { persona: { kind: "incident" }, question: null };
     publish({ kind: "reply", text: message });
-    // A failure is retryable on the next mount. Only a successful result is
-    // retained by repository revision.
-    if (flights.get(project.id) === flight) flights.delete(project.id);
+    // The failed flight is KEPT. Dropping it here made the failure retryable
+    // on the next mount, which sounds like resilience and is actually an
+    // unbounded loop: ProjectView remounts constantly, so each remount bought
+    // another model call. It is released after SETUP_RETRY_COOLDOWN_MS, so a
+    // retry still happens — just not sixty times in twenty minutes.
   };
   const execute = async () => {
     publish({ kind: "reply", text: "I'm understanding how this project fits together and starting everything it needs." });
@@ -1163,6 +1182,18 @@ export function createVibeProjectSetupSession(
     flight?.status === "succeeded" &&
     project.vibe?.setupRevision &&
     project.vibe.setupRevision !== flight.fingerprint
+  ) {
+    flights.delete(project.id);
+    flight = undefined;
+  }
+  // A failed flight is held until the cooldown expires, then released so the
+  // next mount may try again. Held, it is reused as-is: start() only runs a
+  // flight that is idle, so the person keeps seeing the incident instead of
+  // watching a new model call begin every time the view remounts.
+  if (
+    flight?.status === "failed" &&
+    flight.failedAt !== null &&
+    Date.now() - flight.failedAt >= SETUP_RETRY_COOLDOWN_MS
   ) {
     flights.delete(project.id);
     flight = undefined;
