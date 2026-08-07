@@ -1,5 +1,7 @@
 import type { Project, Component, RunCommand } from "./projects";
 import { AGENT_CLIS } from "./projects";
+import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
+import { launchEnvSync } from "./profiles";
 import * as ipc from "./ipc";
 import { DEFAULT_VIBE_BUILDER_DEPS } from "./vibeBuilderSession";
 import type { BuilderSession } from "./vibeBuilderSessionTypes";
@@ -508,22 +510,27 @@ export async function runVibeProjectSetupTask(
     let output = "";
     let error = "";
     let finishEvent: ((result: AttemptRun) => void) | null = null;
+    let live: ProjectRunnerTransport | null = null;
     const launch: StructuredRunnerLaunch = {
       bin,
       policy: {
         systemPromptAppend: vibeSetupSystemPrompt(input.repositoryFingerprint),
         permissionMode: "plan",
-        allowedTools: [
-          "mcp__canopy__canopy_project",
-          "mcp__canopy__canopy_component_files",
-        ],
+        // The sidecar as a whole — nobody is here to answer a prompt for the
+        // one reader that was left off the list. What this agent may do stays
+        // decided by disallowedTools and plan mode, not by which canopy_* names
+        // someone remembered. See agentTools.ts.
+        allowedTools: [CANOPY_MCP_ALLOWANCE],
         disallowedTools: ["Bash", "Edit", "Write", "NotebookEdit", "KillShell"],
         model: chosen.requestedModel ?? "",
         sessionId: deps.sessionId(),
         cwd: input.projectRoot,
         authority: "read-only",
       },
-      env: [["CANOPY_VIBE_SETUP", "1"], ["CANOPY_RUN_ID", runId], ["CANOPY_ATTEMPT_ID", attempt.attemptId]],
+      // The attempt is recorded against a route that names a profile; without
+      // its env the process runs on the default login and the record is
+      // fiction. Same miss as the Build executor's.
+      env: [...launchEnvSync(chosen.cli), ["CANOPY_VIBE_SETUP", "1"], ["CANOPY_RUN_ID", runId], ["CANOPY_ATTEMPT_ID", attempt.attemptId]],
     };
     let transport: ProjectRunnerTransport;
     try {
@@ -531,10 +538,23 @@ export async function runVibeProjectSetupTask(
         emit(event) {
           if (event.kind === "delta" || event.kind === "reply") output += event.text;
           else if (event.kind === "error") error = event.message;
+          // A setup agent that cannot read the project cannot describe it. Left
+          // unread it returns prose instead of JSON and the attempt is filed as
+          // a malformed proposal — blaming the model for a launch-policy fault.
+          // Ended here instead, on a sentence the classifier reads as a task
+          // failure, so the same block is not tried on two more routes.
+          else if (event.kind === "blocked") {
+            error =
+              `Canopy requested permissions to use ${event.tool} in a session it started itself, ` +
+              "and the request had nobody to answer it.";
+            void live?.stop().catch(() => {});
+            finishEvent?.({ kind: "failed", text: error, timedOut: false });
+          }
           else if (event.kind === "turnEnd") finishEvent?.({ kind: "complete", text: output });
           else if (event.kind === "exit") finishEvent?.({ kind: "failed", text: error || output || "setup agent exited", timedOut: false });
         },
       }, { resume: false });
+      live = transport;
     } catch (spawnError) {
       transport = { send: async () => {}, stop: async () => {} };
       error = String(spawnError);
@@ -636,6 +656,7 @@ export function createVibeProjectSetupSession(
   const listeners = new Set<(event: import("./structuredEvents").StructuredRunnerEvent) => void>();
   let state: BuilderSession["state"] = { persona: { kind: "turn-progress" }, question: null };
   let stopped = false;
+  let started = false;
   const abort = new AbortController();
   const publish = (event: import("./structuredEvents").StructuredRunnerEvent) => {
     if (!stopped) for (const listener of listeners) listener(event);
@@ -692,12 +713,20 @@ export function createVibeProjectSetupSession(
       publish({ kind: "reply", text: "I couldn't determine a safe complete setup for this project." });
     }
   };
-  queueMicrotask(() => void execute());
+  const start = () => {
+    if (started || stopped) return;
+    started = true;
+    // Start after the listener is installed. Besides avoiding work during
+    // React render, this makes the first plain-language status observable
+    // instead of publishing it into an empty listener set.
+    queueMicrotask(() => void execute());
+  };
   return {
     get state() { return state; },
     events$: {
       subscribe(listener) {
         listeners.add(listener);
+        start();
         return () => listeners.delete(listener);
       },
     },

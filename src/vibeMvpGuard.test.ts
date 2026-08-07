@@ -55,6 +55,19 @@ describe("the vibe MVP wiring boundaries", () => {
     expect(buildChat).not.toContain("onEdit");
   });
 
+  it("creates automatic setup inside the lifecycle effect, not during render", () => {
+    const projectView = read("src/components/ProjectView/index.tsx");
+    const setup = projectView.slice(
+      projectView.indexOf("const [vibeProjectSetupSession"),
+      projectView.indexOf("const vibeWaitingSession"),
+    );
+    expect(setup).toContain("useEffect(() => {");
+    expect(setup).toContain("const session = createVibeProjectSetupSession(");
+    expect(setup).toContain("setVibeProjectSetupSession(session)");
+    expect(setup).toContain("void session.stop()");
+    expect(setup).not.toContain("useMemo(");
+  });
+
   it("never asks a Build user to configure or start a server", () => {
     const preview = read("src/components/PreviewView.tsx");
     expect(preview).not.toContain("Add a run command to a component");

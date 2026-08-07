@@ -14,6 +14,16 @@ import {
   type VibeBuilderSessionOptions,
 } from "./vibeBuilderSession";
 import type { VerificationObservation } from "./vibeVerification";
+import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
+
+const launchEnvSync = vi.fn((_cliId: string) => [] as [string, string][]);
+// Only launchEnvSync is faked. DEFAULT_PROFILE and launchProfile stay real, so
+// this cannot pass by accident on a mock that also hides a real drift in
+// those two.
+vi.mock("./profiles", async (orig) => ({
+  ...(await orig<typeof import("./profiles")>()),
+  launchEnvSync: (cliId: string) => launchEnvSync(cliId),
+}));
 
 const route = {
   cli: "claude",
@@ -459,6 +469,76 @@ describe("VibeBuilderSession", () => {
       expect.anything(),
       expect.anything(),
     );
+  });
+
+  it("carries the active profile's env into the Build launch, without shadowing Canopy's own", async () => {
+    // The route this attempt is recorded against names a profile; without its
+    // env the process runs on the default login and the attempt record says
+    // an account the turn never used.
+    launchEnvSync.mockReturnValueOnce([["CLAUDE_CONFIG_DIR", "/tmp/profile/.claude"]]);
+    const h = harness();
+    await h.session.send("Make the button blue");
+    expect(h.deps.runner.start).toHaveBeenCalledWith(
+      expect.anything(),
+      "claude",
+      expect.objectContaining({
+        // Fixed and last, so the profile's entries can never shadow the ones
+        // the attempt is correlated by.
+        env: [
+          ["CLAUDE_CONFIG_DIR", "/tmp/profile/.claude"],
+          ["CANOPY_VIBE", "1"],
+          ["CANOPY_RUN_ID", "run-1"],
+          ["CANOPY_ATTEMPT_ID", "attempt-1"],
+        ],
+      }),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("allows Canopy's whole sidecar, because nobody is here to answer a prompt", async () => {
+    // The list this replaced held three names, and the tools a Build turn
+    // reaches for next — waiting on a port, restarting, opening the preview —
+    // were refused with no one to grant them.
+    const h = harness();
+    await h.session.send("Make the button blue");
+    expect(h.deps.runner.start).toHaveBeenCalledWith(
+      expect.anything(),
+      "claude",
+      expect.objectContaining({
+        policy: expect.objectContaining({
+          allowedTools: [CANOPY_MCP_ALLOWANCE],
+          // Authority still comes from what is withheld, not from the allowance.
+          disallowedTools: expect.arrayContaining(["Bash", "KillShell"]),
+        }),
+      }),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("ends the attempt when a Canopy tool is refused, in Canopy's own words", async () => {
+    // Left alone the turn ends looking successful and hands a non-engineer the
+    // model's advice to grant the tools in a screen that does not exist.
+    const h = harness();
+    await h.session.send("Start the server");
+    h.emit({ kind: "blocked", tool: "mcp__canopy__canopy_start_server" });
+    h.emit({ kind: "exit" });
+
+    await vi.waitFor(() =>
+      expect(h.deps.settleAttempt).toHaveBeenCalledWith(
+        expect.objectContaining({ state: "failed", failureClass: "task" }),
+      ),
+    );
+    // Every route shares the launch policy that blocked, so trying another one
+    // spends an attempt on an identical refusal.
+    expect(h.deps.reserveAttempt).not.toHaveBeenCalled();
+    expect(h.session.state.persona.kind).toBe("permission-stall");
+    // Canopy's fault, said as Canopy's fault. Not "about the work itself" —
+    // that would leave someone rewriting a request that was never the problem —
+    // and not the model's advice to go and grant the tools somewhere.
+    expect(h.replies.join(" ")).toMatch(/fault in Canopy/i);
+    expect(h.replies.join(" ")).not.toMatch(/grant/i);
   });
 
   it("moves to another model when the route runs out of quota, and says so", async () => {

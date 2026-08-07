@@ -236,7 +236,13 @@ export function failoverDecision(input: FailoverInput): {
         kind: "stop",
         reason: verdict.signature ?? "task-failure",
         narration:
-          "This one is about the work itself, not the model, so switching wouldn't help.",
+          // A permission block is classed task because no route escapes it —
+          // but it is not about the work, and saying so would leave someone
+          // rewriting a request that was never the problem. It is a fault in
+          // Canopy, and only Canopy can clear it.
+          verdict.signature === "tool-permission-denied"
+            ? "I couldn't use Canopy's own controls to do that. That's a fault in Canopy, not something you did — switching models wouldn't help."
+            : "This one is about the work itself, not the model, so switching wouldn't help.",
       },
     };
   }

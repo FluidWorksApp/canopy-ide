@@ -36,7 +36,8 @@ import { probeCli, type CliProbeDeps } from "./vibeCliProbe";
 import { inspectFleetRoute } from "./fleetSnapshot";
 import { choicesFor } from "./modelCatalog";
 import { AGENT_CLIS, checkCliUpdates, checkInstalledClis } from "./projects";
-import { DEFAULT_PROFILE, launchProfile } from "./profiles";
+import { DEFAULT_PROFILE, launchEnvSync, launchProfile } from "./profiles";
+import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 import {
   FAMILY_FOR_CLI,
   failoverDecision,
@@ -1654,6 +1655,33 @@ export class VibeBuilderSession implements BuilderSession {
           );
         }
         break;
+      // Canopy asked itself for permission and had nobody to answer. Left
+      // alone the turn ends looking successful, and what reaches a
+      // non-engineer is the model's own advice to go and grant the tools —
+      // in a screen that does not exist. The attempt ends on it instead, and
+      // the stop path speaks (see the tool-permission-denied narration in
+      // vibeFailover).
+      case "blocked": {
+        this.lastRunnerError =
+          `Canopy requested permissions to use ${event.tool} in a session it started itself, ` +
+          "and the request had nobody to answer it.";
+        if (reservation) {
+          void this.persist(() =>
+            this.deps.appendTranscript({
+              runId: reservation.envelope.runId,
+              attemptId: reservation.attempt.attemptId,
+              kind: "error",
+              body: this.lastRunnerError,
+            }),
+          );
+        }
+        // Ending the process routes through `exit` to handleAttemptFailure,
+        // where the classifier reads that sentence as a task failure and
+        // stops — rather than spending two more routes on a block that every
+        // route shares.
+        void this.transport?.stop().catch(() => {});
+        break;
+      }
       case "turnEnd":
         if (this.verifying) return;
         this.hasRun = true;
@@ -1938,11 +1966,11 @@ export class VibeBuilderSession implements BuilderSession {
           `Work only inside ${this.options.componentPath}. Use Edit, Write, Read, Grep and Glob; ` +
           "do not use a shell. Explain outcomes in plain language. Canopy runs verification independently.",
         permissionMode: "acceptEdits",
-        allowedTools: [
-          "mcp__canopy__canopy_project",
-          "mcp__canopy__canopy_start_server",
-          "mcp__canopy__canopy_server_output",
-        ],
+        // The whole sidecar, not the three tools someone thought of. Nobody is
+        // sitting in this session to answer a prompt, and a Build turn reaches
+        // well past starting a server — it waits on a port, restarts, opens the
+        // preview and reads the console back. See agentTools.ts.
+        allowedTools: [CANOPY_MCP_ALLOWANCE],
         disallowedTools: ["Bash", "KillShell", "NotebookEdit"],
         // The model the route asked for, actually applied — it becomes
         // `--model`/`-m` at launch. Recording a requestedModel we never passed
@@ -1953,6 +1981,11 @@ export class VibeBuilderSession implements BuilderSession {
         authority: "workspace-write",
       },
       env: [
+        // The route this attempt is recorded against names a profile
+        // (listNativeRoutes ranks per profile). Without this the process runs
+        // on the default login regardless, and the attempt record says an
+        // account the turn never used.
+        ...launchEnvSync(cli),
         ["CANOPY_VIBE", "1"],
         ["CANOPY_RUN_ID", runId],
         ["CANOPY_ATTEMPT_ID", attemptId],

@@ -12,7 +12,17 @@ import {
 } from "./vibeProjectSetup";
 import * as ipc from "./ipc";
 import type { RouteCandidate } from "./vibeFailover";
+import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 import type { VibeProjectSetupTaskDeps } from "./vibeProjectSetup";
+
+const launchEnvSync = vi.fn((_cliId: string) => [] as [string, string][]);
+// Only launchEnvSync is faked. DEFAULT_PROFILE and launchProfile stay real, so
+// this cannot pass by accident on a mock that also hides a real drift in
+// those two.
+vi.mock("./profiles", async (orig) => ({
+  ...(await orig<typeof import("./profiles")>()),
+  launchEnvSync: (cliId: string) => launchEnvSync(cliId),
+}));
 
 const root = "/repo";
 const proposal = (): VibeProjectSetupProposal => ({
@@ -270,7 +280,7 @@ const routes = (): RouteCandidate[] => [{
   choices: [{ id: "gpt-5.6-sol", label: "GPT", hint: "" }],
 }];
 
-function taskDeps(events: Array<Array<{ kind: string; text?: string; message?: string }>>): VibeProjectSetupTaskDeps & {
+function taskDeps(events: Array<Array<{ kind: string; text?: string; message?: string; tool?: string }>>): VibeProjectSetupTaskDeps & {
   launches: Array<{ cli: string; launch: import("./structuredRunners").StructuredRunnerLaunch }>;
   killed: string[];
   settlements: Array<{ state: string; failureCode?: string | null }>;
@@ -320,10 +330,10 @@ describe("bounded setup agent task", () => {
       cli: "claude",
       launch: { policy: {
         authority: "read-only",
-        allowedTools: [
-          "mcp__canopy__canopy_project",
-          "mcp__canopy__canopy_component_files",
-        ],
+        // The whole sidecar, so a reader nobody listed cannot raise a prompt
+        // with no one to answer it. Read-only is still enforced — by plan mode
+        // and by what disallowedTools withholds, not by the canopy_* names.
+        allowedTools: [CANOPY_MCP_ALLOWANCE],
         disallowedTools: expect.arrayContaining(["Bash", "Edit", "Write"]),
       } },
     });
@@ -383,9 +393,71 @@ describe("bounded setup agent task", () => {
     expect(deps.killed).toEqual(["attempt-1"]);
     expect(deps.settlements).toContainEqual(expect.objectContaining({ state: "interrupted", failureCode: "project-closed" }));
   });
+
+  it("ends the attempt on a block instead of filing it as a malformed proposal", async () => {
+    // Before this fix, a setup agent that could not read the project returned
+    // prose instead of JSON, and the attempt was filed as invalid-output —
+    // blaming the model for what was actually a launch-policy fault.
+    const deps = taskDeps([[{ kind: "blocked", tool: "mcp__canopy__canopy_project" }]]);
+    const result = await runVibeProjectSetupTask(taskInput, deps);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).not.toBe("invalid-output");
+    // Every route shares the launch policy that blocked, so trying another one
+    // would spend an attempt on an identical refusal.
+    expect(deps.launches).toHaveLength(1);
+  });
+
+  it("carries the active profile's env into the setup launch, without shadowing Canopy's own", async () => {
+    launchEnvSync.mockReturnValueOnce([["CLAUDE_CONFIG_DIR", "/tmp/profile/.claude"]]);
+    const deps = taskDeps([[{ kind: "delta", text: JSON.stringify(proposal()) }, { kind: "turnEnd" }]]);
+    await runVibeProjectSetupTask(taskInput, deps);
+    const launch = deps.launches[0];
+    expect(launch).toBeDefined();
+    expect(launch!.launch.env).toBeDefined();
+    const env = launch!.launch.env!;
+    expect(env[0]).toEqual(["CLAUDE_CONFIG_DIR", "/tmp/profile/.claude"]);
+    // Fixed and last, so the profile's entries — whatever a CLI adds later —
+    // can never shadow the ones the attempt is correlated by.
+    expect(env.slice(-3)).toEqual([
+      ["CANOPY_VIBE_SETUP", "1"],
+      ["CANOPY_RUN_ID", "setup-run"],
+      ["CANOPY_ATTEMPT_ID", "attempt-1"],
+    ]);
+  });
 });
 
 describe("non-technical setup surface", () => {
+  it("does not begin repository work until the Build surface owns the session", async () => {
+    const observe = vi.fn(async () => ({
+      projectRoot: root,
+      fingerprint: "tree-1",
+      paths: context().existingPaths,
+    }));
+    const session = createVibeProjectSetupSession(
+      project(),
+      async () => true,
+      {
+        observe,
+        run: async () => ({
+          ok: false,
+          reason: "agent-failed",
+          message: "I couldn't inspect this project.",
+          runId: null,
+          attempts: 0,
+        }),
+        providerIds: context().providerIds,
+      },
+    );
+
+    await Promise.resolve();
+    expect(observe).not.toHaveBeenCalled();
+
+    const unsubscribe = session.events$.subscribe(() => {});
+    await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(1));
+    unsubscribe();
+    await session.stop();
+  });
+
   it("persists a valid proposal without ever presenting a technical question", async () => {
     const configured: Project[] = [];
     const ready = new Promise<void>((resolve) => {
