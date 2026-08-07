@@ -256,6 +256,17 @@ describe("setup identity materialization", () => {
     expect(result.project.components[0].commands?.[0].argv).toEqual(["pnpm", "dev"]);
   });
 
+  it("keeps what each component is, so nothing downstream has to guess it", () => {
+    // The survey establishes a role per component and materialization dropped
+    // it, so the only surviving record of "this is an API with no UI" was the
+    // proposal, which is not persisted. Anything reading the project later —
+    // Build's starter suggestions were the case that caught this — could then
+    // only infer a role from the directory name, which is the guessing this
+    // whole survey exists to replace.
+    const result = materializeVibeSetup(project(), proposal());
+    expect(result.project.components.map((item) => item.role)).toEqual(["web", "api"]);
+  });
+
   it("keeps ids stable across label-only changes", () => {
     const first = materializeVibeSetup(project(), proposal()).project;
     const renamed = proposal();

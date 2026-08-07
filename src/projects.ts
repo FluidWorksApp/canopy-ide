@@ -19,12 +19,21 @@ export interface RunCommand {
   purpose?: "serve" | "check" | "worker" | "setup";
 }
 
+/** What a component is, as established by project setup rather than guessed
+ *  from its directory name. Optional because most projects predate setup and
+ *  because a person may add a component by hand; absent means unknown, which
+ *  callers must treat as "say nothing", never as "web". */
+export type ComponentRole =
+  | "web" | "api" | "worker" | "database" | "mobile"
+  | "library" | "tooling" | "other";
+
 export interface Component {
   id: string;
   label: string;
   path: string;
   /** Named run commands (dev server, worker, ...) launched in this dir. */
   commands?: RunCommand[];
+  role?: ComponentRole;
 }
 
 export interface VibeConfig {

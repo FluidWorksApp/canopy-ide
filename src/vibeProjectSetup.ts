@@ -1,4 +1,4 @@
-import type { Project, Component, RunCommand } from "./projects";
+import type { Project, Component, ComponentRole, RunCommand } from "./projects";
 import { AGENT_CLIS } from "./projects";
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 import { launchEnvSync } from "./profiles";
@@ -32,9 +32,9 @@ const MAX_SERVICES = 32;
 const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 const KEY = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
-export type VibeComponentRole =
-  | "web" | "api" | "worker" | "database" | "mobile"
-  | "library" | "tooling" | "other";
+/** The persisted spelling is the source of truth, so a role survives into the
+ *  project file rather than existing only inside a proposal. */
+export type VibeComponentRole = ComponentRole;
 export type VibeCommandPurpose = "serve" | "check" | "worker" | "setup";
 
 export interface VibeSetupCommandProposal {
@@ -309,7 +309,7 @@ export function materializeVibeSetup(project: Project, proposal: VibeProjectSetu
       commandIds[`${candidate.key}:${command.key}`] = commandId;
       return { id: commandId, name: command.label, command: displayArgv(command.argv), argv: command.argv, cwd: commandCwd, purpose: command.purpose };
     });
-    return { id, label: candidate.label, path: candidateRoot, commands };
+    return { id, label: candidate.label, path: candidateRoot, commands, role: candidate.role };
   });
   const previewComponentId = componentIds[proposal.preview.componentKey];
   const previewRunCommandId = commandIds[`${proposal.preview.componentKey}:${proposal.preview.commandKey}`];
