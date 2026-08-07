@@ -16,7 +16,7 @@ import {
 import type { VerificationObservation } from "./vibeVerification";
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 
-const launchEnvSync = vi.fn(() => [] as [string, string][]);
+const launchEnvSync = vi.fn((_cliId: string) => [] as [string, string][]);
 // Only launchEnvSync is faked. DEFAULT_PROFILE and launchProfile stay real, so
 // this cannot pass by accident on a mock that also hides a real drift in
 // those two.

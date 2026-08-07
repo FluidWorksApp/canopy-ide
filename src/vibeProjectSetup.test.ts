@@ -15,7 +15,7 @@ import type { RouteCandidate } from "./vibeFailover";
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 import type { VibeProjectSetupTaskDeps } from "./vibeProjectSetup";
 
-const launchEnvSync = vi.fn(() => [] as [string, string][]);
+const launchEnvSync = vi.fn((_cliId: string) => [] as [string, string][]);
 // Only launchEnvSync is faked. DEFAULT_PROFILE and launchProfile stay real, so
 // this cannot pass by accident on a mock that also hides a real drift in
 // those two.
@@ -411,7 +411,10 @@ describe("bounded setup agent task", () => {
     launchEnvSync.mockReturnValueOnce([["CLAUDE_CONFIG_DIR", "/tmp/profile/.claude"]]);
     const deps = taskDeps([[{ kind: "delta", text: JSON.stringify(proposal()) }, { kind: "turnEnd" }]]);
     await runVibeProjectSetupTask(taskInput, deps);
-    const env = deps.launches[0].launch.env;
+    const launch = deps.launches[0];
+    expect(launch).toBeDefined();
+    expect(launch!.launch.env).toBeDefined();
+    const env = launch!.launch.env!;
     expect(env[0]).toEqual(["CLAUDE_CONFIG_DIR", "/tmp/profile/.claude"]);
     // Fixed and last, so the profile's entries — whatever a CLI adds later —
     // can never shadow the ones the attempt is correlated by.
