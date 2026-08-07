@@ -819,45 +819,88 @@ export const DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS: VibeProjectSetupSessionDep
   providerIds: new Set(["supabase", "neon", "firebase", "stripe", "vercel", "netlify", "cloudflare", "fly"]),
 };
 
-/** Chat-shaped only because Build already owns that surface. It has no input
- * actions: setup is automatic, and a failure speaks plainly rather than asking
- * a non-engineer to adjudicate commands or components. */
-export function createVibeProjectSetupSession(
+type SetupSessionEvent = import("./structuredEvents").StructuredRunnerEvent;
+type SetupFlightStatus = "idle" | "running" | "succeeded" | "failed";
+
+interface VibeProjectSetupFlight {
+  project: Project;
+  persist: (configured: Project) => Promise<boolean>;
+  listeners: Set<(event: SetupSessionEvent) => void>;
+  state: BuilderSession["state"];
+  status: SetupFlightStatus;
+  fingerprint: string | null;
+  abort: AbortController;
+  start(): void;
+}
+
+/** A setup task belongs to the project and dependency lifetime, not to one
+ * React render. ProjectView is intentionally mounted and cleaned up more than
+ * once in development, and a person can switch away and back while discovery
+ * is running. A WeakMap keeps the production cache app-local and lets injected
+ * test dependencies own an isolated cache without a test-only reset hook. */
+const setupFlights = new WeakMap<
+  VibeProjectSetupSessionDeps,
+  Map<string, VibeProjectSetupFlight>
+>();
+
+function flightsFor(deps: VibeProjectSetupSessionDeps): Map<string, VibeProjectSetupFlight> {
+  let flights = setupFlights.get(deps);
+  if (!flights) {
+    flights = new Map();
+    setupFlights.set(deps, flights);
+  }
+  return flights;
+}
+
+function createVibeProjectSetupFlight(
   project: Project,
   persist: (configured: Project) => Promise<boolean>,
-  deps: VibeProjectSetupSessionDeps = DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS,
-): BuilderSession & { stop(): Promise<void> } {
-  const listeners = new Set<(event: import("./structuredEvents").StructuredRunnerEvent) => void>();
-  let state: BuilderSession["state"] = { persona: { kind: "turn-progress" }, question: null };
-  let stopped = false;
-  let started = false;
-  const abort = new AbortController();
-  const publish = (event: import("./structuredEvents").StructuredRunnerEvent) => {
-    if (!stopped) for (const listener of listeners) listener(event);
+  deps: VibeProjectSetupSessionDeps,
+  flights: Map<string, VibeProjectSetupFlight>,
+): VibeProjectSetupFlight {
+  const flight: VibeProjectSetupFlight = {
+    project,
+    persist,
+    listeners: new Set(),
+    state: { persona: { kind: "turn-progress" }, question: null },
+    status: "idle",
+    fingerprint: null,
+    abort: new AbortController(),
+    start() {},
+  };
+  const publish = (event: SetupSessionEvent) => {
+    for (const listener of flight.listeners) listener(event);
+  };
+  const fail = (message: string) => {
+    flight.status = "failed";
+    flight.state = { persona: { kind: "incident" }, question: null };
+    publish({ kind: "reply", text: message });
+    // A failure is retryable on the next mount. Only a successful result is
+    // retained by repository revision.
+    if (flights.get(project.id) === flight) flights.delete(project.id);
   };
   const execute = async () => {
     publish({ kind: "reply", text: "I'm understanding how this project fits together and starting everything it needs." });
     try {
-      const before = await deps.observe(project);
-      if (stopped) return;
+      const activeProject = flight.project;
+      const before = await deps.observe(activeProject);
       const validationContext: VibeSetupValidationContext = {
         projectRoot: before.projectRoot,
         repositoryFingerprint: before.fingerprint,
         existingPaths: before.paths,
         providerIds: deps.providerIds,
-        existingComponents: project.components,
+        existingComponents: activeProject.components,
       };
       const task = await deps.run({
-        projectId: project.id,
-        projectName: project.name,
+        projectId: activeProject.id,
+        projectName: activeProject.name,
         projectRoot: before.projectRoot,
         componentRoots: before.componentRoots,
         inventory: [...before.paths],
         repositoryFingerprint: before.fingerprint,
         onActivity: publish,
-        signal: abort.signal,
+        signal: flight.abort.signal,
       }, validationContext);
-      if (stopped) return;
       if (!task.ok) {
         // Every exit below says the same plain sentence to the person and
         // nothing at all to anyone who has to fix it. The reason code and the
@@ -867,17 +910,16 @@ export function createVibeProjectSetupSession(
           "error",
           `vibe-setup: task failed (${task.reason}) runId=${task.runId ?? "none"} attempts=${task.attempts}: ${task.message}`,
         );
-        state = { persona: { kind: "incident" }, question: null };
-        publish({ kind: "reply", text: task.message });
+        fail(task.message);
         return;
       }
-      const after = await deps.observe(project);
+      const after = await deps.observe(activeProject);
       const validation = validateVibeSetupProposal(task.output, {
         projectRoot: after.projectRoot,
         repositoryFingerprint: after.fingerprint,
         existingPaths: after.paths,
         providerIds: deps.providerIds,
-        existingComponents: project.components,
+        existingComponents: activeProject.components,
       });
       if (!validation.ok) {
         // Which rule rejected it, not just that something did. A proposal is
@@ -885,20 +927,20 @@ export function createVibeProjectSetupSession(
         // an unobserved path is a scope bug, a fingerprint mismatch is a race
         // with the person editing, a missing component is the model.
         void ipc.jsLog("error", `vibe-setup: proposal rejected: ${validation.errors.join("; ")}`);
-        state = { persona: { kind: "incident" }, question: null };
-        publish({ kind: "reply", text: "I couldn't determine a safe complete setup for this project." });
+        fail("I couldn't determine a safe complete setup for this project.");
         return;
       }
-      const configured = materializeVibeSetup(project, validation.proposal, after.projectRoot).project;
-      if (!(await persist(configured))) {
-        state = { persona: { kind: "incident" }, question: null };
-        publish({ kind: "reply", text: "I understood the project, but couldn't save its setup." });
+      const configured = materializeVibeSetup(activeProject, validation.proposal, after.projectRoot).project;
+      if (!(await flight.persist(configured))) {
+        fail("I understood the project, but couldn't save its setup.");
         return;
       }
-      state = { persona: { kind: "question-answered" }, question: null };
+      flight.fingerprint = after.fingerprint;
+      flight.status = "succeeded";
+      flight.state = { persona: { kind: "question-answered" }, question: null };
       publish({ kind: "ready" });
     } catch (error) {
-      if (stopped) return;
+      if (flight.abort.signal.aborted) return;
       // The person is told the same plain thing either way — they cannot act on
       // a stack trace. But the cause has to survive somewhere: this catch
       // covers the whole preflight, including the native file snapshot, which
@@ -906,28 +948,85 @@ export function createVibeProjectSetupSession(
       // one of those failures reads as "the agent couldn't work it out" and
       // sends someone hunting the model for a fault in Canopy.
       void ipc.jsLog("error", `vibe-setup: preflight failed: ${String(error)}`);
-      state = { persona: { kind: "incident" }, question: null };
-      publish({ kind: "reply", text: "I couldn't determine a safe complete setup for this project." });
+      fail("I couldn't determine a safe complete setup for this project.");
     }
   };
-  const start = () => {
-    if (started || stopped) return;
-    started = true;
+  flight.start = () => {
+    if (flight.status !== "idle") return;
+    flight.status = "running";
     // Start after the listener is installed. Besides avoiding work during
     // React render, this makes the first plain-language status observable
     // instead of publishing it into an empty listener set.
     queueMicrotask(() => void execute());
   };
+  return flight;
+}
+
+/** Chat-shaped only because Build already owns that surface. It has no input
+ * actions: setup is automatic, and a failure speaks plainly rather than asking
+ * a non-engineer to adjudicate commands or components. */
+export function createVibeProjectSetupSession(
+  project: Project,
+  persist: (configured: Project) => Promise<boolean>,
+  deps: VibeProjectSetupSessionDeps = DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS,
+): BuilderSession & { stop(): Promise<void> } {
+  const flights = flightsFor(deps);
+  let flight = flights.get(project.id);
+  // A known different persisted revision is a different repository setup. An
+  // absent revision is commonly the stale ProjectView value from just before
+  // this flight persisted; reusing the successful flight prevents that render
+  // race from spending a second model call.
+  if (
+    flight?.status === "succeeded" &&
+    project.vibe?.setupRevision &&
+    project.vibe.setupRevision !== flight.fingerprint
+  ) {
+    flights.delete(project.id);
+    flight = undefined;
+  }
+  if (!flight) {
+    flight = createVibeProjectSetupFlight(project, persist, deps, flights);
+    flights.set(project.id, flight);
+  } else if (flight.status === "idle") {
+    // Strict Mode may dispose the first facade before Build subscribes. Use the
+    // freshest project and persistence callback when the shared flight starts.
+    flight.project = project;
+    flight.persist = persist;
+  }
+  const ownedListeners = new Set<(event: SetupSessionEvent) => void>();
+  let stopped = false;
   return {
-    get state() { return state; },
+    get state() { return flight.state; },
     events$: {
       subscribe(listener) {
-        listeners.add(listener);
-        start();
-        return () => listeners.delete(listener);
+        if (stopped) return () => {};
+        // The same callback may be used by two facades. Give each subscription
+        // its own identity so stopping one view cannot detach the other.
+        const ownedListener = (event: SetupSessionEvent) => listener(event);
+        ownedListeners.add(ownedListener);
+        flight.listeners.add(ownedListener);
+        if (flight.status === "succeeded") {
+          queueMicrotask(() => {
+            if (!stopped && ownedListeners.has(ownedListener)) ownedListener({ kind: "ready" });
+          });
+        } else {
+          flight.start();
+        }
+        return () => {
+          ownedListeners.delete(ownedListener);
+          flight.listeners.delete(ownedListener);
+        };
       },
     },
     send: async () => {},
-    stop: async () => { stopped = true; abort.abort(); },
+    stop: async () => {
+      stopped = true;
+      for (const listener of ownedListeners) flight.listeners.delete(listener);
+      ownedListeners.clear();
+      // Deliberately do not abort: this facade is owned by one ProjectView
+      // mount, while the bounded setup flight is owned by the project. A
+      // switch or Strict Mode cleanup must not spend another reservation and
+      // model call when the person comes back.
+    },
   };
 }

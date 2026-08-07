@@ -13,7 +13,11 @@ import {
 import * as ipc from "./ipc";
 import type { RouteCandidate } from "./vibeFailover";
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
-import type { VibeProjectSetupTaskDeps } from "./vibeProjectSetup";
+import type {
+  VibeProjectSetupSessionDeps,
+  VibeProjectSetupTaskDeps,
+  VibeProjectSetupTaskResult,
+} from "./vibeProjectSetup";
 
 const launchEnvSync = vi.fn((_cliId: string) => [] as [string, string][]);
 // Only launchEnvSync is faked. DEFAULT_PROFILE and launchProfile stay real, so
@@ -376,7 +380,7 @@ describe("bounded setup agent task", () => {
       [{ kind: "error", message: "usage limit reached for your plan" }, { kind: "exit" }],
       [{ kind: "delta", text: JSON.stringify(proposal()) }, { kind: "turnEnd" }],
     ]);
-    const result = await runVibeProjectSetupTask(taskInput, deps);
+    await runVibeProjectSetupTask(taskInput, deps);
     expect(deps.launches.map((item) => item.cli)).not.toContain("codex");
     // Claude is the only structured runner today, so a route failure has
     // nowhere to go. Retrying it in place is honest; switching is not.
@@ -439,6 +443,7 @@ describe("non-technical setup surface", () => {
   it("does not begin repository work until the Build surface owns the session", async () => {
     const observe = vi.fn(async () => ({
       projectRoot: root,
+      componentRoots: ["/repo/apps/web", "/repo/services/api"],
       fingerprint: "tree-1",
       paths: context().existingPaths,
     }));
@@ -474,7 +479,12 @@ describe("non-technical setup surface", () => {
         project(),
         async (next) => { configured.push(next); return true; },
         {
-          observe: async () => ({ projectRoot: root, fingerprint: "tree-1", paths: context().existingPaths }),
+          observe: async () => ({
+            projectRoot: root,
+            componentRoots: ["/repo/apps/web", "/repo/services/api"],
+            fingerprint: "tree-1",
+            paths: context().existingPaths,
+          }),
           run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
           providerIds: context().providerIds,
         },
@@ -490,6 +500,64 @@ describe("non-technical setup surface", () => {
     expect(configured[0].vibe?.version).toBe(1);
   });
 
+  it("keeps one project-owned setup flight across view switches and an unchanged completed revision", async () => {
+    let finishRun!: (result: VibeProjectSetupTaskResult) => void;
+    const pendingRun = new Promise<VibeProjectSetupTaskResult>((resolve) => {
+      finishRun = resolve;
+    });
+    const deps: VibeProjectSetupSessionDeps = {
+      observe: vi.fn(async () => ({
+        projectRoot: root,
+        componentRoots: ["/repo/apps/web", "/repo/services/api"],
+        fingerprint: "tree-1",
+        paths: context().existingPaths,
+      })),
+      run: vi.fn(async () => pendingRun),
+      providerIds: context().providerIds,
+    };
+    const persisted: Project[] = [];
+    const persist = vi.fn(async (configured: Project) => {
+      persisted.push(configured);
+      return true;
+    });
+
+    const firstView = createVibeProjectSetupSession(project(), persist, deps);
+    firstView.events$.subscribe(() => {});
+    await vi.waitFor(() => expect(deps.run).toHaveBeenCalledTimes(1));
+
+    // ProjectView cleanup represents both a Strict Mode replay and switching
+    // away. Returning while discovery is live must attach to that same task,
+    // not reserve and launch another one.
+    await firstView.stop();
+    const secondView = createVibeProjectSetupSession(project(), persist, deps);
+    const ready = new Promise<void>((resolve) => {
+      secondView.events$.subscribe((event) => {
+        if (event.kind === "ready") resolve();
+      });
+    });
+    await Promise.resolve();
+    expect(deps.run).toHaveBeenCalledTimes(1);
+
+    finishRun({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 });
+    await ready;
+    expect(persist).toHaveBeenCalledTimes(1);
+
+    // A render with the just-persisted project and the same repository
+    // revision can replay the terminal result, but cannot spend another model
+    // call or race a second persist against the first.
+    const completedProject = persisted[0];
+    expect(completedProject.vibe?.setupRevision).toBe("tree-1");
+    const thirdView = createVibeProjectSetupSession(completedProject, persist, deps);
+    const replayed = new Promise<void>((resolve) => {
+      thirdView.events$.subscribe((event) => {
+        if (event.kind === "ready") resolve();
+      });
+    });
+    await replayed;
+    expect(deps.run).toHaveBeenCalledTimes(1);
+    expect(persist).toHaveBeenCalledTimes(1);
+  });
+
   it("stops plainly on invalid setup instead of falling back to a picker", async () => {
     const replies: string[] = [];
     const done = new Promise<void>((resolve) => {
@@ -497,7 +565,12 @@ describe("non-technical setup surface", () => {
         project(),
         async () => true,
         {
-          observe: async () => ({ projectRoot: root, fingerprint: "tree-1", paths: context().existingPaths }),
+          observe: async () => ({
+            projectRoot: root,
+            componentRoots: ["/repo/apps/web", "/repo/services/api"],
+            fingerprint: "tree-1",
+            paths: context().existingPaths,
+          }),
           run: async () => ({ ok: true, output: { nope: true }, runId: "setup-run", attempts: 1 }),
           providerIds: context().providerIds,
         },
