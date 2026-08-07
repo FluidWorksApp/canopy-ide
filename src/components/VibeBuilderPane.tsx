@@ -216,6 +216,7 @@ export function VibeBuilderPane({
   const [draft, setDraft] = useState("");
   const [answeringQuestion, setAnsweringQuestion] = useState<string | null>(null);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
+  const [cushionDismissed, setCushionDismissed] = useState(false);
   const [composerFocused, setComposerFocused] = useState(false);
   const [stopping, setStopping] = useState(false);
   const questionCard = useRef<HTMLDivElement>(null);
@@ -234,7 +235,10 @@ export function VibeBuilderPane({
     setStopping(false);
     const switchedProject = projectIdRef.current !== projectId;
     projectIdRef.current = projectId;
-    if (switchedProject) setTranscriptOpen(false);
+    if (switchedProject) {
+      setTranscriptOpen(false);
+      setCushionDismissed(false);
+    }
     const held = projectId ? projectConversations.get(projectId) : undefined;
     setHasSpoken(held?.hasSpoken ?? false);
     setView((current) => {
@@ -350,7 +354,11 @@ export function VibeBuilderPane({
 
   useEffect(() => {
     setAnsweringQuestion(null);
-    if (view.questionId) questionCard.current?.focus();
+    if (view.questionId) {
+      // A genuinely new ask gets one entrance. After that the person may tuck
+      // it away without answering; its id and session state stay untouched.
+      setCushionDismissed(false);
+    }
   }, [view.questionId]);
 
   useEffect(() => {
@@ -424,12 +432,15 @@ export function VibeBuilderPane({
 
   const status = vibeBuilderStatus(view.persona, phase);
   const showWelcome = !hasSpoken && view.items.length === 0;
+  const contextualCushion =
+    Boolean(question) || (showWelcome && starterIdeas.length > 0);
   const cushionOpen =
-    transcriptOpen ||
-    Boolean(question) ||
-    (showWelcome && starterIdeas.length > 0);
+    transcriptOpen || (contextualCushion && !cushionDismissed);
   const composerOpen =
     !status.blocking && (composerFocused || Boolean(draft.trim()) || cushionOpen);
+  useEffect(() => {
+    if (view.questionId && cushionOpen) questionCard.current?.focus();
+  }, [cushionOpen, view.questionId]);
   const stopCurrentTurn = async () => {
     if (!session.cancelCurrentTurn || stopping) return;
     setStopping(true);
@@ -440,6 +451,16 @@ export function VibeBuilderPane({
       setComposerFocused(false);
       composer.current?.blur();
     }
+  };
+  const toggleContextualCushion = () => {
+    if (cushionOpen) {
+      setTranscriptOpen(false);
+      setCushionDismissed(true);
+      setComposerFocused(false);
+      composer.current?.blur();
+      return;
+    }
+    setCushionDismissed(false);
   };
 
   const conversation = view.items.map((item) => {
@@ -645,6 +666,28 @@ export function VibeBuilderPane({
             )}
           </div>
 
+          {contextualCushion && (
+            <button
+              className="vibe-builder-collapse"
+              type="button"
+              aria-expanded={cushionOpen}
+              aria-label={
+                cushionOpen
+                  ? question
+                    ? "Collapse question"
+                    : "Collapse suggestions"
+                  : question
+                    ? "Show pending question"
+                    : "Show suggestions"
+              }
+              title={cushionOpen ? "Show more of the product" : "Show this again"}
+              onClick={toggleContextualCushion}
+            >
+              <svg aria-hidden viewBox="0 0 24 24">
+                <path d={cushionOpen ? "M6 9l6 6 6-6" : "M6 15l6-6 6 6"} />
+              </svg>
+            </button>
+          )}
           <button
             className="vibe-builder-transcript"
             type="button"

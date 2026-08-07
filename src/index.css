@@ -24408,6 +24408,7 @@ a.btn-sm {
   opacity: 0.72;
 }
 
+.vibe-builder-collapse,
 .vibe-builder-transcript,
 .vibe-builder-stop,
 .project-view-vibe .vibe-builder-send {
@@ -24430,10 +24431,12 @@ a.btn-sm {
     filter var(--dur-fast) var(--ease-out);
 }
 
+.vibe-builder-collapse,
 .vibe-builder-transcript {
   padding: 0;
 }
 
+.vibe-builder-collapse > svg,
 .vibe-builder-transcript > svg {
   width: 22px;
   height: 22px;
@@ -24442,6 +24445,11 @@ a.btn-sm {
   stroke: currentColor;
   stroke-linecap: round;
   stroke-width: 1.8;
+}
+
+.vibe-builder-collapse > svg {
+  width: 20px;
+  height: 20px;
 }
 
 .vibe-builder-stop {
@@ -24489,6 +24497,7 @@ a.btn-sm {
   transform: translateX(2px);
 }
 
+.vibe-builder-collapse:hover,
 .vibe-builder-transcript:hover,
 .vibe-builder-stop:hover:not(:disabled),
 .project-view-vibe .vibe-builder-send:hover:not(:disabled) {
@@ -24505,6 +24514,7 @@ a.btn-sm {
   transform: translate(3px, -1px);
 }
 
+.vibe-builder-collapse:focus-visible,
 .vibe-builder-transcript:focus-visible,
 .vibe-builder-stop:focus-visible,
 .project-view-vibe .vibe-builder-send:focus-visible {
@@ -24845,6 +24855,7 @@ a.btn-sm {
   }
 
   .vibe-builder-starters button,
+  .vibe-builder-collapse,
   .vibe-builder-transcript,
   .vibe-builder-stop,
   .project-view-vibe .vibe-builder-send,

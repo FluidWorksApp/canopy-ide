@@ -212,6 +212,32 @@ describe("VibeBuilderPane", () => {
     expect(pane.classList.contains("is-collapsed")).toBe(true);
   });
 
+  it("minimizes a pending question without answering or losing it", () => {
+    const h = harness({
+      persona: { kind: "question-asked" },
+      question: {
+        id: "repair-later",
+        kind: "question",
+        prompt: "The app server keeps stopping.",
+        detail: "I found the cause and can fix it when you're ready.",
+      },
+    });
+    render(<VibeBuilderPane session={h.session} />);
+    const pane = screen.getByRole("region", { name: "Ash builder" });
+
+    expect(screen.getByText("The app server keeps stopping.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Collapse question" }));
+
+    expect(pane.classList.contains("is-collapsed")).toBe(true);
+    expect(screen.queryByText("The app server keeps stopping.")).toBeNull();
+    expect(h.send).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show pending question" }));
+    expect(pane.classList.contains("is-cushion")).toBe(true);
+    expect(screen.getByText("The app server keeps stopping.")).toBeTruthy();
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
   it("shows the real discovery state and stops only the current turn", async () => {
     const h = harness({ persona: { kind: "turn-progress" } });
     render(
