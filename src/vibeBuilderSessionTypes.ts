@@ -8,7 +8,12 @@ export interface BuilderQuestionAction {
 
 export interface BuilderQuestion {
   id: string;
-  kind: "question" | "confirm";
+  /** `notice` is Canopy saying something while it handles it — there is
+   *  nothing to answer, and the pane must not invite a reply. Without it every
+   *  presented item was a question, so "The app server keeps stopping. I'm
+   *  reading its output to find out why." arrived under "Reply below.",
+   *  asking the person to act on the one thing Canopy had just taken on. */
+  kind: "question" | "confirm" | "notice";
   prompt: string;
   detail?: string;
   diff?: string;

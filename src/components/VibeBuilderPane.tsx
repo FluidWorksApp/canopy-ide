@@ -588,7 +588,7 @@ export function VibeBuilderPane({
                 tabIndex={-1}
                 aria-live="assertive"
                 aria-atomic="true"
-                aria-label={`${question.kind === "confirm" ? "Confirm" : "Question"}: ${question.prompt}`}
+                aria-label={`${question.kind === "confirm" ? "Confirm" : question.kind === "notice" ? "Update" : "Question"}: ${question.prompt}`}
               >
                 <div className="companion-ask-what">{question.prompt}</div>
                 {question.detail && (
@@ -614,7 +614,10 @@ export function VibeBuilderPane({
                       </button>
                     ))}
                   </div>
-                ) : (
+                ) : question.kind === "notice" ? null : (
+                  // A notice is Canopy reporting, not asking. "Reply below."
+                  // under "I'm reading its output to find out why" told the
+                  // person to act on the one thing Canopy had just taken over.
                   <span className="companion-ask-detail">Reply below.</span>
                 )}
               </div>

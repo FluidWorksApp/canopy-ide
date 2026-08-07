@@ -1410,7 +1410,7 @@ export class VibeBuilderSession implements BuilderSession {
         { kind: "incident" },
         {
           id: `vibe-server-${input.componentId}-${input.runCommandId}`,
-          kind: "question",
+          kind: "notice",
           prompt: "The app server keeps stopping.",
           detail: "I'm reading its output to find out why.",
         },
@@ -1598,7 +1598,7 @@ export class VibeBuilderSession implements BuilderSession {
           { kind: "idle" },
           {
             id: `vibe-repair-fixed-${input.componentId}-${this.deps.now()}`,
-            kind: "question",
+            kind: "notice",
             prompt: "Found it and fixed it.",
             detail: [
               result.verdict.diagnosis,

@@ -289,6 +289,32 @@ describe("VibeBuilderPane", () => {
     expect(screen.getByText(/learn the project before suggesting/i)).toBeTruthy();
   });
 
+  it("does not ask for a reply to something Canopy is already handling", () => {
+    // Shipped state: the crash-loop incident said "The app server keeps
+    // stopping. I'm reading its output to find out why." and then, underneath,
+    // "Reply below." — telling the person to act on the one thing a repair
+    // agent had just taken over.
+    const h = harness(idle());
+    render(<VibeBuilderPane session={h.session} />);
+    act(() => {
+      h.setState({
+        persona: { kind: "incident" },
+        question: {
+          id: "n1",
+          kind: "notice",
+          prompt: "The app server keeps stopping.",
+          detail: "I'm reading its output to find out why.",
+        },
+      });
+      h.emit({ kind: "ready" });
+    });
+    const notice = screen.getByRole("group", {
+      name: "Update: The app server keeps stopping.",
+    });
+    expect(within(notice).getByText("I'm reading its output to find out why.")).toBeTruthy();
+    expect(within(notice).queryByText("Reply below.")).toBeNull();
+  });
+
   it("pins the persona to needs while a question is outstanding", () => {
     const h = harness(idle());
     render(<VibeBuilderPane session={h.session} />);
