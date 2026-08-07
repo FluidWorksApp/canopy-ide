@@ -15,7 +15,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StructuredRunnerEvent } from "../structuredEvents";
 import {
   VibeBuilderPane,
+  vibeStarterIdeas,
 } from "./VibeBuilderPane";
+import type { ComponentRole, Project } from "../projects";
 import type {
   BuilderSession,
   BuilderSessionState,
@@ -79,6 +81,36 @@ function harness(initial: BuilderSessionState) {
 
 const idle = (): BuilderSessionState => ({ persona: { kind: "idle" } });
 
+const discoveredProject = (
+  id: string,
+  role: ComponentRole,
+  purposes: Array<"serve" | "check" | "worker" | "setup"> = ["serve"],
+): Project => ({
+  id,
+  name: "Product",
+  components: [{
+    id: "main",
+    label: "Main",
+    path: "/project",
+    role,
+    commands: purposes.map((purpose, index) => ({
+      id: `command-${index}`,
+      name: purpose,
+      command: purpose,
+      purpose,
+    })),
+  }],
+  vibe: {
+    version: 1,
+    enabled: true,
+    setupRevision: "tree-1",
+    componentId: "main",
+    runCommandId: "command-0",
+    requiredProcesses: [{ componentId: "main", runCommandId: "command-0" }],
+    externalServices: [],
+  },
+});
+
 describe("VibeBuilderPane", () => {
   it("renders consecutive tool events as one latest-tool row with a count", () => {
     const h = harness(idle());
@@ -133,20 +165,34 @@ describe("VibeBuilderPane", () => {
     expect((input as HTMLTextAreaElement).value).toBe("");
   });
 
-  it("turns a non-technical starting idea into an editable message", async () => {
+  it("offers editable starting ideas that match the discovered project", async () => {
     const h = harness(idle());
-    render(<VibeBuilderPane session={h.session} />);
+    const project = discoveredProject("api-starters", "api", ["serve", "check"]);
+    render(<VibeBuilderPane session={h.session} project={project} />);
 
     fireEvent.click(screen.getByRole("button", {
-      name: /Make this experience feel premium/,
+      name: /Make the service easier to rely on/,
     }));
 
     const input = screen.getByRole("textbox", { name: "Message Ash" });
     expect((input as HTMLTextAreaElement).value).toBe(
-      "Make this experience feel premium",
+      "Make the service easier to rely on",
     );
+    expect(screen.queryByText(/landing page/i)).toBeNull();
+    expect(screen.getByText("Check that everything is working")).toBeTruthy();
     await waitFor(() => expect(document.activeElement).toBe(input));
     expect(h.send).not.toHaveBeenCalled();
+  });
+
+  it("offers no invented starters before project discovery completes", () => {
+    const project = discoveredProject("unknown-starters", "api");
+    project.vibe = { version: 1, enabled: true };
+    expect(vibeStarterIdeas(project)).toEqual([]);
+
+    const h = harness(idle());
+    render(<VibeBuilderPane session={h.session} project={project} />);
+    expect(screen.queryByLabelText("Starting ideas")).toBeNull();
+    expect(screen.getByText(/learn the project before suggesting/i)).toBeTruthy();
   });
 
   it("pins the persona to needs while a question is outstanding", () => {
@@ -284,29 +330,53 @@ describe("VibeBuilderPane", () => {
     expect(screen.getByRole("alert").textContent).toContain("runner stopped");
   });
 
-  it("ignores a late send failure after the session changes", async () => {
+  it("keeps a person's turn through internal session swaps and a project remount", async () => {
     let reject!: (error: Error) => void;
+    const project = discoveredProject("session-handoff", "api");
     const first = harness(idle());
     first.send.mockReturnValueOnce(
       new Promise<void>((_resolve, rejectPromise) => {
         reject = rejectPromise;
       }),
     );
-    const mounted = render(<VibeBuilderPane session={first.session} />);
+    const mounted = render(<VibeBuilderPane session={first.session} project={project} />);
     fireEvent.change(screen.getByRole("textbox"), {
       target: { value: "Old session message" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     const second = harness(idle());
-    mounted.rerender(<VibeBuilderPane session={second.session} />);
+    // Setup, waiting and the live builder are internal session identities, not
+    // new conversations. The old expectation erased the person's visible turn
+    // here, which also made the first-visit card come back.
+    mounted.rerender(<VibeBuilderPane session={second.session} project={project} />);
     await act(async () => {
       reject(new Error("old session stopped"));
       await Promise.resolve();
     });
 
     expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText("Old session message")).toBeTruthy();
+    expect(screen.queryByText("What should we make?")).toBeNull();
+
+    const otherProject = discoveredProject("other-project", "web");
+    const other = harness(idle());
+    mounted.rerender(
+      <VibeBuilderPane session={other.session} project={otherProject} />,
+    );
     expect(screen.queryByText("Old session message")).toBeNull();
+    expect(screen.getByText("What should we make?")).toBeTruthy();
+
+    const returned = harness(idle());
+    mounted.rerender(<VibeBuilderPane session={returned.session} project={project} />);
+    expect(screen.getByText("Old session message")).toBeTruthy();
+    expect(screen.queryByText("What should we make?")).toBeNull();
+
+    mounted.unmount();
+    const third = harness(idle());
+    render(<VibeBuilderPane session={third.session} project={project} />);
+    expect(screen.getByText("Old session message")).toBeTruthy();
+    expect(screen.queryByText("What should we make?")).toBeNull();
   });
 
   it("announces completed prose once the turn ends, not on every delta", () => {

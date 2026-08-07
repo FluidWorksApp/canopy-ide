@@ -9,6 +9,7 @@ import type {
   BuilderSession,
   BuilderSessionState,
 } from "../vibeBuilderSessionTypes";
+import type { Project } from "../projects";
 import { mascotDef } from "../mascots";
 import { Markdown } from "./Markdown";
 import { Mascot } from "./Mascot";
@@ -31,6 +32,67 @@ interface BuilderView {
   questionId: string | null;
   openReplyId: string | null;
   announcement: { sourceId: string; text: string } | null;
+}
+
+export type VibeBuilderProject = Pick<Project, "id" | "components" | "vibe">;
+
+/** Conversations are project-owned, while runner sessions are replaceable
+ * implementation details. Setup, waiting and the live builder can hand off in
+ * one conversation; switching away and back must not erase what the person
+ * already said or make the first-visit card return. App-lifetime only: no chat
+ * content is added to workspace persistence. */
+const projectConversations = new Map<
+  string,
+  { items: BuilderItem[]; hasSpoken: boolean }
+>();
+let builderItemSequence = 0;
+
+export function vibeStarterIdeas(project: VibeBuilderProject | undefined): string[] {
+  if (
+    !project?.vibe?.setupRevision ||
+    project.components.length === 0 ||
+    project.components.some((component) => !component.role)
+  ) {
+    return [];
+  }
+
+  const roles = new Set(project.components.map((component) => component.role));
+  const preview = project.components.find(
+    (component) => component.id === project.vibe?.componentId,
+  );
+  const ideas: string[] = [];
+  const add = (idea: string) => {
+    if (!ideas.includes(idea)) ideas.push(idea);
+  };
+
+  if (preview?.role === "web") add("Polish what people see first");
+  else if (preview?.role === "mobile") add("Polish the first screen");
+  else if (roles.has("api")) add("Make the service easier to rely on");
+  else if (roles.has("worker")) add("Make background work more reliable");
+  else if (roles.has("database")) add("Make data changes safer");
+  else if (roles.has("library")) add("Make this easier for people to use");
+  else if (roles.has("tooling")) add("Simplify the everyday workflow");
+
+  const requiredService = project.vibe.externalServices?.find(
+    (service) => service.requiredForPreview,
+  );
+  if (requiredService) add(`Connect ${requiredService.label}`);
+
+  if (preview?.role === "web") add("Make it feel great on every screen");
+  else if (preview?.role === "mobile") add("Make the app easier to use");
+  else if (roles.has("api")) add("Add a new capability");
+  else if (roles.has("worker")) add("Help failed work recover smoothly");
+
+  if (
+    ideas.length < 3 &&
+    project.components.some((component) =>
+      component.commands?.some((command) => command.purpose === "check"),
+    )
+  ) {
+    add("Check that everything is working");
+  }
+
+  return ideas.slice(0, 3);
 }
 
 function initialView(state: BuilderSessionState): BuilderView {
@@ -74,14 +136,28 @@ function applySessionState(
 }
 
 /** Presentation-only builder chat. The session owns execution; this owns pixels. */
-export function VibeBuilderPane({ session }: { session: BuilderSession }) {
-  const sequence = useRef(0);
-  const nextId = () => `builder-${++sequence.current}`;
-  const [view, setView] = useState(() => initialView(session.state));
+export function VibeBuilderPane({
+  session,
+  project,
+}: {
+  session: BuilderSession;
+  project?: VibeBuilderProject;
+}) {
+  const nextId = () => `builder-${++builderItemSequence}`;
+  const [view, setView] = useState(() => {
+    const initial = initialView(session.state);
+    const held = project ? projectConversations.get(project.id) : undefined;
+    return held ? { ...initial, items: held.items } : initial;
+  });
+  const [hasSpoken, setHasSpoken] = useState(
+    () => (project ? projectConversations.get(project.id)?.hasSpoken : false) ?? false,
+  );
   const [draft, setDraft] = useState("");
   const [answeringQuestion, setAnsweringQuestion] = useState<string | null>(null);
   const questionCard = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const projectId = project?.id ?? null;
+  const projectIdRef = useRef(projectId);
   const sessionVersion = useRef(0);
   const snapshot = session.state;
 
@@ -89,7 +165,20 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
     sessionVersion.current += 1;
     setDraft("");
     setAnsweringQuestion(null);
-    setView(initialView(session.state));
+    const switchedProject = projectIdRef.current !== projectId;
+    projectIdRef.current = projectId;
+    const held = projectId ? projectConversations.get(projectId) : undefined;
+    setHasSpoken(held?.hasSpoken ?? false);
+    setView((current) => {
+      const items = switchedProject ? held?.items ?? [] : current.items;
+      const next = { ...current, items };
+      return {
+        ...next,
+        ...applySessionState(next, session.state),
+        openReplyId: null,
+        announcement: null,
+      };
+    });
     return session.events$.subscribe((event) => {
       if (event.kind === "error") setAnsweringQuestion(null);
       setView((current) => {
@@ -171,7 +260,16 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
         return { ...current, ...state, items, openReplyId };
       });
     });
-  }, [session]);
+  }, [projectId, session]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    const held = projectConversations.get(projectId);
+    projectConversations.set(projectId, {
+      items: view.items,
+      hasSpoken: held?.hasSpoken ?? hasSpoken,
+    });
+  }, [hasSpoken, projectId, view.items]);
 
   // A stable session object may receive a replaced state snapshot from its
   // parent without a runner event (for example, a verification result).
@@ -203,6 +301,14 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
   const send = (text: string) => {
     const message = text.trim();
     if (!message) return;
+    setHasSpoken(true);
+    if (projectId) {
+      const held = projectConversations.get(projectId);
+      projectConversations.set(projectId, {
+        items: held?.items ?? view.items,
+        hasSpoken: true,
+      });
+    }
     setView((current) => ({
       ...current,
       items: [...current.items, { id: nextId(), kind: "you", text: message }],
@@ -233,11 +339,7 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
 
   const name = mascotDef().label;
   const question = view.question;
-  const starterIdeas = [
-    "Create a polished landing page",
-    "Make this experience feel premium",
-    "Fix what isn't working",
-  ];
+  const starterIdeas = vibeStarterIdeas(project);
 
   const chooseStarter = (idea: string) => {
     setDraft(idea);
@@ -280,22 +382,25 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
         role="region"
         aria-label="Builder conversation"
       >
-        {view.items.length === 0 && (
+        {!hasSpoken && view.items.length === 0 && (
           <div className="vibe-builder-welcome">
             <span className="vibe-builder-welcome-kicker">Your idea, in motion</span>
             <strong>What should we make?</strong>
             <p>
-              Describe the result you want. {name} will understand the project
-              and handle the technical setup.
+              {starterIdeas.length > 0
+                ? "Choose a starting point, or describe the result you want."
+                : `${name} will learn the project before suggesting a direction. Tell it the result you want.`}
             </p>
-            <div className="vibe-builder-starters" aria-label="Starting ideas">
-              {starterIdeas.map((idea) => (
-                <button type="button" key={idea} onClick={() => chooseStarter(idea)}>
-                  <span aria-hidden>+</span>
-                  {idea}
-                </button>
-              ))}
-            </div>
+            {starterIdeas.length > 0 && (
+              <div className="vibe-builder-starters" aria-label="Starting ideas">
+                {starterIdeas.map((idea) => (
+                  <button type="button" key={idea} onClick={() => chooseStarter(idea)}>
+                    <span aria-hidden>+</span>
+                    {idea}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
         {view.items.map((item) => {
