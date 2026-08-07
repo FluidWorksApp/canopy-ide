@@ -31,6 +31,20 @@ describe("vibe server health wiring", () => {
     expect(term).toContain("onExitedRef.current(event)");
   });
 
+  it("drops the incident when the person stops the server themselves", () => {
+    // The incident only cleared when the server came back on a port, so
+    // someone who stopped it deliberately kept being told "The app server
+    // keeps stopping" — Canopy insisting on a fault they had just chosen.
+    const view = read("src/components/ProjectView/index.tsx");
+    const start = view.indexOf("vibeServerExit.current =");
+    const watcher = view.slice(start, view.indexOf("const autoStartedVibeRun", start));
+    const stop = watcher.indexOf("event.requested");
+    expect(stop).toBeGreaterThan(-1);
+    // Before the crash-loop branch, or it never runs for a requested stop.
+    expect(stop).toBeLessThan(watcher.indexOf('decision.action !== "crash-loop"'));
+    expect(watcher.slice(stop)).toContain("resolveServerIncident(watched.targetKey)");
+  });
+
   it("restarts the same run tab and records a durable crash-loop incident", () => {
     const view = read("src/components/ProjectView/index.tsx");
     const start = view.indexOf("vibeServerExit.current =");

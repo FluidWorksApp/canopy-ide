@@ -8838,6 +8838,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
       },
     );
     vibeServerHealth.current = decision.state;
+    // Stopping it yourself ends the crash-loop story. The incident only ever
+    // cleared when the server came back on a port — so a person who stopped
+    // it deliberately was left staring at "The app server keeps stopping",
+    // with Canopy insisting on a fault they had just chosen. A deliberate
+    // stop is an answer, not a symptom.
+    if (
+      event.requested &&
+      openVibeServerIncident.current === watched.targetKey
+    ) {
+      watched.session.resolveServerIncident(watched.targetKey);
+      openVibeServerIncident.current = null;
+      resolveAttentionByKey(
+        `vibe-server:${project.id}:${watched.componentId}:${watched.runCommandId}`,
+        "withdrawn",
+      );
+    }
     if (decision.action === "restart") {
       restartRun(tabId, undefined, "watchdog");
       return;
