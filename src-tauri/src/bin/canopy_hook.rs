@@ -554,6 +554,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     return Ok(());
                 }
+                if let Some(decision) = build_shell_decision(&hook_event, &event) {
+                    println!("{}", decision);
+                    return Ok(());
+                }
             }
             if hook_event == "UserPromptSubmit" || hook_event == "SessionStart" {
                 // A session that has just started has never been told any of
@@ -1519,6 +1523,119 @@ const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 /// The file a PostToolUse event wrote to, or None when the tool didn't write
 /// one. NotebookEdit names its target `notebook_path`.
+/// Irreversible inside the workspace, or an attempt to leave it — the shell
+/// half of the authority model.
+///
+/// This mirrors `DESTRUCTIVE` in `src/workspaceAuthority.ts`, and the pairing is
+/// deliberate rather than duplicated by accident: codex is confined by the OS
+/// sandbox, but Claude Code has no equivalent, so for that dialect the only
+/// real enforcement point is this hook. A rule that lives only in the prompt is
+/// a request; here it is a refusal. The two lists must be changed together, and
+/// the tests below carry the same cases as the TypeScript ones so a drift shows
+/// up as a failure on one side.
+///
+/// Each entry returns what the action COSTS, not what the command says: the
+/// person answering has been promised they never need to read a shell command,
+/// and "git reset --hard" is not a question they can be expected to adjudicate.
+fn destructive_reason(command: &str) -> Option<&'static str> {
+    let c = command.trim();
+    let has = |needle: &str| c.contains(needle);
+    // `rm` with a recursive or force flag, in any order or combination.
+    let rm_destroys = c.split_whitespace().enumerate().any(|(i, word)| {
+        (word == "rm" || word.ends_with("/rm") || (i > 0 && word == "rm"))
+            && c.split_whitespace()
+                .skip(i + 1)
+                .take_while(|w| w.starts_with('-'))
+                .any(|w| w.contains('r') || w.contains('f'))
+    });
+    if rm_destroys {
+        return Some("This deletes files for good. I can't undo it afterwards.");
+    }
+    if has("git reset --hard")
+        || has("git clean -f")
+        || has("git clean -df")
+        || has("git clean -fd")
+        || has("git checkout -- ")
+        || has("git restore ")
+    {
+        return Some("This throws away changes that haven't been saved to a version.");
+    }
+    if has("git push") && (has("--force") || has(" -f")) {
+        return Some("This overwrites the shared history everyone else is working from.");
+    }
+    let lower = c.to_ascii_lowercase();
+    if lower.contains("drop database")
+        || lower.contains("drop table")
+        || lower.contains("drop schema")
+        || lower.contains("truncate table")
+        || lower.contains("migrate reset")
+        || lower.contains("db push --force")
+    {
+        return Some("This deletes data that isn't coming back.");
+    }
+    if has("sudo ")
+        || has("brew install")
+        || has("brew uninstall")
+        || has("brew upgrade")
+        || (has("npm install") && has(" -g"))
+        || (has("npm i ") && has(" -g"))
+    {
+        return Some("This changes software for your whole computer, not just this project.");
+    }
+    if has(".env") || lower.contains("secret") {
+        return Some("This touches the private keys this project uses.");
+    }
+    None
+}
+
+/// A Build turn is about to run a shell command. Decide, and when the cost is
+/// irreversible, put the question to the person before it happens.
+///
+/// Only Build sessions (`CANOPY_VIBE`) are gated. An Engineer-mode agent runs
+/// with its user present and Claude's own permission flow in front of it;
+/// interposing here would be answering a question that was never ours.
+///
+/// Returns the JSON to print, or None to stay out of the way.
+fn build_shell_decision(hook_event: &str, event: &serde_json::Value) -> Option<String> {
+    if hook_event != "PreToolUse" || std::env::var("CANOPY_VIBE").is_err() {
+        return None;
+    }
+    if event["tool_name"].as_str()? != "Bash" {
+        return None;
+    }
+    let command = event["tool_input"]["command"].as_str()?;
+    let reason = destructive_reason(command)?;
+    let approved = ui_op(
+        "ask",
+        &serde_json::json!({
+            "question": format!("{reason} Go ahead?"),
+            "options": ["Yes, go ahead", "No, leave it"],
+        }),
+        180,
+    )
+    .map(|answer| {
+        let a = answer.to_ascii_lowercase();
+        a.contains("yes") || a.contains("go ahead")
+    })
+    // No answer is not consent. A timeout, a closed project or an unreachable
+    // app all land here, and every one of them means nobody said yes.
+    .unwrap_or(false);
+    Some(
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": if approved { "allow" } else { "deny" },
+                "permissionDecisionReason": if approved {
+                    "You approved this.".to_string()
+                } else {
+                    format!("{reason} I left it alone because that wasn't approved.")
+                },
+            }
+        })
+        .to_string(),
+    )
+}
+
 fn edited_path(event: &serde_json::Value) -> Option<&str> {
     let tool = event["tool_name"].as_str()?;
     if !EDIT_TOOLS.contains(&tool) {
@@ -5113,6 +5230,85 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// These carry the same cases as `judgeCommand` in
+    /// src/workspaceAuthority.test.ts. Claude Code has no OS sandbox, so this
+    /// hook is the only place the boundary is actually enforced for that
+    /// dialect — if the two lists drift, one side stops protecting anything.
+    #[test]
+    fn the_work_itself_runs_without_asking() {
+        for command in [
+            "npm install",
+            "pnpm install --frozen-lockfile",
+            "npm create vite@latest . -- --template react-ts",
+            "bash -lc 'pnpm install && pnpm run build'",
+            "cargo build",
+            "npx prisma generate",
+            "git add -A && git commit -m 'wip'",
+        ] {
+            assert!(
+                destructive_reason(command).is_none(),
+                "{command} should not need approval"
+            );
+        }
+    }
+
+    #[test]
+    fn irreversible_work_is_stopped_and_named_by_its_cost() {
+        let cases = [
+            ("rm -rf src/legacy", "deletes files for good"),
+            ("bash -lc \"npm ci && rm -rf ../../other\"", "deletes files for good"),
+            ("git reset --hard HEAD~3", "haven't been saved"),
+            ("git clean -fd", "haven't been saved"),
+            ("git push --force origin main", "shared history"),
+            ("psql -c 'DROP TABLE donations'", "isn't coming back"),
+            ("npx prisma migrate reset", "isn't coming back"),
+            ("sudo apt-get install pkg-config", "whole computer"),
+            ("brew install postgresql", "whole computer"),
+            ("npm install -g pnpm", "whole computer"),
+            ("cp .env.production .env", "private keys"),
+        ];
+        for (command, expected) in cases {
+            let reason = destructive_reason(command)
+                .unwrap_or_else(|| panic!("{command} should need approval"));
+            assert!(
+                reason.contains(expected),
+                "{command}: expected a reason mentioning {expected:?}, got {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_question_never_quotes_the_command() {
+        // The person answering has been promised they never need to read a
+        // shell command; "git reset --hard" is not something to adjudicate.
+        let reason = destructive_reason("git reset --hard").unwrap();
+        assert!(!reason.contains("git"));
+        assert!(!reason.contains("--hard"));
+    }
+
+    #[test]
+    fn only_build_turns_are_gated() {
+        // An Engineer-mode agent has its user present and Claude's own
+        // permission flow in front of it. Interposing there would be answering
+        // a question that was never ours.
+        let event = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "rm -rf everything" },
+        });
+        std::env::remove_var("CANOPY_VIBE");
+        assert!(build_shell_decision("PreToolUse", &event).is_none());
+    }
+
+    #[test]
+    fn a_non_shell_tool_is_left_alone() {
+        let event = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "/tmp/x", "command": "rm -rf /" },
+        });
+        assert!(build_shell_decision("PreToolUse", &event).is_none());
+        assert!(build_shell_decision("PostToolUse", &event).is_none());
+    }
 
     /// The comment above `peer_context` has always promised this and nothing
     /// implemented it: a ~1000-token blob was rebuilt and re-injected on every
