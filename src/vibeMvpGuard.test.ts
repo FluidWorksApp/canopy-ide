@@ -70,10 +70,20 @@ describe("the vibe MVP wiring boundaries", () => {
 
   it("never asks a Build user to configure or start a server", () => {
     const preview = read("src/components/PreviewView.tsx");
+    const buildPreview = preview.slice(
+      preview.indexOf("if (buildMode)"),
+      preview.indexOf('<div className="preview-empty">', preview.indexOf("if (buildMode)")),
+    );
+    const projectView = read("src/components/ProjectView/index.tsx");
+    expect(projectView).toContain("buildMode={vibe}");
+    expect(buildPreview).toContain("Your idea is taking shape");
+    expect(buildPreview).toContain("will appear here automatically");
+    expect(buildPreview).not.toContain("server");
+    expect(buildPreview).not.toContain("component");
+    expect(buildPreview).not.toContain("localhost");
     expect(preview).not.toContain("Add a run command to a component");
     expect(preview).not.toContain("project settings");
     expect(preview).not.toContain("Once it's listening");
-    expect(preview).toContain("I'm getting your project ready.");
   });
 
   it("persists inferred target data before publishing it to ProjectView", () => {

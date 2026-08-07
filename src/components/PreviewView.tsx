@@ -84,6 +84,9 @@ interface PreviewViewProps {
    *  this only tunes the agent-cursor choreography; under the webview engine it
    *  is what puts the native view on screen at all. */
   visible: boolean;
+  /** Build mode speaks in outcomes and opens the configured preview itself;
+   * Engineer mode keeps the explicit server picker for manual browser tabs. */
+  buildMode?: boolean;
   /** A passive PiP is pulling frames from this page. This also creates a native
    *  browser that has never been shown full-size, so an attention-free agent can
    *  work without first taking over the user's tab. */
@@ -153,6 +156,7 @@ export function PreviewView({
   feedbackPanelHidden = false,
   dir,
   visible,
+  buildMode = false,
   streaming = false,
   onPatch,
   servers,
@@ -1070,6 +1074,44 @@ export function PreviewView({
   // Once a page is open the URL bar (and canopy_browser_navigate) will go
   // anywhere, remote origins included; those pages just have no component link.
   if (!origin) {
+    if (buildMode) {
+      return (
+        <div className="preview-empty preview-empty-vibe">
+          <div className="vibe-preview-copy">
+            <span className="vibe-preview-kicker">Live preview</span>
+            <h2>Your idea is taking shape</h2>
+            <p>
+              Your first look will appear here automatically. You can keep
+              describing changes while it gets ready.
+            </p>
+          </div>
+          <div className="vibe-preview-mockup" aria-hidden>
+            <div className="vibe-preview-mockup-bar">
+              <span />
+              <span />
+              <span />
+            </div>
+            <div className="vibe-preview-mockup-body">
+              <div className="vibe-preview-mockup-rail" />
+              <div className="vibe-preview-mockup-page">
+                <div className="vibe-preview-skeleton vibe-preview-skeleton-title" />
+                <div className="vibe-preview-skeleton vibe-preview-skeleton-copy" />
+                <div className="vibe-preview-skeleton vibe-preview-skeleton-action" />
+                <div className="vibe-preview-mockup-cards">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="vibe-preview-status" role="status">
+            <span aria-hidden />
+            Preparing your preview
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="preview-empty">
         <h2>Preview a running server</h2>

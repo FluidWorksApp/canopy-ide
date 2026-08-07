@@ -81,6 +81,7 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
   const [draft, setDraft] = useState("");
   const [answeringQuestion, setAnsweringQuestion] = useState<string | null>(null);
   const questionCard = useRef<HTMLDivElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
   const sessionVersion = useRef(0);
   const snapshot = session.state;
 
@@ -232,6 +233,16 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
 
   const name = mascotDef().label;
   const question = view.question;
+  const starterIdeas = [
+    "Create a polished landing page",
+    "Make this experience feel premium",
+    "Fix what isn't working",
+  ];
+
+  const chooseStarter = (idea: string) => {
+    setDraft(idea);
+    requestAnimationFrame(() => composer.current?.focus());
+  };
 
   return (
     <section
@@ -240,16 +251,22 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
       style={{ display: "flex", minHeight: 0, flexDirection: "column" }}
     >
       <header className="vibe-builder-head companion-head">
-        <Mascot
-          state={view.persona.state}
-          tone={view.persona.tone}
-          size={54}
-          title={`${name} is ${view.persona.state}`}
-          className="vibe-builder-mascot"
-        />
+        <div className={`vibe-builder-mascot-stage is-${view.persona.state}`}>
+          <Mascot
+            state={view.persona.state}
+            tone={view.persona.tone}
+            size={46}
+            title={`${name} is ${view.persona.state}`}
+            className="vibe-builder-mascot"
+          />
+        </div>
         <div className="vibe-builder-identity">
-          <strong>{name}</strong>
-          <span className="companion-cli"> · your builder</span>
+          <div className="vibe-builder-name-row">
+            <strong>{name}</strong>
+            <span className="vibe-builder-mode">
+              <span aria-hidden /> Build mode
+            </span>
+          </div>
           {view.persona.utterance && (
             <div className="vibe-builder-aside" aria-live="polite">
               {view.persona.utterance}
@@ -264,7 +281,22 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
         aria-label="Builder conversation"
       >
         {view.items.length === 0 && (
-          <p className="companion-empty">Tell {name} what you want to build.</p>
+          <div className="vibe-builder-welcome">
+            <span className="vibe-builder-welcome-kicker">Your idea, in motion</span>
+            <strong>What should we make?</strong>
+            <p>
+              Describe the result you want. {name} will understand the project
+              and handle the technical setup.
+            </p>
+            <div className="vibe-builder-starters" aria-label="Starting ideas">
+              {starterIdeas.map((idea) => (
+                <button type="button" key={idea} onClick={() => chooseStarter(idea)}>
+                  <span aria-hidden>+</span>
+                  {idea}
+                </button>
+              ))}
+            </div>
+          </div>
         )}
         {view.items.map((item) => {
           if (item.kind === "activity") {
@@ -405,26 +437,31 @@ export function VibeBuilderPane({ session }: { session: BuilderSession }) {
           send(draft);
         }}
       >
-        <textarea
-          className="vibe-builder-input companion-input"
-          rows={1}
-          value={draft}
-          aria-label={`Message ${name}`}
-          placeholder={`Tell ${name} what to change`}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              send(draft);
-            }
-          }}
-        />
+        <div className="vibe-builder-input-shell">
+          <textarea
+            ref={composer}
+            className="vibe-builder-input companion-input"
+            rows={1}
+            value={draft}
+            aria-label={`Message ${name}`}
+            placeholder={`Tell ${name} what you want`}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                send(draft);
+              }
+            }}
+          />
+          <span className="vibe-builder-input-note">No technical steps needed</span>
+        </div>
         <button
           className="vibe-builder-send companion-send"
           type="submit"
           disabled={!draft.trim()}
         >
-          Send
+          <span>Send</span>
+          <span className="vibe-builder-send-arrow" aria-hidden>↗</span>
         </button>
       </form>
     </section>

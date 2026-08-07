@@ -133,6 +133,22 @@ describe("VibeBuilderPane", () => {
     expect((input as HTMLTextAreaElement).value).toBe("");
   });
 
+  it("turns a non-technical starting idea into an editable message", async () => {
+    const h = harness(idle());
+    render(<VibeBuilderPane session={h.session} />);
+
+    fireEvent.click(screen.getByRole("button", {
+      name: /Make this experience feel premium/,
+    }));
+
+    const input = screen.getByRole("textbox", { name: "Message Ash" });
+    expect((input as HTMLTextAreaElement).value).toBe(
+      "Make this experience feel premium",
+    );
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
   it("pins the persona to needs while a question is outstanding", () => {
     const h = harness(idle());
     render(<VibeBuilderPane session={h.session} />);
@@ -343,5 +359,19 @@ describe("the builder pane boundary", () => {
     expect(source).toContain("reducePersona(");
     expect(source).toContain("state={view.persona.state}");
     expect(source).not.toMatch(/<Mascot[^>]*state=["']/s);
+  });
+
+  it("takes its atmosphere from skin tokens and respects material and motion variants", () => {
+    const css = readFileSync(join(process.cwd(), "src/index.css"), "utf8");
+    const build = css.slice(
+      css.indexOf("/* ── Build mode"),
+      css.indexOf("/* ── The agents page"),
+    );
+    expect(build).toContain("var(--accent)");
+    expect(build).toContain("var(--cyan)");
+    expect(build).toContain(':root[data-theme="pixel"]');
+    expect(build).toContain(':root[data-theme="vitrine"]');
+    expect(build).toContain("prefers-reduced-motion: reduce");
+    expect(build).not.toMatch(/#[0-9a-f]{3,8}/i);
   });
 });
