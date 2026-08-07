@@ -8902,8 +8902,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     postAttention({
       kind: "question",
       tone: "error",
-      title: "The Build server keeps stopping",
-      body: "I stopped restarting it. Open the failed run to inspect its output.",
+      title: "The preview couldn't stay open",
+      body: "I stopped retrying so your computer stays responsive. I'll explain what needs attention in Build.",
       source: "project",
       projectId: project.id,
       projectName: project.name,
@@ -8940,7 +8940,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         true,
         undefined,
         undefined,
-        true,
+        // Build owns a preview surface, not a process-output surface. Keep the
+        // run mounted for Engineer and for diagnostics without selecting it.
+        false,
         undefined,
         { componentId: component.id, runCommandId: command.id },
       );
@@ -10286,6 +10288,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [activeTerminalGroup],
   );
 
+  // Build and Engineer share one mounted tab runtime so switching modes never
+  // kills a PTY or reloads a preview. They do not share the presented tab:
+  // Build always owns its preview canvas, while Engineer keeps its actual tab
+  // selection (including every run's raw output) untouched underneath.
+  const surfaceTabId = vibe ? vibePreview?.id ?? null : activeTabId;
   const mainArea = (
     <div className="project-main">
       {tabMenu.menu && (
@@ -10418,6 +10425,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 ? identifyAgent(statsByPty.get(tab.ptyId)?.agent_hint)
                 : null;
             const shown =
+              !vibe &&
               !softClosed &&
               visible &&
               (pane != null || (!grouped && tab.id === activeTabId));
@@ -10535,7 +10543,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   termHandles.current.set(tab.id, h);
                 }}
                 cwd={tab.cwd}
-                active={!softClosed && tab.id === activeTabId && visible}
+                active={
+                  !vibe && !softClosed && tab.id === activeTabId && visible
+                }
                 attachId={tab.attachId}
                 killAttachedOnClose={tab.killAttachedOnClose}
                 // A run tab hands its command to the shell to run-and-exit
@@ -10655,7 +10665,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   patchTab(tab.id, { notice });
                   if (
                     tab.ptyId != null &&
-                    !(tab.id === activeTabId && visible)
+                    !(tab.id === activeTabId && visible && !vibe)
                   ) {
                     pushAttention(
                       tab.ptyId,
@@ -10699,7 +10709,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             </div>
             );
           })}
-        {activeTerminalGroup &&
+        {!vibe && activeTerminalGroup &&
           activeTerminalLayout?.dividers.map((divider) => (
             <div
               key={divider.nodeId}
@@ -10719,7 +10729,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               title="Drag to resize · double-click to equalize"
             />
           ))}
-        {paneDrop && (
+        {!vibe && paneDrop && (
           <div
             className="pane-drop-preview"
             style={{
@@ -10743,7 +10753,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             data-tab-id={tab.id}
             className="fill doc-host"
             style={hostStyle(
-              tab.id === activeTabId && visible,
+              tab.id === surfaceTabId && visible,
               tab.type === "preview" && browserEngine === "proxy",
             )}
           >
@@ -10950,7 +10960,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             underneath stays mounted (unmounting a Term kills its PTY) and shows
             faintly through the frosted glass. The layer stays in the DOM so it
             can fade; the heavy AgentWorkspaceView only mounts while open. */}
-        {agentTermWs && (
+        {!vibe && agentTermWs && (
           <>
             {!wsDrawerOpen && (
               <button

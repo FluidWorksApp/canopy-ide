@@ -45,6 +45,40 @@ describe("the vibe MVP wiring boundaries", () => {
     expect(projectView).toContain("{mainArea}");
   });
 
+  it("keeps raw run output mounted for Engineer but presents only the preview in Build", () => {
+    const projectView = read("src/components/ProjectView/index.tsx");
+    const autoStartAt = projectView.indexOf("const autoStartedVibeRuns");
+    const firstEffect = projectView.indexOf("useEffect(", autoStartAt);
+    const autoStart = projectView.slice(
+      autoStartAt,
+      projectView.indexOf("useEffect(", firstEffect + 1),
+    );
+    const launch = autoStart.slice(
+      autoStart.indexOf("addTerminal("),
+      autoStart.indexOf("{ componentId:"),
+    );
+    expect(launch).toContain("run mounted for Engineer");
+    expect(launch.indexOf("false,")).toBeGreaterThan(
+      launch.indexOf("run mounted for Engineer"),
+    );
+
+    const main = projectView.slice(
+      projectView.indexOf("const surfaceTabId"),
+      projectView.indexOf("// ---------- side panels ----------"),
+    );
+    expect(main).toContain(
+      "const surfaceTabId = vibe ? vibePreview?.id ?? null : activeTabId;",
+    );
+    expect(main).toContain("const shown =\n              !vibe &&");
+    expect(main).toContain(
+      "!vibe && !softClosed && tab.id === activeTabId && visible",
+    );
+    expect(main).toContain("tab.id === surfaceTabId && visible");
+    expect(main).toContain("{!vibe && activeTerminalGroup &&");
+    expect(main).toContain("{!vibe && agentTermWs &&");
+    expect(projectView).not.toContain("Open the failed run to inspect its output");
+  });
+
   it("never sends Build mode to the target setup modal", () => {
     const projectView = read("src/components/ProjectView/index.tsx");
     const chat = projectView.indexOf('<aside className="vibe-chat-placeholder"');
