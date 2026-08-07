@@ -7,6 +7,7 @@ import {
   StructuredEventParser,
   type StructuredRunnerEvent,
 } from "./structuredEvents";
+import { classifyFailure } from "./failureClassifier";
 
 function collector() {
   const events: StructuredRunnerEvent[] = [];
@@ -138,6 +139,92 @@ describe("the streaming protocol", () => {
     const t = new StructuredEventParser(host);
     t.handleLine(line({ type: "system", subtype: "init" }));
     expect(host.events).toEqual([{ kind: "ready" }]);
+  });
+});
+
+// The failure this exists for, recorded verbatim from
+// ~/.claude/projects/…/1f7f983d-….jsonl: a Build session asked for
+// canopy_project and canopy_start_server, was refused for want of a permission
+// no one could grant, and then explained to a non-engineer how to grant it.
+// Canopy saw none of that — tool results arrive on a `user` line, and the
+// parser did not read `user` lines at all. The turn ended looking successful.
+describe("a tool call blocked on a permission nobody can grant", () => {
+  const denial = (tool: string) =>
+    line({
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_1",
+            content: `Claude requested permissions to use ${tool}, but you haven't granted it yet.`,
+            is_error: true,
+          },
+        ],
+      },
+    });
+
+  it("names the tool that was refused", () => {
+    const host = collector();
+    const t = new StructuredEventParser(host);
+    t.handleLine(denial("mcp__canopy__canopy_start_server"));
+    expect(host.events).toEqual([
+      { kind: "blocked", tool: "mcp__canopy__canopy_start_server" },
+    ]);
+  });
+
+  it("reads the block form of a result as well as the bare string", () => {
+    const host = collector();
+    const t = new StructuredEventParser(host);
+    t.handleLine(
+      line({
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              content: [
+                {
+                  type: "text",
+                  text: "Claude requested permissions to use mcp__canopy__canopy_project, but you haven't granted it yet.",
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    expect(host.events).toEqual([
+      { kind: "blocked", tool: "mcp__canopy__canopy_project" },
+    ]);
+  });
+
+  it("stays silent for an ordinary tool result", () => {
+    // Reading every result back would make the parser a transcript reader and
+    // put file contents through the chat. Only the refusal is acted on.
+    const host = collector();
+    const t = new StructuredEventParser(host);
+    t.handleLine(
+      line({
+        type: "user",
+        message: {
+          content: [{ type: "tool_result", content: "1\t{\n2\t  \"name\": \"cause-api\"," }],
+        },
+      }),
+    );
+    expect(host.events).toEqual([]);
+  });
+
+  it("is classified as a task failure, so the same block is not retried on two more routes", () => {
+    // Every route shares one launch policy: a permission block is identical on
+    // all of them. The fix is in Canopy's argv, not in the fleet.
+    const verdict = classifyFailure({
+      agent: "claude",
+      text:
+        "Canopy requested permissions to use mcp__canopy__canopy_start_server in a session " +
+        "it started itself, and the request had nobody to answer it.",
+    });
+    expect(verdict).toEqual({ class: "task", signature: "tool-permission-denied" });
   });
 });
 

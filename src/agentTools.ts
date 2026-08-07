@@ -160,3 +160,23 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
 ];
 
 export const ALL_AGENT_TOOLS = AGENT_TOOL_GROUPS.flatMap((g) => g.tools.map((t) => t.name));
+
+/** Every tool from Canopy's own sidecar, as one permission rule.
+ *
+ * For sessions Canopy spawns and nobody is sitting in front of. A permission
+ * prompt there has no one to answer it: the agent asks, the ask goes nowhere,
+ * and the turn ends by telling a non-engineer to "grant the Canopy MCP tools"
+ * in a screen that does not exist. So the whole server is allowed up front.
+ *
+ * A rule rather than a list, and the distinction is the point. ALL_AGENT_TOOLS
+ * is deliberately a subset of what the sidecar serves — agentTools.test.ts says
+ * so, and names the device set and canopy_browser_point as the tools with no
+ * settings switch — so every list we could write here re-creates the dead end
+ * for whatever it left out. That is exactly how the last fix left
+ * canopy_wait_for and canopy_restart_server blocked.
+ *
+ * This is not a widening of authority. What an owned session may do is decided
+ * by the tools withheld from it (`disallowedTools`, and the sidecar's own
+ * disable list), on the same terms as the companion's — see companionTools.ts.
+ * It only stops Canopy asking itself for permission to use itself. */
+export const CANOPY_MCP_ALLOWANCE = "mcp__canopy";
