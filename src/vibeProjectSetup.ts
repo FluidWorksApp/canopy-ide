@@ -1059,7 +1059,6 @@ function createVibeProjectSetupFlight(
   project: Project,
   persist: (configured: Project) => Promise<boolean>,
   deps: VibeProjectSetupSessionDeps,
-  flights: Map<string, VibeProjectSetupFlight>,
 ): VibeProjectSetupFlight {
   const flight: VibeProjectSetupFlight = {
     project,
@@ -1212,7 +1211,7 @@ export function createVibeProjectSetupSession(
     flight = undefined;
   }
   if (!flight) {
-    flight = createVibeProjectSetupFlight(project, persist, deps, flights);
+    flight = createVibeProjectSetupFlight(project, persist, deps);
     flights.set(project.id, flight);
   } else if (flight.status === "idle") {
     // Strict Mode may dispose the first facade before Build subscribes. Use the
