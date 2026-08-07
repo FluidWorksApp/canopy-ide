@@ -110,3 +110,16 @@ export const STRUCTURED_RUNNERS: Record<string, StructuredRunner> = {
   claude: CLAUDE_RUNNER,
   codex: CODEX_RUNNER,
 };
+
+/** Whether this CLI can run a task that is read back off a JSON stream.
+ *
+ *  The question every caller actually has, asked of the capability rather than
+ *  of the name. Canopy's registry holds seven CLIs and the person may have
+ *  connected any of them; which ones can stream is a property of the runner
+ *  written for each, not a preference, and it changes as runners are added.
+ *  Callers that named `claude` directly were not choosing Claude — they were
+ *  spelling "the one I know streams", and they broke the day a route resolved
+ *  to anything else: `startStructured` throws before a process exists, and the
+ *  task reports the agent failing rather than the launch being impossible. */
+export const streamsStructured = (cliId: string): boolean =>
+  STRUCTURED_RUNNERS[cliId]?.tier === "structured";

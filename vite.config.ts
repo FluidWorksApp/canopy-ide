@@ -25,6 +25,20 @@ function thirdPartyNotices(): Plugin {
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), thirdPartyNotices()],
+  server: {
+    // tauri.conf.json's devUrl is a fixed http://localhost:5173. Vite's default
+    // is to step aside when that port is taken and quietly serve on the next
+    // free one — which does not move the webview, so `tauri dev` compiles this
+    // checkout, opens a window, and loads whatever else already owned 5173.
+    //
+    // That is not hypothetical. A Vite left running from an unrelated worktree
+    // owned 5173 for a day; every dev run since served that worktree's
+    // frontend, and the symptom was a fix that "did not work" while its source
+    // was demonstrably correct — the running JavaScript was another branch's.
+    // Refusing to start is the only honest outcome: a dev server on the wrong
+    // port is worse than no dev server, because it looks like it worked.
+    strictPort: true,
+  },
   build: {
     // The file-type icons (material-icon-theme, ~1250 SVGs) all sit under the
     // 4KB default inline limit, so Vite embeds every one as a data: URI in the

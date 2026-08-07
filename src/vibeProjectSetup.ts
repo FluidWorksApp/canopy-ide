@@ -7,7 +7,7 @@ import { DEFAULT_VIBE_BUILDER_DEPS } from "./vibeBuilderSession";
 import type { BuilderSession } from "./vibeBuilderSessionTypes";
 import { redactSecrets } from "./vibeSecretScan";
 import type { ProjectRunnerController, ProjectRunnerTransport } from "./projectRunner";
-import type { StructuredRunnerLaunch } from "./structuredRunners";
+import { streamsStructured, type StructuredRunnerLaunch } from "./structuredRunners";
 import type {
   TaskAttemptReserveInput,
   TaskAttemptSettlement,
@@ -334,14 +334,61 @@ export function materializeVibeSetup(project: Project, proposal: VibeProjectSetu
 
 export const VIBE_SETUP_USER_MESSAGE = "Inspect this repository and return its complete Build setup as the required JSON object. Do not modify files and do not ask the person technical questions.";
 
-export function vibeSetupSystemPrompt(fingerprint: string): string {
-  return `You are Canopy's project setup agent. Read the entire repository, including non-JavaScript components. Do not edit files. Discover every component, how each runs, the one page-serving preview target, every process required for that page to work, external services, and deployment evidence. Return exactly one JSON object with schemaVersion 1 and repositoryFingerprint ${JSON.stringify(fingerprint)}. Commands are argv arrays, never shell strings. Evidence fields contain repository paths. If you cannot determine a complete setup, return no proposal and explain the blocker plainly.`;
+/** How many observed paths are handed over. Enough to recognise every
+ *  component and its build files; short of the point where the listing costs
+ *  more than the search it replaces. */
+const INVENTORY_LIMIT = 1500;
+
+/** The brief, with the project's actual layout in it.
+ *
+ *  Canopy has already walked these directories — `observeVibeSetupRepository`
+ *  snapshots every file to compute the fingerprint, and then used that only to
+ *  validate the answer. The agent was left to rediscover the same tree with
+ *  glob, from a working directory that is merely the components' common
+ *  ancestor: for two sibling checkouts that is whatever folder the person keeps
+ *  repositories in, and the search never finished inside the timeout.
+ *
+ *  So the inventory goes in the brief. Truncation is stated rather than
+ *  silent — an agent that believes it has the whole tree will conclude a
+ *  component does not exist. */
+export function vibeSetupUserMessage(
+  componentRoots: readonly string[],
+  inventory: readonly string[] = [],
+): string {
+  if (componentRoots.length === 0) return VIBE_SETUP_USER_MESSAGE;
+  const listed = inventory.slice(0, INVENTORY_LIMIT);
+  const layout = listed.length
+    ? `\n\nCanopy has already observed these files. Use this instead of searching; read individual files only where you need their contents:\n${listed.join("\n")}` +
+      (inventory.length > listed.length
+        ? `\n(+${inventory.length - listed.length} more files not listed — the components above are complete, this listing is not.)`
+        : "")
+    : "";
+  return (
+    `${VIBE_SETUP_USER_MESSAGE}\n\nThe project is exactly these directories:\n${componentRoots.join("\n")}` +
+    layout
+  );
+}
+
+export function vibeSetupSystemPrompt(fingerprint: string, componentRoots: readonly string[] = []): string {
+  // The working directory is the components' common ancestor, which for two
+  // sibling checkouts is whatever folder the person keeps repositories in —
+  // here that was ~/Documents/GitHub, 106GB of unrelated projects. Told only
+  // to "read the entire repository", the agent globbed all of it and hit the
+  // timeout without producing a proposal. The roots are known before launch,
+  // so name them rather than leaving it to infer them from where it landed.
+  const scope = componentRoots.length
+    ? ` The project consists solely of these directories: ${componentRoots.join(", ")}. Confine every search to them; sibling directories under the working directory belong to unrelated projects.`
+    : "";
+  return `You are Canopy's project setup agent.${scope} Read the entire repository, including non-JavaScript components. Do not edit files. Discover every component, how each runs, the one page-serving preview target, every process required for that page to work, external services, and deployment evidence. Return exactly one JSON object with schemaVersion 1 and repositoryFingerprint ${JSON.stringify(fingerprint)}. Commands are argv arrays, never shell strings. Evidence fields contain repository paths. If you cannot determine a complete setup, return no proposal and explain the blocker plainly.`;
 }
 
 export interface VibeSetupRepositoryObservation {
   projectRoot: string;
   fingerprint: string;
   paths: ReadonlySet<string>;
+  /** The configured component directories. Distinct from projectRoot, which is
+   *  only their common ancestor and may hold unrelated repositories. */
+  componentRoots: string[];
 }
 
 export async function observeVibeSetupRepository(project: Project): Promise<VibeSetupRepositoryObservation> {
@@ -372,8 +419,17 @@ export async function observeVibeSetupRepository(project: Project): Promise<Vibe
     return `${path}:${snapshot.size}:${snapshot.modified_ms ?? -1}`;
   });
   facts.sort();
-  return { projectRoot, paths, fingerprint: `fs-${hash(facts.join("\n"))}` };
+  return { projectRoot, paths, componentRoots: roots, fingerprint: `fs-${hash(facts.join("\n"))}` };
 }
+
+/** What this task needs from a model, as a class the routing table answers.
+ *
+ *  Discovery reads files and reports structure. It is not the thinking the
+ *  builder does, and asking for the builder's tier spent the frontier model on
+ *  enumeration — slower, dearer, and no more correct. Declared once here so the
+ *  ranking and the failover that follows it cannot disagree about which job
+ *  this is. */
+const SETUP_TASK_CLASS = "survey" as const;
 
 const SETUP_ROUTE_VERSIONS: RouteVersions = {
   harnessVersion: "vibe-project-setup-1",
@@ -397,12 +453,22 @@ export interface VibeProjectSetupTaskInput {
   projectId: string;
   projectName: string;
   projectRoot: string;
+  /** Named to the agent so it searches the project rather than everything that
+   *  happens to sit beside it under projectRoot. */
+  componentRoots?: readonly string[];
+  /** Paths Canopy already observed, handed over so the agent reads rather than
+   *  searches. */
+  inventory?: readonly string[];
   repositoryFingerprint: string;
   attemptCap?: number;
   timeoutMs?: number;
   /** Schema/repository validation owned by Canopy. A JSON object is not a
    * successful attempt merely because it parses. */
   validateOutput?: (output: unknown) => boolean;
+  /** What the agent is doing right now, for the pane. Setup can run for
+   *  minutes; without this it prints one line and then looks hung, which is
+   *  indistinguishable from being hung. */
+  onActivity?: (event: import("./structuredEvents").StructuredRunnerEvent) => void;
   signal?: AbortSignal;
 }
 
@@ -425,6 +491,7 @@ async function runSetupAttempt(
   subscribe: (finish: (result: AttemptRun) => void) => void,
   timeoutMs: number,
   signal?: AbortSignal,
+  brief: string = VIBE_SETUP_USER_MESSAGE,
 ): Promise<AttemptRun> {
   return new Promise<AttemptRun>((resolve) => {
     let finished = false;
@@ -450,7 +517,7 @@ async function runSetupAttempt(
       void transport.stop().catch(() => {});
       finish({ kind: "failed", text: "project setup agent timed out", timedOut: true });
     }, timeoutMs);
-    void transport.send(VIBE_SETUP_USER_MESSAGE).catch((error) =>
+    void transport.send(brief).catch((error) =>
       finish({ kind: "failed", text: String(error), timedOut: false }),
     );
   });
@@ -464,9 +531,26 @@ export async function runVibeProjectSetupTask(
   deps: VibeProjectSetupTaskDeps,
 ): Promise<VibeProjectSetupTaskResult> {
   const attemptCap = Math.max(1, Math.min(3, input.attemptCap ?? 3));
-  const timeoutMs = Math.max(1_000, Math.min(180_000, input.timeoutMs ?? 90_000));
-  const candidates = await deps.listRoutes().catch(() => []);
-  const eligible = rankRoutes(candidates, "build");
+  // Setup runs once per repository fingerprint, not once per turn, so a tight
+  // budget buys nothing and costs the whole feature. 90s was set against a
+  // single-component project; a real one (four components, sixty reads to
+  // establish how each runs) does not finish, and the person is told the agent
+  // could not understand their project rather than that it was cut off.
+  const timeoutMs = Math.max(1_000, Math.min(600_000, input.timeoutMs ?? 300_000));
+  // Setup reads its result off a JSON stream, so a CLI Canopy can only run
+  // one-shot is not a slower route here — it is not a route at all. Ranking it
+  // anyway spends the whole attempt budget on `has no verified streaming
+  // runner`, thrown before a process exists, and reports it as the agent
+  // failing to understand the project.
+  const candidates = (await deps.listRoutes().catch(() => [])).filter(
+    (candidate) => streamsStructured(candidate.cli),
+  );
+  // Reading a repository and reporting what is in it is a survey, not a build.
+  // Asking for "build" requested the frontier tier — Opus for a job that is
+  // enumeration and file reading, where the workhorse is both faster and the
+  // class the routing table already assigns to delegated work. The tier is a
+  // requirement declared by the task; TIER_FOR_CLASS is where it is answered.
+  const eligible = rankRoutes(candidates, SETUP_TASK_CLASS);
   let chosen = eligible[0];
   if (!chosen) {
     return {
@@ -514,7 +598,7 @@ export async function runVibeProjectSetupTask(
     const launch: StructuredRunnerLaunch = {
       bin,
       policy: {
-        systemPromptAppend: vibeSetupSystemPrompt(input.repositoryFingerprint),
+        systemPromptAppend: vibeSetupSystemPrompt(input.repositoryFingerprint, input.componentRoots ?? []),
         permissionMode: "plan",
         // The sidecar as a whole — nobody is here to answer a prompt for the
         // one reader that was left off the list. What this agent may do stays
@@ -530,12 +614,20 @@ export async function runVibeProjectSetupTask(
       // The attempt is recorded against a route that names a profile; without
       // its env the process runs on the default login and the record is
       // fiction. Same miss as the Build executor's.
+      // cwd is only the components' common ancestor; these are the directories
+      // the project actually is, granted explicitly so reading one never
+      // depends on where the launch happened to land.
+      additionalDirectories: input.componentRoots ?? [],
       env: [...launchEnvSync(chosen.cli), ["CANOPY_VIBE_SETUP", "1"], ["CANOPY_RUN_ID", runId], ["CANOPY_ATTEMPT_ID", attempt.attemptId]],
     };
     let transport: ProjectRunnerTransport;
     try {
       transport = await deps.runner.start(attempt.attemptId, chosen.cli, launch, {
         emit(event) {
+          // Whatever it is doing, said out loud. A setup that runs for minutes
+          // behind one unchanging line is indistinguishable from a hung one,
+          // and the person has no way to tell which they are looking at.
+          if (event.kind === "tool") input.onActivity?.(event);
           if (event.kind === "delta" || event.kind === "reply") output += event.text;
           else if (event.kind === "error") error = event.message;
           // A setup agent that cannot read the project cannot describe it. Left
@@ -561,7 +653,13 @@ export async function runVibeProjectSetupTask(
     }
     const result = error
       ? { kind: "failed", text: error, timedOut: false } as const
-      : await runSetupAttempt(transport, (finish) => { finishEvent = finish; }, timeoutMs, input.signal);
+      : await runSetupAttempt(
+          transport,
+          (finish) => { finishEvent = finish; },
+          timeoutMs,
+          input.signal,
+          vibeSetupUserMessage(input.componentRoots ?? [], input.inventory ?? []),
+        );
     if (result.kind === "complete") {
       try {
         const parsed = parseVibeSetupOutput(result.text);
@@ -580,6 +678,13 @@ export async function runVibeProjectSetupTask(
       await deps.settleAttempt({ attemptId: attempt.attemptId, state: "interrupted", failureClass: "lifecycle", failureCode: "project-closed" });
       return { ok: false, reason: "agent-failed", message: "Project setup stopped when the project closed.", runId, attempts: attemptsUsed };
     }
+    // The one string that says what actually went wrong. It reaches the
+    // failover classifier and then nothing keeps it: every attempt after this
+    // reports "setup-agent-failed", which names the outcome and not the cause.
+    void ipc.jsLog(
+      "error",
+      `vibe-setup: attempt ${attemptsUsed} on ${chosen.cli} failed (timedOut=${result.timedOut}): ${result.text.slice(0, 600)}`,
+    );
     await deps.settleAttempt({
       attemptId: attempt.attemptId,
       state: "failed",
@@ -591,7 +696,7 @@ export async function runVibeProjectSetupTask(
       history,
       current: chosen,
       candidates,
-      task: "build",
+      task: SETUP_TASK_CLASS,
       attemptsUsed,
       attemptCap,
     });
@@ -677,11 +782,22 @@ export function createVibeProjectSetupSession(
         projectId: project.id,
         projectName: project.name,
         projectRoot: before.projectRoot,
+        componentRoots: before.componentRoots,
+        inventory: [...before.paths],
         repositoryFingerprint: before.fingerprint,
+        onActivity: publish,
         signal: abort.signal,
       }, validationContext);
       if (stopped) return;
       if (!task.ok) {
+        // Every exit below says the same plain sentence to the person and
+        // nothing at all to anyone who has to fix it. The reason code and the
+        // run it belongs to are the difference between "the agent couldn't work
+        // it out" and knowing the agent never started.
+        void ipc.jsLog(
+          "error",
+          `vibe-setup: task failed (${task.reason}) runId=${task.runId ?? "none"} attempts=${task.attempts}: ${task.message}`,
+        );
         state = { persona: { kind: "incident" }, question: null };
         publish({ kind: "reply", text: task.message });
         return;
@@ -695,6 +811,11 @@ export function createVibeProjectSetupSession(
         existingComponents: project.components,
       });
       if (!validation.ok) {
+        // Which rule rejected it, not just that something did. A proposal is
+        // refused for one of forty reasons and they are not interchangeable:
+        // an unobserved path is a scope bug, a fingerprint mismatch is a race
+        // with the person editing, a missing component is the model.
+        void ipc.jsLog("error", `vibe-setup: proposal rejected: ${validation.errors.join("; ")}`);
         state = { persona: { kind: "incident" }, question: null };
         publish({ kind: "reply", text: "I couldn't determine a safe complete setup for this project." });
         return;
@@ -707,8 +828,15 @@ export function createVibeProjectSetupSession(
       }
       state = { persona: { kind: "question-answered" }, question: null };
       publish({ kind: "ready" });
-    } catch {
+    } catch (error) {
       if (stopped) return;
+      // The person is told the same plain thing either way — they cannot act on
+      // a stack trace. But the cause has to survive somewhere: this catch
+      // covers the whole preflight, including the native file snapshot, which
+      // rejects a path outside the registered workspace scope. Discarded, every
+      // one of those failures reads as "the agent couldn't work it out" and
+      // sends someone hunting the model for a fault in Canopy.
+      void ipc.jsLog("error", `vibe-setup: preflight failed: ${String(error)}`);
       state = { persona: { kind: "incident" }, question: null };
       publish({ kind: "reply", text: "I couldn't determine a safe complete setup for this project." });
     }

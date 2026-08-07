@@ -364,14 +364,23 @@ describe("bounded setup agent task", () => {
     expect(deps.settlements).not.toContainEqual(expect.objectContaining({ state: "completed" }));
   });
 
-  it("uses existing failover for a route failure", async () => {
+  it("never fails over to a CLI it cannot launch", async () => {
+    // This used to assert claude → codex, and passed because the fixture
+    // runner will start anything. Production cannot: setup reads its result
+    // off a JSON stream, and startStructured throws "has no verified streaming
+    // runner" for codex's one-shot tier before a process exists. Ranked anyway,
+    // both attempts died on that throw and Build reported it as the agent
+    // failing to understand the project — with no transcript, because no agent
+    // ever ran.
     const deps = taskDeps([
       [{ kind: "error", message: "usage limit reached for your plan" }, { kind: "exit" }],
       [{ kind: "delta", text: JSON.stringify(proposal()) }, { kind: "turnEnd" }],
     ]);
     const result = await runVibeProjectSetupTask(taskInput, deps);
-    expect(result).toMatchObject({ ok: true, attempts: 2 });
-    expect(deps.launches.map((item) => item.cli)).toEqual(["claude", "codex"]);
+    expect(deps.launches.map((item) => item.cli)).not.toContain("codex");
+    // Claude is the only structured runner today, so a route failure has
+    // nowhere to go. Retrying it in place is honest; switching is not.
+    expect(new Set(deps.launches.map((item) => item.cli))).toEqual(new Set(["claude"]));
   });
 
   it("kills a timed-out attempt and returns a plain-language failure", async () => {

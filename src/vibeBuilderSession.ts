@@ -1114,7 +1114,11 @@ export class VibeBuilderSession implements BuilderSession {
         if (this.stopped) throw new Error("the builder session was closed during launch");
         const transport = await this.deps.runner.start(
           reservation.attempt.attemptId,
-          "claude",
+          // The route's CLI, not a fixed one. launch.bin already comes from
+          // chosen.cli, so naming a different id here ran one CLI's binary
+          // under another's argv the moment the fleet resolved to anything but
+          // Claude.
+          chosen.cli,
           launch,
           {
             emit: (event) =>
