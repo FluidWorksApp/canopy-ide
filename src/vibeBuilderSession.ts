@@ -61,6 +61,11 @@ import {
   type SecretScanResult,
 } from "./vibeSecretScan";
 import {
+  vibeRequestMode,
+  vibeToolChangesProject,
+  type VibeRequestMode,
+} from "./vibeRequestMode";
+import {
   checkpointDecision,
   type CheckpointContext,
 } from "./vibeCheckpoints";
@@ -948,6 +953,10 @@ export class VibeBuilderSession implements BuilderSession {
   private lastVerification: VerificationOutcome = "incomplete";
   /** The message being worked on, replayed verbatim onto a reseeded attempt. */
   private currentGoal: string | null = null;
+  /** A question does not become build work merely because it was asked in
+   * Build mode. Explicit editor events can still promote it to a change. */
+  private currentTurnMode: VibeRequestMode = "change";
+  private currentTurnChanged = false;
   /** The surface metadata this run was reserved with. Held whole because
    *  `taskUpdateMetadata` replaces the blob rather than patching it, so the
    *  summary can only be added by rewriting what was there. */
@@ -1085,6 +1094,7 @@ export class VibeBuilderSession implements BuilderSession {
       // exist in the store at all.
       const chosen = await this.resolveRouteForLaunch();
       const contract = contractFor(goal);
+      const requestMode = vibeRequestMode(goal);
       const route = this.routeSnapshot();
       this.turnMetadata = this.historyMetadata(goal, chosen.cli);
       const reservation = await this.deps.reserve({
@@ -1093,14 +1103,20 @@ export class VibeBuilderSession implements BuilderSession {
         componentId: this.options.componentId,
         worktreePath: this.options.componentPath,
         goal,
-        acceptance: [
-          "Implement the requested change in the selected component.",
-          "Report configured-check and local-preview evidence independently.",
-        ],
+        acceptance:
+          requestMode === "question"
+            ? [
+                "Answer the question using the project and preview as evidence.",
+                "Do not change the project unless the person asks for a change.",
+              ]
+            : [
+                "Implement the requested change in the selected component.",
+                "Report configured-check and local-preview evidence independently.",
+              ],
         contextSummary: `Build mode in ${this.options.projectName}`,
         riskClass: "reversible",
         authorityPolicy: {
-          writes: "workspace",
+          writes: requestMode === "question" ? "denied" : "workspace",
           shell: "denied",
           verification: contract,
         },
@@ -1757,6 +1773,8 @@ export class VibeBuilderSession implements BuilderSession {
       // failover that paraphrased the goal would be solving a different
       // problem than the one that failed.
       this.currentGoal = message;
+      this.currentTurnMode = vibeRequestMode(message);
+      this.currentTurnChanged = false;
       this.attemptsUsed = 1;
       this.attemptHistory = [];
       this.lastRunnerError = "";
@@ -1826,6 +1844,7 @@ export class VibeBuilderSession implements BuilderSession {
         this.snapshot = { ...this.snapshot, persona: { kind: "turn-progress" } };
         break;
       case "tool":
+        if (vibeToolChangesProject(event.name)) this.currentTurnChanged = true;
         this.snapshot = { ...this.snapshot, persona: { kind: "turn-progress" } };
         if (reservation) {
           void this.persist(() =>
@@ -1895,7 +1914,11 @@ export class VibeBuilderSession implements BuilderSession {
         this.publish(event);
         const turnEpoch = this.turnEpoch;
         let verification!: Promise<void>;
-        verification = this.verifyTurn(turnEpoch)
+        verification = (
+          this.currentTurnMode === "question" && !this.currentTurnChanged
+            ? this.finishQuestionTurn(turnEpoch)
+            : this.verifyTurn(turnEpoch)
+        )
           .catch((error) => {
             if (turnEpoch !== this.turnEpoch) return;
             this.runtimeIncidentOpen = true;
@@ -1934,6 +1957,22 @@ export class VibeBuilderSession implements BuilderSession {
         break;
     }
     this.publish(event);
+  }
+
+  /** Finish an explanation without pretending it changed the product. */
+  private async finishQuestionTurn(turnEpoch: number): Promise<void> {
+    const reservation = this.reservation;
+    if (!reservation || this.stopped || turnEpoch !== this.turnEpoch) return;
+    const answerSummary = this.assistant.trim().replace(/\s+/g, " ").slice(0, 240);
+    await this.flushAssistant();
+    if (this.stopped || turnEpoch !== this.turnEpoch) return;
+    await this.recordTurnSummary(
+      reservation.envelope.runId,
+      answerSummary || "Answered the question.",
+    );
+    this.present({ kind: "verify-passed" }, null);
+    this.publish({ kind: "turnEnd" });
+    await this.finishAttempt("completed");
   }
 
   private async verifyTurn(turnEpoch: number): Promise<void> {
@@ -2145,19 +2184,13 @@ export class VibeBuilderSession implements BuilderSession {
           paths: review.paths,
         },
       });
-      const containsPossibleSecret = Boolean(
-        !decision.checkpoint && review.secrets && !review.secrets.clean,
-      );
+      // A refused checkpoint remains fully auditable in Engineer mode, but it
+      // is not a product decision and offers no useful action in Build. Retry
+      // it after later work without turning internal Git bookkeeping into a
+      // conversation card.
       this.present(
         verdict.outcome === "failed" ? { kind: "verify-failed" } : { kind: "verify-passed" },
-        {
-          id: `checkpoint-${attemptId}-${this.deps.now()}`,
-          kind: "notice",
-          prompt: "Your changes are still here.",
-          detail: containsPossibleSecret
-            ? "I found something that may be private, so I left this version unsaved. You can keep working."
-            : "I couldn't create a checkpoint for this turn. You can keep working; I'll try again after the next change.",
-        },
+        null,
       );
     } else {
       this.present(
@@ -2287,17 +2320,22 @@ export class VibeBuilderSession implements BuilderSession {
     // could not run and the person was shown `node_modules missing, did you
     // mean to install?`. Making something work is the job, and a job whose
     // tools stop at editing text cannot do it.
-    const grant = grantFor("build", {
+    const workspace = {
       root: this.options.componentPath,
       siblings: this.options.siblingPaths ?? [],
-    });
+    };
+    const grant =
+      this.currentTurnMode === "question"
+        ? grantFor("survey", workspace)
+        : grantFor("build", workspace);
     return {
       bin: AGENT_CLIS.find((c) => c.id === cli)?.bin ?? this.options.cliBin,
       policy: {
         systemPromptAppend:
-          `You are the Build-mode executor for ${this.options.projectName}. ` +
-          `Work inside ${this.options.componentPath}. Make the change and make it actually run: ` +
-          "install what it needs, build it, and check your own work. " +
+          `You are the Build-mode collaborator for ${this.options.projectName}. ` +
+          `Work inside ${this.options.componentPath}. Follow the person's intent exactly. ` +
+          "If they ask a question, investigate and answer it without changing the project. " +
+          "If they ask for a change, make it actually run: install what it needs, build it, and check your own work. " +
           "Explain outcomes in plain language — the person reading you does not read stack traces. " +
           "Canopy runs verification independently.",
         permissionMode: grant.permissionMode,

@@ -188,7 +188,7 @@ describe("the vibe MVP wiring boundaries", () => {
     expect(session).toContain("secretScanClean: secrets.clean");
     expect(session).not.toMatch(/secretScanClean:\s*(true|false)/);
     expect(session).toContain('kind: "turn-diff"');
-    expect(session).toContain('prompt: "Your changes are still here."');
+    expect(session).not.toContain('prompt: "Your changes are still here."');
     expect(session).not.toContain("diff: review.diff");
     expect(session).not.toContain("response: SAVE_CHECKPOINT");
   });

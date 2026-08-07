@@ -117,6 +117,19 @@ const discoveredProject = (
 });
 
 describe("VibeBuilderPane", () => {
+  it("describes a question as investigation rather than a change", () => {
+    const h = harness(idle());
+    h.send.mockImplementation(() => new Promise<void>(() => {}));
+    render(<VibeBuilderPane session={h.session} />);
+    const input = screen.getByRole("textbox", { name: "Message Ash" });
+
+    fireEvent.change(input, { target: { value: "What's this error?" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(screen.getByText("Looking into your question…")).toBeTruthy();
+    expect(screen.queryByText("Making your change…")).toBeNull();
+  });
+
   it("renders consecutive tool events as one latest-tool row with a count", () => {
     const h = harness(idle());
     render(<VibeBuilderPane session={h.session} />);

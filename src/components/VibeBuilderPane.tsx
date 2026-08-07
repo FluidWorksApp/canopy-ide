@@ -10,6 +10,7 @@ import type {
   BuilderSessionState,
 } from "../vibeBuilderSessionTypes";
 import type { Project } from "../projects";
+import { vibeRequestMode, type VibeRequestMode } from "../vibeRequestMode";
 import { mascotDef } from "../mascots";
 import { Markdown } from "./Markdown";
 import { Mascot } from "./Mascot";
@@ -20,6 +21,7 @@ type BuilderItem =
       kind: "you";
       text: string;
       delivery: "active" | "queued" | "done" | "failed";
+      requestMode: VibeRequestMode;
     }
   | { id: string; kind: "ash"; text: string }
   | {
@@ -54,6 +56,7 @@ export type VibeSignalState =
 export function vibeBuilderStatus(
   persona: PersonaState,
   phase: VibeBuilderPhase,
+  requestMode: VibeRequestMode = "change",
 ): { label: string; signal: VibeSignalState; busy: boolean; blocking: boolean } {
   // Setup and handoff sessions intentionally cannot accept instructions. Keep
   // that capability explicit instead of inferring it from a busy animation:
@@ -67,10 +70,14 @@ export function vibeBuilderStatus(
           busy: true,
           blocking,
         }
-      : { label: "Making your change…", signal: "creating", busy: true, blocking };
+      : requestMode === "question"
+        ? { label: "Looking into your question…", signal: "creating", busy: true, blocking }
+        : { label: "Making your change…", signal: "creating", busy: true, blocking };
   }
   if (persona.state === "explaining") {
-    return { label: "Checking the result…", signal: "checking", busy: true, blocking };
+    return requestMode === "question"
+      ? { label: "Putting the answer together…", signal: "checking", busy: true, blocking }
+      : { label: "Checking the result…", signal: "checking", busy: true, blocking };
   }
   if (persona.state === "needs") {
     return { label: "Waiting for you", signal: "waiting", busy: false, blocking };
@@ -406,6 +413,7 @@ export function VibeBuilderPane({
     const message = text.trim();
     if (!message) return;
     const itemId = nextId();
+    const requestMode = vibeRequestMode(message);
     setHasSpoken(true);
     if (projectId) {
       const held = projectConversations.get(projectId);
@@ -427,7 +435,7 @@ export function VibeBuilderPane({
               ? { ...item, delivery: "done" as const }
               : item,
           ),
-          { id: itemId, kind: "you", text: message, delivery },
+          { id: itemId, kind: "you", text: message, delivery, requestMode },
         ],
         persona: reducePersona(current.persona, { kind: "turn-started" }),
         openReplyId: null,
@@ -482,7 +490,13 @@ export function VibeBuilderPane({
     requestAnimationFrame(() => composer.current?.focus());
   };
 
-  const status = vibeBuilderStatus(view.persona, phase);
+  const currentRequestMode = [...view.items]
+    .reverse()
+    .find(
+      (item): item is Extract<BuilderItem, { kind: "you" }> =>
+        item.kind === "you" && item.delivery === "active",
+    )?.requestMode;
+  const status = vibeBuilderStatus(view.persona, phase, currentRequestMode);
   const latestUserRequest = [...view.items]
     .reverse()
     .find(

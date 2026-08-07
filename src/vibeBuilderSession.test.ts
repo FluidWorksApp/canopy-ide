@@ -234,6 +234,60 @@ function harness(
 beforeEach(() => vi.clearAllMocks());
 
 describe("VibeBuilderSession", () => {
+  it("answers a question without verification or checkpoint noise", async () => {
+    const h = harness();
+    await h.session.send("What's this error?");
+    h.emit({ kind: "delta", text: "The preview cannot reach its products API." });
+    h.emit({ kind: "turnEnd" });
+
+    await vi.waitFor(() =>
+      expect(h.deps.settleAttempt).toHaveBeenCalledWith(
+        expect.objectContaining({ state: "completed" }),
+      ),
+    );
+    expect(h.deps.runCheck).not.toHaveBeenCalled();
+    expect(h.deps.inspectBrowser).not.toHaveBeenCalled();
+    expect(h.deps.reviewCheckpoint).not.toHaveBeenCalled();
+    expect(h.deps.commit).not.toHaveBeenCalled();
+    expect(h.session.state.question).toBeNull();
+    expect(h.deps.reserve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        acceptance: expect.arrayContaining([
+          "Do not change the project unless the person asks for a change.",
+        ]),
+        authorityPolicy: expect.objectContaining({ writes: "denied" }),
+      }),
+    );
+    expect(h.deps.runner.start).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({
+        policy: expect.objectContaining({
+          authority: "read-only",
+          disallowedTools: expect.arrayContaining(["Bash", "Edit", "Write"]),
+        }),
+      }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(h.transcripts).toContainEqual(
+      expect.objectContaining({
+        kind: "assistant",
+        body: "The preview cannot reach its products API.",
+      }),
+    );
+  });
+
+  it("still verifies when an editor tool changes the project during a question", async () => {
+    const h = harness();
+    await h.session.send("What's this error?");
+    h.emit({ kind: "tool", name: "Edit", detail: "src/App.tsx" });
+    h.emit({ kind: "turnEnd" });
+
+    await vi.waitFor(() => expect(h.deps.runCheck).toHaveBeenCalledTimes(1));
+    expect(h.deps.reviewCheckpoint).toHaveBeenCalledTimes(1);
+  });
+
   it("collects turn-scoped network evidence through the production dependency", async () => {
     vi.spyOn(ipc, "browserHere").mockResolvedValue({
       url: "http://localhost:5173/",
@@ -924,8 +978,11 @@ describe("VibeBuilderSession", () => {
     });
     finishReview(safeReview("verified"));
     await vi.waitFor(() => {
-      expect(h.session.state.question?.prompt).toBe("Your changes are still here.");
+      expect(h.events).toContainEqual(
+        expect.objectContaining({ kind: "checkpoint.refused", code: "incident-open" }),
+      );
     });
+    expect(h.session.state.question).toBeNull();
     expect(h.deps.commit).not.toHaveBeenCalled();
   });
 
@@ -986,7 +1043,7 @@ describe("VibeBuilderSession", () => {
       .toHaveLength(5);
   });
 
-  it("records unknown evidence without exposing implementation details", async () => {
+  it("records unknown evidence without surfacing checkpoint bookkeeping", async () => {
     const unknown = (kind: VerificationObservation["kind"]) =>
       observation(kind, "unknown");
     const review = safeReview("incomplete");
@@ -1006,12 +1063,12 @@ describe("VibeBuilderSession", () => {
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
 
-    await vi.waitFor(() => {
-      expect(h.session.state.question?.prompt).toBe("Your changes are still here.");
-    });
-    expect(h.session.state.question?.kind).toBe("notice");
-    expect(h.session.state.question?.diff).toBeUndefined();
-    expect(h.session.state.question?.actions).toBeUndefined();
+    await vi.waitFor(() =>
+      expect(h.events).toContainEqual(
+        expect.objectContaining({ kind: "checkpoint.refused" }),
+      ),
+    );
+    expect(h.session.state.question).toBeNull();
     expect(h.events).toContainEqual(
       expect.objectContaining({ kind: "verification.verdict", code: "incomplete" }),
     );
@@ -1076,7 +1133,12 @@ describe("VibeBuilderSession", () => {
     const h = harness({ reviewCheckpoint: vi.fn(async () => review) });
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
-    await vi.waitFor(() => expect(h.session.state.question).not.toBeNull());
+    await vi.waitFor(() =>
+      expect(h.events).toContainEqual(
+        expect.objectContaining({ kind: "checkpoint.refused" }),
+      ),
+    );
+    expect(h.session.state.question).toBeNull();
     expect(h.deps.commit).not.toHaveBeenCalled();
 
     await h.session.send("Save this version");
@@ -1099,7 +1161,11 @@ describe("VibeBuilderSession", () => {
     const h = harness({ reviewCheckpoint: review });
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
-    await vi.waitFor(() => expect(h.session.state.question).not.toBeNull());
+    await vi.waitFor(() =>
+      expect(h.events).toContainEqual(
+        expect.objectContaining({ kind: "checkpoint.refused" }),
+      ),
+    );
 
     await h.session.send("Save this version");
     expect(h.deps.commit).not.toHaveBeenCalled();
