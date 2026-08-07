@@ -14,6 +14,7 @@ import {
   type VibeBuilderSessionOptions,
 } from "./vibeBuilderSession";
 import type { VerificationObservation } from "./vibeVerification";
+import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 
 const route = {
   cli: "claude",
@@ -459,6 +460,51 @@ describe("VibeBuilderSession", () => {
       expect.anything(),
       expect.anything(),
     );
+  });
+
+  it("allows Canopy's whole sidecar, because nobody is here to answer a prompt", async () => {
+    // The list this replaced held three names, and the tools a Build turn
+    // reaches for next — waiting on a port, restarting, opening the preview —
+    // were refused with no one to grant them.
+    const h = harness();
+    await h.session.send("Make the button blue");
+    expect(h.deps.runner.start).toHaveBeenCalledWith(
+      expect.anything(),
+      "claude",
+      expect.objectContaining({
+        policy: expect.objectContaining({
+          allowedTools: [CANOPY_MCP_ALLOWANCE],
+          // Authority still comes from what is withheld, not from the allowance.
+          disallowedTools: expect.arrayContaining(["Bash", "KillShell"]),
+        }),
+      }),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("ends the attempt when a Canopy tool is refused, in Canopy's own words", async () => {
+    // Left alone the turn ends looking successful and hands a non-engineer the
+    // model's advice to grant the tools in a screen that does not exist.
+    const h = harness();
+    await h.session.send("Start the server");
+    h.emit({ kind: "blocked", tool: "mcp__canopy__canopy_start_server" });
+    h.emit({ kind: "exit" });
+
+    await vi.waitFor(() =>
+      expect(h.deps.settleAttempt).toHaveBeenCalledWith(
+        expect.objectContaining({ state: "failed", failureClass: "task" }),
+      ),
+    );
+    // Every route shares the launch policy that blocked, so trying another one
+    // spends an attempt on an identical refusal.
+    expect(h.deps.reserveAttempt).not.toHaveBeenCalled();
+    expect(h.session.state.persona.kind).toBe("permission-stall");
+    // Canopy's fault, said as Canopy's fault. Not "about the work itself" —
+    // that would leave someone rewriting a request that was never the problem —
+    // and not the model's advice to go and grant the tools somewhere.
+    expect(h.replies.join(" ")).toMatch(/fault in Canopy/i);
+    expect(h.replies.join(" ")).not.toMatch(/grant/i);
   });
 
   it("moves to another model when the route runs out of quota, and says so", async () => {

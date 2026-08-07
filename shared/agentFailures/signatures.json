@@ -8,7 +8,8 @@
     { "id": "provider-down", "class": "transient", "patterns": ["overloaded", "503", "502", "500 internal", "service unavailable", "internal server error"], "note": "Retry-in-place first; promote to route only if it persists." },
     { "id": "network", "class": "transient", "patterns": ["econnreset", "econnrefused", "etimedout", "network error", "connection reset", "dns"], "note": "The wire, not the route." },
     { "id": "timeout", "class": "transient", "patterns": ["timed out", "timeout", "deadline exceeded"], "note": "One long tool call and a dead session read the same; only recurrence distinguishes them." },
-    { "id": "context-overflow", "class": "task", "patterns": ["context length", "context window", "prompt is too long", "maximum context"], "note": "No route fixes a task that no longer fits; the task needs a smaller reseed." }
+    { "id": "context-overflow", "class": "task", "patterns": ["context length", "context window", "prompt is too long", "maximum context"], "note": "No route fixes a task that no longer fits; the task needs a smaller reseed." },
+    { "id": "tool-permission-denied", "class": "task", "patterns": ["requested permissions to use"], "note": "A permission prompt raised in a session Canopy started, where nobody can answer it. Classed task because every route shares the same launch policy: switching burns attempts on an identical block. The fix is in Canopy's argv, not in the fleet." }
   ],
   "clis": {}
 }

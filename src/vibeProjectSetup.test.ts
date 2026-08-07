@@ -12,6 +12,7 @@ import {
 } from "./vibeProjectSetup";
 import * as ipc from "./ipc";
 import type { RouteCandidate } from "./vibeFailover";
+import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 import type { VibeProjectSetupTaskDeps } from "./vibeProjectSetup";
 
 const root = "/repo";
@@ -320,10 +321,10 @@ describe("bounded setup agent task", () => {
       cli: "claude",
       launch: { policy: {
         authority: "read-only",
-        allowedTools: [
-          "mcp__canopy__canopy_project",
-          "mcp__canopy__canopy_component_files",
-        ],
+        // The whole sidecar, so a reader nobody listed cannot raise a prompt
+        // with no one to answer it. Read-only is still enforced — by plan mode
+        // and by what disallowedTools withholds, not by the canopy_* names.
+        allowedTools: [CANOPY_MCP_ALLOWANCE],
         disallowedTools: expect.arrayContaining(["Bash", "Edit", "Write"]),
       } },
     });
