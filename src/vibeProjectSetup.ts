@@ -728,7 +728,7 @@ export async function runVibeProjectSetupTask(
         // before the JSON, or an empty turn all land here identically.
         void ipc.jsLog(
           "error",
-          `vibe-setup: could not parse the agent's output (${String(parseError)}); it returned: ${result.text.slice(0, 500) || "(nothing)"}`,
+          `vibe-setup: could not parse the output of ${chosen.cli} (${String(parseError)}); it returned: ${result.text.slice(0, 500) || "(nothing)"}`,
         );
         await deps.settleAttempt({ attemptId: attempt.attemptId, state: "blocked", failureClass: "task", failureCode: "invalid-structured-output" });
         return { ok: false, reason: "invalid-output", message: "I couldn't determine a safe complete setup for this project.", runId, attempts: attemptsUsed };
