@@ -329,6 +329,7 @@ export interface AgentAction {
     | "job_done"
     | "task_named"
     | "close_session"
+    | "spawn_agent"
     | "message_agent";
   route: string;
   dir?: string;
@@ -363,6 +364,14 @@ export interface AgentAction {
    *  with `browserResult` — delivered or not, exactly once, on every path.
    *  Without one the agent is told the outcome by a toast it cannot read. */
   opId?: number;
+  /** spawn_agent: bridge-owned delegation lineage and launch request. */
+  parentPtyId?: number;
+  spawnDepth?: number;
+  brief?: string;
+  agent?: string;
+  placement?: "tab" | "split";
+  relativeToPtyId?: number;
+  direction?: "left" | "right" | "top" | "bottom";
   /** job_done / task_named: what the agent calls this run. Straight from the
    *  model and clamped where it is read (taskIdentity.ts) — nothing here has
    *  been checked for length, for being one glyph, or for being a string. */
@@ -451,6 +460,11 @@ export const browserResult = (id: number, ok: boolean, data: unknown) =>
     ok,
     data: JSON.stringify(data ?? null),
   }).catch((err) => console.warn("browser_result failed", id, err));
+
+/** Bind a just-created child PTY to its bridge-owned parent/depth before its
+ * opening brief is submitted and it can make its own tool call. */
+export const agentSpawnReady = (id: number, ptyId: number) =>
+  invoke<void>("context_agent_spawn_ready", { id, ptyId });
 
 /** An op only the running UI can answer: a language-server question, the
  *  trackers it holds keys for, a question for the user. Same ticketing as

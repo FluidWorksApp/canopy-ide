@@ -60,6 +60,10 @@ pub struct ContextBridge {
     /// here and waits; the frontend answers through the `browser_result`
     /// command (one ticket space for every request/response op, browser or not).
     pending: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<(bool, serde_json::Value)>>>,
+    /// Agent-created terminals waiting for the frontend to report their PTY.
+    /// Kept beside `pending` so depth/count gates are enforced by the bridge,
+    /// never by caller-supplied fields or a racy UI snapshot.
+    pending_spawns: Mutex<HashMap<u64, PendingAgentSpawn>>,
     next_op: AtomicU64,
     /// Advisory file claims, held and ended together in the durable mesh store. Several
     /// agents routinely share one checkout; a claim is how one says "I'm editing
@@ -91,6 +95,17 @@ pub struct AgentIdentity {
     /// spawned. Both are absent for an ordinary user-directed terminal.
     pub run_id: Option<String>,
     pub attempt_id: Option<String>,
+    /// Delegation lineage is assigned by the bridge before the child receives
+    /// its opening brief. Ordinary user-created agents are roots (depth zero).
+    pub spawn_depth: u8,
+    pub parent_pty_id: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingAgentSpawn {
+    parent: AgentIdentity,
+    child_depth: u8,
+    child_pty_id: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -232,6 +247,7 @@ impl Default for ContextBridge {
             agents: Mutex::new(HashMap::new()),
             attempts: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
+            pending_spawns: Mutex::new(HashMap::new()),
             next_op: AtomicU64::new(1),
             claims: crate::mesh::ClaimStore::load(),
             disabled_tools: Mutex::new(None),
@@ -278,6 +294,8 @@ impl ContextBridge {
                 cwd: cwd.to_string(),
                 run_id: task.map(|task| task.run_id.clone()),
                 attempt_id: task.map(|task| task.attempt_id.clone()),
+                spawn_depth: 0,
+                parent_pty_id: None,
             },
         );
         Some((port, token))
@@ -481,10 +499,44 @@ pub fn context_messages(state: tauri::State<'_, ContextBridge>) -> Vec<crate::me
 /// is waiting on (op timed out, duplicate answer) is dropped silently.
 #[tauri::command]
 pub fn browser_result(state: tauri::State<'_, ContextBridge>, id: u64, ok: bool, data: String) {
+    if !ok {
+        state.pending_spawns.lock().unwrap().remove(&id);
+    }
     if let Some(tx) = state.pending.lock().unwrap().remove(&id) {
         let value = serde_json::from_str(&data).unwrap_or(serde_json::Value::String(data));
         let _ = tx.send((ok, value));
     }
+}
+
+/// Bind a newly spawned PTY into the caller's delegation tree before its brief
+/// is submitted. Only the ProjectView can invoke this native command; the MCP
+/// caller cannot choose its own depth or parent.
+#[tauri::command]
+pub fn context_agent_spawn_ready(
+    state: tauri::State<'_, ContextBridge>,
+    id: u64,
+    pty_id: u32,
+) -> Result<(), String> {
+    let pending = state
+        .pending_spawns
+        .lock()
+        .unwrap()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| "agent spawn is no longer pending".to_string())?;
+    let mut agents = state.agents.lock().unwrap();
+    let Some(child) = agents.values_mut().find(|agent| agent.pty_id == pty_id) else {
+        return Err("spawned terminal has no Canopy agent identity".into());
+    };
+    if child.instance != pending.parent.instance {
+        return Err("spawned terminal belongs to another Canopy app run".into());
+    }
+    child.spawn_depth = pending.child_depth;
+    child.parent_pty_id = Some(pending.parent.pty_id);
+    if let Some(spawn) = state.pending_spawns.lock().unwrap().get_mut(&id) {
+        spawn.child_pty_id = Some(pty_id);
+    }
+    Ok(())
 }
 
 // ---- HTTP handlers --------------------------------------------------------
@@ -2279,6 +2331,12 @@ struct Action {
     description: Option<String>,
     icon: Option<String>,
     tags: Option<Vec<String>>,
+    /// spawn_agent: the complete delegation brief plus launch presentation.
+    agent: Option<String>,
+    placement: Option<String>,
+    #[serde(rename = "relativeToPtyId")]
+    relative_to_pty_id: Option<u32>,
+    direction: Option<String>,
     /// job_done / close_session: the launching app instance (env
     /// CANOPY_INSTANCE), so a pty id recycled across an app restart can't
     /// close an unrelated tab.
@@ -2290,6 +2348,28 @@ struct Action {
     reply_to: Option<String>,
     #[serde(rename = "ref")]
     mesh_ref: Option<crate::mesh::MeshRef>,
+}
+
+const MAX_AGENT_SPAWN_DEPTH: u8 = 2;
+const MAX_AGENT_SPAWN_CHILDREN: usize = 4;
+const AGENT_SPAWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
+
+fn next_agent_spawn_depth(
+    parent_depth: u8,
+    live_children: usize,
+    pending_children: usize,
+) -> Result<u8, String> {
+    if parent_depth >= MAX_AGENT_SPAWN_DEPTH {
+        return Err(format!(
+            "delegation depth limit reached ({MAX_AGENT_SPAWN_DEPTH}); continue this work yourself or message an existing agent"
+        ));
+    }
+    if live_children + pending_children >= MAX_AGENT_SPAWN_CHILDREN {
+        return Err(format!(
+            "this agent already has {MAX_AGENT_SPAWN_CHILDREN} live or starting children; finish or close one before spawning another"
+        ));
+    }
+    Ok(parent_depth + 1)
 }
 
 /// One shared item as the sender passes it: only the path is required, and the
@@ -2600,6 +2680,159 @@ async fn action(
                 }),
             );
             "Told the user.".to_string()
+        }
+        "spawn_agent" => {
+            let Some(parent) = who.agent().cloned() else {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Only a Canopy agent terminal can spawn a child agent; the companion uses canopy_start_session."
+                        .into(),
+                );
+            };
+            let body = act
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string);
+            let Some(body) = body else {
+                return (StatusCode::BAD_REQUEST, "spawn_agent needs a brief".into());
+            };
+            if body.len() > MAX_MESH_TEXT {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("spawn_agent brief is capped at {} KB", MAX_MESH_TEXT / 1024),
+                );
+            }
+            let placement = act.placement.as_deref().unwrap_or("tab");
+            if !matches!(placement, "tab" | "split") {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "placement must be tab or split".into(),
+                );
+            }
+            if placement == "split"
+                && (act.relative_to_pty_id.is_none()
+                    || !matches!(
+                        act.direction.as_deref(),
+                        Some("left" | "right" | "top" | "bottom")
+                    ))
+            {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "split placement needs relativeToPtyId and direction (left, right, top, bottom)"
+                        .into(),
+                );
+            }
+            let live_children = snaps
+                .agents
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|agent| {
+                    agent.instance == parent.instance && agent.parent_pty_id == Some(parent.pty_id)
+                })
+                .count();
+            let pending_children = snaps
+                .pending_spawns
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|spawn| spawn.parent.key() == parent.key() && spawn.child_pty_id.is_none())
+                .count();
+            let child_depth =
+                match next_agent_spawn_depth(parent.spawn_depth, live_children, pending_children) {
+                    Ok(depth) => depth,
+                    Err(error) => return (StatusCode::TOO_MANY_REQUESTS, error),
+                };
+            let id = snaps.next_op.fetch_add(1, Ordering::Relaxed);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            snaps.pending.lock().unwrap().insert(id, tx);
+            snaps.pending_spawns.lock().unwrap().insert(
+                id,
+                PendingAgentSpawn {
+                    parent: parent.clone(),
+                    child_depth,
+                    child_pty_id: None,
+                },
+            );
+            let delivered = format!("{} {body}", sender_tag(&who));
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({
+                    "kind": "spawn_agent",
+                    "route": parent.cwd,
+                    "cwd": parent.cwd,
+                    "parentPtyId": parent.pty_id,
+                    "spawnDepth": child_depth,
+                    "opId": id,
+                    "text": delivered,
+                    "brief": body,
+                    "title": act.title,
+                    "agent": act.agent,
+                    "placement": placement,
+                    "relativeToPtyId": act.relative_to_pty_id,
+                    "direction": act.direction,
+                }),
+            );
+            return match tokio::time::timeout(AGENT_SPAWN_TIMEOUT, rx).await {
+                Ok(Ok((true, data))) => {
+                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    let Some(child_id) = data.get("ptyId").and_then(|value| value.as_u64()) else {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Canopy started a child but did not report its terminal id".into(),
+                        );
+                    };
+                    let child_id = child_id as u32;
+                    let target_cwd = data
+                        .get("cwd")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(&parent.cwd)
+                        .to_string();
+                    let record = snaps.mesh.record(new_message(
+                        &app,
+                        &who,
+                        child_id,
+                        target_cwd,
+                        body,
+                        Vec::new(),
+                        None,
+                        None,
+                    ));
+                    snaps.mesh.note_delivery(&record.id, &delivered);
+                    snaps.mesh.mark_submitted(&record.id);
+                    (
+                        StatusCode::OK,
+                        format!(
+                            "Started child agent in terminal {child_id} as task {} (attempt {}). Opening brief recorded as mesh message {}.",
+                            data.get("runId").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                            data.get("attemptId").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                            record.id,
+                        ),
+                    )
+                }
+                Ok(Ok((false, data))) => {
+                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    (StatusCode::BAD_REQUEST, body_text(data))
+                }
+                Ok(Err(_)) => {
+                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Canopy dropped this agent spawn request".into(),
+                    )
+                }
+                Err(_) => {
+                    snaps.pending.lock().unwrap().remove(&id);
+                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    (
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "Canopy did not report the child launch in time; check canopy_agents before retrying"
+                            .into(),
+                    )
+                }
+            };
         }
         "message_agent" => {
             let Some(text) = act.text.as_deref() else {
@@ -4522,6 +4755,8 @@ mod tests {
             cwd: "/w".into(),
             run_id: None,
             attempt_id: None,
+            spawn_depth: 0,
+            parent_pty_id: None,
         };
         let b = AgentIdentity {
             pty_id: 2,
@@ -4529,6 +4764,8 @@ mod tests {
             cwd: "/w".into(),
             run_id: None,
             attempt_id: None,
+            spawn_depth: 0,
+            parent_pty_id: None,
         };
         let recycled = AgentIdentity {
             pty_id: 1,
@@ -4536,6 +4773,8 @@ mod tests {
             cwd: "/w".into(),
             run_id: None,
             attempt_id: None,
+            spawn_depth: 0,
+            parent_pty_id: None,
         };
         assert_ne!(a.key(), b.key());
         assert_ne!(a.key(), recycled.key());
@@ -4547,9 +4786,23 @@ mod tests {
                 cwd: "/elsewhere".into(),
                 run_id: Some("run_task".into()),
                 attempt_id: Some("attempt_task".into()),
+                spawn_depth: 0,
+                parent_pty_id: None,
             }
             .key()
         );
+    }
+
+    #[test]
+    fn agent_spawn_gate_bounds_depth_and_live_plus_starting_children() {
+        assert_eq!(next_agent_spawn_depth(0, 0, 0).unwrap(), 1);
+        assert_eq!(next_agent_spawn_depth(1, 3, 0).unwrap(), 2);
+        assert!(next_agent_spawn_depth(2, 0, 0)
+            .unwrap_err()
+            .contains("depth limit"));
+        assert!(next_agent_spawn_depth(0, 3, 1)
+            .unwrap_err()
+            .contains("4 live or starting children"));
     }
 
     /// The registry is what makes "who is calling" answerable, and what tells
@@ -4876,6 +5129,8 @@ mod tests {
             cwd: cwd.into(),
             run_id: None,
             attempt_id: None,
+            spawn_depth: 0,
+            parent_pty_id: None,
         })
     }
 
