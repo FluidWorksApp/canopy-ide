@@ -662,6 +662,30 @@ pub fn context_messages(state: tauri::State<'_, ContextBridge>) -> Vec<crate::me
         .collect()
 }
 
+/// The pairs the user has severed in the agent control panel.
+#[tauri::command]
+pub fn context_mesh_severed(
+    state: tauri::State<'_, ContextBridge>,
+) -> Vec<crate::mesh::SeveredPair> {
+    state.mesh.severed_pairs()
+}
+
+/// Sever or reconnect one pair, from the control panel. Always the current
+/// launch's terminals: the panel can only click an edge between live sessions,
+/// and a pty id means nothing outside the launch that minted it.
+#[tauri::command]
+pub fn context_mesh_sever(
+    state: tauri::State<'_, ContextBridge>,
+    a: u32,
+    b: u32,
+    severed: bool,
+) -> Vec<crate::mesh::SeveredPair> {
+    state
+        .mesh
+        .set_severed(a, b, crate::pty::instance_token(), severed, now_ms());
+    state.mesh.severed_pairs()
+}
+
 /// The frontend's answer to a browser-control op: `data` is a JSON document
 /// (or plain text) that becomes the waiting HTTP response's body. An id nobody
 /// is waiting on (op timed out, duplicate answer) is dropped silently.
@@ -2399,6 +2423,23 @@ fn sender_tag(app: &tauri::AppHandle, who: &Caller) -> String {
     }
 }
 
+/// What a send between a severed pair gets back: the same 404 shape as a
+/// terminal that doesn't exist. The pair is unreachable from this session and
+/// the wording says why, so the sender neither retries into a wall nor
+/// invents a crashed terminal.
+fn severed_refusal(severed: &crate::mesh::Severed) -> (StatusCode, String) {
+    (
+        StatusCode::NOT_FOUND,
+        format!(
+            "No route to Canopy terminal {to} from your terminal {from}: the user disconnected \
+             this pair in the agent control panel. It can be reconnected there; until then, \
+             reach the user with canopy_notify (see canopy_agents).",
+            to = severed.to_pty_id,
+            from = severed.from_pty_id,
+        ),
+    )
+}
+
 /// What is safe to type into somebody else's terminal.
 ///
 /// Newlines have to go because a newline in a TUI composer submits, and a
@@ -3182,7 +3223,12 @@ async fn action(
                         .and_then(|value| value.as_str())
                         .unwrap_or(&parent.cwd)
                         .to_string();
-                    let record = snaps.mesh.record(new_message(
+                    // The opening brief uses the same write door as every
+                    // other mesh delivery. `record` owns severed-pair
+                    // enforcement; treating its Result as an infallible row
+                    // here would both fail to compile and, worse, create a
+                    // second path that could claim a refused brief landed.
+                    let record = match snaps.mesh.record(new_message(
                         &app,
                         &who,
                         child_id,
@@ -3191,7 +3237,18 @@ async fn action(
                         Vec::new(),
                         None,
                         None,
-                    ));
+                    )) {
+                        Ok(record) => record,
+                        Err(cut) => {
+                            return (
+                                StatusCode::CONFLICT,
+                                format!(
+                                    "Started child agent in terminal {child_id}, but its opening brief was refused because the connection between terminals {} and {} is severed",
+                                    cut.from_pty_id, cut.to_pty_id
+                                ),
+                            )
+                        }
+                    };
                     snaps.mesh.note_delivery(&record.id, &delivered);
                     snaps.mesh.mark_submitted(&record.id);
                     (
@@ -3500,7 +3557,7 @@ async fn action(
                     "message_agent needs text with something in it".into(),
                 );
             }
-            let record = snaps.mesh.record(new_message(
+            let record = match snaps.mesh.record(new_message(
                 &app,
                 &who,
                 id,
@@ -3512,7 +3569,10 @@ async fn action(
                 Vec::new(),
                 None,
                 None,
-            ));
+            )) {
+                Ok(record) => record,
+                Err(severed) => return severed_refusal(&severed),
+            };
             // The receiving agent is told where this came from. Without it a
             // message is indistinguishable from the user typing, so "another
             // agent asked me to do this" was not a thing the target could
@@ -3588,7 +3648,7 @@ async fn action(
                     );
                 }
             }
-            let record = snaps.mesh.record(new_message(
+            let record = match snaps.mesh.record(new_message(
                 &app,
                 &who,
                 id,
@@ -3597,7 +3657,10 @@ async fn action(
                 items,
                 act.reply_to.clone(),
                 act.mesh_ref.clone(),
-            ));
+            )) {
+                Ok(record) => record,
+                Err(severed) => return severed_refusal(&severed),
+            };
             // The full body lives on the mesh; what lands in the terminal is a
             // one-line notice carrying the id, so the target knows to look —
             // and a 40-line handoff stops arriving as 40 keystroke lines.
@@ -5436,6 +5499,21 @@ mod tests {
         // The user's own control surface can stop a runaway agent; the rule is
         // about one agent reaching for another, not about Canopy itself.
         assert!(may_act_on_terminal(&Caller::Root, 2, Agent, "stop").is_ok());
+    }
+
+    /// A severed pair answers a send with the missing-terminal status — 404,
+    /// one sentence — naming both ends and where to reconnect them, so the
+    /// sender is told this route is gone rather than that its target crashed.
+    #[test]
+    fn a_severed_pair_reads_as_not_found_to_the_sender() {
+        let (status, body) = severed_refusal(&crate::mesh::Severed {
+            from_pty_id: 3,
+            to_pty_id: 9,
+        });
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("terminal 9"), "got: {body}");
+        assert!(body.contains("terminal 3"), "got: {body}");
+        assert!(body.contains("disconnected"), "got: {body}");
     }
 
     /// The half that is easy to get backwards. The monitor classifies on a

@@ -11029,6 +11029,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             active={active}
             projectName={project.name}
             roots={roots}
+            allProjects={allProjects}
             stats={projectStats}
             hookPath={hookPath}
             pending={pending}
