@@ -6,6 +6,10 @@ import {
   observeVibeSetupRepository,
   setupAgentInventory,
   parseVibeSetupOutput,
+  extractVibeSetupComponentEvidence,
+  vibeSetupRetryUserMessage,
+  VIBE_SETUP_COMPONENT_CHECKPOINT,
+  VIBE_SETUP_FINAL_MARKER,
   validateVibeSetupProposal,
   runVibeProjectSetupTask,
   createVibeProjectSetupSession,
@@ -221,6 +225,51 @@ describe("project setup structured output", () => {
   it("extracts the single JSON object from a fenced agent response", () => {
     const value = proposal();
     expect(parseVibeSetupOutput(`\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\``)).toEqual(value);
+  });
+
+  it("parses the marked final object without mistaking component checkpoints for it", () => {
+    const value = proposal();
+    const output = [
+      `${VIBE_SETUP_COMPONENT_CHECKPOINT} ${JSON.stringify(value.components[0])}`,
+      VIBE_SETUP_FINAL_MARKER,
+      JSON.stringify(value),
+    ].join("\n");
+    expect(parseVibeSetupOutput(output)).toEqual(value);
+  });
+
+  it("retains only bounded, secret-free checkpoints for configured roots", () => {
+    const value = proposal();
+    const foreign = { ...value.components[1], root: "/tmp/other" };
+    const secret = {
+      ...value.components[1],
+      label: `AKIA${"A".repeat(16)}`,
+    };
+    const evidence = extractVibeSetupComponentEvidence([
+      `${VIBE_SETUP_COMPONENT_CHECKPOINT} ${JSON.stringify(value.components[0])}`,
+      `${VIBE_SETUP_COMPONENT_CHECKPOINT} not-json`,
+      `${VIBE_SETUP_COMPONENT_CHECKPOINT} ${JSON.stringify(foreign)}`,
+      `${VIBE_SETUP_COMPONENT_CHECKPOINT} ${JSON.stringify(secret)}`,
+    ].join("\n"), ["/repo/apps/web", "/repo/services/api"]);
+
+    expect(evidence).toEqual([{
+      root: "/repo/apps/web",
+      component: value.components[0],
+    }]);
+  });
+
+  it("narrows retry instructions to unresolved components while carrying prior evidence", () => {
+    const value = proposal();
+    const message = vibeSetupRetryUserMessage(
+      ["/repo/apps/web", "/repo/services/api"],
+      ["/repo/apps/web/package.json", "/repo/services/api/go.mod"],
+      [{ root: "/repo/apps/web", component: value.components[0] }],
+    );
+    const narrowed = message.slice(message.indexOf("Narrow this attempt"));
+
+    expect(message).toContain(JSON.stringify(value.components[0]));
+    expect(message).toContain("do not search these completed component directories again");
+    expect(narrowed).toContain("/repo/services/api");
+    expect(narrowed).not.toContain("/repo/apps/web");
   });
 
   it("accepts a complete multi-component preview graph", () => {
@@ -461,15 +510,17 @@ const routes = (): RouteCandidate[] => [{
 
 function taskDeps(events: Array<Array<{ kind: string; text?: string; message?: string; tool?: string }>>): VibeProjectSetupTaskDeps & {
   launches: Array<{ cli: string; launch: import("./structuredRunners").StructuredRunnerLaunch }>;
+  messages: string[];
   killed: string[];
   settlements: Array<{ state: string; failureCode?: string | null }>;
 } {
   let ordinal = 1;
   const launches: Array<{ cli: string; launch: import("./structuredRunners").StructuredRunnerLaunch }> = [];
+  const messages: string[] = [];
   const killed: string[] = [];
   const settlements: Array<{ state: string; failureCode?: string | null }> = [];
   return {
-    launches, killed, settlements,
+    launches, messages, killed, settlements,
     listRoutes: async () => routes(),
     cliVersion: async () => "selftest",
     binFor: (cli) => cli,
@@ -486,7 +537,8 @@ function taskDeps(events: Array<Array<{ kind: string; text?: string; message?: s
         launches.push({ cli, launch });
         const mine = events.shift() ?? [];
         return {
-          send: async () => {
+          send: async (message) => {
+            messages.push(message);
             queueMicrotask(() => mine.forEach((event) => host.emit(event as never)));
           },
           stop: async () => { killed.push(attemptId); },
@@ -509,6 +561,7 @@ describe("bounded setup agent task", () => {
       cli: "claude",
       launch: { policy: {
         authority: "read-only",
+        systemPromptAppend: expect.stringContaining(VIBE_SETUP_COMPONENT_CHECKPOINT),
         // The whole sidecar, so a reader nobody listed cannot raise a prompt
         // with no one to answer it. Read-only is still enforced — by plan mode
         // and by what disallowedTools withholds, not by the canopy_* names.
@@ -516,6 +569,8 @@ describe("bounded setup agent task", () => {
         disallowedTools: expect.arrayContaining(["Bash", "Edit", "Write"]),
       } },
     });
+    expect(deps.launches[0].launch.policy.systemPromptAppend)
+      .toContain(VIBE_SETUP_FINAL_MARKER);
     expect(deps.settlements).toContainEqual(expect.objectContaining({ state: "completed" }));
   });
 
@@ -609,6 +664,58 @@ describe("bounded setup agent task", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await expect(pending).resolves.toMatchObject({ ok: false, reason: "timeout", attempts: 1 });
     expect(deps.killed).toEqual(["attempt-1"]);
+  });
+
+  it("keeps completed component evidence and narrows the retry after a timeout", async () => {
+    vi.useFakeTimers();
+    const value = proposal();
+    const checkpoint = `${VIBE_SETUP_COMPONENT_CHECKPOINT} ${JSON.stringify(value.components[0])}\n`;
+    const deps = taskDeps([
+      [{ kind: "delta", text: checkpoint }],
+      [{
+        kind: "delta",
+        text: `${VIBE_SETUP_FINAL_MARKER}\n${JSON.stringify(value)}`,
+      }, { kind: "turnEnd" }],
+    ]);
+    const pending = runVibeProjectSetupTask({
+      ...taskInput,
+      componentRoots: ["/repo/apps/web", "/repo/services/api"],
+      inventory: ["/repo/apps/web/package.json", "/repo/services/api/go.mod"],
+    }, deps);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(pending).resolves.toMatchObject({ ok: true, attempts: 2 });
+    expect(deps.killed).toEqual(["attempt-1"]);
+    expect(deps.messages).toHaveLength(2);
+    const narrowed = deps.messages[1].slice(deps.messages[1].indexOf("Narrow this attempt"));
+    expect(deps.messages[1]).toContain(JSON.stringify(value.components[0]));
+    expect(deps.messages[1]).not.toContain("/repo/apps/web/package.json\n/repo/services/api/go.mod");
+    expect(narrowed).toContain("/repo/services/api");
+    expect(narrowed).not.toContain("/repo/apps/web");
+    expect(deps.launches[1].launch.additionalDirectories)
+      .toEqual(["/repo/services/api"]);
+  });
+
+  it("returns retained evidence when the bounded survey cannot finish", async () => {
+    vi.useFakeTimers();
+    const value = proposal();
+    const checkpoint = `${VIBE_SETUP_COMPONENT_CHECKPOINT} ${JSON.stringify(value.components[0])}\n`;
+    const deps = taskDeps([[{ kind: "delta", text: checkpoint }]]);
+    const pending = runVibeProjectSetupTask({
+      ...taskInput,
+      attemptCap: 1,
+      componentRoots: ["/repo/apps/web", "/repo/services/api"],
+    }, deps);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      reason: "timeout",
+      partialEvidence: [{
+        root: "/repo/apps/web",
+        component: value.components[0],
+      }],
+    });
   });
 
   it("kills and interrupts an attempt when its project closes", async () => {

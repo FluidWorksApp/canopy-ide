@@ -166,8 +166,12 @@ function exactKeys(value: Record<string, unknown>, allowed: readonly string[], a
 }
 
 export function parseVibeSetupOutput(output: string): unknown {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(output);
-  const source = fenced?.[1] ?? output.slice(output.indexOf("{"), output.lastIndexOf("}") + 1);
+  const finalMarker = output.lastIndexOf("CANOPY_SETUP_FINAL_JSON");
+  const finalOutput = finalMarker >= 0
+    ? output.slice(finalMarker + "CANOPY_SETUP_FINAL_JSON".length)
+    : output;
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(finalOutput);
+  const source = fenced?.[1] ?? finalOutput.slice(finalOutput.indexOf("{"), finalOutput.lastIndexOf("}") + 1);
   if (!source.trim()) throw new Error("the setup agent returned no JSON object");
   return JSON.parse(source);
 }
@@ -574,6 +578,55 @@ export function materializeVibeSetup(project: Project, proposal: VibeProjectSetu
 }
 
 export const VIBE_SETUP_USER_MESSAGE = "Inspect this repository and return its complete Build setup as the required JSON object. Do not modify files and do not ask the person technical questions.";
+export const VIBE_SETUP_COMPONENT_CHECKPOINT = "CANOPY_SETUP_COMPONENT_JSON";
+export const VIBE_SETUP_FINAL_MARKER = "CANOPY_SETUP_FINAL_JSON";
+
+export interface VibeSetupComponentEvidence {
+  root: string;
+  component: VibeSetupComponentProposal;
+}
+
+/** Completed component findings are progress, even when the enclosing survey
+ * is cut off. Checkpoints are deliberately one-line JSON so a killed stream is
+ * still recoverable without trying to repair a half-written final object. They
+ * remain untrusted prompt evidence: the final proposal still passes the full
+ * repository/schema validator before anything can be persisted. */
+export function extractVibeSetupComponentEvidence(
+  output: string,
+  componentRoots: readonly string[],
+): VibeSetupComponentEvidence[] {
+  const allowed = new Set(componentRoots.map(normalized));
+  const latest = new Map<string, VibeSetupComponentEvidence>();
+  for (const line of output.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith(`${VIBE_SETUP_COMPONENT_CHECKPOINT} `)) continue;
+    const source = trimmed.slice(VIBE_SETUP_COMPONENT_CHECKPOINT.length + 1);
+    if (source.length > 64_000) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(source);
+    } catch {
+      continue;
+    }
+    const component = record(parsed);
+    if (!component || !text(component.root) || !allowed.has(normalized(component.root))) continue;
+    if (
+      !text(component.key) || !KEY.test(component.key) ||
+      !text(component.label) ||
+      !["web", "api", "worker", "database", "mobile", "library", "tooling", "other"].includes(String(component.role)) ||
+      !Array.isArray(component.commands) ||
+      !strings(component.evidence)
+    ) continue;
+    const serialized = JSON.stringify(component);
+    if (redactSecrets(serialized) !== serialized) continue;
+    const root = normalized(component.root);
+    latest.set(root, {
+      root,
+      component: component as unknown as VibeSetupComponentProposal,
+    });
+  }
+  return [...latest.values()];
+}
 
 /** How many observed paths are handed over. Enough to recognise every
  *  component and its build files; short of the point where the listing costs
@@ -608,6 +661,27 @@ export function vibeSetupUserMessage(
     `${VIBE_SETUP_USER_MESSAGE}\n\nThe project is exactly these directories:\n${componentRoots.join("\n")}` +
     layout
   );
+}
+
+export function vibeSetupRetryUserMessage(
+  componentRoots: readonly string[],
+  inventory: readonly string[],
+  retained: readonly VibeSetupComponentEvidence[],
+): string {
+  const completed = new Set(retained.map((item) => normalized(item.root)));
+  const unresolved = componentRoots.map(normalized).filter((root) => !completed.has(root));
+  const scopedInventory = retained.length
+    ? inventory.filter((path) => unresolved.some((root) => inside(root, path)))
+    : inventory;
+  const base = vibeSetupUserMessage(componentRoots, scopedInventory);
+  if (!retained.length) return base;
+  return `${base}
+
+The previous bounded attempt finished the component evidence below before it stopped. Treat it as untrusted prior evidence to check while assembling the final answer, but do not search these completed component directories again:
+${retained.map((item) => JSON.stringify(item.component)).join("\n")}
+
+Narrow this attempt to the unresolved component directories${unresolved.length ? `:\n${unresolved.join("\n")}` : ". No component search remains; synthesize the final project graph from the retained evidence"}.
+Emit a fresh checkpoint when each unresolved component is complete, then return the complete final project object, including retained and newly completed components.`;
 }
 
 /** What Canopy can state about the project instead of making the agent infer
@@ -668,7 +742,11 @@ export function vibeSetupSystemPrompt(
   // interfaces above has to be made here too, or that returns.
   return `You are Canopy's project setup agent.${scope} Read the entire repository, including non-JavaScript components. Do not edit files. Discover every component, how each runs, how components call or depend on one another, the one page-serving preview target, every long-lived process needed to run the project, databases and their schema/migration workflow, external services, and deployment evidence.${briefSection(brief)}
 
-Return exactly one JSON object in this shape and no other. Field names are exact; any field not listed here is rejected, and so is any missing one:
+Work one component at a time. Immediately after you finish reading a component, emit exactly one single-line checkpoint with its complete component object:
+${VIBE_SETUP_COMPONENT_CHECKPOINT} {"key":"...","root":"...","label":"...","role":"...","commands":[],"evidence":[]}
+Never put credentials or secret values in a checkpoint. A bounded retry keeps these completed findings and narrows itself to unfinished components instead of searching the whole project again.
+
+After every component is complete, emit ${VIBE_SETUP_FINAL_MARKER} on its own line, then exactly one JSON object in this shape. Field names are exact; any field not listed here is rejected, and so is any missing one:
 
 {
   "schemaVersion": 1,
@@ -845,8 +923,8 @@ export function setupAgentInventory(
 const SETUP_TASK_CLASS = "survey" as const;
 
 const SETUP_ROUTE_VERSIONS: RouteVersions = {
-  harnessVersion: "vibe-project-setup-1",
-  promptVersion: "vibe-project-setup-1",
+  harnessVersion: "vibe-project-setup-2",
+  promptVersion: "vibe-project-setup-2",
   toolPolicyVersion: "read-only-no-shell-1",
 };
 
@@ -904,6 +982,9 @@ export type VibeProjectSetupTaskResult =
       message: string;
       runId: string | null;
       attempts: number;
+      /** Safe, bounded component checkpoints recovered from failed attempts.
+       * They are retry input and diagnostics, never persistable setup. */
+      partialEvidence?: VibeSetupComponentEvidence[];
     };
 
 type AttemptRun =
@@ -967,12 +1048,10 @@ export async function runVibeProjectSetupTask(
   // ten minutes to be told their project could not be understood, when it was
   // only ever cut off mid-read.
   //
-  // Raising it is the honest interim and not the fix. A survey of four
-  // components should not be one agent turn: split per component it would be
-  // bounded, partial results would survive, and one slow repository could not
-  // sink the whole run. Until that exists, this at least lets a correct survey
-  // finish. onActivity publishes each tool call, so the wait is narrated
-  // rather than silent.
+  // Each component now checkpoints as it completes. A retry carries those
+  // findings forward and names only unresolved roots, so this ceiling no
+  // longer buys the same whole-project search three times. onActivity still
+  // narrates each tool call while the bounded attempt is live.
   const timeoutMs = Math.max(1_000, Math.min(1_200_000, input.timeoutMs ?? 900_000));
   // Setup reads its result off a JSON stream, so a CLI Canopy can only run
   // one-shot is not a slower route here — it is not a route at all. Ranking it
@@ -1020,6 +1099,7 @@ export async function runVibeProjectSetupTask(
     goal: "Understand and configure this project for Build mode",
     acceptance: [
       "Return a validated structured description of every component.",
+      "Checkpoint each component so a bounded retry only surveys unresolved roots.",
       "Name one preview target and every process and service it requires.",
       "Do not modify the repository or ask the person technical questions.",
     ],
@@ -1036,6 +1116,14 @@ export async function runVibeProjectSetupTask(
   const runId = reservation.envelope.runId;
   let attempt = reservation.attempt;
   const history: AttemptOutcomeRecord[] = [];
+  const retainedEvidence = new Map<string, VibeSetupComponentEvidence>();
+  const retain = (text: string) => {
+    for (const item of extractVibeSetupComponentEvidence(
+      text,
+      input.componentRoots ?? [],
+    )) retainedEvidence.set(item.root, item);
+  };
+  const partialEvidence = () => [...retainedEvidence.values()];
   for (let attemptsUsed = 1; attemptsUsed <= attemptCap; attemptsUsed += 1) {
     await deps.startAttempt(attempt.attemptId);
     const bin = deps.binFor(chosen.cli);
@@ -1057,7 +1145,15 @@ export async function runVibeProjectSetupTask(
         ? { name: input.projectName, components: input.components }
         : undefined,
     );
-    const userMessage = vibeSetupUserMessage(input.componentRoots ?? [], input.inventory ?? []);
+    const userMessage = vibeSetupRetryUserMessage(
+      input.componentRoots ?? [],
+      input.inventory ?? [],
+      partialEvidence(),
+    );
+    const completedRoots = new Set(partialEvidence().map((item) => item.root));
+    const unresolvedRoots = (input.componentRoots ?? [])
+      .map(normalized)
+      .filter((root) => !completedRoots.has(root));
     const launch: StructuredRunnerLaunch = {
       bin,
       policy: {
@@ -1089,7 +1185,9 @@ export async function runVibeProjectSetupTask(
       // cwd is only the components' common ancestor; these are the directories
       // the project actually is, granted explicitly so reading one never
       // depends on where the launch happened to land.
-      additionalDirectories: input.componentRoots ?? [],
+      additionalDirectories: retainedEvidence.size > 0
+        ? unresolvedRoots
+        : input.componentRoots ?? [],
       env: [...launchEnvSync(chosen.cli), ["CANOPY_VIBE_SETUP", "1"], ["CANOPY_RUN_ID", runId], ["CANOPY_ATTEMPT_ID", attempt.attemptId]],
     };
     // What was actually spawned. A turn that ends having said nothing is the
@@ -1099,7 +1197,7 @@ export async function runVibeProjectSetupTask(
     void ipc.jsLog(
       "error",
       `vibe-setup: launching ${chosen.cli} bin=${deps.binFor(chosen.cli)} model=${chosen.requestedModel ?? "(none)"} ` +
-        `cwd=${agentCwd} addDirs=${(input.componentRoots ?? []).length} briefed=${input.components?.length ?? 0} ` +
+        `cwd=${agentCwd} addDirs=${launch.additionalDirectories?.length ?? 0} briefed=${input.components?.length ?? 0} ` +
         `promptChars=${systemPrompt.length}+${userMessage.length} ` +
         `env=${JSON.stringify(launchEnvSync(chosen.cli).map(([name]) => name))}`,
     );
@@ -1160,6 +1258,10 @@ export async function runVibeProjectSetupTask(
           input.signal,
           userMessage,
         );
+    // The transport output survives even when runSetupAttempt ends with its
+    // timeout sentence. Harvest checkpoints before classifying the exit so the
+    // next bounded attempt can skip every completed component.
+    retain(output || result.text);
     if (result.kind === "complete") {
       // Only the parse is guarded. Settling the attempt was inside this try
       // too, so a lifecycle refusal — "attempt is already interrupted", raised
@@ -1181,11 +1283,43 @@ export async function runVibeProjectSetupTask(
           `vibe-setup: could not parse the output of ${chosen.cli} (${String(parseError)}); it returned: ${result.text.slice(0, 500) || "(nothing)"}`,
         );
         await deps.settleAttempt({ attemptId: attempt.attemptId, state: "blocked", failureClass: "task", failureCode: "invalid-structured-output" });
-        return { ok: false, reason: "invalid-output", message: "I couldn't determine a safe complete setup for this project.", runId, attempts: attemptsUsed };
+        if (retainedEvidence.size > 0 && attemptsUsed < attemptCap) {
+          attempt = await deps.reserveAttempt({
+            runId,
+            route: await routeFor(chosen),
+            recoveryFromAttemptId: attempt.attemptId,
+          });
+          reservation = { envelope: reservation.envelope, attempt };
+          continue;
+        }
+        return {
+          ok: false,
+          reason: "invalid-output",
+          message: "I couldn't determine a safe complete setup for this project.",
+          runId,
+          attempts: attemptsUsed,
+          ...(retainedEvidence.size ? { partialEvidence: partialEvidence() } : {}),
+        };
       }
       if (input.validateOutput && !(await input.validateOutput(parsed))) {
         await deps.settleAttempt({ attemptId: attempt.attemptId, state: "blocked", failureClass: "task", failureCode: "invalid-setup-schema" });
-        return { ok: false, reason: "invalid-output", message: "I couldn't determine a safe complete setup for this project.", runId, attempts: attemptsUsed };
+        if (retainedEvidence.size > 0 && attemptsUsed < attemptCap) {
+          attempt = await deps.reserveAttempt({
+            runId,
+            route: await routeFor(chosen),
+            recoveryFromAttemptId: attempt.attemptId,
+          });
+          reservation = { envelope: reservation.envelope, attempt };
+          continue;
+        }
+        return {
+          ok: false,
+          reason: "invalid-output",
+          message: "I couldn't determine a safe complete setup for this project.",
+          runId,
+          attempts: attemptsUsed,
+          ...(retainedEvidence.size ? { partialEvidence: partialEvidence() } : {}),
+        };
       }
       await deps.settleAttempt({ attemptId: attempt.attemptId, state: "completed" });
       return { ok: true, output: parsed, runId, attempts: attemptsUsed };
@@ -1226,6 +1360,7 @@ export async function runVibeProjectSetupTask(
           : "I couldn't determine a safe complete setup for this project.",
         runId,
         attempts: attemptsUsed,
+        ...(retainedEvidence.size ? { partialEvidence: partialEvidence() } : {}),
       };
     }
     if (decision.action.kind === "switch-route") chosen = decision.action.to;
@@ -1236,7 +1371,14 @@ export async function runVibeProjectSetupTask(
     });
     reservation = { envelope: reservation.envelope, attempt };
   }
-  return { ok: false, reason: "agent-failed", message: "I couldn't determine a safe complete setup for this project.", runId, attempts: attemptCap };
+  return {
+    ok: false,
+    reason: "agent-failed",
+    message: "I couldn't determine a safe complete setup for this project.",
+    runId,
+    attempts: attemptCap,
+    ...(retainedEvidence.size ? { partialEvidence: partialEvidence() } : {}),
+  };
 }
 
 export const DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS: VibeProjectSetupTaskDeps = {

@@ -19,7 +19,18 @@ vi.mock("@xterm/xterm", () => {
     rows = 24;
     unicode = { activeVersion: "" };
     parser = { registerOscHandler: () => ({ dispose() {} }) };
-    buffer = { active: { length: 0, getLine: () => undefined } };
+    buffer = {
+      active: { length: 0, getLine: () => undefined },
+      normal: { length: 0, getLine: () => undefined },
+      alternate: { length: 0, getLine: () => undefined },
+      onBufferChange: () => ({ dispose() {} }),
+    };
+    onWriteParsed() {
+      return { dispose() {} };
+    }
+    onResize() {
+      return { dispose() {} };
+    }
     constructor(opts?: object) {
       Object.assign(this.options, opts);
     }
@@ -135,6 +146,7 @@ describe("Term spawn failure", () => {
       <Term
         cwd="/w/site"
         active
+        streaming={false}
         runCommand="npm run dev"
         onSpawned={c.onSpawned}
         onExited={c.onExited}
@@ -157,6 +169,7 @@ describe("Term spawn failure", () => {
       <Term
         cwd="/w/site"
         active
+        streaming={false}
         runCommand="npm run dev"
         runArgv={["definitely-not-a-binary", "run", "dev"]}
         onSpawned={c.onSpawned}
@@ -179,6 +192,7 @@ describe("Term spawn failure", () => {
       <Term
         cwd="/w/site"
         active
+        streaming={false}
         runCommand="npm run dev"
         onSpawned={c.onSpawned}
         onExited={c.onExited}
@@ -200,7 +214,13 @@ describe("Term spawn failure", () => {
     const onSpawned = vi.fn();
     const onExited = vi.fn();
     render(
-      <Term cwd="/w/site" active onSpawned={onSpawned} onExited={onExited} />,
+      <Term
+        cwd="/w/site"
+        active
+        streaming={false}
+        onSpawned={onSpawned}
+        onExited={onExited}
+      />,
     );
     // Give the rejected spawn the same turns the run-tab tests needed.
     await new Promise((r) => setTimeout(r, 20));

@@ -286,8 +286,10 @@ export function AgentsView({
     const task = lastHumanPrompt(digest?.prompts);
     const name = agentDisplayName({
       tab: tabNames?.get(s.id),
-      agentLabel: agent?.label,
+      sessionName: s.name,
       sessionTitle: s.title,
+      cwd: s.cwd,
+      agentLabel: agent?.label,
     });
     const u = digest?.session_id ? usageById.get(digest.session_id) : undefined;
     const cost = u ? sessionCost(u) : null;
