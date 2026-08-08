@@ -110,6 +110,24 @@ describe("repair prompt", () => {
     expect(user).toContain("console, failed requests, and page state");
     expect(user).toContain("reproduce the same route again after the fix");
   });
+
+  it("routes a missing environment through autonomous least-invasive provisioning", () => {
+    const { system } = repairPrompt({
+      ...problem(),
+      code: "environment-missing",
+      statement: "A tool this project needs is not installed yet.",
+      evidence: { context: "pnpm did not resolve on the login-shell PATH." },
+    });
+
+    expect(system).toContain("try Corepack first");
+    expect(system).toContain("already-installed version manager");
+    expect(system).toContain("Homebrew only as the fallback");
+    expect(system).toContain("Do not ask the person to run installation commands");
+    expect(system).toContain("You may use the network");
+    expect(system).not.toContain(
+      "ask_user and receive an explicit yes before installing or upgrading anything machine-wide",
+    );
+  });
 });
 
 describe("repair verdict", () => {
