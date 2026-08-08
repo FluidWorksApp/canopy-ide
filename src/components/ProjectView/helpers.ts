@@ -82,6 +82,15 @@ export interface TermSubTab {
    *  `runId` keys this run's entry in the task history — the record outlives
    *  the tab, which is the point. */
   micro?: { taskId: string; runId?: string; attemptId?: string };
+  /** A long-lived child delegated by another agent. Unlike `micro`, it is an
+   * ordinary visible/restorable terminal; these ids only bind its PTY and
+   * settle the durable attempt when it exits or the user closes it. */
+  spawnedTask?: {
+    runId: string;
+    attemptId: string;
+    parentPtyId: number;
+    depth: number;
+  };
   /** Visual-only grouping. Every member remains a normal terminal tab with its
    * own PTY; ProjectView lays members of the same group into one split surface. */
   paneGroup?: string;
