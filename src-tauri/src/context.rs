@@ -994,6 +994,49 @@ fn same_mesh_project(app: &tauri::AppHandle, a: &str, b: &str) -> bool {
     }
 }
 
+/// Resolve a human-facing name back to the PTY credential it labels. Project
+/// scope comes from the authenticated caller whenever possible, so a name can
+/// never become a cross-project authority shortcut.
+fn terminal_for_name(
+    app: &tauri::AppHandle,
+    caller_cwd: &str,
+    requested: &str,
+) -> Result<u32, String> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Err("message_agent needs a non-empty name".into());
+    }
+    let caller_project = project_for_cwd(app, caller_cwd).map(|project| project.0);
+    let manager = app.state::<crate::pty::PtyManager>();
+    let sessions: Vec<_> = manager
+        .sessions()
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect();
+    let mut matches = sessions
+        .into_iter()
+        .filter(|session| session.name.lock().unwrap().eq_ignore_ascii_case(requested))
+        .filter(|session| {
+            caller_project.as_ref().is_none_or(|project_id| {
+                project_for_cwd(app, &session.cwd).is_some_and(|target| &target.0 == project_id)
+            })
+        })
+        .map(|session| session.id)
+        .collect::<Vec<_>>();
+    matches.sort_unstable();
+    match matches.as_slice() {
+        [id] => Ok(*id),
+        [] => Err(format!(
+            "No running Canopy agent named \"{requested}\" in this project (see canopy_agents)"
+        )),
+        _ => Err(format!(
+            "More than one running agent is named \"{requested}\"; use ptyId from canopy_agents"
+        )),
+    }
+}
+
 /// A project a directory can resolve to: its id, its display name, and the
 /// component paths that decide whether a directory belongs to it.
 type ProjectCandidate = (String, String, Vec<String>);
@@ -2334,12 +2377,24 @@ const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 /// thing it could establish — and anything carried in the message inherited the
 /// user's authority by default. Both delivery routes use this, or the one that
 /// doesn't becomes the way around it.
-fn sender_tag(who: &Caller) -> String {
+fn sender_tag(app: &tauri::AppHandle, who: &Caller) -> String {
     match who.agent() {
-        Some(a) => format!(
-            "[canopy: message from the agent in {} (terminal {})]",
-            a.cwd, a.pty_id
-        ),
+        Some(a) => {
+            let name = app
+                .state::<crate::pty::PtyManager>()
+                .get(a.pty_id)
+                .map(|session| session.name.lock().unwrap().clone());
+            match name {
+                Some(name) => format!(
+                    "[canopy: message from {name}, the agent in {} (terminal {})]",
+                    a.cwd, a.pty_id
+                ),
+                None => format!(
+                    "[canopy: message from the agent in {} (terminal {})]",
+                    a.cwd, a.pty_id
+                ),
+            }
+        }
         None => "[canopy: message from the Canopy companion]".to_string(),
     }
 }
@@ -2393,7 +2448,14 @@ fn agent_has_mesh_reader(agent: Option<&str>) -> bool {
 /// it is, and the run's title — "what it is working on" as its tab shows it.
 /// Both `None` for a terminal no snapshot names, which is not an error: the
 /// message still records the pty and cwd it can prove.
-fn agent_meta(app: &tauri::AppHandle, pty_id: u32) -> (Option<String>, Option<String>) {
+fn agent_meta(
+    app: &tauri::AppHandle,
+    pty_id: u32,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let name = app
+        .state::<crate::pty::PtyManager>()
+        .get(pty_id)
+        .map(|session| session.name.lock().unwrap().clone());
     let bridge = app.state::<ContextBridge>();
     let snaps = bridge.snapshots.lock().unwrap();
     for project in snaps.values() {
@@ -2403,13 +2465,14 @@ fn agent_meta(app: &tauri::AppHandle, pty_id: u32) -> (Option<String>, Option<St
         for a in agents {
             if a.get("ptyId").and_then(|v| v.as_u64()) == Some(pty_id as u64) {
                 return (
+                    name,
                     a.get("agent").and_then(|v| v.as_str()).map(str::to_string),
                     a.get("title").and_then(|v| v.as_str()).map(str::to_string),
                 );
             }
         }
     }
-    (None, None)
+    (name, None, None)
 }
 
 /// Assemble a mesh record from what the bridge can prove: the sender from the
@@ -2426,18 +2489,20 @@ fn new_message(
     reply_to: Option<String>,
     reference: Option<crate::mesh::MeshRef>,
 ) -> crate::mesh::NewMessage {
-    let (from_agent, from_task) = who
+    let (from_name, from_agent, from_task) = who
         .agent()
         .map(|a| agent_meta(app, a.pty_id))
-        .unwrap_or((None, None));
-    let (to_agent, to_task) = agent_meta(app, to_pty_id);
+        .unwrap_or((None, None, None));
+    let (to_name, to_agent, to_task) = agent_meta(app, to_pty_id);
     crate::mesh::NewMessage {
         from_pty_id: who.agent().map(|a| a.pty_id),
         from_cwd: who.agent().map(|a| a.cwd.clone()),
+        from_name,
         from_agent,
         from_task,
         to_pty_id,
         to_cwd: Some(to_cwd),
+        to_name,
         to_agent,
         to_task,
         text,
@@ -2621,6 +2686,10 @@ struct Action {
     /// CANOPY_PTY — the tool takes no id, so it can name no other terminal.
     #[serde(rename = "ptyId")]
     pty_id: Option<u32>,
+    /// message_agent: the stable Canopy-assigned display name, resolved back
+    /// to a PTY inside the caller's project. It labels the credential; it does
+    /// not replace it.
+    name: Option<String>,
     /// open_file / show_diff: the file to put in front of the user, and where
     /// in it to land.
     path: Option<String>,
@@ -3079,7 +3148,7 @@ async fn action(
                     child_pty_id: None,
                 },
             );
-            let delivered = format!("{} {body}", sender_tag(&who));
+            let delivered = format!("{} {body}", sender_tag(&app, &who));
             let _ = app.emit(
                 "agent:action",
                 serde_json::json!({
@@ -3161,15 +3230,36 @@ async fn action(
             let Some(text) = act.text.as_deref() else {
                 return (StatusCode::BAD_REQUEST, "message_agent needs text".into());
             };
+            if act.pty_id.is_some() && act.name.is_some() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "message_agent accepts either ptyId or name, not both".into(),
+                );
+            }
+            let addressed_id = if let Some(id) = act.pty_id {
+                Some(id)
+            } else if let Some(name) = act.name.as_deref() {
+                let caller_cwd = who
+                    .agent()
+                    .map(|agent| agent.cwd.as_str())
+                    .or(act.cwd.as_deref())
+                    .unwrap_or_default();
+                match terminal_for_name(&app, caller_cwd, name) {
+                    Ok(id) => Some(id),
+                    Err(error) => return (StatusCode::NOT_FOUND, error),
+                }
+            } else {
+                None
+            };
             // The `pr` form names a pull request rather than a terminal, and
             // resolving it is the frontend's job: only it holds the pty→session
             // binding, and only it can reopen an ended conversation or open a
             // tab for a fresh agent. So this hands over rather than answering.
-            if act.pty_id.is_none() {
+            if addressed_id.is_none() {
                 let Some(pr) = act.pr.as_deref() else {
                     return (
                         StatusCode::BAD_REQUEST,
-                        "message_agent needs ptyId or pr".into(),
+                        "message_agent needs ptyId, name, or pr".into(),
                     );
                 };
                 // Prepared here, exactly as the ptyId form is. The frontend
@@ -3320,7 +3410,7 @@ async fn action(
                                 id: pr.to_string(),
                             }),
                         ));
-                        let line = format!("{} {routed}", sender_tag(&who));
+                        let line = format!("{} {routed}", sender_tag(&app, &who));
                         if let Err(e) = deliver_line(
                             &app,
                             target_id,
@@ -3364,10 +3454,10 @@ async fn action(
                     }
                 };
             }
-            let Some(id) = act.pty_id else {
+            let Some(id) = addressed_id else {
                 return (
                     StatusCode::BAD_REQUEST,
-                    "message_agent needs ptyId and text".into(),
+                    "message_agent needs ptyId or name and text".into(),
                 );
             };
             // Straight into the other agent's stdin, exactly as if the user had
@@ -3428,7 +3518,7 @@ async fn action(
             // agent asked me to do this" was not a thing the target could
             // establish — and anything carried in the message inherited the
             // user's authority by default.
-            let line = format!("{} {body}", sender_tag(&who));
+            let line = format!("{} {body}", sender_tag(&app, &who));
             if let Err(e) = deliver_line(&app, id, target_cwd, record.id.clone(), &line) {
                 return (StatusCode::BAD_REQUEST, e);
             }
@@ -3511,7 +3601,7 @@ async fn action(
             // The full body lives on the mesh; what lands in the terminal is a
             // one-line notice carrying the id, so the target knows to look —
             // and a 40-line handoff stops arriving as 40 keystroke lines.
-            let notice = format!("{} {}", sender_tag(&who), mesh_notice_for(&record));
+            let notice = format!("{} {}", sender_tag(&app, &who), mesh_notice_for(&record));
             if let Err(e) = deliver_line(&app, id, target_cwd, record.id.clone(), &notice) {
                 return (StatusCode::BAD_REQUEST, e);
             }
@@ -5609,10 +5699,12 @@ mod tests {
             id: "m1".into(),
             from_pty_id: from,
             from_cwd: (!from_cwd.is_empty()).then(|| from_cwd.to_string()),
+            from_name: None,
             from_agent: None,
             from_task: None,
             to_pty_id: to,
             to_cwd: (!to_cwd.is_empty()).then(|| to_cwd.to_string()),
+            to_name: None,
             to_agent: None,
             to_task: None,
             text: "x".into(),

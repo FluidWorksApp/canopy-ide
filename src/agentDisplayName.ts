@@ -1,16 +1,13 @@
-// What a running session is called in the Agents panel.
-//
-// The panel used to print the CLI's own name, so six Claude sessions read as
-// six rows all saying "claude" — the one word they have in common, and the one
-// that tells them apart least. The tab strip already names them: the CLI
-// repaints its title with what it is working on, and the user can rename a tab
-// outright. That name is the one already learned, so the row borrows it.
+// What a running session is called everywhere Canopy surfaces it. The assigned
+// name is stable even when a CLI repeatedly repaints its terminal title.
 
 /** The tab showing a session, as far as naming is concerned. */
 export interface TabName {
+  /** Canopy's stable per-session name. */
+  name?: string;
   /** Auto title, tracked from the shell/OSC — what the CLI calls itself. */
   title?: string;
-  /** The user's rename. Wins over everything: it was typed on purpose. */
+  /** Legacy/prespawn rename, promoted into `name` once the PTY exists. */
   customTitle?: string;
 }
 
@@ -74,41 +71,47 @@ const uninformative = (title: string, agentLabel?: string) =>
   (!!agentLabel && title.toLowerCase() === agentLabel.toLowerCase());
 
 /**
- * The name for one row: the tab's name when the tab has one worth showing,
- * otherwise the identified CLI, otherwise whatever the backend called the
- * session.
- *
- * Precedence is deliberate. A rename is an instruction and always wins. The
- * auto title wins next, because a CLI that titles its tab "Fix the login
- * redirect" has said something no other source can. Only when the tab says
- * nothing useful — a fresh shell, a bare bin name — does the row fall back to
- * naming the program.
+ * Precedence is deliberate: assigned name, then the CLI's useful title, then
+ * cwd basename. `agentLabel` exists only for compatibility with an older
+ * native core that supplies none of those.
  */
 export function agentDisplayName({
   tab,
-  agentLabel,
   sessionTitle,
+  sessionName,
+  cwd,
+  agentLabel,
 }: {
   tab?: TabName;
-  agentLabel?: string;
   sessionTitle?: string;
+  sessionName?: string;
+  cwd?: string;
+  /** Retained only as the last compatibility fallback for old native cores. */
+  agentLabel?: string;
 }): string {
-  const renamed = clean(tab?.customTitle);
-  if (renamed) return renamed;
-  const auto = clean(tab?.title);
+  const assigned = clean(tab?.name) || clean(sessionName) || clean(tab?.customTitle);
+  if (assigned) return assigned;
+  const auto = clean(tab?.title) || clean(sessionTitle);
   if (auto && !uninformative(auto, agentLabel)) return auto;
-  return agentLabel || clean(sessionTitle) || "shell";
+  const dir = clean(cwd).replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).pop();
+  return dir || agentLabel || "shell";
 }
 
 /** ptyId -> the tab showing it, for every terminal tab that has spawned. The
  *  Agents panel keys rows by pty, so that is what the map is keyed by. */
 export function tabNamesByPty(
-  tabs: readonly { type: string; ptyId?: number | null; title?: string; customTitle?: string }[],
+  tabs: readonly {
+    type: string;
+    ptyId?: number | null;
+    name?: string;
+    title?: string;
+    customTitle?: string;
+  }[],
 ): Map<number, TabName> {
   const out = new Map<number, TabName>();
   for (const t of tabs) {
     if (t.type !== "terminal" || t.ptyId == null) continue;
-    out.set(t.ptyId, { title: t.title, customTitle: t.customTitle });
+    out.set(t.ptyId, { name: t.name, title: t.title, customTitle: t.customTitle });
   }
   return out;
 }
