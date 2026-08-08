@@ -1334,26 +1334,15 @@ impl PtyManager {
         let cols = if cols == 0 { 80 } else { cols };
         let rows = if rows == 0 { 24 } else { rows };
 
-        // Refuse new work before allocating a PTY or process when the native
-        // host sample says doing so would spend the IDE's control-plane reserve.
-        // Existing sessions are untouched. Mock apps do not manage the governor,
-        // which keeps spawn tests independent of the machine running them.
+        // Sample the host only to size this terminal's own starting allowance.
+        // A previous host-wide admission gate refused every new terminal before
+        // it had an id, so one busy project prevented an unrelated shell — and
+        // Build's setup agent — from starting at all. Pressure shedding remains
+        // host-wide, but allowance, measurement, grants and stop decisions begin
+        // only after the new PTY has its own session identity below.
         let host = app
             .try_state::<crate::governor::TerminalGovernor>()
             .map(|_| crate::watchdog::memory_info());
-        if host.is_some_and(|memory| {
-            !crate::governor::allows_new_terminal(
-                memory.total_bytes,
-                memory.available_bytes,
-                memory.level,
-            )
-        }) {
-            let memory = host.expect("checked above");
-            return Err(format!(
-                "cannot start a new terminal while host memory is constrained ({} MiB available); Canopy is preserving memory for the IDE and existing terminals",
-                memory.available_bytes / (1024 * 1024)
-            ));
-        }
 
         let pty_system = native_pty_system();
         let pair = pty_system
