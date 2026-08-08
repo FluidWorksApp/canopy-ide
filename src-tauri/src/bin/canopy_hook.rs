@@ -1141,6 +1141,17 @@ fn update_digest(
         if let Some(p) = event["prompt"].as_str() {
             let p = p.trim();
             if !p.is_empty() {
+                // The prompt that started the session, kept apart from the
+                // rotating window above: `prompts` drops its oldest entries,
+                // so on a long session the reason it exists at all was the
+                // first thing lost.
+                if digest
+                    .get("first_prompt")
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
+                    digest["first_prompt"] = serde_json::json!(truncate(p, 220));
+                }
                 if let Some(arr) = digest["prompts"].as_array_mut() {
                     arr.push(serde_json::json!(truncate(p, 220)));
                     while arr.len() > MAX_PROMPTS {
@@ -5148,6 +5159,47 @@ mod tests {
         assert_eq!(fnv1a("abc"), fnv1a("abc"));
         assert_ne!(fnv1a("abc"), fnv1a("abd"));
         assert_ne!(fnv1a(""), fnv1a("a"));
+    }
+
+    /// `prompts` is a rotating window, so on a long session the prompt that
+    /// started it — the one thing that says why the session exists — was the
+    /// first thing dropped. It is retained separately, once, at this same
+    /// write boundary.
+    #[test]
+    fn the_first_prompt_outlives_the_rotating_window() {
+        let session = "first-prompt-test-session";
+        let path = format!("{}/.canopy/sessions/{session}.json", home());
+        let _ = std::fs::remove_file(&path);
+
+        let cwd = std::env::temp_dir().join("canopy-first-prompt-test");
+        let _ = std::fs::create_dir_all(&cwd);
+        let cwd = cwd.to_string_lossy().to_string();
+        for n in 1..=MAX_PROMPTS + 2 {
+            let event = serde_json::json!({
+                "session_id": session,
+                "prompt": format!("p{n}"),
+            });
+            update_digest(session, &cwd, &event, "UserPromptSubmit", None).unwrap();
+        }
+
+        let digest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(digest["first_prompt"].as_str(), Some("p1"));
+        // The window still rotates exactly as before: newest MAX_PROMPTS,
+        // oldest gone.
+        let prompts: Vec<&str> = digest["prompts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect();
+        assert_eq!(prompts.len(), MAX_PROMPTS);
+        assert_eq!(prompts.first().copied(), Some("p3"));
+        assert_eq!(
+            prompts.last().copied(),
+            Some(format!("p{}", MAX_PROMPTS + 2).as_str())
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The environment is ours to read, so this is the easy half. The half that
