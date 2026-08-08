@@ -35,6 +35,16 @@ const read = (f: string) => readFileSync(join(SRC, f), "utf8");
  *  and so cannot be spoken for by the main boundary. */
 const STORES = [
   {
+    id: "mesh",
+    file: "mesh.rs",
+    variant: "Mesh",
+    module: "meshLinks.ts",
+    boundary: "record",
+    // Severing is not a message, so the log's write door cannot speak for it;
+    // submission amends a record in place, same as a delete amends the set.
+    delete_boundaries: ["set_severed", "mark_submitted"],
+  },
+  {
     id: "notes",
     file: "notes.rs",
     variant: "Notes",

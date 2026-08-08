@@ -10029,6 +10029,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             active={tab.id === activeTabId && visible}
             projectName={project.name}
             roots={roots}
+            allProjects={allProjects}
             stats={projectStats}
             hookPath={hookPath}
             pending={pending}

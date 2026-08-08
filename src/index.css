@@ -24742,3 +24742,277 @@ a.btn-sm {
   font-size: 10px;
   white-space: nowrap;
 }
+
+/* ---- Agent control panel (AgentControlPanel.tsx): graph + table views ---- */
+
+.agv-modes {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  overflow: hidden;
+  background: var(--bg-raised);
+}
+
+.agv-mode {
+  border: none;
+  background: none;
+  padding: 3px 11px;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  text-transform: capitalize;
+  cursor: pointer;
+}
+
+.agv-mode + .agv-mode {
+  border-left: 1px solid var(--border);
+}
+
+.agv-mode-on {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text);
+}
+
+.acp-body {
+  overflow: auto;
+}
+
+.acp-empty {
+  max-width: 1180px;
+  margin: 40px auto;
+  color: var(--text-dim);
+}
+
+/* The graph: an SVG wire layer under absolutely-positioned node buttons. */
+.acp-graph {
+  position: relative;
+  margin: 24px auto 0;
+}
+
+.acp-wires {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+
+.acp-edge {
+  cursor: pointer;
+}
+
+/* A wide invisible twin of the wire, so severing is not a pixel hunt. */
+.acp-edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 16;
+  pointer-events: stroke;
+}
+
+.acp-edge-wire {
+  fill: none;
+  stroke: color-mix(in srgb, var(--accent) 55%, var(--border));
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+
+.acp-edge:hover .acp-edge-wire {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.acp-edge marker path {
+  fill: color-mix(in srgb, var(--accent) 70%, var(--border));
+}
+
+/* Severed: the wire is visibly cut — dashed, drained of its accent, a mark at
+   the break — and no pulse ever rides it. */
+.acp-edge-severed .acp-edge-wire {
+  stroke: color-mix(in srgb, var(--danger) 55%, var(--border));
+  stroke-dasharray: 5 7;
+}
+
+.acp-edge-severed:hover .acp-edge-wire {
+  stroke: var(--danger);
+}
+
+.acp-edge-cut {
+  fill: var(--danger);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+/* One message, travelling. The dot rides the edge via animateMotion; the CSS
+   only fades it out at journey's end. */
+.acp-pulse {
+  fill: var(--accent);
+  animation: acp-pulse-fade 1.1s ease-in forwards;
+  pointer-events: none;
+}
+
+@keyframes acp-pulse-fade {
+  0% {
+    opacity: 0.4;
+  }
+  25% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.acp-group {
+  position: absolute;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  background: color-mix(in srgb, var(--bg-raised) 45%, transparent);
+  pointer-events: none;
+}
+
+.acp-group-name {
+  position: absolute;
+  top: -9px;
+  left: 12px;
+  padding: 0 6px;
+  background: var(--bg);
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  white-space: nowrap;
+}
+
+.acp-node {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 190px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  background: var(--bg-raised);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.acp-node:hover {
+  border-color: var(--accent);
+}
+
+.acp-node.st-working {
+  border-color: color-mix(in srgb, var(--ok) 60%, var(--border-strong));
+}
+
+.acp-node.st-waiting {
+  border-color: color-mix(in srgb, var(--warn) 65%, var(--border-strong));
+}
+
+.acp-node-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.acp-node-name {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.acp-node-detail {
+  max-width: 100%;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.acp-state {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+
+.acp-state.st-working {
+  color: var(--ok);
+}
+
+/* `unknown` shares waiting's alarm colour, never idle's calm — a session that
+   stopped reporting has not told us it finished (shared/agentLife). */
+.acp-state.st-waiting,
+.acp-state.st-unknown {
+  color: var(--warn);
+}
+
+/* The table: one row per agent, identity leading. */
+.acp-table {
+  width: 100%;
+  max-width: 1180px;
+  margin: 18px auto 0;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+
+.acp-table th {
+  text-align: left;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-strong);
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  font-weight: 500;
+}
+
+.acp-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.acp-table tbody tr {
+  cursor: pointer;
+}
+
+.acp-table tbody tr:hover td {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.acp-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.acp-agent-name {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.acp-dim {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.acp-prompt {
+  max-width: 380px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.acp-prompt em {
+  color: var(--text-faint);
+}
