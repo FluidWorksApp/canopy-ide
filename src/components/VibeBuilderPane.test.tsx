@@ -22,6 +22,12 @@ import type {
   BuilderSession,
   BuilderSessionState,
 } from "../vibeBuilderSessionTypes";
+import type { PreviewAnnotation, PreviewShot } from "../preview";
+import {
+  publishVibePreviewContext,
+  removeVibePreviewContext,
+  type VibePreviewContext,
+} from "../vibePreviewContext";
 
 vi.mock("./Markdown", () => ({
   Markdown: ({ text }: { text: string }) => <p>{text}</p>,
@@ -53,7 +59,7 @@ afterEach(cleanup);
 function harness(initial: BuilderSessionState) {
   let state = initial;
   const listeners = new Set<(event: StructuredRunnerEvent) => void>();
-  const send = vi.fn<(text: string) => void | Promise<void>>();
+  const send = vi.fn<BuilderSession["send"]>();
   const cancelCurrentTurn = vi.fn<() => void | Promise<void>>();
   const session: BuilderSession = {
     events$: {
@@ -188,6 +194,113 @@ describe("VibeBuilderPane", () => {
     expect(screen.getByText("Make the button blue")).toBeTruthy();
     expect(screen.getByRole("img", { name: "Ash is thinking" })).toBeTruthy();
     expect((input as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it("keeps preview annotations and screenshots in the island and sends them as context", async () => {
+    const h = harness(idle());
+    const annotation: PreviewAnnotation = {
+      n: 1,
+      selector: "nav",
+      tag: "nav",
+      id: null,
+      classes: "site-nav",
+      text: "Home",
+      html: "<nav>Home</nav>",
+      components: ["Navigation"],
+      rect: { x: 0, y: 0, w: 400, h: 50 },
+      pageUrl: "http://localhost:3000/",
+      pageTitle: "Home",
+      comment: "Simplify this",
+    };
+    const shot: PreviewShot = {
+      n: 1,
+      path: "/project/.canopy/spot/home.png",
+      thumb: "data:image/png;base64,AA==",
+      width: 800,
+      height: 600,
+      region: false,
+      pageUrl: "http://localhost:3000/",
+      note: "Fix the spacing",
+    };
+    const setAnnotationComment = vi.fn();
+    const markSent = vi.fn();
+    const context: VibePreviewContext = {
+      projectId: "visual",
+      tabId: "preview",
+      url: "http://localhost:3000/",
+      server: null,
+      annotations: [annotation],
+      shots: [shot],
+      picking: false,
+      capturing: false,
+      captureMode: "visible",
+      go: vi.fn(),
+      navigate: vi.fn(),
+      togglePicking: vi.fn(),
+      capture: vi.fn(),
+      setAnnotationComment,
+      removeAnnotation: vi.fn(),
+      clearAnnotations: vi.fn(),
+      setShotNote: vi.fn(),
+      removeShot: vi.fn(),
+      clearShots: vi.fn(),
+      markSent,
+    };
+    publishVibePreviewContext(context);
+
+    render(
+      <VibeBuilderPane
+        session={h.session}
+        project={discoveredProject("visual", "web")}
+      />,
+    );
+
+    expect(screen.getByRole("region", { name: "Preview context" })).toBeTruthy();
+    fireEvent.change(screen.getByRole("textbox", { name: "Feedback for annotation 1" }), {
+      target: { value: "Use less chrome" },
+    });
+    expect(setAnnotationComment).toHaveBeenCalledWith(1, "Use less chrome");
+
+    const input = screen.getByRole("textbox", { name: "Message Ash" });
+    fireEvent.change(input, { target: { value: "Polish this page" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(h.send).toHaveBeenCalledWith(
+      "Polish this page",
+      expect.objectContaining({
+        context: expect.stringContaining("Simplify this"),
+      }),
+    );
+    expect(h.send.mock.calls[0]?.[1]?.context).toContain("home.png");
+    await waitFor(() => expect(markSent).toHaveBeenCalledWith([annotation], [shot]));
+    publishVibePreviewContext({
+      ...context,
+      annotations: [{ ...annotation, sent: true }],
+      shots: [{ ...shot, sent: true }],
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Preview context" })).toBeNull(),
+    );
+    removeVibePreviewContext("visual", "preview");
+  });
+
+  it("preserves a half-typed request when the same project's session is replaced", () => {
+    const first = harness(idle());
+    const second = harness(idle());
+    const activeProject = discoveredProject("stable", "web");
+    const rendered = render(
+      <VibeBuilderPane session={first.session} project={activeProject} />,
+    );
+    const input = screen.getByRole("textbox", { name: "Message Ash" });
+    fireEvent.change(input, { target: { value: "Change the member dashboard" } });
+
+    rendered.rerender(
+      <VibeBuilderPane session={second.session} project={activeProject} />,
+    );
+
+    expect(screen.getByRole("textbox", { name: "Message Ash" })).toHaveValue(
+      "Change the member dashboard",
+    );
   });
 
   it("keeps the product unobstructed until Transcript morphs the pill into a cushion", () => {

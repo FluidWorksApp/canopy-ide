@@ -52,6 +52,10 @@ import {
 } from "../pageCapture";
 import { getSettings, updateSettings } from "../settings";
 import { registerBrowserTarget } from "../previewAgent";
+import {
+  publishVibePreviewContext,
+  removeVibePreviewContext,
+} from "../vibePreviewContext";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { LiveDot } from "./icons";
@@ -617,13 +621,13 @@ export function PreviewView({
         };
         onPatchRef.current({
           annotations: [...annotationsRef.current, next],
-          feedbackPanelHidden: false,
+          feedbackPanelHidden: buildMode,
         });
       }
     },
     // Every entry here is now identity-stable, so this callback is too — which
     // is what stops the listener effects below re-registering per render.
-    [answer, navigate, post, postAgentOp, restoreFocus, unproxied],
+    [answer, buildMode, navigate, post, postAgentOp, restoreFocus, unproxied],
   );
 
   // The picker inside a proxied page talks postMessage; accept only messages
@@ -815,7 +819,7 @@ export function PreviewView({
   const togglePicking = () => {
     const on = !picking;
     setPicking(on);
-    if (on) onPatch({ feedbackPanelHidden: false });
+    if (on && !buildMode) onPatch({ feedbackPanelHidden: false });
     post({ canopy: "mode", on });
   };
 
@@ -916,7 +920,7 @@ export function PreviewView({
           thumbnail(image.png),
         ]);
         onPatchRef.current({
-          feedbackPanelHidden: false,
+          feedbackPanelHidden: buildMode,
           shots: [
             ...shotsRef.current,
             {
@@ -938,7 +942,7 @@ export function PreviewView({
         setCapturing(false);
       }
     },
-    [askRegion, dir, onNotice, shootPane],
+    [askRegion, buildMode, dir, onNotice, shootPane],
   );
 
   /** Take one, and remember the mode as the button's one-click default. */
@@ -1056,6 +1060,43 @@ export function PreviewView({
       post({ canopy: "navigate", delta });
     }
   };
+
+  useEffect(() => {
+    if (!buildMode || !visible) {
+      removeVibePreviewContext(projectId, tabId);
+      return;
+    }
+    publishVibePreviewContext({
+      projectId,
+      tabId,
+      url,
+      server: linked,
+      annotations,
+      shots,
+      picking,
+      capturing,
+      captureMode,
+      go,
+      navigate,
+      togglePicking,
+      capture: runCapture,
+      setAnnotationComment: setComment,
+      removeAnnotation,
+      clearAnnotations,
+      setShotNote,
+      removeShot,
+      clearShots: () => onPatch({ shots: [] }),
+      markSent: (sentAnnotations, sentShots) => {
+        if (sentAnnotations.length > 0) {
+          markAnnotationsSent(new Set(sentAnnotations.map(annotationVersion)));
+        }
+        if (sentShots.length > 0) {
+          markShotsSent(new Set(sentShots.map(shotVersion)));
+        }
+      },
+    });
+    return () => removeVibePreviewContext(projectId, tabId);
+  });
 
   const body = useMemo(() => {
     if (engine === null) return null;
@@ -1181,7 +1222,7 @@ export function PreviewView({
           onClose={captureMenu.close}
         />
       )}
-      <div className="preview-toolbar">
+      {!buildMode && <div className="preview-toolbar">
         <Button icon title="Back" onClick={() => go(-1)}>
           ‹
         </Button>
@@ -1254,7 +1295,7 @@ export function PreviewView({
             ▾
           </Button>
         </span>
-      </div>
+      </div>}
       <div className="preview-body">
         {/* The emulated viewport scrolls inside this box, not in .preview-body:
             a page wider than the window has to push against a scrollbar, not
@@ -1279,7 +1320,7 @@ export function PreviewView({
             {body}
           </div>
         </div>
-        {!feedbackPanelHidden && (annotations.length > 0 || picking || shots.length > 0) && (
+        {!buildMode && !feedbackPanelHidden && (annotations.length > 0 || picking || shots.length > 0) && (
           <div className="preview-panel">
             {shots.length > 0 && (
               <>

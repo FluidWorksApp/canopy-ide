@@ -135,7 +135,7 @@ describe("the vibe MVP wiring boundaries", () => {
   it("hides only Companion's renderer in Build while attention keeps rendering", () => {
     const app = read("src/App.tsx");
     expect(app).toContain("personaBinding(");
-    expect(app).toContain("toasts.length > 0 && attentionFallbackVisible");
+    expect(app).toContain("deliveredToasts.length > 0 && attentionFallbackVisible");
     expect(app).toContain("!activeBuildMode && updateAvail");
     expect(app).toContain("!activeBuildMode && releaseNotes && !updateAvail");
     expect(app).toContain("companionVisible && (");

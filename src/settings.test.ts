@@ -24,6 +24,7 @@ describe("getSettings / updateSettings", () => {
     expect(s.tabSwitchMode).toBe("recent");
     expect(s.restoreUserClosedSessions).toBe(false);
     expect(s.agentAskForAttention).toBe(false);
+    expect(s.notificationPopupsEnabled).toBe(true);
     expect(s.dictationTriggerMode).toBe("hold");
     expect(s.dictationModKey).toBe("ShiftLeft");
   });
@@ -48,6 +49,7 @@ describe("getSettings / updateSettings", () => {
       tabSwitchMode: "order",
       restoreUserClosedSessions: true,
       agentAskForAttention: false,
+      notificationPopupsEnabled: false,
     });
     const s = getSettings();
     expect(s.theme).toBe("gotham");
@@ -55,6 +57,7 @@ describe("getSettings / updateSettings", () => {
     expect(s.tabSwitchMode).toBe("order");
     expect(s.restoreUserClosedSessions).toBe(true);
     expect(s.agentAskForAttention).toBe(false);
+    expect(s.notificationPopupsEnabled).toBe(false);
   });
 
   it("merges successive patches rather than replacing the whole object", () => {

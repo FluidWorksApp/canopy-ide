@@ -81,6 +81,7 @@ import {
 import type {
   BuilderQuestion,
   BuilderQuestionAction,
+  BuilderSendOptions,
   BuilderSession,
   BuilderSessionState,
 } from "./vibeBuilderSessionTypes";
@@ -186,6 +187,14 @@ export interface VibeServerStartupInput
   /** The prompt class is evidence for the repair agent, never an instruction
    * to type a guessed answer. */
   promptCode?: string;
+}
+
+export interface VibeManagedProcessFailureInput
+  extends Omit<
+    VibeServerIncidentInput,
+    "crashTimes" | "automaticRestarts"
+  > {
+  kind: "setup" | "runtime";
 }
 
 export interface CheckpointReview {
@@ -1237,7 +1246,7 @@ export class VibeBuilderSession implements BuilderSession {
     return queued;
   }
 
-  send(text: string): Promise<void> {
+  send(text: string, options?: BuilderSendOptions): Promise<void> {
     const message = text.trim();
     if (!message || this.stopped) return Promise.resolve();
     if (message === SAVE_CHECKPOINT && this.pendingCheckpoint) {
@@ -1269,7 +1278,9 @@ export class VibeBuilderSession implements BuilderSession {
       sent = resolve;
       failed = reject;
     });
-    const queued = this.sendQueue.then(() => this.runTurn(message, sent, failed));
+    const queued = this.sendQueue.then(() =>
+      this.runTurn(message, sent, failed, options?.context),
+    );
     this.sendQueue = queued.catch(() => {});
     return accepted;
   }
@@ -1699,6 +1710,48 @@ export class VibeBuilderSession implements BuilderSession {
     );
   }
 
+  /** A managed command exiting non-zero is already a repair problem. Waiting
+   * for two blind restarts loses the first failure's evidence, while treating
+   * setup as a toast leaves the server permanently gated. Both enter the same
+   * repair loop as startup stalls, with the supervisor's terminal tail. */
+  async reportManagedProcessFailure(
+    input: VibeManagedProcessFailureInput,
+  ): Promise<void> {
+    this.serverIncidentOpen = true;
+    this.incidentOpen = true;
+    const label = input.component?.label ?? "project";
+    this.present(
+      { kind: "incident" },
+      {
+        id: `vibe-process-${input.componentId}-${input.runCommandId}`,
+        kind: "notice",
+        prompt: "Something needed fixing — I'm on it.",
+        detail:
+          input.kind === "setup"
+            ? `I'm reading why ${label} couldn't finish getting ready.`
+            : `I'm reading why the ${label} process stopped.`,
+      },
+    );
+    const logTail = await Promise.resolve(input.logTail).catch(() => "");
+    if (this.stopped) return;
+    void this.repairServerProblem(
+      {
+        ...input,
+        crashTimes: [],
+        automaticRestarts: 0,
+      },
+      logTail,
+      {
+        code: input.kind === "setup" ? "setup-failed" : "runtime-error",
+        statement: (componentLabel) =>
+          input.kind === "setup"
+            ? `The ${componentLabel} setup command exited before it finished successfully.`
+            : `The ${componentLabel} process exited with an error.`,
+        context: `Managed process state: failed. This was the first observed non-zero exit; diagnose it before attempting another start.`,
+      },
+    );
+  }
+
   /** Keys with a repair underway, so a re-reported incident cannot stack a
    *  second agent onto the same broken server. */
   private repairsInFlight = new Set<string>();
@@ -1820,17 +1873,24 @@ export class VibeBuilderSession implements BuilderSession {
           },
         );
       } else {
+        const failedPrompt =
+          incident.code === "server-start-failed"
+            ? "The project process still hasn't started."
+            : incident.code === "setup-failed"
+              ? "The project still isn't ready."
+              : incident.code === "runtime-error"
+                ? "The project process still isn't running."
+                : "The app server keeps stopping.";
         this.present(
           { kind: "incident" },
           {
             id: `vibe-repair-failed-${input.componentId}-${this.deps.now()}`,
             kind: "question",
-            prompt:
-              incident.code === "server-start-failed"
-                ? "The project process still hasn't started."
-                : "The app server keeps stopping.",
+            prompt: failedPrompt,
             detail:
-              incident.code === "server-start-failed"
+              incident.code === "server-start-failed" ||
+              incident.code === "setup-failed" ||
+              incident.code === "runtime-error"
                 ? `${result.message} The run keeps its terminal output for inspection.`
                 : `${result.message} The failed run keeps the server output for inspection.`,
           },
@@ -1899,7 +1959,12 @@ export class VibeBuilderSession implements BuilderSession {
     message: string,
     sent: () => void,
     failed: (error: unknown) => void,
+    context?: string,
   ): Promise<void> {
+    const evidence = context?.trim();
+    const agentMessage = evidence
+      ? `${message}\n\nLive preview context:\n${evidence}`
+      : message;
     const turnEpoch = ++this.turnEpoch;
     try {
       if (this.verifying) await this.verifying;
@@ -1912,7 +1977,7 @@ export class VibeBuilderSession implements BuilderSession {
       // Held so a reseeded attempt replays the same request verbatim. A
       // failover that paraphrased the goal would be solving a different
       // problem than the one that failed.
-      this.currentGoal = message;
+      this.currentGoal = agentMessage;
       this.currentTurnMode = vibeRequestMode(message);
       this.currentTurnChanged = false;
       this.attemptsUsed = 1;
@@ -1952,7 +2017,7 @@ export class VibeBuilderSession implements BuilderSession {
       const completed = new Promise<void>((resolve) => {
         this.finishTurn = resolve;
       });
-      await transport.send(message);
+      await transport.send(agentMessage);
       sent();
       await completed;
     } catch (error) {

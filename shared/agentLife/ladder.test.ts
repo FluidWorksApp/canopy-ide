@@ -51,6 +51,51 @@ describe("rungs 1-4 — what the CLI proved", () => {
     expect(life).toMatchObject({ state: "waiting", confidence: "proven" });
   });
 
+  it("only promotes Codex permission requests that survive the dwell", () => {
+    const fresh = agentLife(
+      ev({
+        digest: {
+          state: "waiting",
+          state_via: "structured-block",
+          agent: "codex",
+          updated: NOW,
+        },
+        pty: live({ quietForMs: 200 }),
+      }),
+    );
+    expect(fresh).toMatchObject({ state: "working", via: "output" });
+
+    const persisted = agentLife(
+      ev({
+        digest: {
+          state: "waiting",
+          state_via: "structured-block",
+          agent: "codex",
+          updated: NOW - POLICY.structuredBlockDwellMs / 1000,
+        },
+        pty: live({ quietForMs: 999_999 }),
+      }),
+    );
+    expect(persisted).toMatchObject({
+      state: "waiting",
+      via: "structured-block",
+    });
+  });
+
+  it("does not delay CLIs whose permission event cannot auto-resolve", () => {
+    const life = agentLife(
+      ev({
+        digest: {
+          state: "waiting",
+          state_via: "structured-block",
+          agent: "claude",
+          updated: NOW,
+        },
+      }),
+    );
+    expect(life.state).toBe("waiting");
+  });
+
   it("takes an attention-only CLI's block as waiting, but only reported", () => {
     const life = agentLife(ev({ digest: { state: "waiting", state_via: "declared-block", agent: "aider", updated: ago(10) } }));
     expect(life.state).toBe("waiting");

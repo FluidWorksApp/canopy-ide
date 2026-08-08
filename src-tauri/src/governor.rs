@@ -350,17 +350,6 @@ fn protected_reserve(total_bytes: u64) -> u64 {
     (3 * GIB).max(total_bytes / 4).min(total_bytes)
 }
 
-/// Admission is the one host-critical action that cannot corrupt existing
-/// work: refuse a new process tree before it exists. Keep the IDE reserve
-/// intact and treat the watchdog's critical level as independently decisive.
-pub(crate) fn allows_new_terminal(
-    total_bytes: u64,
-    available_bytes: u64,
-    pressure_level: u8,
-) -> bool {
-    pressure_level < crate::watchdog::MEM_CRIT && available_bytes > protected_reserve(total_bytes)
-}
-
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1365,17 +1354,6 @@ mod tests {
     }
 
     #[test]
-    fn admission_preserves_host_reserve_and_refuses_critical_pressure() {
-        assert!(allows_new_terminal(gib(16), gib(5), 0));
-        assert!(!allows_new_terminal(gib(16), gib(4), 0));
-        assert!(!allows_new_terminal(
-            gib(16),
-            gib(8),
-            crate::watchdog::MEM_CRIT
-        ));
-    }
-
-    #[test]
     fn metrics_track_peak_ema_and_signed_growth_from_the_existing_tick() {
         let governor = TerminalGovernor::default();
         governor.observe(&[(7, 100)], gib(16), gib(8), 1_000);
@@ -1409,6 +1387,34 @@ mod tests {
             .is_empty());
         let events = governor.observe(&[(1, allowance / 2)], gib(8), gib(6), 17_000);
         assert_eq!(events[0].status.state, BudgetState::Normal);
+    }
+
+    #[test]
+    fn one_terminal_crossing_its_allowance_does_not_limit_its_project_siblings() {
+        let governor = TerminalGovernor::default();
+        let allowance = base_allowance(gib(8));
+        let high = allowance * 95 / 100;
+        let low = allowance / 4;
+
+        governor.observe(&[(11, high), (12, low)], gib(8), gib(6), 1_000);
+        governor.observe(&[(11, high), (12, low)], gib(8), gib(6), 3_000);
+
+        let snapshot = governor.snapshot();
+        let pressured = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == 11)
+            .unwrap();
+        let sibling = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == 12)
+            .unwrap();
+        assert_eq!(pressured.state, BudgetState::AwaitingGrant);
+        assert!(pressured.grant_request.is_some());
+        assert_eq!(sibling.state, BudgetState::Normal);
+        assert!(sibling.grant_request.is_none());
+        assert_eq!(sibling.allowance_bytes, allowance);
     }
 
     fn awaiting(governor: &TerminalGovernor, available: u64) -> GrantRequest {

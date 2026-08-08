@@ -329,6 +329,7 @@ export interface AgentAction {
     | "job_done"
     | "task_named"
     | "close_session"
+    | "spawn_agent"
     | "message_agent";
   route: string;
   dir?: string;
@@ -363,6 +364,14 @@ export interface AgentAction {
    *  with `browserResult` — delivered or not, exactly once, on every path.
    *  Without one the agent is told the outcome by a toast it cannot read. */
   opId?: number;
+  /** spawn_agent: bridge-owned delegation lineage and launch request. */
+  parentPtyId?: number;
+  spawnDepth?: number;
+  brief?: string;
+  agent?: string;
+  placement?: "tab" | "split";
+  relativeToPtyId?: number;
+  direction?: "left" | "right" | "top" | "bottom";
   /** job_done / task_named: what the agent calls this run. Straight from the
    *  model and clamped where it is read (taskIdentity.ts) — nothing here has
    *  been checked for length, for being one glyph, or for being a string. */
@@ -451,6 +460,11 @@ export const browserResult = (id: number, ok: boolean, data: unknown) =>
     ok,
     data: JSON.stringify(data ?? null),
   }).catch((err) => console.warn("browser_result failed", id, err));
+
+/** Bind a just-created child PTY to its bridge-owned parent/depth before its
+ * opening brief is submitted and it can make its own tool call. */
+export const agentSpawnReady = (id: number, ptyId: number) =>
+  invoke<void>("context_agent_spawn_ready", { id, ptyId });
 
 /** An op only the running UI can answer: a language-server question, the
  *  trackers it holds keys for, a question for the user. Same ticketing as
@@ -2946,6 +2960,32 @@ export interface SyncOutcome {
   message: string;
 }
 
+/** One PR head for the dashboard's object-store-only merge probe. */
+export interface PrMergeCandidate {
+  number: number;
+  branch: string;
+  base: string;
+  base_sha: string;
+  head_sha: string;
+}
+
+/** Whether two PR heads can coexist, plus ancestry for real stack detection. */
+export interface PrMergePairProbe {
+  first: number;
+  second: number;
+  clean: boolean | null;
+  conflicts: string[];
+  first_ancestor_second: boolean;
+  second_ancestor_first: boolean;
+}
+
+export interface PrMergePlanProbe {
+  repo: string;
+  pairs: PrMergePairProbe[];
+  unavailable: number[];
+  fetch_error: string | null;
+}
+
 /** Non-destructive: dry-runs the merge in the object store, so it is safe to
  *  call on a timer while the user is mid-edit. `fetch` refreshes the remote. */
 export const gitSyncProbe = (repo: string, fetch: boolean, base?: string | null) =>
@@ -2956,6 +2996,14 @@ export const gitSyncApply = (repo: string, base: string) =>
   invoke<SyncOutcome>("git_sync_apply", { repo, base });
 
 export const gitSyncAbort = (repo: string) => invoke<string>("git_sync_abort", { repo });
+
+/** Pairwise PR compatibility using the same merge-tree law as branch sync:
+ *  object database only; never the worktree, index, HEAD or a branch ref. */
+export const gitPrMergeProbe = (
+  repo: string,
+  candidates: PrMergeCandidate[],
+  fetch = true,
+) => invoke<PrMergePlanProbe>("git_pr_merge_probe", { repo, candidates, fetch });
 
 export const gitWorkAudit = (repo: string) =>
   invoke<WorkAudit>("git_work_audit", { repo });
@@ -3243,6 +3291,9 @@ export const ghPrRequestReview = (
   number: number,
   reviewers: string[],
 ) => invoke<string>("gh_pr_request_review", { repo, number, reviewers });
+/** Change a PR's base only on an explicit dashboard click. */
+export const ghPrRetarget = (repo: string, number: number, base: string) =>
+  invoke<string>("gh_pr_retarget", { repo, number, base });
 export const ghPrAutoMerge = (
   repo: string,
   number: number,
@@ -3272,6 +3323,8 @@ export interface PrRow {
   url: string;
   branch: string;
   base: string;
+  head_sha?: string;
+  base_sha?: string;
   draft: boolean;
   created: string;
   updated: string;
