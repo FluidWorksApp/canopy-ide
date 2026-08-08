@@ -3690,7 +3690,7 @@ async fn action(
                             .map(sanitize_message)
                             .filter(|v| !v.is_empty())
                             .unwrap_or_else(|| body.clone());
-                        let record = snaps.mesh.record(new_message(
+                        let record = match snaps.mesh.record(new_message(
                             &app,
                             &who,
                             target_id,
@@ -3702,7 +3702,10 @@ async fn action(
                                 kind: "pr".into(),
                                 id: pr.to_string(),
                             }),
-                        ));
+                        )) {
+                            Ok(record) => record,
+                            Err(severed) => return severed_refusal(&severed),
+                        };
                         let line = format!("{} {routed}", sender_tag(&app, &who));
                         if let Err(e) = deliver_line(
                             &app,
