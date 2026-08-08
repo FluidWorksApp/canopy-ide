@@ -22,6 +22,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -33,7 +34,9 @@ use crate::winproc::NoConsoleWindow;
 /// The revision we ask for. Servers answer with their own and we take theirs;
 /// this is a preference, not a requirement, and every server in the wild
 /// negotiates down rather than refusing.
-const PROTOCOL_VERSION: &str = "2025-06-18";
+const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+const LEGACY_PROTOCOL_VERSION: &str = "2025-06-18";
+const CLIENT_NAME: &str = "Canopy";
 
 /// Cold starts are the norm — `npx` may fetch a package before the server says
 /// anything at all — so the handshake gets room. A hung server still fails in
@@ -53,6 +56,9 @@ const STDERR_KEEP: usize = 8 * 1024;
 /// materialized. Local MCP servers are plugins, not trusted memory peers.
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SCHEMA_BYTES: usize = 512 * 1024;
+const MAX_SCHEMA_NODES: usize = 10_000;
+const MAX_SCHEMA_DEPTH: usize = 64;
 
 // ---------------------------------------------------------------------------
 // What crosses into the webview
@@ -165,6 +171,49 @@ struct Connection {
     transport: Transport,
     next_id: i64,
     last_used: Instant,
+    era: ProtocolEra,
+    protocol_version: String,
+    tool_cache: Option<ToolCache>,
+    tool_headers: HashMap<String, Vec<HeaderParam>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProtocolEra {
+    Probing,
+    Modern,
+    Legacy,
+}
+
+#[derive(Clone)]
+struct ToolCache {
+    tools: Vec<McpTool>,
+    expires_at: Instant,
+}
+
+#[derive(Clone)]
+struct HeaderParam {
+    argument: String,
+    header: String,
+}
+
+#[derive(Debug)]
+struct RpcFailure {
+    method: String,
+    code: Option<i64>,
+    message: String,
+}
+
+impl std::fmt::Display for RpcFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.code {
+            Some(code) => write!(
+                f,
+                "{} failed: {} (code {})",
+                self.method, self.message, code
+            ),
+            None => write!(f, "{} failed: {}", self.method, self.message),
+        }
+    }
 }
 
 impl Connection {
@@ -175,15 +224,57 @@ impl Connection {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, String> {
+        self.request_raw(method, params, timeout, false)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn request_raw(
+        &mut self,
+        method: &str,
+        mut params: Value,
+        timeout: Duration,
+        probe_modern: bool,
+    ) -> Result<Value, RpcFailure> {
         self.next_id += 1;
         let id = self.next_id;
+        let modern = probe_modern || self.era == ProtocolEra::Modern;
+        if modern {
+            attach_modern_meta(&mut params, &self.protocol_version);
+        }
+        let parameter_headers = if modern && method == "tools/call" {
+            self.parameter_headers(&params)
+                .map_err(|message| RpcFailure {
+                    method: method.to_string(),
+                    code: None,
+                    message,
+                })?
+        } else {
+            Vec::new()
+        };
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         self.last_used = Instant::now();
 
         let response = match &mut self.transport {
             Transport::Stdio(t) => t.round_trip(id, &body, timeout).await,
-            Transport::Http(t) => t.round_trip(id, &body, timeout).await,
-        }?;
+            Transport::Http(t) => {
+                t.round_trip(
+                    id,
+                    method,
+                    &body,
+                    timeout,
+                    modern,
+                    &self.protocol_version,
+                    &parameter_headers,
+                )
+                .await
+            }
+        }
+        .map_err(|message| RpcFailure {
+            method: method.to_string(),
+            code: None,
+            message,
+        })?;
 
         if let Some(error) = response.get("error") {
             let message = error
@@ -191,17 +282,37 @@ impl Connection {
                 .and_then(|m| m.as_str())
                 .unwrap_or("unknown error");
             let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
-            return Err(format!("{method} failed: {message} (code {code})"));
+            return Err(RpcFailure {
+                method: method.to_string(),
+                code: Some(code),
+                message: message.to_string(),
+            });
         }
-        Ok(response.get("result").cloned().unwrap_or(Value::Null))
+        let result = response.get("result").cloned().unwrap_or(Value::Null);
+        if modern {
+            validate_modern_result(method, &result).map_err(|message| RpcFailure {
+                method: method.to_string(),
+                code: None,
+                message,
+            })?;
+        }
+        Ok(result)
     }
 
     /// A notification: no id, no reply, and nothing to wait for.
     async fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
+        let mut params = params;
+        let modern = self.era == ProtocolEra::Modern;
+        if modern {
+            attach_modern_meta(&mut params, &self.protocol_version);
+        }
         let body = json!({ "jsonrpc": "2.0", "method": method, "params": params });
         match &mut self.transport {
             Transport::Stdio(t) => t.send(&body).await,
-            Transport::Http(t) => t.notify(&body).await,
+            Transport::Http(t) => {
+                t.notify(method, &body, modern, &self.protocol_version)
+                    .await
+            }
         }
     }
 
@@ -215,6 +326,64 @@ impl Connection {
                 .unwrap_or_default(),
             Transport::Http(_) => String::new(),
         }
+    }
+
+    fn parameter_headers(&self, params: &Value) -> Result<Vec<(String, String)>, String> {
+        let Some(name) = params.get("name").and_then(Value::as_str) else {
+            return Ok(Vec::new());
+        };
+        let Some(definitions) = self.tool_headers.get(name) else {
+            return Ok(Vec::new());
+        };
+        let arguments = params.get("arguments").and_then(Value::as_object);
+        definitions
+            .iter()
+            .filter_map(|definition| {
+                let value = arguments?.get(&definition.argument)?;
+                (!value.is_null()).then_some((definition, value))
+            })
+            .map(|(definition, value)| {
+                Ok((
+                    format!("mcp-param-{}", definition.header),
+                    encode_mcp_parameter(value)?,
+                ))
+            })
+            .collect()
+    }
+}
+
+fn attach_modern_meta(params: &mut Value, protocol_version: &str) {
+    if !params.is_object() {
+        *params = json!({});
+    }
+    let object = params.as_object_mut().expect("object created above");
+    let meta = object
+        .entry("_meta")
+        .or_insert_with(|| json!({}))
+        .as_object_mut();
+    let Some(meta) = meta else { return };
+    meta.insert(
+        "io.modelcontextprotocol/protocolVersion".into(),
+        json!(protocol_version),
+    );
+    meta.insert(
+        "io.modelcontextprotocol/clientCapabilities".into(),
+        json!({}),
+    );
+    meta.insert(
+        "io.modelcontextprotocol/clientInfo".into(),
+        json!({ "name": CLIENT_NAME, "version": env!("CARGO_PKG_VERSION") }),
+    );
+}
+
+fn validate_modern_result(method: &str, result: &Value) -> Result<(), String> {
+    match result.get("resultType").and_then(Value::as_str) {
+        Some("complete") => Ok(()),
+        Some("input_required") | Some("task") => Err(format!(
+            "{method} returned an asynchronous result; MCP Tasks support is not enabled yet"
+        )),
+        Some(other) => Err(format!("unknown MCP result type `{other}`")),
+        None => Err("the modern MCP result omitted resultType".into()),
     }
 }
 
@@ -314,7 +483,14 @@ async fn read_capped_line(
 }
 
 impl HttpTransport {
-    fn post(&self, body: &Value) -> Result<reqwest::RequestBuilder, String> {
+    fn post(
+        &self,
+        method: &str,
+        body: &Value,
+        modern: bool,
+        protocol_version: &str,
+        parameter_headers: &[(String, String)],
+    ) -> Result<reqwest::RequestBuilder, String> {
         let encoded = serde_json::to_vec(body).map_err(|e| e.to_string())?;
         if encoded.len() > MAX_REQUEST_BYTES {
             return Err(format!(
@@ -330,20 +506,37 @@ impl HttpTransport {
             // request; a client that accepts only one gets a 406 from half of
             // them.
             .header("accept", "application/json, text/event-stream")
-            .header("mcp-protocol-version", PROTOCOL_VERSION);
+            .header("mcp-protocol-version", protocol_version);
+        if modern {
+            req = req.header("mcp-method", method);
+            if let Some(name) = modern_request_name(method, body) {
+                req = req.header("mcp-name", encode_mcp_name(name));
+            }
+        }
         for (name, value) in &self.headers {
             req = req.header(name, value);
         }
-        if let Some(session) = &self.session_id {
-            req = req.header("mcp-session-id", session);
+        for (name, value) in parameter_headers {
+            req = req.header(name, value);
+        }
+        if !modern {
+            if let Some(session) = &self.session_id {
+                req = req.header("mcp-session-id", session);
+            }
         }
         // Serialized here rather than through reqwest's `json` helper, which
         // would mean turning on a feature to do what `to_string` already does.
         Ok(req.body(encoded))
     }
 
-    async fn notify(&mut self, body: &Value) -> Result<(), String> {
-        self.post(body)?
+    async fn notify(
+        &mut self,
+        method: &str,
+        body: &Value,
+        modern: bool,
+        protocol_version: &str,
+    ) -> Result<(), String> {
+        self.post(method, body, modern, protocol_version, &[])?
             .send()
             .await
             .map(|_| ())
@@ -353,20 +546,30 @@ impl HttpTransport {
     async fn round_trip(
         &mut self,
         id: i64,
+        method: &str,
         body: &Value,
         timeout: Duration,
+        modern: bool,
+        protocol_version: &str,
+        parameter_headers: &[(String, String)],
     ) -> Result<Value, String> {
-        let response = tokio::time::timeout(timeout, self.post(body)?.send())
-            .await
-            .map_err(|_| format!("the server did not answer within {}s", timeout.as_secs()))?
-            .map_err(|e| format!("the server could not be reached: {e}"))?;
+        let response = tokio::time::timeout(
+            timeout,
+            self.post(method, body, modern, protocol_version, parameter_headers)?
+                .send(),
+        )
+        .await
+        .map_err(|_| format!("the server did not answer within {}s", timeout.as_secs()))?
+        .map_err(|e| format!("the server could not be reached: {e}"))?;
 
-        if let Some(session) = response
-            .headers()
-            .get("mcp-session-id")
-            .and_then(|v| v.to_str().ok())
-        {
-            self.session_id = Some(session.to_string());
+        if !modern {
+            if let Some(session) = response
+                .headers()
+                .get("mcp-session-id")
+                .and_then(|v| v.to_str().ok())
+            {
+                self.session_id = Some(session.to_string());
+            }
         }
 
         let status = response.status();
@@ -396,6 +599,14 @@ impl HttpTransport {
         let text =
             String::from_utf8(bytes).map_err(|_| "the MCP response was not UTF-8".to_string())?;
         if !status.is_success() {
+            // Modern discovery deliberately uses the response error code to
+            // distinguish a modern server from a legacy one. Preserve a
+            // JSON-RPC error even when HTTP correctly reports it as a 4xx.
+            if let Ok(message) = parse_http_body(&text, id) {
+                if message.get("error").is_some() {
+                    return Ok(message);
+                }
+            }
             // The body is where a hosted server explains a 401, so it goes in
             // the message rather than just the code.
             let detail = text.trim();
@@ -407,6 +618,49 @@ impl HttpTransport {
             return Err(format!("the server answered {status}: {detail}"));
         }
         parse_http_body(&text, id)
+    }
+}
+
+fn modern_request_name<'a>(method: &str, body: &'a Value) -> Option<&'a str> {
+    match method {
+        "tools/call" | "prompts/get" => body.pointer("/params/name")?.as_str(),
+        "resources/read" => body.pointer("/params/uri")?.as_str(),
+        _ => None,
+    }
+}
+
+fn encode_mcp_name(name: &str) -> String {
+    if !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return name.to_string();
+    }
+    format!(
+        "=?base64?{}?=",
+        base64::engine::general_purpose::STANDARD.encode(name)
+    )
+}
+
+fn encode_mcp_parameter(value: &Value) -> Result<String, String> {
+    let raw = match value {
+        Value::String(value) => value.clone(),
+        Value::Bool(_) | Value::Number(_) => value.to_string(),
+        _ => return Err("an x-mcp-header argument must be a primitive value".into()),
+    };
+    let plain = raw.is_ascii()
+        && raw.trim() == raw
+        && raw
+            .bytes()
+            .all(|byte| byte == b'\t' || byte >= 0x20 && byte != 0x7f);
+    if plain {
+        Ok(raw)
+    } else {
+        Ok(format!(
+            "=?base64?{}?=",
+            base64::engine::general_purpose::STANDARD.encode(raw)
+        ))
     }
 }
 
@@ -531,30 +785,69 @@ async fn open(spec: &LaunchSpec) -> Result<(Connection, McpSession), String> {
         transport,
         next_id: 0,
         last_used: Instant::now(),
+        era: ProtocolEra::Probing,
+        protocol_version: MODERN_PROTOCOL_VERSION.to_string(),
+        tool_cache: None,
+        tool_headers: HashMap::new(),
     };
 
-    let init = conn
-        .request(
-            "initialize",
-            json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                // No capabilities claimed, because none are implemented. A
-                // server that would have asked us to sample or elicit is told
-                // up front that we can't, rather than left waiting on a reply
-                // that never comes.
-                "capabilities": {},
-                "clientInfo": { "name": "Canopy", "version": env!("CARGO_PKG_VERSION") },
-            }),
-            CONNECT_TIMEOUT,
-        )
+    let handshake = match conn
+        .request_raw("server/discover", json!({}), CONNECT_TIMEOUT, true)
         .await
-        .map_err(|e| with_stderr(e, &conn))?;
+    {
+        Ok(discovery) => {
+            conn.era = ProtocolEra::Modern;
+            let selected = discovery
+                .get("supportedVersions")
+                .and_then(Value::as_array)
+                .and_then(|versions| {
+                    versions
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .find(|version| *version == MODERN_PROTOCOL_VERSION)
+                })
+                .ok_or_else(|| {
+                    "server/discover did not offer MCP 2026-07-28; no modern version is shared"
+                        .to_string()
+                })?;
+            conn.protocol_version = selected.to_string();
+            discovery
+        }
+        Err(error) if matches!(error.code, Some(-32020 | -32021 | -32022)) => {
+            return Err(with_stderr(error.to_string(), &conn));
+        }
+        Err(_) => {
+            // A number of legacy stdio servers terminate as soon as their
+            // first message is not `initialize`. Probe on a disposable child,
+            // then give the legacy handshake a fresh process and clean wire.
+            if spec.transport == "stdio" {
+                conn.transport = start_stdio(spec)?;
+                conn.next_id = 0;
+            }
+            conn.era = ProtocolEra::Legacy;
+            conn.protocol_version = LEGACY_PROTOCOL_VERSION.to_string();
+            let initialized = conn
+                .request(
+                    "initialize",
+                    json!({
+                        "protocolVersion": LEGACY_PROTOCOL_VERSION,
+                        // No capabilities claimed, because none are implemented.
+                        "capabilities": {},
+                        "clientInfo": { "name": CLIENT_NAME, "version": env!("CARGO_PKG_VERSION") },
+                    }),
+                    CONNECT_TIMEOUT,
+                )
+                .await
+                .map_err(|e| with_stderr(e, &conn))?;
+            conn.notify("notifications/initialized", json!({})).await?;
+            initialized
+        }
+    };
 
-    // Required by the spec before any other request, and servers do enforce it.
-    conn.notify("notifications/initialized", json!({})).await?;
-
-    let server_info = init.get("serverInfo");
-    let capabilities = init
+    let server_info = handshake
+        .get("serverInfo")
+        .or_else(|| handshake.pointer("/_meta/io.modelcontextprotocol~1serverInfo"));
+    let capabilities = handshake
         .get("capabilities")
         .and_then(|c| c.as_object())
         .map(|c| c.keys().cloned().collect::<Vec<_>>())
@@ -584,11 +877,14 @@ async fn open(spec: &LaunchSpec) -> Result<(Connection, McpSession), String> {
         key: spec.key.clone(),
         server_name: string_at(server_info, "name"),
         server_version: string_at(server_info, "version"),
-        protocol_version: init
-            .get("protocolVersion")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        instructions: init
+        protocol_version: Some(
+            handshake
+                .get("protocolVersion")
+                .and_then(Value::as_str)
+                .unwrap_or(&conn.protocol_version)
+                .to_string(),
+        ),
+        instructions: handshake
             .get("instructions")
             .and_then(|v| v.as_str())
             .map(str::to_string),
@@ -618,11 +914,64 @@ fn string_at(value: Option<&Value>, key: &str) -> Option<String> {
     value?.get(key)?.as_str().map(str::to_string)
 }
 
+/// Bound untrusted JSON Schema before it reaches the webview. Draft 2020-12 is
+/// intentionally open-ended, so validation here is structural rather than a
+/// keyword allow-list: unknown vocabulary is preserved, while schemas large or
+/// deep enough to exhaust the renderer and references that would require a
+/// network fetch are rejected.
+fn schema_safety(schema: &Value) -> Result<(), String> {
+    let bytes = serde_json::to_vec(schema).map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_SCHEMA_BYTES {
+        return Err(format!("schema exceeded {MAX_SCHEMA_BYTES} bytes"));
+    }
+    if !schema.is_object() && !schema.is_boolean() {
+        return Err("a JSON Schema must be an object or boolean".into());
+    }
+
+    fn visit(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), String> {
+        if depth > MAX_SCHEMA_DEPTH {
+            return Err(format!("schema exceeded depth {MAX_SCHEMA_DEPTH}"));
+        }
+        *nodes += 1;
+        if *nodes > MAX_SCHEMA_NODES {
+            return Err(format!("schema exceeded {MAX_SCHEMA_NODES} nodes"));
+        }
+        match value {
+            Value::Object(object) => {
+                if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                    if !reference.starts_with('#') {
+                        return Err("external $ref is not allowed".into());
+                    }
+                }
+                for child in object.values() {
+                    visit(child, depth + 1, nodes)?;
+                }
+            }
+            Value::Array(array) => {
+                for child in array {
+                    visit(child, depth + 1, nodes)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    visit(schema, 0, &mut 0)
+}
+
 /// Every page of `tools/list`. Servers with many tools paginate, and stopping at
 /// the first page would silently hide the rest.
 async fn list_tools(conn: &mut Connection) -> Result<Vec<McpTool>, String> {
+    if let Some(cache) = &conn.tool_cache {
+        if cache.expires_at > Instant::now() {
+            return Ok(cache.tools.clone());
+        }
+    }
     let mut tools = Vec::new();
+    let mut tool_headers = HashMap::new();
     let mut cursor: Option<String> = None;
+    let mut ttl_ms: Option<u64> = None;
     loop {
         let params = match &cursor {
             Some(c) => json!({ "cursor": c }),
@@ -637,6 +986,21 @@ async fn list_tools(conn: &mut Connection) -> Result<Vec<McpTool>, String> {
             let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
                 continue;
             };
+            let input_schema = item
+                .get("inputSchema")
+                .cloned()
+                .unwrap_or_else(|| json!({ "type": "object" }));
+            if schema_safety(&input_schema).is_err()
+                || item
+                    .get("outputSchema")
+                    .is_some_and(|schema| schema_safety(schema).is_err())
+            {
+                continue;
+            }
+            let Ok(headers) = tool_header_params(&input_schema) else {
+                continue;
+            };
+            tool_headers.insert(name.to_string(), headers);
             tools.push(McpTool {
                 name: name.to_string(),
                 title: item
@@ -649,10 +1013,7 @@ async fn list_tools(conn: &mut Connection) -> Result<Vec<McpTool>, String> {
                     .map(str::to_string),
                 // An absent schema means "no arguments", which the form
                 // renderer should see as an empty object rather than as null.
-                input_schema: item
-                    .get("inputSchema")
-                    .cloned()
-                    .unwrap_or_else(|| json!({ "type": "object" })),
+                input_schema,
                 output_schema: item.get("outputSchema").cloned(),
                 annotations: item.get("annotations").cloned(),
             });
@@ -661,13 +1022,96 @@ async fn list_tools(conn: &mut Connection) -> Result<Vec<McpTool>, String> {
             .get("nextCursor")
             .and_then(|c| c.as_str())
             .map(str::to_string);
+        if conn.era == ProtocolEra::Modern {
+            if let Some(page_ttl) = page.get("ttlMs").and_then(Value::as_u64) {
+                ttl_ms = Some(ttl_ms.map_or(page_ttl, |current| current.min(page_ttl)));
+            }
+        }
         // A server that keeps handing back a cursor would loop forever; the
         // page count is a backstop, not a limit anyone should reach.
         if cursor.is_none() || tools.len() > 2000 {
             break;
         }
     }
+    if let Some(ttl_ms) = ttl_ms.filter(|ttl| *ttl > 0) {
+        conn.tool_cache = Some(ToolCache {
+            tools: tools.clone(),
+            expires_at: Instant::now() + Duration::from_millis(ttl_ms),
+        });
+    } else {
+        conn.tool_cache = None;
+    }
+    conn.tool_headers = tool_headers;
     Ok(tools)
+}
+
+fn tool_header_params(schema: &Value) -> Result<Vec<HeaderParam>, String> {
+    fn contains_header(value: &Value) -> bool {
+        match value {
+            Value::Object(object) => {
+                object.contains_key("x-mcp-header") || object.values().any(contains_header)
+            }
+            Value::Array(array) => array.iter().any(contains_header),
+            _ => false,
+        }
+    }
+
+    let mut headers = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        if contains_header(schema) {
+            return Err("x-mcp-header must annotate a top-level property".into());
+        }
+        return Ok(headers);
+    };
+    for (argument, property) in properties {
+        let Some(property_object) = property.as_object() else {
+            continue;
+        };
+        if property_object
+            .iter()
+            .filter(|(key, _)| key.as_str() != "x-mcp-header")
+            .any(|(_, value)| contains_header(value))
+        {
+            return Err("x-mcp-header must not annotate a nested property".into());
+        }
+        let Some(header) = property_object.get("x-mcp-header") else {
+            continue;
+        };
+        let Some(header) = header.as_str() else {
+            return Err("x-mcp-header must be a string".into());
+        };
+        if header.is_empty()
+            || !header.is_ascii()
+            || header
+                .bytes()
+                .any(|byte| byte <= 0x20 || byte == b':' || byte == 0x7f)
+        {
+            return Err("x-mcp-header contains an invalid header name".into());
+        }
+        let primitive = match property_object.get("type") {
+            Some(Value::String(kind)) => {
+                matches!(kind.as_str(), "string" | "number" | "integer" | "boolean")
+            }
+            Some(Value::Array(kinds)) => kinds.iter().all(|kind| {
+                kind.as_str().is_some_and(|kind| {
+                    matches!(kind, "string" | "number" | "integer" | "boolean" | "null")
+                })
+            }),
+            _ => false,
+        };
+        if !primitive {
+            return Err("x-mcp-header must annotate a primitive property".into());
+        }
+        if !seen.insert(header.to_ascii_lowercase()) {
+            return Err("x-mcp-header names must be unique ignoring case".into());
+        }
+        headers.push(HeaderParam {
+            argument: argument.clone(),
+            header: header.to_string(),
+        });
+    }
+    Ok(headers)
 }
 
 /// Prompts and resources, which are listed for completeness. A failure here is
@@ -906,6 +1350,54 @@ mod tests {
         assert!(err.contains("could not be read"), "{err}");
     }
 
+    #[test]
+    fn modern_metadata_and_result_discrimination_are_strict() {
+        let mut params = json!({ "name": "echo" });
+        attach_modern_meta(&mut params, MODERN_PROTOCOL_VERSION);
+        assert_eq!(
+            params.pointer("/_meta/io.modelcontextprotocol~1protocolVersion"),
+            Some(&json!(MODERN_PROTOCOL_VERSION))
+        );
+        assert!(validate_modern_result("tools/call", &json!({ "resultType": "complete" })).is_ok());
+        assert!(validate_modern_result("tools/call", &json!({})).is_err());
+        assert!(
+            validate_modern_result("tools/call", &json!({ "resultType": "input_required" }))
+                .unwrap_err()
+                .contains("Tasks support is not enabled")
+        );
+    }
+
+    #[test]
+    fn schemas_and_header_annotations_are_bounded() {
+        assert!(schema_safety(&json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": { "id": { "type": "string" } },
+            "properties": { "id": { "$ref": "#/$defs/id" } }
+        }))
+        .is_ok());
+        assert!(schema_safety(&json!({ "$ref": "https://example.invalid/schema" })).is_err());
+
+        let headers = tool_header_params(&json!({
+            "type": "object",
+            "properties": { "region": { "type": "string", "x-mcp-header": "Region" } }
+        }))
+        .expect("valid annotation");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].argument, "region");
+        assert!(tool_header_params(&json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "string", "x-mcp-header": "Region" },
+                "b": { "type": "string", "x-mcp-header": "REGION" }
+            }
+        }))
+        .is_err());
+        assert_eq!(encode_mcp_parameter(&json!(42)).unwrap(), "42");
+        assert!(encode_mcp_parameter(&json!("日本語"))
+            .unwrap()
+            .starts_with("=?base64?"));
+    }
+
     /// An absolute path is taken as given — resolving it through a login shell
     /// would be a process start per server for no answer.
     #[test]
@@ -974,6 +1466,38 @@ for line in sys.stdin:
               "error": {"code": -32601, "message": "no such method"}})
 "#;
 
+    const MODERN_FAKE_SERVER: &str = r#"
+import json, sys
+listed = False
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    req = json.loads(line)
+    method, rid = req.get("method"), req.get("id")
+    meta = req.get("params", {}).get("_meta", {})
+    if meta.get("io.modelcontextprotocol/protocolVersion") != "2026-07-28":
+        send({"jsonrpc":"2.0","id":rid,"error":{"code":-32022,"message":"missing version"}})
+    elif method == "server/discover":
+        send({"jsonrpc":"2.0","id":rid,"result":{
+            "resultType":"complete","supportedVersions":["2026-07-28"],
+            "capabilities":{"tools":{}},"instructions":"modern",
+            "_meta":{"io.modelcontextprotocol/serverInfo":{"name":"modern-fake","version":"1.0"}}}})
+    elif method == "tools/list" and not listed:
+        listed = True
+        send({"jsonrpc":"2.0","id":rid,"result":{
+            "resultType":"complete","ttlMs":60000,"cacheScope":"private",
+            "tools":[{"name":"echo","inputSchema":{"type":"object","properties":{
+                "text":{"type":"string","x-mcp-header":"Route"}}}}]}})
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":rid,"error":{"code":-32603,"message":"cache was missed"}})
+    elif method == "tools/call":
+        send({"jsonrpc":"2.0","id":rid,"result":{"resultType":"complete",
+            "content":[{"type":"text","text":"ok"}],"isError":False}})
+    else:
+        send({"jsonrpc":"2.0","id":rid,"error":{"code":-32601,"message":"no such method"}})
+"#;
+
     fn fake_spec() -> Option<LaunchSpec> {
         // Skipped rather than failed where there is no python3: this covers the
         // transport, and a machine without an interpreter is not evidence the
@@ -992,6 +1516,40 @@ for line in sys.stdin:
             env: BTreeMap::new(),
             cwd: None,
         })
+    }
+
+    fn modern_fake_spec() -> Option<LaunchSpec> {
+        let mut spec = fake_spec()?;
+        spec.key = "test:modern-fake".into();
+        spec.name = "modern-fake".into();
+        spec.args = vec!["-u".into(), "-c".into(), MODERN_FAKE_SERVER.into()];
+        Some(spec)
+    }
+
+    #[tokio::test]
+    async fn modern_discovery_metadata_results_and_cache_work_together() {
+        let Some(spec) = modern_fake_spec() else {
+            return;
+        };
+        let (mut conn, session) = open(&spec).await.expect("connects");
+        assert_eq!(conn.era, ProtocolEra::Modern);
+        assert_eq!(session.protocol_version.as_deref(), Some("2026-07-28"));
+        assert_eq!(session.server_name.as_deref(), Some("modern-fake"));
+        assert_eq!(session.instructions.as_deref(), Some("modern"));
+        assert_eq!(session.tools.len(), 1);
+        assert_eq!(
+            list_tools(&mut conn).await.expect("uses ttl cache").len(),
+            1
+        );
+        let result = conn
+            .request(
+                "tools/call",
+                json!({ "name": "echo", "arguments": { "text": "hello" } }),
+                CALL_TIMEOUT,
+            )
+            .await
+            .expect("calls");
+        assert_eq!(result["content"][0]["text"], "ok");
     }
 
     #[tokio::test]

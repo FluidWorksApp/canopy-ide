@@ -295,6 +295,9 @@ export interface PtyExit {
   exit_code: number | null;
   /** True when Canopy requested shutdown; false for a process that died itself. */
   requested: boolean;
+  /** Present only on events synthesized in the renderer when the spawn itself
+   *  was refused (no process ever existed); the Rust event never carries it. */
+  spawnError?: string;
 }
 export const onPtyExit = (cb: (e: PtyExit) => void): Promise<UnlistenFn> =>
   listen<PtyExit>("pty:exit", (event) => cb(event.payload));
@@ -2207,6 +2210,11 @@ export interface SessionStats {
  *  that needs one now and has no `onPtyStats` subscription. Reads the cache the
  *  monitor already fills. */
 export const ptyStats = (): Promise<SessionStats[]> => invoke<SessionStats[]>("pty_stats");
+
+/** Verify the exact path declared by a Build run on one of that PTY's local
+ * listening ports. Native transport keeps browser CORS out of process health. */
+export const probeHttpReadiness = (port: number, path: string): Promise<boolean> =>
+  invoke<boolean>("probe_http_readiness", { port, path });
 
 export const onPtyStats = (
   cb: (stats: SessionStats[]) => void,

@@ -2089,8 +2089,8 @@ fn relocate_stray_research(session_id: &str, entry_dir: &std::path::Path) {
 ///
 /// Canopy stamps CANOPY_CTX_PORT and _TOKEN onto every PTY it opens, and every
 /// CLI that inherits its environment passes them down to the MCP servers it
-/// starts. Codex does not: verified against codex-cli 0.146.0, it spawns stdio
-/// MCP servers with twelve core variables and nothing else —
+/// starts. Codex does not: verified against codex-cli 0.146.0 on 2026-08-02,
+/// it spawns stdio MCP servers with twelve core variables and nothing else —
 ///
 ///   HOME LANG LOGNAME PATH PWD SHELL SHLVL TERM TMPDIR USER _ __CF_USER_TEXT_ENCODING
 ///
@@ -2203,6 +2203,8 @@ fn mcp_main() {
     // stdout is shared: one message per write, never interleaved.
     let out = std::sync::Arc::new(std::sync::Mutex::new(std::io::stdout()));
     let subscriptions: Subscriptions = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let modern_subscriptions: ModernSubscriptions =
+        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -2212,6 +2214,26 @@ fn mcp_main() {
         let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
+        if msg.get("method").and_then(|m| m.as_str()) == Some("notifications/cancelled") {
+            if let Some(cancelled) = msg.pointer("/params/requestId").cloned() {
+                let key = cancelled.to_string();
+                if modern_subscriptions.lock().unwrap().remove(&key).is_some() {
+                    write_message(
+                        &out,
+                        &rpc_ok_for(
+                            cancelled.clone(),
+                            serde_json::json!({
+                                "_meta": {
+                                    "io.modelcontextprotocol/subscriptionId": cancelled,
+                                }
+                            }),
+                            true,
+                        ),
+                    );
+                }
+            }
+            continue;
+        }
         // Notifications (no id) expect no reply.
         let Some(id) = msg.get("id").cloned() else {
             continue;
@@ -2225,6 +2247,7 @@ fn mcp_main() {
         // and write_message keeps stdout one-message-at-a-time.
         if msg.get("method").and_then(|m| m.as_str()) == Some("tools/call") {
             let out = out.clone();
+            let modern = request_is_modern(&msg);
             std::thread::spawn(move || {
                 let name = msg
                     .pointer("/params/name")
@@ -2235,15 +2258,16 @@ fn mcp_main() {
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
                 let reply = match call_tool(name, &args) {
-                    Ok(output) => rpc_ok(id, output.into_result(name)),
+                    Ok(output) => rpc_ok_for(id, output.into_result(name), modern),
                     // Tool failures are results with isError, not protocol
                     // errors — the agent reads them and adapts.
-                    Err(text) => rpc_ok(
+                    Err(text) => rpc_ok_for(
                         id,
                         serde_json::json!({
                             "content": [{ "type": "text", "text": text }],
                             "isError": true,
                         }),
+                        modern,
                     ),
                 };
                 write_message(&out, &reply);
@@ -2251,7 +2275,27 @@ fn mcp_main() {
             continue;
         }
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let modern = request_is_modern(&msg);
         let reply = match method {
+            "server/discover" => {
+                if request_protocol(&msg) != Some("2026-07-28") {
+                    rpc_err(id, -32022, "unsupported MCP protocol version")
+                } else {
+                    let mut result = serde_json::json!({
+                        "supportedVersions": ["2026-07-28"],
+                        "capabilities": {
+                            "tools": { "listChanged": false },
+                            "resources": { "listChanged": false },
+                            "prompts": { "listChanged": false },
+                        },
+                    });
+                    if in_canopy() {
+                        result["instructions"] =
+                            serde_json::json!(agent_instructions::mcp_instructions());
+                    }
+                    rpc_ok_for(id, cacheable(result, 30_000), true)
+                }
+            }
             "initialize" => {
                 // Echo the client's protocol version: these tools are simple
                 // enough to be valid under every revision so far.
@@ -2283,28 +2327,74 @@ fn mcp_main() {
                 }
                 rpc_ok(id, result)
             }
-            "ping" => rpc_ok(id, serde_json::json!({})),
-            "tools/list" => rpc_ok(id, tools_list()),
-            "resources/list" => rpc_ok(id, resources_list()),
-            "resources/templates/list" => {
-                rpc_ok(id, serde_json::json!({ "resourceTemplates": [] }))
+            "ping" => rpc_ok_for(id, serde_json::json!({}), modern),
+            "tools/list" => rpc_ok_for(id, cacheable_if_modern(tools_list(), modern), modern),
+            "resources/list" => {
+                rpc_ok_for(id, cacheable_if_modern(resources_list(), modern), modern)
             }
+            "resources/templates/list" => rpc_ok_for(
+                id,
+                cacheable_if_modern(serde_json::json!({ "resourceTemplates": [] }), modern),
+                modern,
+            ),
             "resources/read" => {
                 let uri = msg
                     .pointer("/params/uri")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 match read_resource(uri) {
-                    Ok(text) => rpc_ok(
+                    Ok(text) => rpc_ok_for(
                         id,
-                        serde_json::json!({ "contents": [
-                            { "uri": uri, "mimeType": "application/json", "text": text }
-                        ]}),
+                        cacheable_if_modern(
+                            serde_json::json!({ "contents": [
+                                { "uri": uri, "mimeType": "application/json", "text": text }
+                            ]}),
+                            modern,
+                        ),
+                        modern,
                     ),
-                    Err(e) => rpc_err(id, -32002, &e),
+                    Err(e) => rpc_err(id, if modern { -32602 } else { -32002 }, &e),
                 }
             }
-            "resources/subscribe" => {
+            "subscriptions/listen" if modern => {
+                let requested = msg
+                    .pointer("/params/notifications/resourceSubscriptions")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.as_str())
+                    .filter(|uri| RESOURCES.iter().any(|(known, _, _)| known == uri))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                let mut bodies = HashMap::new();
+                for uri in &requested {
+                    bodies.insert(uri.clone(), read_resource(uri).unwrap_or_default());
+                }
+                let first = modern_subscriptions.lock().unwrap().is_empty();
+                modern_subscriptions.lock().unwrap().insert(
+                    id.to_string(),
+                    ModernSubscription {
+                        id: id.clone(),
+                        bodies,
+                    },
+                );
+                if first {
+                    watch_modern_resources(out.clone(), modern_subscriptions.clone());
+                }
+                write_message(
+                    &out,
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/subscriptions/acknowledged",
+                        "params": {
+                            "notifications": { "resourceSubscriptions": requested },
+                            "_meta": { "io.modelcontextprotocol/subscriptionId": id },
+                        }
+                    }),
+                );
+                continue;
+            }
+            "resources/subscribe" if !modern => {
                 let uri = msg
                     .pointer("/params/uri")
                     .and_then(|v| v.as_str())
@@ -2324,20 +2414,20 @@ fn mcp_main() {
                     rpc_err(id, -32002, &format!("unknown resource: {uri}"))
                 }
             }
-            "resources/unsubscribe" => {
+            "resources/unsubscribe" if !modern => {
                 if let Some(uri) = msg.pointer("/params/uri").and_then(|v| v.as_str()) {
                     subscriptions.lock().unwrap().remove(uri);
                 }
                 rpc_ok(id, serde_json::json!({}))
             }
-            "prompts/list" => rpc_ok(id, prompts_list()),
+            "prompts/list" => rpc_ok_for(id, cacheable_if_modern(prompts_list(), modern), modern),
             "prompts/get" => {
                 let name = msg
                     .pointer("/params/name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 match prompt_get(name) {
-                    Ok(result) => rpc_ok(id, result),
+                    Ok(result) => rpc_ok_for(id, result, modern),
                     Err(e) => rpc_err(id, -32602, &e),
                 }
             }
@@ -2351,6 +2441,13 @@ fn mcp_main() {
 }
 
 type Subscriptions = std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>;
+
+struct ModernSubscription {
+    id: serde_json::Value,
+    bodies: HashMap<String, String>,
+}
+
+type ModernSubscriptions = std::sync::Arc<std::sync::Mutex<HashMap<String, ModernSubscription>>>;
 
 fn write_message(out: &std::sync::Arc<std::sync::Mutex<std::io::Stdout>>, msg: &serde_json::Value) {
     use std::io::Write;
@@ -2404,6 +2501,44 @@ fn watch_resources(
                     }),
                 );
             }
+        }
+    });
+}
+
+fn watch_modern_resources(
+    out: std::sync::Arc<std::sync::Mutex<std::io::Stdout>>,
+    subscriptions: ModernSubscriptions,
+) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let mut notifications = Vec::new();
+        {
+            let mut held = subscriptions.lock().unwrap();
+            for subscription in held.values_mut() {
+                let uris = subscription.bodies.keys().cloned().collect::<Vec<_>>();
+                for uri in uris {
+                    let Ok(body) = read_resource(&uri) else {
+                        continue;
+                    };
+                    if subscription.bodies.get(&uri) == Some(&body) {
+                        continue;
+                    }
+                    subscription.bodies.insert(uri.clone(), body);
+                    notifications.push(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/resources/updated",
+                        "params": {
+                            "uri": uri,
+                            "_meta": {
+                                "io.modelcontextprotocol/subscriptionId": subscription.id,
+                            }
+                        }
+                    }));
+                }
+            }
+        }
+        for notification in notifications {
+            write_message(&out, &notification);
         }
     });
 }
@@ -2512,6 +2647,56 @@ fn prompt_get(name: &str) -> Result<serde_json::Value, String> {
 
 fn rpc_ok(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+fn request_protocol(msg: &serde_json::Value) -> Option<&str> {
+    msg.pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
+        .and_then(|value| value.as_str())
+}
+
+fn request_is_modern(msg: &serde_json::Value) -> bool {
+    request_protocol(msg) == Some("2026-07-28")
+}
+
+fn cacheable(mut result: serde_json::Value, ttl_ms: u64) -> serde_json::Value {
+    if let Some(object) = result.as_object_mut() {
+        object.insert("ttlMs".into(), serde_json::json!(ttl_ms));
+        object.insert("cacheScope".into(), serde_json::json!("private"));
+    }
+    result
+}
+
+fn cacheable_if_modern(result: serde_json::Value, modern: bool) -> serde_json::Value {
+    if modern {
+        cacheable(result, 2_000)
+    } else {
+        result
+    }
+}
+
+fn rpc_ok_for(
+    id: serde_json::Value,
+    mut result: serde_json::Value,
+    modern: bool,
+) -> serde_json::Value {
+    if modern {
+        if let Some(object) = result.as_object_mut() {
+            object.insert("resultType".into(), serde_json::json!("complete"));
+            let meta = object
+                .entry("_meta")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(meta) = meta.as_object_mut() {
+                meta.insert(
+                    "io.modelcontextprotocol/serverInfo".into(),
+                    serde_json::json!({
+                        "name": "canopy",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    }),
+                );
+            }
+        }
+    }
+    rpc_ok(id, result)
 }
 
 fn rpc_err(id: serde_json::Value, code: i32, message: &str) -> serde_json::Value {
@@ -5330,6 +5515,40 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modern_results_carry_identity_and_cache_hints_only_in_the_modern_era() {
+        let modern = rpc_ok_for(
+            serde_json::json!(1),
+            cacheable_if_modern(serde_json::json!({ "tools": [] }), true),
+            true,
+        );
+        assert_eq!(modern["result"]["resultType"], "complete");
+        assert_eq!(modern["result"]["cacheScope"], "private");
+        assert_eq!(
+            modern["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "canopy"
+        );
+
+        let legacy = rpc_ok_for(
+            serde_json::json!(1),
+            cacheable_if_modern(serde_json::json!({ "tools": [] }), false),
+            false,
+        );
+        assert!(legacy["result"].get("resultType").is_none());
+        assert!(legacy["result"].get("ttlMs").is_none());
+    }
+
+    #[test]
+    fn modern_requests_are_selected_by_per_request_metadata() {
+        let modern = serde_json::json!({
+            "params": { "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            }}
+        });
+        assert!(request_is_modern(&modern));
+        assert!(!request_is_modern(&serde_json::json!({ "params": {} })));
+    }
 
     /// These carry the same cases as `judgeCommand` in
     /// src/workspaceAuthority.test.ts. Claude Code has no OS sandbox, so this

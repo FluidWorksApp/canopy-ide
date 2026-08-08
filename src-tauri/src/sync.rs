@@ -23,8 +23,9 @@
 use crate::fsx::WorkspaceManager;
 use crate::git::{default_base, git, head_branch, repo_path, run, run_net};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use tauri::State;
 
 /// Incoming commit subjects carried back for the "what's coming" line. A
@@ -274,6 +275,67 @@ fn dry_run_pair(top: &Path, first: &str, second: &str) -> (Option<bool>, Vec<Str
     }
 }
 
+#[derive(Clone)]
+struct CachedPairProbe {
+    clean: Option<bool>,
+    conflicts: Vec<String>,
+    low_ancestor_high: bool,
+    high_ancestor_low: bool,
+}
+
+const PAIR_CACHE_LIMIT: usize = 2_048;
+static PAIR_CACHE: OnceLock<Mutex<HashMap<(String, String), CachedPairProbe>>> = OnceLock::new();
+
+/// Cache exactly by the two immutable heads. Adding another PR to a category
+/// must not recompute every pair already proved; moving either head naturally
+/// creates a new key. OIDs are content identities, so the result is repo-free.
+fn cached_pair_probe(
+    top: &Path,
+    first: &PrMergeCandidate,
+    second: &PrMergeCandidate,
+) -> PrMergePairProbe {
+    let (low, high, first_is_low) = if first.head_sha <= second.head_sha {
+        (&first.head_sha, &second.head_sha, true)
+    } else {
+        (&second.head_sha, &first.head_sha, false)
+    };
+    let key = (low.clone(), high.clone());
+    let cache = PAIR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cached = cache.lock().ok().and_then(|cache| cache.get(&key).cloned());
+    let value = cached.unwrap_or_else(|| {
+        let (clean, conflicts) = dry_run_pair(top, low, high);
+        let value = CachedPairProbe {
+            clean,
+            conflicts,
+            low_ancestor_high: is_ancestor(top, low, high),
+            high_ancestor_low: is_ancestor(top, high, low),
+        };
+        if let Ok(mut cache) = cache.lock() {
+            if cache.len() >= PAIR_CACHE_LIMIT {
+                cache.clear();
+            }
+            cache.insert(key, value.clone());
+        }
+        value
+    });
+    PrMergePairProbe {
+        first: first.number,
+        second: second.number,
+        clean: value.clean,
+        conflicts: value.conflicts,
+        first_ancestor_second: if first_is_low {
+            value.low_ancestor_high
+        } else {
+            value.high_ancestor_low
+        },
+        second_ancestor_first: if first_is_low {
+            value.high_ancestor_low
+        } else {
+            value.low_ancestor_high
+        },
+    }
+}
+
 /// Pairwise compatibility for one bounded dashboard group. A refresh may add
 /// missing objects, but deliberately writes no ref (`--no-write-fetch-head`)
 /// and never touches a checkout. The caller groups by repo/base/category, so
@@ -320,15 +382,7 @@ fn pr_merge_probe(top: &Path, candidates: &[PrMergeCandidate], fetch: bool) -> P
             if unavailable.contains(&second.number) {
                 continue;
             }
-            let (clean, conflicts) = dry_run_pair(top, &first.head_sha, &second.head_sha);
-            pairs.push(PrMergePairProbe {
-                first: first.number,
-                second: second.number,
-                clean,
-                conflicts,
-                first_ancestor_second: is_ancestor(top, &first.head_sha, &second.head_sha),
-                second_ancestor_first: is_ancestor(top, &second.head_sha, &first.head_sha),
-            });
+            pairs.push(cached_pair_probe(top, first, second));
         }
     }
 
@@ -907,7 +961,7 @@ mod tests {
         let two = f.git(&["rev-parse", "HEAD"]);
         let before = f.git(&["rev-parse", "HEAD"]);
 
-        let candidate = |number, _branch: &str, head_sha: String| PrMergeCandidate {
+        let candidate = |number, head_sha: String| PrMergeCandidate {
             number,
             base: "main".into(),
             base_sha: base.clone(),
@@ -916,9 +970,9 @@ mod tests {
         let out = pr_merge_probe(
             &f.dir,
             &[
-                candidate(1, "one", one),
-                candidate(2, "two", two),
-                candidate(3, "stacked", stacked),
+                candidate(1, one.clone()),
+                candidate(2, two),
+                candidate(3, stacked.clone()),
             ],
             false,
         );
@@ -932,6 +986,11 @@ mod tests {
             .find(|p| (p.first, p.second) == (1, 3))
             .unwrap();
         assert!(ancestry.first_ancestor_second);
+        // The same cached OID pair remains directionally correct when callers
+        // present it in the opposite order.
+        let reversed = pr_merge_probe(&f.dir, &[candidate(3, stacked), candidate(1, one)], false);
+        assert!(!reversed.pairs[0].first_ancestor_second);
+        assert!(reversed.pairs[0].second_ancestor_first);
         assert_eq!(f.git(&["rev-parse", "HEAD"]), before);
         assert!(f.git(&["status", "--porcelain"]).is_empty());
     }

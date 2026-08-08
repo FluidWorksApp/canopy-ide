@@ -24,6 +24,13 @@ import {
   type RouteVersions,
   type SelectedRoute,
 } from "./vibeFailover";
+import type { RepairProblem } from "./vibeRepair";
+import {
+  DEFAULT_VIBE_SETUP_VERIFICATION_DEPS,
+  verifyVibeSetupBeforePersist,
+  type VibeSetupVerificationFailure,
+  type VibeSetupVerificationResult,
+} from "./vibeSetupVerification";
 
 export const VIBE_SETUP_SCHEMA_VERSION = 1 as const;
 const MAX_COMPONENTS = 64;
@@ -1248,6 +1255,17 @@ export const DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS: VibeProjectSetupTaskDeps = {
 export interface VibeProjectSetupSessionDeps {
   observe(project: Project): Promise<VibeSetupRepositoryObservation>;
   run(input: VibeProjectSetupTaskInput, validation: VibeSetupValidationContext): Promise<VibeProjectSetupTaskResult>;
+  verify(
+    project: Project,
+    existingPaths: ReadonlySet<string>,
+    proposedArgv: ReadonlyMap<string, string[]>,
+    signal?: AbortSignal,
+  ): Promise<VibeSetupVerificationResult>;
+  repair(
+    problem: RepairProblem,
+    signal?: AbortSignal,
+    onActivity?: (doing: string) => void,
+  ): Promise<boolean>;
   providerIds: ReadonlySet<string>;
 }
 
@@ -1313,8 +1331,87 @@ export const DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS: VibeProjectSetupSessionDep
       return result.ok;
     },
   }, DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS),
+  verify: (project, existingPaths, proposedArgv, signal) =>
+    verifyVibeSetupBeforePersist(
+      project,
+      existingPaths,
+      DEFAULT_VIBE_SETUP_VERIFICATION_DEPS,
+      signal,
+      proposedArgv,
+    ),
+  repair: async (problem, signal, onActivity) => {
+    // Dynamic to keep the setup runner and repair runner from forming a
+    // module-initialisation cycle. They deliberately share the same reserved
+    // task/route dependencies once the repair is actually needed.
+    const { runVibeRepairTask } = await import("./vibeRepairSession");
+    const result = await runVibeRepairTask(
+      { problem, signal, onActivity },
+      DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS,
+    );
+    return result.ok && result.verdict.fixed;
+  },
   providerIds: new Set(["supabase", "neon", "firebase", "stripe", "vercel", "netlify", "cloudflare", "fly"]),
 };
+
+function verificationRepairProblem(
+  project: Project,
+  failure: VibeSetupVerificationFailure,
+): RepairProblem {
+  const code = failure.code === "environment-missing"
+    ? "environment-missing"
+    : failure.code === "readiness-failed"
+      ? "server-start-failed"
+      : "setup-failed";
+  return {
+    code,
+    statement: failure.statement,
+    projectId: project.id,
+    projectName: project.name,
+    component: {
+      id: failure.target.component.id,
+      label: failure.target.component.label,
+      path: failure.target.component.path,
+      ...(failure.target.component.role ? { role: failure.target.component.role } : {}),
+    },
+    runCommand: {
+      id: failure.target.command.id,
+      name: failure.target.command.name,
+      command: failure.target.command.command,
+    },
+    commands: failure.target.component.commands ?? [],
+    topology: {
+      components: project.components.map((component) => ({
+        id: component.id,
+        label: component.label,
+        path: component.path,
+        ...(component.role ? { role: component.role } : {}),
+        commands: component.commands ?? [],
+      })),
+      requiredProcesses: project.vibe?.requiredProcesses ?? [],
+      componentLinks: project.vibe?.componentLinks ?? [],
+      dataStores: project.vibe?.dataStores ?? [],
+      externalServices: project.vibe?.externalServices ?? [],
+    },
+    evidence: { context: failure.context },
+  };
+}
+
+function verificationArgv(
+  proposal: VibeProjectSetupProposal,
+  materialized: MaterializedVibeSetup,
+): ReadonlyMap<string, string[]> {
+  const result = new Map<string, string[]>();
+  for (const component of proposal.components) {
+    const componentId = materialized.componentIds[component.key];
+    for (const command of component.commands) {
+      const commandId = materialized.commandIds[`${component.key}:${command.key}`];
+      if (componentId && commandId) {
+        result.set(`${componentId}:${commandId}`, command.argv);
+      }
+    }
+  }
+  return result;
+}
 
 type SetupSessionEvent = import("./structuredEvents").StructuredRunnerEvent;
 type SetupFlightStatus = "idle" | "running" | "succeeded" | "failed";
@@ -1524,7 +1621,59 @@ function createVibeProjectSetupFlight(
         fail("I couldn't determine a safe complete setup for this project.");
         return;
       }
-      const configured = materializeVibeSetup(activeProject, validation.proposal, after.projectRoot).project;
+      const materialized = materializeVibeSetup(
+        activeProject,
+        validation.proposal,
+        after.projectRoot,
+      );
+      const configured = materialized.project;
+      const proposedArgv = verificationArgv(validation.proposal, materialized);
+      let verification = await deps.verify(
+        configured,
+        after.paths,
+        proposedArgv,
+        flight.abort.signal,
+      );
+      if (!verification.ok) {
+        publish({
+          kind: "reply",
+          text: verification.failure.code === "environment-missing"
+            ? "I'm adding a tool this project needs, then I'll check the setup again."
+            : "The proposed setup needs a correction. I'm fixing and checking it before I save anything.",
+        });
+        const fixed = await deps.repair(
+          verificationRepairProblem(configured, verification.failure),
+          flight.abort.signal,
+          (doing) => publish({ kind: "reply", text: doing }),
+        );
+        if (flight.abort.signal.aborted) return;
+        if (!fixed) {
+          void ipc.jsLog(
+            "error",
+            `vibe-setup: verification repair failed (${verification.failure.code}): ${verification.failure.context}`,
+          );
+          fail("I couldn't finish preparing this project yet.");
+          return;
+        }
+        // Provisioning and setup repair may change both PATH and lockfiles.
+        // Re-observe, then re-run the entire gate once. A fixed verdict is not
+        // evidence that the command now resolves or the server becomes ready.
+        const repaired = await deps.observe(configured);
+        verification = await deps.verify(
+          configured,
+          repaired.paths,
+          proposedArgv,
+          flight.abort.signal,
+        );
+        if (!verification.ok) {
+          void ipc.jsLog(
+            "error",
+            `vibe-setup: verification still failed after repair (${verification.failure.code}): ${verification.failure.context}`,
+          );
+          fail("I couldn't finish preparing this project yet.");
+          return;
+        }
+      }
       if (!(await flight.persist(configured))) {
         fail("I understood the project, but couldn't save its setup.");
         return;

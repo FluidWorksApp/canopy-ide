@@ -238,6 +238,45 @@ pub fn pty_stats(app: tauri::AppHandle) -> Vec<SessionStats> {
         .unwrap_or_default()
 }
 
+fn http_readiness_url(port: u16, path: &str) -> Result<String, String> {
+    if path.is_empty()
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || path.len() > 2_048
+        || path.contains(['\r', '\n'])
+    {
+        return Err("HTTP readiness path must be a local absolute path".into());
+    }
+    Ok(format!("http://127.0.0.1:{port}{path}"))
+}
+
+fn http_readiness_status(status: reqwest::StatusCode) -> bool {
+    status.is_success() || status.is_redirection()
+}
+
+/// Prove the HTTP readiness contract a Build setup declared. Listening on a
+/// port is only a transport fact: another endpoint (or another service in the
+/// same process tree) must not release dependent processes. Native reqwest
+/// avoids browser CORS policy turning a healthy local endpoint into a false
+/// negative. Redirects count as a response from the declared path but are not
+/// followed outside localhost.
+#[tauri::command]
+pub async fn probe_http_readiness(port: u16, path: String) -> Result<bool, String> {
+    let url = http_readiness_url(port, &path)?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(750))
+        .timeout(Duration::from_millis(1_500))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .map_err(|error| format!("could not create readiness probe: {error}"))?;
+    let response = match client.get(url).send().await {
+        Ok(response) => response,
+        Err(_) => return Ok(false),
+    };
+    Ok(http_readiness_status(response.status()))
+}
+
 static MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// TCP listening ports for `pids`, as pid -> ports.
@@ -5350,7 +5389,28 @@ mod integration_tests {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{clear_stale_stats, SessionStats, StatsCache};
+    use super::{
+        clear_stale_stats, http_readiness_status, http_readiness_url, SessionStats, StatsCache,
+    };
+
+    #[test]
+    fn http_readiness_is_pinned_to_localhost_and_the_declared_path() {
+        assert_eq!(
+            http_readiness_url(4173, "/health/ready?deep=1").unwrap(),
+            "http://127.0.0.1:4173/health/ready?deep=1"
+        );
+        for path in ["", "health", "//example.com/", "/ok\r\nHost: example.com"] {
+            assert!(http_readiness_url(4173, path).is_err(), "accepted {path:?}");
+        }
+        assert!(http_readiness_status(reqwest::StatusCode::NO_CONTENT));
+        assert!(http_readiness_status(
+            reqwest::StatusCode::TEMPORARY_REDIRECT
+        ));
+        assert!(!http_readiness_status(reqwest::StatusCode::NOT_FOUND));
+        assert!(!http_readiness_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

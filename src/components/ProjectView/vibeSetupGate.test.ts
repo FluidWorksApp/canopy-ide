@@ -117,8 +117,17 @@ describe("vibeRunReady", () => {
   it("waits for a declared port before releasing dependent processes", () => {
     const tab = { ptyId: 7, exited: false };
     const command = { readiness: { kind: "port" as const } };
-    expect(vibeRunReady(tab, command, [{ id: 7, ports: [] }])).toBe(false);
-    expect(vibeRunReady(tab, command, [{ id: 7, ports: [5432] }])).toBe(true);
+    expect(vibeRunReady(tab, command, [{ id: 7, ports: [] }], new Set())).toBe(false);
+    expect(vibeRunReady(tab, command, [{ id: 7, ports: [5432] }], new Set())).toBe(true);
+  });
+
+  it("requires the supervisor's exact-path proof for HTTP readiness", () => {
+    const tab = { ptyId: 7, exited: false };
+    const command = { readiness: { kind: "http" as const, path: "/healthz" } };
+    expect(vibeRunReady(tab, command, [{ id: 7, ports: [3000] }], new Set()))
+      .toBe(false);
+    expect(vibeRunReady(tab, command, [{ id: 7, ports: [3000] }], new Set([7])))
+      .toBe(true);
   });
 
   it("accepts a live worker with process-alive readiness", () => {
@@ -134,6 +143,15 @@ describe("vibeRunReady", () => {
     expect(vibeRunReady(
       { ptyId: 9, exited: false },
       { readiness: { kind: "process-alive" } },
+      [],
+      new Set(),
+    )).toBe(false);
+  });
+
+  it("does not treat an unspecified readiness policy as immediately ready", () => {
+    expect(vibeRunReady(
+      { ptyId: 9, exited: false },
+      {},
       [],
       new Set(),
     )).toBe(false);

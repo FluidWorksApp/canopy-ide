@@ -691,6 +691,9 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     install: "npm install -g @anthropic-ai/claude-code",
     pkgs: ["npm:@anthropic-ai/claude-code"],
     latestUrl: "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
+    // Registry argv re-verified against Claude Code 2.1.226 local --help on
+    // 2026-08-09. This stamps syntax only; Build's security caveat lives with
+    // the structured runner that consumes the flags.
     // Verified: `claude update` self-updates both the npm and native installs.
     update: "claude update",
     // Verified: `-r, --resume [value]  Resume a conversation by session ID`.
@@ -729,6 +732,8 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     install: "npm install -g @openai/codex",
     pkgs: ["npm:@openai/codex"],
     latestUrl: "https://registry.npmjs.org/@openai/codex/latest",
+    // Registry argv re-verified against codex-cli 0.147.0 local help on
+    // 2026-08-09 (`codex --help`, `exec --help`, and `exec resume --help`).
     // Verified: `codex resume <SESSION_ID>` — subcommand, id is positional and
     // takes a UUID or a session name.
     resume: (id, bin) => `${bin} resume ${id}`,
@@ -747,7 +752,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // "keep going, inside this workspace".
     //
     // NOT `--full-auto`, which every guide still names: it is gone from codex
-    // 0.146's --help, and a flag clap doesn't know refuses to launch at all.
+    // 0.147.0's --help, and a flag clap doesn't know refuses to launch at all.
     unattended: "--ask-for-approval never --sandbox workspace-write",
   },
   {
@@ -782,6 +787,10 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // distribution name, which nothing on disk states.
     pkgs: ["py:aider"],
     latestUrl: "https://pypi.org/pypi/aider-chat/json",
+    // Registry flags (`--read`, `--restore-chat-history`, `--yes-always`, and
+    // `--notifications-command`) re-verified together against aider 0.86.2
+    // local --help on 2026-08-09. This reconciles the launcher and notification
+    // halves against one installed release.
     // Verified: `--yes-always  Always say yes to every confirmation`.
     skipPermissions: "--yes-always",
     // No `unattended`, and not for want of looking: aider's help offers
@@ -804,6 +813,9 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     bin: "agy",
     icon: "◇",
     install: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+    // Registry flags re-verified against Antigravity 1.1.11 local --help on
+    // 2026-08-09 (`--conversation`, permission bypass, mode, model, add-dir,
+    // sandbox, and stream-json output).
     // Verified: `--conversation <uuid>` resumes by id (`-c` takes the most
     // recent). It is NOT `--resume`.
     resume: (id, bin) => `${bin} --conversation ${id}`,

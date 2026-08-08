@@ -115,6 +115,10 @@ export async function runVibeRepairTask(
     authorityPolicy: {
       writes: "component",
       shell: "allowed",
+      network: "allowed",
+      ...(problem.code === "environment-missing"
+        ? { provisioning: "corepack-version-manager-brew" }
+        : {}),
       confirmDestructive: true,
       verification: { required: [] },
     },
@@ -152,6 +156,7 @@ export async function runVibeRepairTask(
       sessionId: deps.sessionId(),
       cwd: problem.component.path,
       authority: "workspace-write",
+      network: true,
     },
     env: [
       ...launchEnvSync(chosen.cli),

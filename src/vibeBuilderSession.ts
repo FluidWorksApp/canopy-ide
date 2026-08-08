@@ -18,7 +18,7 @@ import {
 import type { TaskReservation } from "./taskEnvelope";
 import type { TaskAttemptSettlement } from "./taskEnvelope";
 import { appendTranscript } from "./taskTranscript";
-import { fleetGate } from "./fleetState";
+import { fleetGate, fleetState } from "./fleetState";
 import { redactSecrets } from "./vibeSecretScan";
 import {
   proposeAbstraction,
@@ -73,6 +73,7 @@ import {
 import {
   capturedNetworkObservation,
   judgeVerification,
+  type CapturedNetworkRequest,
   type ObservationKind,
   type VerificationContract,
   type VerificationObservation,
@@ -85,6 +86,13 @@ import type {
   BuilderSession,
   BuilderSessionState,
 } from "./vibeBuilderSessionTypes";
+import {
+  buildRouteRecoveryActions,
+  parseRouteRecoveryResponse,
+  routeRecoveryResponse,
+  type VibeRouteRecoveryAction,
+  type VibeRouteRecoveryResult,
+} from "./vibeRouteRecovery";
 
 const SAVE_CHECKPOINT = "Save this version";
 /** Sentinels a question's own buttons send back. Deliberately not words anyone
@@ -96,6 +104,7 @@ const HARNESS_VERSION = "vibe-mvp-1";
 const PROMPT_VERSION = "vibe-builder-1";
 const TOOL_POLICY_VERSION = "workspace-write-no-shell-1";
 const VIBE_ATTEMPT_CAP = 3;
+const BROWSER_EVIDENCE_TAIL_CHARS = 8_000;
 const ROUTE_VERSIONS = {
   harnessVersion: HARNESS_VERSION,
   promptVersion: PROMPT_VERSION,
@@ -132,6 +141,12 @@ export interface VibeBuilderSessionOptions {
   dataStores?: NonNullable<VibeConfig["dataStores"]>;
   externalServices?: NonNullable<VibeConfig["externalServices"]>;
   previewTabId(): string | null;
+  /** Perform a recovery offered by the no-route card. ProjectView owns the UI
+   * side effects (terminal tabs, profiles and Settings); the session owns the
+   * decision and outcome card so every pipeline state still exits visibly. */
+  recoverRoute?(
+    action: VibeRouteRecoveryAction,
+  ): Promise<VibeRouteRecoveryResult>;
 }
 
 export interface TurnBaseline {
@@ -149,6 +164,12 @@ export interface CheckRunResult {
 export interface BrowserInspection {
   observations: VerificationObservation[];
   screenshot?: string | null;
+  /** Full error messages, not the one-line observation summary. */
+  consoleErrors?: string[];
+  /** Capped console transcript from before and after verification's reload. */
+  consoleTail?: string;
+  failedRequests?: CapturedNetworkRequest[];
+  pageUrl?: string;
 }
 
 export interface VibeServerIncidentInput {
@@ -406,12 +427,18 @@ async function inspectNativeBrowser(
   if (!tabId) return unknownBrowser(at, visual, "no project preview is available");
   const before = await ipc.browserHere(tabId).catch(() => null);
   if (!before?.url) return unknownBrowser(at, visual, "the project preview has not loaded a route");
-  const turnNetwork = networkScoped
-    ? await ipc.browserRunOp(tabId, { op: "network", lines: 300 }).catch(() => null)
-    : null;
-  const beforeDocument = await ipc
-    .browserRunOp(tabId, { op: "eval", code: "performance.timeOrigin" })
-    .catch(() => null);
+  // Snapshot both volatile rings before reload. The page owns these buffers;
+  // navigation destroys them, which used to erase the exact error the person
+  // had just seen before verification could judge it.
+  const [turnNetwork, beforeConsole, beforeDocument] = await Promise.all([
+    networkScoped
+      ? ipc.browserRunOp(tabId, { op: "network", lines: 300 }).catch(() => null)
+      : null,
+    ipc.browserRunOp(tabId, { op: "console", lines: 300 }).catch(() => null),
+    ipc
+      .browserRunOp(tabId, { op: "eval", code: "performance.timeOrigin" })
+      .catch(() => null),
+  ]);
   const beforeOrigin = (beforeDocument?.data as { result?: number } | undefined)
     ?.result;
   const reloaded = await ipc.browserNavigate(tabId, null, "reload").then(
@@ -484,12 +511,33 @@ async function inspectNativeBrowser(
   ];
 
   const consoleAck = await ipc
-    .browserRunOp(tabId, { op: "console", lines: 100 })
+    .browserRunOp(tabId, { op: "console", lines: 300 })
     .catch(() => null);
-  const consoleData = consoleAck?.data as
-    | { messages?: { level?: string; text?: string }[] }
-    | undefined;
-  if (!consoleAck?.done || !consoleAck.ok || !Array.isArray(consoleData?.messages)) {
+  type ConsoleMessage = { level?: string; text?: string };
+  const readConsole = (ack: typeof consoleAck): ConsoleMessage[] | null => {
+    const data = ack?.data as { messages?: ConsoleMessage[] } | undefined;
+    return ack?.done && ack.ok && Array.isArray(data?.messages) ? data.messages : null;
+  };
+  const beforeMessages = readConsole(beforeConsole);
+  const afterMessages = readConsole(consoleAck);
+  const consoleMessages = [...(beforeMessages ?? []), ...(afterMessages ?? [])];
+  const consoleErrors = [...new Set(
+    consoleMessages
+      .filter((message) => message.level === "error")
+      .map((message) => message.text?.trim() || "Unknown browser error"),
+  )];
+  const consoleTail = consoleMessages
+    .map((message) => `[${message.level ?? "log"}] ${message.text ?? ""}`.trimEnd())
+    .join("\n")
+    .slice(-BROWSER_EVIDENCE_TAIL_CHARS);
+  if (consoleErrors.length > 0) {
+    observations.push({
+      kind: "console",
+      verdict: "fail",
+      note: `${consoleErrors.length} console error${consoleErrors.length === 1 ? "" : "s"} (first: ${consoleErrors[0]})`,
+      at,
+    });
+  } else if (!beforeMessages || !afterMessages) {
     observations.push({
       kind: "console",
       verdict: "unknown",
@@ -497,13 +545,10 @@ async function inspectNativeBrowser(
       at,
     });
   } else {
-    const errors = consoleData.messages.filter((message) => message.level === "error");
     observations.push({
       kind: "console",
-      verdict: errors.length ? "fail" : "pass",
-      note: errors.length
-        ? `${errors.length} console error${errors.length === 1 ? "" : "s"} (first: ${errors[0].text ?? "unknown"})`
-        : "no console errors",
+      verdict: "pass",
+      note: "no console errors",
       at,
     });
   }
@@ -533,6 +578,12 @@ async function inspectNativeBrowser(
         data!.total! <= data!.requests!.length,
     );
   const requests = captures.flatMap(({ data }) => data?.requests ?? []);
+  const failedRequests = requests.filter(
+    (request) =>
+      Boolean(request.error) ||
+      request.status === 0 ||
+      (typeof request.status === "number" && request.status >= 400),
+  );
   observations.push(
     networkComplete
       ? capturedNetworkObservation(requests, at)
@@ -565,7 +616,14 @@ async function inspectNativeBrowser(
       });
     }
   }
-  return { observations, screenshot };
+  return {
+    observations,
+    screenshot,
+    consoleErrors,
+    consoleTail,
+    failedRequests,
+    pageUrl: here.url,
+  };
 }
 
 const normalized = (path: string) => path.replaceAll("\\", "/").replace(/\/$/, "");
@@ -688,14 +746,19 @@ async function listNativeRoutes(): Promise<RouteCandidate[]> {
   const candidates = await Promise.all(
     families.map(async ([cli, family]) => {
       const def = AGENT_CLIS.find((c) => c.id === cli);
-      if (!def || installed[def.bin] !== true) return null;
+      if (!def) return null;
       const profileId = launchProfile(cli) ?? DEFAULT_PROFILE;
-      const snapshot = await inspectFleetRoute(def, profileId, installed);
+      // A missing binary's verdict is complete from the install probe alone.
+      // Do not add account, plan and hook IPC to the path whose whole job is
+      // to make the Install action appear quickly.
+      const state = installed[def.bin] === true
+        ? (await inspectFleetRoute(def, profileId, installed)).state
+        : fleetState({ agent: cli, profile: profileId, installed: false });
       return {
         cli,
         profileId,
         family,
-        state: snapshot.state,
+        state,
         choices: choicesFor(family),
       } satisfies RouteCandidate;
     }),
@@ -1128,13 +1191,32 @@ export class VibeBuilderSession implements BuilderSession {
       // Say which of the two reasons it was, because "no agent available" sends
       // someone to the wrong place half the time.
       const gated = candidates.filter((c) => !fleetGate(c.state).allowed);
-      throw new Error(
+      const message =
         gated.length === candidates.length && candidates.length > 0
           ? `No agent is ready to build right now: ${gated
               .map((c) => `${c.cli} (${fleetGate(c.state).why})`)
               .join(", ")}`
-          : "No agent with a usable model is available to build right now.",
+          : "No agent with a usable model is available to build right now.";
+      const detail = candidates.length > 0
+        ? candidates
+            .map((candidate) => {
+              const gate = fleetGate(candidate.state);
+              return `${candidate.cli}: ${gate.why ?? "no usable model is configured"}`;
+            })
+            .join("\n")
+        : "No supported coding agent is installed and ready yet.";
+      const actions = buildRouteRecoveryActions(candidates, AGENT_CLIS);
+      this.present(
+        { kind: "idle" },
+        {
+          id: `vibe-no-route-${this.deps.now()}`,
+          kind: "question",
+          prompt: "I need a coding agent before I can make this change.",
+          detail,
+          actions,
+        },
       );
+      throw new Error(message);
     }
     const cliVersion = await this.deps
       .cliVersion(chosen.cli)
@@ -1246,9 +1328,58 @@ export class VibeBuilderSession implements BuilderSession {
     return queued;
   }
 
+  private async recoverRoute(action: VibeRouteRecoveryAction): Promise<void> {
+    const recover = this.options.recoverRoute;
+    if (!recover) {
+      this.present(
+        { kind: "idle" },
+        {
+          id: `vibe-route-recovery-unavailable-${this.deps.now()}`,
+          kind: "question",
+          prompt: "I couldn't open that recovery action.",
+          detail: "Open Settings → Agents to install, sign in, or repair the coding agent.",
+        },
+      );
+      return;
+    }
+
+    this.present({ kind: "turn-progress" }, null);
+    let result: VibeRouteRecoveryResult;
+    try {
+      result = await recover(action);
+    } catch (error) {
+      result = {
+        ok: false,
+        prompt: "I couldn't finish that agent setup step.",
+        detail: String(error),
+      };
+    }
+    this.present(
+      { kind: "idle" },
+      {
+        id: `vibe-route-recovery-${this.deps.now()}`,
+        kind: result.ok ? "notice" : "question",
+        prompt: result.prompt,
+        detail: result.detail,
+        actions: result.ok
+          ? undefined
+          : [
+              {
+                label: "Agent settings & binary path",
+                response: routeRecoveryResponse({ kind: "agent-settings" }),
+              },
+            ],
+      },
+    );
+  }
+
   send(text: string, options?: BuilderSendOptions): Promise<void> {
     const message = text.trim();
     if (!message || this.stopped) return Promise.resolve();
+    const routeRecovery = parseRouteRecoveryResponse(message);
+    if (routeRecovery) {
+      return this.enqueue(() => this.recoverRoute(routeRecovery));
+    }
     if (message === SAVE_CHECKPOINT && this.pendingCheckpoint) {
       return this.enqueue(() => this.saveCheckpoint());
     }
@@ -1772,6 +1903,24 @@ export class VibeBuilderSession implements BuilderSession {
     };
   }
 
+  /** Resolve repair through one production-safe seam. Keeping the import lazy
+   *  avoids vibeRepairSession → vibeProjectSetup → this module closing a cycle
+   *  during initialization, while still letting tests inject a deterministic
+   *  repair agent. */
+  private repairDependency(): NonNullable<VibeBuilderSessionDeps["repair"]> {
+    if (this.deps.repair) return this.deps.repair;
+    return async (repairInput: VibeRepairTaskInput): Promise<VibeRepairTaskResult> => {
+      const [runtime, setup] = await Promise.all([
+        import("./vibeRepairSession"),
+        import("./vibeProjectSetup"),
+      ]);
+      return runtime.runVibeRepairTask(
+        repairInput,
+        setup.DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS,
+      );
+    };
+  }
+
   /** The troubleshooter. Where reportServerIncident files evidence, this
    *  spends it: a repair agent gets the log tail, the component, and every
    *  command the survey found, diagnoses, acts inside the component, and asks
@@ -1814,21 +1963,7 @@ export class VibeBuilderSession implements BuilderSession {
           ...(incident.context ? { context: incident.context } : {}),
         },
       };
-      // The default is imported at call time, not module load: a static
-      // import of vibeRepairSession → vibeProjectSetup → this module would
-      // close a cycle at init.
-      const repair =
-        this.deps.repair ??
-        (async (repairInput: VibeRepairTaskInput): Promise<VibeRepairTaskResult> => {
-          const [runtime, setup] = await Promise.all([
-            import("./vibeRepairSession"),
-            import("./vibeProjectSetup"),
-          ]);
-          return runtime.runVibeRepairTask(
-            repairInput,
-            setup.DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS,
-          );
-        });
+      const repair = this.repairDependency();
       let result: VibeRepairTaskResult;
       try {
         result = await repair({ problem });
@@ -2180,6 +2315,30 @@ export class VibeBuilderSession implements BuilderSession {
     await this.finishAttempt("completed");
   }
 
+  private async retainBrowserScreenshot(
+    browser: BrowserInspection,
+    runId: string,
+    attemptId: string,
+  ): Promise<void> {
+    if (!browser.screenshot) return;
+    const screenshot = await this.deps
+      .writeArtifact({
+        runId,
+        attemptId,
+        kind: "preview-screenshot-base64",
+        content: browser.screenshot,
+      })
+      .catch(() => null);
+    const observation = browser.observations.find(
+      (candidate) => candidate.kind === "screenshot",
+    );
+    if (observation && screenshot) observation.evidence = screenshot.id;
+    else if (observation) {
+      observation.verdict = "unknown";
+      observation.note = "the screenshot could not be retained as evidence";
+    }
+  }
+
   private async verifyTurn(turnEpoch: number): Promise<void> {
     const reservation = this.reservation;
     const baseline = this.baseline;
@@ -2221,24 +2380,8 @@ export class VibeBuilderSession implements BuilderSession {
       this.networkScoped,
     );
     if (turnEpoch !== this.turnEpoch) return;
-    if (browser.screenshot) {
-      const screenshot = await this.deps
-        .writeArtifact({
-          runId,
-          attemptId,
-          kind: "preview-screenshot-base64",
-          content: browser.screenshot,
-        })
-        .catch(() => null);
-      const observation = browser.observations.find(
-        (candidate) => candidate.kind === "screenshot",
-      );
-      if (observation && screenshot) observation.evidence = screenshot.id;
-      else if (observation) {
-        observation.verdict = "unknown";
-        observation.note = "the screenshot could not be retained as evidence";
-      }
-    }
+    await this.retainBrowserScreenshot(browser, runId, attemptId);
+    if (this.stopped || turnEpoch !== this.turnEpoch) return;
     const observations = [check.observation, ...browser.observations];
     if (this.stopped || turnEpoch !== this.turnEpoch) return;
     for (const observation of observations) {
@@ -2254,6 +2397,46 @@ export class VibeBuilderSession implements BuilderSession {
       });
     }
     let verdict = judgeVerification(contract, observations);
+    const browserFailed = browser.observations.some(
+      (observation) =>
+        (observation.kind === "console" || observation.kind === "network") &&
+        observation.verdict === "fail",
+    );
+    if (verdict.outcome === "failed" && browserFailed) {
+      const reinspected = await this.repairRuntimeBrowserFailure(
+        browser,
+        goal,
+        at,
+        turnEpoch,
+      );
+      if (this.stopped || turnEpoch !== this.turnEpoch) return;
+      if (reinspected) {
+        await this.retainBrowserScreenshot(reinspected, runId, attemptId);
+        if (this.stopped || turnEpoch !== this.turnEpoch) return;
+        for (const observation of reinspected.observations) {
+          const current = observations.findIndex(
+            (candidate) => candidate.kind === observation.kind,
+          );
+          if (current >= 0) observations[current] = observation;
+          else observations.push(observation);
+          await this.deps.appendEvent({
+            runId,
+            attemptId,
+            kind: "verification.observation",
+            code: observation.kind,
+            source: "canopy",
+            confidence: observation.verdict,
+            metadata: observation,
+            occurredAt: observation.at,
+          });
+        }
+        this.runtimeIncidentOpen = reinspected.observations.some(
+          (observation) => observation.verdict === "fail",
+        );
+        this.incidentOpen = this.serverIncidentOpen || this.runtimeIncidentOpen;
+        verdict = judgeVerification(contract, observations);
+      }
+    }
     // A failed check is not a result to report. It is a problem to solve.
     //
     // This is the hole the person kept falling into: Canopy ran `pnpm run
@@ -2423,6 +2606,112 @@ export class VibeBuilderSession implements BuilderSession {
     );
   }
 
+  /** Give a browser failure to the same repair agent used for setup and
+   *  server failures, then inspect the exact preview route once more. The
+   *  caller keeps both inspections in the ledger and independently re-judges
+   *  them; a repair agent's `fixed` field is never treated as proof. */
+  private async repairRuntimeBrowserFailure(
+    browser: BrowserInspection,
+    goal: string,
+    at: number,
+    turnEpoch: number,
+  ): Promise<BrowserInspection | null> {
+    if (this.stopped || turnEpoch !== this.turnEpoch) return null;
+    const failed = browser.observations.filter(
+      (observation) =>
+        (observation.kind === "console" || observation.kind === "network") &&
+        observation.verdict === "fail",
+    );
+    if (failed.length === 0) return null;
+
+    this.present(
+      { kind: "incident" },
+      {
+        id: `vibe-browser-repair-${this.deps.now()}`,
+        kind: "notice",
+        prompt: "Something in the preview broke.",
+        detail: "I'm checking the browser evidence to find out why.",
+      },
+    );
+    const component = this.options.projectComponents?.find(
+      (candidate) => candidate.id === this.options.componentId,
+    );
+    const problem: RepairProblem = {
+      code: "runtime-error",
+      statement: `The embedded preview for ${this.options.projectName} showed a runtime error.`,
+      projectId: this.options.projectId,
+      projectName: this.options.projectName,
+      component: {
+        id: this.options.componentId,
+        label: component?.label ?? this.options.projectName,
+        path: component?.path ?? this.options.componentPath,
+        ...(component?.role ? { role: component.role } : {}),
+      },
+      commands: [...(component?.commands ?? this.options.componentCommands ?? [])],
+      topology: this.repairTopology(),
+      evidence: {
+        ...(browser.pageUrl ? { pageUrl: browser.pageUrl } : {}),
+        ...(browser.consoleTail ? { consoleTail: browser.consoleTail } : {}),
+        ...(browser.failedRequests?.length
+          ? { failedRequests: browser.failedRequests }
+          : {}),
+        context: failed.map((observation) => observation.note).join(" "),
+      },
+    };
+    const result = await this.repairDependency()({ problem }).catch(() => null);
+    if (this.stopped || turnEpoch !== this.turnEpoch) return null;
+    if (!result?.ok || !result.verdict.fixed) {
+      this.runtimeIncidentOpen = true;
+      this.incidentOpen = true;
+      const detail = result?.ok
+        ? [result.verdict.diagnosis, result.verdict.blocker].filter(Boolean).join(" ")
+        : result?.message ?? "I couldn't finish diagnosing the preview error.";
+      this.present(
+        { kind: "incident" },
+        {
+          id: `vibe-browser-repair-blocked-${this.deps.now()}`,
+          kind: "question",
+          prompt: "I found a preview problem that still needs attention.",
+          detail,
+        },
+      );
+      return null;
+    }
+
+    this.present(
+      { kind: "verify-running" },
+      {
+        id: `vibe-browser-repair-fixed-${this.deps.now()}`,
+        kind: "notice",
+        prompt: "Fixed it — checking the preview again.",
+        detail: result.verdict.diagnosis,
+      },
+    );
+    const reinspectAt = Math.max(at + 1, this.deps.now());
+    const reinspected = await this.deps
+      .inspectBrowser(
+        this.options.previewTabId(),
+        visualTask(goal),
+        reinspectAt,
+        this.networkScoped,
+      )
+      .catch(() => null);
+    if (!reinspected && !this.stopped && turnEpoch === this.turnEpoch) {
+      this.runtimeIncidentOpen = true;
+      this.incidentOpen = true;
+      this.present(
+        { kind: "incident" },
+        {
+          id: `vibe-browser-reinspect-blocked-${this.deps.now()}`,
+          kind: "question",
+          prompt: "I made a fix, but couldn't check the preview again.",
+          detail: "The preview inspection stopped before it could confirm the result.",
+        },
+      );
+    }
+    return reinspected;
+  }
+
   /** Hand a failed check to a repair agent, and if it says it fixed something,
    *  run the check again so the claim is tested rather than believed.
    *
@@ -2439,7 +2728,7 @@ export class VibeBuilderSession implements BuilderSession {
     at: number,
     turnEpoch: number,
   ): Promise<CheckRunResult | null> {
-    if (this.stopped || !this.deps.repair) return null;
+    if (this.stopped) return null;
     this.present(
       { kind: "incident" },
       {
@@ -2472,9 +2761,8 @@ export class VibeBuilderSession implements BuilderSession {
           : undefined,
       },
     };
-    const result = await this.deps
-      .repair({ problem })
-      .catch(() => null);
+    const repair = this.repairDependency();
+    const result = await repair({ problem }).catch(() => null);
     if (this.stopped || turnEpoch !== this.turnEpoch) return null;
     if (!result?.ok || !result.verdict.fixed) {
       // Say what was learned even when it could not be fixed. "It failed" and

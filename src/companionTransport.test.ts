@@ -378,7 +378,7 @@ describe("the oneshot protocol (codex)", () => {
   });
 
   it("reads the MCP tool name from the field codex actually sends", () => {
-    // Verified against codex-cli 0.146.0. The event is:
+    // Verified against codex-cli 0.146.0 on 2026-08-02. The event is:
     //   {"type":"mcp_tool_call","server":"canopy","tool":"canopy_project",…}
     // We read `item.name`, which is never set on these, so the companion ran
     // tools on codex and showed an empty trail — a panel that answered from

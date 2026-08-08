@@ -27,8 +27,9 @@ export interface StructuredRunnerHost {
 export type StructuredDialect = "claude" | "codex";
 
 /** `codex exec --json` emits one of these per line. Fields are those observed
- *  against codex-cli 0.146.1; everything else on the line is ignored, which is
- *  what lets an unknown item type degrade to silence instead of a throw. */
+ *  against codex-cli 0.146.1 on 2026-08-07; everything else on the line is
+ *  ignored, which is what lets an unknown item type degrade to silence instead
+ *  of a throw. */
 interface CodexMessage {
   type?: string;
   thread_id?: string;
