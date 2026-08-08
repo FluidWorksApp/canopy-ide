@@ -3,8 +3,11 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { PreviewAnnotation, PreviewShot } from "./preview";
 import {
+  bindVibePreviewAttempt,
   getVibePreviewContext,
+  getVibePreviewAttemptTabId,
   publishVibePreviewContext,
+  releaseVibePreviewAttempt,
   removeVibePreviewContext,
   subscribeVibePreviewContext,
   vibePreviewBrief,
@@ -93,6 +96,21 @@ describe("vibe preview context", () => {
       annotations: [annotation(true)],
       shots: [shot(true)],
     }))).toBe("");
+  });
+
+  it("holds one immutable preview tab for the whole attempt", () => {
+    bindVibePreviewAttempt("project", "attempt-1", "preview-a");
+
+    // Presentation can move to another preview without retargeting work that
+    // is already running.
+    publishVibePreviewContext(context({ tabId: "preview-b" }));
+    expect(getVibePreviewAttemptTabId("project", "attempt-1")).toBe("preview-a");
+    expect(getVibePreviewAttemptTabId("other-project", "attempt-1")).toBeUndefined();
+
+    releaseVibePreviewAttempt("other-project", "attempt-1");
+    expect(getVibePreviewAttemptTabId("project", "attempt-1")).toBe("preview-a");
+    releaseVibePreviewAttempt("project", "attempt-1");
+    expect(getVibePreviewAttemptTabId("project", "attempt-1")).toBeUndefined();
   });
 
   it("keeps Build edge-to-edge while Engineer retains the detailed preview panel", () => {

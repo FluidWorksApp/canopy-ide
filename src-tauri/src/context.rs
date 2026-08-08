@@ -267,6 +267,14 @@ impl Caller {
             Caller::Root => None,
         }
     }
+
+    fn attempt_id(&self) -> Option<&str> {
+        match self {
+            Caller::Agent(agent) => agent.attempt_id.as_deref(),
+            Caller::Attempt(attempt) => Some(&attempt.attempt_id),
+            Caller::Root => None,
+        }
+    }
 }
 
 /// One agent's advisory claim over a set of paths, and everything that has
@@ -4175,9 +4183,9 @@ async fn browser(
     headers: HeaderMap,
     Json(op): Json<BrowserOp>,
 ) -> (StatusCode, String) {
-    if !authorized(&app, &headers) {
+    let Some(who) = caller(&app, &headers) else {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
-    }
+    };
     // Everything checkable without the page is checked here, so the agent gets
     // an immediate 4xx to correct against instead of a UI round-trip.
     match op.op.as_str() {
@@ -4268,6 +4276,7 @@ async fn browser(
             "op": op.op,
             "route": route,
             "ptyId": op.pty_id,
+            "attemptId": who.attempt_id(),
             "scope": op.scope,
             "url": op.url,
             "action": op.action,
@@ -5760,6 +5769,29 @@ mod tests {
             }
             .key()
         );
+    }
+
+    #[test]
+    fn browser_attempt_identity_comes_from_the_authenticated_caller() {
+        let terminal = Caller::Agent(AgentIdentity {
+            pty_id: 7,
+            instance: "run-a".into(),
+            cwd: "/w".into(),
+            run_id: Some("run-1".into()),
+            attempt_id: Some("attempt-terminal".into()),
+            spawn_depth: 0,
+            parent_pty_id: None,
+        });
+        let structured = Caller::Attempt(AttemptIdentity {
+            instance: "run-a".into(),
+            cwd: "/w".into(),
+            run_id: "run-2".into(),
+            attempt_id: "attempt-structured".into(),
+        });
+
+        assert_eq!(terminal.attempt_id(), Some("attempt-terminal"));
+        assert_eq!(structured.attempt_id(), Some("attempt-structured"));
+        assert_eq!(Caller::Root.attempt_id(), None);
     }
 
     #[test]

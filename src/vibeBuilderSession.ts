@@ -94,6 +94,10 @@ import {
   type VibeRouteRecoveryAction,
   type VibeRouteRecoveryResult,
 } from "./vibeRouteRecovery";
+import {
+  bindVibePreviewAttempt,
+  releaseVibePreviewAttempt,
+} from "./vibePreviewContext";
 
 const SAVE_CHECKPOINT = "Save this version";
 /** Sentinels a question's own buttons send back. Deliberately not words anyone
@@ -1063,6 +1067,9 @@ export class VibeBuilderSession implements BuilderSession {
   } | null = null;
   private persistQueue: Promise<void> = Promise.resolve();
   private networkScoped = false;
+  /** The preview copied at the current durable attempt boundary. The mutable
+   * ProjectView callback is never consulted again during that attempt. */
+  private attemptPreviewTabId: string | null = null;
   private serverIncidentKeys = new Set<string>();
   private unsettledServerAttempts = new Map<string, TaskAttemptSettlement>();
   private activeRoute: ResolvedRoute | null = null;
@@ -1342,6 +1349,7 @@ export class VibeBuilderSession implements BuilderSession {
       });
       this.reservation = reservation;
       this.settled = false;
+      this.bindAttemptPreview(reservation.attempt.attemptId);
 
       const launch = this.launchSpec(
         reservation.envelope.runId,
@@ -2219,7 +2227,7 @@ export class VibeBuilderSession implements BuilderSession {
         throw error;
       }
       this.networkScoped = await this.deps.beginBrowserTurn(
-        this.options.previewTabId(),
+        this.attemptPreviewTabId,
       );
       const completed = new Promise<void>((resolve) => {
         this.finishTurn = resolve;
@@ -2446,7 +2454,7 @@ export class VibeBuilderSession implements BuilderSession {
       if (artifact) check.observation.evidence = artifact.id;
     }
     const browser = await this.deps.inspectBrowser(
-      this.options.previewTabId(),
+      this.attemptPreviewTabId,
       visualTask(goal),
       at,
       this.networkScoped,
@@ -2730,7 +2738,10 @@ export class VibeBuilderSession implements BuilderSession {
         context: failed.map((observation) => observation.note).join(" "),
       },
     };
-    const result = await this.repairDependency()({ problem }).catch(() => null);
+    const result = await this.repairDependency()({
+      problem,
+      previewTabId: this.attemptPreviewTabId,
+    }).catch(() => null);
     if (this.stopped || turnEpoch !== this.turnEpoch) return null;
     if (!result?.ok || !result.verdict.fixed) {
       this.runtimeIncidentOpen = true;
@@ -2762,7 +2773,7 @@ export class VibeBuilderSession implements BuilderSession {
     const reinspectAt = Math.max(at + 1, this.deps.now());
     const reinspected = await this.deps
       .inspectBrowser(
-        this.options.previewTabId(),
+        this.attemptPreviewTabId,
         visualTask(goal),
         reinspectAt,
         this.networkScoped,
@@ -3048,6 +3059,7 @@ export class VibeBuilderSession implements BuilderSession {
       this.reservation = { envelope: failed.envelope, attempt };
       this.settled = false;
       this.attemptsUsed += 1;
+      this.bindAttemptPreview(attempt.attemptId);
       await this.deps.startAttempt(attempt.attemptId);
       const transport = await this.deps.runner.start(
         attempt.attemptId,
@@ -3179,9 +3191,10 @@ export class VibeBuilderSession implements BuilderSession {
     failureCode?: string,
   ): Promise<void> {
     if (this.settled || !this.reservation) return;
+    const attemptId = this.reservation.attempt.attemptId;
     const settled = await this.deps
       .settleAttempt({
-        attemptId: this.reservation.attempt.attemptId,
+        attemptId,
         state,
         failureClass,
         failureCode,
@@ -3189,6 +3202,20 @@ export class VibeBuilderSession implements BuilderSession {
       .then(() => true)
       .catch(() => false);
     if (settled) this.settled = true;
+    this.releaseAttemptPreview(attemptId);
+  }
+
+  private bindAttemptPreview(attemptId: string): void {
+    const tabId = this.options.previewTabId();
+    this.attemptPreviewTabId = tabId;
+    bindVibePreviewAttempt(this.options.projectId, attemptId, tabId);
+  }
+
+  private releaseAttemptPreview(attemptId: string): void {
+    releaseVibePreviewAttempt(this.options.projectId, attemptId);
+    if (this.reservation?.attempt.attemptId === attemptId) {
+      this.attemptPreviewTabId = null;
+    }
   }
 
   async cancelCurrentTurn(): Promise<void> {

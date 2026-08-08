@@ -462,6 +462,7 @@ import {
   terminalGovernorByPty,
 } from "../../terminalMemoryPressure";
 import { TerminalMemoryFlyout } from "../TerminalMemoryFlyout";
+import { getVibePreviewAttemptTabId } from "../../vibePreviewContext";
 
 /** Work items join PRs through the provenance cache — synchronous on purpose,
  *  like every read the gesture path makes. A PR tab loads its edges on open,
@@ -5382,6 +5383,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const previews = tabsRef.current.filter(
         (t): t is PreviewSubTab => t.type === "preview",
       );
+      const attemptTabId = op.attemptId
+        ? getVibePreviewAttemptTabId(project.id, op.attemptId)
+        : undefined;
       // Each session gets a page of its own, and stays on the one it is on —
       // see pickBrowserTab for why both halves matter.
       const tab = pickBrowserTab(
@@ -5392,6 +5396,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           navigating: op.op === "navigate" && !!op.url,
           currentTabId:
             op.ptyId == null ? null : sessionPreview.current.get(op.ptyId) ?? null,
+          attemptTabId,
         },
         activeTabIdRef.current,
       );
@@ -5404,7 +5409,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }
         if (op.ptyId != null) showBrowserPip(tab.id, op.ptyId);
         dispatchBrowserOp(tab.id, op);
-      } else if (op.op === "navigate" && op.url) {
+      } else if (attemptTabId === undefined && op.op === "navigate" && op.url) {
         const id = openPreview(op.url, op.ptyId, false);
         if (op.ptyId != null) showBrowserPip(id, op.ptyId);
         dispatchBrowserOp(id, op);
@@ -5412,7 +5417,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         void ipc.browserResult(
           op.id,
           false,
-          "No preview page is open in this project. Call canopy_browser_navigate with a url first — canopy_project's runServers lists the addresses.",
+          attemptTabId !== undefined
+            ? "This Build attempt's preview is no longer open. Start a new Build turn to bind a new preview."
+            : "No preview page is open in this project. Call canopy_browser_navigate with a url first — canopy_project's runServers lists the addresses.",
         );
       }
     };

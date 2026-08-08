@@ -4,11 +4,13 @@ import type { VibeProjectSetupTaskDeps } from "./vibeProjectSetup";
 import type { StructuredRunnerLaunch } from "./structuredRunners";
 import type { TaskReserveInput } from "./taskEnvelope";
 import type { RouteCandidate } from "./vibeFailover";
+import { getVibePreviewAttemptTabId } from "./vibePreviewContext";
 
 describe("environment provisioning repair launch", () => {
   it("records and launches with network authority instead of asking a non-technical person to provision", async () => {
     let reserved: TaskReserveInput | null = null;
     let launch: StructuredRunnerLaunch | null = null;
+    let previewDuringRepair: string | null | undefined;
     const route: RouteCandidate = {
       cli: "claude",
       profileId: "default",
@@ -48,6 +50,10 @@ describe("environment provisioning repair launch", () => {
       reserveAttempt: vi.fn(async () => { throw new Error("not used"); }),
       runner: {
         start: async (_attemptId, _cli, policy, host) => {
+          previewDuringRepair = getVibePreviewAttemptTabId(
+            "project-1",
+            "repair-attempt",
+          );
           launch = policy;
           return {
             send: async () => queueMicrotask(() => {
@@ -69,6 +75,7 @@ describe("environment provisioning repair launch", () => {
 
     await expect(runVibeRepairTask({
       timeoutMs: 2_000,
+      previewTabId: "preview-original",
       problem: {
         code: "environment-missing",
         statement: "A tool this project needs is not installed yet.",
@@ -89,5 +96,7 @@ describe("environment provisioning repair launch", () => {
     expect(launch).toMatchObject({
       policy: { authority: "workspace-write", network: true },
     });
+    expect(previewDuringRepair).toBe("preview-original");
+    expect(getVibePreviewAttemptTabId("project-1", "repair-attempt")).toBeUndefined();
   });
 });
