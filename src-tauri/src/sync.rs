@@ -22,7 +22,8 @@
 
 use crate::fsx::WorkspaceManager;
 use crate::git::{default_base, git, head_branch, repo_path, run, run_net};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tauri::State;
 
@@ -96,6 +97,35 @@ pub struct SyncOutcome {
     /// git's own first line — "Fast-forward", "Merge made by the 'ort'
     /// strategy", or the reason it stopped.
     pub message: String,
+}
+
+/// A PR head carried by the batched watcher. OIDs, rather than branch names,
+/// make the frontend cache self-invalidating when somebody pushes again.
+#[derive(Deserialize, Clone, Debug)]
+pub struct PrMergeCandidate {
+    pub number: u32,
+    pub base: String,
+    pub base_sha: String,
+    pub head_sha: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct PrMergePairProbe {
+    pub first: u32,
+    pub second: u32,
+    /// None means one of the commits was unavailable or this git cannot probe.
+    pub clean: Option<bool>,
+    pub conflicts: Vec<String>,
+    pub first_ancestor_second: bool,
+    pub second_ancestor_first: bool,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct PrMergePlanProbe {
+    pub repo: String,
+    pub pairs: Vec<PrMergePairProbe>,
+    pub unavailable: Vec<u32>,
+    pub fetch_error: Option<String>,
 }
 
 /// The real git directory, following the `.git` *file* a worktree has instead
@@ -196,6 +226,117 @@ fn dry_run_merge(top: &Path, base: &str) -> DryRun {
             DryRun::Conflicts(files)
         }
         _ => DryRun::Unsupported,
+    }
+}
+
+fn valid_oid(oid: &str) -> bool {
+    (oid.len() == 40 || oid.len() == 64) && oid.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn has_commit(top: &Path, oid: &str) -> bool {
+    valid_oid(oid) && run(git(top).args(["cat-file", "-e", &format!("{oid}^{{commit}}")])).is_ok()
+}
+
+fn is_ancestor(top: &Path, older: &str, newer: &str) -> bool {
+    run(git(top).args(["merge-base", "--is-ancestor", older, newer])).is_ok()
+}
+
+/// Merge two immutable PR heads in the object database. Like dry_run_merge,
+/// this never moves HEAD, a ref, the index or a worktree.
+fn dry_run_pair(top: &Path, first: &str, second: &str) -> (Option<bool>, Vec<String>) {
+    let out = crate::process_capture::output(
+        git(top).args([
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            "-z",
+            first,
+            second,
+        ]),
+        crate::process_capture::DEFAULT_STREAM_MAX,
+    );
+    let Ok(out) = out else {
+        return (None, Vec::new());
+    };
+    match out.status.code() {
+        Some(0) => (Some(true), Vec::new()),
+        Some(1) => {
+            let raw = String::from_utf8_lossy(&out.stdout);
+            let files = nul_fields(&raw)
+                .skip(1)
+                .take(CONFLICT_LIMIT)
+                .map(str::to_string)
+                .collect();
+            (Some(false), files)
+        }
+        _ => (None, Vec::new()),
+    }
+}
+
+/// Pairwise compatibility for one bounded dashboard group. A refresh may add
+/// missing objects, but deliberately writes no ref (`--no-write-fetch-head`)
+/// and never touches a checkout. The caller groups by repo/base/category, so
+/// this stays at n·(n-1)/2 only among PRs that could actually land together.
+fn pr_merge_probe(top: &Path, candidates: &[PrMergeCandidate], fetch: bool) -> PrMergePlanProbe {
+    let mut fetch_error = None;
+    if fetch
+        && candidates
+            .iter()
+            .any(|c| !has_commit(top, &c.head_sha) || !has_commit(top, &c.base_sha))
+    {
+        let mut refs = BTreeSet::new();
+        for c in candidates {
+            refs.insert(format!("refs/pull/{}/head", c.number));
+            if !c.base.trim().is_empty() {
+                refs.insert(format!("refs/heads/{}", c.base));
+            }
+        }
+        let mut cmd = git(top);
+        cmd.args([
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "origin",
+        ]);
+        cmd.args(refs);
+        if let Err(error) = run_net(&mut cmd) {
+            fetch_error = Some(error);
+        }
+    }
+
+    let unavailable: Vec<u32> = candidates
+        .iter()
+        .filter(|c| !has_commit(top, &c.head_sha) || !has_commit(top, &c.base_sha))
+        .map(|c| c.number)
+        .collect();
+    let mut pairs = Vec::new();
+    for (i, first) in candidates.iter().enumerate() {
+        if unavailable.contains(&first.number) {
+            continue;
+        }
+        for second in candidates.iter().skip(i + 1) {
+            if unavailable.contains(&second.number) {
+                continue;
+            }
+            let (clean, conflicts) = dry_run_pair(top, &first.head_sha, &second.head_sha);
+            pairs.push(PrMergePairProbe {
+                first: first.number,
+                second: second.number,
+                clean,
+                conflicts,
+                first_ancestor_second: is_ancestor(top, &first.head_sha, &second.head_sha),
+                second_ancestor_first: is_ancestor(top, &second.head_sha, &first.head_sha),
+            });
+        }
+    }
+
+    PrMergePlanProbe {
+        repo: top.to_string_lossy().to_string(),
+        pairs,
+        unavailable,
+        fetch_error,
     }
 }
 
@@ -465,6 +606,17 @@ pub async fn git_sync_abort(
     abort(&top)
 }
 
+#[tauri::command]
+pub async fn git_pr_merge_probe(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    candidates: Vec<PrMergeCandidate>,
+    fetch: bool,
+) -> Result<PrMergePlanProbe, String> {
+    let top = repo_path(&state, &repo)?;
+    Ok(pr_merge_probe(&top, &candidates, fetch))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,5 +883,84 @@ mod tests {
     fn missing_base_is_an_error_not_a_silent_zero() {
         let f = Fixture::new();
         assert!(probe(&f.dir, false, Some("origin/nope")).is_err());
+    }
+
+    #[test]
+    fn pr_pairs_report_clean_and_stacked_heads_without_moving_head() {
+        let f = Fixture::new();
+        let base = f.git(&["rev-parse", "HEAD"]);
+
+        f.git(&["checkout", "-q", "-b", "one"]);
+        f.write("one.txt", "one\n");
+        f.commit("one");
+        let one = f.git(&["rev-parse", "HEAD"]);
+
+        f.git(&["checkout", "-q", "-b", "stacked"]);
+        f.write("stacked.txt", "stacked\n");
+        f.commit("stacked");
+        let stacked = f.git(&["rev-parse", "HEAD"]);
+
+        f.git(&["checkout", "-q", "main"]);
+        f.git(&["checkout", "-q", "-b", "two"]);
+        f.write("two.txt", "two\n");
+        f.commit("two");
+        let two = f.git(&["rev-parse", "HEAD"]);
+        let before = f.git(&["rev-parse", "HEAD"]);
+
+        let candidate = |number, _branch: &str, head_sha: String| PrMergeCandidate {
+            number,
+            base: "main".into(),
+            base_sha: base.clone(),
+            head_sha,
+        };
+        let out = pr_merge_probe(
+            &f.dir,
+            &[
+                candidate(1, "one", one),
+                candidate(2, "two", two),
+                candidate(3, "stacked", stacked),
+            ],
+            false,
+        );
+        assert!(out.fetch_error.is_none());
+        assert!(out.unavailable.is_empty());
+        assert_eq!(out.pairs.len(), 3);
+        assert_eq!(out.pairs[0].clean, Some(true));
+        let ancestry = out
+            .pairs
+            .iter()
+            .find(|p| (p.first, p.second) == (1, 3))
+            .unwrap();
+        assert!(ancestry.first_ancestor_second);
+        assert_eq!(f.git(&["rev-parse", "HEAD"]), before);
+        assert!(f.git(&["status", "--porcelain"]).is_empty());
+    }
+
+    #[test]
+    fn pr_pair_probe_names_conflicts_without_checking_out_either_head() {
+        let f = Fixture::new();
+        let base = f.git(&["rev-parse", "HEAD"]);
+        f.git(&["checkout", "-q", "-b", "left"]);
+        f.write("f.txt", "a\nLEFT\nc\n");
+        f.commit("left");
+        let left = f.git(&["rev-parse", "HEAD"]);
+        f.git(&["checkout", "-q", "main"]);
+        f.git(&["checkout", "-q", "-b", "right"]);
+        f.write("f.txt", "a\nRIGHT\nc\n");
+        f.commit("right");
+        let right = f.git(&["rev-parse", "HEAD"]);
+        let before = f.git(&["rev-parse", "HEAD"]);
+        let make = |number, head_sha| PrMergeCandidate {
+            number,
+            base: "main".into(),
+            base_sha: base.clone(),
+            head_sha,
+        };
+
+        let out = pr_merge_probe(&f.dir, &[make(1, left), make(2, right)], false);
+        assert_eq!(out.pairs[0].clean, Some(false));
+        assert_eq!(out.pairs[0].conflicts, vec!["f.txt"]);
+        assert_eq!(f.git(&["rev-parse", "HEAD"]), before);
+        assert!(f.git(&["status", "--porcelain"]).is_empty());
     }
 }
