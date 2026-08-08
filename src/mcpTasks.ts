@@ -1,4 +1,9 @@
 import type { TaskEnvelopeDetail } from "./taskEnvelope";
+import type { BuilderManagedProcessState } from "./vibeBuilderCards";
+import type {
+  BuilderCard,
+  BuilderProgressStage,
+} from "./vibeBuilderSessionTypes";
 
 export const MCP_TASKS_EXTENSION = "io.modelcontextprotocol/tasks";
 
@@ -39,32 +44,8 @@ export interface McpTask {
   error?: { code: number; message: string; data?: unknown };
 }
 
-export interface McpTaskSupervisorEvidence {
-  state:
-    | "spawning"
-    | "working"
-    | "waiting-on-input"
-    | "ready"
-    | "exited-ok"
-    | "failed"
-    | "hung";
-  exit: "observe" | "auto-answer" | "complete" | "repair";
-  deadlineAt: number | null;
-  prompt: { kind: "safe-confirmation" | "interactive" } | null;
-}
-
-export interface McpTaskDecisionCard {
-  id: string;
-  kind: "decision";
-  reason: "credentials" | "account-link" | "destructive" | "payment" | "choice";
-  title: string;
-  detail?: string;
-  actions?: readonly {
-    label: string;
-    response: string;
-    tone?: "primary" | "neutral" | "danger";
-  }[];
-}
+export type McpTaskSupervisorEvidence = BuilderManagedProcessState;
+export type McpTaskDecisionCard = Extract<BuilderCard, { kind: "decision" }>;
 
 /** The #516 BuilderCard-compatible MRTR boundary. Only human-facing copy and
  * opaque action values survive; command, diff, logs and environment have no
@@ -104,37 +85,9 @@ export function mcpInputRequestForCard(
   };
 }
 
-export type McpTaskCard =
-  | {
-      id: string;
-      kind: "progress";
-      stage: "discovering" | "installing" | "compiling" | "starting" | "repairing";
-      title: string;
-      detail?: string;
-      deadlineAt?: number | null;
-    }
-  | {
-      id: string;
-      kind: "decision";
-      reason: "credentials" | "account-link" | "destructive" | "payment" | "choice";
-      title: string;
-      detail?: string;
-      actions?: readonly { label: string; response: string; tone?: "primary" | "neutral" | "danger" }[];
-    }
-  | {
-      id: string;
-      kind: "outcome";
-      tone: "success" | "warning" | "neutral";
-      title: string;
-      detail?: string;
-    };
+export type McpTaskCard = BuilderCard;
 
-type McpTaskProgressStage =
-  | "discovering"
-  | "installing"
-  | "compiling"
-  | "starting"
-  | "repairing";
+type McpTaskProgressStage = BuilderProgressStage;
 
 interface TaskPresentationMetadata {
   stage?: McpTaskProgressStage;

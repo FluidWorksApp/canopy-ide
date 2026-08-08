@@ -866,6 +866,8 @@ pub fn run() {
             context::context_claim_history_for_path,
             context::context_release_claim,
             context::context_messages,
+            context::context_mesh_severed,
+            context::context_mesh_sever,
             context::context_agent_spawn_ready,
             context::browser_result,
             snapshot::webview_snapshot,

@@ -2232,6 +2232,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
   wsDigestsRef.current = wsDigests;
   const thisInstanceRef = useRef(thisInstance);
   thisInstanceRef.current = thisInstance;
+  const routeToRaiserRef = useRef<
+    (
+      pr: string,
+      text: string,
+    ) => Promise<{ delivered: boolean; note: string; [key: string]: unknown }>
+  >(async () => ({ delivered: false, note: "PR routing is not ready." }));
   useEffect(() => {
     void ipc
       .instanceId()
@@ -5016,11 +5022,42 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // that was. Rust hands it over here because only this side holds the
       // pty→session binding and can reopen an ended conversation or open a tab
       // for a fresh one. Same route as the PR tab's "Send a change".
+      if (a.kind === "message_agent_start" && a.pr && a.text) {
+        const opId = a.opId;
+        const number = Number(parsePrUrl(a.pr)?.number ?? a.pr.replace(/^#/, ""));
+        const row = prWatchSnapshot().rows.find(
+          (r) =>
+            r.number === number &&
+            rootsRef.current.some(
+              (root) => root === r.repo || root.startsWith(`${r.repo}/`),
+            ),
+        );
+        if (!row) {
+          if (opId != null)
+            void ipc.browserResult(opId, false, `No open PR #${number} in this project.`);
+          return;
+        }
+        void startMicroTask(
+          addressPrCommentsTask,
+          { repo: row.repo, pr: toPrInfo(row) },
+          a.text,
+        ).then((started) => {
+          if (opId != null)
+            void ipc.browserResult(opId, started, {
+              started,
+              note: started
+                ? `Started a fresh agent on #${number}.`
+                : `Couldn't start an agent for #${number}.`,
+            });
+        });
+        return;
+      }
       if (a.kind === "message_agent" && a.pr && a.text) {
         const opId = a.opId;
-        void routeToRaiser(a.pr, a.text).then(
-          ({ delivered, note }) => {
-            if (opId != null) void ipc.browserResult(opId, delivered, note);
+        void routeToRaiserRef.current(a.pr, a.text).then(
+          (result) => {
+            if (opId != null)
+              void ipc.browserResult(opId, result.delivered, result);
           },
           (err) => {
             if (opId != null) void ipc.browserResult(opId, false, String(err));
@@ -5122,6 +5159,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     patchTabRaw,
     showBrowserPip,
     startSpawnedAgent,
+    startMicroTask,
   ]);
 
   // The companion asking for a coding session on a brief (canopy_start_session).
@@ -7048,6 +7086,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       agentId?: string;
       cwd: string;
       text: string;
+      /** Resolve/reopen the terminal but leave the write to the Rust mesh
+       *  bridge. Used by canopy_message_agent({pr}) so there is one audited
+       *  delivery door rather than a frontend bypass. */
+      deliver?: boolean;
     }): Promise<{ delivered: boolean; note: string; ptyId?: number }> => {
       const { sessionId, cwd, text } = opts;
       const agentId = opts.agentId ?? "agent";
@@ -7063,18 +7105,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
         )?.[0];
       // 1) The workspace's own terminal, if it's still live.
       if (alive(opts.ptyId)) {
-        typeInto(opts.ptyId);
+        if (opts.deliver !== false) typeInto(opts.ptyId);
         return {
           delivered: true,
-          note: `Sent to ${agentId}.`,
+          note: opts.deliver === false ? `Found ${agentId}.` : `Sent to ${agentId}.`,
           ptyId: opts.ptyId,
         };
       }
       // 2) Any live terminal running this session (it may have moved tabs).
       const moved = sessionId ? livePtyForSession() : undefined;
       if (moved != null) {
-        typeInto(moved);
-        return { delivered: true, note: `Sent to ${agentId}.`, ptyId: moved };
+        if (opts.deliver !== false) typeInto(moved);
+        return {
+          delivered: true,
+          note: opts.deliver === false ? `Found ${agentId}.` : `Sent to ${agentId}.`,
+          ptyId: moved,
+        };
       }
       // 3) Ended: resume, wait for the session to report a PTY, then deliver.
       if (!sessionId) {
@@ -7127,10 +7173,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (back != null) {
           // A moment past first paint before pasting into the resumed TUI.
           await new Promise((r) => setTimeout(r, 800));
-          typeInto(back);
+          if (opts.deliver !== false) typeInto(back);
           return {
             delivered: true,
-            note: `Resumed ${agentId} and sent the comments.`,
+            note:
+              opts.deliver === false
+                ? `Resumed ${agentId}.`
+                : `Resumed ${agentId} and sent the comments.`,
             ptyId: back,
           };
         }
@@ -7158,7 +7207,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       pr: ipc.PrInfo,
       to: PrAgent,
       text: string,
-    ): Promise<{ delivered: boolean; note: string }> => {
+      deliver = true,
+    ): Promise<{
+      delivered: boolean;
+      note: string;
+      ptyId?: number;
+      line?: string;
+      started?: boolean;
+    }> => {
       const brief =
         `About pull request #${pr.number} "${pr.title}" (${pr.url}), which you opened from ` +
         `${pr.branch}: ${text}\n\nWhen the change is made, push so the PR updates.`;
@@ -7172,17 +7228,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ? `No conversation left to reopen — started a fresh agent on #${pr.number}.`
           : `Couldn't start an agent for #${pr.number}.`;
         onNotice(note);
-        return { delivered: started, note };
+        return { delivered: started, note, started };
       }
-      const { delivered, note } = await messageAgent({
+      const { delivered, note, ptyId } = await messageAgent({
         ptyId: to.ptyId,
         sessionId: to.sessionId,
         agentId: to.agent ?? undefined,
         cwd: to.cwd ?? "",
         text: brief,
+        deliver,
       });
       onNotice(note);
-      return { delivered, note };
+      return { delivered, note, ptyId, line: brief };
     },
     [messageAgent, onNotice, startMicroTask],
   );
@@ -7190,7 +7247,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** The same, entered by PR number or url rather than from the PR's own tab —
    *  which is how the companion asks (`canopy_message_agent({pr})`). */
   const routeToRaiser = useCallback(
-    async (pr: string, text: string): Promise<{ delivered: boolean; note: string }> => {
+    async (pr: string, text: string) => {
       const number = Number(parsePrUrl(pr)?.number ?? pr.replace(/^#/, ""));
       if (!Number.isSafeInteger(number) || number <= 0) {
         const note = `"${pr}" isn't a pull request I can look up.`;
@@ -7220,10 +7277,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
         live: liveSessionsRef.current,
         dirExists: (dir) => alive.has(dir),
       });
-      return sendToRaiser(row.repo, toPrInfo(row), to, text);
+      if (to.kind === "cold" || !to.sessionId) {
+        // The bridge must authorize the project's one mesh switch before a
+        // fresh task is created. Return resolution only; Rust sends the
+        // separate message_agent_start action after that check.
+        return {
+          delivered: true,
+          cold: true,
+          cwd: row.repo,
+          note: `No conversation left to reopen for #${number}.`,
+        };
+      }
+      // Resolve/reopen only. Rust receives the pty id through browserResult
+      // and performs the role check, mesh record and two-write delivery.
+      return sendToRaiser(row.repo, toPrInfo(row), to, text, false);
     },
     [onNotice, sendToRaiser],
   );
+  routeToRaiserRef.current = routeToRaiser;
   const runningAgents = useMemo(
     () =>
       projectStats.flatMap((s) => {
@@ -10974,6 +11045,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             active={active}
             projectName={project.name}
             roots={roots}
+            allProjects={allProjects}
             stats={projectStats}
             hookPath={hookPath}
             pending={pending}
