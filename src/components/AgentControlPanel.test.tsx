@@ -123,7 +123,7 @@ const allProjects = [
 
 function renderPanel(mode: "graph" | "table") {
   seams.stats = [
-    session({ id: 7 }),
+    session({ id: 7, name: "Coral Hawk" }),
     session({ id: 8, cwd: "/w/canopy/.claude/worktrees/agent-x" }),
     session({
       id: 9,
@@ -197,7 +197,7 @@ describe("the control panel table", () => {
   it("is the same dataset flat: identity leading, initial prompt and current work", async () => {
     seed();
     renderPanel("table");
-    const lead = await screen.findByText("claude #7");
+    const lead = await screen.findByText("Coral Hawk");
     expect(lead).toBeTruthy();
     // Identity detail: branch riding next to the name.
     expect(screen.getByText(/⎇ feat\/panel/)).toBeTruthy();

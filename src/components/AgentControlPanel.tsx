@@ -390,6 +390,9 @@ export function AgentControlPanel({
  *  the composite without touching either view. */
 function labelFor(row: SessionRow, tabNames?: Map<number, TabName>) {
   return nodeLabel({
+    // The naming substrate is now live on SessionStats. Keep the PTY id as the
+    // credential everywhere else; this is display identity only.
+    name: row.session.name,
     agentLabel: row.agent?.label,
     ptyId: row.session.id,
     tabTitle: agentDisplayName({
