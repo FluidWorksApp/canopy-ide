@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { editor } from "@codingame/monaco-vscode-editor-api";
+import type { editor } from "monaco-editor";
 import {
   acknowledgeEditorModelRestore,
   cancelInactiveEditorModel,

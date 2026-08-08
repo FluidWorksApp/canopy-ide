@@ -1,4 +1,4 @@
-import type { editor } from "@codingame/monaco-vscode-editor-api";
+import type { editor } from "monaco-editor";
 
 const INACTIVE_DELAY_MS = 60_000;
 const MAX_PENDING_MODELS = 128;
