@@ -61,9 +61,19 @@ const stateKey = (s: FleetState) => `${s.agent}:${s.profile}`;
 export function rankRoutes(
   candidates: RouteCandidate[],
   task: TaskClass,
+  preferredCli?: string,
 ): SelectedRoute[] {
-  const byKey = new Map(candidates.map((c) => [stateKey(c.state), c]));
-  const allowed = candidates.filter((c) => fleetGate(c.state).allowed);
+  // Fleet ranking is stable within a health tier. Seed it with the user's
+  // primary agent first so an equally healthy Claude/Codex/Gemini fleet does
+  // not silently turn object declaration order into a product preference.
+  const ordered = preferredCli
+    ? [...candidates].sort(
+        (left, right) =>
+          Number(right.cli === preferredCli) - Number(left.cli === preferredCli),
+      )
+    : candidates;
+  const byKey = new Map(ordered.map((c) => [stateKey(c.state), c]));
+  const allowed = ordered.filter((c) => fleetGate(c.state).allowed);
   return rankFleet(allowed.map((c) => c.state)).flatMap((state) => {
     const candidate = byKey.get(stateKey(state));
     if (!candidate) return [];

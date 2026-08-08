@@ -11,6 +11,7 @@
 // nothing ever read it. A repair task is the thing that reads it.
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 import { launchEnvSync } from "./profiles";
+import { getSettings } from "./settings";
 import * as ipc from "./ipc";
 import type { ProjectRunnerTransport } from "./projectRunner";
 import { streamsStructured, type StructuredRunnerLaunch } from "./structuredRunners";
@@ -79,7 +80,11 @@ export async function runVibeRepairTask(
   const candidates = (await deps.listRoutes().catch(() => [])).filter(
     (candidate) => streamsStructured(candidate.cli),
   );
-  const eligible = rankRoutes(candidates, REPAIR_TASK_CLASS);
+  const eligible = rankRoutes(
+    candidates,
+    REPAIR_TASK_CLASS,
+    getSettings().defaultAgent,
+  );
   const chosen = eligible[0];
   if (!chosen) {
     return {

@@ -51,6 +51,16 @@ describe("route selection", () => {
     expect(ranked[1].caveat).toBeTruthy();
   });
 
+  it("uses the user's preferred agent first when routes are equally healthy", () => {
+    const ranked = rankRoutes([claude(), codex()], "build", "codex");
+    expect(ranked.map((route) => route.cli)).toEqual(["codex", "claude"]);
+  });
+
+  it("uses a healthier route when the preferred agent is degraded", () => {
+    const ranked = rankRoutes([claude(), codex("degraded")], "build", "codex");
+    expect(ranked.map((route) => route.cli)).toEqual(["claude", "codex"]);
+  });
+
   it("flags a served tier below the one the class asked for", () => {
     const haikuOnly: RouteCandidate = {
       ...claude(),

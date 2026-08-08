@@ -126,6 +126,16 @@ describe("vibeRunReady", () => {
       { ptyId: 9, exited: false },
       { readiness: { kind: "process-alive" } },
       [],
+      new Set([9]),
     )).toBe(true);
+  });
+
+  it("does not accept a live worker before output supervision verifies it", () => {
+    expect(vibeRunReady(
+      { ptyId: 9, exited: false },
+      { readiness: { kind: "process-alive" } },
+      [],
+      new Set(),
+    )).toBe(false);
   });
 });

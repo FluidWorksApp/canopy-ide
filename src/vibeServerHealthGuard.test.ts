@@ -17,7 +17,10 @@ describe("vibe server health wiring", () => {
     // component-owned cwd without changing its identity.
     expect(autoStart).toContain("for (const { component, command, identity } of vibeRequiredRuns)");
     expect(autoStart).toContain("identity.dependsOn");
-    expect(autoStart).toContain("vibeRunReady(dependencyTab, dependencyCommand, projectStats)");
+    expect(autoStart).toContain("vibeRunReady(");
+    expect(autoStart).toContain("dependencyTab,");
+    expect(autoStart).toContain("dependencyCommand,");
+    expect(autoStart).toContain("projectStats,");
     expect(autoStart).toContain("command.cwd ?? component.path");
     expect(autoStart).toContain(
       "{ componentId: component.id, runCommandId: command.id }",
@@ -77,5 +80,24 @@ describe("vibe server health wiring", () => {
     expect(session).toContain("this.incidentOpen = this.serverIncidentOpen");
     expect(session).toContain('kind: "vibe-server-log-tail"');
     expect(session).toContain('kind: "watchdog-incident"');
+  });
+
+  it("routes managed run states through one classifier and startup repair exit", () => {
+    const view = read("src/components/ProjectView/index.tsx");
+    const supervisor = read("src/managedProcessSupervisor.ts");
+    expect(view).toContain("classifyManagedProcess({");
+    expect(view).toContain("reportServerStartupStall({");
+    expect(view).not.toContain("detectManagedProcessPrompt(");
+    for (const state of [
+      "spawning",
+      "working",
+      "waiting-on-input",
+      "ready",
+      "exited-ok",
+      "failed",
+      "hung",
+    ]) {
+      expect(supervisor).toContain(`| "${state}"`);
+    }
   });
 });

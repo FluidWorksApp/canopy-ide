@@ -4,6 +4,7 @@ import {
   materializeVibeSetup,
   plainSetupActivity,
   observeVibeSetupRepository,
+  setupAgentInventory,
   parseVibeSetupOutput,
   validateVibeSetupProposal,
   runVibeProjectSetupTask,
@@ -184,6 +185,30 @@ describe("project setup repository observation", () => {
     const before = await observeVibeSetupRepository(project());
     const after = await observeVibeSetupRepository(project());
     expect(after.fingerprint).not.toBe(before.fingerprint);
+  });
+
+  it("bounds the agent prompt inventory while retaining setup evidence", () => {
+    const paths = new Set<string>([
+      "/repo/apps/web",
+      "/repo/apps/web/package.json",
+      "/repo/apps/web/vercel.json",
+      "/repo/services/api",
+      "/repo/services/api/schema.prisma",
+      "/repo/services/api/migrations/0042_sessions.sql",
+      ...Array.from({ length: 1_500 }, (_, index) => `/repo/apps/web/src/generated/file-${index}.ts`),
+    ]);
+
+    const inventory = setupAgentInventory(paths, ["/repo/apps/web", "/repo/services/api"]);
+
+    expect(inventory).toHaveLength(800);
+    expect(inventory).toEqual(expect.arrayContaining([
+      "/repo/apps/web",
+      "/repo/apps/web/package.json",
+      "/repo/apps/web/vercel.json",
+      "/repo/services/api",
+      "/repo/services/api/schema.prisma",
+      "/repo/services/api/migrations/0042_sessions.sql",
+    ]));
   });
 });
 
@@ -495,6 +520,21 @@ describe("bounded setup agent task", () => {
     const reserve = vi.spyOn(deps, "reserve");
     await expect(runVibeProjectSetupTask(taskInput, deps)).resolves.toMatchObject({ ok: false, reason: "no-agent", attempts: 0 });
     expect(reserve).not.toHaveBeenCalled();
+  });
+
+  it("rechecks routes once when Build races agent discovery at startup", async () => {
+    const deps = taskDeps([[
+      { kind: "delta", text: JSON.stringify(proposal()) },
+      { kind: "turnEnd" },
+    ]]);
+    const probes = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(routes());
+    deps.listRoutes = probes;
+
+    await expect(runVibeProjectSetupTask(taskInput, deps)).resolves.toMatchObject({ ok: true });
+    expect(probes).toHaveBeenCalledTimes(2);
+    expect(deps.launches).toHaveLength(1);
   });
 
   it("treats invalid structured output as a task failure without model shopping", async () => {

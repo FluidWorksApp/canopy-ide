@@ -2,6 +2,7 @@ import type { Project, Component, ComponentRole, RunCommand } from "./projects";
 import { AGENT_CLIS } from "./projects";
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 import { launchEnvSync } from "./profiles";
+import { getSettings } from "./settings";
 import * as ipc from "./ipc";
 import { DEFAULT_VIBE_BUILDER_DEPS } from "./vibeBuilderSession";
 import type { BuilderSession } from "./vibeBuilderSessionTypes";
@@ -796,6 +797,37 @@ export async function observeVibeSetupRepository(project: Project): Promise<Vibe
   return { projectRoot, paths, componentRoots: roots, fingerprint: `fs-${hash(facts.join("\n"))}` };
 }
 
+const SETUP_AGENT_INVENTORY_CAP = 800;
+const SETUP_INVENTORY_SIGNAL = /(?:^|\/)(?:package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|Cargo\.toml|go\.mod|pyproject\.toml|requirements[^/]*\.txt|Gemfile|pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|Dockerfile|compose\.ya?ml|docker-compose\.ya?ml|Makefile|Procfile|Package\.swift|pubspec\.yaml|composer\.json|[^/]+\.csproj|schema\.prisma|drizzle\.config\.[^/]+|wrangler\.toml|vercel\.json|firebase\.json|README[^/]*|[^/]*(?:schema|migration)[^/]*)$/i;
+
+/** Give the survey a map, not a serialization of the whole repository.
+ * Validation still keeps the complete native snapshot. Only the prompt is
+ * bounded: manifests, database/deployment evidence, and shallow landmarks
+ * arrive first; the read-only agent can inspect deeper paths through tools. */
+export function setupAgentInventory(
+  paths: ReadonlySet<string>,
+  componentRoots: readonly string[],
+): string[] {
+  const roots = componentRoots.map(normalized);
+  const rootSet = new Set(roots);
+  const all = [...paths].map(normalized).sort();
+  const depthFromRoot = (path: string) => {
+    const root = roots
+      .filter((candidate) => inside(candidate, path))
+      .sort((a, b) => b.length - a.length)[0];
+    if (!root) return Number.MAX_SAFE_INTEGER;
+    return path.slice(root.length).split("/").filter(Boolean).length;
+  };
+  const priority = all.filter(
+    (path) => rootSet.has(path) || SETUP_INVENTORY_SIGNAL.test(path),
+  );
+  const prioritySet = new Set(priority);
+  const shallow = all
+    .filter((path) => !prioritySet.has(path))
+    .sort((a, b) => depthFromRoot(a) - depthFromRoot(b) || a.localeCompare(b));
+  return [...priority, ...shallow].slice(0, SETUP_AGENT_INVENTORY_CAP);
+}
+
 /** What this task needs from a model, as a class the routing table answers.
  *
  *  Discovery reads files and reports structure. It is not the thinking the
@@ -821,6 +853,9 @@ export interface VibeProjectSetupTaskDeps {
   startAttempt(attemptId: string): Promise<unknown>;
   settleAttempt(input: TaskAttemptSettlement): Promise<unknown>;
   reserveAttempt(input: TaskAttemptReserveInput): Promise<import("./taskEnvelope").TaskAttempt>;
+  /** Route discovery starts alongside the app. Production waits briefly before
+   * one empty-result retry; tests may omit this to keep that retry synchronous. */
+  sleep?(ms: number): Promise<void>;
 }
 
 export interface VibeProjectSetupTaskInput {
@@ -849,6 +884,9 @@ export interface VibeProjectSetupTaskInput {
    *  indistinguishable from being hung. */
   onActivity?: (event: import("./structuredEvents").StructuredRunnerEvent) => void;
   signal?: AbortSignal;
+  /** The user's primary agent. Alternatives remain available for classified
+   * route failure, but declaration order must never pick the vendor. */
+  preferredCli?: string;
 }
 
 export type VibeProjectSetupTaskResult =
@@ -934,15 +972,24 @@ export async function runVibeProjectSetupTask(
   // anyway spends the whole attempt budget on `has no verified streaming
   // runner`, thrown before a process exists, and reports it as the agent
   // failing to understand the project.
-  const candidates = (await deps.listRoutes().catch(() => [])).filter(
+  let candidates = (await deps.listRoutes().catch(() => [])).filter(
     (candidate) => streamsStructured(candidate.cli),
   );
+  // CLI discovery and profile hydration race the first Build render. One empty
+  // sample is not proof that no route exists: wait for the startup window and
+  // probe once more instead of caching a false no-agent result for five minutes.
+  if (candidates.length === 0 && !input.signal?.aborted) {
+    await deps.sleep?.(750);
+    candidates = (await deps.listRoutes().catch(() => [])).filter(
+      (candidate) => streamsStructured(candidate.cli),
+    );
+  }
   // Reading a repository and reporting what is in it is a survey, not a build.
   // Asking for "build" requested the frontier tier — Opus for a job that is
   // enumeration and file reading, where the workhorse is both faster and the
   // class the routing table already assigns to delegated work. The tier is a
   // requirement declared by the task; TIER_FOR_CLASS is where it is answered.
-  const eligible = rankRoutes(candidates, SETUP_TASK_CLASS);
+  const eligible = rankRoutes(candidates, SETUP_TASK_CLASS, input.preferredCli);
   let chosen = eligible[0];
   if (!chosen) {
     return {
@@ -1195,6 +1242,7 @@ export const DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS: VibeProjectSetupTaskDeps = {
   startAttempt: DEFAULT_VIBE_BUILDER_DEPS.startAttempt,
   settleAttempt: DEFAULT_VIBE_BUILDER_DEPS.settleAttempt,
   reserveAttempt: DEFAULT_VIBE_BUILDER_DEPS.reserveAttempt,
+  sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
 };
 
 export interface VibeProjectSetupSessionDeps {
@@ -1253,6 +1301,7 @@ export const DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS: VibeProjectSetupSessionDep
   observe: observeVibeSetupRepository,
   run: (input, validation) => runVibeProjectSetupTask({
     ...input,
+    preferredCli: getSettings().defaultAgent,
     validateOutput: async (output) => {
       const result = validateVibeSetupProposal(output, await confirmCitedPaths(output, validation));
       // The rules that rejected it. Without them "invalid-output" says only
@@ -1330,6 +1379,20 @@ function flightsFor(deps: VibeProjectSetupSessionDeps): Map<string, VibeProjectS
   return flights;
 }
 
+/** Explicit retry from Build settings. Automatic remounts still respect the
+ * cooldown; a person who just enabled an agent route need not wait for it. A
+ * running survey is cancelled before replacement, so retry never creates two
+ * setup terminals. Completed surveys remain authoritative. */
+export function retryVibeProjectSetup(projectId: string): boolean {
+  const flights = flightsFor(DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS);
+  const flight = flights.get(projectId);
+  if (flight?.status === "succeeded") return false;
+  if (flight?.status === "running") flight.abort.abort();
+  flights.delete(projectId);
+  failedSetups.delete(projectId);
+  return true;
+}
+
 function createVibeProjectSetupFlight(
   project: Project,
   persist: (configured: Project) => Promise<boolean>,
@@ -1381,11 +1444,15 @@ function createVibeProjectSetupFlight(
         projectRoot: before.projectRoot,
         componentRoots: before.componentRoots,
         components: activeProject.components,
-        inventory: [...before.paths],
+        inventory: setupAgentInventory(before.paths, before.componentRoots),
         repositoryFingerprint: before.fingerprint,
         onActivity: publish,
         signal: flight.abort.signal,
       }, validationContext);
+      // An explicit retry replaces this flight immediately. Its cancelled
+      // terminal may still resolve a moment later; never let that stale result
+      // overwrite the replacement flight's progress or failure state.
+      if (flight.abort.signal.aborted) return;
       if (!task.ok) {
         // Every exit below says the same plain sentence to the person and
         // nothing at all to anyone who has to fix it. The reason code and the

@@ -548,10 +548,18 @@ export function vibeRunReady(
   tab: Pick<TermSubTab, "ptyId" | "exited"> | undefined,
   command: Pick<RunCommand, "readiness">,
   stats: Pick<ipc.SessionStats, "id" | "ports">[],
+  verifiedProcessPtys?: ReadonlySet<number>,
 ): boolean {
   if (!tab || tab.exited || tab.ptyId == null) return false;
   if (command.readiness?.kind === "port" || command.readiness?.kind === "http") {
     return Boolean(stats.find((sample) => sample.id === tab.ptyId)?.ports.length);
+  }
+  // A worker can be alive while npx/pnpm/auth is waiting at a prompt. Build's
+  // output supervisor grants this only after the PTY has produced prompt-free
+  // output and stayed alive for a short settling window. The optional fallback
+  // preserves the helper's legacy callers outside Build supervision.
+  if (command.readiness?.kind === "process-alive" && verifiedProcessPtys) {
+    return verifiedProcessPtys.has(tab.ptyId);
   }
   return true;
 }

@@ -111,21 +111,28 @@ const setup = () => {
 };
 
 describe("IntegrationsPanel", () => {
-  it("keeps the local layer usable independently of cloud account state", () => {
+  it("opens on a focused local environment and keeps local controls usable", () => {
     const actions = setup();
-    fireEvent.click(screen.getByText(":4173"));
+    expect(screen.getByRole("button", { name: "Local" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByText("1 of 2 services running")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open :4173" }));
     fireEvent.click(screen.getByTitle("Start API"));
     fireEvent.click(screen.getByTitle("Stop Web"));
 
     expect(actions.onOpenLocal).toHaveBeenCalledWith(4173);
     expect(actions.onStartLocal).toHaveBeenCalledWith("/repo/api\0dev");
     expect(actions.onStopLocal).toHaveBeenCalledWith("/repo/web\0dev");
-    expect(screen.getByText("Local runs stay available while an account is linking.")).toBeTruthy();
+    expect(screen.getByText("Local services remain available while provider setup runs.")).toBeTruthy();
   });
 
-  it("shows provider resources, migration snapshots, and the actual latest deployment", () => {
+  it("separates cloud facts by environment and shows the actual latest deployment", () => {
     const actions = setup();
-    expect(screen.getAllByText(/0042_add_sessions/)).toHaveLength(2);
+    expect(screen.queryByText("Production database")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Production" }));
+
+    expect(screen.getByText("Production database")).toBeTruthy();
+    expect(screen.getByText(/Migration 0042_add_sessions/)).toBeTruthy();
     expect(document.querySelector(".integration-deployment-latest")?.textContent).toContain("Backend");
     expect(document.querySelector(".integration-deployment-latest")?.textContent).toContain("latest");
 
@@ -135,17 +142,26 @@ describe("IntegrationsPanel", () => {
 
   it("offers the full autonomous provider catalog and starts an API-first setup", () => {
     const actions = setup();
-    fireEvent.click(screen.getByText("Add an integration"));
+    fireEvent.click(screen.getByRole("button", { name: "Add service" }));
 
     expect(screen.getByText("Backend platforms")).toBeTruthy();
     expect(screen.getByText("Secrets & security")).toBeTruthy();
+    expect(screen.getByText("Canopy uses a linked API first, then a provider CLI when needed.")).toBeTruthy();
     expect(screen.getAllByText("CLI · API · MCP").length).toBeGreaterThan(0);
-    const supabaseRow = screen.getAllByText("Supabase")
-      .map((element) => element.closest(".integration-provider-row"))
-      .find(Boolean);
+    const supabaseRow = screen.getByText("Supabase").closest(".integration-provider-row");
     expect(supabaseRow?.textContent).toContain("needed");
     fireEvent.click(supabaseRow?.querySelector("button") as HTMLButtonElement);
     expect(actions.onAutomate).toHaveBeenCalledWith("supabase");
+  });
+
+  it("keeps preview empty state distinct from production history", () => {
+    const actions = setup();
+    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
+
+    expect(screen.getByText("Nothing has been deployed to this environment.")).toBeTruthy();
+    expect(screen.queryByText("Backend")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Set up Vercel" }));
+    expect(actions.onAutomate).toHaveBeenCalledWith("vercel");
   });
 
   it("never renders a credential field or secret value", () => {

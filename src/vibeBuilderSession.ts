@@ -40,6 +40,7 @@ import type { Component, ComponentRole, RunCommand, VibeConfig } from "./project
 import type { RepairProblem } from "./vibeRepair";
 import type { VibeRepairTaskInput, VibeRepairTaskResult } from "./vibeRepairSession";
 import { DEFAULT_PROFILE, launchEnvSync, launchProfile } from "./profiles";
+import { getSettings } from "./settings";
 import { grantFor } from "./workspaceAuthority";
 import {
   FAMILY_FOR_CLI,
@@ -174,6 +175,17 @@ export interface VibeServerIncidentInput {
   commands?: RunCommand[];
   /** The crashing command itself, by name and spelling. */
   command?: { name: string; command: string };
+}
+
+export interface VibeServerStartupInput
+  extends Omit<
+    VibeServerIncidentInput,
+    "exitCode" | "crashTimes" | "automaticRestarts"
+  > {
+  reason: "interactive-prompt" | "readiness-timeout";
+  /** The prompt class is evidence for the repair agent, never an instruction
+   * to type a guessed answer. */
+  promptCode?: string;
 }
 
 export interface CheckpointReview {
@@ -655,8 +667,17 @@ async function reviewGitCheckpoint(args: {
  *  are candidates — a route whose family we cannot name cannot be ranked. */
 async function listNativeRoutes(): Promise<RouteCandidate[]> {
   const installed = await checkInstalledClis();
+  const preferred = getSettings().defaultAgent;
+  // rankFleet is deliberately stable within a health tier. Put the person's
+  // preferred agent first here, at the only native candidate source, so Build
+  // turns, project discovery, and repair all share the same primary route.
+  // Fleet health can still demote an exhausted/unhealthy preference, and
+  // evidence-classified route failure can still fail over afterwards.
+  const families = Object.entries(FAMILY_FOR_CLI).sort(
+    ([left], [right]) => Number(right === preferred) - Number(left === preferred),
+  );
   const candidates = await Promise.all(
-    Object.entries(FAMILY_FOR_CLI).map(async ([cli, family]) => {
+    families.map(async ([cli, family]) => {
       const def = AGENT_CLIS.find((c) => c.id === cli);
       if (!def || installed[def.bin] !== true) return null;
       const profileId = launchProfile(cli) ?? DEFAULT_PROFILE;
@@ -1092,7 +1113,7 @@ export class VibeBuilderSession implements BuilderSession {
    *  nothing and the route tuple is a literal. */
   private async resolveRouteForLaunch(): Promise<SelectedRoute> {
     const candidates = await this.deps.listRoutes();
-    const eligible = rankRoutes(candidates, "build");
+    const eligible = rankRoutes(candidates, "build", this.options.cliId);
     const chosen = eligible[0];
     if (!chosen) {
       // Say which of the two reasons it was, because "no agent available" sends
@@ -1615,7 +1636,10 @@ export class VibeBuilderSession implements BuilderSession {
       // tail now goes to a repair agent that reads it, acts inside the
       // component, and asks before anything destructive. Not awaited: the
       // incident is recorded either way, and repair reports through present().
-      if (input.present !== false) void this.repairServerCrash(input, logTail);
+      if (input.present !== false) void this.repairServerProblem(input, logTail, {
+        code: "server-crash-loop",
+        statement: (label) => `The ${label} process keeps stopping moments after it starts.`,
+      });
       if (input.present === false) this.serverIncidentKeys.delete(input.key);
       return settled ? "recorded" : "recorded-unsettled";
     } catch {
@@ -1630,6 +1654,49 @@ export class VibeBuilderSession implements BuilderSession {
       }
       return "failed";
     }
+  }
+
+  /** A live PTY can still be a failed start: package runners, authentication,
+   * and project pickers all wait forever while the process remains healthy.
+   * The supervisor passes the terminal tail here so the same repair agent that
+   * handles crashes can research a supported unattended path and verify it. */
+  async reportServerStartupStall(input: VibeServerStartupInput): Promise<void> {
+    if (this.serverIncidentKeys.has(input.key)) return;
+    this.serverIncidentKeys.add(input.key);
+    this.serverIncidentOpen = true;
+    this.incidentOpen = true;
+    this.present(
+      { kind: "incident" },
+      {
+        id: `vibe-startup-${input.componentId}-${input.runCommandId}`,
+        kind: "notice",
+        prompt: `The ${input.component?.label ?? "project"} process is waiting instead of starting.`,
+        detail: "I'm reading its terminal output and checking the supported unattended setup.",
+      },
+    );
+    const logTail = await Promise.resolve(input.logTail).catch(() => "");
+    if (this.stopped) return;
+    void this.repairServerProblem(
+      {
+        ...input,
+        exitCode: null,
+        crashTimes: [],
+        automaticRestarts: 0,
+      },
+      logTail,
+      {
+        code: "server-start-failed",
+        statement: (label) =>
+          input.reason === "interactive-prompt"
+            ? `The ${label} process is alive but its terminal is waiting for interactive input instead of becoming ready.`
+            : `The ${label} process stayed alive but did not reach its declared readiness signal.`,
+        context: [
+          `Startup observation: ${input.reason}`,
+          input.promptCode ? `Prompt class: ${input.promptCode}` : null,
+          "Research the CLI's supported non-interactive flags or API path before responding. Do not guess account, project, environment, credential, or destructive answers.",
+        ].filter(Boolean).join(". "),
+      },
+    );
   }
 
   /** Keys with a repair underway, so a re-reported incident cannot stack a
@@ -1658,9 +1725,14 @@ export class VibeBuilderSession implements BuilderSession {
    *  the person (canopy_ask_user) before anything destructive. Its verdict is
    *  spoken in Build's own voice — never "the server keeps stopping" with
    *  nothing behind it. */
-  private async repairServerCrash(
+  private async repairServerProblem(
     input: VibeServerIncidentInput,
     logTail: string,
+    incident: {
+      code: RepairProblem["code"];
+      statement: (label: string) => string;
+      context?: string;
+    },
   ): Promise<void> {
     if (this.stopped || this.repairsInFlight.has(input.key)) return;
     this.repairsInFlight.add(input.key);
@@ -1672,8 +1744,8 @@ export class VibeBuilderSession implements BuilderSession {
         ...(input.component?.role ? { role: input.component.role } : {}),
       };
       const problem: RepairProblem = {
-        code: "server-crash-loop",
-        statement: `The ${component.label} process keeps stopping moments after it starts.`,
+        code: incident.code,
+        statement: incident.statement(component.label),
         projectId: this.options.projectId,
         projectName: this.options.projectName,
         component,
@@ -1686,6 +1758,7 @@ export class VibeBuilderSession implements BuilderSession {
           logTail,
           exitCode: input.exitCode,
           crashCount: input.crashTimes.length,
+          ...(incident.context ? { context: incident.context } : {}),
         },
       };
       // The default is imported at call time, not module load: a static
@@ -1752,8 +1825,14 @@ export class VibeBuilderSession implements BuilderSession {
           {
             id: `vibe-repair-failed-${input.componentId}-${this.deps.now()}`,
             kind: "question",
-            prompt: "The app server keeps stopping.",
-            detail: `${result.message} The failed run keeps the server output for inspection.`,
+            prompt:
+              incident.code === "server-start-failed"
+                ? "The project process still hasn't started."
+                : "The app server keeps stopping.",
+            detail:
+              incident.code === "server-start-failed"
+                ? `${result.message} The run keeps its terminal output for inspection.`
+                : `${result.message} The failed run keeps the server output for inspection.`,
           },
         );
       }

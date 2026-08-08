@@ -764,6 +764,55 @@ describe("VibeBuilderSession", () => {
     );
   });
 
+  it("hands a live startup prompt and terminal tail to the repair agent", async () => {
+    const repair = vi.fn(async (): Promise<VibeRepairTaskResult> => ({
+      ok: true,
+      runId: "repair-1",
+      verdict: {
+        diagnosis: "npx was waiting for its package confirmation.",
+        actions: [{ did: "Restarted it with npx --yes." }],
+        fixed: true,
+      },
+    }));
+    const h = harness({ repair }, {
+      projectComponents: [{
+        id: "worker",
+        label: "Worker",
+        path: "/repo/worker",
+        role: "worker",
+        commands: [],
+      }],
+    });
+
+    await h.session.reportServerStartupStall({
+      key: "worker:dev:startup",
+      componentId: "worker",
+      runCommandId: "dev",
+      reason: "interactive-prompt",
+      promptCode: "npx-install",
+      ports: [],
+      outputBytes: 100,
+      totalCpu: 0,
+      totalMemBytes: 1024,
+      logTail: "Need to install trigger.dev. Ok to proceed? (y)",
+      component: { label: "Worker", path: "/repo/worker", role: "worker" },
+      commands: [],
+      command: { name: "Trigger.dev worker", command: "npx trigger.dev@latest dev" },
+    });
+
+    await vi.waitFor(() => expect(repair).toHaveBeenCalled());
+    expect(repair).toHaveBeenCalledWith({
+      problem: expect.objectContaining({
+        code: "server-start-failed",
+        statement: expect.stringContaining("waiting for interactive input"),
+        evidence: expect.objectContaining({
+          logTail: "Need to install trigger.dev. Ok to proceed? (y)",
+          context: expect.stringContaining("npx-install"),
+        }),
+      }),
+    });
+  });
+
   it("correlates a retried incident to the attempt that was live when it crashed", async () => {
     // The crash is observed during one turn but only persists during a later
     // one. What the bundle has to say is which attempt was running when the
