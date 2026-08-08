@@ -123,6 +123,7 @@ export const COMPANION_TOOLS: string[] = COMPANION_TOOL_GROUPS.flatMap((g) =>
 export const PER_PROJECT_TOOLS: string[] = [
   "canopy_project",
   "canopy_component_files",
+  "canopy_spawn_agent",
 ];
 
 /** Shared tools that change something the user would have to undo.

@@ -70,6 +70,9 @@ IDE the user is watching, and their results stay inspectable:\n\
   be able to find again -> canopy_mesh_send (persistent, by message id); \
   what you've sent and received, or a message id someone gave you -> \
   canopy_mesh\n\
+- Delegating a bounded, independent slice -> canopy_spawn_agent with a complete \
+  brief. The child has no memory of this conversation; use canopy_agents first \
+  and prefer messaging an existing owner when the work is already in flight.\n\
 \n\
 - Investigating anything worth writing down (how does X work, which approach, \
   what would break) -> canopy_research search FIRST, someone may already have \
