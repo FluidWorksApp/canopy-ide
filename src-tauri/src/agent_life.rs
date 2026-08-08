@@ -115,6 +115,8 @@ pub struct CliFidelity {
     #[serde(default)]
     pub structured_block: Vec<String>,
     #[serde(default)]
+    pub dwell_structured_block: bool,
+    #[serde(default)]
     pub notification: String,
     #[serde(default)]
     pub prompt_ready_text: Option<String>,
@@ -147,6 +149,9 @@ struct RawFidelity {
     #[serde(rename = "structuredBlock")]
     structured_block: Vec<String>,
     #[serde(default)]
+    #[serde(rename = "dwellStructuredBlock")]
+    dwell_structured_block: bool,
+    #[serde(default)]
     notification: String,
     #[serde(default)]
     #[serde(rename = "promptReadyText")]
@@ -166,6 +171,10 @@ pub struct Policy {
     pub answer_window_ms: u64,
     #[serde(rename = "hookTrustSecs")]
     pub hook_trust_secs: u64,
+    #[serde(rename = "structuredBlockDwellMs")]
+    pub structured_block_dwell_ms: u64,
+    #[serde(rename = "permissionNoticeCooldownMs")]
+    pub permission_notice_cooldown_ms: u64,
     #[serde(rename = "startupGraceSecs")]
     pub startup_grace_secs: u64,
     #[serde(rename = "peerMaxAgeSecs")]
@@ -194,6 +203,7 @@ fn manifest() -> &'static Vec<CliFidelity> {
                         starts_turn: r.starts_turn,
                         tool_activity: r.tool_activity,
                         structured_block: r.structured_block,
+                        dwell_structured_block: r.dwell_structured_block,
                         notification: r.notification,
                         prompt_ready_text: r.prompt_ready_text,
                         needs_trust: r.needs_trust,
@@ -212,6 +222,8 @@ pub fn policy() -> &'static Policy {
             quiet_output_ms: 3000,
             answer_window_ms: 5000,
             hook_trust_secs: 300,
+            structured_block_dwell_ms: 2000,
+            permission_notice_cooldown_ms: 15000,
             startup_grace_secs: 20,
             peer_max_age_secs: 1800,
             credited_gap_secs: 900,
@@ -347,13 +359,22 @@ pub fn agent_life(digest: &serde_json::Value, pty: Option<&PtyEvidence>, now: u6
                 )
             }
             "structured-block" => {
-                return say(
-                    LifeState::Waiting,
-                    Confidence::Proven,
-                    "structured-block",
-                    updated,
-                    None,
-                )
+                if f.dwell_structured_block
+                    && updated > 0
+                    && now.saturating_sub(updated).saturating_mul(1000)
+                        < pol.structured_block_dwell_ms
+                {
+                    // Fall through to live terminal evidence until the
+                    // structural block has survived its dwell.
+                } else {
+                    return say(
+                        LifeState::Waiting,
+                        Confidence::Proven,
+                        "structured-block",
+                        updated,
+                        None,
+                    );
+                }
             }
             "declared-block" => {
                 let c = if f.notification == "attention-only" {
@@ -500,6 +521,7 @@ mod tests {
     fn policy_parses() {
         assert_eq!(policy().quiet_cpu_percent, 2.0);
         assert_eq!(policy().hook_trust_secs, 300);
+        assert_eq!(policy().structured_block_dwell_ms, 2000);
     }
 
     #[test]
@@ -530,6 +552,19 @@ mod tests {
     fn silence_never_decays_a_block() {
         let d = json!({"state":"waiting","state_via":"structured-block","agent":"claude","updated":NOW-864_000});
         let l = agent_life(&d, Some(&live(0.0, Some(999_999))), NOW);
+        assert_eq!(l.state, LifeState::Waiting);
+    }
+
+    #[test]
+    fn codex_permission_requests_must_survive_the_dwell() {
+        let fresh =
+            json!({"state":"waiting","state_via":"structured-block","agent":"codex","updated":NOW});
+        let l = agent_life(&fresh, Some(&live(0.0, Some(200))), NOW);
+        assert_eq!(l.state, LifeState::Working);
+        assert_eq!(l.via, "output");
+
+        let persisted = json!({"state":"waiting","state_via":"structured-block","agent":"codex","updated":NOW-2});
+        let l = agent_life(&persisted, Some(&live(0.0, Some(999_999))), NOW);
         assert_eq!(l.state, LifeState::Waiting);
     }
 

@@ -41,6 +41,10 @@ export interface CliFidelity {
   /** Events that prove the agent is blocked, structurally — a tool-name
    *  equality or a dedicated permission event. No free text. */
   structuredBlock: string[];
+  /** This CLI may emit a structural block that its own automatic mode resolves
+   *  immediately. Hold that rung for POLICY.structuredBlockDwellMs before it
+   *  is allowed to promote the session or reach the attention fast lane. */
+  dwellStructuredBlock?: boolean;
   notification: NotificationMeaning;
   /** Read only when `notification === "mixed"`: the CLI's own completion text. */
   promptReadyText?: string;
@@ -65,6 +69,7 @@ export const UNKNOWN_CLI: CliFidelity = {
   startsTurn: [],
   toolActivity: [],
   structuredBlock: [],
+  dwellStructuredBlock: false,
   notification: "none",
   verifiedAt: "never",
 };

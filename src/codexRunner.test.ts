@@ -1,8 +1,9 @@
 // Codex, read off the real CLI.
 //
 // Every line in CODEX_TURN and CODEX_RESUME below was captured verbatim from
-// `codex exec --json` (codex-cli 0.146.1) — a turn told to run a shell command,
-// read a file and edit it, then a second turn resuming the same thread. They are
+// `codex exec --json` (codex-cli 0.146.1, captured 2026-08-07) — a turn told
+// to run a shell command, read a file and edit it, then a second turn resuming
+// the same thread. They are
 // pasted rather than invented because the one bug this parser exists to avoid is
 // a schema someone guessed: a wrong item name does not throw, it just silently
 // drops the reply, and the task reports the agent saying nothing.

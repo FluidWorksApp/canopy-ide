@@ -146,6 +146,11 @@ const context = (): VibeSetupValidationContext => ({
   existingComponents: project().components,
 });
 
+const verifiedSessionDeps = {
+  verify: vi.fn(async () => ({ ok: true as const })),
+  repair: vi.fn(async () => false),
+};
+
 describe("project setup repository observation", () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -669,6 +674,7 @@ describe("non-technical setup surface", () => {
           runId: null,
           attempts: 0,
         }),
+        ...verifiedSessionDeps,
         providerIds: context().providerIds,
       },
     );
@@ -696,6 +702,7 @@ describe("non-technical setup surface", () => {
             paths: context().existingPaths,
           }),
           run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
+          ...verifiedSessionDeps,
           providerIds: context().providerIds,
         },
       );
@@ -708,6 +715,106 @@ describe("non-technical setup surface", () => {
     await ready;
     expect(configured).toHaveLength(1);
     expect(configured[0].vibe?.version).toBe(1);
+  });
+
+  it("repairs a missing environment, re-verifies it, and only then persists", async () => {
+    const order: string[] = [];
+    const verify = vi.fn(async (configured: Project) => {
+      order.push("verify");
+      if (verify.mock.calls.length > 1) return { ok: true as const };
+      const component = configured.components[0];
+      return {
+        ok: false as const,
+        failure: {
+          code: "environment-missing" as const,
+          statement: "A tool this project needs is not installed yet.",
+          target: {
+            component,
+            command: component.commands![0],
+            argv: component.commands![0].argv!,
+          },
+          missingExecutables: ["pnpm"],
+          context: "pnpm did not resolve on the login-shell PATH.",
+        },
+      };
+    });
+    const repair = vi.fn(async () => { order.push("repair"); return true; });
+    let observations = 0;
+    const persist = vi.fn(async () => { order.push("persist"); return true; });
+    const session = createVibeProjectSetupSession(project(), persist, {
+      observe: async () => {
+        observations += 1;
+        return {
+          projectRoot: root,
+          componentRoots: ["/repo/apps/web", "/repo/services/api"],
+          fingerprint: "tree-1",
+          paths: context().existingPaths,
+        };
+      },
+      run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
+      verify,
+      repair,
+      providerIds: context().providerIds,
+    });
+    const ready = new Promise<void>((resolve) => {
+      session.events$.subscribe((event) => {
+        if (event.kind === "ready") resolve();
+      });
+    });
+
+    await ready;
+    expect(order).toEqual(["verify", "repair", "verify", "persist"]);
+    expect(observations).toBe(3);
+    expect(repair).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: "environment-missing",
+        evidence: { context: expect.stringContaining("login-shell PATH") },
+      }),
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+  });
+
+  it("does not persist when a repair verdict is not followed by a successful proof", async () => {
+    const persist = vi.fn(async () => true);
+    const verify = vi.fn(async (configured: Project) => {
+      const component = configured.components[0];
+      return {
+        ok: false as const,
+        failure: {
+          code: "readiness-failed" as const,
+          statement: "Website did not become ready.",
+          target: {
+            component,
+            command: component.commands![0],
+            argv: component.commands![0].argv!,
+          },
+          missingExecutables: [] as [],
+          context: "The readiness deadline expired.",
+        },
+      };
+    });
+    const session = createVibeProjectSetupSession(project(), persist, {
+      observe: async () => ({
+        projectRoot: root,
+        componentRoots: ["/repo/apps/web", "/repo/services/api"],
+        fingerprint: "tree-1",
+        paths: context().existingPaths,
+      }),
+      run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
+      verify,
+      repair: async () => true,
+      providerIds: context().providerIds,
+    });
+    const failed = new Promise<void>((resolve) => {
+      session.events$.subscribe((event) => {
+        if (event.kind === "reply" && event.text.includes("couldn't finish preparing")) resolve();
+      });
+    });
+
+    await failed;
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(persist).not.toHaveBeenCalled();
   });
 
   it("keeps a correct survey when an unrelated file was saved while it ran", async () => {
@@ -732,6 +839,7 @@ describe("non-technical setup surface", () => {
             paths: context().existingPaths,
           }),
           run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
+          ...verifiedSessionDeps,
           providerIds: context().providerIds,
         },
       );
@@ -764,6 +872,7 @@ describe("non-technical setup surface", () => {
         runId: "setup-run",
         attempts: 2,
       })),
+      ...verifiedSessionDeps,
       providerIds: context().providerIds,
     };
 
@@ -801,6 +910,7 @@ describe("non-technical setup surface", () => {
         paths: context().existingPaths,
       })),
       run: vi.fn(async () => pendingRun),
+      ...verifiedSessionDeps,
       providerIds: context().providerIds,
     };
     const persisted: Project[] = [];
@@ -860,6 +970,7 @@ describe("non-technical setup surface", () => {
             paths: context().existingPaths,
           }),
           run: async () => ({ ok: true, output: { nope: true }, runId: "setup-run", attempts: 1 }),
+          ...verifiedSessionDeps,
           providerIds: context().providerIds,
         },
       );

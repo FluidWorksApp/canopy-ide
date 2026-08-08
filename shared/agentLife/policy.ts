@@ -11,6 +11,12 @@ export interface Policy {
   answerWindowMs: number;
   /** How long a hook event's claim of a turn in flight stands unaided. */
   hookTrustSecs: number;
+  /** How long a CLI-marked transient structural block must persist before it
+   *  becomes a user-facing `waiting` state. */
+  structuredBlockDwellMs: number;
+  /** Repeated identical permission questions from one session reuse the same
+   *  attention item inside this window. */
+  permissionNoticeCooldownMs: number;
   /** A process is here but nothing has spoken for it yet. */
   startupGraceSecs: number;
   /** How long quiet must hold before a tab falls into the Idle stack. */

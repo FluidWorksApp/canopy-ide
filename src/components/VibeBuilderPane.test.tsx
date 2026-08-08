@@ -551,7 +551,7 @@ describe("VibeBuilderPane", () => {
         ],
       },
     });
-    render(<VibeBuilderPane session={h.session} />);
+    const mounted = render(<VibeBuilderPane session={h.session} />);
 
     const confirm = screen.getByRole("group", {
       name: "Confirm: Apply the database migration?",
@@ -561,6 +561,11 @@ describe("VibeBuilderPane", () => {
     const apply = within(confirm).getByRole("button", { name: "Apply it" });
     fireEvent.click(apply);
     expect(h.send).toHaveBeenCalledWith("approve");
+    openTranscript();
+    expect(
+      mounted.container.querySelector(".companion-msg-you .companion-said")
+        ?.textContent,
+    ).toBe("Apply it");
     expect(apply.hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("img", { name: "Ash is needs" })).toBeTruthy();
   });
@@ -620,6 +625,8 @@ describe("VibeBuilderPane", () => {
     await waitFor(() => {
       expect(screen.getByRole("alert").textContent).toContain("session stopped");
     });
+    expect(screen.getByRole("img", { name: "Ash is idle" })).toBeTruthy();
+    expect(screen.queryByText("Making your change…")).toBeNull();
   });
 
   it("re-enables a confirm card when the runner reports an error", () => {
