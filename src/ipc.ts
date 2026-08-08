@@ -168,6 +168,9 @@ export interface PtyExit {
   exit_code: number | null;
   /** True when Canopy requested shutdown; false for a process that died itself. */
   requested: boolean;
+  /** Present only on events synthesized in the renderer when the spawn itself
+   *  was refused (no process ever existed); the Rust event never carries it. */
+  spawnError?: string;
 }
 export const onPtyExit = (cb: (e: PtyExit) => void): Promise<UnlistenFn> =>
   listen<PtyExit>("pty:exit", (event) => cb(event.payload));
