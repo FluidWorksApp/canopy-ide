@@ -23,6 +23,9 @@ import { Button } from "./ui";
 const decoder = new TextDecoder();
 
 interface FileViewProps {
+  /** Only the foreground document owns decoded/viewer/editor surfaces. The
+   *  OpenFile bytes and Monaco model remain the rehydration source. */
+  active: boolean;
   file: OpenFile;
   onSave: () => void;
   onDirty: (dirty: boolean) => void;
@@ -63,9 +66,14 @@ export function FileView(props: FileViewProps) {
   // the empty-string shortcut is wrong because `modelFor` *creates* the model
   // from it the first time a file is opened.
   const text = useMemo(
-    () => (file.bytes ? decoder.decode(file.bytes) : ""),
-    [file.bytes],
+    () => (props.active && file.bytes ? decoder.decode(file.bytes) : ""),
+    [props.active, file.bytes],
   );
+
+  // Keep the pane mounted so tab identity/state is stable, but unmount every
+  // heavyweight child while backgrounded. Code text already lives in its
+  // Monaco model; native viewers can be recreated losslessly from file.bytes.
+  if (!props.active) return <div className="fill" aria-hidden />;
 
   // Refused before the bytes were read — say why, and offer the two things
   // that are actually useful for a file Canopy can't show.

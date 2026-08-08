@@ -12,18 +12,18 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { INSERT_TEXT_EVENT } from "../insertText";
 import { openLink } from "../links";
 import { matchesModifierClick } from "../shortcuts";
 import * as ipc from "../ipc";
-import { getSettings, THEME_CHANGE_EVENT, type Settings } from "../settings";
+import { getSettings, type Settings } from "../settings";
 import { terminalTheme } from "../terminalThemes";
 import { createLinkHint, opensLink } from "../terminalLinks";
 import { matchesChord, resolve } from "../shortcuts";
 import { TerminalStreamLedger } from "../terminalStreamLedger";
 import { terminalRetentionRegistry } from "../terminalRetention";
 import { TerminalCompactionController } from "../terminalCompaction";
+import { registerTerminalPressureShedder } from "../rendererPressureRelief";
+import { registerTerminalWindowEvents } from "../terminalWindowEvents";
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -216,8 +216,6 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       term.options.cursorBlink = next.terminalCursorBlink;
       if (metricsChanged) syncNowRef.current?.();
     };
-    window.addEventListener(THEME_CHANGE_EVENT, onThemeChange);
-
     const fit = new FitAddon();
     term.loadAddon(fit);
     const serializer = new SerializeAddon();
@@ -281,7 +279,6 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     const updateRetention = () => retention.update(retentionSample());
     const retentionSubs = [
       term.onWriteParsed(() => {
-        retention.parsedWrite();
         updateRetention();
       }),
       term.onResize(updateRetention),
@@ -329,6 +326,9 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
           restored: retention.restored,
         },
       },
+    );
+    const unregisterPressureShedder = registerTerminalPressureShedder(() =>
+      compaction.compactNow(),
     );
 
     // No WebGL renderer. @xterm/addon-webgl 0.19.0 corrupts rendering on
@@ -523,7 +523,6 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     const onFocus = () => {
       if (activeRef.current) syncNowRef.current?.();
     };
-    window.addEventListener("focus", onFocus);
     let unlistenExit: (() => void) | undefined;
     const earlyExits = new Map<number, ipc.PtyExit>();
     let streamGeneration: number | null = null;
@@ -545,8 +544,10 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       if (chunk.gap) {
         term.write("\r\n\x1b[33m[Canopy: earlier terminal output was truncated]\x1b[0m\r\n");
       }
+      const parseStartedAt = performance.now();
       term.write(bytes, () => {
         if (epoch !== streamEpoch) return;
+        retention.parsedWrite(bytes.length, performance.now() - parseStartedAt);
         if (streamGeneration != null && ptyIdRef.current != null) {
           void ipc.ptyAck(ptyIdRef.current, streamGeneration, bytes.length);
         } else {
@@ -767,50 +768,23 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       }),
     ];
 
-    // OS file drops. Tauri intercepts these at the native layer (dragDropEnabled
-    // defaults on), so the HTML5 drop event never fires in the webview and the
-    // only way to receive a dropped file is this event. It is window-global —
-    // every Term hears every drop — so exactly one may act: the active one
-    // (there is one per app: visible project x active tab). Routed through
-    // term.paste(), which takes xterm's ordered input path (like the key
-    // handler above) and wraps the text in bracketed-paste markers, so zsh and
-    // TUIs treat it as pasted text rather than typed keystrokes.
-    //
-    // The WEBVIEW WINDOW, which is neither `getCurrentWindow()` nor
-    // `getCurrentWebview()` — and the difference is the whole bug. Tauri routes
-    // a drop by the main webview's `WebviewKind`, and `features = ["unstable"]`
-    // (which browser.rs needs for `add_child`) makes that kind `WindowChild`,
-    // so every drop is emitted to the `Webview` target. A `Window` listener
-    // does not match `Webview` (manager/mod.rs `filter_target`), which is why
-    // listening on the window silently killed drops everywhere. Only
-    // `WebviewWindow` is matched by all three routes Tauri can take —
-    // `emit_to_window`, `emit_to_webview` and `AnyLabel` — so it is correct
-    // however the app is built. Guarded by termDropTarget.test.ts.
-    let unlistenDrop: (() => void) | undefined;
-    void getCurrentWebviewWindow()
-      .onDragDropEvent((e) => {
-        if (e.payload.type !== "drop" || !activeRef.current) return;
-        const paths = e.payload.paths;
-        if (!paths.length) return;
+    // One renderer-global listener set routes native drops, dictation/clipboard
+    // insertion, focus and theme events to terminals. This terminal contributes
+    // only a small target record; hidden tabs do not each retain four global
+    // event closures and a Tauri drag/drop subscription.
+    const unregisterWindowEvents = registerTerminalWindowEvents({
+      active: () => activeRef.current,
+      focus: () => onFocus(),
+      insertText: (text) => {
+        term.paste(text);
+        term.focus();
+      },
+      dropPaths: (paths) => {
         term.paste(paths.map(shellQuote).join(" ") + " ");
         term.focus();
-      })
-      .then((un) => {
-        if (disposed) un();
-        else unlistenDrop = un;
-      });
-
-    // Text inserted by a global surface (dictation, clipboard history). Same
-    // contract as the drop handler above: exactly one active Term may act, and
-    // term.paste() keeps bracketed-paste semantics.
-    const onInsertText = (e: Event) => {
-      if (!activeRef.current) return;
-      const text = (e as CustomEvent).detail as string;
-      if (!text) return;
-      term.paste(text);
-      term.focus();
-    };
-    window.addEventListener(INSERT_TEXT_EVENT, onInsertText);
+      },
+      themeChanged: onThemeChange,
+    });
 
     // Debounced resize: propose, let the pty apply it and SIGWINCH the child,
     // then match the grid to what it confirmed. A hidden tab proposes nothing
@@ -839,17 +813,15 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       disposed = true;
       clearTimeout(resizeTimer);
       observer.disconnect();
-      window.removeEventListener(THEME_CHANGE_EVENT, onThemeChange);
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener(INSERT_TEXT_EVENT, onInsertText);
+      unregisterWindowEvents();
       linkHint.dispose();
       dataSub.dispose();
       titleSub.dispose();
+      unregisterPressureShedder();
       compaction.dispose();
       retentionSubs.forEach((s) => s.dispose());
       retention.dispose();
       oscSubs.forEach((s) => s.dispose());
-      unlistenDrop?.();
       unlistenExit?.();
       // Attached tabs detach on close — the agent was spawned from the phone and
       // stays alive and controllable there. Only a tab that OWNS its pty kills it.

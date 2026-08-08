@@ -110,41 +110,24 @@ export class TerminalCompactionController {
     this.hidden = true;
     const epoch = ++this.epoch;
     this.cancelTimer();
-    this.timer = this.setTimer(() => {
-      this.timer = null;
-      if (!this.currentHidden(epoch) || this.snapshot) return;
-      this.surface.drain(() => {
-        if (!this.currentHidden(epoch) || this.snapshot) return;
-        this.metrics.attempted();
-        let vt: string;
-        try {
-          vt = this.surface.serialize();
-        } catch {
-          this.metrics.failed();
-          return;
-        }
-        const measured = utf8BytesThroughLimit(vt, this.maxBytes);
-        if (measured.exceeded) {
-          this.metrics.rejectedTooLarge(measured.bytes);
-          return;
-        }
-        if (!this.metrics.reserve(measured.bytes)) {
-          this.metrics.rejectedGlobalBudget();
-          return;
-        }
-        this.reservedBytes = measured.bytes;
-        this.snapshot = { vt, bytes: measured.bytes };
-        try {
-          this.surface.clearCells();
-        } catch {
-          this.snapshot = null;
-          this.releaseReservation();
-          this.metrics.failed();
-          return;
-        }
-        this.metrics.compacted();
-      });
-    }, this.idleMs);
+    this.scheduleCompaction(epoch, this.idleMs);
+  }
+
+  /** Pressure relief may advance the hidden-idle timer, but never touches a
+   * visible/restoring/already-compacted terminal. */
+  compactNow(): boolean {
+    if (
+      this.disposed ||
+      !this.hidden ||
+      this.snapshot != null ||
+      this.restoring != null
+    ) {
+      return false;
+    }
+    const epoch = ++this.epoch;
+    this.cancelTimer();
+    this.scheduleCompaction(epoch, 0);
+    return true;
   }
 
   /** Resolve only after VT restoration, before native output may reattach. */
@@ -208,6 +191,46 @@ export class TerminalCompactionController {
 
   private currentHidden(epoch: number): boolean {
     return !this.disposed && this.hidden && this.epoch === epoch;
+  }
+
+  private scheduleCompaction(epoch: number, delayMs: number): void {
+    this.timer = this.setTimer(() => {
+      this.timer = null;
+      if (!this.currentHidden(epoch) || this.snapshot) return;
+      this.surface.drain(() => this.compactAfterDrain(epoch));
+    }, delayMs);
+  }
+
+  private compactAfterDrain(epoch: number): void {
+    if (!this.currentHidden(epoch) || this.snapshot) return;
+    this.metrics.attempted();
+    let vt: string;
+    try {
+      vt = this.surface.serialize();
+    } catch {
+      this.metrics.failed();
+      return;
+    }
+    const measured = utf8BytesThroughLimit(vt, this.maxBytes);
+    if (measured.exceeded) {
+      this.metrics.rejectedTooLarge(measured.bytes);
+      return;
+    }
+    if (!this.metrics.reserve(measured.bytes)) {
+      this.metrics.rejectedGlobalBudget();
+      return;
+    }
+    this.reservedBytes = measured.bytes;
+    this.snapshot = { vt, bytes: measured.bytes };
+    try {
+      this.surface.clearCells();
+    } catch {
+      this.snapshot = null;
+      this.releaseReservation();
+      this.metrics.failed();
+      return;
+    }
+    this.metrics.compacted();
   }
 
   private cancelTimer(): void {

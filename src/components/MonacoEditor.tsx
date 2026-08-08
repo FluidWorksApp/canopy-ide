@@ -5,8 +5,15 @@ import { useEffect, useRef } from "react";
 import { monaco } from "../monaco-setup";
 import { getSettings, THEME_CHANGE_EVENT } from "../settings";
 import { setCaret, truncateSelection } from "../editorState";
+import {
+  editorViewState,
+  rememberEditorViewState,
+} from "../editorViewState";
 
 interface MonacoEditorProps {
+  /** Inactive editors release their DOM/editor instance while retaining the
+   *  model and a bounded view-state record for lossless tab switching. */
+  active?: boolean;
   model: monaco.editor.ITextModel;
   onSave: () => void;
   onDirty: (dirty: boolean) => void;
@@ -16,17 +23,26 @@ interface MonacoEditorProps {
   onCursor?: (anchor: number, head: number) => void;
 }
 
-export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorProps) {
+export function MonacoEditor({
+  active = true,
+  model,
+  onSave,
+  onDirty,
+  onCursor,
+}: MonacoEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const saveRef = useRef(onSave);
   const dirtyRef = useRef(onDirty);
   const cursorRef = useRef(onCursor);
+  const modelRef = useRef(model);
   saveRef.current = onSave;
   dirtyRef.current = onDirty;
   cursorRef.current = onCursor;
+  modelRef.current = model;
 
   useEffect(() => {
+    if (!active) return;
     const el = containerRef.current;
     if (!el) return;
     const s = getSettings();
@@ -44,6 +60,12 @@ export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorP
       fixedOverflowWidgets: true,
     });
     editorRef.current = editor;
+    const initialModel = modelRef.current;
+    editor.setModel(initialModel);
+    const saved = editorViewState<monaco.editor.ICodeEditorViewState>(
+      initialModel.uri.toString(),
+    );
+    if (saved) editor.restoreViewState(saved);
     // The Editor pane in Settings wrote these four straight to storage and
     // nothing ever read them back, so changing the editor font did nothing at
     // all. Apply on create, and live on change like the terminal does.
@@ -89,14 +111,20 @@ export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorP
       );
     });
     return () => {
+      const current = editor.getModel();
+      const viewState = editor.saveViewState();
+      if (current && viewState) {
+        rememberEditorViewState(current.uri.toString(), viewState);
+      }
       window.removeEventListener(THEME_CHANGE_EVENT, onSettingsChange);
       cursorSub.dispose();
       editor.dispose();
       editorRef.current = null;
     };
-  }, []);
+  }, [active]);
 
   useEffect(() => {
+    if (!active) return;
     const editor = editorRef.current;
     if (!editor) return;
     editor.setModel(model);
@@ -119,7 +147,7 @@ export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorP
       window.removeEventListener("canopy:reveal-line", reveal);
       sub.dispose();
     };
-  }, [model]);
+  }, [active, model]);
 
   return <div className="fill" ref={containerRef} />;
 }

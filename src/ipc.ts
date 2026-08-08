@@ -33,6 +33,8 @@ export interface PtyGeometry {
 
 export interface SpawnResult extends PtyGeometry {
   id: number;
+  /** Rust-owned lifetime identity; independent of renderer/stream generations. */
+  session_generation: number;
   pid: number | null;
   /** Native output-stream generation. Null for detached/headless sessions. */
   generation: number | null;
@@ -42,6 +44,7 @@ export type PtySessionKind = "desktop" | "remote" | "detached";
 
 export interface PtySummary extends PtyGeometry {
   id: number;
+  session_generation: number;
   pid: number | null;
   cwd: string;
   title: string;
@@ -254,6 +257,7 @@ export const ptyDetachDesktop = (id: number, generation: number) =>
 
 export interface PtyExit {
   id: number;
+  session_generation: number;
   exit_code: number | null;
   /** True when Canopy requested shutdown; false for a process that died itself. */
   requested: boolean;
@@ -265,6 +269,7 @@ export const onPtyExit = (cb: (e: PtyExit) => void): Promise<UnlistenFn> =>
  *  open a tab attached to it (via ptyAttach) in the matching project. */
 export interface PtySpawned {
   id: number;
+  session_generation: number;
   cwd: string;
   title: string;
   cols: number;
@@ -757,6 +762,18 @@ export const browserClose = (tabId: string) =>
     tabId, rendererGeneration: browserRendererGeneration(),
   }).catch(() => {});
 
+export interface BrowserCloseMetrics {
+  pending: number;
+  retryRunning: boolean;
+  attempts: number;
+  successes: number;
+  failures: number;
+}
+
+/** Content-free native orphan-close/retry counters. */
+export const browserCloseMetrics = () =>
+  invoke<BrowserCloseMetrics>("browser_close_metrics");
+
 /** Run one agent browser op against the page. Read-only ops answer here;
  *  anything cursor-led reports `done: false` and lands on `onBrowserEvents`. */
 export interface BrowserOpAck {
@@ -840,16 +857,25 @@ export const fsStat = (path: string) =>
     { path },
   );
 
-export async function fsReadFile(path: string): Promise<Uint8Array> {
-  const data = await invoke<ArrayBuffer | number[]>("fs_read_file", { path });
+export async function fsReadFile(
+  path: string,
+  maxBytes?: number,
+): Promise<Uint8Array> {
+  const data = await invoke<ArrayBuffer | number[]>("fs_read_file", {
+    path,
+    maxBytes,
+  });
   return data instanceof ArrayBuffer
     ? new Uint8Array(data)
     : Uint8Array.from(data);
 }
 
 const textDecoder = new TextDecoder();
-export async function fsReadText(path: string): Promise<string> {
-  return textDecoder.decode(await fsReadFile(path));
+export async function fsReadText(
+  path: string,
+  maxBytes?: number,
+): Promise<string> {
+  return textDecoder.decode(await fsReadFile(path, maxBytes));
 }
 
 // ---------- agent instructions ----------
@@ -2052,6 +2078,11 @@ export interface SessionStats {
   desktop_delivery_chunks?: number;
   desktop_delivery_bytes?: number;
   desktop_acked_bytes?: number;
+  desktop_delivery_chunk_bytes_max?: number;
+  desktop_ack_latency_last_ms?: number;
+  desktop_ack_latency_max_ms?: number;
+  desktop_ack_latency_total_ms?: number;
+  desktop_ack_latency_samples?: number;
 }
 /** The latest process reading for every live terminal, on demand — for a caller
  *  that needs one now and has no `onPtyStats` subscription. Reads the cache the

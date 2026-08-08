@@ -73,6 +73,51 @@ SPA state loss, release-owned lifecycle telemetry is still required to explain
 that application-level reset because it did not cross an OS process or main-
 frame navigation boundary.
 
+### Critical-pressure episode at 15:53 +0700: live main renderer, separate child reload
+
+A third read-only production check followed another user-visible apparent
+restart. This event was severe, but it was **not** another native-host or main
+WebContent process replacement:
+
+- native Canopy PID `49786` retained its 2026-08-07 14:40:16 start time;
+- main IDE WebContent PID `43665` retained its 13:44:26 start time and was still
+  the active main renderer after the episode;
+- the preceding 50-minute WebKit timeline contained no main-renderer
+  `WebPageProxy::reload`, main-frame provisional/commit load, termination, or
+  replacement event.
+
+The OS did record genuine critical pressure. At 15:53:52, WebContent `43665`
+received a system VM-pressure-critical notification. WebKit reported one page,
+29 `Document` objects, a 759 MiB live JavaScript heap inside 1,084 MiB capacity,
+about 9.32 million JavaScript objects, 1,885 MiB of dirty `bmalloc` memory, and a
+2,047 MiB physical footprint. The same PID's periodic footprint reading reached
+5,547 MiB at 15:58:42, later oscillated above 5 GiB, and then fell sharply
+without a process change. This is direct evidence of large, partly reclaimable
+renderer-owned state and repeated allocation/reclamation pressure; it is not
+evidence that the native Rust host or a terminal process tree owned those bytes.
+
+At 15:55:41 the host separately created child WebContent PID `85686` for page
+proxy `275826`, called `WebPageProxy::reload` about 620 ms later, and completed
+that child's main-frame load. That child was about 79--89 MiB during the sampled
+window and remained an XPC process afterward. The reload belongs to this child,
+not to main PID `43665`. As with the older closed AWS child, a surviving idle
+WebKit XPC process is not by itself proof that a frontend tab still owns a page;
+the leak criterion is retained page/footprint or an untracked native child.
+Renderer-generation ownership, pending-open cancellation, orphan reconciliation,
+and hidden-frame release address the controllable lifecycle paths, while the
+runbook requires footprint and ownership evidence before classifying an idle
+helper as leaked.
+
+The reported UI/progress reset therefore remains an **application-level symptom
+without an observed WebKit restart boundary**. A React remount, state reset, or
+feature-owned recovery cannot be reconstructed from the installed build because
+its Canopy file log stopped updating before this interval and it lacks the new
+release resilience telemetry. This episode strengthens the renderer-retention
+root cause and the rationale for pressure shedding, bounded editor/terminal/IO
+retention, and persistent generation/recovery telemetry; those implementations
+still require the tests and soaks below. It does not falsify the 13:44 OOM finding
+or justify claiming a second renderer death.
+
 ### Implementation update — renderer continuity (2026-08-08)
 
 The current worktree now replaces destructive renderer boot cleanup with a
@@ -95,7 +140,11 @@ Renderer registration also closes native preview child WebViews left behind by
 a predecessor page. This addresses the observed `docs.aws.amazon.com` WebContent
 process surviving after its tab was gone. A normal `browser_close` now removes
 its registry entry only after the native close succeeds, so recovery can retry a
-failed close instead of losing the only handle to the leaked view.
+failed close instead of losing the only handle to the leaked view. Failed closes
+enter one Rust-owned label queue drained by a singleton retry worker with
+100 ms--30 s capped backoff; this does not depend on a future renderer reload.
+Constant-size counters expose pending labels, worker state, attempts, successes,
+and failures without retaining URLs or page content.
 
 The adversarial lifecycle pass found two deeper variants and they are now
 covered as well: close-during-`add_child` invalidates a native creation token, and
@@ -110,8 +159,10 @@ Finally, the heartbeat listener is installed immediately after native renderer
 registration, before Monaco and React, and acknowledgements carry the renderer
 generation. Focused native tests cover process survival, stale acknowledgements,
 double registration, Remote/detached survival, bounded/truncated replay, and
-orphan browser teardown; the complete frontend suite passes. Runtime tests that
-kill real platform WebContent processes remain open below.
+orphan browser teardown. The focused milestone suites pass; the full frontend
+run currently has one pre-existing `attemptIdentityGuard` source-order assertion
+failure that reproduces without this milestone. Runtime tests that kill real
+platform WebContent processes remain open below.
 
 ### Implementation update — hidden xterm compaction (2026-08-08)
 
@@ -846,6 +897,9 @@ The checklist is deliberately broader than the first patch. A checked item is
 complete in the current worktree; unchecked items must not be inferred from a
 nearby implementation. Items marked **atomic** must ship together.
 
+The bounded incident procedure and numeric release gates are in
+[`memory-resilience-runbook.md`](./memory-resilience-runbook.md).
+
 ### A. Immediate renderer-pressure containment
 
 - [x] Capture a live OS footprint and short stack sample for the native host and
@@ -880,7 +934,7 @@ nearby implementation. Items marked **atomic** must ship together.
 
 ### B. PTY continuity and renderer reattachment — **atomic**
 
-- [ ] Define Rust-owned session ids and session generations independent of any
+- [x] Define Rust-owned session ids and session generations independent of any
   renderer.
 - [x] Replace the spawn-time immutable desktop channel with a replaceable,
   generation-scoped attachment.
@@ -901,8 +955,9 @@ nearby implementation. Items marked **atomic** must ship together.
   and an explicit development orphan-reap operation.
 - [x] Remove boot-time `pty_kill_all` only in the same release as enumeration,
   restore reconciliation, generation-scoped attach, and bounded detached drain.
-- [ ] Keep app-exit `kill_all`; distinguish app exit from renderer exit in code
-  and telemetry.
+- [x] Keep app-exit `kill_all`; distinguish app exit from renderer exit in code
+  and telemetry. App exit records start and `kill_all` return (including forced
+  signal count) in the bounded incident ring and the release resilience log.
 - [ ] Test reload, WebContent termination, navigation, double reload, and renderer
   startup failure against harmless marker-producing PTYs.
 - [x] Test headless Remote and detached micro-task PTYs in the same matrix.
@@ -932,10 +987,15 @@ nearby implementation. Items marked **atomic** must ship together.
   JavaScript snapshot survives a whole-renderer OOM.
 - [ ] Dispose inactive xterm renderers only after the chosen fidelity mechanism
   is verified.
-- [ ] Gate ResizeObserver, focus, drag/drop, theme, and global event listeners for
-  inactive terminals where safe.
-- [ ] Coalesce PTY delivery by both time and byte size; publish metrics for chunks,
-  bytes, parse latency, ack latency, and outstanding bytes.
+- [x] Gate ResizeObserver for hidden terminals and collapse focus, drag/drop,
+  theme, and global inserted-text handling into one renderer-wide listener set
+  that routes input only to the active terminal and tears down at zero owners.
+- [x] Coalesce PTY delivery by both time (10 ms) and byte size (64 KiB); publish
+  scalar chunks, bytes, maximum chunk, renderer write-completion latency
+  (queue plus parse for callbacks still belonging to the attached epoch),
+  native ack latency, and outstanding-byte metrics. The native pending-ack
+  ledger is bounded to 256 batches and preserves the oldest latency when it
+  aggregates; this is not claimed as isolated xterm parser CPU time.
 - [ ] Add a bounded-output multi-terminal soak test with one visible pane and
   many hidden tabs.
 
@@ -1000,9 +1060,13 @@ nearby implementation. Items marked **atomic** must ship together.
   encoded input before allocating the decoded byte buffer and recheck decoded
   size before writing.
 - [x] Gate language-service and agent LSP-tool whole-file reads at 8 MiB before
-  IPC and reject a post-stat growth result instead of retaining it. The native general-purpose
-  read command still needs a caller-supplied atomic maximum to close the
-  stat/read allocation race for every frontend caller.
+  IPC and reject a post-stat growth result instead of retaining it. The native
+  read command now accepts the same caller maximum, opens one stable file
+  handle, re-authorizes and compares cross-platform file identity after open,
+  and reads at most `max + 1` bytes. This closes path/symlink replacement and
+  concurrent-growth allocation races while retaining a 512 MiB compatibility
+  backstop for legacy callers. Project open/share/watcher reads now pass their
+  viewer-specific limits instead of using that compatibility ceiling.
 - [ ] Avoid retaining raw bytes, decoded text, editor models, and unchanged
   baseline strings simultaneously.
 - [x] Transfer code-file content ownership to the Monaco model after decoding;
@@ -1017,11 +1081,21 @@ nearby implementation. Items marked **atomic** must ship together.
 - [ ] Dispose inactive Monaco models, workers, language-client state, WebGL/canvas
   surfaces, image decoders, and preview resources according to an explicit
   ownership contract.
+- [x] Pass document visibility through the retained pane cache, dispose inactive
+  Monaco editor instances while preserving bounded view state, and unmount
+  inactive file/viewer descendants without discarding the owning tab model or
+  unsaved text. Resource ownership follows the same `surfaceTabId` as the host,
+  including Build mode's preview-over-Engineer selection. Language clients,
+  media decoders, and all model ownership remain under the broader item above.
 - [ ] Bound preview request bodies, generated HTML, response copies, and decoded
   assets by bytes.
 - [x] Cap buffered preview request bodies and injectable HTML at 16 MiB before
   accumulation; non-HTML responses remain streaming. Frontend decoded assets
   and generated DOM still need a separate owner budget.
+- [x] Keep failed native preview closes nameable and retry them from one bounded
+  Rust worker even while the main renderer remains continuous; publish only
+  scalar pending/attempt/success/failure counters. A fail-then-success regression
+  proves the registry handle is retained until native close succeeds.
 - [ ] Audit every queue/ring/cache for owner, unit, limit, overflow behavior,
   expiry, and observability.
 
@@ -1032,12 +1106,20 @@ nearby implementation. Items marked **atomic** must ship together.
   generation aware.
 - [x] Coordinate native WebContent termination and heartbeat recovery through one
   reload decision state machine.
-- [ ] Set a bounded maximum recovery delay while allowing one short pressure-shed
-  probe before reload.
-- [x] Never use same-event-loop heartbeat alone as proof of process death; record
-  event-loop starvation separately.
+- [x] Bound heartbeat escalation to three stale 3-second observations followed
+  by exactly one 3-second native pressure-shed probe before reload; recovery
+  clears the probe state, minimize discards an armed probe, reload-call failure
+  rolls back its slot/grace, and rate limiting suppresses further preview-probe
+  churn.
+- [x] Treat same-event-loop heartbeat as a renderer-stall recovery signal, not
+  proof of process death; record event-loop starvation separately and never
+  reload on one late observation. The preview pressure probe is relief, not an
+  independent liveness oracle.
 - [x] Add bounded release logging for native termination/heartbeat reload reason,
-  renderer generation, suppression/rate-limit outcome, and recovery start.
+  renderer generation, suppression/rate-limit outcome, recovery start, and app
+  exit PTY cleanup. Release builds persist only the watchdog module into one
+  rotating 1 MiB `resilience` log; broader logs remain disabled to avoid paths,
+  URLs, commands, and user text.
 - [x] Exclude terminal content, prompts, secrets, full commands, and paths from
   watchdog/governor incident logs; both retain scalar metadata in bounded rings.
 - [ ] Test slow Monaco initialization, deliberate event-loop stalls, genuine
@@ -1084,6 +1166,11 @@ nearby implementation. Items marked **atomic** must ship together.
 - [ ] On host-critical pressure, stop new heavy work, shed renderer caches and
   hidden attachments, then choose a bounded graceful-stop victim if pausing does
   not reclaim memory.
+- [x] On host-critical pressure, refuse new PTY trees, pause new renderer
+  byte-materialising I/O admissions, retain honest leases for work already in
+  flight, compact hidden terminals immediately, and release hidden browser
+  freeze frames. Automatic victim selection/graceful stop remains deliberately
+  open because it can destroy an in-flight agent turn.
 - [x] Refuse new PTY process trees before spawn when native pressure is critical
   or host availability has reached the protected IDE reserve; never disturb an
   already-running session as an admission-control side effect.
@@ -1137,14 +1224,18 @@ nearby implementation. Items marked **atomic** must ship together.
   dedicated runners.
 - [ ] Add multi-hour soak tests for browser snapshots, previews, terminal churn,
   file switching, and reconnect cycles.
-- [ ] Define pass/fail footprint slopes and maximum recovery times, not only
+- [x] Define pass/fail footprint slopes and maximum recovery times, not only
   end-state assertions.
 - [ ] Roll out behind telemetry-visible feature flags with conservative defaults.
 - [ ] Provide a kill switch for governor enforcement while retaining measurement.
 - [ ] Write the user-facing memory-grant, pause, recovery, and incident messages.
-- [ ] Publish an operational runbook for collecting bounded profiles without
+- [x] Publish an operational runbook for collecting bounded profiles without
   risking live terminal work.
-- [ ] Re-run an independent adversarial review after each atomic milestone.
+- [x] Re-run an independent adversarial review for this atomic milestone. The
+  second pass found no remaining static release blocker after fixes to active
+  pane caching, pressure ordering, browser close retries, and watchdog decision
+  races. Repeat this review for later milestones; runtime/platform soaks remain
+  open above.
 
 ## Implementation order
 

@@ -27,7 +27,7 @@ const SRC = join(process.cwd(), "src");
 
 /** Every surface that receives an OS file drop. A new one belongs here — the
  *  claim is that no drop listener anywhere escapes the rule. */
-const DROP_SURFACES = ["components/Term.tsx", "components/ChatView.tsx"];
+const DROP_SURFACES = ["terminalWindowEvents.ts", "components/ChatView.tsx"];
 
 /** Code only. The rule is explained in prose above the call sites, and that
  *  prose names the two wrong handles — scanning it would fail on the fix. */

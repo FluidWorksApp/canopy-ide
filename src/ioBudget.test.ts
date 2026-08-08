@@ -135,4 +135,45 @@ describe("IoBudget", () => {
     ).rejects.toThrow("boom");
     expect(budget.snapshot()).toMatchObject({ active: 0, activeBytes: 0 });
   });
+
+  it("refuses new heavy work and holds queued admission while the host is critical", async () => {
+    const budget = new IoBudget({ ...limits, maxConcurrent: 1 });
+    const gate = deferred();
+    const queuedOperation = vi.fn(async () => {});
+    const active = budget.run({ scope: "one", bytes: 4 }, () => gate.promise);
+    const queued = budget.run({ scope: "two", bytes: 2 }, queuedOperation);
+    await vi.waitFor(() => expect(budget.snapshot().queued).toBe(1));
+
+    budget.setHostPressure(2);
+    gate.resolve();
+    await active;
+    await Promise.resolve();
+    expect(queuedOperation).not.toHaveBeenCalled();
+    expect(budget.snapshot()).toMatchObject({
+      hostPressureLevel: 2,
+      active: 0,
+      queued: 1,
+    });
+    await expect(
+      budget.run({ scope: "three", bytes: 1 }, async () => {}),
+    ).rejects.toMatchObject({ reason: "host-critical" });
+
+    budget.setHostPressure(0);
+    await queued;
+    expect(queuedOperation).toHaveBeenCalledTimes(1);
+    expect(budget.snapshot()).toMatchObject({
+      hostPressureLevel: 0,
+      active: 0,
+      queued: 0,
+    });
+  });
+
+  it("fails closed on an invalid host-pressure sample", async () => {
+    const budget = new IoBudget(limits);
+    budget.setHostPressure(Number.NaN);
+    expect(budget.snapshot().hostPressureLevel).toBe(2);
+    await expect(
+      budget.run({ scope: "one", bytes: 1 }, async () => {}),
+    ).rejects.toMatchObject({ reason: "host-critical" });
+  });
 });

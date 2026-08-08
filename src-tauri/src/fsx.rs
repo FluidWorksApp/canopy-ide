@@ -9,6 +9,7 @@ use crate::winproc::NoConsoleWindow;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -406,22 +407,58 @@ pub async fn fs_read_dir(
 /// provider, an agent tool — from moving a DVD image into the WebView.
 const MAX_READ_BYTES: u64 = 512 * 1024 * 1024;
 
+fn read_file_capped(
+    source: std::fs::File,
+    requested_max: Option<u64>,
+) -> Result<Vec<u8>, String> {
+    let max = requested_max.unwrap_or(MAX_READ_BYTES).min(MAX_READ_BYTES);
+    let initial_len = source.metadata().map_err(|e| e.to_string())?.len();
+    if initial_len > max {
+        return Err(format!("file is too large to load ({initial_len} bytes; limit {max})"));
+    }
+
+    // Read through the already-open handle and stop after max+1 bytes. A path
+    // replacement cannot switch this handle underneath us, and concurrent file
+    // growth can allocate at most one byte past the caller's limit before it is
+    // rejected. This closes the old metadata(path) -> read(path) race that could
+    // allocate the generic 512 MiB backstop for an 8 MiB frontend request.
+    let mut bytes = Vec::new();
+    source
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > max {
+        return Err(format!(
+            "file grew past the read limit ({} bytes; limit {max})",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
 /// Returns raw file bytes (no base64) via tauri::ipc::Response.
 #[tauri::command]
 pub async fn fs_read_file(
     state: State<'_, WorkspaceManager>,
     path: String,
+    max_bytes: Option<u64>,
 ) -> Result<tauri::ipc::Response, String> {
     let file = check_scope(&state, Path::new(&path))?;
-    // Checked before the read, not after: the point is to never allocate it.
-    let len = std::fs::metadata(&file).map_err(|e| e.to_string())?.len();
-    if len > MAX_READ_BYTES {
-        return Err(format!(
-            "file is too large to load ({:.1} GB)",
-            len as f64 / (1024.0 * 1024.0 * 1024.0)
-        ));
+    let source = std::fs::File::open(&file).map_err(|e| e.to_string())?;
+    let opened_identity = same_file::Handle::from_file(
+        source.try_clone().map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    // Re-authorize after open and compare the live path with the stable handle.
+    // If an agent replaces a scoped path with a symlink (or swaps it back) in
+    // the check-to-open window, either scope validation or identity comparison
+    // fails. The bytes always come from the already-validated handle.
+    let current = check_scope(&state, Path::new(&path))?;
+    let current_identity = same_file::Handle::from_path(&current).map_err(|e| e.to_string())?;
+    if opened_identity != current_identity {
+        return Err("file changed while opening; retry the read".into());
     }
-    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+    let bytes = read_file_capped(source, max_bytes)?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 
@@ -1223,6 +1260,43 @@ mod tests {
         assert_eq!(snapshots[0].path, file.to_string_lossy());
         assert_eq!(snapshots[0].size, 10);
         assert!(snapshots[0].modified_ms.is_some());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn native_file_reader_obeys_the_caller_limit_before_full_allocation() {
+        let root = std::env::temp_dir().join(format!("canopy-capped-read-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let file = root.join("payload.bin");
+        write(&file, "0123456789");
+
+        let open = || std::fs::File::open(&file).unwrap();
+        assert_eq!(read_file_capped(open(), Some(10)).unwrap(), b"0123456789");
+        let error = read_file_capped(open(), Some(8)).unwrap_err();
+        assert!(error.contains("limit 8"));
+        assert_eq!(read_file_capped(open(), Some(u64::MAX)).unwrap().len(), 10);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn open_file_identity_detects_path_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "canopy-file-identity-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&root).ok();
+        let path = root.join("payload.bin");
+        let old = root.join("opened.bin");
+        write(&path, "authorized");
+        let opened = std::fs::File::open(&path).unwrap();
+        std::fs::rename(&path, &old).unwrap();
+        write(&path, "replacement");
+
+        let opened = same_file::Handle::from_file(opened).unwrap();
+        let current = same_file::Handle::from_path(&path).unwrap();
+        assert_ne!(opened, current);
 
         std::fs::remove_dir_all(&root).ok();
     }

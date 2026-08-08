@@ -27,6 +27,8 @@ import {
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, Notify, RelayHandle } from "./types";
 import type { CustomMicroTask } from "./microTasks";
+import { shedRendererPressure } from "./rendererPressureRelief";
+import { bindMemoryPressure } from "./memoryPressureBinding";
 import {
   applyVibeTargetSelection,
   type VibeTargetSelection,
@@ -2288,18 +2290,14 @@ export default function App() {
   // editor boot cannot be mistaken for a dead renderer. This effect only
   // surfaces host pressure once the UI exists.
   useEffect(() => {
-    let unMem: (() => void) | undefined;
-    void ipc
-      .onMemoryPressure((p) => setMemPressure(p.level > 0 ? p : null))
-      .then((u) => {
-        unMem = u;
-      });
-    void ipc
-      .memoryInfo()
-      .then((p) => p && p.level > 0 && setMemPressure(p));
-    return () => {
-      unMem?.();
-    };
+    return bindMemoryPressure(
+      ipc.onMemoryPressure,
+      ipc.memoryInfo,
+      (p) => {
+        shedRendererPressure(p.level);
+        setMemPressure(p.level > 0 ? p : null);
+      },
+    );
   }, []);
 
   const saveProject = useCallback(

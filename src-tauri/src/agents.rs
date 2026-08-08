@@ -139,6 +139,11 @@ pub struct SessionStats {
     pub desktop_delivery_chunks: u64,
     pub desktop_delivery_bytes: u64,
     pub desktop_acked_bytes: u64,
+    pub desktop_delivery_chunk_bytes_max: u64,
+    pub desktop_ack_latency_last_ms: u64,
+    pub desktop_ack_latency_max_ms: u64,
+    pub desktop_ack_latency_total_ms: u64,
+    pub desktop_ack_latency_samples: u64,
 }
 
 /// The one process worth identifying in a terminal.
@@ -536,6 +541,11 @@ pub fn start_monitor(app: AppHandle) {
                         desktop_delivery_chunks: delivery.delivery_chunks,
                         desktop_delivery_bytes: delivery.delivery_bytes,
                         desktop_acked_bytes: delivery.acked_bytes,
+                        desktop_delivery_chunk_bytes_max: delivery.delivery_chunk_bytes_max,
+                        desktop_ack_latency_last_ms: delivery.ack_latency_last_ms,
+                        desktop_ack_latency_max_ms: delivery.ack_latency_max_ms,
+                        desktop_ack_latency_total_ms: delivery.ack_latency_total_ms,
+                        desktop_ack_latency_samples: delivery.ack_latency_samples,
                     });
                 }
 
@@ -5330,6 +5340,11 @@ mod tests {
             desktop_delivery_chunks: 0,
             desktop_delivery_bytes: 0,
             desktop_acked_bytes: 0,
+            desktop_delivery_chunk_bytes_max: 0,
+            desktop_ack_latency_last_ms: 0,
+            desktop_ack_latency_max_ms: 0,
+            desktop_ack_latency_total_ms: 0,
+            desktop_ack_latency_samples: 0,
         }]));
         let mut ports = HashMap::from([(7, vec![4321])]);
 

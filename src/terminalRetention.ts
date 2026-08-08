@@ -30,6 +30,10 @@ export interface TerminalRetentionSnapshot {
   estimatedBufferCells: number;
   estimatedBufferCellsHighWater: number;
   parsedWriteBatches: number;
+  parsedWriteBytes: number;
+  parseLatencyLastMs: number;
+  parseLatencyMaxMs: number;
+  parseLatencyTotalMs: number;
   compactionAttempts: number;
   compactionSuccesses: number;
   compactionRejectedTooLarge: number;
@@ -71,6 +75,10 @@ const empty = (): TerminalRetentionSnapshot => ({
   estimatedBufferCells: 0,
   estimatedBufferCellsHighWater: 0,
   parsedWriteBatches: 0,
+  parsedWriteBytes: 0,
+  parseLatencyLastMs: 0,
+  parseLatencyMaxMs: 0,
+  parseLatencyTotalMs: 0,
   compactionAttempts: 0,
   compactionSuccesses: 0,
   compactionRejectedTooLarge: 0,
@@ -84,7 +92,7 @@ const empty = (): TerminalRetentionSnapshot => ({
 
 export interface TerminalRetentionTracker {
   update: (sample: TerminalRetentionSample) => void;
-  parsedWrite: () => void;
+  parsedWrite: (bytes?: number, latencyMs?: number) => void;
   compactionAttempted: () => void;
   compactionFailed: () => void;
   reserveCompaction: (bytes: number) => boolean;
@@ -121,8 +129,18 @@ export class TerminalRetentionRegistry {
         current = normalized(next);
         this.add(current);
       },
-      parsedWrite: () => {
-        if (!disposed) this.state.parsedWriteBatches += 1;
+      parsedWrite: (bytes = 0, latencyMs = 0) => {
+        if (disposed) return;
+        const boundedBytes = count(bytes);
+        const boundedLatency = count(latencyMs);
+        this.state.parsedWriteBatches += 1;
+        this.state.parsedWriteBytes += boundedBytes;
+        this.state.parseLatencyLastMs = boundedLatency;
+        this.state.parseLatencyMaxMs = Math.max(
+          this.state.parseLatencyMaxMs,
+          boundedLatency,
+        );
+        this.state.parseLatencyTotalMs += boundedLatency;
       },
       compactionAttempted: () => {
         if (!disposed) this.state.compactionAttempts += 1;

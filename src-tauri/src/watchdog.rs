@@ -15,8 +15,8 @@
 //! reloadable preview heaps as pressure rises, and tell the UI before the
 //! system decides to take the main renderer itself.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -32,6 +32,10 @@ const PING_EVERY: Duration = Duration::from_secs(3);
 const STALE_AFTER: Duration = Duration::from_secs(9);
 /// Consecutive stale readings before the webview is reloaded.
 const MISSES_BEFORE_RELOAD: u32 = 3;
+/// One native pressure-shed pass may run before heartbeat recovery. It gets
+/// exactly one ping interval; renderer progress must never depend on an
+/// unbounded series of hopeful cache sweeps.
+const PRESSURE_SHED_PROBE: Duration = PING_EVERY;
 /// Grace after a reload before enforcement resumes — the fresh page needs
 /// time to boot before it can start answering pings.
 const RELOAD_GRACE: Duration = Duration::from_secs(45);
@@ -43,6 +47,11 @@ const RELOAD_WINDOW: Duration = Duration::from_secs(10 * 60);
 /// Native termination and heartbeat can report the same failure. One reload is
 /// enough; suppress duplicate initiators while the replacement page boots.
 const INCIDENTS_MAX: usize = 128;
+
+/// Temporary value while a native reload call is in flight. It cannot collide
+/// with a real epoch-millisecond acknowledgement, so compare-exchange can tell
+/// whether a renderer ack/registration raced the call without an ABA window.
+const ACK_RECOVERY_SENTINEL: u64 = u64::MAX;
 
 /// How often host memory is sampled.
 const MEM_POLL_EVERY: Duration = Duration::from_secs(5);
@@ -76,6 +85,81 @@ pub struct RecoveryIncident {
     pub generation: u64,
     pub detail: u64,
     pub outcome: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeartbeatAction {
+    Healthy,
+    Waiting,
+    BeginPressureShed,
+    RecoveredAfterShed,
+    Reload,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReloadDecision {
+    Started,
+    InRecovery,
+    RateLimited,
+    Failed,
+}
+
+fn reload_decision_message(
+    reason: &'static str,
+    outcome: &'static str,
+    generation: u64,
+    detail: u64,
+    reloads_in_window: usize,
+    grace_remaining_ms: u64,
+) -> String {
+    format!(
+        "webview-recovery decision reason={reason} outcome={outcome} generation={generation} detail={detail} reloads_in_window={reloads_in_window} grace_remaining_ms={grace_remaining_ms}"
+    )
+}
+
+#[derive(Default)]
+struct HeartbeatTracker {
+    misses: u32,
+    probe_deadline_ms: Option<u64>,
+    suppressed_until_ms: Option<u64>,
+}
+
+impl HeartbeatTracker {
+    fn observe(&mut self, now: u64, stale: bool) -> HeartbeatAction {
+        if !stale {
+            self.misses = 0;
+            self.suppressed_until_ms = None;
+            return if self.probe_deadline_ms.take().is_some() {
+                HeartbeatAction::RecoveredAfterShed
+            } else {
+                HeartbeatAction::Healthy
+            };
+        }
+        if self.suppressed_until_ms.is_some_and(|until| now < until) {
+            return HeartbeatAction::Waiting;
+        }
+        self.suppressed_until_ms = None;
+        if let Some(deadline) = self.probe_deadline_ms {
+            if now >= deadline {
+                self.probe_deadline_ms = None;
+                return HeartbeatAction::Reload;
+            }
+            return HeartbeatAction::Waiting;
+        }
+        self.misses = self.misses.saturating_add(1);
+        if self.misses < MISSES_BEFORE_RELOAD {
+            return HeartbeatAction::Waiting;
+        }
+        self.misses = 0;
+        self.probe_deadline_ms = Some(now.saturating_add(PRESSURE_SHED_PROBE.as_millis() as u64));
+        HeartbeatAction::BeginPressureShed
+    }
+
+    fn suppress_for(&mut self, now: u64, duration: Duration) {
+        self.misses = 0;
+        self.probe_deadline_ms = None;
+        self.suppressed_until_ms = Some(now.saturating_add(duration.as_millis() as u64));
+    }
 }
 
 impl Default for WatchdogState {
@@ -124,16 +208,34 @@ impl WatchdogState {
     fn request_reload<R: tauri::Runtime>(
         &self,
         main: &tauri::webview::Webview<R>,
-        reason: &str,
+        reason: &'static str,
         detail: u64,
-    ) -> bool {
+    ) -> ReloadDecision {
+        self.request_reload_with(reason, detail, || {
+            main.reload().map_err(|error| error.to_string())
+        })
+    }
+
+    fn request_reload_with<F>(&self, reason: &'static str, detail: u64, reload: F) -> ReloadDecision
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
         let now = now_ms();
+        let generation = self.renderer_generation.load(Ordering::SeqCst);
+        let grace_until = now.saturating_add(RELOAD_GRACE.as_millis() as u64);
         {
             let mut recovery = self.recovery.lock().unwrap();
             if now < recovery.grace_until_ms {
                 drop(recovery);
                 self.record(reason, detail, "suppressed_during_recovery");
-                return false;
+                self.log_reload_decision(
+                    reason,
+                    "suppressed_during_recovery",
+                    generation,
+                    detail,
+                    now,
+                );
+                return ReloadDecision::InRecovery;
             }
             let window_ms = RELOAD_WINDOW.as_millis() as u64;
             while recovery
@@ -146,27 +248,86 @@ impl WatchdogState {
             if recovery.reloads_ms.len() >= MAX_RELOADS {
                 drop(recovery);
                 self.record(reason, detail, "rate_limited");
-                log::error!(
-                    "webview recovery: {MAX_RELOADS} reloads in {}s; refusing churn",
-                    RELOAD_WINDOW.as_secs()
-                );
-                return false;
+                self.log_reload_decision(reason, "rate_limited", generation, detail, now);
+                return ReloadDecision::RateLimited;
             }
             recovery.reloads_ms.push_back(now);
-            recovery.grace_until_ms = now.saturating_add(RELOAD_GRACE.as_millis() as u64);
+            recovery.grace_until_ms = grace_until;
         }
-        self.last_ack_ms.store(now, Ordering::Relaxed);
-        match main.reload() {
+        let previous_ack = self
+            .last_ack_ms
+            .swap(ACK_RECOVERY_SENTINEL, Ordering::Relaxed);
+        match reload() {
             Ok(()) => {
+                // Keep a real acknowledgement that arrived during reload;
+                // otherwise begin the replacement page's grace from this
+                // decision without leaving the sentinel visible afterward.
+                let _ = self.last_ack_ms.compare_exchange(
+                    ACK_RECOVERY_SENTINEL,
+                    now,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
                 self.record(reason, detail, "reload_started");
-                true
+                self.log_reload_decision(reason, "reload_started", generation, detail, now);
+                ReloadDecision::Started
             }
-            Err(error) => {
+            Err(_error) => {
+                // The slot/grace was a reservation closing simultaneous reload
+                // races, not a completed attempt. Roll it back when the native
+                // reload call itself fails so telemetry and retry timing remain
+                // truthful.
+                let mut recovery = self.recovery.lock().unwrap();
+                if recovery.grace_until_ms == grace_until {
+                    recovery.grace_until_ms = 0;
+                }
+                if let Some(index) = recovery.reloads_ms.iter().rposition(|at| *at == now) {
+                    recovery.reloads_ms.remove(index);
+                }
+                drop(recovery);
+                // `reload()` is native work and acknowledgements continue on a
+                // different thread while it runs. Restore the old timestamp
+                // only if our recovery sentinel is still present;
+                // otherwise a live renderer's newer acknowledgement wins.
+                let _ = self.last_ack_ms.compare_exchange(
+                    ACK_RECOVERY_SENTINEL,
+                    previous_ack,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
                 self.record(reason, detail, "reload_failed");
-                log::error!("webview recovery ({reason}) reload failed: {error}");
-                false
+                self.log_reload_decision(reason, "reload_failed", generation, detail, now);
+                ReloadDecision::Failed
             }
         }
+    }
+
+    /// One fixed-shape, content-free release record for every reload decision.
+    /// The in-memory incident ring is richer while the native host lives; this
+    /// line is what survives renderer and app exits in the 1 MiB resilience log.
+    fn log_reload_decision(
+        &self,
+        reason: &'static str,
+        outcome: &'static str,
+        generation: u64,
+        detail: u64,
+        now: u64,
+    ) {
+        let recovery = self.recovery.lock().unwrap();
+        let reloads_in_window = recovery.reloads_ms.len();
+        let grace_remaining_ms = recovery.grace_until_ms.saturating_sub(now);
+        drop(recovery);
+        log::info!(
+            "{}",
+            reload_decision_message(
+                reason,
+                outcome,
+                generation,
+                detail,
+                reloads_in_window,
+                grace_remaining_ms,
+            )
+        );
     }
 
     fn incidents(&self) -> Vec<RecoveryIncident> {
@@ -177,6 +338,18 @@ impl WatchdogState {
             .iter()
             .cloned()
             .collect()
+    }
+
+    pub fn app_exiting(&self, live_ptys: u64) {
+        self.record("app_exit", live_ptys, "kill_all_started");
+        log::info!("app-exit cleanup: requesting stop for {live_ptys} live PTYs");
+    }
+
+    pub fn app_exit_cleanup_returned(&self, requested: u64, force_signals: u64) {
+        self.record("app_exit", force_signals, "kill_all_returned");
+        log::info!(
+            "app-exit cleanup: PTY kill_all returned (requested={requested}, force_signals={force_signals})"
+        );
     }
 }
 
@@ -195,9 +368,7 @@ pub fn watchdog_ack(state: tauri::State<'_, Arc<WatchdogState>>, generation: u64
 }
 
 #[tauri::command]
-pub fn watchdog_incidents(
-    state: tauri::State<'_, Arc<WatchdogState>>,
-) -> Vec<RecoveryIncident> {
+pub fn watchdog_incidents(state: tauri::State<'_, Arc<WatchdogState>>) -> Vec<RecoveryIncident> {
     state.incidents()
 }
 
@@ -334,11 +505,6 @@ pub fn ping_is_stale(age_ms: u64, stale_ms: u64) -> bool {
     age_ms >= stale_ms
 }
 
-/// Enough consecutive stale pings to reload the webview.
-pub fn misses_trigger_reload(misses: u32, threshold: u32) -> bool {
-    misses >= threshold
-}
-
 /// Refresh previews only while pressure is getting worse. A downward critical
 /// -> warning transition means the first refresh worked and must not trigger a
 /// second, user-visible reload.
@@ -368,7 +534,7 @@ fn start_webview_watchdog(app: AppHandle) {
     std::thread::Builder::new()
         .name("webview-watchdog".into())
         .spawn(move || {
-            let mut misses: u32 = 0;
+            let mut heartbeat = HeartbeatTracker::default();
             loop {
                 std::thread::sleep(PING_EVERY);
                 // Only the main webview. Previews and browser tabs have their
@@ -385,30 +551,56 @@ fn start_webview_watchdog(app: AppHandle) {
                     // A hidden or minimized webview is throttled by WebKit and
                     // may legitimately not run JS — and its death is not
                     // something the user can see anyway. Skip enforcement.
+                    // Never carry an expired pressure-probe deadline through a
+                    // minimized interval. On restore the renderer gets a fresh
+                    // observation window before any recovery action.
+                    heartbeat = HeartbeatTracker::default();
                     continue;
                 }
                 if ack.in_recovery_grace() {
+                    heartbeat = HeartbeatTracker::default();
                     continue;
                 }
                 let age_ms = now_ms().saturating_sub(ack.last_ack_ms.load(Ordering::Relaxed));
                 let delivered = app.emit("watchdog:ping", ()).is_ok();
-                if delivered && !ping_is_stale(age_ms, STALE_AFTER.as_millis() as u64) {
-                    misses = 0;
-                    continue;
+                let stale = !delivered
+                    || ping_is_stale(age_ms, STALE_AFTER.as_millis() as u64);
+                match heartbeat.observe(now_ms(), stale) {
+                    HeartbeatAction::Healthy | HeartbeatAction::Waiting => {}
+                    HeartbeatAction::RecoveredAfterShed => {
+                        ack.record("heartbeat_pressure_probe", age_ms, "recovered");
+                    }
+                    HeartbeatAction::BeginPressureShed => {
+                        let released = app
+                            .state::<crate::browser::BrowserManager>()
+                            .reload_for_memory_pressure(&app, false)
+                            .len() as u64;
+                        ack.record("heartbeat_pressure_probe", released, "started");
+                    }
+                    HeartbeatAction::Reload => {
+                        // Same-event-loop liveness cannot distinguish a dead
+                        // renderer from prolonged JS starvation. One bounded
+                        // native shed probe has now also failed.
+                        log::error!(
+                            "webview-watchdog: renderer heartbeat stalled (ack {}ms stale); requesting recovery",
+                            age_ms
+                        );
+                        match ack.request_reload(&main, "heartbeat_stall", age_ms) {
+                            ReloadDecision::Started | ReloadDecision::InRecovery => {}
+                            ReloadDecision::RateLimited => {
+                                // Do not restart the miss/probe cycle and reload
+                                // hidden previews forever after the main reload
+                                // limiter has already refused further churn.
+                                heartbeat.suppress_for(now_ms(), RELOAD_WINDOW);
+                            }
+                            ReloadDecision::Failed => {
+                                // A native reload failure may be transient, but
+                                // retrying every few pings creates its own churn.
+                                heartbeat.suppress_for(now_ms(), RELOAD_GRACE);
+                            }
+                        }
+                    }
                 }
-                misses += 1;
-                if !misses_trigger_reload(misses, MISSES_BEFORE_RELOAD) {
-                    continue;
-                }
-                // Same-event-loop liveness cannot distinguish a dead renderer
-                // from prolonged JS starvation. Record exactly that evidence;
-                // the coordinator deduplicates it with native termination.
-                log::error!(
-                    "webview-watchdog: renderer heartbeat stalled (ack {}ms stale); requesting recovery",
-                    age_ms
-                );
-                misses = 0;
-                ack.request_reload(&main, "heartbeat_stall", age_ms);
             }
         })
         .expect("spawn webview-watchdog");
@@ -526,7 +718,29 @@ mod tests {
         }
         let incidents = state.incidents();
         assert_eq!(incidents.len(), INCIDENTS_MAX);
-        assert_eq!(incidents.last().unwrap().detail, (INCIDENTS_MAX + 49) as u64);
+        assert_eq!(
+            incidents.last().unwrap().detail,
+            (INCIDENTS_MAX + 49) as u64
+        );
+    }
+
+    #[test]
+    fn app_exit_records_the_live_pty_count_before_cleanup() {
+        let state = WatchdogState::default();
+        state.renderer_registered(9);
+        state.app_exiting(4);
+        let incident = state.incidents().pop().unwrap();
+        assert_eq!(incident.kind, "app_exit");
+        assert_eq!(incident.generation, 9);
+        assert_eq!(incident.detail, 4);
+        assert_eq!(incident.outcome, "kill_all_started");
+
+        state.app_exit_cleanup_returned(4, 1);
+        let incident = state.incidents().pop().unwrap();
+        assert_eq!(incident.kind, "app_exit");
+        assert_eq!(incident.generation, 9);
+        assert_eq!(incident.detail, 1);
+        assert_eq!(incident.outcome, "kill_all_returned");
     }
 
     #[test]
@@ -535,8 +749,14 @@ mod tests {
         let main = app.get_webview(APP_WEBVIEW).unwrap();
         let state = WatchdogState::default();
         state.renderer_registered(7);
-        assert!(state.request_reload(&main, "native_termination", 0));
-        assert!(!state.request_reload(&main, "heartbeat_stall", 30_000));
+        assert_eq!(
+            state.request_reload(&main, "native_termination", 0),
+            ReloadDecision::Started
+        );
+        assert_eq!(
+            state.request_reload(&main, "heartbeat_stall", 30_000),
+            ReloadDecision::InRecovery
+        );
         assert!(state
             .incidents()
             .iter()
@@ -560,8 +780,127 @@ mod tests {
     fn ping_staleness_and_reload_trigger() {
         assert!(!ping_is_stale(8_999, 9_000));
         assert!(ping_is_stale(9_000, 9_000));
-        assert!(!misses_trigger_reload(2, 3));
-        assert!(misses_trigger_reload(3, 3));
+    }
+
+    #[test]
+    fn heartbeat_allows_exactly_one_bounded_pressure_shed_probe() {
+        let mut tracker = HeartbeatTracker::default();
+        assert_eq!(tracker.observe(0, true), HeartbeatAction::Waiting);
+        assert_eq!(tracker.observe(3_000, true), HeartbeatAction::Waiting);
+        assert_eq!(
+            tracker.observe(6_000, true),
+            HeartbeatAction::BeginPressureShed
+        );
+        assert_eq!(tracker.observe(8_999, true), HeartbeatAction::Waiting);
+        assert_eq!(tracker.observe(9_000, true), HeartbeatAction::Reload);
+        assert_eq!(tracker.probe_deadline_ms, None);
+    }
+
+    #[test]
+    fn heartbeat_probe_recovery_resets_the_tracker() {
+        let mut tracker = HeartbeatTracker::default();
+        tracker.observe(0, true);
+        tracker.observe(3_000, true);
+        tracker.observe(6_000, true);
+        assert_eq!(
+            tracker.observe(7_000, false),
+            HeartbeatAction::RecoveredAfterShed
+        );
+        assert_eq!(tracker.observe(10_000, false), HeartbeatAction::Healthy);
+    }
+
+    #[test]
+    fn minimized_interval_discards_an_expired_probe_deadline() {
+        let mut tracker = HeartbeatTracker::default();
+        tracker.observe(0, true);
+        tracker.observe(3_000, true);
+        assert_eq!(
+            tracker.observe(6_000, true),
+            HeartbeatAction::BeginPressureShed
+        );
+        // This is what the window-hidden branch does before observations resume.
+        tracker = HeartbeatTracker::default();
+        assert_eq!(tracker.observe(60_000, true), HeartbeatAction::Waiting);
+    }
+
+    #[test]
+    fn reload_suppression_prevents_repeated_pressure_probe_churn() {
+        let mut tracker = HeartbeatTracker::default();
+        tracker.suppress_for(10_000, RELOAD_WINDOW);
+        assert_eq!(tracker.observe(20_000, true), HeartbeatAction::Waiting);
+        assert_eq!(tracker.observe(20_000, false), HeartbeatAction::Healthy);
+        assert_eq!(tracker.observe(23_000, true), HeartbeatAction::Waiting);
+    }
+
+    #[test]
+    fn failed_native_reload_rolls_back_slot_grace_and_ack() {
+        let state = WatchdogState::default();
+        state.renderer_registered(3);
+        let previous_ack = state.last_ack_ms.load(Ordering::Relaxed);
+        assert_eq!(
+            state.request_reload_with("test_failure", 7, || Err("no surface".into())),
+            ReloadDecision::Failed
+        );
+        assert_eq!(state.last_ack_ms.load(Ordering::Relaxed), previous_ack);
+        let recovery = state.recovery.lock().unwrap();
+        assert_eq!(recovery.grace_until_ms, 0);
+        assert!(recovery.reloads_ms.is_empty());
+        drop(recovery);
+        assert!(state
+            .incidents()
+            .iter()
+            .any(|incident| incident.outcome == "reload_failed"));
+    }
+
+    #[test]
+    fn failed_native_reload_does_not_clobber_a_racing_ack() {
+        let state = WatchdogState::default();
+        state.renderer_registered(3);
+        let racing_ack = state.last_ack_ms.load(Ordering::Relaxed).saturating_add(1);
+        assert_eq!(
+            state.request_reload_with("test_failure", 7, || {
+                // Models a heartbeat acknowledgement (or replacement renderer
+                // registration) arriving while the native reload call runs.
+                state.last_ack_ms.store(racing_ack, Ordering::Relaxed);
+                Err("no surface".into())
+            }),
+            ReloadDecision::Failed
+        );
+        assert_eq!(state.last_ack_ms.load(Ordering::Relaxed), racing_ack);
+    }
+
+    #[test]
+    fn successful_native_reload_keeps_a_racing_ack_and_never_leaves_the_sentinel() {
+        let state = WatchdogState::default();
+        state.renderer_registered(3);
+        let racing_ack = state.last_ack_ms.load(Ordering::Relaxed).saturating_add(1);
+        assert_eq!(
+            state.request_reload_with("test_success", 8, || {
+                state.last_ack_ms.store(racing_ack, Ordering::Relaxed);
+                Ok(())
+            }),
+            ReloadDecision::Started
+        );
+        assert_eq!(state.last_ack_ms.load(Ordering::Relaxed), racing_ack);
+
+        let clean = WatchdogState::default();
+        clean.renderer_registered(4);
+        assert_eq!(
+            clean.request_reload_with("test_success", 9, || Ok(())),
+            ReloadDecision::Started
+        );
+        assert_ne!(
+            clean.last_ack_ms.load(Ordering::Relaxed),
+            ACK_RECOVERY_SENTINEL
+        );
+    }
+
+    #[test]
+    fn release_reload_decision_record_has_only_fixed_scalar_fields() {
+        assert_eq!(
+            reload_decision_message("heartbeat_stall", "reload_started", 4, 9_001, 2, 45_000),
+            "webview-recovery decision reason=heartbeat_stall outcome=reload_started generation=4 detail=9001 reloads_in_window=2 grace_remaining_ms=45000"
+        );
     }
 
     #[test]

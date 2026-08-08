@@ -769,6 +769,33 @@ export function forgetBrowserView(tabId: string) {
   schedule();
 }
 
+/** Drop only reconstructable freeze-frame copies owned by views that are
+ * already hidden. Native pages and visible placeholders are untouched; a
+ * future show captures a fresh frame. */
+export function releaseHiddenBrowserFrames(): {
+  frames: number;
+  bytes: number;
+} {
+  let frames = 0;
+  let bytes = 0;
+  for (const [tabId, entry] of views) {
+    if (entry.wanted && entry.shown !== false) continue;
+    if (!entry.frame && entry.frameBytes === 0) continue;
+    entry.captureSeq += 1;
+    entry.dirty = true;
+    const previous = entry.frame;
+    const previousBytes = entry.frameBytes;
+    entry.frame = null;
+    entry.frameBytes = 0;
+    releaseFrameSrc(previous);
+    releaseBrowserFrame(previousBytes);
+    publish(tabId, entry);
+    frames += 1;
+    bytes += previousBytes;
+  }
+  return { frames, bytes };
+}
+
 /** What every registered view believes about itself, for anything watching.
  *
  *  A reading, not a recalculation: whoever is checking this layer has to be

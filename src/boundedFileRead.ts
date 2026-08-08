@@ -29,14 +29,16 @@ export interface BoundedFileReadOptions {
 }
 
 /** Gate a whole-file IPC read before the native byte array crosses into the
- * renderer. The post-read check closes ordinary metadata drift for retention;
- * preventing a malicious/stat-read growth race allocation requires a bounded
- * native read command and remains a separate backend item. */
+ * renderer. The native reader receives the same maximum and reads at most one
+ * byte beyond it, while this post-read check also defends custom/test readers. */
 export async function readBoundedFile(
   path: string,
   options: BoundedFileReadOptions,
 ): Promise<Uint8Array> {
-  const reader = options.reader ?? { stat: ipc.fsStat, read: ipc.fsReadFile };
+  const reader = options.reader ?? {
+    stat: ipc.fsStat,
+    read: (candidate: string) => ipc.fsReadFile(candidate, options.maxBytes),
+  };
   const stat = await reader.stat(path);
   if (stat.is_dir) throw new Error(`${path} is a directory`);
   if (stat.size > options.maxBytes) {

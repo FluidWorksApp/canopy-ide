@@ -484,6 +484,27 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            } else {
+                // Release builds retain one small, content-free resilience log
+                // across renderer and native-host exits. Do not widen this
+                // filter: ordinary application logs may contain paths, URLs or
+                // user-authored text that do not belong in incident telemetry.
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::default()
+                        .level(log::LevelFilter::Info)
+                        .max_file_size(1024 * 1024)
+                        .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+                        .clear_targets()
+                        .target(
+                            tauri_plugin_log::Target::new(
+                                tauri_plugin_log::TargetKind::LogDir {
+                                    file_name: Some("resilience".into()),
+                                },
+                            )
+                            .filter(|metadata| metadata.target().contains("watchdog")),
+                        )
+                        .build(),
+                )?;
             }
             // Edge's built-in shortcuts are not Canopy's to hand out — see
             // webview_keys.rs. Done here rather than at window creation
@@ -808,6 +829,7 @@ pub fn run() {
             browser::browser_set_bounds,
             browser::browser_set_visible,
             browser::browser_close,
+            browser::browser_close_metrics,
             browser::browser_run_op,
             browser::browser_command,
             browser::browser_here,
@@ -861,8 +883,16 @@ pub fn run() {
                 // the app quit mid-dictation. Cheap, and the one piece of state
                 // here that outlives the process.
                 sysaudio::restore();
+                let pty = app.state::<pty::PtyManager>();
+                app.state::<std::sync::Arc<watchdog::WatchdogState>>()
+                    .app_exiting(pty.live_count() as u64);
                 // Guarantee no child processes outlive the app.
-                app.state::<pty::PtyManager>().kill_all();
+                let pty_cleanup = pty.kill_all();
+                app.state::<std::sync::Arc<watchdog::WatchdogState>>()
+                    .app_exit_cleanup_returned(
+                        pty_cleanup.requested,
+                        pty_cleanup.force_signals,
+                    );
                 app.state::<lsp::LspManager>().kill_all();
                 // ... and no relay socket either.
                 app.state::<relay::RelayManager>().shutdown();

@@ -90,6 +90,21 @@ const harness = (surface = new FakeSurface(), maxSerializedBytes = 1_024) => {
 };
 
 describe("hidden terminal compaction", () => {
+  it("advances hidden idle compaction under pressure but never compacts visible state", async () => {
+    const h = harness();
+    expect(h.controller.compactNow()).toBe(false);
+    h.controller.hide();
+    expect(h.controller.compactNow()).toBe(true);
+    h.fireTimer();
+    h.surface.pendingDrain?.();
+    expect(h.compacted).toHaveBeenCalledOnce();
+
+    const shown = h.controller.show();
+    h.surface.pendingRestore?.();
+    await shown;
+    expect(h.controller.compactNow()).toBe(false);
+  });
+
   it("drains parsing, compacts, then restores before show resolves", async () => {
     const h = harness();
     h.controller.hide();

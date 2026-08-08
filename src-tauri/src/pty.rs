@@ -28,6 +28,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast;
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
+const PENDING_ACK_BATCHES_MAX: usize = 256;
 /// How long the flusher polls for the child's exit status once its output has
 /// ended, before reporting the exit without one. Long enough for a normally
 /// exiting process (the status is usually there on the first poll), short enough
@@ -112,6 +113,9 @@ pub fn instance_id() -> String {
 
 pub struct Session {
     pub id: u32,
+    /// Rust-owned lifetime identity, independent of renderer and attachment
+    /// generations. It never changes for this child process.
+    pub session_generation: u64,
     pub pid: Option<u32>,
     pub kind: SessionKind,
     pub title: Mutex<String>,
@@ -168,6 +172,11 @@ pub struct Session {
     desktop_delivery_chunks: AtomicU64,
     desktop_delivery_bytes: AtomicU64,
     desktop_acked_bytes: AtomicU64,
+    desktop_delivery_chunk_bytes_max: AtomicU64,
+    desktop_ack_latency_last_ms: AtomicU64,
+    desktop_ack_latency_max_ms: AtomicU64,
+    desktop_ack_latency_total_ms: AtomicU64,
+    desktop_ack_latency_samples: AtomicU64,
     /// When the human last typed, so the CLI's echo of a keystroke is not read
     /// as the agent working.
     last_input_ms: AtomicU64,
@@ -178,6 +187,55 @@ struct DesktopAttachment {
     generation: u64,
     channel: Channel<InvokeResponseBody>,
     outstanding: usize,
+    pending_acks: PendingAckLedger,
+}
+
+#[derive(Default)]
+struct PendingAckLedger {
+    batches: VecDeque<(usize, u64)>,
+}
+
+impl PendingAckLedger {
+    fn record(&mut self, bytes: usize, sent_ms: u64) {
+        if bytes == 0 {
+            return;
+        }
+        if self.batches.len() >= PENDING_ACK_BATCHES_MAX {
+            if let Some((pending, _oldest_sent_ms)) = self.batches.back_mut() {
+                *pending = pending.saturating_add(bytes);
+            }
+        } else {
+            self.batches.push_back((bytes, sent_ms));
+        }
+    }
+
+    fn acknowledge(&mut self, bytes: usize, now_ms: u64) -> Option<u64> {
+        if bytes == 0 {
+            return None;
+        }
+        let latency = self
+            .batches
+            .front()
+            .map(|(_, sent)| now_ms.saturating_sub(*sent))?;
+        let mut remaining = bytes;
+        while remaining > 0 {
+            let Some((pending, _)) = self.batches.front_mut() else {
+                break;
+            };
+            let consumed = remaining.min(*pending);
+            *pending -= consumed;
+            remaining -= consumed;
+            if *pending == 0 {
+                self.batches.pop_front();
+            }
+        }
+        Some(latency)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.batches.len()
+    }
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,6 +265,11 @@ pub struct DesktopDeliveryMetrics {
     pub delivery_chunks: u64,
     pub delivery_bytes: u64,
     pub acked_bytes: u64,
+    pub delivery_chunk_bytes_max: u64,
+    pub ack_latency_last_ms: u64,
+    pub ack_latency_max_ms: u64,
+    pub ack_latency_total_ms: u64,
+    pub ack_latency_samples: u64,
 }
 
 /// Wall-clock milliseconds. Only ever differenced against itself.
@@ -225,6 +288,12 @@ const REAPED_TTL: Duration = Duration::from_secs(60);
 const REAPED_SESSIONS: usize = 8;
 
 type ReapedOutput = Arc<Mutex<VecDeque<(u32, Vec<u8>, std::time::Instant)>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KillAllReport {
+    pub requested: u64,
+    pub force_signals: u64,
+}
 
 /// Keep an exited session's output readable for a short while. Called once,
 /// immediately before the session leaves the live map.
@@ -259,6 +328,7 @@ pub struct PtyManager {
     /// bytes outlive the session instead.
     reaped: Arc<Mutex<VecDeque<(u32, Vec<u8>, std::time::Instant)>>>,
     next_id: AtomicU32,
+    next_session_generation: AtomicU64,
     /// Monotonic identity of the currently authoritative JavaScript page.
     /// Registering a new page detaches every channel held by the previous one.
     renderer_generation: AtomicU64,
@@ -274,6 +344,7 @@ impl Default for PtyManager {
             sessions: Default::default(),
             reaped: Default::default(),
             next_id: AtomicU32::new(0),
+            next_session_generation: AtomicU64::new(0),
             renderer_generation: AtomicU64::new(0),
             renderer_gate: Mutex::new(()),
         }
@@ -283,6 +354,7 @@ impl Default for PtyManager {
 #[derive(Serialize, Clone)]
 pub struct PtyExit {
     pub id: u32,
+    pub session_generation: u64,
     pub exit_code: Option<u32>,
     pub requested: bool,
 }
@@ -292,6 +364,7 @@ pub struct PtyExit {
 #[derive(Serialize, Clone)]
 pub struct PtySpawned {
     pub id: u32,
+    pub session_generation: u64,
     pub cwd: String,
     pub title: String,
     pub cols: u16,
@@ -303,6 +376,7 @@ pub struct PtySpawned {
 #[derive(Serialize, Clone)]
 pub struct PtySummary {
     pub id: u32,
+    pub session_generation: u64,
     pub pid: Option<u32>,
     pub cwd: String,
     pub title: String,
@@ -316,6 +390,7 @@ pub struct PtySummary {
 #[derive(Serialize, Clone)]
 pub struct SpawnResult {
     pub id: u32,
+    pub session_generation: u64,
     pub pid: Option<u32>,
     /// The size the pty was actually opened at — see PtyGeometry.
     pub cols: u16,
@@ -337,6 +412,24 @@ pub struct PtyGeometry {
 }
 
 impl PtyManager {
+    fn allocate_session_identity(&self) -> Result<(u32, u64), String> {
+        let id = self
+            .next_id
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                value.checked_add(1)
+            })
+            .map(|previous| previous + 1)
+            .map_err(|_| "terminal session id space exhausted".to_string())?;
+        let generation = self
+            .next_session_generation
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                value.checked_add(1)
+            })
+            .map(|previous| previous + 1)
+            .map_err(|_| "terminal session generation space exhausted".to_string())?;
+        Ok((id, generation))
+    }
+
     pub fn sessions(&self) -> Arc<Mutex<HashMap<u32, Arc<Session>>>> {
         self.sessions.clone()
     }
@@ -344,6 +437,10 @@ impl PtyManager {
     /// Look up a live session by id.
     pub fn get(&self, id: u32) -> Option<Arc<Session>> {
         self.sessions.lock().unwrap().get(&id).cloned()
+    }
+
+    pub fn live_count(&self) -> usize {
+        self.sessions.lock().unwrap().len()
     }
 
     /// Every session live right now, so a remote client can determine which
@@ -358,6 +455,7 @@ impl PtyManager {
                 let (cols, rows) = *s.size.lock().unwrap();
                 PtySummary {
                     id: s.id,
+                    session_generation: s.session_generation,
                     pid: s.pid,
                     cwd: s.cwd.clone(),
                     title: s.title.lock().unwrap().clone(),
@@ -480,7 +578,7 @@ impl PtyManager {
     /// Signals them all first and *then* waits once, rather than terminating them
     /// one at a time: the grace period is for agents to flush their transcripts,
     /// and serialising it would cost GRACE per terminal on every quit.
-    pub fn kill_all(&self) {
+    pub fn kill_all(&self) -> KillAllReport {
         let sessions: Vec<Arc<Session>> = self.sessions.lock().unwrap().values().cloned().collect();
         for s in &sessions {
             s.request_stop();
@@ -492,8 +590,16 @@ impl PtyManager {
             }
             thread::sleep(Duration::from_millis(50));
         }
-        for s in &sessions {
-            s.force();
+        let mut force_signals = 0_u64;
+        for session in &sessions {
+            if session.alive() {
+                force_signals += 1;
+                session.force();
+            }
+        }
+        KillAllReport {
+            requested: sessions.len() as u64,
+            force_signals,
         }
     }
 }
@@ -554,6 +660,7 @@ impl Session {
             generation,
             channel,
             outstanding: 0,
+            pending_acks: PendingAckLedger::default(),
         });
         if !snapshot.is_empty() || gap {
             let attachment = desktop.as_mut().expect("attachment inserted");
@@ -570,9 +677,7 @@ impl Session {
                 *desktop = None;
                 return Err("renderer closed while the terminal was reattaching".into());
             }
-            self.desktop_delivery_chunks.fetch_add(1, Ordering::Relaxed);
-            self.desktop_delivery_bytes
-                .fetch_add(snapshot.len() as u64, Ordering::Relaxed);
+            self.record_desktop_delivery(attachment, snapshot.len());
         }
         drop(desktop);
         drop(ring);
@@ -599,9 +704,7 @@ impl Session {
                 .send(InvokeResponseBody::Raw(desktop_chunk(start, false, &data)))
                 .is_ok()
             {
-                self.desktop_delivery_chunks.fetch_add(1, Ordering::Relaxed);
-                self.desktop_delivery_bytes
-                    .fetch_add(data.len() as u64, Ordering::Relaxed);
+                self.record_desktop_delivery(attachment, data.len());
                 return;
             }
             generation
@@ -631,6 +734,20 @@ impl Session {
         attachment.outstanding -= acknowledged;
         self.desktop_acked_bytes
             .fetch_add(acknowledged as u64, Ordering::Relaxed);
+        if acknowledged > 0 {
+            let latency = attachment
+                .pending_acks
+                .acknowledge(acknowledged, now_ms())
+                .unwrap_or(0);
+            self.desktop_ack_latency_last_ms
+                .store(latency, Ordering::Relaxed);
+            self.desktop_ack_latency_max_ms
+                .fetch_max(latency, Ordering::Relaxed);
+            self.desktop_ack_latency_total_ms
+                .fetch_add(latency, Ordering::Relaxed);
+            self.desktop_ack_latency_samples
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn detach_matching(&self, renderer_generation: u64, generation: u64) {
@@ -641,6 +758,19 @@ impl Session {
         }) {
             *desktop = None;
         }
+    }
+
+    fn record_desktop_delivery(
+        &self,
+        attachment: &mut DesktopAttachment,
+        bytes: usize,
+    ) {
+        self.desktop_delivery_chunks.fetch_add(1, Ordering::Relaxed);
+        self.desktop_delivery_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+        self.desktop_delivery_chunk_bytes_max
+            .fetch_max(bytes as u64, Ordering::Relaxed);
+        attachment.pending_acks.record(bytes, now_ms());
     }
 
     /// The process the kernel currently has in this pty's foreground.
@@ -748,6 +878,21 @@ impl Session {
             delivery_chunks: self.desktop_delivery_chunks.load(Ordering::Relaxed),
             delivery_bytes: self.desktop_delivery_bytes.load(Ordering::Relaxed),
             acked_bytes: self.desktop_acked_bytes.load(Ordering::Relaxed),
+            delivery_chunk_bytes_max: self
+                .desktop_delivery_chunk_bytes_max
+                .load(Ordering::Relaxed),
+            ack_latency_last_ms: self
+                .desktop_ack_latency_last_ms
+                .load(Ordering::Relaxed),
+            ack_latency_max_ms: self
+                .desktop_ack_latency_max_ms
+                .load(Ordering::Relaxed),
+            ack_latency_total_ms: self
+                .desktop_ack_latency_total_ms
+                .load(Ordering::Relaxed),
+            ack_latency_samples: self
+                .desktop_ack_latency_samples
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -1158,6 +1303,7 @@ impl PtyManager {
                 "pty:spawned",
                 PtySpawned {
                     id: res.id,
+                    session_generation: res.session_generation,
                     cwd: s.cwd.clone(),
                     title: s.title.lock().unwrap().clone(),
                     cols: res.cols,
@@ -1227,7 +1373,7 @@ impl PtyManager {
             .map_err(|e| e.to_string())?;
 
         // Allocated before spawn so the child can carry its own session id in env.
-        let id = state.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        let (id, session_generation) = state.allocate_session_identity()?;
 
         let shell = shell.unwrap_or_else(default_shell);
         let mut cmd = match &run {
@@ -1390,6 +1536,7 @@ impl PtyManager {
                     generation: 1,
                     channel: sink.channel,
                     outstanding: 0,
+                    pending_acks: PendingAckLedger::default(),
                 }),
                 Some(1),
             ),
@@ -1398,6 +1545,7 @@ impl PtyManager {
 
         let session = Arc::new(Session {
             id,
+            session_generation,
             pid,
             kind,
             title: Mutex::new(shell.clone()),
@@ -1426,6 +1574,11 @@ impl PtyManager {
             desktop_delivery_chunks: AtomicU64::new(0),
             desktop_delivery_bytes: AtomicU64::new(0),
             desktop_acked_bytes: AtomicU64::new(0),
+            desktop_delivery_chunk_bytes_max: AtomicU64::new(0),
+            desktop_ack_latency_last_ms: AtomicU64::new(0),
+            desktop_ack_latency_max_ms: AtomicU64::new(0),
+            desktop_ack_latency_total_ms: AtomicU64::new(0),
+            desktop_ack_latency_samples: AtomicU64::new(0),
             last_input_ms: AtomicU64::new(0),
         });
 
@@ -1610,6 +1763,7 @@ impl PtyManager {
                         "pty:exit",
                         PtyExit {
                             id: session.id,
+                            session_generation: session.session_generation,
                             exit_code,
                             requested: session.shutdown.load(Ordering::SeqCst),
                         },
@@ -1620,6 +1774,7 @@ impl PtyManager {
 
         Ok(SpawnResult {
             id,
+            session_generation,
             pid,
             cols,
             rows,
@@ -1812,6 +1967,32 @@ fn dirs_home() -> Option<String> {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn rust_owns_monotonic_session_ids_and_generations() {
+        let manager = PtyManager::default();
+        assert_eq!(manager.allocate_session_identity().unwrap(), (1, 1));
+        assert_eq!(manager.allocate_session_identity().unwrap(), (2, 2));
+        assert_eq!(manager.renderer_generation.load(Ordering::SeqCst), 0);
+        manager.register_renderer();
+        assert_eq!(manager.allocate_session_identity().unwrap(), (3, 3));
+    }
+
+    #[test]
+    fn pending_ack_ledger_is_bounded_and_keeps_the_oldest_latency() {
+        let mut ledger = PendingAckLedger::default();
+        for sent in 0..(PENDING_ACK_BATCHES_MAX as u64 + 40) {
+            ledger.record(1, sent);
+        }
+        assert_eq!(ledger.len(), PENDING_ACK_BATCHES_MAX);
+        assert_eq!(ledger.acknowledge(1, 1_000), Some(1_000));
+        assert_eq!(ledger.len(), PENDING_ACK_BATCHES_MAX - 1);
+
+        let remaining = PENDING_ACK_BATCHES_MAX + 39;
+        assert_eq!(ledger.acknowledge(remaining, 1_000), Some(999));
+        assert_eq!(ledger.len(), 0);
+        assert_eq!(ledger.acknowledge(1, 1_000), None);
+    }
 
     /// Poll a session's scrollback until it contains `needle` or we time out.
     fn wait_for(pm: &PtyManager, id: u32, needle: &str, timeout: Duration) -> bool {

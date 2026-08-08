@@ -26,7 +26,7 @@
 //!    hook below cancels and turns into a drain.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
@@ -44,8 +44,31 @@ pub struct BrowserManager {
     /// browser children. A delayed command from a predecessor is rejected.
     renderer_generation: AtomicU64,
     /// A child whose close failed must remain nameable even when it never made
-    /// it into `views`; renderer recovery retries these labels.
+    /// it into `views`. This is also the bounded pending-close queue: one
+    /// native retry worker drains these labels even when the renderer stays
+    /// alive and no later renderer-registration sweep occurs.
     orphans: Mutex<HashMap<String, String>>,
+    close_retry_running: AtomicBool,
+    close_retry_attempts: AtomicU64,
+    close_retry_successes: AtomicU64,
+    close_retry_failures: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCloseMetrics {
+    pending: usize,
+    retry_running: bool,
+    attempts: u64,
+    successes: u64,
+    failures: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CloseSweep {
+    attempted: u64,
+    closed: u64,
+    remaining: usize,
 }
 
 enum OpenDecision {
@@ -84,6 +107,16 @@ const DRAIN_SCHEME: &str = "canopy-drain";
 /// page's own op deadline (frontend side) is much longer; this only guards
 /// against a webview that never calls the completion handler at all.
 const EVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A single worker retries transient WebKit close failures. The delay reaches
+/// a low-frequency ceiling rather than creating an unbounded task/timer set.
+const CLOSE_RETRY_DELAYS: [std::time::Duration; 5] = [
+    std::time::Duration::from_millis(100),
+    std::time::Duration::from_millis(500),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(10),
+    std::time::Duration::from_secs(30),
+];
 
 /// Whether this build can host a native browser view at all. The child-webview
 /// API is desktop-only, and only macOS has been through the overlap, snapshot
@@ -183,6 +216,93 @@ impl BrowserManager {
             .insert(label.to_string(), tab_id.to_string());
     }
 
+    fn close_metrics(&self) -> BrowserCloseMetrics {
+        BrowserCloseMetrics {
+            pending: self.orphans.lock().unwrap().len(),
+            retry_running: self.close_retry_running.load(Ordering::SeqCst),
+            attempts: self.close_retry_attempts.load(Ordering::Relaxed),
+            successes: self.close_retry_successes.load(Ordering::Relaxed),
+            failures: self.close_retry_failures.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Apply one close attempt per queued label. Keeping the close operation
+    /// injectable makes the fail-then-success lifecycle test deterministic;
+    /// native WebKit lookup/close is supplied by `retry_pending_closes`.
+    fn sweep_pending_with(&self, mut close: impl FnMut(&str) -> bool) -> CloseSweep {
+        let targets = self
+            .orphans
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(label, tab_id)| (label.clone(), tab_id.clone()))
+            .collect::<Vec<_>>();
+        let mut sweep = CloseSweep::default();
+        for (label, tab_id) in targets {
+            sweep.attempted += 1;
+            self.close_retry_attempts.fetch_add(1, Ordering::Relaxed);
+            if !close(&label) {
+                self.close_retry_failures.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            sweep.closed += 1;
+            self.close_retry_successes.fetch_add(1, Ordering::Relaxed);
+            let mut views = self.views.lock().unwrap();
+            if views.get(&tab_id).is_some_and(|state| state.label == label) {
+                views.remove(&tab_id);
+            }
+            drop(views);
+            let mut orphans = self.orphans.lock().unwrap();
+            if orphans.get(&label).is_some_and(|owner| owner == &tab_id) {
+                orphans.remove(&label);
+            }
+        }
+        sweep.remaining = self.orphans.lock().unwrap().len();
+        sweep
+    }
+
+    fn retry_pending_closes<R: tauri::Runtime>(&self, app: &tauri::AppHandle<R>) -> CloseSweep {
+        self.sweep_pending_with(|label| match app.get_webview(label) {
+            Some(view) => view.close().is_ok(),
+            None => true,
+        })
+    }
+
+    fn schedule_close_retry<R: tauri::Runtime>(&self, app: tauri::AppHandle<R>) {
+        if self.close_retry_running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tauri::async_runtime::spawn(async move {
+            let mut delay = 0usize;
+            loop {
+                tokio::time::sleep(CLOSE_RETRY_DELAYS[delay]).await;
+                let manager = app.state::<BrowserManager>();
+                let sweep = manager.retry_pending_closes(&app);
+                if sweep.remaining == 0 {
+                    manager.close_retry_running.store(false, Ordering::SeqCst);
+                    // Close can race the transition above. If it queued work
+                    // while this worker still looked active, start exactly one
+                    // replacement worker after releasing the flag.
+                    if !manager.orphans.lock().unwrap().is_empty() {
+                        manager.schedule_close_retry(app.clone());
+                    }
+                    break;
+                }
+                delay = (delay + 1).min(CLOSE_RETRY_DELAYS.len() - 1);
+            }
+        });
+    }
+
+    fn queue_close_retry<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        tab_id: &str,
+        label: &str,
+    ) {
+        self.remember_orphan(tab_id, label);
+        self.schedule_close_retry(app.clone());
+    }
+
     fn label(&self, tab_id: &str) -> Option<String> {
         self.views
             .lock()
@@ -217,13 +337,15 @@ impl BrowserManager {
         self.views.lock().unwrap().clear();
         self.orphans.lock().unwrap().clear();
         self.opening.lock().unwrap().clear();
+        self.close_retry_running.store(false, Ordering::SeqCst);
     }
 
     /// A JavaScript page owns every child browser view through a React
     /// component. Reload/crash skips those components' cleanup while the native
     /// manager survives, leaving WebKit content processes alive with no tab.
     /// A newly registered page therefore closes all predecessor-owned views.
-    /// Failed closes remain registered so a later recovery pass can retry.
+    /// Failed closes remain registered and the singleton retry worker keeps
+    /// trying even if the replacement renderer never registers again.
     pub fn close_renderer_orphans<R: tauri::Runtime>(&self, app: &tauri::AppHandle<R>) {
         // A predecessor may still be blocked inside add_child and have no view
         // to enumerate yet. Invalidate every creation token first; when that
@@ -243,28 +365,15 @@ impl BrowserManager {
             }
         }
         for (tab_id, label) in targets {
-            let closed = match app.get_webview(&label) {
-                Some(view) => match view.close() {
-                    Ok(()) => true,
-                    Err(error) => {
-                        log::warn!(
-                            "renderer recovery: couldn't close orphaned browser view {tab_id} ({label}): {error}"
-                        );
-                        false
-                    }
-                },
-                None => true,
-            };
-            if closed {
-                let mut views = self.views.lock().unwrap();
-                if views
-                    .get(&tab_id)
-                    .is_some_and(|state| state.label == label)
-                {
-                    views.remove(&tab_id);
-                }
-                self.orphans.lock().unwrap().remove(&label);
-            }
+            self.remember_orphan(&tab_id, &label);
+        }
+        let sweep = self.retry_pending_closes(app);
+        if sweep.remaining > 0 {
+            log::warn!(
+                "renderer recovery: {} browser view close(s) remain queued after the initial sweep",
+                sweep.remaining
+            );
+            self.schedule_close_retry(app.clone());
         }
     }
 
@@ -446,8 +555,18 @@ pub async fn browser_open(
         OpenDecision::Pending => Ok(()),
         OpenDecision::Create(token) => {
             let result = create(
-                app.clone(), window, tab_id.clone(), token, url, x, y, width, height,
-                background, visible, renderer_generation,
+                app.clone(),
+                window,
+                tab_id.clone(),
+                token,
+                url,
+                x,
+                y,
+                width,
+                height,
+                background,
+                visible,
+                renderer_generation,
             );
             if result.is_err() {
                 app.state::<BrowserManager>()
@@ -594,10 +713,8 @@ fn create(
         // nothing to publish; a failed close is retained for the next recovery
         // sweep, so it can never become an unnameable WebContent process.
         if let Err(error) = view.close() {
-            manager.remember_orphan(&tab_id, &label);
-            log::warn!(
-                "browser creation cancellation: couldn't close {tab_id} ({label}): {error}"
-            );
+            manager.queue_close_retry(&app, &tab_id, &label);
+            log::warn!("browser creation cancellation: couldn't close {tab_id} ({label}): {error}");
         }
         return Ok(());
     }
@@ -611,12 +728,11 @@ fn create(
         if let Err(error) = view.hide() {
             // It is already registered, so browser_close either releases it or
             // deliberately keeps the entry for renderer recovery to retry.
-            let close_error =
-                browser_close(app.clone(), tab_id.clone(), renderer_generation).err();
+            let close_error = browser_close(app.clone(), tab_id.clone(), renderer_generation).err();
             return Err(match close_error {
-                Some(close) => format!(
-                    "couldn't hide the browser view: {error}; close also failed: {close}"
-                ),
+                Some(close) => {
+                    format!("couldn't hide the browser view: {error}; close also failed: {close}")
+                }
                 None => format!("couldn't hide the browser view: {error}"),
             });
         }
@@ -846,28 +962,42 @@ pub fn browser_close(
         .filter_map(|(label, owner)| (owner == &tab_id).then_some(label.clone()))
         .collect::<Vec<_>>();
     let Some(label) = label else {
-        for orphan in orphan_labels {
-            if let Some(wv) = app.get_webview(&orphan) {
-                wv.close().map_err(|e| e.to_string())?;
-            }
-            manager.orphans.lock().unwrap().remove(&orphan);
+        if orphan_labels.is_empty() {
+            return Ok(());
+        }
+        let sweep = manager.retry_pending_closes(&app);
+        if orphan_labels
+            .iter()
+            .any(|orphan| manager.orphans.lock().unwrap().contains_key(orphan))
+        {
+            manager.schedule_close_retry(app.clone());
+            return Err(format!(
+                "{} browser view close(s) remain queued after a failed close",
+                sweep.remaining
+            ));
         }
         return Ok(());
     };
     if let Some(wv) = app.get_webview(&label) {
-        wv.close().map_err(|e| e.to_string())?;
+        if let Err(error) = wv.close() {
+            manager.queue_close_retry(&app, &tab_id, &label);
+            return Err(error.to_string());
+        }
     }
     // Remove only after close succeeds. If WebKit refuses the close, retaining
     // the handle lets renderer recovery retry instead of losing the only name
     // by which the leaked process can be reached.
     let mut views = manager.views.lock().unwrap();
-    if views
-        .get(&tab_id)
-        .is_some_and(|state| state.label == label)
-    {
+    if views.get(&tab_id).is_some_and(|state| state.label == label) {
         views.remove(&tab_id);
     }
+    manager.orphans.lock().unwrap().remove(&label);
     Ok(())
+}
+
+#[tauri::command]
+pub fn browser_close_metrics(app: tauri::AppHandle) -> BrowserCloseMetrics {
+    app.state::<BrowserManager>().close_metrics()
 }
 
 /// Run one browser op (`canopy_browser_*`) against the page. Read-only ops
@@ -954,10 +1084,7 @@ pub async fn browser_here(
 /// shared by every tab on purpose (that is what keeps you logged in), so this
 /// is all-or-nothing, exactly like a browser's "clear browsing data".
 #[tauri::command]
-pub fn browser_clear_data(
-    app: tauri::AppHandle,
-    renderer_generation: u64,
-) -> Result<(), String> {
+pub fn browser_clear_data(app: tauri::AppHandle, renderer_generation: u64) -> Result<(), String> {
     app.state::<BrowserManager>()
         .require_renderer(renderer_generation)?;
     if !SUPPORTED {
@@ -1026,6 +1153,46 @@ mod tests {
         let manager = BrowserManager::default();
         manager.remember_orphan("tab", "orphan-label");
         assert_eq!(manager.labels(), vec!["orphan-label".to_string()]);
+    }
+
+    #[test]
+    fn pending_close_retries_fail_then_succeed_without_losing_the_handle() {
+        let manager = BrowserManager::default();
+        manager
+            .views
+            .lock()
+            .unwrap()
+            .insert("tab".into(), state("view-label", 1));
+        manager.remember_orphan("tab", "view-label");
+
+        let first = manager.sweep_pending_with(|_| false);
+        assert_eq!(
+            first,
+            CloseSweep {
+                attempted: 1,
+                closed: 0,
+                remaining: 1,
+            }
+        );
+        assert_eq!(manager.label("tab").as_deref(), Some("view-label"));
+        assert_eq!(manager.close_metrics().pending, 1);
+
+        let second = manager.sweep_pending_with(|_| true);
+        assert_eq!(
+            second,
+            CloseSweep {
+                attempted: 1,
+                closed: 1,
+                remaining: 0,
+            }
+        );
+        assert!(manager.views.lock().unwrap().is_empty());
+        assert!(manager.orphans.lock().unwrap().is_empty());
+        let metrics = manager.close_metrics();
+        assert_eq!(
+            (metrics.attempts, metrics.successes, metrics.failures),
+            (2, 1, 1)
+        );
     }
 
     #[test]

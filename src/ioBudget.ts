@@ -25,6 +25,7 @@ export interface IoAdmission {
 }
 
 export interface IoBudgetSnapshot {
+  hostPressureLevel: number;
   active: number;
   activeBytes: number;
   queued: number;
@@ -33,9 +34,12 @@ export interface IoBudgetSnapshot {
 }
 
 export class IoBudgetExceededError extends Error {
-  readonly reason: "request-too-large" | "queue-full";
+  readonly reason: "request-too-large" | "queue-full" | "host-critical";
 
-  constructor(reason: "request-too-large" | "queue-full", message: string) {
+  constructor(
+    reason: "request-too-large" | "queue-full" | "host-critical",
+    message: string,
+  ) {
     super(message);
     this.name = "IoBudgetExceededError";
     this.reason = reason;
@@ -80,6 +84,7 @@ export class IoBudget {
   private active = 0;
   private activeBytes = 0;
   private queuedBytes = 0;
+  private hostPressureLevel = 0;
 
   constructor(limits: IoBudgetLimits) {
     this.limits = {
@@ -100,6 +105,7 @@ export class IoBudget {
 
   snapshot(): IoBudgetSnapshot {
     return {
+      hostPressureLevel: this.hostPressureLevel,
       active: this.active,
       activeBytes: this.activeBytes,
       queued: this.waiting.length,
@@ -111,6 +117,16 @@ export class IoBudget {
         ]),
       ),
     };
+  }
+
+  /** Do not begin byte-materialising work while the host is critical. Existing
+   * operations keep their honest lease until settlement; queued work resumes
+   * only after pressure clears. */
+  setHostPressure(level: number): void {
+    this.hostPressureLevel = Number.isFinite(level)
+      ? Math.max(0, Math.min(2, Math.trunc(level)))
+      : 2;
+    if (this.hostPressureLevel < 2) this.pump();
   }
 
   async run<T>(
@@ -151,6 +167,14 @@ export class IoBudget {
       );
     }
     if (request.signal?.aborted) return Promise.reject(abortError());
+    if (this.hostPressureLevel >= 2) {
+      return Promise.reject(
+        new IoBudgetExceededError(
+          "host-critical",
+          "I/O admission is paused while host memory pressure is critical",
+        ),
+      );
+    }
     const canStartNow = this.canAdmit({ scope, bytes });
     if (
       !canStartNow &&
@@ -199,6 +223,7 @@ export class IoBudget {
   }
 
   private pump(): void {
+    if (this.hostPressureLevel >= 2) return;
     while (this.active < this.limits.maxConcurrent) {
       const index = this.waiting.findIndex((waiter) => this.canAdmit(waiter));
       if (index < 0) return;

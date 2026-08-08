@@ -481,6 +481,10 @@ import {
   vibeSetupGate,
 } from "./helpers";
 import { Button } from "../ui";
+import {
+  documentResourceActive,
+  shouldReuseInactiveDocumentPane,
+} from "../../documentResourceActive";
 export { tabDisplayLabel, previewLabel, deviceLabel };
 export type {
   SideTab,
@@ -1829,7 +1833,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           let model = monaco.editor.getModel(monaco.Uri.file(abs));
           if (!model) {
             try {
-              model = modelFor(abs, await ipc.fsReadText(abs));
+              model = modelFor(abs, await ipc.fsReadText(abs, sizeLimitFor("code")));
             } catch {
               onNotice(`Couldn't open ${relPath} to share.`, "error");
               return;
@@ -5842,7 +5846,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         const stat = await ipc.fsStat(path);
         blocked = opts?.force ? null : blockForOpen(path, kind, stat.size);
         if (!blocked) {
-          bytes = await ipc.fsReadFile(path);
+          bytes = await ipc.fsReadFile(
+            path,
+            opts?.force ? stat.size : sizeLimitFor(kind),
+          );
           // Extensions that claim nothing (.dat, .pack, no extension at all)
           // only give themselves away in the bytes.
           if (kind === "code" && looksBinary(bytes)) {
@@ -6147,7 +6154,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // re-read it every time something touches it on disk.
         if (file.blocked) continue;
         try {
-          const bytes = await ipc.fsReadFile(path);
+          const bytes = await ipc.fsReadFile(path, sizeLimitFor(file.kind));
           if (file.kind === "code") {
             const newText = decoder.decode(bytes);
             const model = monaco.editor.getModel(monaco.Uri.file(path));
@@ -8776,6 +8783,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       (tab): tab is PreviewSubTab =>
         tab.type === "preview" && tab.id === vibeOwnedPreviewId.current,
     ) ?? null;
+  // Build and Engineer share one mounted runtime but not the presented tab.
+  // This exact id also drives doc-host display and every heavyweight child's
+  // ownership; using activeTabId here would retain the hidden Engineer pane.
+  const surfaceTabId = vibe ? vibePreview?.id ?? null : activeTabId;
   if (vibeOwnedPreviewId.current && !vibePreview) vibeOwnedPreviewId.current = null;
   const vibePreviewIdRef = useRef<string | null>(null);
   vibePreviewIdRef.current = vibePreview?.id ?? null;
@@ -9848,22 +9859,30 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // rebuilt when it's in front (so it always sees current props) or when its
   // tab changed underneath it.
   const docTabs = tabs.filter((t): t is DocSubTab => t.type !== "terminal");
-  const panes = useRef(new Map<string, { tab: DocSubTab; el: ReactNode }>());
+  const panes = useRef(
+    new Map<string, { tab: DocSubTab; active: boolean; el: ReactNode }>(),
+  );
   useEffect(() => {
     const live = new Set(tabs.map((t) => t.id));
     for (const id of [...panes.current.keys()])
       if (!live.has(id)) panes.current.delete(id);
   }, [tabs]);
   const paneFor = (tab: DocSubTab): ReactNode => {
+    const active = documentResourceActive(tab.id, surfaceTabId, visible);
     const cached = panes.current.get(tab.id);
-    if (cached && cached.tab === tab && tab.id !== activeTabId)
+    // An inactive pane may keep the same element between unrelated ProjectView
+    // ticks, but the active transition itself must always reach the child. The
+    // previous cache returned the element created while active after its host
+    // became display:none, leaving native previews wanted and heavyweight
+    // editor/viewer resources alive indefinitely.
+    if (cached && shouldReuseInactiveDocumentPane(cached, tab, active))
       return cached.el;
-    const el = docTabView(tab);
-    panes.current.set(tab.id, { tab, el });
+    const el = docTabView(tab, active);
+    panes.current.set(tab.id, { tab, active, el });
     return el;
   };
 
-  function docTabView(tab: DocSubTab): ReactNode {
+  function docTabView(tab: DocSubTab, active: boolean): ReactNode {
     switch (tab.type) {
       case "branch":
         return (
@@ -10084,7 +10103,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             shots={tab.shots ?? []}
             feedbackPanelHidden={tab.feedbackPanelHidden}
             dir={componentsRef.current[0]?.path ?? firstRoot}
-            visible={tab.id === activeTabId && visible}
+            visible={active}
             streaming={shownBrowserPips.some((p) => p.tabId === tab.id)}
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             servers={previewServers}
@@ -10121,7 +10140,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             serial={tab.serial}
             projectDir={tab.projectDir}
             annotations={tab.annotations}
-            visible={tab.id === activeTabId && visible}
+            visible={active}
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             agentTargets={agentTargets}
             installed={installed}
@@ -10140,7 +10159,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       case "agents":
         return (
           <AgentsView
-            active={tab.id === activeTabId && visible}
+            active={active}
             projectName={project.name}
             roots={roots}
             stats={projectStats}
@@ -10211,7 +10230,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <ClaimView
             claimId={tab.claimId}
             fallback={tab.claim}
-            active={tab.id === activeTabId && visible}
+            active={active}
             // The claim's own pty when it names one (exact, and it survives
             // an agent that cd'd into a subdirectory); the cwd parse only for
             // claims recorded before the field existed. Either way the page
@@ -10229,7 +10248,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             roots={roots}
             installed={installed}
             focus={tab.focus}
-            active={tab.id === activeTabId && visible}
+            active={active}
             onNotice={onNotice}
           />
         );
@@ -10248,6 +10267,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <CollabView
             session={session}
             ownerName={tab.ownerName}
+            active={active}
             onNotice={onNotice}
           />
         ) : (
@@ -10288,6 +10308,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <div className="file-tab-wrap">
             {!inToolbar && cta}
             <FileView
+            active={active}
             toolbarExtra={inToolbar ? cta : undefined}
             file={tab.file}
             onCursor={
@@ -10399,11 +10420,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [activeTerminalGroup],
   );
 
-  // Build and Engineer share one mounted tab runtime so switching modes never
-  // kills a PTY or reloads a preview. They do not share the presented tab:
-  // Build always owns its preview canvas, while Engineer keeps its actual tab
-  // selection (including every run's raw output) untouched underneath.
-  const surfaceTabId = vibe ? vibePreview?.id ?? null : activeTabId;
   const mainArea = (
     <div className="project-main">
       {tabMenu.menu && (

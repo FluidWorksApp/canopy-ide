@@ -10,6 +10,7 @@ import { MonacoEditor } from "./MonacoEditor";
 interface CollabViewProps {
   session: GuestSession;
   ownerName: string;
+  active: boolean;
   onNotice: Notify;
 }
 
@@ -18,7 +19,7 @@ interface CollabViewProps {
  *  away and nobody misses a cursor position that was never true. */
 const CURSOR_EVERY_MS = 50;
 
-export function CollabView({ session, ownerName, onNotice }: CollabViewProps) {
+export function CollabView({ session, ownerName, active, onNotice }: CollabViewProps) {
   const [, bump] = useReducer((n: number) => n + 1, 0);
   const lastCursor = useRef(0);
 
@@ -40,6 +41,7 @@ export function CollabView({ session, ownerName, onNotice }: CollabViewProps) {
       </div>
       <div className="collab-editor">
         <MonacoEditor
+          active={active}
           model={session.model}
           // There is deliberately nowhere for this to write. A guest's copy is
           // not a file, and Cmd-S says so rather than silently doing nothing.

@@ -20,8 +20,8 @@ describe("terminal retention metrics", () => {
     const registry = new TerminalRetentionRegistry();
     const first = registry.track(sample(false, 5_024));
     const second = registry.track(sample(true, 24, 24, 120));
-    first.parsedWrite();
-    first.parsedWrite();
+    first.parsedWrite(512, 7);
+    first.parsedWrite(1_024, 11);
 
     expect(registry.snapshot()).toEqual({
       instances: 2,
@@ -38,6 +38,10 @@ describe("terminal retention metrics", () => {
       estimatedBufferCells: 5_024 * 80 + 48 * 120,
       estimatedBufferCellsHighWater: 5_024 * 80 + 48 * 120,
       parsedWriteBatches: 2,
+      parsedWriteBytes: 1_536,
+      parseLatencyLastMs: 11,
+      parseLatencyMaxMs: 11,
+      parseLatencyTotalMs: 18,
       compactionAttempts: 0,
       compactionSuccesses: 0,
       compactionRejectedTooLarge: 0,
@@ -63,6 +67,10 @@ describe("terminal retention metrics", () => {
       estimatedBufferCells: 0,
       instancesHighWater: 2,
       parsedWriteBatches: 2,
+      parsedWriteBytes: 1_536,
+      parseLatencyLastMs: 11,
+      parseLatencyMaxMs: 11,
+      parseLatencyTotalMs: 18,
     });
   });
 
