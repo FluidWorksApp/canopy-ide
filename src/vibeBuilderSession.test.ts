@@ -813,6 +813,65 @@ describe("VibeBuilderSession", () => {
     });
   });
 
+  it.each([
+    ["setup", "setup-failed", "setup command exited"],
+    ["runtime", "runtime-error", "process exited with an error"],
+  ] as const)(
+    "constructs a %s repair problem on the first non-zero managed-process exit",
+    async (kind, code, statement) => {
+      const repair = vi.fn(async (): Promise<VibeRepairTaskResult> => ({
+        ok: true,
+        runId: `repair-${kind}`,
+        verdict: {
+          diagnosis: "The command used an unavailable dependency.",
+          actions: [{ did: "Installed the declared dependencies and verified the command." }],
+          fixed: true,
+        },
+      }));
+      const h = harness({ repair }, {
+        projectComponents: [{
+          id: "api",
+          label: "API",
+          path: "/repo/api",
+          role: "api",
+          commands: [],
+        }],
+      });
+
+      await h.session.reportManagedProcessFailure({
+        key: `api:${kind}:first-exit`,
+        kind,
+        componentId: "api",
+        runCommandId: kind === "setup" ? "install" : "dev",
+        exitCode: 1,
+        ports: [],
+        outputBytes: 48,
+        totalCpu: 0,
+        totalMemBytes: 1024,
+        logTail: "error: dependency not found",
+        component: { label: "API", path: "/repo/api", role: "api" },
+        commands: [],
+        command: {
+          name: kind === "setup" ? "Install dependencies" : "API server",
+          command: kind === "setup" ? "npm install" : "npm run dev",
+        },
+      });
+
+      await vi.waitFor(() => expect(repair).toHaveBeenCalled());
+      expect(repair).toHaveBeenCalledWith({
+        problem: expect.objectContaining({
+          code,
+          statement: expect.stringContaining(statement),
+          evidence: expect.objectContaining({
+            exitCode: 1,
+            logTail: "error: dependency not found",
+            context: expect.stringContaining("first observed non-zero exit"),
+          }),
+        }),
+      });
+    },
+  );
+
   it("correlates a retried incident to the attempt that was live when it crashed", async () => {
     // The crash is observed during one turn but only persists during a later
     // one. What the bundle has to say is which attempt was running when the

@@ -434,6 +434,7 @@ import { PaneBar } from "../PaneBar";
 import { VibeBuilderPane } from "../VibeBuilderPane";
 import {
   createVibeBuilderSession,
+  type VibeManagedProcessFailureInput,
   type VibeServerIncidentInput,
 } from "../../vibeBuilderSession";
 import type { VibePackageFacts } from "../../vibeTargetInference";
@@ -9119,6 +9120,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
       },
     );
     vibeServerHealth.current.set(watched.targetKey, decision.state);
+    const stats =
+      tab.ptyId == null
+        ? undefined
+        : statsRef.current.find((sample) => sample.id === tab.ptyId);
+    const classification = classifyManagedProcess({
+      now: Date.now(),
+      spawnedAt: Date.now(),
+      outputBytes: stats?.output_bytes ?? 0,
+      quietMs: stats?.quiet_ms ?? 0,
+      ports: stats?.ports ?? [],
+      rawOutput: "",
+      exited: true,
+      exitCode: event.exit_code,
+    });
     // Stopping it yourself ends the crash-loop story. The incident only ever
     // cleared when the server came back on a port — so a person who stopped
     // it deliberately was left staring at "The app server keeps stopping",
@@ -9135,17 +9150,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         "withdrawn",
       );
     }
-    if (decision.action === "restart") {
-      restartRun(tabId, undefined, "watchdog");
-      return;
-    }
-    if (decision.action !== "crash-loop") return;
+    if (classification.exit !== "repair" || decision.action === "ignore") return;
     openVibeServerIncident.current.add(watched.targetKey);
 
-    const stats =
-      tab.ptyId == null
-        ? undefined
-        : statsRef.current.find((sample) => sample.id === tab.ptyId);
     const log =
       termHandles.current.get(tabId)?.captureTextSettled() ??
       Promise.resolve("");
@@ -9159,13 +9166,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const crashedCommand = crashedComponent?.commands?.find(
       (candidate) => candidate.id === watched.runCommandId,
     );
-    const incident: VibeServerIncidentInput = {
+    const failure = {
       key: watched.targetKey,
       componentId: watched.componentId,
       runCommandId: watched.runCommandId,
       exitCode: event.exit_code,
-      crashTimes: decision.state.failures,
-      automaticRestarts: decision.state.failures.length - 1,
       ports: stats?.ports ?? [],
       outputBytes: stats?.output_bytes ?? null,
       totalCpu: stats?.total_cpu ?? null,
@@ -9184,6 +9189,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
       ...(crashedCommand
         ? { command: { name: crashedCommand.name, command: crashedCommand.command } }
         : {}),
+    };
+    if (decision.action === "repair") {
+      const input: VibeManagedProcessFailureInput = {
+        ...failure,
+        key: `${watched.targetKey}:runtime:${decision.state.failures.at(-1)}`,
+        kind: "runtime",
+      };
+      void watched.session.reportManagedProcessFailure(input);
+      return;
+    }
+    if (decision.action !== "crash-loop") return;
+    const incident: VibeServerIncidentInput = {
+      ...failure,
+      crashTimes: decision.state.failures,
+      automaticRestarts: decision.state.failures.length - 1,
     };
     const repairSettlements = (
       session: ReturnType<typeof createVibeBuilderSession>,
@@ -9234,9 +9254,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   };
 
   const autoStartedVibeRuns = useRef(new Set<string>());
-  const surfacedVibeSetupFailures = useRef(new Set<string>());
+  const reportedVibeSetupFailures = useRef(new Set<string>());
   useEffect(() => {
-    if (!visible || !vibe) return;
+    if (!visible || !vibe || !vibeSession) return;
     for (const { component, command, identity } of vibeRequiredRuns) {
       const key = `${component.path}:${component.id}:${command.id}`;
       const running = runTabs.some((tab) => matchesVibeRun(tab, component, command));
@@ -9285,18 +9305,48 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       for (const setup of gate.failed) {
         const setupKey = `${component.path}:${component.id}:${setup.id}`;
-        if (surfacedVibeSetupFailures.current.has(setupKey)) continue;
-        surfacedVibeSetupFailures.current.add(setupKey);
-        postAttention({
-          kind: "question",
-          tone: "error",
-          title: "Getting the project ready didn't finish",
-          body: `“${setup.name}” stopped with an error, so I haven't started ${component.label}. Its output is kept in the run.`,
-          source: "project",
-          projectId: project.id,
-          projectName: project.name,
-          where: { kind: "project", projectId: project.id, path: component.path },
-          dedupeKey: `vibe-setup-run:${project.id}:${component.id}:${setup.id}`,
+        if (reportedVibeSetupFailures.current.has(setupKey)) continue;
+        const failedTab = runTabs.find(
+          (tab) =>
+            tab.componentId === component.id &&
+            tab.runCommandId === setup.id &&
+            tab.exited,
+        );
+        if (!failedTab) continue;
+        const classification = classifyManagedProcess({
+          now: Date.now(),
+          spawnedAt: Date.now(),
+          outputBytes: 0,
+          quietMs: 0,
+          ports: [],
+          readinessKind: "one-shot",
+          rawOutput: "",
+          exited: true,
+          exitCode: failedTab.exitCode,
+        });
+        if (classification.exit !== "repair") continue;
+        reportedVibeSetupFailures.current.add(setupKey);
+        const log =
+          termHandles.current.get(failedTab.id)?.captureTextSettled() ??
+          Promise.resolve("");
+        void vibeSession.reportManagedProcessFailure({
+          key: setupKey,
+          kind: "setup",
+          componentId: component.id,
+          runCommandId: setup.id,
+          exitCode: failedTab.exitCode ?? null,
+          ports: [],
+          outputBytes: null,
+          totalCpu: null,
+          totalMemBytes: null,
+          logTail: log.then((text) => vibeServerLogTail(text)),
+          component: {
+            label: component.label,
+            path: component.path,
+            ...(component.role ? { role: component.role } : {}),
+          },
+          commands: component.commands ?? [],
+          command: { name: setup.name, command: setup.command },
         });
       }
       if (!gate.ready) continue;
@@ -9316,7 +9366,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         { componentId: component.id, runCommandId: command.id },
       );
     }
-  }, [visible, vibe, vibeRequiredRuns, runTabs, projectStats, addTerminal, project.id, project.name, project.components, vibeVerifiedProcessPtys]);
+  }, [visible, vibe, vibeSession, vibeRequiredRuns, runTabs, projectStats, addTerminal, project.id, project.name, project.components, vibeVerifiedProcessPtys]);
 
   // A live PTY is not proof that its command started. Package runners,
   // authentication flows, and project pickers can all wait forever while the

@@ -188,6 +188,14 @@ export interface VibeServerStartupInput
   promptCode?: string;
 }
 
+export interface VibeManagedProcessFailureInput
+  extends Omit<
+    VibeServerIncidentInput,
+    "crashTimes" | "automaticRestarts"
+  > {
+  kind: "setup" | "runtime";
+}
+
 export interface CheckpointReview {
   context: CheckpointContext;
   repoRoot: string;
@@ -1699,6 +1707,48 @@ export class VibeBuilderSession implements BuilderSession {
     );
   }
 
+  /** A managed command exiting non-zero is already a repair problem. Waiting
+   * for two blind restarts loses the first failure's evidence, while treating
+   * setup as a toast leaves the server permanently gated. Both enter the same
+   * repair loop as startup stalls, with the supervisor's terminal tail. */
+  async reportManagedProcessFailure(
+    input: VibeManagedProcessFailureInput,
+  ): Promise<void> {
+    this.serverIncidentOpen = true;
+    this.incidentOpen = true;
+    const label = input.component?.label ?? "project";
+    this.present(
+      { kind: "incident" },
+      {
+        id: `vibe-process-${input.componentId}-${input.runCommandId}`,
+        kind: "notice",
+        prompt: "Something needed fixing — I'm on it.",
+        detail:
+          input.kind === "setup"
+            ? `I'm reading why ${label} couldn't finish getting ready.`
+            : `I'm reading why the ${label} process stopped.`,
+      },
+    );
+    const logTail = await Promise.resolve(input.logTail).catch(() => "");
+    if (this.stopped) return;
+    void this.repairServerProblem(
+      {
+        ...input,
+        crashTimes: [],
+        automaticRestarts: 0,
+      },
+      logTail,
+      {
+        code: input.kind === "setup" ? "setup-failed" : "runtime-error",
+        statement: (componentLabel) =>
+          input.kind === "setup"
+            ? `The ${componentLabel} setup command exited before it finished successfully.`
+            : `The ${componentLabel} process exited with an error.`,
+        context: `Managed process state: failed. This was the first observed non-zero exit; diagnose it before attempting another start.`,
+      },
+    );
+  }
+
   /** Keys with a repair underway, so a re-reported incident cannot stack a
    *  second agent onto the same broken server. */
   private repairsInFlight = new Set<string>();
@@ -1820,17 +1870,24 @@ export class VibeBuilderSession implements BuilderSession {
           },
         );
       } else {
+        const failedPrompt =
+          incident.code === "server-start-failed"
+            ? "The project process still hasn't started."
+            : incident.code === "setup-failed"
+              ? "The project still isn't ready."
+              : incident.code === "runtime-error"
+                ? "The project process still isn't running."
+                : "The app server keeps stopping.";
         this.present(
           { kind: "incident" },
           {
             id: `vibe-repair-failed-${input.componentId}-${this.deps.now()}`,
             kind: "question",
-            prompt:
-              incident.code === "server-start-failed"
-                ? "The project process still hasn't started."
-                : "The app server keeps stopping.",
+            prompt: failedPrompt,
             detail:
-              incident.code === "server-start-failed"
+              incident.code === "server-start-failed" ||
+              incident.code === "setup-failed" ||
+              incident.code === "runtime-error"
                 ? `${result.message} The run keeps its terminal output for inspection.`
                 : `${result.message} The failed run keeps the server output for inspection.`,
           },

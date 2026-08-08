@@ -59,16 +59,29 @@ describe("vibe server health wiring", () => {
     expect(watcher.slice(stop)).toContain("resolveServerIncident(watched.targetKey)");
   });
 
-  it("restarts the same run tab and records a durable crash-loop incident", () => {
+  it("repairs the first failed exit and retains durable crash-loop escalation", () => {
     const view = read("src/components/ProjectView/index.tsx");
     const start = view.indexOf("vibeServerExit.current =");
     const end = view.indexOf("const autoStartedVibeRun", start);
     const watcher = view.slice(start, end);
-    expect(watcher).toContain('restartRun(tabId, undefined, "watchdog")');
+    expect(watcher).toContain('classification.exit !== "repair"');
+    expect(watcher).toContain("reportManagedProcessFailure(input)");
+    expect(watcher).not.toContain('restartRun(tabId, undefined, "watchdog")');
     expect(watcher).not.toContain("addTerminal(");
     expect(watcher).toContain("captureTextSettled");
     expect(watcher).toContain("reportServerIncident");
     expect(watcher).toContain("postAttention");
+  });
+
+  it("routes setup-command failure through the same classifier and repair entry", () => {
+    const view = read("src/components/ProjectView/index.tsx");
+    const start = view.indexOf("for (const setup of gate.failed)");
+    const failure = view.slice(start, view.indexOf("if (!gate.ready)", start));
+    expect(failure).toContain("classifyManagedProcess({");
+    expect(failure).toContain('classification.exit !== "repair"');
+    expect(failure).toContain('kind: "setup"');
+    expect(failure).toContain("reportManagedProcessFailure({");
+    expect(failure).not.toContain("postAttention({");
   });
 
   it("keeps ordinary run reaping separate from the crash watcher", () => {
