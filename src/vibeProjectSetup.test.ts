@@ -675,6 +675,11 @@ describe("non-technical setup surface", () => {
 
     await Promise.resolve();
     expect(observe).not.toHaveBeenCalled();
+    expect(session.state.card).toMatchObject({
+      kind: "progress",
+      stage: "discovering",
+      title: "Understanding your project",
+    });
 
     const unsubscribe = session.events$.subscribe(() => {});
     await vi.waitFor(() => expect(observe).toHaveBeenCalledTimes(1));
@@ -684,8 +689,9 @@ describe("non-technical setup surface", () => {
 
   it("persists a valid proposal without ever presenting a technical question", async () => {
     const configured: Project[] = [];
+    let session!: ReturnType<typeof createVibeProjectSetupSession>;
     const ready = new Promise<void>((resolve) => {
-      const session = createVibeProjectSetupSession(
+      session = createVibeProjectSetupSession(
         project(),
         async (next) => { configured.push(next); return true; },
         {
@@ -708,6 +714,11 @@ describe("non-technical setup surface", () => {
     await ready;
     expect(configured).toHaveLength(1);
     expect(configured[0].vibe?.version).toBe(1);
+    expect(session.state.card).toMatchObject({
+      kind: "outcome",
+      tone: "success",
+      title: "Project setup is ready",
+    });
   });
 
   it("keeps a correct survey when an unrelated file was saved while it ran", async () => {
@@ -848,8 +859,9 @@ describe("non-technical setup surface", () => {
 
   it("stops plainly on invalid setup instead of falling back to a picker", async () => {
     const replies: string[] = [];
+    let session!: ReturnType<typeof createVibeProjectSetupSession>;
     const done = new Promise<void>((resolve) => {
-      const session = createVibeProjectSetupSession(
+      session = createVibeProjectSetupSession(
         project(),
         async () => true,
         {
@@ -872,6 +884,11 @@ describe("non-technical setup surface", () => {
     });
     await done;
     expect(replies.at(-1)).toBe("I couldn't determine a safe complete setup for this project.");
+    expect(session.state.card).toMatchObject({
+      kind: "outcome",
+      tone: "warning",
+      title: "I couldn’t finish setting up the project",
+    });
   });
 });
 

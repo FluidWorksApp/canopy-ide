@@ -6,6 +6,54 @@ export interface BuilderQuestionAction {
   response: string;
 }
 
+/** A button in Build carries an opaque answer, never execution details. The
+ * owner of the card decides whether that answer goes to the builder session,
+ * a managed PTY, or a deep-linked question. */
+export interface BuilderCardAction extends BuilderQuestionAction {
+  tone?: "primary" | "neutral" | "danger";
+}
+
+export type BuilderDecisionReason =
+  | "credentials"
+  | "account-link"
+  | "destructive"
+  | "payment"
+  | "choice";
+
+export type BuilderProgressStage =
+  | "discovering"
+  | "installing"
+  | "compiling"
+  | "starting"
+  | "repairing";
+
+interface BuilderCardBase {
+  id: string;
+  title: string;
+  detail?: string;
+}
+
+/** The only structured interruption surface in Build. It deliberately has no
+ * command, log, diff, environment or stack-trace fields: those stay available
+ * in Engineer while Build speaks in outcomes and decisions. */
+export type BuilderCard =
+  | (BuilderCardBase & {
+      kind: "progress";
+      stage: BuilderProgressStage;
+      /** A real supervisor deadline, not an invented percentage. */
+      deadlineAt?: number | null;
+    })
+  | (BuilderCardBase & {
+      kind: "decision";
+      reason: BuilderDecisionReason;
+      actions?: readonly BuilderCardAction[];
+    })
+  | (BuilderCardBase & {
+      kind: "outcome";
+      tone: "success" | "warning" | "neutral";
+      actions?: readonly BuilderCardAction[];
+    });
+
 export interface BuilderQuestion {
   id: string;
   /** `notice` is Canopy saying something while it handles it — there is
@@ -22,6 +70,9 @@ export interface BuilderQuestion {
 
 export interface BuilderSessionState {
   persona: PersonaInput;
+  /** Preferred presentation contract. `question` remains as a compatibility
+   * seam while existing sessions move onto cards. */
+  card?: BuilderCard | null;
   question?: BuilderQuestion | null;
 }
 

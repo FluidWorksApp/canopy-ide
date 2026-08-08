@@ -1402,7 +1402,17 @@ function createVibeProjectSetupFlight(
     project,
     persist,
     listeners: new Set(),
-    state: { persona: { kind: "turn-progress" }, question: null },
+    state: {
+      persona: { kind: "turn-progress" },
+      card: {
+        id: `vibe-setup-${project.id}`,
+        kind: "progress",
+        stage: "discovering",
+        title: "Understanding your project",
+        detail: "I’m finding the parts that need to start together.",
+      },
+      question: null,
+    },
     status: "idle",
     fingerprint: null,
     failedAt: null,
@@ -1415,7 +1425,17 @@ function createVibeProjectSetupFlight(
   const fail = (message: string) => {
     flight.status = "failed";
     flight.failedAt = Date.now();
-    flight.state = { persona: { kind: "incident" }, question: null };
+    flight.state = {
+      persona: { kind: "incident" },
+      card: {
+        id: `vibe-setup-${flight.project.id}`,
+        kind: "outcome",
+        tone: "warning",
+        title: "I couldn’t finish setting up the project",
+        detail: message,
+      },
+      question: null,
+    };
     if (deps === DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS) {
       failedSetups.set(flight.project.id, flight.failedAt);
     }
@@ -1511,7 +1531,16 @@ function createVibeProjectSetupFlight(
       }
       flight.fingerprint = after.fingerprint;
       flight.status = "succeeded";
-      flight.state = { persona: { kind: "question-answered" }, question: null };
+      flight.state = {
+        persona: { kind: "question-answered" },
+        card: {
+          id: `vibe-setup-${activeProject.id}`,
+          kind: "outcome",
+          tone: "success",
+          title: "Project setup is ready",
+        },
+        question: null,
+      };
       failedSetups.delete(activeProject.id);
       publish({ kind: "ready" });
     } catch (error) {
@@ -1581,7 +1610,16 @@ export function createVibeProjectSetupSession(
       flight = createVibeProjectSetupFlight(project, persist, deps);
       flight.status = "failed";
       flight.failedAt = failedAt;
-      flight.state = { persona: { kind: "incident" }, question: null };
+      flight.state = {
+        persona: { kind: "incident" },
+        card: {
+          id: `vibe-setup-${project.id}`,
+          kind: "outcome",
+          tone: "warning",
+          title: "I couldn’t finish setting up the project",
+        },
+        question: null,
+      };
       flights.set(project.id, flight);
     } else if (failedAt !== undefined) {
       failedSetups.delete(project.id);
