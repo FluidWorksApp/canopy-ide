@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   INITIAL_PERSONA,
   reducePersona,
@@ -11,6 +17,12 @@ import type {
 } from "../vibeBuilderSessionTypes";
 import type { Project } from "../projects";
 import { vibeRequestMode, type VibeRequestMode } from "../vibeRequestMode";
+import { parseVibeIntent } from "../vibeIntent";
+import {
+  getVibePreviewContext,
+  subscribeVibePreviewContext,
+  vibePreviewBrief,
+} from "../vibePreviewContext";
 import { mascotDef } from "../mascots";
 import { Markdown } from "./Markdown";
 import { Mascot } from "./Mascot";
@@ -248,19 +260,29 @@ export function VibeBuilderPane({
   const composer = useRef<HTMLTextAreaElement>(null);
   const transcript = useRef<HTMLDivElement>(null);
   const projectId = project?.id ?? null;
+  const subscribePreview = useCallback(
+    (listener: () => void) =>
+      projectId ? subscribeVibePreviewContext(projectId, listener) : () => {},
+    [projectId],
+  );
+  const previewSnapshot = useCallback(
+    () => (projectId ? getVibePreviewContext(projectId) : null),
+    [projectId],
+  );
+  const previewContext = useSyncExternalStore(subscribePreview, previewSnapshot, () => null);
   const projectIdRef = useRef(projectId);
   const sessionVersion = useRef(0);
   const snapshot = session.state;
 
   useEffect(() => {
     sessionVersion.current += 1;
-    setDraft("");
     setAnsweringQuestion(null);
-    setComposerFocused(false);
     setStopping(false);
     const switchedProject = projectIdRef.current !== projectId;
     projectIdRef.current = projectId;
     if (switchedProject) {
+      setDraft("");
+      setComposerFocused(false);
       setTranscriptOpen(false);
       setCushionDismissed(false);
     }
@@ -412,6 +434,17 @@ export function VibeBuilderPane({
   const send = (text: string) => {
     const message = text.trim();
     if (!message) return;
+    // Managed install/deploy/link requests have their own confirmation path.
+    // For an ordinary Build turn, the island's retained visual items are the
+    // task's structured context even though the transcript keeps showing only
+    // the person's words.
+    const visualBrief = parseVibeIntent(message) ? "" : vibePreviewBrief(previewContext);
+    const sentAnnotations = visualBrief
+      ? previewContext?.annotations.filter((item) => !item.sent) ?? []
+      : [];
+    const sentShots = visualBrief
+      ? previewContext?.shots.filter((item) => !item.sent) ?? []
+      : [];
     const itemId = nextId();
     const requestMode = vibeRequestMode(message);
     setHasSpoken(true);
@@ -447,6 +480,7 @@ export function VibeBuilderPane({
     const version = sessionVersion.current;
     const markAccepted = () => {
       if (version !== sessionVersion.current) return;
+      previewContext?.markSent(sentAnnotations, sentShots);
       setView((current) => ({
         ...current,
         items: current.items.map((item) => {
@@ -462,7 +496,11 @@ export function VibeBuilderPane({
       }));
     };
     try {
-      void Promise.resolve(session.send(message))
+      void Promise.resolve(
+        visualBrief
+          ? session.send(message, { context: visualBrief })
+          : session.send(message),
+      )
         .then(markAccepted)
         .catch((error) => reportSendError(error, version, itemId));
     } catch (error) {
@@ -518,6 +556,8 @@ export function VibeBuilderPane({
     Boolean(question) || (showWelcome && starterIdeas.length > 0);
   const cushionOpen =
     transcriptOpen || (contextualCushion && !cushionDismissed);
+  const pendingAnnotations = previewContext?.annotations.filter((item) => !item.sent) ?? [];
+  const pendingShots = previewContext?.shots.filter((item) => !item.sent) ?? [];
   const composerOpen =
     !status.blocking && (composerFocused || Boolean(draft.trim()) || cushionOpen);
   // Closing the transcript must not make the active turn anonymous. The
@@ -769,6 +809,81 @@ export function VibeBuilderPane({
               </div>
             )}
           </div>
+        )}
+
+        {previewContext && (pendingAnnotations.length > 0 || pendingShots.length > 0) && (
+          <section className="vibe-builder-context" aria-label="Preview context">
+            <div className="vibe-builder-context-head">
+              <span>
+                Page context · {pendingAnnotations.length + pendingShots.length}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  previewContext.clearAnnotations();
+                  previewContext.clearShots();
+                }}
+              >
+                Clear
+              </button>
+            </div>
+            <div className="vibe-builder-context-items">
+              {pendingAnnotations.map((annotation) => (
+                <div
+                  className={`vibe-builder-context-item vibe-builder-context-annotation${
+                    annotation.sent ? " is-sent" : ""
+                  }`}
+                  key={`annotation-${annotation.n}`}
+                >
+                  <span className="vibe-builder-context-mark">{annotation.n}</span>
+                  <span className="vibe-builder-context-label" title={annotation.selector}>
+                    {annotation.components[0] ?? `<${annotation.tag}>`}
+                  </span>
+                  <input
+                    aria-label={`Feedback for annotation ${annotation.n}`}
+                    placeholder="What should change?"
+                    value={annotation.comment}
+                    onChange={(event) =>
+                      previewContext.setAnnotationComment(annotation.n, event.target.value)
+                    }
+                  />
+                  <button
+                    type="button"
+                    aria-label={`Remove annotation ${annotation.n}`}
+                    onClick={() => previewContext.removeAnnotation(annotation.n)}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+              {pendingShots.map((shot) => (
+                <div
+                  className={`vibe-builder-context-item vibe-builder-context-shot${
+                    shot.sent ? " is-sent" : ""
+                  }`}
+                  key={`shot-${shot.n}`}
+                >
+                  <img src={shot.thumb} alt="" />
+                  <span className="vibe-builder-context-label">
+                    {shot.region ? "Region" : "Page"} {shot.n}
+                  </span>
+                  <input
+                    aria-label={`Note for screenshot ${shot.n}`}
+                    placeholder="What should change?"
+                    value={shot.note}
+                    onChange={(event) => previewContext.setShotNote(shot.n, event.target.value)}
+                  />
+                  <button
+                    type="button"
+                    aria-label={`Remove screenshot ${shot.n}`}
+                    onClick={() => previewContext.removeShot(shot.n)}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
         )}
 
         <form

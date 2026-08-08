@@ -25,12 +25,19 @@ export interface BuilderSessionState {
   question?: BuilderQuestion | null;
 }
 
+export interface BuilderSendOptions {
+  /** Extra evidence for the coding agent. Kept separate from the person's
+   * words so intent routing and the visible transcript never mistake page
+   * copy for a request to install, link, or deploy something. */
+  context?: string;
+}
+
 /** The presentation boundary. Execution and persistence stay behind it. */
 export interface BuilderSession {
   events$: {
     subscribe(listener: (event: StructuredRunnerEvent) => void): () => void;
   };
-  send(text: string): void | Promise<void>;
+  send(text: string, options?: BuilderSendOptions): void | Promise<void>;
   /** Cancel only the work currently in flight. The session, preview and
    * conversation remain available for the person's next request. */
   cancelCurrentTurn?: () => void | Promise<void>;

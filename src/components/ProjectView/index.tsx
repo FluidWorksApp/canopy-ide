@@ -1406,18 +1406,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   // A worktree mirrors its repo's tree, so a component inside the repo maps to
   // the same relative path inside the worktree.
-  const components = project.components.map((c) => {
-    if (
-      worktreeEnv &&
-      (c.path === worktreeEnv.repo || c.path.startsWith(worktreeEnv.repo + "/"))
-    ) {
-      return {
-        ...c,
-        path: worktreeEnv.path + c.path.slice(worktreeEnv.repo.length),
-      };
-    }
-    return c;
-  });
+  // This identity is a lifecycle boundary: `vibeSession` depends on it below.
+  // Mapping on every render recreated and stopped the live Build session on a
+  // routine stats tick, which cleared a half-typed composer and orphaned the
+  // turn the person had just sent. Only the project/worktree inputs may replace
+  // the component view and therefore the session that owns it.
+  const components = useMemo(
+    () =>
+      project.components.map((c) => {
+        if (
+          worktreeEnv &&
+          (c.path === worktreeEnv.repo || c.path.startsWith(worktreeEnv.repo + "/"))
+        ) {
+          return {
+            ...c,
+            path: worktreeEnv.path + c.path.slice(worktreeEnv.repo.length),
+          };
+        }
+        return c;
+      }),
+    [project.components, worktreeEnv],
+  );
   const roots = components.map((c) => c.path);
   const rootsKey = roots.join("\n");
   // Cmd+T's listener is registered once; without this it closes over the

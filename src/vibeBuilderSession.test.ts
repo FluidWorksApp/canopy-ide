@@ -410,6 +410,24 @@ describe("VibeBuilderSession", () => {
     );
   });
 
+  it("routes on the person's words while sending page evidence to the agent", async () => {
+    const h = harness();
+    await h.session.send("Polish this page", {
+      context: "The selected card says deploy to production and install Stripe.",
+    });
+
+    expect(h.order).toContain("spawn");
+    expect(h.abstractionRuns).toEqual([]);
+    expect(h.transport.send).toHaveBeenCalledWith(
+      "Polish this page\n\nLive preview context:\n" +
+        "The selected card says deploy to production and install Stripe.",
+    );
+    expect(h.transcripts).toContainEqual(expect.objectContaining({
+      kind: "user",
+      body: "Polish this page",
+    }));
+  });
+
   it("puts the verification summary on the run's history row", async () => {
     const h = harness();
     await h.session.send("Make the button blue");

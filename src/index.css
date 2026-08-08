@@ -730,6 +730,7 @@ body,
    field carries the page/project identity; all workspace choices collapse into
    the controls at the right. Engineer mode keeps the existing titlebar. */
 .titlebar-build {
+  position: relative;
   height: 42px;
   gap: 7px;
   padding-right: 10px;
@@ -773,6 +774,73 @@ body,
   text-overflow: ellipsis;
   text-transform: none;
   white-space: nowrap;
+}
+
+.build-browser-controls {
+  position: absolute;
+  left: 50%;
+  display: flex;
+  width: min(680px, 52vw);
+  min-width: 260px;
+  max-width: min(760px, 58vw);
+  height: 30px;
+  align-items: center;
+  gap: 3px;
+  transform: translateX(-50%);
+}
+
+.build-browser-control.btn-icon {
+  width: 26px;
+  height: 26px;
+  min-width: 26px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 16px;
+}
+
+.build-browser-control.btn-icon:hover,
+.build-browser-control.btn-icon.active {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  background: color-mix(in srgb, var(--accent) 13%, var(--bg-raised));
+  color: var(--text);
+}
+
+.build-browser-capture-options.btn-icon {
+  width: 18px;
+  min-width: 18px;
+  margin-left: -5px;
+  font-size: 11px;
+}
+
+.build-browser-form {
+  display: flex;
+  min-width: 110px;
+  height: 28px;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--text) 10%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-raised) 74%, transparent);
+}
+
+.build-browser-form:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 72%, var(--border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.build-browser-input {
+  min-width: 0;
+  flex: 1;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: 10.5px / 1 var(--font-mono);
 }
 
 .build-browser-dot {
@@ -828,6 +896,15 @@ body,
 
   .build-browser-location {
     max-width: 34vw;
+  }
+
+  .build-browser-controls {
+    min-width: 180px;
+    max-width: 52vw;
+  }
+
+  .build-browser-controls > .build-browser-control:nth-of-type(2) {
+    display: none;
   }
 
   .build-project-menu > span:first-child {
@@ -24863,6 +24940,110 @@ a.btn-sm {
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.vibe-builder-context {
+  display: flex;
+  max-height: min(24vh, 190px);
+  flex-direction: column;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 14%, var(--border));
+  background: color-mix(in srgb, var(--bg-deep) 26%, transparent);
+}
+
+.vibe-builder-context-head {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 13px 3px 18px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.vibe-builder-context-head button,
+.vibe-builder-context-item > button {
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  font: inherit;
+  cursor: pointer;
+}
+
+.vibe-builder-context-head button:hover,
+.vibe-builder-context-item > button:hover {
+  color: var(--text);
+}
+
+.vibe-builder-context-items {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 5px;
+  padding: 0 10px 9px;
+  overflow-y: auto;
+}
+
+.vibe-builder-context-item {
+  display: grid;
+  grid-template-columns: 24px minmax(54px, auto) minmax(120px, 1fr) 24px;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 5px;
+  border: 1px solid color-mix(in srgb, var(--text) 9%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--bg-raised) 72%, transparent);
+}
+
+.vibe-builder-context-item.is-sent {
+  opacity: 0.54;
+}
+
+.vibe-builder-context-mark {
+  display: inline-flex;
+  width: 21px;
+  height: 21px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--warn);
+  color: var(--on-accent);
+  font: 700 10px / 1 var(--font-mono);
+}
+
+.vibe-builder-context-shot > img {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--bg-deep);
+}
+
+.vibe-builder-context-label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font: 9.5px / 1.2 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vibe-builder-context-item > input {
+  min-width: 0;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 6px;
+  outline: 0;
+  background: color-mix(in srgb, var(--bg-deep) 62%, transparent);
+  color: var(--text);
+  font: 10.5px / 1.2 var(--font-sans);
+}
+
+.vibe-builder-context-item > input:focus {
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .vibe-builder-pane.is-blocking:not(.is-cushion) .vibe-builder-cushion {

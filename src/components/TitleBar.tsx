@@ -1,4 +1,11 @@
-import { memo, useEffect, useState, type MouseEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useState,
+  useSyncExternalStore,
+  type MouseEvent,
+} from "react";
 import { BellIcon, CloseIcon, FrostIcon } from "./icons";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import type { Urgency } from "../attention";
@@ -11,6 +18,11 @@ import type { TabDrag } from "../tabDrag";
 // class is simply absent — nothing changes there.
 import { IS_MAC } from "../platform";
 import { Button } from "./ui";
+import { CAPTURE_MODES, captureModeLabel } from "../pageCapture";
+import {
+  getVibePreviewContext,
+  subscribeVibePreviewContext,
+} from "../vibePreviewContext";
 
 /** True while the window is in macOS fullscreen, where the traffic lights are
  *  hidden and the space reserved for them would read as a dead gap. There's no
@@ -84,6 +96,109 @@ interface TitleBarProps {
   onManageProjects: () => void;
 }
 
+/** Build has one browser chrome row: this title bar. PreviewView publishes its
+ * live controls here instead of rendering a second URL/action shelf above the
+ * page. Text labels stay in accessible names; the chrome itself remains quiet. */
+function BuildBrowserControls({ projectId }: {
+  projectId: string;
+}) {
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeVibePreviewContext(projectId, listener),
+    [projectId],
+  );
+  const snapshot = useCallback(() => getVibePreviewContext(projectId), [projectId]);
+  const preview = useSyncExternalStore(subscribe, snapshot, () => null);
+  const [draft, setDraft] = useState(preview?.url ?? "");
+  const captureMenu = useContextMenu();
+
+  useEffect(() => setDraft(preview?.url ?? ""), [preview?.url]);
+
+  // Empty Build preview is already explained by the canvas. Browser chrome is
+  // useful only once there is a page it can control; before that it is a false
+  // address field and competes with the setup state for attention.
+  if (!preview?.url.trim()) return null;
+
+  const openCaptureOptions = (event: MouseEvent) =>
+    captureMenu.open(
+      event,
+      CAPTURE_MODES.map((mode) => ({
+        label: mode.label,
+        hint: mode.id === preview.captureMode ? "default" : mode.hint,
+        onClick: () => preview.capture(mode.id),
+      })),
+    );
+
+  return (
+    <div className="build-browser-controls">
+      <Button icon className="build-browser-control" title="Back" onClick={() => preview.go(-1)}>
+        ‹
+      </Button>
+      <Button icon className="build-browser-control" title="Forward" onClick={() => preview.go(1)}>
+        ›
+      </Button>
+      <Button icon className="build-browser-control" title="Reload" onClick={() => preview.go(0)}>
+        ↻
+      </Button>
+      <form
+        className="build-browser-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          preview.navigate(draft);
+          (event.currentTarget.firstElementChild as HTMLInputElement | null)?.blur();
+        }}
+      >
+        <span className="build-browser-dot" aria-hidden />
+        <input
+          className="build-browser-input"
+          aria-label="Preview address"
+          value={draft}
+          spellCheck={false}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={() => setDraft(preview.url)}
+        />
+      </form>
+      <Button
+        icon
+        className={`build-browser-control ${preview.picking ? "active" : ""}`}
+        title="Annotate page"
+        aria-label={`Annotate page${preview.annotations.length ? `, ${preview.annotations.length} retained` : ""}`}
+        onClick={preview.togglePicking}
+      >
+        ◎
+      </Button>
+      <Button
+        icon
+        className="build-browser-control"
+        title={`Capture ${captureModeLabel(preview.captureMode).toLowerCase()}`}
+        aria-label={`Capture screenshot${preview.shots.length ? `, ${preview.shots.length} retained` : ""}`}
+        disabled={preview.capturing}
+        onClick={() => preview.capture(preview.captureMode)}
+        onContextMenu={openCaptureOptions}
+      >
+        ▣
+      </Button>
+      <Button
+        icon
+        className="build-browser-control build-browser-capture-options"
+        title="Choose capture type"
+        aria-label="Choose capture type"
+        disabled={preview.capturing}
+        onClick={openCaptureOptions}
+      >
+        ⌄
+      </Button>
+      {captureMenu.menu && (
+        <ContextMenu
+          x={captureMenu.menu.x}
+          y={captureMenu.menu.y}
+          items={captureMenu.menu.items}
+          onClose={captureMenu.close}
+        />
+      )}
+    </div>
+  );
+}
+
 // Top chrome: one pill per open project, a live-collab indicator, and the
 // Projects menu. Memoized — it only re-renders when the project set, the
 // active id, or the collab state actually change, not on every App state tick.
@@ -143,12 +258,10 @@ function TitleBarImpl({
     >
       {/* The strip around the pills is draggable too — the pills/badges/close
           are their own click targets, so they still work. */}
-      {buildMode ? (
-        <div className="build-browser-location" data-tauri-drag-region>
-          <span className="build-browser-dot" aria-hidden />
-          <span>Live preview</span>
-          <strong>{activeProject?.name}</strong>
-        </div>
+      {buildMode && activeProject ? (
+        <BuildBrowserControls
+          projectId={activeProject.id}
+        />
       ) : (
       <div className="project-tabs" data-tauri-drag-region>
         {openProjects.map((p, i) => {

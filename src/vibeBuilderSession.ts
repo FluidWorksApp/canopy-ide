@@ -81,6 +81,7 @@ import {
 import type {
   BuilderQuestion,
   BuilderQuestionAction,
+  BuilderSendOptions,
   BuilderSession,
   BuilderSessionState,
 } from "./vibeBuilderSessionTypes";
@@ -1237,7 +1238,7 @@ export class VibeBuilderSession implements BuilderSession {
     return queued;
   }
 
-  send(text: string): Promise<void> {
+  send(text: string, options?: BuilderSendOptions): Promise<void> {
     const message = text.trim();
     if (!message || this.stopped) return Promise.resolve();
     if (message === SAVE_CHECKPOINT && this.pendingCheckpoint) {
@@ -1269,7 +1270,9 @@ export class VibeBuilderSession implements BuilderSession {
       sent = resolve;
       failed = reject;
     });
-    const queued = this.sendQueue.then(() => this.runTurn(message, sent, failed));
+    const queued = this.sendQueue.then(() =>
+      this.runTurn(message, sent, failed, options?.context),
+    );
     this.sendQueue = queued.catch(() => {});
     return accepted;
   }
@@ -1899,7 +1902,12 @@ export class VibeBuilderSession implements BuilderSession {
     message: string,
     sent: () => void,
     failed: (error: unknown) => void,
+    context?: string,
   ): Promise<void> {
+    const evidence = context?.trim();
+    const agentMessage = evidence
+      ? `${message}\n\nLive preview context:\n${evidence}`
+      : message;
     const turnEpoch = ++this.turnEpoch;
     try {
       if (this.verifying) await this.verifying;
@@ -1912,7 +1920,7 @@ export class VibeBuilderSession implements BuilderSession {
       // Held so a reseeded attempt replays the same request verbatim. A
       // failover that paraphrased the goal would be solving a different
       // problem than the one that failed.
-      this.currentGoal = message;
+      this.currentGoal = agentMessage;
       this.currentTurnMode = vibeRequestMode(message);
       this.currentTurnChanged = false;
       this.attemptsUsed = 1;
@@ -1952,7 +1960,7 @@ export class VibeBuilderSession implements BuilderSession {
       const completed = new Promise<void>((resolve) => {
         this.finishTurn = resolve;
       });
-      await transport.send(message);
+      await transport.send(agentMessage);
       sent();
       await completed;
     } catch (error) {
