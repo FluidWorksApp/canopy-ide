@@ -28,6 +28,34 @@ const workspaceConfig = (args: readonly string[]) =>
   args.filter((arg) => arg.startsWith("sandbox_workspace_write."));
 
 describe("structured runner sandbox policy", () => {
+  it("pins dated capability evidence for every launchable Build runner", () => {
+    expect(STRUCTURED_RUNNERS.claude.verification).toMatchObject({
+      cliVersion: "2.1.226",
+      checkedOn: "2026-08-09",
+      flags: {
+        structuredJson: true,
+        systemPrompt: true,
+        planMode: true,
+        toolAllowlist: true,
+        workspaceSandbox: false,
+      },
+    });
+    expect(STRUCTURED_RUNNERS.codex.verification).toMatchObject({
+      cliVersion: "0.147.0",
+      checkedOn: "2026-08-09",
+      flags: {
+        structuredJson: true,
+        systemPrompt: false,
+        planMode: false,
+        toolAllowlist: false,
+        workspaceSandbox: true,
+      },
+    });
+    expect(STRUCTURED_RUNNERS.claude.verification.caveats.join(" ")).toContain(
+      "Edit/Write paths are not confined",
+    );
+  });
+
   it("carries network and writable roots into a workspace-write launch", () => {
     const args = STRUCTURED_RUNNERS.codex.args(launch("workspace-write"));
 

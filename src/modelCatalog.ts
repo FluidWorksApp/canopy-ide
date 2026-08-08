@@ -45,7 +45,9 @@ export type ModelFamily = "anthropic" | "openai" | "google";
  * of the same build.
  *
  * The other two families are catalogue-only (see CATALOGUE_ONLY) and carry
- * pinned ids because neither CLI publishes aliases to use instead.
+ * pinned ids because neither CLI publishes aliases to use instead. A Google
+ * seed supports detected Gemini terminals and donor parsing; it does not make
+ * Gemini a Build route, which requires STRUCTURED_RUNNERS membership.
  */
 export const SEEDS: Record<ModelFamily, ModelChoice[]> = {
   anthropic: [

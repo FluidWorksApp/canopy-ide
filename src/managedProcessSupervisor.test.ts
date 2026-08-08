@@ -3,7 +3,9 @@ import {
   classifyManagedProcess,
   detectManagedProcessPrompt,
   MANAGED_PROCESS_ENV,
+  MANAGED_PROCESS_KINDS,
   MANAGED_PROCESS_STALL_MS,
+  MANAGED_PROCESS_STATES,
   MANAGED_PROMPT_RESPONSE_TIMEOUT_MS,
   plainManagedOutput,
   unattendedManagedRunCommand,
@@ -89,16 +91,85 @@ describe("managed process exit matrix", () => {
     rawOutput: "",
   };
 
-  it.each([
-    ["spawning", { ...base }, "observe"],
-    ["working", { ...base, outputBytes: 20, rawOutput: "Compiling" }, "observe"],
-    ["ready", { ...base, spawnedAt: at - 3_000, outputBytes: 20, rawOutput: "Worker online" }, "complete"],
-    ["ready", { ...base, readinessKind: "port" as const, ports: [3000] }, "complete"],
-    ["exited-ok", { ...base, exited: true, exitCode: 0 }, "complete"],
-    ["failed", { ...base, exited: true, exitCode: 1 }, "repair"],
-    ["hung", { ...base, quietMs: MANAGED_PROCESS_STALL_MS }, "repair"],
-  ] as const)("maps %s to its required exit", (state, observation, exit) => {
-    expect(classifyManagedProcess(observation)).toMatchObject({ state, exit });
+  const samples = {
+    spawning: { ...base },
+    working: { ...base, outputBytes: 20, rawOutput: "Compiling" },
+    "waiting-on-input": { ...base, rawOutput: "Choose a project:" },
+    ready: {
+      ...base,
+      spawnedAt: at - 3_000,
+      outputBytes: 20,
+      rawOutput: "Worker online",
+    },
+    "exited-ok": { ...base, exited: true, exitCode: 0 },
+    failed: { ...base, exited: true, exitCode: 1 },
+    hung: { ...base, spawnedAt: at - MANAGED_PROCESS_STALL_MS },
+  } satisfies Record<(typeof MANAGED_PROCESS_STATES)[number], ManagedProcessObservation>;
+  const expectedExit = {
+    spawning: "observe",
+    working: "observe",
+    "waiting-on-input": "repair",
+    ready: "complete",
+    "exited-ok": "complete",
+    failed: "repair",
+    hung: "repair",
+  } as const;
+
+  const matrix = MANAGED_PROCESS_KINDS.flatMap((kind) =>
+    MANAGED_PROCESS_STATES.map((state) => ({ kind, state })),
+  );
+
+  it.each(matrix)("maps $kind × $state to a bounded agent/chat exit", ({ kind, state }) => {
+    const result = classifyManagedProcess({ ...samples[state], kind });
+    expect(result).toMatchObject({ kind, state, exit: expectedExit[state] });
+    expect(["agent-exit", "chat-card-exit"]).toContain(result.surface);
+    if (state !== "ready" && state !== "exited-ok") {
+      expect(result.deadlineAt).not.toBeNull();
+    }
+  });
+
+  it("uses the declared HTTP path result, never an unrelated listening port", () => {
+    expect(classifyManagedProcess({
+      ...base,
+      readinessKind: "http",
+      ports: [3000],
+      httpReady: false,
+    })).toMatchObject({ state: "spawning", exit: "observe" });
+    expect(classifyManagedProcess({
+      ...base,
+      readinessKind: "http",
+      ports: [3000],
+      httpReady: true,
+    })).toMatchObject({ state: "ready", exit: "complete" });
+  });
+
+  it("anchors readiness deadlines to spawn even while output keeps changing", () => {
+    const before = classifyManagedProcess({
+      ...base,
+      spawnedAt: at - MANAGED_PROCESS_STALL_MS + 1,
+      outputBytes: 500,
+      quietMs: 0,
+      readinessKind: "http",
+      httpReady: false,
+    });
+    expect(before).toMatchObject({ state: "working", deadlineAt: at + 1 });
+    expect(classifyManagedProcess({
+      ...base,
+      spawnedAt: at - MANAGED_PROCESS_STALL_MS,
+      outputBytes: 600,
+      quietMs: 0,
+      readinessKind: "http",
+      httpReady: false,
+    })).toMatchObject({ state: "hung", exit: "repair", deadlineAt: at });
+  });
+
+  it("honours a one-shot command's declared bounded timeout", () => {
+    expect(classifyManagedProcess({
+      ...base,
+      readinessKind: "one-shot",
+      readinessTimeoutMs: 120_000,
+      spawnedAt: at - 60_000,
+    })).toMatchObject({ state: "spawning", deadlineAt: at + 60_000 });
   });
 
   it("auto-answers a supported prompt, then repairs if it stays stuck", () => {

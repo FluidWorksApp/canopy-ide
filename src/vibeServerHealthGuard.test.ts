@@ -113,4 +113,16 @@ describe("vibe server health wiring", () => {
       expect(supervisor).toContain(`| "${state}"`);
     }
   });
+
+  it("probes the declared HTTP path inside the one readiness supervisor", () => {
+    const view = read("src/components/ProjectView/index.tsx");
+    const start = view.indexOf("const inspect = async () =>");
+    const supervisor = view.slice(start, view.indexOf("const vibeRuntimeReady", start));
+    expect(supervisor).toContain("ipc.probeHttpReadiness(");
+    expect(supervisor).toContain("command.readiness.path");
+    expect(supervisor).toContain("httpReady,");
+    expect(supervisor).toContain("readinessTimeoutMs:");
+    expect(supervisor).toContain('classification.state === "hung"');
+    expect(supervisor).toContain("reportServerStartupStall({");
+  });
 });

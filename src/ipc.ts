@@ -2218,6 +2218,11 @@ export interface SessionStats {
  *  monitor already fills. */
 export const ptyStats = (): Promise<SessionStats[]> => invoke<SessionStats[]>("pty_stats");
 
+/** Verify the exact path declared by a Build run on one of that PTY's local
+ * listening ports. Native transport keeps browser CORS out of process health. */
+export const probeHttpReadiness = (port: number, path: string): Promise<boolean> =>
+  invoke<boolean>("probe_http_readiness", { port, path });
+
 export const onPtyStats = (
   cb: (stats: SessionStats[]) => void,
 ): Promise<UnlistenFn> =>

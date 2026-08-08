@@ -106,7 +106,8 @@ fn valid_attempt_id(id: &str) -> bool {
 /// the difference between the turn running and the turn hanging forever.
 /// `codex exec` reads stdin whenever stdin is a pipe, *even when the prompt was
 /// given as an argument* ("Reading additional input from stdin..."), and blocks
-/// until EOF. Held open it never gets one: verified against codex-cli 0.146.1,
+/// until EOF. Held open it never gets one: verified against codex-cli 0.146.1
+/// on 2026-08-07,
 /// which produced no output at all and was still running after two minutes on a
 /// prompt that answers in under ten seconds.
 #[tauri::command]

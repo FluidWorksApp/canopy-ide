@@ -46,6 +46,22 @@ export interface StructuredRunner {
   /** Which JSON schema this CLI's stdout is written in. Not implied by the
    *  tier: two CLIs could share a lifecycle and agree on nothing else. */
   dialect: StructuredDialect;
+  /** Dated evidence for every capability Build assumes. A runner entry is a
+   *  launch permission, so an unstamped entry would silently turn remembered
+   *  CLI behavior into a product guarantee. */
+  verification: {
+    cliVersion: string;
+    checkedOn: string;
+    source: string;
+    flags: {
+      structuredJson: boolean;
+      systemPrompt: boolean;
+      planMode: boolean;
+      toolAllowlist: boolean;
+      workspaceSandbox: boolean;
+    };
+    caveats: readonly string[];
+  };
   args(o: StructuredRunnerLaunch): string[];
   resumeArgs(o: StructuredRunnerLaunch): string[];
 }
@@ -72,7 +88,8 @@ const codexMode = (authority: StructuredRunnerAuthority): string =>
 /** Authority for `codex exec`, where it is a first-class flag.
  *
  *  `-s/--sandbox <read-only|workspace-write|danger-full-access>`, verified
- *  against `codex exec --help` (0.146.1). Never the third value, and never
+ *  against `codex exec --help` (0.147.0) on 2026-08-09. Never the third value,
+ *  and never
  *  `--dangerously-bypass-approvals-and-sandbox`: a task Canopy launched
  *  unattended is the last thing that should be running outside the sandbox. */
 type CodexSandboxPolicy = Pick<
@@ -164,13 +181,30 @@ export function codexResumeSandbox(
   ];
 }
 
-/** Claude has no OS sandbox argv equivalent. Its filesystem containment is
- *  enforced before tools run by canopy_hook.rs's proven PreToolUse
- *  `permissionDecision: "deny"` response; permissionArgs describes which
- *  tools may be attempted, but it is not the containment boundary. */
+/** Claude print/resume argv, re-verified against Claude Code 2.1.226's local
+ *  `--help` on 2026-08-09. Claude has no OS workspace boundary equivalent to
+ *  Codex's sandbox: allowed/disallowed tool flags govern which tools may be
+ *  attempted, but they do not confine Edit/Write paths. The existing Bash
+ *  destructive-command hook is a separate safety gate, not filesystem
+ *  containment. */
 const CLAUDE_RUNNER: StructuredRunner = {
   tier: "structured",
   dialect: "claude",
+  verification: {
+    cliVersion: "2.1.226",
+    checkedOn: "2026-08-09",
+    source: "claude --help",
+    flags: {
+      structuredJson: true,
+      systemPrompt: true,
+      planMode: true,
+      toolAllowlist: true,
+      workspaceSandbox: false,
+    },
+    caveats: [
+      "No OS-backed workspace boundary; Edit/Write paths are not confined by the runner flags.",
+    ],
+  },
   args: (o) => [
     "-p",
     "--input-format",
@@ -206,7 +240,8 @@ const CLAUDE_RUNNER: StructuredRunner = {
   ],
 };
 
-/** `codex exec`, verified against codex-cli 0.146.1.
+/** `codex exec`, re-verified against codex-cli 0.147.0's local `exec --help`
+ *  and `exec resume --help` on 2026-08-09.
  *
  *  No permission flags, and not for want of looking: Claude's `--allowedTools`
  *  has no counterpart here. Codex draws the line with the sandbox instead of a
@@ -223,6 +258,23 @@ const CLAUDE_RUNNER: StructuredRunner = {
 const CODEX_RUNNER: StructuredRunner = {
   tier: "oneshot",
   dialect: "codex",
+  verification: {
+    cliVersion: "0.147.0",
+    checkedOn: "2026-08-09",
+    source: "codex exec --help; codex exec resume --help",
+    flags: {
+      structuredJson: true,
+      systemPrompt: false,
+      planMode: false,
+      toolAllowlist: false,
+      workspaceSandbox: true,
+    },
+    caveats: [
+      "No system-prompt flag; Canopy prepends the brief to each turn.",
+      "No tool allow/deny flags; the OS sandbox is the enforcement boundary.",
+      "Resume accepts neither -C nor --add-dir and inherits the original roots.",
+    ],
+  },
   args: (o) => [
     "exec",
     "--json",
@@ -276,4 +328,7 @@ export const STRUCTURED_RUNNERS: Record<string, StructuredRunner> = {
  *  claim that the argv and the event schema were checked against the real
  *  binary, and nothing else may be routed to Build. */
 export const streamsStructured = (cliId: string): boolean =>
-  Boolean(STRUCTURED_RUNNERS[cliId]);
+  Boolean(
+    STRUCTURED_RUNNERS[cliId]?.verification.cliVersion &&
+    STRUCTURED_RUNNERS[cliId]?.verification.checkedOn,
+  );
