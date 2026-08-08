@@ -24,20 +24,22 @@
 //
 // A prompt that says "only edit files inside the component" is a request. The
 // model usually honours it, which is worse than if it never did, because the
-// failure is rare enough to be a surprise. Both CLIs Canopy drives can do
-// better than a request:
+// failure is rare enough to be a surprise. Codex can do better than a request;
+// Claude currently cannot:
 //
 //   - codex: `-s workspace-write` is enforced by Seatbelt on macOS. From the
 //     binary's own help text: "The sandbox permits reading files, and editing
 //     files in `cwd` and `writable_roots`. Editing files in other directories
 //     requires approval." A write outside the box does not depend on the model
 //     deciding not to.
-//   - claude: no OS sandbox, but a PreToolUse hook can refuse a call before it
-//     runs, and canopy_hook already does exactly that for research writes with
-//     a decision shape proven on Claude's wire (see canopy_hook.rs).
+//   - claude: no OS workspace sandbox. Canopy's PreToolUse hook blocks a small
+//     set of destructive Bash commands and relocates research writes, but it
+//     does not call insideWorkspace for Edit/Write. The prompt and tool flags
+//     are policy here, not filesystem containment.
 //
-// So the boundary below is real on both. What this module owns is deciding
-// where the boundary sits and what still needs a person inside it.
+// The writable-root boundary below is therefore enforced for Codex and carried
+// as the intended scope for Claude. This file records that asymmetry plainly;
+// claiming parity here would hide the exact security work still missing.
 //
 // ## Network is on, and that is a decision
 //
@@ -51,10 +53,12 @@
 //
 // ## What is still worth asking about
 //
-// Because the sandbox already contains writes to the component, the questions
-// left are the ones the sandbox cannot answer: destruction INSIDE the box that
-// no boundary would stop, and any attempt to make the box bigger. Those are
-// the only cases judgeCommand refuses to wave through — see DESTRUCTIVE.
+// For Codex, the sandbox already contains writes to the component. The
+// questions left are destruction INSIDE the box that no boundary would stop,
+// and any attempt to make the box bigger. Claude receives the same questions,
+// but its filesystem scope remains prompt-enforced until an Edit/Write gate is
+// wired. Those are the cases judgeCommand refuses to wave through — see
+// DESTRUCTIVE.
 //
 // Everything else runs. That direction is deliberate: a classifier that asks
 // about anything it does not recognise is a classifier that asks about
@@ -104,10 +108,11 @@ const NEVER = ["KillShell", "NotebookEdit"];
 
 /** The grant for a task in a workspace. The single place authority is decided.
  *
- *  Note what does NOT vary: the boundary. Every task is confined to the same
- *  directories. What varies is whether the agent may write at all, and whether
- *  it has a shell — because a survey that can run commands is a survey that
- *  can change what it is surveying. */
+ *  Note what does NOT vary: the intended boundary. Codex enforces these roots
+ *  in its OS sandbox; Claude receives them as scope but is not yet confined by
+ *  an Edit/Write hook. What varies is whether the agent may write at all, and
+ *  whether it has a shell — because a survey that can run commands is a survey
+ *  that can change what it is surveying. */
 export function grantFor(task: WorkspaceTask, workspace: Workspace): WorkspaceGrant {
   const writableRoots = [workspace.root, ...(workspace.siblings ?? [])];
   if (task === "survey") {
@@ -186,8 +191,9 @@ const DESTRUCTIVE: { test: RegExp; because: string }[] = [
  *  a deletion.
  *
  *  Unrecognised commands are routine, on purpose — see the header. The
- *  filesystem boundary, not this list, is what contains an agent that does
- *  something unexpected. */
+ *  Codex's filesystem boundary, not this list, is what contains an unexpected
+ *  write. Claude has no equivalent boundary yet, so callers must not describe
+ *  this classifier as containment. */
 export function judgeCommand(command: string): CommandVerdict {
   const text = command.trim();
   for (const rule of DESTRUCTIVE) {
@@ -198,9 +204,9 @@ export function judgeCommand(command: string): CommandVerdict {
 
 /** Is this path inside what the workspace may change?
  *
- *  The sandbox enforces this for codex; for claude the PreToolUse hook is the
- *  enforcement and needs the same answer, so both derive it from here rather
- *  than each implementing "inside" slightly differently. */
+ *  Codex's sandbox enforces this answer. Claude does not currently call this
+ *  helper from its PreToolUse path; keep it as the one intended definition so
+ *  that future enforcement cannot invent a second meaning of "inside". */
 export function insideWorkspace(path: string, workspace: Workspace): boolean {
   const target = path.replace(/\/+$/, "");
   return [workspace.root, ...(workspace.siblings ?? [])].some((root) => {

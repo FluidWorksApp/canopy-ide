@@ -2089,8 +2089,8 @@ fn relocate_stray_research(session_id: &str, entry_dir: &std::path::Path) {
 ///
 /// Canopy stamps CANOPY_CTX_PORT and _TOKEN onto every PTY it opens, and every
 /// CLI that inherits its environment passes them down to the MCP servers it
-/// starts. Codex does not: verified against codex-cli 0.146.0, it spawns stdio
-/// MCP servers with twelve core variables and nothing else —
+/// starts. Codex does not: verified against codex-cli 0.146.0 on 2026-08-02,
+/// it spawns stdio MCP servers with twelve core variables and nothing else —
 ///
 ///   HOME LANG LOGNAME PATH PWD SHELL SHLVL TERM TMPDIR USER _ __CF_USER_TEXT_ENCODING
 ///
