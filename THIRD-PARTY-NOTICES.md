@@ -842,9 +842,9 @@ terms govern use of the model:
 
 - **foldhash 0.2.0** — Copyright (c) 2024 Orson Peters
 
-## npm packages (235)
+## npm packages (236)
 
-### MIT — 173
+### MIT — 174
 
 - **@antfu/install-pkg 1.1.0** — Copyright (c) 2021 Anthony Fu <https://github.com/antfu>
 - **@braintree/sanitize-url 7.1.2** — Copyright (c) 2017 Braintree
@@ -944,6 +944,7 @@ terms govern use of the model:
 - **@vue/shared 3.5.40** — Copyright (c) 2018-present, Yuxi (Evan) You
 - **@xmldom/xmldom 0.8.13** — Copyright 2019 - present Christopher J. Brody and other contributors, as listed in: https://github.com/xmldom/xmldom/graphs/contributors; Copyright 2012 - 2017 @jindw <jindw@xidea.org> and other contributors, as listed in: https://github.com/jindw/xmldom/graphs/contributors
 - **@xterm/addon-fit 0.11.0** — Copyright (c) 2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+- **@xterm/addon-serialize 0.14.0** — Copyright The xterm.js authors (per package manifest; the distributed license file carries no copyright line)
 - **@xterm/addon-unicode11 0.9.0** — Copyright (c) 2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
 - **@xterm/addon-web-links 0.12.0** — Copyright (c) 2017, The xterm.js authors (https://github.com/xtermjs/xterm.js)
 - **@xterm/xterm 6.0.0** — Copyright (c) 2017-2019, The xterm.js authors (https://github.com/xtermjs/xterm.js); Copyright (c) 2014-2016, SourceLair Private Company (https://www.sourcelair.com); Copyright (c) 2012-2013, Christopher Jeffrey (https://github.com/chjj/)
