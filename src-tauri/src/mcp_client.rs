@@ -49,6 +49,10 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// here and nowhere else; servers that log happily would otherwise grow without
 /// bound, so only the tail is kept.
 const STDERR_KEEP: usize = 8 * 1024;
+/// JSON-RPC allocation boundaries, applied before complete lines/bodies are
+/// materialized. Local MCP servers are plugins, not trusted memory peers.
+const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // What crosses into the webview
@@ -216,9 +220,16 @@ impl Connection {
 
 impl StdioTransport {
     async fn send(&mut self, body: &Value) -> Result<(), String> {
-        let line = format!("{body}\n");
+        let mut line = serde_json::to_vec(body).map_err(|e| e.to_string())?;
+        if line.len() > MAX_REQUEST_BYTES {
+            return Err(format!(
+                "MCP request is {} bytes; maximum is {MAX_REQUEST_BYTES}",
+                line.len()
+            ));
+        }
+        line.push(b'\n');
         self.stdin
-            .write_all(line.as_bytes())
+            .write_all(&line)
             .await
             .map_err(|e| format!("writing to the server failed: {e}"))?;
         self.stdin
@@ -247,16 +258,10 @@ impl StdioTransport {
     /// protocol. Only end-of-pipe is fatal.
     async fn read_reply(&mut self, id: i64) -> Result<Value, String> {
         loop {
-            let mut line = String::new();
-            let read = self
-                .stdout
-                .read_line(&mut line)
-                .await
-                .map_err(|e| format!("reading from the server failed: {e}"))?;
-            if read == 0 {
+            let Some(line) = read_capped_line(&mut self.stdout, MAX_RESPONSE_BYTES).await? else {
                 return Err("the server closed its output".into());
-            }
-            let Ok(message) = serde_json::from_str::<Value>(line.trim()) else {
+            };
+            let Ok(message) = serde_json::from_slice::<Value>(&line) else {
                 continue;
             };
             if message.get("id").and_then(|v| v.as_i64()) == Some(id) {
@@ -266,8 +271,53 @@ impl StdioTransport {
     }
 }
 
+/// Read one newline-delimited frame while checking the byte budget before each
+/// extension. `AsyncBufReadExt::read_line` only reports size after allocating.
+async fn read_capped_line(
+    reader: &mut BufReader<ChildStdout>,
+    max: usize,
+) -> Result<Option<Vec<u8>>, String> {
+    let mut out = Vec::with_capacity(8 * 1024);
+    let mut oversized = false;
+    loop {
+        let available = reader
+            .fill_buf()
+            .await
+            .map_err(|e| format!("reading from the server failed: {e}"))?;
+        if available.is_empty() {
+            return if out.is_empty() { Ok(None) } else { Ok(Some(out)) };
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(available.len());
+        if !oversized {
+            let keep = take.min(max.saturating_sub(out.len()));
+            out.extend_from_slice(&available[..keep]);
+            oversized = keep < take;
+        }
+        let done = available.get(take.saturating_sub(1)) == Some(&b'\n');
+        reader.consume(take);
+        if done {
+            return if oversized {
+                Err(format!("MCP response line exceeded {max} bytes"))
+            } else {
+                Ok(Some(out))
+            };
+        }
+    }
+}
+
 impl HttpTransport {
-    fn post(&self, body: &Value) -> reqwest::RequestBuilder {
+    fn post(&self, body: &Value) -> Result<reqwest::RequestBuilder, String> {
+        let encoded = serde_json::to_vec(body).map_err(|e| e.to_string())?;
+        if encoded.len() > MAX_REQUEST_BYTES {
+            return Err(format!(
+                "MCP request is {} bytes; maximum is {MAX_REQUEST_BYTES}",
+                encoded.len()
+            ));
+        }
         let mut req = self
             .client
             .post(&self.url)
@@ -285,11 +335,11 @@ impl HttpTransport {
         }
         // Serialized here rather than through reqwest's `json` helper, which
         // would mean turning on a feature to do what `to_string` already does.
-        req.body(body.to_string())
+        Ok(req.body(encoded))
     }
 
     async fn notify(&mut self, body: &Value) -> Result<(), String> {
-        self.post(body)
+        self.post(body)?
             .send()
             .await
             .map(|_| ())
@@ -302,7 +352,7 @@ impl HttpTransport {
         body: &Value,
         timeout: Duration,
     ) -> Result<Value, String> {
-        let response = tokio::time::timeout(timeout, self.post(body).send())
+        let response = tokio::time::timeout(timeout, self.post(body)?.send())
             .await
             .map_err(|_| format!("the server did not answer within {}s", timeout.as_secs()))?
             .map_err(|e| format!("the server could not be reached: {e}"))?;
@@ -316,10 +366,31 @@ impl HttpTransport {
         }
 
         let status = response.status();
-        let text = response
-            .text()
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        {
+            return Err(format!("MCP response exceeded {MAX_RESPONSE_BYTES} bytes"));
+        }
+        let mut response = response;
+        let mut bytes = Vec::with_capacity(
+            response
+                .content_length()
+                .unwrap_or(8 * 1024)
+                .min(MAX_RESPONSE_BYTES as u64) as usize,
+        );
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| format!("reading the response failed: {e}"))?;
+            .map_err(|e| format!("reading the response failed: {e}"))?
+        {
+            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                return Err(format!("MCP response exceeded {MAX_RESPONSE_BYTES} bytes"));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8(bytes)
+            .map_err(|_| "the MCP response was not UTF-8".to_string())?;
         if !status.is_success() {
             // The body is where a hosted server explains a 401, so it goes in
             // the message rather than just the code.

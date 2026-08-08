@@ -20,6 +20,7 @@ import { getSettings, THEME_CHANGE_EVENT, type Settings } from "../settings";
 import { terminalTheme } from "../terminalThemes";
 import { createLinkHint, opensLink } from "../terminalLinks";
 import { matchesChord, resolve } from "../shortcuts";
+import { TerminalStreamLedger } from "../terminalStreamLedger";
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -57,7 +58,11 @@ export interface TermHandle {
 
 interface TermProps {
   cwd?: string;
+  /** Owns keyboard/focus and window-global input events. */
   active: boolean;
+  /** The pane is actually onscreen and should consume native output. All panes
+   *  in a visible split stream; only one of them is `active`. */
+  streaming: boolean;
   /** Typed into the shell right after spawn (e.g. launch an agent CLI). */
   initialCommand?: string;
   /** A run tab's one-shot command: the shell is spawned to run it and exit with
@@ -86,7 +91,7 @@ interface TermProps {
 }
 
 export const Term = forwardRef<TermHandle, TermProps>(function Term(
-  { cwd, active, initialCommand, runCommand, runArgv, env, runId, attemptId, attachId, killAttachedOnClose, onSpawned, onExited, onTitle, onNotify },
+  { cwd, active, streaming, initialCommand, runCommand, runArgv, env, runId, attemptId, attachId, killAttachedOnClose, onSpawned, onExited, onTitle, onNotify },
   ref,
 ) {
   // Frozen once: a Term never switches between spawn and attach mid-life, and
@@ -96,11 +101,15 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const ptyIdRef = useRef<number | null>(null);
+  /** Attach/detach the native output viewer as this pane becomes visible/hidden. */
+  const streamVisibilityRef = useRef<((visible: boolean) => void) | null>(null);
   /** Repaint + size-sync immediately (no debounce); set by the mount effect. */
   const syncNowRef = useRef<(() => void) | null>(null);
   // Mirrored so the mount-once drop listener can see the current value.
   const activeRef = useRef(active);
   activeRef.current = active;
+  const streamingRef = useRef(streaming);
+  streamingRef.current = streaming;
   const onExitedRef = useRef(onExited);
   onExitedRef.current = onExited;
 
@@ -182,7 +191,13 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // skin changes; xterm renders its own surface and needs the theme object
     // pushed explicitly. Reassigning .options.theme repaints immediately — no
     // remount, no fresh PTY, the running shell/agent is untouched.
+    let deferredTheme = false;
     const onThemeChange = () => {
+      if (!streamingRef.current) {
+        deferredTheme = true;
+        return;
+      }
+      deferredTheme = false;
       const next = getSettings();
       term.options.theme = themeFor(next);
       // Font and cursor used to apply only to newly opened terminals. That is
@@ -439,6 +454,37 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     window.addEventListener("focus", onFocus);
     let unlistenExit: (() => void) | undefined;
     const earlyExits = new Map<number, ipc.PtyExit>();
+    let streamGeneration: number | null = null;
+    const streamLedger = new TerminalStreamLedger();
+    let streamEpoch = 0;
+    let streamAttached = false;
+    let streamConnecting = false;
+    let hasBound = false;
+    let setResizeObservation = (_visible: boolean) => {};
+
+    const writeStream = (chunk: ipc.PtyChunk, epoch = streamEpoch) => {
+      const { bytes } = chunk;
+      if (disposed) return;
+      if (!streamLedger.accept(epoch, streamEpoch, chunk.end)) return;
+      // xterm owns the bytes as soon as write() accepts them into its ordered
+      // parser queue. Advancing here (rather than in the completion callback)
+      // makes a hide/show between enqueue and parse resume after this chunk,
+      // instead of replaying and painting it twice.
+      if (chunk.gap) {
+        term.write("\r\n\x1b[33m[Canopy: earlier terminal output was truncated]\x1b[0m\r\n");
+      }
+      term.write(bytes, () => {
+        if (epoch !== streamEpoch) return;
+        if (streamGeneration != null && ptyIdRef.current != null) {
+          void ipc.ptyAck(ptyIdRef.current, streamGeneration, bytes.length);
+        } else {
+          // Spawn/attach can deliver output before its invoke resolves with the
+          // generation. Count only after xterm consumed it, then release that
+          // exact amount once the stream identity is known.
+          streamLedger.addPendingAck(epoch, bytes.length);
+        }
+      });
+    };
 
     // Once the pty (fresh or attached) is bound: adopt its grid and announce
     // the id. Exit listening is installed before either spawn path, so a
@@ -446,11 +492,81 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     const bound = (id: number, geom: { cols: number; rows: number }) => {
       ptyIdRef.current = id;
       applyGeometry(geom);
-      onSpawned(id);
+      if (!hasBound) {
+        hasBound = true;
+        onSpawned(id);
+      }
       const early = earlyExits.get(id);
       if (early) {
         earlyExits.delete(id);
         onExitedRef.current(early);
+      }
+    };
+
+    const adoptStream = (
+      id: number,
+      geom: { cols: number; rows: number },
+      generation: number,
+      epoch: number,
+    ) => {
+      streamGeneration = generation;
+      streamAttached = true;
+      bound(id, geom);
+      const pending = streamLedger.takePendingAck(epoch);
+      if (pending > 0) {
+        void ipc.ptyAck(id, generation, pending);
+      }
+    };
+
+    const detachViewer = () => {
+      // An attach invoke can remain unresolved after this pane hides. Drop any
+      // early parser acknowledgements now rather than retaining one entry per
+      // hide/show epoch until each obsolete invoke eventually settles.
+      streamLedger.discard(streamEpoch);
+      streamEpoch += 1;
+      const id = ptyIdRef.current;
+      const generation = streamGeneration;
+      streamGeneration = null;
+      streamAttached = false;
+      streamConnecting = false;
+      if (id != null && generation != null) {
+        void ipc.ptyDetachDesktop(id, generation);
+      }
+    };
+
+    const attachViewer = async () => {
+      const id = ptyIdRef.current;
+      if (disposed || id == null || streamAttached || streamConnecting) return;
+      streamConnecting = true;
+      const epoch = ++streamEpoch;
+      try {
+        const attached = await ipc.ptyAttachDesktop(
+          id,
+          streamLedger.replayAfter(),
+          (chunk) => writeStream(chunk, epoch),
+        );
+        if (disposed || epoch !== streamEpoch || !streamingRef.current) {
+          streamLedger.discard(epoch);
+          void ipc.ptyDetachDesktop(id, attached.generation);
+          return;
+        }
+        adoptStream(id, attached, attached.generation, epoch);
+      } catch (err) {
+        if (!disposed && epoch === streamEpoch)
+          term.writeln(`\r\n\x1b[31mfailed to attach: ${err}\x1b[0m`);
+      } finally {
+        if (epoch === streamEpoch) streamConnecting = false;
+      }
+    };
+
+    streamVisibilityRef.current = (visible) => {
+      setResizeObservation(visible);
+      if (visible) {
+        if (deferredTheme) onThemeChange();
+        void attachViewer();
+      } else {
+        linkHint.hide();
+        detachViewer();
       }
     };
 
@@ -467,23 +583,17 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       unlistenExit = off;
 
       if (attachIdRef.current != null) {
-        // Attach path: mirror a headless PTY the portal spawned. No ack — a
-        // headless session fans out over a lossy broadcast and never applies
-        // WebView backpressure — and no initial command (the portal already sent
-        // it). The scrollback snapshot arrives first, then the live tail.
+        // Every desktop viewer gets one bounded, generation-scoped stream.
+        // Ownership changes only close behaviour: a restored desktop-owned PTY
+        // is killed on explicit close; a remote/micro-task viewer detaches.
         const id = attachIdRef.current;
-        try {
-          const geom = await ipc.ptyAttach(id, (bytes) => {
-            if (!disposed) term.write(bytes);
-          });
-          if (!disposed) bound(id, geom);
-        } catch (err) {
-          term.writeln(`\r\n\x1b[31mfailed to attach: ${err}\x1b[0m`);
-        }
+        ptyIdRef.current = id;
+        if (streamingRef.current) await attachViewer();
         return;
       }
 
       try {
+        const spawnEpoch = streamEpoch;
         const spawnOpts = {
             // 0 tells Rust to fall back to 80x24; the first resize once the tab is
             // visible corrects it.
@@ -496,17 +606,12 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             runId,
             attemptId,
           };
-        const onData = (bytes: Uint8Array) => {
-            // Feed xterm's own write buffer and ack once it has consumed the
-            // chunk — this drives the Rust-side backpressure window. Never
-            // accumulate output in JS. (Read the ref inside the callback: early
-            // chunks can arrive before the spawn promise resolves.)
-            term.write(bytes, () => {
-              if (ptyIdRef.current != null) {
-                void ipc.ptyAck(ptyIdRef.current, bytes.length);
-              }
-            });
-          };
+        const onData = (chunk: ipc.PtyChunk) => {
+          // Feed xterm's own write buffer and ack once it has consumed the
+          // chunk. The native generation makes a late callback from a prior
+          // page harmless.
+          writeStream(chunk, spawnEpoch);
+        };
         const result = runArgv?.length
           ? await ipc.ptySpawnAttachedArgv({ ...spawnOpts, argv: runArgv }, onData)
           : await ipc.ptySpawn(spawnOpts, onData);
@@ -517,7 +622,16 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         // Adopt whatever the pty opened at, including the 80x24 fallback when
         // we proposed nothing — better a grid that matches the shell than one
         // that looks right and wraps wrong.
-        bound(result.id, result);
+        if (result.generation == null) throw new Error("PTY spawned without a stream generation");
+        if (spawnEpoch !== streamEpoch || !streamingRef.current) {
+          // The pane became hidden while native spawn was in flight. Bind the
+          // id for later reattach, but never adopt its now-stale channel.
+          bound(result.id, result);
+          streamLedger.discard(spawnEpoch);
+          void ipc.ptyDetachDesktop(result.id, result.generation);
+        } else {
+          adoptStream(result.id, result, result.generation, spawnEpoch);
+        }
         // A run tab's command was handed to the shell at spawn (runCommand),
         // so it's already executing — only a typed initialCommand needs sending.
         if (initialCommand && !runCommand) {
@@ -635,7 +749,14 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         if (next) pushGeometry(next);
       }, 50);
     });
-    observer.observe(el);
+    let observing = false;
+    setResizeObservation = (shouldObserve) => {
+      if (shouldObserve === observing) return;
+      if (shouldObserve) observer.observe(el);
+      else observer.disconnect();
+      observing = shouldObserve;
+    };
+    setResizeObservation(streamingRef.current);
 
     return () => {
       disposed = true;
@@ -652,12 +773,14 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       unlistenExit?.();
       // Attached tabs detach on close — the agent was spawned from the phone and
       // stays alive and controllable there. Only a tab that OWNS its pty kills it.
-      if (
-        (attachIdRef.current == null || killAttachedOnCloseRef.current) &&
-        ptyIdRef.current != null
-      ) {
-        void ipc.ptyKill(ptyIdRef.current);
+      if (ptyIdRef.current != null) {
+        if (attachIdRef.current == null || killAttachedOnCloseRef.current) {
+          void ipc.ptyKill(ptyIdRef.current);
+        } else if (streamGeneration != null) {
+          void ipc.ptyDetachDesktop(ptyIdRef.current, streamGeneration);
+        }
       }
+      streamVisibilityRef.current = null;
       syncNowRef.current = null;
       term.dispose();
       termRef.current = null;
@@ -666,12 +789,16 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   }, []);
 
   useEffect(() => {
-    if (!active) return;
-    termRef.current?.focus();
+    streamVisibilityRef.current?.(streaming);
+    if (!streaming) return;
     // One frame so display:block has landed and the container measures; then
     // repaint the buffer that went blank while the tab was hidden.
     const raf = requestAnimationFrame(() => syncNowRef.current?.());
     return () => cancelAnimationFrame(raf);
+  }, [streaming]);
+
+  useEffect(() => {
+    if (active) termRef.current?.focus();
   }, [active]);
 
   return <div className="term-container" ref={containerRef} />;

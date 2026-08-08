@@ -19,6 +19,12 @@ import {
   resolveTaskFile,
   tidyOutput,
   hydrateTaskHistory,
+  loadTaskRunOutput,
+  MAX_EAGER_OUTPUTS,
+  MAX_RETAINED_OUTPUT_CHARS,
+  MAX_SINGLE_OUTPUT_CHARS,
+  OUTPUT_READ_CONCURRENCY,
+  refreshTaskHistory,
 } from "./taskHistory";
 
 const start = (over: Partial<Omit<TaskRun, "id" | "status" | "startedAt">> = {}) =>
@@ -258,6 +264,124 @@ describe("bounds", () => {
     // The run itself is still there — only its transcript went.
     expect(runs[60].status).toBe("done");
     expect(runs).toHaveLength(70);
+  });
+});
+
+const storedSummary = (n: number) => ({
+  runId: `run-${n}`,
+  projectId: "p1",
+  componentId: "p1",
+  kind: "adhoc",
+  title: `Task ${n}`,
+  status: "completed" as const,
+  attemptCount: 1,
+  createdAt: 100 - n,
+  updatedAt: 200 - n,
+  metadata: {
+    history: true,
+    taskId: "adhoc",
+    label: `Task ${n}`,
+    agent: "codex",
+    cwd: "/repo",
+    projectId: "p1",
+    brief: "do it",
+    startedAt: 100 - n,
+    outputArtifactId: `artifact-${n}`,
+  },
+});
+
+describe("durable output hydration bounds", () => {
+  it("hydrates only the newest window with bounded concurrency", async () => {
+    vi.spyOn(ipc, "taskListHistory").mockResolvedValue(
+      Array.from({ length: MAX_EAGER_OUTPUTS + 3 }, (_, n) => storedSummary(n)),
+    );
+    let active = 0;
+    let peak = 0;
+    const read = vi.spyOn(ipc, "taskArtifactRead").mockImplementation(async (id) => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      active--;
+      return `tail:${id}`;
+    });
+
+    await refreshTaskHistory();
+
+    expect(peak).toBeLessThanOrEqual(OUTPUT_READ_CONCURRENCY);
+    expect(read).toHaveBeenCalledTimes(MAX_EAGER_OUTPUTS);
+    expect(read.mock.calls.map(([id]) => id)).toEqual(
+      Array.from({ length: MAX_EAGER_OUTPUTS }, (_, n) => `artifact-${n}`),
+    );
+    expect(taskRuns()[MAX_EAGER_OUTPUTS].output).toBeUndefined();
+  });
+
+  it("stops an older refresh before it starts another output batch", async () => {
+    vi.spyOn(ipc, "taskListHistory")
+      .mockResolvedValueOnce(
+        Array.from({ length: MAX_EAGER_OUTPUTS }, (_, n) => storedSummary(n)),
+      )
+      .mockResolvedValueOnce([]);
+    const releases: Array<() => void> = [];
+    const read = vi.spyOn(ipc, "taskArtifactRead").mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          releases.push(() => resolve("late tail"));
+        }),
+    );
+
+    const stale = refreshTaskHistory();
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(OUTPUT_READ_CONCURRENCY));
+    await refreshTaskHistory();
+    releases.forEach((release) => release());
+    await stale;
+
+    expect(read).toHaveBeenCalledTimes(OUTPUT_READ_CONCURRENCY);
+    expect(taskRuns()).toEqual([]);
+  });
+
+  it("caps individual and aggregate retained output characters", async () => {
+    vi.spyOn(ipc, "taskListHistory").mockResolvedValue(
+      Array.from({ length: MAX_EAGER_OUTPUTS }, (_, n) => storedSummary(n)),
+    );
+    vi.spyOn(ipc, "taskArtifactRead").mockImplementation(async () =>
+      "x".repeat(MAX_SINGLE_OUTPUT_CHARS + 100),
+    );
+
+    await refreshTaskHistory();
+
+    const outputs = taskRuns().flatMap((run) => (run.output ? [run.output] : []));
+    expect(outputs[0].length).toBe(MAX_SINGLE_OUTPUT_CHARS);
+    expect(outputs[0]).toContain("history output truncated");
+    expect(outputs.reduce((sum, output) => sum + output.length, 0)).toBeLessThanOrEqual(
+      MAX_RETAINED_OUTPUT_CHARS,
+    );
+  });
+
+  it("loads an older tail on demand and shares concurrent requests", async () => {
+    vi.spyOn(ipc, "taskListHistory").mockResolvedValue(
+      Array.from({ length: MAX_EAGER_OUTPUTS + 1 }, (_, n) => storedSummary(n)),
+    );
+    let release: ((value: string) => void) | undefined;
+    const read = vi.spyOn(ipc, "taskArtifactRead").mockImplementation(async (id) => {
+      if (id !== `artifact-${MAX_EAGER_OUTPUTS}`) return `tail:${id}`;
+      return new Promise<string>((resolve) => {
+        release = resolve;
+      });
+    });
+    await refreshTaskHistory();
+
+    const first = loadTaskRunOutput(`run-${MAX_EAGER_OUTPUTS}`);
+    const second = loadTaskRunOutput(`run-${MAX_EAGER_OUTPUTS}`);
+    expect(first).toBe(second);
+    expect(
+      read.mock.calls.filter(([id]) => id === `artifact-${MAX_EAGER_OUTPUTS}`),
+    ).toHaveLength(1);
+    release?.("older tail");
+    await first;
+
+    expect(taskRuns().find((run) => run.id === `run-${MAX_EAGER_OUTPUTS}`)?.output).toBe(
+      "older tail",
+    );
   });
 });
 

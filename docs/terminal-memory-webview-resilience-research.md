@@ -13,9 +13,78 @@ ledger.
 Scope: Canopy PTY lifetime, renderer recovery, terminal process-tree memory,
 cross-platform enforcement, and incident observability
 
-Change status: checklist plus first implementation slice. The periodic browser
-snapshot fix is implemented in the current worktree; the remaining items are
-proposals until their checklist entries are explicitly checked.
+Change status: implementation in progress. The periodic browser-snapshot
+containment and the renderer-safe PTY ownership/reattachment milestone are
+implemented in the current worktree; unchecked entries remain open.
+
+### Production incident captured at 13:44 +0700 (2026-08-08)
+
+The later production incident is no longer an inference. Read-only unified-log
+inspection captured the installed pre-fix binary replacing its main renderer at
+13:44:25 while the native Canopy host PID `49786` remained alive:
+
+- WebContent PID `89570` reported a 10,948 MiB physical footprint and could not
+  shrink below WebKit's 4,096 MiB inactive-process kill threshold.
+- WebKit logged `didExceedInactiveMemoryLimit`,
+  `processDidTerminateOrFailedToLaunch: reason=ExceededMemoryLimit`, and an
+  out-of-memory death. Its counters reported a 7,701 MiB JavaScript heap
+  capacity, 4,798 MiB live JavaScript heap, 52,327,938 JavaScript objects, and
+  10,758 MiB of dirty `bmalloc` memory.
+- WebKit terminated PID `89570`, immediately reloaded page id 8, and launched
+  replacement WebContent PID `43665`. The replacement was still alive after the
+  capture; the Canopy host had not restarted. At 14:01, 17 minutes after launch,
+  `vmmap` measured the replacement at 340.7 MiB physical footprint (410.4 MiB
+  peak), about 1.84 million malloc allocations, and 519.9 MiB allocated across
+  malloc zones. This sharp reset further isolates the retained state to the old
+  renderer rather than the native host.
+
+This proves the proximate cause for this incident: WebKit's public-process
+memory protection terminated the oversized main renderer. It also confirms the
+damage path in the pre-fix build: WebKit reloads the SPA after an OOM, and that
+build's boot-time `pty_kill_all` then destroys terminal progress. It does not by
+itself attribute all retained JavaScript objects to one feature; the bounded IO,
+hidden-terminal detachment, snapshot disposal, browser ownership, and renderer
+continuity changes address separate confirmed retention and blast-radius paths.
+
+### Implementation update — renderer continuity (2026-08-08)
+
+The current worktree now replaces destructive renderer boot cleanup with a
+Rust-issued renderer generation. Registering a replacement page detaches the
+predecessor's terminal channels, keeps every PTY child alive, and returns live
+desktop/remote/detached session metadata for reconciliation. Desktop viewers
+have their own attachment generation and outstanding-byte window; stale acks or
+late component cleanup cannot affect a replacement viewer. With no viewer, the
+reader continues draining into the 256 KiB Rust ring, whose replay now marks
+evicted output explicitly.
+
+Every desktop viewer—including a remotely owned terminal—is routed through the
+same replaceable attachment, eliminating the prior unscoped broadcast-forwarder
+thread. Normal remote-viewer close detaches; restored desktop-owned tab close
+still terminates; native application exit still kills all PTYs. The old IPC-wide
+kill is now an explicitly named development-only orphan reap and is refused in
+release builds.
+
+Renderer registration also closes native preview child WebViews left behind by
+a predecessor page. This addresses the observed `docs.aws.amazon.com` WebContent
+process surviving after its tab was gone. A normal `browser_close` now removes
+its registry entry only after the native close succeeds, so recovery can retry a
+failed close instead of losing the only handle to the leaked view.
+
+The adversarial lifecycle pass found two deeper variants and they are now
+covered as well: close-during-`add_child` invalidates a native creation token, and
+failed cleanup of a not-yet-published child is retained in an orphan registry.
+All browser mutators carry the Rust renderer generation, preventing delayed
+commands from a predecessor page from opening, navigating, hiding, or closing a
+replacement page's child. Mock-runtime tests prove ownership/retry behavior;
+only a disposable macOS runtime soak can determine how quickly WebKit releases
+the separate process after `close()` versus retaining an idle process pool.
+
+Finally, the heartbeat listener is installed immediately after native renderer
+registration, before Monaco and React, and acknowledgements carry the renderer
+generation. Focused native tests cover process survival, stale acknowledgements,
+double registration, Remote/detached survival, bounded/truncated replay, and
+orphan browser teardown; the complete frontend suite passes. Runtime tests that
+kill real platform WebContent processes remain open below.
 
 ## Executive finding
 
@@ -57,11 +126,11 @@ the enforcement mechanism differs:
   group pause/resume and graceful termination. Per-process address-space limits
   are not an adequate substitute for aggregate physical-footprint governance.
 
-The exact trigger of the user-reported incident in the two-hour review window was
-not proven. Production observability is insufficient to distinguish an OS
-WebContent termination from a heartbeat false positive or another navigation.
-The destructive consequence of any main-renderer reload is nevertheless directly
-confirmed by the current code.
+The exact trigger of the earlier user-reported incident in the original
+two-hour review window was not proven. The later 13:44 incident above is proven
+to be WebKit termination for `ExceededMemoryLimit`, not a heartbeat false
+positive or navigation. The destructive consequence of either main-renderer
+reload is directly confirmed by the pre-fix code.
 
 ## How to review this document
 
@@ -365,6 +434,29 @@ terminal workload running, then compare the renderer-footprint slope. Also test
 Blob URLs with explicit revocation and verify that repeated frame replacement
 reaches a stable plateau.
 
+A second read-only sample at 13:42 +0700, still without restarting the live app,
+strengthens the layer attribution:
+
+- Main WebContent PID `89570` had an 11.0 GiB physical footprint and 17.6 GiB
+  peak. `vmmap` reported a 20.0 GiB WebKit malloc zone, 6.5 GiB resident,
+  9.9 GiB allocated, 5.5 GiB swapped, and about 28.4 million allocations.
+- The old `docs.aws.amazon.com` helper PID `28282` still existed but had fallen
+  from roughly 84 MiB to 9 MiB RSS. That is consistent with WebKit retaining an
+  idle reusable content process after the child view closes; process presence
+  alone is therefore not proof of a still-owned page. A failure to release its
+  former footprint would be the leak signal.
+- This was the installed pre-fix binary, so the sample validates the problem
+  layer but cannot validate the new close/create/recovery ownership fixes.
+
+At 13:44:22 the same production renderer demonstrated the failure rather than
+merely approaching it. WebKit measured 10,948 MiB physical footprint, failed to
+shrink it below the 4,096 MiB inactive limit, and terminated it with
+`ExceededMemoryLimit` at 13:44:25. The replacement PID `43665` launched within
+the same second. Its JavaScript/object and `bmalloc` counters are recorded in
+the incident section above. This is the acceptance-test baseline for a fixed
+build: sustained use must plateau well below that threshold, and renderer
+replacement must preserve every live PTY even if the threshold is crossed.
+
 ### Why the IDE chip and Activity Monitor disagree
 
 The status chip screenshot at 11:08 showed `44% cpu · 2.4 GB`, while Activity
@@ -483,7 +575,7 @@ Use:
 
 - existing per-process physical-footprint sampling;
 - aggregate descendant-tree accounting;
-- `SIGSTOP`/`SIGCONT` on the PTY process group to stop/resume growth;
+- a bounded descendant/session pause operation to stop/resume growth;
 - graceful `SIGTERM`, existing transcript grace, and `SIGKILL` only when memory
   must actually be reclaimed.
 
@@ -503,6 +595,14 @@ over-budget session if host pressure remains critical.
 > `pty.rs:1150`), which can block other agents indefinitely. The governor
 > design must account for both: pause near turn boundaries where detectable,
 > and either release or surface held claims while paused.
+>
+> A second adversarial pass found that one Unix process group is not the PTY
+> tree: an interactive shell normally puts its foreground agent in a different
+> PGID, and descendants can create more groups. The current termination path now
+> signals both the launch-shell and foreground groups, fixing the common case,
+> but a governor must enumerate a PID/start-time-verified session/descendant set,
+> stop it to a bounded fixed point, and report escapes. Plain
+> `killpg(root_pid, SIGSTOP)` is not an acceptable implementation.
 
 ## Proposed target architecture
 
@@ -578,6 +678,16 @@ xterm scrollback structures.
 
 The governor belongs in the Rust core and should reuse the existing process-tree
 monitor. Avoid a second full process scan.
+
+Implementation status (2026-08-08): a first **monitor-only** Rust milestone now
+owns per-session allowance, generation, grant, transition, metric, and bounded
+incident state. It consumes the existing PTY monitor's process-tree totals and
+refreshes only host memory counters. Temporary 512 MiB/1 GiB grants are
+single-use, generation-checked, idempotent on exact retry, and cannot promise
+headroom already held by earlier grants or the `max(3 GiB, 25%)` host reserve.
+This is policy accounting, not containment: it does not pause, kill, install a
+Job Object, write a cgroup, or enforce an allocation boundary. Capability output
+therefore reports `monitor_only` on macOS, Windows, and Linux.
 
 Suggested state model:
 
@@ -671,10 +781,14 @@ nearby implementation. Items marked **atomic** must ship together.
   reset.
 - [x] Reject stale asynchronous snapshot completions after a view is forgotten
   or its generation changes.
-- [ ] Bound native snapshot dimensions, encoded byte size, and the number of
+- [x] Bound native snapshot dimensions, encoded byte size, and the number of
   in-flight captures globally and per view.
-- [ ] Record capture count, encoded bytes, decode latency, and currently retained
-  frame bytes without recording page content.
+- [x] Record native capture count, success/failure, encoded bytes, capture latency,
+  active captures, payload bytes retained inside capture futures, and high-water
+  marks using constant-size counters that retain no labels, URLs, or page content.
+- [ ] Record frontend image-decode latency and currently retained frame Blob bytes;
+  native metrics deliberately stop at IPC transfer and do not claim to measure
+  JavaScript ownership after command serialization.
 - [ ] Add a long-running replacement test that proves renderer footprint reaches
   a plateau on macOS, Windows, and Linux.
 - [ ] Compare reload, close, and close/recreate only after the frontend child-view
@@ -684,36 +798,38 @@ nearby implementation. Items marked **atomic** must ship together.
 
 - [ ] Define Rust-owned session ids and session generations independent of any
   renderer.
-- [ ] Replace the spawn-time immutable desktop channel with a replaceable,
+- [x] Replace the spawn-time immutable desktop channel with a replaceable,
   generation-scoped attachment.
-- [ ] Store renderer generation, outstanding-byte accounting, and attachment
+- [x] Store renderer generation, outstanding-byte accounting, and attachment
   state in Rust.
-- [ ] Detach only the matching attachment when delivery is stale or unavailable;
+- [x] Detach only the matching attachment when delivery is stale or unavailable;
   never terminate the PTY for renderer lifecycle events.
-- [ ] Continue draining the kernel PTY while detached into a bounded Rust ring;
+- [x] Continue draining the kernel PTY while detached into a bounded Rust ring;
   drop oldest bytes with an explicit gap marker rather than blocking the child.
-- [ ] Add `pty_list_live`/equivalent reconciliation with id, owner, geometry,
+- [x] Add `pty_list_live`/equivalent reconciliation with id, owner, geometry,
   cwd identity, title, exit state, and replay range.
-- [ ] Reattach restored tabs to the original PTY ids instead of spawning
+- [x] Reattach restored tabs to the original PTY ids instead of spawning
   replacements.
-- [ ] Make acknowledgement accounting attachment-generation aware so late acks
+- [x] Make acknowledgement accounting attachment-generation aware so late acks
   cannot release a newer attachment's window.
-- [ ] Define gap-free snapshot-plus-live handoff and test the boundary race.
-- [ ] Preserve explicit tab-close semantics, native application-exit cleanup,
+- [x] Define gap-free snapshot-plus-live handoff and test the boundary race.
+- [x] Preserve explicit tab-close semantics, native application-exit cleanup,
   and an explicit development orphan-reap operation.
-- [ ] Remove boot-time `pty_kill_all` only in the same release as enumeration,
+- [x] Remove boot-time `pty_kill_all` only in the same release as enumeration,
   restore reconciliation, generation-scoped attach, and bounded detached drain.
 - [ ] Keep app-exit `kill_all`; distinguish app exit from renderer exit in code
   and telemetry.
 - [ ] Test reload, WebContent termination, navigation, double reload, and renderer
   startup failure against harmless marker-producing PTYs.
-- [ ] Test headless Remote and detached micro-task PTYs in the same matrix.
+- [x] Test headless Remote and detached micro-task PTYs in the same matrix.
 
 ### C. Hidden terminal and frontend-state pressure
 
-- [ ] Stream to the renderer only for visible tabs and visible split panes.
-- [ ] Detach hidden terminal viewers without pausing their child processes.
-- [ ] Define a bounded replay policy and surface a visible truncation marker.
+- [x] Stream to the renderer only for visible tabs and visible split panes.
+- [x] Detach hidden terminal viewers without pausing their child processes.
+- [x] Define a bounded replay policy and surface a visible truncation marker.
+- [x] Regression-test delayed xterm parsing across hide/show and verify every
+  onscreen multiplex pane streams while keyboard focus remains single-owner.
 - [ ] Measure typical and worst-case xterm bytes per row, long wrapped lines,
   hyperlinks, Unicode cells, and alternate-screen applications.
 - [ ] Preserve 5,000-line scrollback fidelity before disposing any inactive
@@ -738,12 +854,27 @@ nearby implementation. Items marked **atomic** must ship together.
   and response bodies per origin/project, and stream large downloads/uploads.
 - [ ] Abort superseded file reads, fetches, previews, searches, and decodes so
   their buffers cannot outlive the UI state that requested them.
-- [ ] Put byte bounds and backpressure on both WebSocket bridge directions.
+- [x] Bound Agent Workspace journal-file hydration to three concurrent reads,
+  8 MiB per file, and 16 MiB aggregate input; stop launching or retaining a
+  superseded generation, and evict stale diff-data cache entries with a
+  128-entry backstop.
+- [x] Hydrate only the newest eight durable task-output artifacts, two reads at
+  a time; cap retained output to 512 Ki characters per run and 2 Mi characters
+  app-wide, and single-flight lazy loads for older expanded rows.
+- [x] Put byte bounds and backpressure on both WebSocket bridge directions.
 - [ ] Bound LSP, MCP, companion, and structured-runner frames before parsing or
   allocating the complete payload.
-- [ ] Make portal queue limits byte-based as well as count-based.
-- [ ] Coalesce filesystem watcher bursts by project/path and bound pending event
-  bytes.
+- [x] Bound LSP headers/frames, MCP stdio/HTTP request and response bodies, and
+  structured-runner lines before complete-payload allocation; companion framing
+  and MCP tool-result pagination remain separate open work.
+- [x] Make portal queue limits byte-based as well as count-based. The portal now
+  admits at most 8 MiB of queued outbound text, rejects a single message above
+  4 MiB and inbound control frames above 1 MiB, and holds each byte reservation
+  until the socket writer consumes the message.
+- [x] Coalesce filesystem watcher bursts by project/path and bound pending event
+  bytes. One quiet-period task now owns each root, deduplicates at most 2,048
+  paths/512 KiB, and emits an overflow bit that makes the renderer rescan only
+  its already-open files for that root.
 - [ ] Close and instrument file descriptors/Windows handles, pipes, sockets,
   watcher registrations, timers, observers, event subscriptions, and child
   process handles at owner teardown; alert on monotonic handle-count growth.
@@ -751,36 +882,47 @@ nearby implementation. Items marked **atomic** must ship together.
   active operations; release them on cancellation, tab/project close, and error.
 - [ ] Stream or incrementally truncate Git/process output instead of capturing
   the full child output first.
+- [x] Stream and continuously drain commit-patch and per-file Git diff output,
+  retain only the bounded display window, and compute patch statistics across
+  the full stream; branch/network/Linear helpers remain open.
 - [ ] Enforce file-size budgets before decoders/parsers that read whole files.
 - [ ] Avoid retaining raw bytes, decoded text, editor models, and unchanged
   baseline strings simultaneously.
-- [ ] Remove the full-string baseline map where values are never read, or replace
+- [x] Transfer code-file content ownership to the Monaco model after decoding;
+  clear the duplicate IPC `Uint8Array` while keeping native-viewer bytes until
+  those decoder lifecycles are independently rehydratable.
+- [x] Remove the full-string baseline map where values are never read, or replace
   values with hashes/version ids where comparison is required.
 - [ ] Lazily decode media and spreadsheet sheets; release inactive decoded data
   and object URLs.
+- [x] Generate and retain spreadsheet HTML for only the active sheet rather than
+  materialising every sheet table for the lifetime of the tab.
 - [ ] Dispose inactive Monaco models, workers, language-client state, WebGL/canvas
   surfaces, image decoders, and preview resources according to an explicit
   ownership contract.
 - [ ] Bound preview request bodies, generated HTML, response copies, and decoded
   assets by bytes.
+- [x] Cap buffered preview request bodies and injectable HTML at 16 MiB before
+  accumulation; non-HTML responses remain streaming. Frontend decoded assets
+  and generated DOM still need a separate owner budget.
 - [ ] Audit every queue/ring/cache for owner, unit, limit, overflow behavior,
   expiry, and observability.
 
 ### E. Renderer watchdog and incident-safe recovery
 
-- [ ] Install the liveness acknowledgement before Monaco and React startup.
-- [ ] Give every renderer boot a Rust-issued generation and make pings/acks
+- [x] Install the liveness acknowledgement before Monaco and React startup.
+- [x] Give every renderer boot a Rust-issued generation and make pings/acks
   generation aware.
-- [ ] Coordinate native WebContent termination and heartbeat recovery through one
+- [x] Coordinate native WebContent termination and heartbeat recovery through one
   reload decision state machine.
 - [ ] Set a bounded maximum recovery delay while allowing one short pressure-shed
   probe before reload.
-- [ ] Never use same-event-loop heartbeat alone as proof of process death; record
+- [x] Never use same-event-loop heartbeat alone as proof of process death; record
   event-loop starvation separately.
-- [ ] Add bounded release logging for pressure, termination, reload reason,
-  generation, and recovery outcome.
-- [ ] Exclude terminal content, prompts, secrets, full commands, and unnecessary
-  paths from incident logs.
+- [x] Add bounded release logging for native termination/heartbeat reload reason,
+  renderer generation, suppression/rate-limit outcome, and recovery start.
+- [x] Exclude terminal content, prompts, secrets, full commands, and paths from
+  watchdog/governor incident logs; both retain scalar metadata in bounded rings.
 - [ ] Test slow Monaco initialization, deliberate event-loop stalls, genuine
   WebContent termination, and simultaneous recovery triggers.
 
@@ -790,16 +932,32 @@ nearby implementation. Items marked **atomic** must ship together.
   launchd-owned WebKit layer instead of presenting the partial number as total.
 - [ ] Include the main WebContent, graphics/media, networking, preview WebContent,
   Rust host, and known child process trees in app-level accounting.
-- [ ] Reuse the existing two-second process scan; do not create a second full
+- [x] Reuse the existing two-second process scan; do not create a second full
   process-table walker.
-- [ ] Track current, peak, moving-average, and growth-rate footprint per terminal
-  tree and per IDE layer.
+- [x] Track current, peak, moving-average, and growth-rate footprint per terminal
+  tree.
+- [ ] Track the same footprint metrics per IDE/WebView layer.
+- [x] Keep grant accounting and bounded, content-free transition incidents in
+  Rust so they remain available when the renderer is unhealthy.
+- [x] Refuse a new temporary grant when it would consume the measured host
+  reserve or headroom already promised by an earlier grant.
 - [ ] Protect a native/Rust control-plane reserve that does not depend on renderer
-  responsiveness.
+  responsiveness; monitor-only accounting cannot yet enforce this boundary.
+- [x] Report platform measurement and enforcement capability honestly; all three
+  desktop platforms remain `monitor_only` until containment is proven.
+- [x] Implement monitor-only NORMAL, WARNED, AWAITING_GRANT, and OVER_ALLOWANCE
+  transitions with two-sample warning debounce and clear hysteresis.
 - [ ] Define NORMAL, WARNED, RELIEF, AWAITING_GRANT, PAUSED, STOPPING, and EXITED
   transitions with hysteresis and cooldowns.
-- [ ] Ask for a grant before a per-session allowance is raised; support temporary
-  increments and separately confirmed remembered defaults.
+- [x] Require a generation-checked, single-use explicit API call for temporary
+  512 MiB or 1 GiB allowance increments; exact retries are idempotent.
+- [x] Ask in a renderer dialog before a per-session allowance is raised; expose
+  only the Rust-issued 512 MiB/1 GiB choices and an explicit Stop action, and
+  state clearly when the platform remains monitor-only.
+- [ ] Add separately confirmed, native-persisted remembered defaults for a CLI;
+  do not derive them from renderer `localStorage`.
+- [x] Keep grant application/refusal and state transitions in a bounded audit
+  history without terminal content, prompts, commands, or paths.
 - [ ] Make grant, pause, resume, and stop operations idempotent and auditable.
 - [ ] Detect likely in-flight API turns before pausing where possible; warn that
   pause can time out network operations.
@@ -810,6 +968,8 @@ nearby implementation. Items marked **atomic** must ship together.
   not reclaim memory.
 - [ ] Provide a non-renderer fallback decision policy when the UI cannot display
   the grant prompt.
+- [x] Emit a content-free native notification, deep-linked to the terminal, when
+  a session first needs a decision; automatic fallback enforcement remains open.
 
 ### G. Platform containment
 

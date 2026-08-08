@@ -15,6 +15,7 @@ import {
   canResumeRun,
   clearTaskHistory,
   completedTaskRuns,
+  loadTaskRunOutput,
   removeTaskRun,
   resolveTaskFile,
   runIcon,
@@ -136,6 +137,7 @@ export function TaskHistoryView({
   const [filter, setFilter] = useState<Outcome | "all">("all");
   const [page, setPage] = useState(0);
   const [open, setOpen] = useState<string | null>(null);
+  const [loadingOutput, setLoadingOutput] = useState<string | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
 
   // Opened from a run's row: expand that run, and clear whatever search or
@@ -165,6 +167,32 @@ export function TaskHistoryView({
     window.addEventListener(TASK_HISTORY_EVENT, refresh);
     return () => window.removeEventListener(TASK_HISTORY_EVENT, refresh);
   }, [projectId]);
+
+  // Durable terminal output is intentionally cold for older rows. Opening one
+  // is the ownership signal to load it; taskHistory deduplicates the read and
+  // keeps the app-wide retained-output string budget intact.
+  useEffect(() => {
+    if (!open) {
+      setLoadingOutput(null);
+      return;
+    }
+    const run = completedTaskRuns(projectId).find(
+      (candidate) => candidate.id === open,
+    );
+    if (!run?.outputArtifactId || run.output) {
+      setLoadingOutput((id) => (id === open ? null : id));
+      return;
+    }
+    let current = true;
+    setLoadingOutput(open);
+    void loadTaskRunOutput(open).finally(() => {
+      if (current) setRuns(completedTaskRuns(projectId));
+      setLoadingOutput((id) => (id === open ? null : id));
+    });
+    return () => {
+      current = false;
+    };
+  }, [open, projectId]);
 
   // What the header states and what the filter tabs count. Over the whole
   // scope, not the current filter — a count that moves when you click it is a
@@ -582,6 +610,12 @@ export function TaskHistoryView({
                                 {tidyOutput(run.output)}
                               </pre>
                             </details>
+                          ) : run.outputArtifactId ? (
+                            <div className="task-history-note">
+                              {loadingOutput === run.id
+                                ? "Loading the terminal tail…"
+                                : "Open this run again to load its terminal tail."}
+                            </div>
                           ) : (
                             <div className="task-history-note">
                               The terminal output for this run is no longer kept — only the

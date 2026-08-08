@@ -35,6 +35,7 @@ use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use axum::Router;
+use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
@@ -46,8 +47,11 @@ const PICKER_JS: &str = include_str!("preview_picker.js");
 const PICKER_PATH: &str = "/__canopy__/picker.js";
 /// Loading this document clears browser-owned state for this proxy origin.
 pub const RESET_PATH: &str = "/__canopy__/reset";
-/// Request bodies are buffered to forward; cap so a runaway upload can't OOM.
-const MAX_BODY: usize = 64 * 1024 * 1024;
+/// Request bodies and injectable HTML are the only proxy payloads buffered in
+/// native memory. Keep them below a useful development upload/document size;
+/// non-HTML responses continue to stream without this retention.
+const MAX_BODY: usize = 16 * 1024 * 1024;
+const MAX_INJECTABLE_HTML: usize = 16 * 1024 * 1024;
 
 /// One proxied request, as the canopy_browser_network tool reports it.
 type NetLog = Arc<Mutex<std::collections::VecDeque<serde_json::Value>>>;
@@ -627,6 +631,14 @@ fn is_upgrade(headers: &HeaderMap) -> bool {
         .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
 }
 
+fn append_capped(out: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(), ()> {
+    if out.len().saturating_add(chunk.len()) > limit {
+        return Err(());
+    }
+    out.extend_from_slice(chunk);
+    Ok(())
+}
+
 async fn forward_http(ctx: Arc<ProxyCtx>, req: Request) -> Result<Response, String> {
     let (parts, body) = req.into_parts();
     let pq = parts
@@ -719,7 +731,31 @@ async fn forward_http(ctx: Arc<ProxyCtx>, req: Request) -> Result<Response, Stri
     }
 
     if is_html {
-        let bytes = upstream.bytes().await.map_err(|e| e.to_string())?;
+        if upstream
+            .content_length()
+            .is_some_and(|len| len > MAX_INJECTABLE_HTML as u64)
+        {
+            return Err(format!(
+                "preview HTML exceeds the {} MiB injection limit",
+                MAX_INJECTABLE_HTML / (1024 * 1024)
+            ));
+        }
+        let mut bytes = Vec::with_capacity(
+            upstream
+                .content_length()
+                .unwrap_or(0)
+                .min(MAX_INJECTABLE_HTML as u64) as usize,
+        );
+        let mut stream = upstream.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| e.to_string())?;
+            if append_capped(&mut bytes, &chunk, MAX_INJECTABLE_HTML).is_err() {
+                return Err(format!(
+                    "preview HTML exceeds the {} MiB injection limit",
+                    MAX_INJECTABLE_HTML / (1024 * 1024)
+                ));
+            }
+        }
         let html = inject_picker(&bytes);
         return builder.body(Body::from(html)).map_err(|e| e.to_string());
     }
@@ -897,6 +933,14 @@ async fn tunnel_upgrade(ctx: Arc<ProxyCtx>, mut req: Request) -> Result<Response
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn injectable_html_accumulator_refuses_before_crossing_its_limit() {
+        let mut out = Vec::new();
+        append_capped(&mut out, b"abc", 5).unwrap();
+        assert!(append_capped(&mut out, b"def", 5).is_err());
+        assert_eq!(out, b"abc", "the rejected chunk must not be retained");
+    }
 
     #[test]
     fn parse_target_accepts_origin_and_paths() {

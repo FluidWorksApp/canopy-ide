@@ -16,8 +16,9 @@ use crate::blocking;
 use crate::winproc::NoConsoleWindow;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use tauri::State;
 
 use crate::fsx::{check_scope, WorkspaceManager};
@@ -1627,6 +1628,7 @@ pub async fn git_diff(
     path: String,
     staged: bool,
 ) -> Result<String, String> {
+    const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
     let top = repo_path(&state, &repo)?;
     let mut cmd = git(&top);
     cmd.args(["diff", "--no-color"]);
@@ -1634,20 +1636,27 @@ pub async fn git_diff(
         cmd.arg("--staged");
     }
     cmd.args(["--", &path]);
-    let out = run(&mut cmd)?;
-    if out.trim().is_empty() && !staged {
+    let out = run_patch_capped(&mut cmd, MAX_DIFF_BYTES, false)?;
+    if out.patch.trim().is_empty() && !staged {
         // Untracked: show it as new content rather than an empty diff.
         let mut c = git(&top);
         c.args(["diff", "--no-color", "--no-index", "--", "/dev/null", &path]);
         // --no-index exits 1 when files differ, which is the normal case here.
-        if let Ok(o) = blocking::io(|| c.output()) {
-            let text = String::from_utf8_lossy(&o.stdout).to_string();
-            if !text.trim().is_empty() {
-                return Ok(text);
+        if let Ok(o) = run_patch_capped(&mut c, MAX_DIFF_BYTES, true) {
+            if !o.patch.trim().is_empty() {
+                return Ok(if o.truncated {
+                    format!("{}\n[Canopy: diff truncated after 2 MiB]\n", o.patch)
+                } else {
+                    o.patch
+                });
             }
         }
     }
-    Ok(out)
+    Ok(if out.truncated {
+        format!("{}\n[Canopy: diff truncated after 2 MiB]\n", out.patch)
+    } else {
+        out.patch
+    })
 }
 
 #[tauri::command]
@@ -3789,6 +3798,118 @@ fn patch_stats(patch: &str) -> (u32, u32, u32) {
     (files, adds, dels)
 }
 
+#[derive(Default)]
+struct CappedPatchOutput {
+    patch: String,
+    files: u32,
+    adds: u32,
+    dels: u32,
+    truncated: bool,
+}
+
+/// Drain a patch completely so git can exit, but retain only `max` bytes while
+/// counting diff statistics over the full stream. This prevents the old
+/// capture-full-then-truncate path from transiently allocating an arbitrarily
+/// large lockfile/vendor diff.
+fn drain_patch<R: Read>(mut reader: R, max: usize) -> std::io::Result<CappedPatchOutput> {
+    let mut kept = Vec::with_capacity(max.min(64 * 1024));
+    let mut total = 0usize;
+    let (mut files, mut adds, mut dels) = (0u32, 0u32, 0u32);
+    let mut in_hunk = false;
+    let mut prefix = Vec::with_capacity(12);
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read);
+        if kept.len() < max {
+            let take = read.min(max - kept.len());
+            kept.extend_from_slice(&buf[..take]);
+        }
+        for byte in &buf[..read] {
+            if *byte == b'\n' {
+                if prefix.starts_with(b"diff --git ") {
+                    files = files.saturating_add(1);
+                    in_hunk = false;
+                } else if prefix.starts_with(b"@@") {
+                    in_hunk = true;
+                } else if in_hunk {
+                    match prefix.first() {
+                        Some(b'+') => adds = adds.saturating_add(1),
+                        Some(b'-') => dels = dels.saturating_add(1),
+                        _ => {}
+                    }
+                }
+                prefix.clear();
+            } else if prefix.len() < 12 {
+                prefix.push(*byte);
+            }
+        }
+    }
+    let mut patch = String::from_utf8_lossy(&kept).into_owned();
+    let truncated = total > kept.len();
+    if truncated {
+        let _ = truncate_patch(&mut patch, kept.len());
+    }
+    Ok(CappedPatchOutput {
+        patch,
+        files,
+        adds,
+        dels,
+        truncated,
+    })
+}
+
+fn drain_bytes<R: Read>(mut reader: R, max: usize) -> std::io::Result<Vec<u8>> {
+    let mut kept = Vec::with_capacity(max.min(8 * 1024));
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        if kept.len() < max {
+            let take = read.min(max - kept.len());
+            kept.extend_from_slice(&buf[..take]);
+        }
+    }
+    Ok(kept)
+}
+
+fn run_patch_capped(
+    cmd: &mut Command,
+    max: usize,
+    accept_diff_exit: bool,
+) -> Result<CappedPatchOutput, String> {
+    blocking::io(|| {
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let stdout = child.stdout.take().ok_or("git stdout was not piped")?;
+        let stderr = child.stderr.take().ok_or("git stderr was not piped")?;
+        let out = std::thread::spawn(move || drain_patch(stdout, max));
+        let err = std::thread::spawn(move || drain_bytes(stderr, 256 * 1024));
+        let status = child.wait().map_err(|e| e.to_string())?;
+        let output = out
+            .join()
+            .map_err(|_| "git stdout reader panicked".to_string())?
+            .map_err(|e| e.to_string())?;
+        let stderr = err
+            .join()
+            .map_err(|_| "git stderr reader panicked".to_string())?
+            .map_err(|e| e.to_string())?;
+        if status.success() || (accept_diff_exit && status.code() == Some(1)) {
+            Ok(output)
+        } else {
+            Err(String::from_utf8_lossy(&stderr).trim().to_string())
+        }
+    })
+}
+
 /// Truncate to at most `max` bytes, on a line boundary, without splitting a
 /// character. Slicing a String by a raw byte index panics when that index
 /// lands inside a multi-byte character — a 2 MB patch containing CJK or an
@@ -3904,17 +4025,18 @@ pub async fn git_commit_patch(
     // Merges print no patch under plain `git show`; that is reported as an
     // empty patch rather than reaching for a combined diff the renderer
     // cannot display anyway.
-    let mut patch = run(git(&top).args(["show", "--patch", "--format=", &hash]))?;
-
-    let (files, adds, dels) = patch_stats(&patch);
-    let truncated = truncate_patch(&mut patch, MAX_PATCH_BYTES);
+    let output = run_patch_capped(
+        git(&top).args(["show", "--patch", "--format=", &hash]),
+        MAX_PATCH_BYTES,
+        false,
+    )?;
 
     let result = CommitPatch {
-        patch,
-        files_changed: files,
-        insertions: adds,
-        deletions: dels,
-        truncated,
+        patch: output.patch,
+        files_changed: output.files,
+        insertions: output.adds,
+        deletions: output.dels,
+        truncated: output.truncated,
     };
     {
         let mut held = cache.lock().unwrap();
@@ -5414,6 +5536,22 @@ index 333..444 100644
     #[test]
     fn patch_stats_empty_patch_is_zero() {
         assert_eq!(patch_stats(""), (0, 0, 0));
+    }
+
+    #[test]
+    fn streaming_patch_drain_caps_retention_but_counts_the_full_diff() {
+        let mut patch = String::new();
+        for index in 0..2000 {
+            patch.push_str(&format!(
+                "diff --git a/{index} b/{index}\n@@ -1 +1 @@\n-old {index}\n+new {index}\n"
+            ));
+        }
+        let output = drain_patch(std::io::Cursor::new(patch.as_bytes()), 4096).unwrap();
+        assert!(output.truncated);
+        assert!(output.patch.len() <= 4096);
+        assert_eq!(output.files, 2000);
+        assert_eq!(output.adds, 2000);
+        assert_eq!(output.dels, 2000);
     }
 
     #[test]

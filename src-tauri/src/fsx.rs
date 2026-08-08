@@ -8,9 +8,10 @@
 use crate::winproc::NoConsoleWindow;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
 #[derive(Default)]
@@ -31,6 +32,7 @@ pub struct FsChange {
     pub root: String,
     pub paths: Vec<String>,
     pub kind: String,
+    pub overflow: bool,
 }
 
 /// "Whatever git would say about this root just changed." One event, one
@@ -42,21 +44,58 @@ pub struct GitChange {
 
 // ---------- git state: watched, not polled ----------
 
-/// How long the watcher waits for the writes to stop before saying so.
-///
-/// A single `git commit` is a burst: index.lock, index, COMMIT_EDITMSG, the
-/// ref, the reflog. Emitting per event would run `git status` five times
-/// against a repo that is still mid-write; the debounce turns the burst into
-/// one refresh, after it settles. (Zed uses 100ms for the same job in
-/// `git_store.rs`; 150 buys a little more room for a rebase's ref churn.)
-const GIT_SETTLE_MS: u64 = 150;
+/// One quiet-period timer serves both filesystem and git state. A package
+/// install can produce tens of thousands of notify callbacks; retaining one
+/// task and one bounded, deduplicated path set per root keeps that burst from
+/// becoming renderer IPC and timer pressure.
+const WATCH_SETTLE_MS: u64 = 150;
+const MAX_PENDING_WATCH_PATHS: usize = 2_048;
+const MAX_PENDING_WATCH_BYTES: usize = 512 * 1024;
 
-/// Root -> how many bursts we have seen. The delayed emit compares the
-/// generation it captured against this; a later event supersedes it, so a long
-/// operation emits once at the end instead of once per file it touched.
-fn git_pulse() -> &'static Mutex<HashMap<String, u64>> {
-    static PULSE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
-    PULSE.get_or_init(|| Mutex::new(HashMap::new()))
+struct PendingWatch {
+    paths: HashSet<String>,
+    path_bytes: usize,
+    kind: Option<String>,
+    overflow: bool,
+    git_dirty: bool,
+    last_change: Instant,
+}
+
+impl PendingWatch {
+    fn new() -> Self {
+        Self {
+            paths: HashSet::new(),
+            path_bytes: 0,
+            kind: None,
+            overflow: false,
+            git_dirty: false,
+            last_change: Instant::now(),
+        }
+    }
+
+    fn push(&mut self, path: String, kind: &str) {
+        self.kind = Some(match self.kind.take() {
+            None => kind.to_string(),
+            Some(current) if current == kind => current,
+            Some(_) => "other".to_string(),
+        });
+        if self.paths.contains(&path) || self.overflow {
+            return;
+        }
+        if self.paths.len() >= MAX_PENDING_WATCH_PATHS
+            || self.path_bytes.saturating_add(path.len()) > MAX_PENDING_WATCH_BYTES
+        {
+            self.overflow = true;
+            return;
+        }
+        self.path_bytes += path.len();
+        self.paths.insert(path);
+    }
+}
+
+fn watch_pending() -> &'static Mutex<HashMap<String, PendingWatch>> {
+    static PENDING: OnceLock<Mutex<HashMap<String, PendingWatch>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Does this path mean git's own state moved?
@@ -69,7 +108,10 @@ fn git_pulse() -> &'static Mutex<HashMap<String, u64>> {
 /// `index.lock` before `index`, and reacting to the lock means asking a repo
 /// that is mid-write, and racing the very write we are watching.
 pub(crate) fn touches_git_state(path: &str) -> bool {
-    let Some((_, rest)) = path.rsplit_once("/.git/") else {
+    // notify yields native separators. Normalize only for matching so Windows
+    // `.git` and `node_modules` churn gets the same filtering as Unix.
+    let normalized = path.replace('\\', "/");
+    let Some((_, rest)) = normalized.rsplit_once("/.git/") else {
         return false;
     };
     // A linked worktree's HEAD and index live at
@@ -101,24 +143,84 @@ pub(crate) fn touches_git_state(path: &str) -> bool {
         )
 }
 
-/// Note that this root's git state moved, and say so once the writes stop.
-fn pulse_git<R: tauri::Runtime>(app: &AppHandle<R>, root: &str) {
-    let generation = {
-        let mut pulse = git_pulse().lock().unwrap();
-        let counter = pulse.entry(root.to_string()).or_insert(0);
-        *counter = counter.wrapping_add(1);
-        *counter
+fn ignored_watch_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized
+        .split('/')
+        .any(|component| component == "node_modules" || component == ".git")
+}
+
+/// Merge a native callback into the root's single bounded pending batch. Only
+/// the caller that creates the entry creates a timer; later callbacks merely
+/// move its quiet-period boundary and add deduplicated paths.
+fn queue_watch_event<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: &str,
+    paths: Vec<String>,
+    kind: &str,
+    git_dirty: bool,
+) {
+    let start_timer = {
+        let mut pending = watch_pending().lock().unwrap();
+        let start = !pending.contains_key(root);
+        let batch = pending
+            .entry(root.to_string())
+            .or_insert_with(PendingWatch::new);
+        batch.last_change = Instant::now();
+        batch.git_dirty |= git_dirty;
+        for path in paths {
+            batch.push(path, kind);
+        }
+        start
     };
+    if !start_timer {
+        return;
+    }
+
     let app = app.clone();
     let root = root.to_string();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(GIT_SETTLE_MS)).await;
-        // Something newer is already waiting its turn — let that one speak.
-        if git_pulse().lock().unwrap().get(&root) != Some(&generation) {
+        loop {
+            tokio::time::sleep(Duration::from_millis(WATCH_SETTLE_MS)).await;
+            let batch = {
+                let mut pending = watch_pending().lock().unwrap();
+                let Some(batch) = pending.get(&root) else {
+                    return;
+                };
+                if batch.last_change.elapsed() < Duration::from_millis(WATCH_SETTLE_MS) {
+                    None
+                } else {
+                    pending.remove(&root)
+                }
+            };
+            let Some(batch) = batch else {
+                continue;
+            };
+
+            if batch.git_dirty {
+                let _ = app.emit("git:change", GitChange { root: root.clone() });
+            }
+            if !batch.paths.is_empty() || batch.overflow {
+                let mut paths: Vec<String> = batch.paths.into_iter().collect();
+                paths.sort_unstable();
+                let _ = app.emit(
+                    "fs:change",
+                    FsChange {
+                        root: root.clone(),
+                        paths,
+                        kind: batch.kind.unwrap_or_else(|| "other".into()),
+                        overflow: batch.overflow,
+                    },
+                );
+            }
             return;
         }
-        let _ = app.emit("git:change", GitChange { root });
     });
+}
+
+/// Test and call-site shorthand for git-only changes.
+fn pulse_git<R: tauri::Runtime>(app: &AppHandle<R>, root: &str) {
+    queue_watch_event(app, root, Vec::new(), "other", true);
 }
 
 pub(crate) fn check_scope(
@@ -199,25 +301,16 @@ pub async fn workspace_add(
             let paths: Vec<String> = touched
                 .iter()
                 // node_modules / .git churn would flood the UI
-                .filter(|p| !p.contains("/node_modules/") && !p.contains("/.git/"))
+                .filter(|p| !ignored_watch_path(p))
                 .cloned()
                 .collect();
             // The panels that used to poll git want both halves: a write to a
             // tracked file changes what `status` says, and a write inside .git
-            // is a commit, a stage or a branch switch — the half that never
-            // reaches fs:change at all.
-            if !paths.is_empty() || touched.iter().any(|p| touches_git_state(p)) {
-                pulse_git(&app, &emit_root);
-            }
-            if !paths.is_empty() {
-                let _ = app.emit(
-                    "fs:change",
-                    FsChange {
-                        root: emit_root.clone(),
-                        paths,
-                        kind: kind.into(),
-                    },
-                );
+            // is a commit, a stage or a branch switch. Both now share one
+            // bounded per-root coalescer and one quiet-period task.
+            let git_dirty = !paths.is_empty() || touched.iter().any(|p| touches_git_state(p));
+            if !paths.is_empty() || git_dirty {
+                queue_watch_event(&app, &emit_root, paths, kind, git_dirty);
             }
         }
     })
@@ -252,6 +345,10 @@ pub async fn workspace_remove(
     state.roots.lock().unwrap().retain(|r| r != &canonical);
     // Dropping the watcher stops it.
     state.watchers.lock().unwrap().remove(&canonical);
+    watch_pending()
+        .lock()
+        .unwrap()
+        .remove(&canonical.to_string_lossy().to_string());
     Ok(())
 }
 
@@ -968,14 +1065,32 @@ mod tests {
         }
         // Long enough for every one of the five to have fired had they not
         // superseded each other.
-        std::thread::sleep(std::time::Duration::from_millis(GIT_SETTLE_MS * 5));
+        std::thread::sleep(std::time::Duration::from_millis(WATCH_SETTLE_MS * 5));
         assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // And the next burst is still heard: the generation supersedes, it
         // doesn't latch.
         pulse_git(app.handle(), root);
-        std::thread::sleep(std::time::Duration::from_millis(GIT_SETTLE_MS * 5));
+        std::thread::sleep(std::time::Duration::from_millis(WATCH_SETTLE_MS * 5));
         assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn watcher_batch_deduplicates_and_has_item_and_byte_backstops() {
+        let mut batch = PendingWatch::new();
+        batch.push("/w/repo/src/main.rs".into(), "modify");
+        batch.push("/w/repo/src/main.rs".into(), "modify");
+        assert_eq!(batch.paths.len(), 1);
+        assert_eq!(batch.kind.as_deref(), Some("modify"));
+
+        batch.push("/w/repo/src/new.rs".into(), "create");
+        assert_eq!(batch.kind.as_deref(), Some("other"));
+        for i in 0..=MAX_PENDING_WATCH_PATHS {
+            batch.push(format!("/w/repo/generated/{i}.js"), "modify");
+        }
+        assert!(batch.overflow);
+        assert!(batch.paths.len() <= MAX_PENDING_WATCH_PATHS);
+        assert!(batch.path_bytes <= MAX_PENDING_WATCH_BYTES);
     }
 
     /// What the panels stopped polling for. Everything a commit, a stage, a
@@ -996,9 +1111,16 @@ mod tests {
             // A linked worktree's own HEAD, in the main checkout's .git.
             "/w/repo/.git/worktrees/feature/HEAD",
             "/w/repo/.git/worktrees/feature/index",
+            r"C:\w\repo\.git\HEAD",
+            r"C:\w\repo\.git\worktrees\feature\index",
         ] {
             assert!(touches_git_state(p), "should have noticed {p}");
         }
+        assert!(ignored_watch_path(r"C:\w\repo\node_modules\pkg\index.js"));
+        assert!(ignored_watch_path(r"C:\w\repo\node_modules"));
+        assert!(ignored_watch_path(r"C:\w\repo\.git\objects\ab\cd"));
+        assert!(ignored_watch_path(r"C:\w\repo\.git"));
+        assert!(!ignored_watch_path(r"C:\w\repo\src\main.rs"));
 
         for p in [
             // The lock is written *before* the file it guards: reacting to it

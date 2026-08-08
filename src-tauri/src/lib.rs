@@ -20,6 +20,7 @@ mod dictation;
 mod dictation;
 mod fsx;
 mod git;
+mod governor;
 mod instructions;
 mod lsp;
 mod maintenance;
@@ -391,11 +392,7 @@ pub fn run() {
     // and for terminations that do not produce this callback.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     let builder = builder.on_web_content_process_terminate(|webview| {
-        let label = webview.label();
-        log::error!("webview renderer terminated ({label}); reloading");
-        if let Err(error) = webview.reload() {
-            log::error!("webview renderer reload failed ({label}): {error}");
-        }
+        watchdog::web_content_terminated(webview);
     });
     // Must be first: a second `canopy <dir>` invocation forwards its argv
     // here and exits, instead of starting an app that would fight this one
@@ -433,6 +430,7 @@ pub fn run() {
         .manage(browser::BrowserManager::default())
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
+        .manage(governor::TerminalGovernor::default())
         .manage(tunnel::TunnelManager::default())
         .manage(prwatch::PrWatcher::default())
         .manage(dictation::DictationManager::default())
@@ -567,12 +565,14 @@ pub fn run() {
             pty::pty_spawn_argv,
             pty::pty_spawn_attached_argv,
             pty::pty_output,
-            pty::pty_attach,
+            pty::pty_attach_desktop,
+            pty::pty_detach_desktop,
+            pty::pty_renderer_register,
             pty::pty_write,
             pty::pty_ack,
             pty::pty_resize,
             pty::pty_kill,
-            pty::pty_kill_all,
+            pty::pty_dev_reap_all,
             pty::pty_set_title,
             pty::instance_id,
             android::android_sdk_status,
@@ -775,6 +775,9 @@ pub fn run() {
             agents::set_context_scopes,
             agents::session_digests,
             agents::pty_stats,
+            governor::terminal_governor_status,
+            governor::terminal_governor_incidents,
+            governor::terminal_governor_grant,
             agents::session_forget,
             profiles::profiles_list,
             profiles::profile_create,
@@ -822,6 +825,7 @@ pub fn run() {
             snapshot::webview_snapshot,
             snapshot::browser_snapshot,
             snapshot::browser_frame,
+            snapshot::snapshot_capture_metrics,
             portal::remote_enable,
             portal::remote_disable,
             portal::remote_status,
@@ -845,6 +849,7 @@ pub fn run() {
             dictation::dictation_supported,
             watchdog::watchdog_ack,
             watchdog::memory_info,
+            watchdog::watchdog_incidents,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

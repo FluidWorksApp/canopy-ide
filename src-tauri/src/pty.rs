@@ -7,10 +7,11 @@
 //!   many small reads into one IPC message) and sends raw bytes over a `Channel`.
 //! - One writer thread per session owns the master's write end and is the only
 //!   thread that ever blocks in `write()`. Callers enqueue and return.
-//! - Backpressure: `outstanding` counts bytes sent to the WebView but not yet acked
-//!   (the frontend acks after xterm.js consumes a chunk). When pending + outstanding
-//!   exceeds `high_water`, the reader stops reading — the kernel PTY buffer fills and
-//!   the child blocks on write. Memory stays bounded; nothing is dropped.
+//! - Backpressure belongs to the current renderer attachment, not the process.
+//!   Acks carry an attachment generation, so a late ack from a destroyed page
+//!   cannot release a replacement page's window. While no renderer is attached,
+//!   the PTY keeps draining into the bounded Rust scrollback ring instead of
+//!   wedging the child behind an abandoned WebView channel.
 //! - Teardown: kill the child's whole process group, reader hits EOF, flusher drains,
 //!   reaps the child, removes the session, emits `pty:exit`. No zombies, no leaks.
 
@@ -18,7 +19,7 @@ use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, Master
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -33,6 +34,10 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 /// that a process wedged mid-exit can't keep a dead terminal on screen.
 const REAP_WAIT: Duration = Duration::from_millis(1000);
 const READ_BUF_SIZE: usize = 64 * 1024;
+/// One IPC/output-ring delivery. Time coalescing still happens every 10ms, but
+/// a burst can never become one multi-megabyte allocation copied through Rust,
+/// Tauri and JavaScript at once.
+const OUTPUT_CHUNK_MAX: usize = 64 * 1024;
 const DEFAULT_HIGH_WATER: usize = 2 * 1024 * 1024;
 /// How much unwritten input a session may queue before writes are refused.
 /// A child that has stopped reading its stdin fills the kernel's tty buffer in
@@ -50,6 +55,22 @@ const SCROLLBACK_CAP: usize = 256 * 1024;
 /// Bounded fan-out queue to remote subscribers. Lossy on lag by design: a slow
 /// phone is dropped to a resync, never allowed to stall the agent.
 const BROADCAST_CAP: usize = 512;
+/// Raw desktop channel envelope: magic, flags, reserved bytes, absolute output
+/// offset, then PTY bytes. The offset lets a hidden xterm detach and request
+/// only what arrived after it stopped, preserving its older 5,000-line buffer.
+const DESKTOP_CHUNK_HEADER: usize = 16;
+const DESKTOP_CHUNK_MAGIC: &[u8; 4] = b"CPTY";
+const DESKTOP_CHUNK_GAP: u8 = 1;
+
+fn desktop_chunk(start: u64, gap: bool, data: &[u8]) -> Vec<u8> {
+    let mut framed = Vec::with_capacity(DESKTOP_CHUNK_HEADER + data.len());
+    framed.extend_from_slice(DESKTOP_CHUNK_MAGIC);
+    framed.push(if gap { DESKTOP_CHUNK_GAP } else { 0 });
+    framed.extend_from_slice(&[0, 0, 0]);
+    framed.extend_from_slice(&start.to_le_bytes());
+    framed.extend_from_slice(data);
+    framed
+}
 
 /// What a remote subscriber receives off a session's fan-out: coalesced output
 /// bytes, or a size change so a remote terminal can render the TUI at the same
@@ -92,6 +113,7 @@ pub fn instance_id() -> String {
 pub struct Session {
     pub id: u32,
     pub pid: Option<u32>,
+    pub kind: SessionKind,
     pub title: Mutex<String>,
     pub cwd: String,
     /// Input queued for the writer thread, and the signal that wakes it. The
@@ -105,8 +127,12 @@ pub struct Session {
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
     shutdown: AtomicBool,
     eof: AtomicBool,
-    pending: Mutex<Vec<u8>>,
-    outstanding: AtomicUsize,
+    pending: Mutex<VecDeque<u8>>,
+    /// The one desktop renderer currently consuming this session. Kept behind
+    /// a replaceable attachment so a WebView reload can discard the old channel
+    /// and its unacked-byte count without touching the child process.
+    desktop: Mutex<Option<DesktopAttachment>>,
+    next_attachment: AtomicU64,
     high_water: usize,
     /// Recent output kept for remote (Canopy Remote) attach — a catch-up
     /// snapshot only, independent of the WebView's own scrollback.
@@ -133,9 +159,54 @@ pub struct Session {
     /// output — diffing rendered text would call that silence.
     last_output_ms: AtomicU64,
     output_bytes: AtomicU64,
+    /// Bytes evicted from the front of the replay ring. A reattaching terminal
+    /// gets an explicit marker instead of silently presenting a partial history
+    /// as though it were complete.
+    dropped_output_bytes: AtomicU64,
+    /// Content-free delivery counters for soak tests and incident telemetry.
+    /// These are cumulative for the PTY lifetime and never retain a chunk.
+    desktop_delivery_chunks: AtomicU64,
+    desktop_delivery_bytes: AtomicU64,
+    desktop_acked_bytes: AtomicU64,
     /// When the human last typed, so the CLI's echo of a keystroke is not read
     /// as the agent working.
     last_input_ms: AtomicU64,
+}
+
+struct DesktopAttachment {
+    renderer_generation: u64,
+    generation: u64,
+    channel: Channel<InvokeResponseBody>,
+    outstanding: usize,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    /// Spawned by a visible desktop tab. Recreate the tab after a renderer
+    /// replacement and kill the process only when the user explicitly closes it.
+    Desktop,
+    /// Spawned by Canopy Remote. A desktop tab is only a viewer and closing it
+    /// must leave the remotely-owned process alive.
+    Remote,
+    /// A task surface with no tab. Never manufacture a terminal tab for it.
+    Detached,
+}
+
+struct DesktopSink {
+    renderer_generation: u64,
+    channel: Channel<InvokeResponseBody>,
+}
+
+#[derive(Clone, Copy)]
+pub struct DesktopDeliveryMetrics {
+    pub attached: bool,
+    pub outstanding_bytes: u64,
+    pub replay_bytes: u64,
+    pub dropped_output_bytes: u64,
+    pub delivery_chunks: u64,
+    pub delivery_bytes: u64,
+    pub acked_bytes: u64,
 }
 
 /// Wall-clock milliseconds. Only ever differenced against itself.
@@ -173,7 +244,6 @@ fn reap_output(reaped: &ReapedOutput, id: u32, session: &Session) {
     }
 }
 
-#[derive(Default)]
 pub struct PtyManager {
     sessions: Arc<Mutex<HashMap<u32, Arc<Session>>>>,
     /// Output of sessions that have exited, kept briefly.
@@ -189,6 +259,25 @@ pub struct PtyManager {
     /// bytes outlive the session instead.
     reaped: Arc<Mutex<VecDeque<(u32, Vec<u8>, std::time::Instant)>>>,
     next_id: AtomicU32,
+    /// Monotonic identity of the currently authoritative JavaScript page.
+    /// Registering a new page detaches every channel held by the previous one.
+    renderer_generation: AtomicU64,
+    /// Serializes the small generation-sensitive parts of register, attach and
+    /// session insertion. Without it, a stale page could pass validation, pause,
+    /// then insert its channel just after the replacement detached everything.
+    renderer_gate: Mutex<()>,
+}
+
+impl Default for PtyManager {
+    fn default() -> Self {
+        Self {
+            sessions: Default::default(),
+            reaped: Default::default(),
+            next_id: AtomicU32::new(0),
+            renderer_generation: AtomicU64::new(0),
+            renderer_gate: Mutex::new(()),
+        }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -214,8 +303,14 @@ pub struct PtySpawned {
 #[derive(Serialize, Clone)]
 pub struct PtySummary {
     pub id: u32,
+    pub pid: Option<u32>,
     pub cwd: String,
     pub title: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub kind: SessionKind,
+    pub replay_start: u64,
+    pub replay_end: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -225,6 +320,8 @@ pub struct SpawnResult {
     /// The size the pty was actually opened at — see PtyGeometry.
     pub cols: u16,
     pub rows: u16,
+    /// Present only when output is attached to the desktop renderer.
+    pub generation: Option<u64>,
 }
 
 /// The size a pty agreed to, which is not always the size that was asked for.
@@ -253,16 +350,68 @@ impl PtyManager {
     /// agents are attachable authoritatively — without waiting on (or trusting)
     /// the periodic `pty:stats` event.
     pub fn summaries(&self) -> Vec<PtySummary> {
-        self.sessions
+        let mut summaries = self.sessions
             .lock()
             .unwrap()
             .values()
-            .map(|s| PtySummary {
-                id: s.id,
-                cwd: s.cwd.clone(),
-                title: s.title.lock().unwrap().clone(),
+            .map(|s| {
+                let (cols, rows) = *s.size.lock().unwrap();
+                PtySummary {
+                    id: s.id,
+                    pid: s.pid,
+                    cwd: s.cwd.clone(),
+                    title: s.title.lock().unwrap().clone(),
+                    cols,
+                    rows,
+                    kind: s.kind,
+                    replay_start: s.dropped_output_bytes.load(Ordering::Relaxed),
+                    replay_end: s.output_bytes.load(Ordering::Relaxed),
+                }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        summaries.sort_by_key(|s| s.id);
+        summaries
+    }
+
+    /// Make this JavaScript page authoritative and cut every stream still
+    /// pointing at its predecessor. The PTYs themselves remain alive and keep
+    /// draining into their bounded rings until this page reattaches.
+    pub fn register_renderer(&self) -> RendererRegistration {
+        let _gate = self.renderer_gate.lock().unwrap();
+        let generation = self.renderer_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let sessions = self.sessions.lock().unwrap().values().cloned().collect::<Vec<_>>();
+        for session in sessions {
+            session.detach_desktop();
+        }
+        RendererRegistration {
+            generation,
+            sessions: self.summaries(),
+        }
+    }
+
+    fn require_renderer(&self, generation: u64) -> Result<(), String> {
+        let current = self.renderer_generation.load(Ordering::SeqCst);
+        if generation == 0 || generation != current {
+            return Err(format!(
+                "renderer generation {generation} is stale (current {current})"
+            ));
+        }
+        Ok(())
+    }
+
+    fn attach_desktop(
+        &self,
+        id: u32,
+        renderer_generation: u64,
+        after: Option<u64>,
+        channel: Channel<InvokeResponseBody>,
+    ) -> Result<DesktopAttachResult, String> {
+        let _gate = self.renderer_gate.lock().unwrap();
+        self.require_renderer(renderer_generation)?;
+        let session = self
+            .get(id)
+            .ok_or_else(|| format!("no pty session {id}"))?;
+        session.attach_desktop(renderer_generation, after, channel)
     }
 
     /// Queue bytes for a session's PTY stdin. Shared by the `pty_write` command
@@ -349,7 +498,151 @@ impl PtyManager {
     }
 }
 
+#[derive(Serialize, Clone)]
+pub struct DesktopAttachResult {
+    pub cols: u16,
+    pub rows: u16,
+    pub generation: u64,
+    pub replay_start: u64,
+    pub replay_end: u64,
+}
+
+#[derive(Serialize, Clone)]
+pub struct RendererRegistration {
+    pub generation: u64,
+    pub sessions: Vec<PtySummary>,
+}
+
 impl Session {
+    fn detach_desktop(&self) {
+        *self.desktop.lock().unwrap() = None;
+    }
+
+    fn desktop_outstanding(&self) -> usize {
+        self.desktop
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|attachment| attachment.outstanding)
+            .unwrap_or(0)
+    }
+
+    /// Replace the desktop output stream and replay the bounded native ring.
+    /// Lock ordering is scrollback -> desktop, matching the flusher's record +
+    /// send order. That makes snapshot then live output gap-free without an
+    /// unbounded handoff buffer.
+    fn attach_desktop(
+        &self,
+        renderer_generation: u64,
+        after: Option<u64>,
+        channel: Channel<InvokeResponseBody>,
+    ) -> Result<DesktopAttachResult, String> {
+        let ring = self.scrollback.lock().unwrap();
+        let generation = self.next_attachment.fetch_add(1, Ordering::SeqCst) + 1;
+        let ring_start = self.dropped_output_bytes.load(Ordering::Relaxed);
+        let ring_end = ring_start.saturating_add(ring.len() as u64);
+        let (replay_start, gap) = match after {
+            None => (ring_start, ring_start > 0),
+            Some(cursor) if cursor >= ring_start && cursor <= ring_end => (cursor, false),
+            Some(_) => (ring_start, true),
+        };
+        let skip = replay_start.saturating_sub(ring_start) as usize;
+        let snapshot = ring.iter().skip(skip).copied().collect::<Vec<_>>();
+        let mut desktop = self.desktop.lock().unwrap();
+        *desktop = Some(DesktopAttachment {
+            renderer_generation,
+            generation,
+            channel,
+            outstanding: 0,
+        });
+        if !snapshot.is_empty() || gap {
+            let attachment = desktop.as_mut().expect("attachment inserted");
+            attachment.outstanding = snapshot.len();
+            if attachment
+                .channel
+                .send(InvokeResponseBody::Raw(desktop_chunk(
+                    replay_start,
+                    gap,
+                    &snapshot,
+                )))
+                .is_err()
+            {
+                *desktop = None;
+                return Err("renderer closed while the terminal was reattaching".into());
+            }
+            self.desktop_delivery_chunks.fetch_add(1, Ordering::Relaxed);
+            self.desktop_delivery_bytes
+                .fetch_add(snapshot.len() as u64, Ordering::Relaxed);
+        }
+        drop(desktop);
+        drop(ring);
+        let (cols, rows) = *self.size.lock().unwrap();
+        Ok(DesktopAttachResult {
+            cols,
+            rows,
+            generation,
+            replay_start,
+            replay_end: ring_end,
+        })
+    }
+
+    fn send_desktop(&self, start: u64, data: Vec<u8>) {
+        let generation = {
+            let mut desktop = self.desktop.lock().unwrap();
+            let Some(attachment) = desktop.as_mut() else {
+                return;
+            };
+            attachment.outstanding = attachment.outstanding.saturating_add(data.len());
+            let generation = attachment.generation;
+            if attachment
+                .channel
+                .send(InvokeResponseBody::Raw(desktop_chunk(start, false, &data)))
+                .is_ok()
+            {
+                self.desktop_delivery_chunks.fetch_add(1, Ordering::Relaxed);
+                self.desktop_delivery_bytes
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
+                return;
+            }
+            generation
+        };
+        // A failed channel means only that renderer attachment is gone. Never
+        // terminate the PTY: a new page can reattach to the same child.
+        let mut desktop = self.desktop.lock().unwrap();
+        if desktop
+            .as_ref()
+            .is_some_and(|attachment| attachment.generation == generation)
+        {
+            *desktop = None;
+        }
+    }
+
+    fn acknowledge(&self, renderer_generation: u64, generation: u64, bytes: usize) {
+        let mut desktop = self.desktop.lock().unwrap();
+        let Some(attachment) = desktop.as_mut() else {
+            return;
+        };
+        if attachment.renderer_generation != renderer_generation
+            || attachment.generation != generation
+        {
+            return;
+        }
+        let acknowledged = bytes.min(attachment.outstanding);
+        attachment.outstanding -= acknowledged;
+        self.desktop_acked_bytes
+            .fetch_add(acknowledged as u64, Ordering::Relaxed);
+    }
+
+    fn detach_matching(&self, renderer_generation: u64, generation: u64) {
+        let mut desktop = self.desktop.lock().unwrap();
+        if desktop.as_ref().is_some_and(|attachment| {
+            attachment.renderer_generation == renderer_generation
+                && attachment.generation == generation
+        }) {
+            *desktop = None;
+        }
+    }
+
     /// The process the kernel currently has in this pty's foreground.
     ///
     /// This is the authoritative answer to "what is this terminal running",
@@ -436,26 +729,66 @@ impl Session {
         self.output_bytes.load(Ordering::Relaxed)
     }
 
-    /// Feed a freshly-flushed chunk to remote consumers: append to the bounded
-    /// scrollback and fan it out to any subscribers, both under one lock so an
-    /// attaching viewer never sees a torn boundary. Best-effort — no subscribers
-    /// (or a lagging one) is fine and never blocks the flusher.
+    /// Bounded-state delivery diagnostics. Lock order matches attach so the
+    /// process monitor can sample this without introducing a lifecycle race.
+    pub fn desktop_delivery_metrics(&self) -> DesktopDeliveryMetrics {
+        let replay_bytes = self.scrollback.lock().unwrap().len() as u64;
+        let (attached, outstanding_bytes) = self
+            .desktop
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| (true, a.outstanding as u64))
+            .unwrap_or((false, 0));
+        DesktopDeliveryMetrics {
+            attached,
+            outstanding_bytes,
+            replay_bytes,
+            dropped_output_bytes: self.dropped_output_bytes.load(Ordering::Relaxed),
+            delivery_chunks: self.desktop_delivery_chunks.load(Ordering::Relaxed),
+            delivery_bytes: self.desktop_delivery_bytes.load(Ordering::Relaxed),
+            acked_bytes: self.desktop_acked_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Append a freshly-flushed chunk to the bounded scrollback and fan it out
+    /// to remote subscribers. Callers hold `scrollback` across this helper.
     ///
     /// Also where the output clock is stamped. This runs on every flush for
     /// every pty, headless ones included, and the bytes are already in hand —
     /// so "when did this terminal last say anything" costs two relaxed stores.
-    fn record_remote(&self, data: &[u8]) {
+    fn record_output_locked(&self, ring: &mut VecDeque<u8>, data: &[u8]) -> u64 {
         self.last_output_ms.store(now_ms(), Ordering::Relaxed);
-        self.output_bytes
-            .fetch_add(data.len() as u64, Ordering::Relaxed);
-        let mut ring = self.scrollback.lock().unwrap();
+        let start = self.output_bytes.load(Ordering::Relaxed);
         ring.extend(data.iter().copied());
         let overflow = ring.len().saturating_sub(SCROLLBACK_CAP);
         if overflow > 0 {
             ring.drain(0..overflow);
+            self.dropped_output_bytes
+                .fetch_add(overflow as u64, Ordering::Relaxed);
         }
+        self.output_bytes
+            .store(start.saturating_add(data.len() as u64), Ordering::Relaxed);
         // Err just means nobody is attached right now; ignore it.
         let _ = self.subscribers.send(PtyEvent::Data(Arc::from(data)));
+        start
+    }
+
+    /// Record output for headless/test producers that do not have a desktop
+    /// delivery to join atomically.
+    #[cfg(test)]
+    fn record_remote(&self, data: &[u8]) -> u64 {
+        let mut ring = self.scrollback.lock().unwrap();
+        self.record_output_locked(&mut ring, data)
+    }
+
+    /// Join ring append and desktop delivery under the same lock order used by
+    /// attach (`scrollback -> desktop`). Without this, attach could snapshot a
+    /// just-recorded chunk and then receive that same chunk again as live data.
+    fn record_and_send_desktop(&self, data: Vec<u8>) {
+        let mut ring = self.scrollback.lock().unwrap();
+        let start = self.record_output_locked(&mut ring, &data);
+        self.send_desktop(start, data);
     }
 
     /// Record a new grid size and tell remote subscribers, so a remote terminal
@@ -484,11 +817,28 @@ impl Session {
     fn request_stop(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
         #[cfg(unix)]
-        if let Some(pid) = self.pid {
+        for pgid in self.process_groups() {
             unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+                libc::killpg(pgid as libc::pid_t, libc::SIGTERM);
             }
         }
+    }
+
+    /// Interactive shells put their foreground job in a different process
+    /// group from the shell. Signal both groups: targeting only the launch
+    /// shell can leave the agent that actually owns the terminal running.
+    #[cfg(unix)]
+    fn process_groups(&self) -> Vec<u32> {
+        let mut groups = Vec::with_capacity(2);
+        if let Some(root) = self.pid {
+            groups.push(root);
+        }
+        if let Some(foreground) = self.foreground_pid() {
+            if !groups.contains(&foreground) {
+                groups.push(foreground);
+            }
+        }
+        groups
     }
 
     /// Whether any process in the group is still alive. Signal 0 tests for
@@ -496,10 +846,9 @@ impl Session {
     fn alive(&self) -> bool {
         #[cfg(unix)]
         {
-            match self.pid {
-                Some(pid) => unsafe { libc::killpg(pid as libc::pid_t, 0) == 0 },
-                None => false,
-            }
+            self.process_groups()
+                .into_iter()
+                .any(|pgid| unsafe { libc::killpg(pgid as libc::pid_t, 0) == 0 })
         }
         #[cfg(not(unix))]
         {
@@ -522,10 +871,10 @@ impl Session {
     /// Last resort, for a process group that ignored SIGTERM.
     fn force(&self) {
         #[cfg(unix)]
-        if let Some(pid) = self.pid {
-            if self.alive() {
+        for pgid in self.process_groups() {
+            if unsafe { libc::killpg(pgid as libc::pid_t, 0) == 0 } {
                 unsafe {
-                    libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                    libc::killpg(pgid as libc::pid_t, libc::SIGKILL);
                 }
             }
         }
@@ -550,8 +899,10 @@ pub fn pty_spawn(
     env: Option<Vec<(String, String)>>,
     run_id: Option<String>,
     attempt_id: Option<String>,
+    renderer_generation: u64,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<SpawnResult, String> {
+    state.require_renderer(renderer_generation)?;
     let binding = tasks.spawn_binding(run_id.as_deref(), attempt_id.as_deref())?;
     let result = state.spawn(
         app,
@@ -561,7 +912,11 @@ pub fn pty_spawn(
         shell,
         high_water,
         run_command.map(RunSpec::Shell),
-        Some(on_data),
+        SessionKind::Desktop,
+        Some(DesktopSink {
+            renderer_generation,
+            channel: on_data,
+        }),
         env,
         binding.clone(),
     );
@@ -598,6 +953,7 @@ pub fn pty_spawn_detached(
         None,
         None,
         Some(RunSpec::Shell(command)),
+        SessionKind::Detached,
         None,
         env,
         binding.clone(),
@@ -645,6 +1001,7 @@ pub fn pty_spawn_argv(
         None,
         None,
         Some(RunSpec::Argv(argv)),
+        SessionKind::Detached,
         None,
         env,
         binding.clone(),
@@ -668,11 +1025,13 @@ pub fn pty_spawn_attached_argv(
     env: Option<Vec<(String, String)>>,
     run_id: Option<String>,
     attempt_id: Option<String>,
+    renderer_generation: u64,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<SpawnResult, String> {
     if argv.first().map(|p| p.trim().is_empty()).unwrap_or(true) {
         return Err("argv must name a program".into());
     }
+    state.require_renderer(renderer_generation)?;
     let binding = tasks.spawn_binding(run_id.as_deref(), attempt_id.as_deref())?;
     let result = state.spawn(
         app,
@@ -682,7 +1041,11 @@ pub fn pty_spawn_attached_argv(
         None,
         high_water,
         Some(RunSpec::Argv(argv)),
-        Some(on_data),
+        SessionKind::Desktop,
+        Some(DesktopSink {
+            renderer_generation,
+            channel: on_data,
+        }),
         env,
         binding.clone(),
     );
@@ -774,6 +1137,7 @@ impl PtyManager {
             None,
             None,
             None,
+            SessionKind::Remote,
             None,
             account,
             None,
@@ -804,12 +1168,12 @@ impl PtyManager {
         Ok(res.id)
     }
 
-    /// The shared spawn core. `on_data` is the WebView streaming channel when a
-    /// desktop tab owns this PTY; `None` for a headless (remote-only) PTY, which
-    /// skips WebView backpressure so nothing stalls a headless agent's output.
+    /// The shared spawn core. `desktop` is the replaceable WebView streaming
+    /// attachment when a desktop tab owns this PTY; headless and detached PTYs
+    /// skip WebView backpressure so no absent renderer can stall their output.
     /// Generic over the runtime so it can be exercised with a mock app in tests.
     #[allow(clippy::too_many_arguments)]
-    pub fn spawn<R: tauri::Runtime>(
+    fn spawn<R: tauri::Runtime>(
         &self,
         app: AppHandle<R>,
         cols: u16,
@@ -818,7 +1182,8 @@ impl PtyManager {
         shell: Option<String>,
         high_water: Option<usize>,
         run: Option<RunSpec>,
-        on_data: Option<Channel<InvokeResponseBody>>,
+        kind: SessionKind,
+        desktop: Option<DesktopSink>,
         extra_env: Option<Vec<(String, String)>>,
         task_identity: Option<crate::tasks::AttemptBinding>,
     ) -> Result<SpawnResult, String> {
@@ -967,9 +1332,24 @@ impl PtyManager {
         let pid = child.process_id();
         let killer = child.clone_killer();
 
+        let desktop_renderer_generation = desktop.as_ref().map(|sink| sink.renderer_generation);
+        let (desktop, generation) = match desktop {
+            Some(sink) => (
+                Some(DesktopAttachment {
+                    renderer_generation: sink.renderer_generation,
+                    generation: 1,
+                    channel: sink.channel,
+                    outstanding: 0,
+                }),
+                Some(1),
+            ),
+            None => (None, None),
+        };
+
         let session = Arc::new(Session {
             id,
             pid,
+            kind,
             title: Mutex::new(shell.clone()),
             cwd,
             input: Mutex::new(Vec::new()),
@@ -979,8 +1359,9 @@ impl PtyManager {
             child: Mutex::new(Some(child)),
             shutdown: AtomicBool::new(false),
             eof: AtomicBool::new(false),
-            pending: Mutex::new(Vec::new()),
-            outstanding: AtomicUsize::new(0),
+            pending: Mutex::new(VecDeque::new()),
+            desktop: Mutex::new(desktop),
+            next_attachment: AtomicU64::new(generation.unwrap_or(0)),
             high_water: high_water.unwrap_or(DEFAULT_HIGH_WATER),
             scrollback: Mutex::new(VecDeque::new()),
             size: Mutex::new((cols, rows)),
@@ -991,10 +1372,32 @@ impl PtyManager {
             // since it started.
             last_output_ms: AtomicU64::new(0),
             output_bytes: AtomicU64::new(0),
+            dropped_output_bytes: AtomicU64::new(0),
+            desktop_delivery_chunks: AtomicU64::new(0),
+            desktop_delivery_bytes: AtomicU64::new(0),
+            desktop_acked_bytes: AtomicU64::new(0),
             last_input_ms: AtomicU64::new(0),
         });
 
+        // Commit a desktop session under the same gate as renderer replacement.
+        // Validation at the command boundary is only an early refusal; this is
+        // the race-closing check after process creation and immediately before
+        // the channel becomes reachable by the flusher.
+        let renderer_gate = desktop_renderer_generation
+            .map(|_| state.renderer_gate.lock().unwrap());
+        if let Some(renderer_generation) = desktop_renderer_generation {
+            if let Err(error) = state.require_renderer(renderer_generation) {
+                drop(renderer_gate);
+                session.terminate();
+                if let Some(mut child) = session.child.lock().unwrap().take() {
+                    let _ = child.wait();
+                }
+                retire();
+                return Err(error);
+            }
+        }
         state.sessions.lock().unwrap().insert(id, session.clone());
+        drop(renderer_gate);
 
         // Reader thread: blocking reads -> pending buffer, with backpressure.
         {
@@ -1011,7 +1414,7 @@ impl PtyManager {
                         // kernel PTY buffer fills and the child blocks — bounded memory.
                         loop {
                             let queued = session.pending.lock().unwrap().len()
-                                + session.outstanding.load(Ordering::SeqCst);
+                                + session.desktop_outstanding();
                             if queued <= session.high_water
                                 || session.shutdown.load(Ordering::SeqCst)
                             {
@@ -1022,7 +1425,11 @@ impl PtyManager {
                         match reader.read(&mut buf) {
                             Ok(0) | Err(_) => break,
                             Ok(n) => {
-                                session.pending.lock().unwrap().extend_from_slice(&buf[..n]);
+                                session
+                                    .pending
+                                    .lock()
+                                    .unwrap()
+                                    .extend(buf[..n].iter().copied());
                             }
                         }
                     }
@@ -1080,25 +1487,17 @@ impl PtyManager {
                             if pending.is_empty() {
                                 None
                             } else {
-                                Some(std::mem::take(&mut *pending))
+                                let take = pending.len().min(OUTPUT_CHUNK_MAX);
+                                Some(pending.drain(..take).collect::<Vec<_>>())
                             }
                         };
                         match chunk {
                             Some(data) => {
-                                // Mirror to remote subscribers + scrollback (Canopy
-                                // Remote) first, while `data` is still borrowable.
-                                session.record_remote(&data);
-                                // Only the WebView path uses outstanding-bytes
-                                // backpressure; a headless (remote-only) PTY has no
-                                // acker, so skip it or the reader would stall the
-                                // agent after high_water bytes of output.
-                                if let Some(ch) = &on_data {
-                                    session.outstanding.fetch_add(data.len(), Ordering::SeqCst);
-                                    if ch.send(InvokeResponseBody::Raw(data)).is_err() {
-                                        // WebView side is gone; stop streaming.
-                                        session.terminate();
-                                    }
-                                }
+                                // Append to the replay ring and deliver to the
+                                // current desktop attachment as one ordered
+                                // boundary. With no attachment, this still drains
+                                // into the bounded ring for a replacement page.
+                                session.record_and_send_desktop(data);
                             }
                             None => {
                                 if session.eof.load(Ordering::SeqCst)
@@ -1165,6 +1564,7 @@ impl PtyManager {
             pid,
             cols,
             rows,
+            generation,
         })
     }
 }
@@ -1174,70 +1574,63 @@ pub fn pty_write(state: State<'_, PtyManager>, id: u32, data: String) -> Result<
     state.write(id, &data)
 }
 
-/// Attach a desktop WebView to an ALREADY-running PTY (e.g. one a phone spawned):
-/// replay its scrollback, then forward live output onto `on_data`. Reuses the
-/// remote broadcast fan-out, so the flusher and the desktop-spawn path are
-/// untouched. Returns the PTY's current grid. Lossy on heavy floods (re-seeds on
-/// lag); fine for viewing a remote-spawned agent — a TUI redraws itself.
+/// Attach the current desktop page to a PTY that survived its predecessor.
+/// Unlike the remote viewer path above, this stream participates in bounded
+/// backpressure and every ack is scoped to the returned attachment generation.
 #[tauri::command]
-pub fn pty_attach(
+pub fn pty_attach_desktop(
     state: State<'_, PtyManager>,
     id: u32,
+    renderer_generation: u64,
+    after: Option<u64>,
     on_data: Channel<InvokeResponseBody>,
-) -> Result<PtyGeometry, String> {
-    let (cols, rows, snapshot, mut rx) = state
-        .attach(id)
-        .ok_or_else(|| format!("no pty session {id}"))?;
-    if !snapshot.is_empty() {
-        let _ = on_data.send(InvokeResponseBody::Raw(snapshot));
+) -> Result<DesktopAttachResult, String> {
+    state.attach_desktop(id, renderer_generation, after, on_data)
+}
+
+/// Release a normal tab-close attachment without killing its remotely-owned
+/// child. Generation matching prevents a late cleanup from an old component or
+/// page from detaching the replacement stream.
+#[tauri::command]
+pub fn pty_detach_desktop(
+    state: State<'_, PtyManager>,
+    id: u32,
+    renderer_generation: u64,
+    generation: u64,
+) -> Result<(), String> {
+    if let Ok(session) = get_session(&state, id) {
+        session.detach_matching(renderer_generation, generation);
     }
-    let sessions = state.sessions();
-    thread::spawn(move || loop {
-        match rx.blocking_recv() {
-            Ok(PtyEvent::Data(bytes)) => {
-                if on_data
-                    .send(InvokeResponseBody::Raw(bytes.to_vec()))
-                    .is_err()
-                {
-                    break; // the WebView detached
-                }
-            }
-            Ok(PtyEvent::Resize(_, _)) => {}
-            Err(broadcast::error::RecvError::Lagged(_)) => {
-                // Fell behind a flood — re-seed from scrollback and resubscribe.
-                let Some(s) = sessions.lock().unwrap().get(&id).cloned() else {
-                    break;
-                };
-                let snap: Vec<u8> = s.scrollback.lock().unwrap().iter().copied().collect();
-                rx = s.subscribers.subscribe();
-                let _ = on_data.send(InvokeResponseBody::Raw(b"\x1bc".to_vec()));
-                if !snap.is_empty() {
-                    let _ = on_data.send(InvokeResponseBody::Raw(snap));
-                }
-            }
-            Err(broadcast::error::RecvError::Closed) => break,
-        }
-    });
-    Ok(PtyGeometry { cols, rows })
+    Ok(())
+}
+
+/// First native handshake performed by each JavaScript page. It invalidates
+/// the predecessor's PTY streams, closes browser child views whose React owners
+/// disappeared with that page, and returns the live sessions to reconcile.
+#[tauri::command]
+pub fn pty_renderer_register(
+    app: AppHandle,
+    state: State<'_, PtyManager>,
+) -> RendererRegistration {
+    let registration = state.register_renderer();
+    app.state::<crate::browser::BrowserManager>()
+        .renderer_registered(&app, registration.generation);
+    app.state::<Arc<crate::watchdog::WatchdogState>>()
+        .renderer_registered(registration.generation);
+    registration
 }
 
 /// Frontend ack after xterm.js consumes a chunk — releases backpressure.
 #[tauri::command]
-pub fn pty_ack(state: State<'_, PtyManager>, id: u32, bytes: usize) -> Result<(), String> {
+pub fn pty_ack(
+    state: State<'_, PtyManager>,
+    id: u32,
+    renderer_generation: u64,
+    generation: u64,
+    bytes: usize,
+) -> Result<(), String> {
     if let Ok(session) = get_session(&state, id) {
-        let mut current = session.outstanding.load(Ordering::SeqCst);
-        loop {
-            let next = current.saturating_sub(bytes);
-            match session.outstanding.compare_exchange(
-                current,
-                next,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
-        }
+        session.acknowledge(renderer_generation, generation, bytes);
     }
     Ok(())
 }
@@ -1273,12 +1666,16 @@ pub fn pty_resize(
     Ok(PtyGeometry { cols, rows })
 }
 
-/// Called by the frontend at boot: any session alive at that moment belongs to
-/// a previous page (webview reloads destroy JS state without unmounting), so
-/// reap them all. Prevents orphaned shells across dev reloads / Cmd+R.
+/// Explicit development-only orphan reap. Normal renderer boot uses
+/// `pty_renderer_register`, and release builds refuse this command so no UI path
+/// can accidentally regain the old destructive blast radius.
 #[tauri::command]
-pub fn pty_kill_all(state: State<'_, PtyManager>) {
+pub fn pty_dev_reap_all(state: State<'_, PtyManager>) -> Result<(), String> {
+    if !cfg!(debug_assertions) {
+        return Err("PTY orphan reaping is available only in development builds".into());
+    }
     state.kill_all();
+    Ok(())
 }
 
 #[tauri::command]
@@ -1414,6 +1811,7 @@ mod tests {
                 None,
                 None,
                 Some(RunSpec::Argv(vec!["echo".into(), "REAPED_MARKER".into()])),
+                SessionKind::Detached,
                 None,
                 None,
                 None,
@@ -1460,6 +1858,7 @@ mod tests {
                     "echo".into(),
                     format!("ARGV_{hostile}"),
                 ])),
+                SessionKind::Detached,
                 None,
                 None,
                 None,
@@ -1505,6 +1904,7 @@ mod tests {
                 None,
                 None,
                 Some(RunSpec::Argv(argv.clone())),
+                SessionKind::Detached,
                 None,
                 None,
                 None,
@@ -1534,6 +1934,7 @@ mod tests {
                 Some(RunSpec::Shell(
                     "echo DETACHED_$CANOPY_MICRO_TASK; sleep 20".into(),
                 )),
+                SessionKind::Detached,
                 None,
                 Some(vec![("CANOPY_MICRO_TASK".into(), "1".into())]),
                 None,
@@ -1567,6 +1968,7 @@ mod tests {
                 Some(RunSpec::Shell(
                     "echo TASK_${CANOPY_RUN_ID}_${CANOPY_ATTEMPT_ID}; sleep 20".into(),
                 )),
+                SessionKind::Detached,
                 None,
                 Some(vec![
                     ("CANOPY_RUN_ID".into(), "invented".into()),
@@ -1618,6 +2020,7 @@ mod tests {
                      sleep 0.1; done"
                         .into(),
                 )),
+                SessionKind::Detached,
                 None,
                 Some(vec![("CANOPY_MICRO_TASK".into(), "1".into())]),
                 None,
@@ -1735,6 +2138,336 @@ mod tests {
         let (_c, _r, snap, _rx) = pm.attach(id).expect("attach");
         let _ = pm.kill(id);
         assert!(String::from_utf8_lossy(&snap).contains("SNAPSHOT_MARKER"));
+    }
+
+    #[test]
+    fn renderer_replacement_preserves_process_and_scopes_acks_to_the_new_stream() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let first = pm.register_renderer();
+        let first_bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let first_sink = {
+            let bytes = first_bytes.clone();
+            Channel::new(move |body| {
+                if let InvokeResponseBody::Raw(chunk) = body {
+                    bytes.lock().unwrap().extend(chunk);
+                }
+                Ok(())
+            })
+        };
+        let spawned = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                Some(64 * 1024),
+                None,
+                SessionKind::Desktop,
+                Some(DesktopSink {
+                    renderer_generation: first.generation,
+                    channel: first_sink,
+                }),
+                None,
+                None,
+            )
+            .expect("desktop spawn");
+        pm.write(spawned.id, "echo BEFORE_RELOAD\r")
+            .expect("initial write");
+        assert!(wait_for(
+            &pm,
+            spawned.id,
+            "BEFORE_RELOAD",
+            Duration::from_secs(8),
+        ));
+        let old_stream = spawned.generation.expect("desktop generation");
+
+        let second = pm.register_renderer();
+        let session = pm.get(spawned.id).expect("PTY survives renderer");
+        assert!(session.desktop.lock().unwrap().is_none());
+        assert_eq!(second.sessions.len(), 1);
+        assert_eq!(second.sessions[0].kind, SessionKind::Desktop);
+
+        // With no page attached, output still drains into the bounded native
+        // ring instead of blocking at the old renderer's unacked window.
+        pm.write(spawned.id, "echo AFTER_RELOAD\r")
+            .expect("write after renderer loss");
+        assert!(wait_for(
+            &pm,
+            spawned.id,
+            "AFTER_RELOAD",
+            Duration::from_secs(8),
+        ));
+
+        let replacement_bytes = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let replacement_sink = {
+            let bytes = replacement_bytes.clone();
+            Channel::new(move |body| {
+                if let InvokeResponseBody::Raw(chunk) = body {
+                    bytes.lock().unwrap().extend(chunk);
+                }
+                Ok(())
+            })
+        };
+        let attached = pm
+            .attach_desktop(spawned.id, second.generation, None, replacement_sink)
+            .expect("replacement attach");
+        assert!(String::from_utf8_lossy(&replacement_bytes.lock().unwrap())
+            .contains("AFTER_RELOAD"));
+        let before = session.desktop_outstanding();
+        assert!(before > 0, "snapshot should await the replacement page's ack");
+
+        session.acknowledge(first.generation, old_stream, usize::MAX);
+        assert_eq!(
+            session.desktop_outstanding(),
+            before,
+            "stale page released the replacement page's backpressure"
+        );
+        session.acknowledge(second.generation, attached.generation, usize::MAX);
+        assert_eq!(session.desktop_outstanding(), 0);
+
+        // A second reload invalidates even a late attach attempt from page two.
+        let third = pm.register_renderer();
+        let stale = pm.attach_desktop(
+            spawned.id,
+            second.generation,
+            None,
+            Channel::new(|_| Ok(())),
+        );
+        assert!(stale.is_err());
+        assert!(pm
+            .attach_desktop(
+                spawned.id,
+                third.generation,
+                None,
+                Channel::new(|_| Ok(())),
+            )
+            .is_ok());
+        let _ = pm.kill(spawned.id);
+    }
+
+    #[test]
+    fn renderer_replacement_does_not_touch_remote_or_detached_sessions() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        pm.register_renderer();
+        let remote = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None, None)
+            .expect("remote spawn");
+        let detached = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                None,
+                SessionKind::Detached,
+                None,
+                None,
+                None,
+            )
+            .expect("detached spawn")
+            .id;
+
+        let replacement = pm.register_renderer();
+        assert!(pm.get(remote).is_some());
+        assert!(pm.get(detached).is_some());
+        assert_eq!(
+            replacement
+                .sessions
+                .iter()
+                .find(|summary| summary.id == remote)
+                .map(|summary| summary.kind),
+            Some(SessionKind::Remote),
+        );
+        assert_eq!(
+            replacement
+                .sessions
+                .iter()
+                .find(|summary| summary.id == detached)
+                .map(|summary| summary.kind),
+            Some(SessionKind::Detached),
+        );
+
+        pm.write(remote, "echo REMOTE_AFTER_RELOAD\r").unwrap();
+        pm.write(detached, "echo DETACHED_AFTER_RELOAD\r").unwrap();
+        assert!(wait_for(
+            &pm,
+            remote,
+            "REMOTE_AFTER_RELOAD",
+            Duration::from_secs(8),
+        ));
+        assert!(wait_for(
+            &pm,
+            detached,
+            "DETACHED_AFTER_RELOAD",
+            Duration::from_secs(8),
+        ));
+        let _ = pm.kill(remote);
+        let _ = pm.kill(detached);
+    }
+
+    #[test]
+    fn truncated_replay_is_bounded_and_explicit() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None, None)
+            .expect("spawn");
+        let session = pm.get(id).unwrap();
+        session.record_remote(&vec![b'x'; SCROLLBACK_CAP + 37]);
+        let registration = pm.register_renderer();
+        let summary = registration
+            .sessions
+            .iter()
+            .find(|summary| summary.id == id)
+            .unwrap();
+        assert!(summary.replay_start >= 37);
+        assert_eq!(summary.replay_end - summary.replay_start, SCROLLBACK_CAP as u64);
+
+        let replay = Arc::new(Mutex::new(Vec::new()));
+        let sink = {
+            let replay = replay.clone();
+            Channel::new(move |body| {
+                if let InvokeResponseBody::Raw(chunk) = body {
+                    replay.lock().unwrap().extend(chunk);
+                }
+                Ok(())
+            })
+        };
+        pm.attach_desktop(id, registration.generation, None, sink)
+            .expect("attach");
+        let replay = replay.lock().unwrap();
+        assert!(replay.len() <= SCROLLBACK_CAP + DESKTOP_CHUNK_HEADER);
+        assert_eq!(&replay[..4], DESKTOP_CHUNK_MAGIC);
+        assert_ne!(replay[4] & DESKTOP_CHUNK_GAP, 0);
+        assert_eq!(replay.len() - DESKTOP_CHUNK_HEADER, SCROLLBACK_CAP);
+        let _ = pm.kill(id);
+    }
+
+    #[test]
+    fn reattach_cursor_replays_only_bytes_received_while_hidden() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Argv(vec!["sleep".into(), "20".into()])),
+                SessionKind::Detached,
+                None,
+                None,
+                None,
+            )
+            .expect("spawn")
+            .id;
+        let session = pm.get(id).unwrap();
+        // Isolate the cursor contract from shell startup noise.
+        {
+            session.scrollback.lock().unwrap().clear();
+            session.output_bytes.store(0, Ordering::Relaxed);
+            session.dropped_output_bytes.store(0, Ordering::Relaxed);
+        }
+        session.record_remote(b"before-hidden-after");
+        let registration = pm.register_renderer();
+        let replay = Arc::new(Mutex::new(Vec::new()));
+        let sink = {
+            let replay = replay.clone();
+            Channel::new(move |body| {
+                if let InvokeResponseBody::Raw(chunk) = body {
+                    replay.lock().unwrap().extend(chunk);
+                }
+                Ok(())
+            })
+        };
+        pm.attach_desktop(id, registration.generation, Some(14), sink)
+            .expect("incremental attach");
+        let replay = replay.lock().unwrap();
+        assert_eq!(&replay[..4], DESKTOP_CHUNK_MAGIC);
+        assert_eq!(replay[4] & DESKTOP_CHUNK_GAP, 0);
+        assert_eq!(u64::from_le_bytes(replay[8..16].try_into().unwrap()), 14);
+        assert_eq!(&replay[DESKTOP_CHUNK_HEADER..], b"after");
+        let _ = pm.kill(id);
+    }
+
+    #[test]
+    fn attach_snapshot_and_live_boundary_has_no_gap_or_overlap() {
+        use std::sync::Barrier;
+
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Argv(vec!["sleep".into(), "20".into()])),
+                SessionKind::Detached,
+                None,
+                None,
+                None,
+            )
+            .expect("spawn")
+            .id;
+        let session = pm.get(id).unwrap();
+        {
+            session.scrollback.lock().unwrap().clear();
+            session.output_bytes.store(0, Ordering::Relaxed);
+            session.dropped_output_bytes.store(0, Ordering::Relaxed);
+        }
+        session.record_remote(b"seed");
+        let registration = pm.register_renderer();
+        let frames = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let sink = {
+            let frames = frames.clone();
+            Channel::new(move |body| {
+                if let InvokeResponseBody::Raw(frame) = body {
+                    frames.lock().unwrap().push(frame);
+                }
+                Ok(())
+            })
+        };
+
+        let barrier = Arc::new(Barrier::new(2));
+        let producer_session = session.clone();
+        let producer_barrier = barrier.clone();
+        let producer = thread::spawn(move || {
+            producer_barrier.wait();
+            for value in 0_u32..500 {
+                producer_session.record_and_send_desktop(value.to_le_bytes().to_vec());
+            }
+        });
+        barrier.wait();
+        pm.attach_desktop(id, registration.generation, None, sink)
+            .expect("attach at producer boundary");
+        producer.join().unwrap();
+
+        let mut expected = b"seed".to_vec();
+        for value in 0_u32..500 {
+            expected.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut actual = Vec::new();
+        let mut cursor = 0_u64;
+        for frame in frames.lock().unwrap().iter() {
+            assert_eq!(&frame[..4], DESKTOP_CHUNK_MAGIC);
+            let start = u64::from_le_bytes(frame[8..16].try_into().unwrap());
+            assert_eq!(start, cursor, "frame range overlapped or skipped output");
+            let payload = &frame[DESKTOP_CHUNK_HEADER..];
+            actual.extend_from_slice(payload);
+            cursor += payload.len() as u64;
+        }
+        assert_eq!(actual, expected);
+        let _ = pm.kill(id);
     }
 
     // Regression: kill tears the session down (no leaked child / map entry).

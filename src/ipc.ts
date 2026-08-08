@@ -34,7 +34,82 @@ export interface PtyGeometry {
 export interface SpawnResult extends PtyGeometry {
   id: number;
   pid: number | null;
+  /** Native output-stream generation. Null for detached/headless sessions. */
+  generation: number | null;
 }
+
+export type PtySessionKind = "desktop" | "remote" | "detached";
+
+export interface PtySummary extends PtyGeometry {
+  id: number;
+  pid: number | null;
+  cwd: string;
+  title: string;
+  kind: PtySessionKind;
+  replay_start: number;
+  replay_end: number;
+}
+
+export interface RendererRegistration {
+  generation: number;
+  sessions: PtySummary[];
+}
+
+export interface PtyChunk {
+  bytes: Uint8Array;
+  /** Absolute byte range in the native session output stream. */
+  start: number;
+  end: number;
+  /** True when bytes before `start` fell out of the bounded replay ring. */
+  gap: boolean;
+}
+
+const PTY_HEADER = 16;
+export const decodePtyChunk = (payload: ArrayBuffer | number[]): PtyChunk => {
+  const framed = payload instanceof ArrayBuffer
+    ? new Uint8Array(payload)
+    : Uint8Array.from(payload);
+  if (
+    framed.length < PTY_HEADER ||
+    framed[0] !== 0x43 || framed[1] !== 0x50 ||
+    framed[2] !== 0x54 || framed[3] !== 0x59
+  ) {
+    // Compatibility with a native core from before cursor envelopes. It cannot
+    // be resumed incrementally, so mark it as a gap from offset zero.
+    return { bytes: framed, start: 0, end: framed.length, gap: true };
+  }
+  const start = Number(new DataView(
+    framed.buffer,
+    framed.byteOffset + 8,
+    8,
+  ).getBigUint64(0, true));
+  const bytes = framed.subarray(PTY_HEADER);
+  return { bytes, start, end: start + bytes.length, gap: (framed[4] & 1) !== 0 };
+};
+
+let renderer: RendererRegistration | null = null;
+
+/** Make this page authoritative before mounting anything that can spawn a PTY.
+ * Rust detaches predecessor channels and returns the children that survived it. */
+export async function ptyRendererRegister(): Promise<RendererRegistration> {
+  const registration = await invoke<RendererRegistration>("pty_renderer_register");
+  renderer = registration;
+  return registration;
+}
+
+/** Snapshot returned by the boot handshake, consumed idempotently by App. */
+export const rendererPtySessions = (): PtySummary[] => renderer?.sessions ?? [];
+
+const rendererGeneration = (): number => {
+  if (renderer == null) throw new Error("terminal renderer is not registered");
+  return renderer.generation;
+};
+
+/** Browser cleanup can be requested while the renderer is still booting or
+ * already tearing down. Keep those calls promise-shaped so callers can safely
+ * catch them; Rust treats generation 0 as stale and performs no mutation. PTY
+ * creation remains strict through rendererGeneration() above. */
+const browserRendererGeneration = (): number => renderer?.generation ?? 0;
 
 export async function ptySpawn(
   opts: {
@@ -55,18 +130,17 @@ export async function ptySpawn(
     runId?: string;
     attemptId?: string;
   },
-  onData: (bytes: Uint8Array) => void,
+  onData: (chunk: PtyChunk) => void,
 ): Promise<SpawnResult> {
   const channel = new Channel<ArrayBuffer | number[]>();
   // Raw channel payloads arrive as ArrayBuffer for large chunks but as plain
   // number[] below Tauri's internal direct-execute threshold — handle both.
-  channel.onmessage = (data) =>
-    onData(
-      data instanceof ArrayBuffer
-        ? new Uint8Array(data)
-        : Uint8Array.from(data),
-    );
-  return invoke("pty_spawn", { ...opts, onData: channel });
+  channel.onmessage = (data) => onData(decodePtyChunk(data));
+  return invoke("pty_spawn", {
+    ...opts,
+    rendererGeneration: rendererGeneration(),
+    onData: channel,
+  });
 }
 
 // Write/ack/kill/set-title can always lose a race with the session's own exit:
@@ -79,13 +153,17 @@ export async function ptySpawn(
 const gone = (p: Promise<void>) => p.catch(() => {});
 export const ptyWrite = (id: number, data: string) =>
   gone(invoke<void>("pty_write", { id, data }));
-export const ptyAck = (id: number, bytes: number) =>
-  gone(invoke<void>("pty_ack", { id, bytes }));
+export const ptyAck = (id: number, generation: number, bytes: number) =>
+  gone(invoke<void>("pty_ack", {
+    id,
+    rendererGeneration: rendererGeneration(),
+    generation,
+    bytes,
+  }));
 /** Resize the pty; resolves with the size it actually took (clamped to >= 1). */
 export const ptyResize = (id: number, cols: number, rows: number) =>
   invoke<PtyGeometry>("pty_resize", { id, cols, rows });
 export const ptyKill = (id: number) => gone(invoke<void>("pty_kill", { id }));
-export const ptyKillAll = () => invoke<void>("pty_kill_all");
 export const ptySetTitle = (id: number, title: string) =>
   gone(invoke<void>("pty_set_title", { id, title }));
 
@@ -116,19 +194,21 @@ export async function ptySpawnAttachedArgv(
     runId?: string;
     attemptId?: string;
   },
-  onData: (bytes: Uint8Array) => void,
+  onData: (chunk: PtyChunk) => void,
 ): Promise<SpawnResult> {
   const channel = new Channel<ArrayBuffer | number[]>();
-  channel.onmessage = (data) => onData(
-    data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data),
-  );
-  return invoke<SpawnResult>("pty_spawn_attached_argv", { ...opts, onData: channel });
+  channel.onmessage = (data) => onData(decodePtyChunk(data));
+  return invoke<SpawnResult>("pty_spawn_attached_argv", {
+    ...opts,
+    rendererGeneration: rendererGeneration(),
+    onData: channel,
+  });
 }
 
 /** Spawn a PTY with no tab attached to it: a micro-task's agent, which runs its
  *  one job and reports through canopy_job_done. Nothing is announced, so no tab
- *  opens; the Tasks panel watches it by pty id, and `ptyAttach` is how the user
- *  looks at it if they want to. `command` runs as the shell's argument, so the
+ *  opens; the Tasks panel watches it by pty id, and `ptyAttachDesktop` is how
+ *  the user looks at it if they want to. `command` runs as the shell's argument, so the
  *  PTY exits when the agent does. */
 export const ptySpawnDetached = (opts: {
   cwd?: string;
@@ -144,24 +224,33 @@ export const ptySpawnDetached = (opts: {
 export const ptyOutput = (id: number, max?: number) =>
   invoke<string | null>("pty_output", { id, max }).catch(() => null);
 
-/** Attach to a PTY that already exists (spawned headless from the remote
- *  portal). Streams the scrollback snapshot first, then live output — the same
- *  byte contract as ptySpawn's onData, but no ack/backpressure: a headless PTY
- *  fans out over a lossy broadcast, so the desktop just consumes. Resolves with
- *  the size the pty is running at, so the tab renders at the same grid. */
-export async function ptyAttach(
+/** Attach this page to an existing PTY, including one that survived renderer loss.
+ * The returned generation must accompany every ack; stale pages are ignored. */
+export async function ptyAttachDesktop(
   id: number,
-  onData: (bytes: Uint8Array) => void,
-): Promise<PtyGeometry> {
+  after: number | null,
+  onData: (chunk: PtyChunk) => void,
+): Promise<PtyGeometry & {
+  generation: number;
+  replay_start: number;
+  replay_end: number;
+}> {
   const channel = new Channel<ArrayBuffer | number[]>();
-  channel.onmessage = (data) =>
-    onData(
-      data instanceof ArrayBuffer
-        ? new Uint8Array(data)
-        : Uint8Array.from(data),
-    );
-  return invoke("pty_attach", { id, onData: channel });
+  channel.onmessage = (data) => onData(decodePtyChunk(data));
+  return invoke("pty_attach_desktop", {
+    id,
+    rendererGeneration: rendererGeneration(),
+    after,
+    onData: channel,
+  });
 }
+
+export const ptyDetachDesktop = (id: number, generation: number) =>
+  gone(invoke<void>("pty_detach_desktop", {
+    id,
+    rendererGeneration: rendererGeneration(),
+    generation,
+  }));
 
 export interface PtyExit {
   id: number;
@@ -580,6 +669,24 @@ export interface BrowserShot {
   mimeType: string;
 }
 
+/** Constant-size native capture counters for diagnostics and soak tests. */
+export interface SnapshotCaptureMetrics {
+  attempts: number;
+  successes: number;
+  failures: number;
+  encodedBytes: number;
+  active: number;
+  activeHighWater: number;
+  retainedBytes: number;
+  retainedHighWater: number;
+  latencyMsAverage: number;
+  latencyMsLast: number;
+  latencyMsMax: number;
+}
+
+export const snapshotCaptureMetrics = () =>
+  invoke<SnapshotCaptureMetrics>("snapshot_capture_metrics");
+
 export const browserSnapshot = (
   tabId: string,
   maxWidth?: number,
@@ -609,13 +716,18 @@ export const browserOpen = (
   height: number,
   background?: [number, number, number],
   visible = true,
-) => invoke<void>("browser_open", { tabId, url, x, y, width, height, background, visible });
+) => invoke<void>("browser_open", {
+  tabId, url, x, y, width, height, background, visible,
+  rendererGeneration: browserRendererGeneration(),
+});
 
 export const browserNavigate = (
   tabId: string,
   url?: string | null,
   action?: string | null,
-) => invoke<void>("browser_navigate", { tabId, url, action });
+) => invoke<void>("browser_navigate", {
+  tabId, url, action, rendererGeneration: browserRendererGeneration(),
+});
 
 export const browserSetBounds = (
   tabId: string,
@@ -623,19 +735,27 @@ export const browserSetBounds = (
   y: number,
   width: number,
   height: number,
-) => invoke<void>("browser_set_bounds", { tabId, x, y, width, height });
+) => invoke<void>("browser_set_bounds", {
+  tabId, x, y, width, height, rendererGeneration: browserRendererGeneration(),
+});
 
 export const browserSetVisible = (tabId: string, visible: boolean) =>
-  invoke<void>("browser_set_visible", { tabId, visible });
+  invoke<void>("browser_set_visible", {
+    tabId, visible, rendererGeneration: browserRendererGeneration(),
+  });
 
 /** Whether the page has ever rendered a frame — which "loaded" does not
  *  imply. A page that loads while its view is hidden never paints, and shows
  *  blank when the view finally appears. */
 export const browserPainted = (tabId: string) =>
-  invoke<boolean>("browser_painted", { tabId });
+  invoke<boolean>("browser_painted", {
+    tabId, rendererGeneration: browserRendererGeneration(),
+  });
 
 export const browserClose = (tabId: string) =>
-  invoke<void>("browser_close", { tabId }).catch(() => {});
+  invoke<void>("browser_close", {
+    tabId, rendererGeneration: browserRendererGeneration(),
+  }).catch(() => {});
 
 /** Run one agent browser op against the page. Read-only ops answer here;
  *  anything cursor-led reports `done: false` and lands on `onBrowserEvents`. */
@@ -645,19 +765,27 @@ export interface BrowserOpAck {
   data?: unknown;
 }
 export const browserRunOp = (tabId: string, op: Record<string, unknown>) =>
-  invoke<BrowserOpAck | null>("browser_run_op", { tabId, op });
+  invoke<BrowserOpAck | null>("browser_run_op", {
+    tabId, op, rendererGeneration: browserRendererGeneration(),
+  });
 
 /** A host->page command with no answer: annotate mode, badge sync, navigate. */
 export const browserCommand = (tabId: string, message: Record<string, unknown>) =>
-  invoke<void>("browser_command", { tabId, message });
+  invoke<void>("browser_command", {
+    tabId, message, rendererGeneration: browserRendererGeneration(),
+  });
 
 /** Where the page thinks it is, for in-page navigations the load hook can't
  *  see. */
 export const browserHere = (tabId: string) =>
-  invoke<{ url: string; title: string } | null>("browser_here", { tabId });
+  invoke<{ url: string; title: string } | null>("browser_here", {
+    tabId, rendererGeneration: browserRendererGeneration(),
+  });
 
 /** Wipe the shared browser profile — cookies, storage, caches, every site. */
-export const browserClearData = () => invoke<void>("browser_clear_data");
+export const browserClearData = () => invoke<void>("browser_clear_data", {
+  rendererGeneration: browserRendererGeneration(),
+});
 
 /** Messages a page pushed up: agent-op results, annotations, in-page
  *  navigations, the ready announcement after every load. */
@@ -1638,6 +1766,10 @@ export interface FsChange {
   root: string;
   paths: string[];
   kind: "create" | "modify" | "remove" | "other";
+  /** Native watcher burst exceeded its item/byte budget. `paths` is the
+   * bounded prefix; consumers that retain open files must rescan their own
+   * small owner set for this root. */
+  overflow?: boolean;
 }
 export const onFsChange = (cb: (e: FsChange) => void): Promise<UnlistenFn> =>
   listen<FsChange>("fs:change", (event) => cb(event.payload));
@@ -1912,6 +2044,14 @@ export interface SessionStats {
   quiet_ms: number | null;
   since_input_ms: number | null;
   output_bytes: number;
+  /** Content-free native delivery diagnostics; optional for older native cores. */
+  desktop_attached?: boolean;
+  desktop_outstanding_bytes?: number;
+  replay_bytes?: number;
+  dropped_output_bytes?: number;
+  desktop_delivery_chunks?: number;
+  desktop_delivery_bytes?: number;
+  desktop_acked_bytes?: number;
 }
 /** The latest process reading for every live terminal, on demand — for a caller
  *  that needs one now and has no `onPtyStats` subscription. Reads the cache the
@@ -1922,6 +2062,100 @@ export const onPtyStats = (
   cb: (stats: SessionStats[]) => void,
 ): Promise<UnlistenFn> =>
   listen<SessionStats[]>("pty:stats", (event) => cb(event.payload));
+
+// ---------- Terminal resource governor ----------
+
+export type TerminalBudgetState =
+  | "normal"
+  | "warned"
+  | "awaiting_grant"
+  | "over_allowance";
+
+export interface TerminalGovernorCapability {
+  platform: string;
+  /** Currently always monitor_only: no platform hard boundary is claimed. */
+  enforcement: "monitor_only";
+  measurement: string;
+  hard_limit: boolean;
+  pause: boolean;
+}
+
+export interface TerminalGrantRequest {
+  request_id: string;
+  budget_generation: number;
+  increments: number[];
+}
+
+export interface TerminalBudgetStatus {
+  id: number;
+  budget_generation: number;
+  state: TerminalBudgetState;
+  base_allowance_bytes: number;
+  granted_bytes: number;
+  allowance_bytes: number;
+  current_bytes: number;
+  peak_bytes: number;
+  ema_bytes: number;
+  growth_bytes_per_second: number;
+  samples: number;
+  grant_request: TerminalGrantRequest | null;
+}
+
+export interface TerminalGovernorSnapshot {
+  capability: TerminalGovernorCapability;
+  host_total_bytes: number;
+  host_available_bytes: number;
+  protected_reserve_bytes: number;
+  aggregate_terminal_bytes: number;
+  grantable_headroom_bytes: number;
+  sessions: TerminalBudgetStatus[];
+}
+
+export interface TerminalGovernorIncident {
+  at_ms: number;
+  id: number;
+  event: string;
+  from: TerminalBudgetState | null;
+  to: TerminalBudgetState | null;
+  current_bytes: number;
+  allowance_bytes: number;
+  detail: string;
+}
+
+export interface TerminalGovernorEvent {
+  kind: "state_changed" | "grant_applied";
+  status: TerminalBudgetStatus;
+}
+
+export interface TerminalGrantOutcome {
+  applied: boolean;
+  idempotent: boolean;
+  status: TerminalBudgetStatus;
+}
+
+export const terminalGovernorStatus = (): Promise<TerminalGovernorSnapshot> =>
+  invoke<TerminalGovernorSnapshot>("terminal_governor_status");
+
+export const terminalGovernorIncidents = (): Promise<TerminalGovernorIncident[]> =>
+  invoke<TerminalGovernorIncident[]>("terminal_governor_incidents");
+
+export const terminalGovernorGrant = (
+  id: number,
+  budgetGeneration: number,
+  requestId: string,
+  incrementBytes: number,
+): Promise<TerminalGrantOutcome> =>
+  invoke<TerminalGrantOutcome>("terminal_governor_grant", {
+    id,
+    budgetGeneration,
+    requestId,
+    incrementBytes,
+  });
+
+export const onTerminalGovernor = (
+  cb: (event: TerminalGovernorEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<TerminalGovernorEvent>("terminal:governor", (event) => cb(event.payload));
 
 export interface AppStats {
   cpu: number;
@@ -1956,7 +2190,25 @@ export interface MemoryPressure {
 export const onWatchdogPing = (cb: () => void): Promise<UnlistenFn> =>
   listen("watchdog:ping", () => cb());
 
-export const watchdogAck = () => invoke<void>("watchdog_ack").catch(() => {});
+export const watchdogAck = () =>
+  invoke<void>("watchdog_ack", { generation: rendererGeneration() }).catch(() => {});
+
+/** Install liveness before Monaco/React startup can delay the App effect. */
+export const installEarlyWatchdogHeartbeat = async (): Promise<UnlistenFn> => {
+  await watchdogAck();
+  return onWatchdogPing(() => void watchdogAck());
+};
+
+export interface RecoveryIncident {
+  at_ms: number;
+  kind: string;
+  generation: number;
+  /** Content-free numeric context, such as heartbeat age in milliseconds. */
+  detail: number;
+  outcome: string;
+}
+export const watchdogIncidents = () =>
+  invoke<RecoveryIncident[]>("watchdog_incidents");
 
 export const onMemoryPressure = (
   cb: (p: MemoryPressure) => void,

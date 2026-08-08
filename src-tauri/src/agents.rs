@@ -95,6 +95,7 @@ struct SessionMeta {
     quiet_ms: Option<u64>,
     since_input_ms: Option<u64>,
     output_bytes: u64,
+    delivery: crate::pty::DesktopDeliveryMetrics,
 }
 
 #[derive(Serialize, Clone)]
@@ -131,6 +132,13 @@ pub struct SessionStats {
     pub quiet_ms: Option<u64>,
     pub since_input_ms: Option<u64>,
     pub output_bytes: u64,
+    pub desktop_attached: bool,
+    pub desktop_outstanding_bytes: u64,
+    pub replay_bytes: u64,
+    pub dropped_output_bytes: u64,
+    pub desktop_delivery_chunks: u64,
+    pub desktop_delivery_bytes: u64,
+    pub desktop_acked_bytes: u64,
 }
 
 /// The one process worth identifying in a terminal.
@@ -282,6 +290,44 @@ fn listening_ports(_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
     HashMap::new()
 }
 
+/// Feed the terminal governor from this monitor's already-refreshed process
+/// tree. The only additional refresh is the host-wide memory counters; this
+/// deliberately does not create another process-table walker.
+fn update_terminal_governor(app: &AppHandle, sys: &mut System, stats: &[SessionStats]) {
+    let host = crate::watchdog::memory_pressure(sys);
+    let observations: Vec<(u32, u64)> = stats
+        .iter()
+        .map(|session| (session.id, session.total_mem_bytes))
+        .collect();
+    let Some(governor) = app.try_state::<crate::governor::TerminalGovernor>() else {
+        return;
+    };
+    for event in governor.observe(
+        &observations,
+        host.total_bytes,
+        host.available_bytes,
+        crate::pty::now_ms(),
+    ) {
+        if matches!(
+            event.status.state,
+            crate::governor::BudgetState::AwaitingGrant
+                | crate::governor::BudgetState::OverAllowance
+        ) {
+            crate::notify::notify_native(
+                app.clone(),
+                format!("Terminal {} needs a memory decision", event.status.id),
+                format!(
+                    "Using {} MiB of a {} MiB one-session allowance. Open Canopy to allow more or stop it.",
+                    event.status.current_bytes / (1024 * 1024),
+                    event.status.allowance_bytes / (1024 * 1024),
+                ),
+                Some(format!("canopy://terminal?pty={}", event.status.id)),
+            );
+        }
+        let _ = app.emit("terminal:governor", event);
+    }
+}
+
 pub fn start_monitor(app: AppHandle) {
     if MONITOR_STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -321,6 +367,7 @@ pub fn start_monitor(app: AppHandle) {
                         quiet_ms: s.quiet_ms(now_ms),
                         since_input_ms: s.since_input_ms(now_ms),
                         output_bytes: s.output_bytes(),
+                        delivery: s.desktop_delivery_metrics(),
                     })
                     .collect();
                 // Publish the transition to zero once. Otherwise the final
@@ -405,6 +452,7 @@ pub fn start_monitor(app: AppHandle) {
                 // app stats above must keep flowing regardless — a project with
                 // no terminal open still shows its footprint.
                 if sessions.is_empty() {
+                    update_terminal_governor(&app, &mut sys, &[]);
                     continue;
                 }
 
@@ -420,6 +468,7 @@ pub fn start_monitor(app: AppHandle) {
                         quiet_ms,
                         since_input_ms,
                         output_bytes,
+                        delivery,
                     } = meta;
                     let Some(root) = root else { continue };
                     // What this terminal is running, identified once from the
@@ -474,6 +523,13 @@ pub fn start_monitor(app: AppHandle) {
                         quiet_ms,
                         since_input_ms,
                         output_bytes,
+                        desktop_attached: delivery.attached,
+                        desktop_outstanding_bytes: delivery.outstanding_bytes,
+                        replay_bytes: delivery.replay_bytes,
+                        dropped_output_bytes: delivery.dropped_output_bytes,
+                        desktop_delivery_chunks: delivery.delivery_chunks,
+                        desktop_delivery_bytes: delivery.delivery_bytes,
+                        desktop_acked_bytes: delivery.acked_bytes,
                     });
                 }
 
@@ -512,6 +568,7 @@ pub fn start_monitor(app: AppHandle) {
                         }
                     }
                 }
+                update_terminal_governor(&app, &mut sys, &stats);
                 if let Some(cache) = app.try_state::<StatsCache>() {
                     *cache.0.lock().unwrap() = stats.clone();
                 }
@@ -5260,6 +5317,13 @@ mod tests {
             quiet_ms: None,
             since_input_ms: None,
             output_bytes: 0,
+            desktop_attached: false,
+            desktop_outstanding_bytes: 0,
+            replay_bytes: 0,
+            dropped_output_bytes: 0,
+            desktop_delivery_chunks: 0,
+            desktop_delivery_bytes: 0,
+            desktop_acked_bytes: 0,
         }]));
         let mut ports = HashMap::from([(7, vec![4321])]);
 

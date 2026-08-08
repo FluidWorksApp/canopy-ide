@@ -16,8 +16,9 @@
 //! system decides to take the main renderer itself.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use sysinfo::System;
 use tauri::{AppHandle, Emitter, Manager};
@@ -39,6 +40,9 @@ const MAX_RELOADS: usize = 3;
 /// …within this window. Beyond that the renderer death is not transient and
 /// reloading is just churn; the watchdog stops and logs instead.
 const RELOAD_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// Native termination and heartbeat can report the same failure. One reload is
+/// enough; suppress duplicate initiators while the replacement page boots.
+const INCIDENTS_MAX: usize = 128;
 
 /// How often host memory is sampled.
 const MEM_POLL_EVERY: Duration = Duration::from_secs(5);
@@ -54,13 +58,125 @@ pub const MEM_CRIT: u8 = 2;
 /// own thread), so it lives behind an Arc.
 pub struct WatchdogState {
     last_ack_ms: AtomicU64,
+    renderer_generation: AtomicU64,
+    recovery: Mutex<RecoveryState>,
+}
+
+#[derive(Default)]
+struct RecoveryState {
+    grace_until_ms: u64,
+    reloads_ms: VecDeque<u64>,
+    incidents: VecDeque<RecoveryIncident>,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct RecoveryIncident {
+    pub at_ms: u64,
+    pub kind: String,
+    pub generation: u64,
+    pub detail: u64,
+    pub outcome: String,
 }
 
 impl Default for WatchdogState {
     fn default() -> Self {
         Self {
             last_ack_ms: AtomicU64::new(now_ms()),
+            renderer_generation: AtomicU64::new(0),
+            recovery: Mutex::new(RecoveryState::default()),
         }
+    }
+}
+
+impl WatchdogState {
+    pub fn renderer_registered(&self, generation: u64) {
+        self.renderer_generation.store(generation, Ordering::SeqCst);
+        self.last_ack_ms.store(now_ms(), Ordering::Relaxed);
+        self.record("renderer_registered", 0, "ready");
+    }
+
+    fn acknowledge(&self, generation: u64) -> bool {
+        if self.renderer_generation.load(Ordering::SeqCst) != generation {
+            return false;
+        }
+        self.last_ack_ms.store(now_ms(), Ordering::Relaxed);
+        true
+    }
+
+    fn record(&self, kind: &str, detail: u64, outcome: &str) {
+        let mut recovery = self.recovery.lock().unwrap();
+        recovery.incidents.push_back(RecoveryIncident {
+            at_ms: now_ms(),
+            kind: kind.to_string(),
+            generation: self.renderer_generation.load(Ordering::SeqCst),
+            detail,
+            outcome: outcome.to_string(),
+        });
+        while recovery.incidents.len() > INCIDENTS_MAX {
+            recovery.incidents.pop_front();
+        }
+    }
+
+    fn in_recovery_grace(&self) -> bool {
+        now_ms() < self.recovery.lock().unwrap().grace_until_ms
+    }
+
+    fn request_reload<R: tauri::Runtime>(
+        &self,
+        main: &tauri::webview::Webview<R>,
+        reason: &str,
+        detail: u64,
+    ) -> bool {
+        let now = now_ms();
+        {
+            let mut recovery = self.recovery.lock().unwrap();
+            if now < recovery.grace_until_ms {
+                drop(recovery);
+                self.record(reason, detail, "suppressed_during_recovery");
+                return false;
+            }
+            let window_ms = RELOAD_WINDOW.as_millis() as u64;
+            while recovery
+                .reloads_ms
+                .front()
+                .is_some_and(|at| now.saturating_sub(*at) >= window_ms)
+            {
+                recovery.reloads_ms.pop_front();
+            }
+            if recovery.reloads_ms.len() >= MAX_RELOADS {
+                drop(recovery);
+                self.record(reason, detail, "rate_limited");
+                log::error!(
+                    "webview recovery: {MAX_RELOADS} reloads in {}s; refusing churn",
+                    RELOAD_WINDOW.as_secs()
+                );
+                return false;
+            }
+            recovery.reloads_ms.push_back(now);
+            recovery.grace_until_ms = now.saturating_add(RELOAD_GRACE.as_millis() as u64);
+        }
+        self.last_ack_ms.store(now, Ordering::Relaxed);
+        match main.reload() {
+            Ok(()) => {
+                self.record(reason, detail, "reload_started");
+                true
+            }
+            Err(error) => {
+                self.record(reason, detail, "reload_failed");
+                log::error!("webview recovery ({reason}) reload failed: {error}");
+                false
+            }
+        }
+    }
+
+    fn incidents(&self) -> Vec<RecoveryIncident> {
+        self.recovery
+            .lock()
+            .unwrap()
+            .incidents
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -74,8 +190,36 @@ fn now_ms() -> u64 {
 /// The webview answers every ping with this. When the answers stop, the
 /// renderer is gone (jetsam-killed, crashed, or wedged) and the loop reloads.
 #[tauri::command]
-pub fn watchdog_ack(state: tauri::State<'_, Arc<WatchdogState>>) {
-    state.last_ack_ms.store(now_ms(), Ordering::Relaxed);
+pub fn watchdog_ack(state: tauri::State<'_, Arc<WatchdogState>>, generation: u64) {
+    state.acknowledge(generation);
+}
+
+#[tauri::command]
+pub fn watchdog_incidents(
+    state: tauri::State<'_, Arc<WatchdogState>>,
+) -> Vec<RecoveryIncident> {
+    state.incidents()
+}
+
+/// Apple reports WebContent termination immediately. Route the main renderer
+/// through the same coordinator as heartbeat recovery; preview renderers keep
+/// their independent tab-level reload.
+pub fn web_content_terminated<R: tauri::Runtime>(webview: &tauri::webview::Webview<R>) {
+    let label = webview.label().to_string();
+    if label == APP_WEBVIEW {
+        let state = webview
+            .app_handle()
+            .state::<Arc<WatchdogState>>()
+            .inner()
+            .clone();
+        log::error!("webview renderer terminated ({label}); coordinating recovery");
+        state.request_reload(webview, "native_termination", 0);
+    } else {
+        log::error!("preview renderer terminated ({label}); reloading preview");
+        if let Err(error) = webview.reload() {
+            log::error!("preview renderer reload failed ({label}): {error}");
+        }
+    }
 }
 
 /// Snapshot of host memory, emitted on pressure-level changes and served to
@@ -174,7 +318,7 @@ fn host_memory(sys: &mut System) -> HostMemorySample {
     sysinfo_memory(sys)
 }
 
-fn memory_pressure(sys: &mut System) -> MemoryPressure {
+pub(crate) fn memory_pressure(sys: &mut System) -> MemoryPressure {
     let sample = host_memory(sys);
     MemoryPressure {
         level: pressure_level(sample.total_bytes, sample.available_bytes),
@@ -225,8 +369,6 @@ fn start_webview_watchdog(app: AppHandle) {
         .name("webview-watchdog".into())
         .spawn(move || {
             let mut misses: u32 = 0;
-            let mut reloads: Vec<Instant> = Vec::new();
-            let mut grace_until = Instant::now() + RELOAD_GRACE;
             loop {
                 std::thread::sleep(PING_EVERY);
                 // Only the main webview. Previews and browser tabs have their
@@ -245,7 +387,7 @@ fn start_webview_watchdog(app: AppHandle) {
                     // something the user can see anyway. Skip enforcement.
                     continue;
                 }
-                if Instant::now() < grace_until {
+                if ack.in_recovery_grace() {
                     continue;
                 }
                 let age_ms = now_ms().saturating_sub(ack.last_ack_ms.load(Ordering::Relaxed));
@@ -258,28 +400,15 @@ fn start_webview_watchdog(app: AppHandle) {
                 if !misses_trigger_reload(misses, MISSES_BEFORE_RELOAD) {
                     continue;
                 }
-                // A genuine death. Reload — but only so many times in a window
-                // before calling it non-transient and giving up.
-                let now = Instant::now();
-                reloads.retain(|t| now.duration_since(*t) < RELOAD_WINDOW);
-                if reloads.len() >= MAX_RELOADS {
-                    log::error!(
-                        "webview-watchdog: {MAX_RELOADS} reloads in {}s; giving up",
-                        RELOAD_WINDOW.as_secs()
-                    );
-                    return;
-                }
+                // Same-event-loop liveness cannot distinguish a dead renderer
+                // from prolonged JS starvation. Record exactly that evidence;
+                // the coordinator deduplicates it with native termination.
                 log::error!(
-                    "webview-watchdog: webview unresponsive (ack {}ms stale); reloading",
+                    "webview-watchdog: renderer heartbeat stalled (ack {}ms stale); requesting recovery",
                     age_ms
                 );
-                reloads.push(now);
-                grace_until = now + RELOAD_GRACE;
                 misses = 0;
-                ack.last_ack_ms.store(now_ms(), Ordering::Relaxed);
-                if let Err(e) = main.reload() {
-                    log::error!("webview-watchdog: reload failed: {e}");
-                }
+                ack.request_reload(&main, "heartbeat_stall", age_ms);
             }
         })
         .expect("spawn webview-watchdog");
@@ -375,6 +504,43 @@ mod tests {
         assert_eq!(pressure_level(100, 30), MEM_OK);
         // A machine with nothing left at all.
         assert_eq!(pressure_level(1, 0), MEM_CRIT);
+    }
+
+    #[test]
+    fn stale_renderer_cannot_keep_the_watchdog_alive() {
+        let state = WatchdogState::default();
+        state.renderer_registered(4);
+        state.last_ack_ms.store(1, Ordering::Relaxed);
+        assert!(!state.acknowledge(3));
+        assert_eq!(state.last_ack_ms.load(Ordering::Relaxed), 1);
+        assert!(state.acknowledge(4));
+        assert!(state.last_ack_ms.load(Ordering::Relaxed) > 1);
+    }
+
+    #[test]
+    fn recovery_incident_history_is_bounded() {
+        let state = WatchdogState::default();
+        state.renderer_registered(1);
+        for index in 0..(INCIDENTS_MAX + 50) {
+            state.record("test", index as u64, "observed");
+        }
+        let incidents = state.incidents();
+        assert_eq!(incidents.len(), INCIDENTS_MAX);
+        assert_eq!(incidents.last().unwrap().detail, (INCIDENTS_MAX + 49) as u64);
+    }
+
+    #[test]
+    fn simultaneous_recovery_triggers_start_only_one_reload() {
+        let app = mock_app();
+        let main = app.get_webview(APP_WEBVIEW).unwrap();
+        let state = WatchdogState::default();
+        state.renderer_registered(7);
+        assert!(state.request_reload(&main, "native_termination", 0));
+        assert!(!state.request_reload(&main, "heartbeat_stall", 30_000));
+        assert!(state
+            .incidents()
+            .iter()
+            .any(|incident| incident.outcome == "suppressed_during_recovery"));
     }
 
     #[cfg(target_os = "macos")]

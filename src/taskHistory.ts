@@ -93,6 +93,15 @@ const MAX_IMPORT_SCAN = 1000;
  *  workspace, settings and terminal memory — so the transcript ages out long
  *  before the record itself does. */
 const MAX_WITH_OUTPUT = 60;
+/** Durable artifacts can each be 2 MB. Hydrating all 200 used to make history a
+ * 400 MB fan-out before the old count trim ran. Keep a small newest window warm;
+ * older tails load only when their row opens. Character budgets are deliberate:
+ * JavaScript strings are the retained representation in the WebContent heap. */
+export const MAX_EAGER_OUTPUTS = 8;
+export const OUTPUT_READ_CONCURRENCY = 2;
+export const MAX_SINGLE_OUTPUT_CHARS = 512 * 1024;
+export const MAX_RETAINED_OUTPUT_CHARS = 2 * 1024 * 1024;
+const OUTPUT_TRUNCATION_MARKER = "\n…(history output truncated for memory)";
 
 /** Parsed-runs cache, keyed on the raw stored string. The blob can approach
  *  half a megabyte (transcript tails), and read() is called by every open PR
@@ -102,12 +111,14 @@ let cache: { raw: string | null; runs: TaskRun[] } | null = null;
 let authoritative: TaskRun[] | null = null;
 let hydrating: Promise<TaskRun[]> | null = null;
 const persistQueues = new Map<string, Promise<void>>();
+const outputLoads = new Map<string, Promise<TaskRun | undefined>>();
 let refreshGeneration = 0;
 
 export function resetTaskHistoryForTests(): void {
   cache = null;
   authoritative = null;
   hydrating = null;
+  outputLoads.clear();
 }
 
 function read(): TaskRun[] {
@@ -125,15 +136,48 @@ function read(): TaskRun[] {
   return runs;
 }
 
-function write(runs: TaskRun[]) {
-  // Newest first, so trimming is a slice and the panel needs no sort.
-  const trimmed = runs
-    .slice(0, MAX_RUNS)
-    .map((r, i) =>
-      i < MAX_WITH_OUTPUT || r.output === undefined
-        ? r
-        : { ...r, output: undefined },
+function boundedOutput(output: string, maxChars: number): string {
+  if (output.length <= maxChars) return output;
+  if (maxChars <= OUTPUT_TRUNCATION_MARKER.length)
+    return output.slice(0, Math.max(0, maxChars));
+  return `${output.slice(0, maxChars - OUTPUT_TRUNCATION_MARKER.length)}${OUTPUT_TRUNCATION_MARKER}`;
+}
+
+/** Count and retained-string limits are different protections. `preferredOutputId` lets a
+ * user inspect an old row without its newly loaded tail being immediately
+ * evicted behind newer ones. */
+function boundOutputs(runs: TaskRun[], preferredOutputId?: string): TaskRun[] {
+  const trimmed = runs.slice(0, MAX_RUNS);
+  const priority = preferredOutputId
+    ? [
+        ...trimmed.filter((run) => run.id === preferredOutputId),
+        ...trimmed.filter((run) => run.id !== preferredOutputId),
+      ]
+    : trimmed;
+  const kept = new Map<string, string>();
+  let chars = 0;
+  for (const run of priority) {
+    if (!run.output || kept.size >= MAX_WITH_OUTPUT) continue;
+    const room = MAX_RETAINED_OUTPUT_CHARS - chars;
+    if (room <= 0) break;
+    const output = boundedOutput(
+      run.output,
+      Math.min(room, MAX_SINGLE_OUTPUT_CHARS),
     );
+    if (!output) continue;
+    kept.set(run.id, output);
+    chars += output.length;
+  }
+  return trimmed.map((run) => {
+    const output = kept.get(run.id);
+    if (output != null) return output === run.output ? run : { ...run, output };
+    return run.output === undefined ? run : { ...run, output: undefined };
+  });
+}
+
+function write(runs: TaskRun[], preferredOutputId?: string) {
+  // Newest first, so trimming is a slice and the panel needs no sort.
+  const trimmed = boundOutputs(runs, preferredOutputId);
   if (authoritative) {
     authoritative = trimmed;
   } else try {
@@ -300,20 +344,81 @@ export async function refreshTaskHistory(): Promise<TaskRun[]> {
   const projected = (await ipc.taskListHistory(MAX_RUNS))
     .map(rowFromSummary)
     .filter((row): row is TaskRun => Boolean(row));
-  const rows = await Promise.all(
-    projected.map(async (run) =>
-      run.outputArtifactId
-        ? {
-            ...run,
-            output: await ipc.taskArtifactRead(run.outputArtifactId).catch(() => undefined),
-          }
-        : run,
-    ),
-  );
+  if (generation !== refreshGeneration) return authoritative ?? projected;
+
+  // Only the newest window is warm. Work proceeds in small batches so a newer
+  // refresh can stop this generation before it starts another set of reads.
+  const outputs = new Map<string, string>();
+  const candidates = projected
+    .filter((run) => run.outputArtifactId)
+    .slice(0, MAX_EAGER_OUTPUTS);
+  let chars = 0;
+  for (let at = 0; at < candidates.length; at += OUTPUT_READ_CONCURRENCY) {
+    if (
+      generation !== refreshGeneration ||
+      chars >= MAX_RETAINED_OUTPUT_CHARS
+    ) {
+      break;
+    }
+    const batch = candidates.slice(at, at + OUTPUT_READ_CONCURRENCY);
+    const loaded = await Promise.all(
+      batch.map((run) =>
+        ipc.taskArtifactRead(run.outputArtifactId as string).catch(() => undefined),
+      ),
+    );
+    if (generation !== refreshGeneration) return authoritative ?? projected;
+    for (let index = 0; index < batch.length; index++) {
+      const raw = loaded[index];
+      if (!raw) continue;
+      const room = MAX_RETAINED_OUTPUT_CHARS - chars;
+      if (room <= 0) break;
+      const output = boundedOutput(raw, Math.min(room, MAX_SINGLE_OUTPUT_CHARS));
+      if (!output) continue;
+      outputs.set(batch[index].id, output);
+      chars += output.length;
+    }
+  }
+  const rows = projected.map((run) => {
+    const output = outputs.get(run.id);
+    return output == null ? run : { ...run, output };
+  });
   if (generation !== refreshGeneration) return authoritative ?? rows;
   authoritative = rows;
   write(rows);
   return rows;
+}
+
+/** Load one durable tail on demand. Concurrent opens of the same row share one
+ * read, and the preferred-id budget evicts other cached tails rather than the
+ * output the user just asked to see. */
+export function loadTaskRunOutput(runId: string): Promise<TaskRun | undefined> {
+  const current = authoritative?.find((run) => run.id === runId);
+  if (!current || current.output || !current.outputArtifactId)
+    return Promise.resolve(current);
+  const pending = outputLoads.get(runId);
+  if (pending) return pending;
+  const artifactId = current.outputArtifactId;
+  const load = ipc
+    .taskArtifactRead(artifactId)
+    .then((raw) => {
+      const stillCurrent = authoritative?.find(
+        (run) => run.id === runId && run.outputArtifactId === artifactId,
+      );
+      if (!stillCurrent || !authoritative) return stillCurrent;
+      const next = authoritative.map((run) =>
+        run.id === runId
+          ? { ...run, output: boundedOutput(raw, MAX_SINGLE_OUTPUT_CHARS) }
+          : run,
+      );
+      write(next, runId);
+      return authoritative?.find((run) => run.id === runId);
+    })
+    .catch(() => authoritative?.find((run) => run.id === runId))
+    .finally(() => {
+      if (outputLoads.get(runId) === load) outputLoads.delete(runId);
+    });
+  outputLoads.set(runId, load);
+  return load;
 }
 
 /** Adopt the old localStorage log exactly once. The source is removed only

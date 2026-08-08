@@ -1108,7 +1108,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const wakeWorktreeEnvRef = useRef(wakeWorktreeEnv);
   wakeWorktreeEnvRef.current = wakeWorktreeEnv;
 
-  const baselines = useRef(new Map<string, string>());
   const recentSaves = useRef(new Map<string, number>());
   const termHandles = useRef(new Map<string, TermHandle | null>());
   const livePtyByTab = useRef(new Map<string, number>());
@@ -1399,7 +1398,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (
         !belongs ||
         event.kind === "remove" ||
-        !event.paths.some((path) => path.toLowerCase().endsWith(".md"))
+        (!event.overflow &&
+          !event.paths.some((path) => path.toLowerCase().endsWith(".md")))
       ) {
         return;
       }
@@ -1605,9 +1605,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
         cwd: string;
         title: string;
         activate?: boolean;
+        killOnClose?: boolean;
       };
       if (d?.projectId !== project.id) return;
-      attachTerminal(d.ptyId, d.cwd, d.title, "📱", d.activate !== false);
+      attachTerminal(
+        d.ptyId,
+        d.cwd,
+        d.title,
+        d.killOnClose ? "⌨" : "📱",
+        d.activate !== false,
+        d.killOnClose === true,
+      );
     };
     window.addEventListener("canopy:attach-terminal", onAttach);
     return () => window.removeEventListener("canopy:attach-terminal", onAttach);
@@ -5305,7 +5313,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
           shared.current.delete(closing.file.path);
         }
         monaco.editor.getModel(monaco.Uri.file(closing.file.path))?.dispose();
-        baselines.current.delete(closing.file.path);
       }
       if (closing?.type === "collab") {
         collabRef.current.close(closing.doc);
@@ -5875,14 +5882,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       if (bytes && (kind === "code" || diffOriginal != null)) {
         const text = decoder.decode(bytes);
-        if (!baselines.current.has(path)) baselines.current.set(path, text);
         modelFor(path, text);
         const root = roots.find((r) => path.startsWith(r + "/"));
         if (root && kind === "code") void ensureLanguageServer(path, root);
       }
+      // Once Monaco owns the decoded document, keeping the IPC Uint8Array as
+      // well is a second complete representation that no code path reads.
+      // Native viewers (including a temporary diff of one) still own their
+      // bytes until their decoder lifecycle is made independently lazy.
+      const retainedBytes = kind === "code" ? null : bytes;
       if (existing) {
         patchFile(path, {
-          bytes,
+          bytes: retainedBytes,
           blocked,
           ...(diffOriginal != null
             ? { view: "diff" as const, diffOriginal }
@@ -5910,7 +5921,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             diffOriginal,
             dirty: false,
             external: null,
-            bytes,
+            bytes: retainedBytes,
             blocked,
           },
         },
@@ -5974,7 +5985,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
       recentSaves.current.set(path, Date.now());
       try {
         await ipc.fsWriteFile(path, content);
-        baselines.current.set(path, content);
         patchFile(path, { dirty: false });
       } catch (err) {
         console.error("save failed", path, err);
@@ -5995,7 +6005,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const file = findFile(path);
       if (!file?.external) return;
       monaco.editor.getModel(monaco.Uri.file(path))?.setValue(file.external);
-      baselines.current.set(path, file.external);
       patchFile(path, { external: null, dirty: false });
     },
     [patchFile],
@@ -6005,7 +6014,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
     (path: string) => {
       const file = findFile(path);
       if (!file?.external) return;
-      baselines.current.set(path, file.external);
       patchFile(path, { external: null, dirty: true });
     },
     [patchFile],
@@ -6017,7 +6025,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!file) return;
       if (file.view === "preview" && file.bytes) {
         const text = decoder.decode(file.bytes);
-        if (!baselines.current.has(path)) baselines.current.set(path, text);
         modelFor(path, text);
       }
       patchFile(path, {
@@ -6107,8 +6114,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
     });
     const unlisten = ipc.onFsChange(async (e) => {
       const now = Date.now();
-      for (const path of e.paths) {
-        if (!roots.some((r) => path.startsWith(r + "/"))) continue;
+      // A huge watcher burst deliberately stops retaining every native path.
+      // Re-read only this view's already-open files in that root — a bounded
+      // owner set — instead of asking Rust to queue the whole directory storm.
+      const paths = e.overflow
+        ? tabsRef.current
+            .filter((tab): tab is FileSubTab => tab.type === "file")
+            .map((tab) => tab.file.path)
+            .filter(
+              (path) =>
+                path === e.root ||
+                path.startsWith(e.root + "/") ||
+                path.startsWith(e.root + "\\"),
+            )
+        : e.paths;
+      for (const path of new Set(paths)) {
+        const normalizedPath = path.replaceAll("\\", "/");
+        if (
+          !roots.some((r) => {
+            const normalizedRoot = r.replaceAll("\\", "/").replace(/\/$/, "");
+            return (
+              normalizedPath === normalizedRoot ||
+              normalizedPath.startsWith(normalizedRoot + "/")
+            );
+          })
+        ) continue;
         const saved = recentSaves.current.get(path);
         if (saved && now - saved < 1500) continue;
         const file = findFile(path);
@@ -6122,7 +6152,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
             const newText = decoder.decode(bytes);
             const model = monaco.editor.getModel(monaco.Uri.file(path));
             if (!model || model.getValue() === newText) {
-              baselines.current.set(path, newText);
               continue;
             }
             patchFile(path, { external: newText });
@@ -6381,8 +6410,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // throw the work away rather than put it away.
       const ok = writeHibernation(project.id, snap);
       // Put the workspace down properly rather than letting the unmount do it.
-      // Unmounting kills the PTYs but nothing else: the editor models, the
-      // diff baselines and any live share would all be left holding memory,
+      // Unmounting kills the PTYs but nothing else: the editor models and any
+      // live share would all be left holding memory,
       // which for a feature whose whole point is reclaiming it would be a
       // strange thing to skip. closeTab already knows how to end each kind.
       if (ok) for (const t of [...tabsRef.current]) closeTabRef.current(t.id);
@@ -10628,6 +10657,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 active={
                   !vibe && !softClosed && tab.id === activeTabId && visible
                 }
+                streaming={shown}
                 attachId={tab.attachId}
                 killAttachedOnClose={tab.killAttachedOnClose}
                 // A run tab hands its command to the shell to run-and-exit

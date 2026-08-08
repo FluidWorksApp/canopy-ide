@@ -1,7 +1,7 @@
 // Native file renderers. Each viewer receives raw bytes from the Rust core and
 // renders fully offline (mermaid and SheetJS are lazy-loaded so they cost
 // nothing until a matching file is opened).
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   parse as parseJsonc,
   printParseErrorCode,
@@ -134,16 +134,18 @@ export function ImageView({ path, bytes }: { path: string; bytes: Uint8Array }) 
 // ---------- Spreadsheets (SheetJS, lazy) ----------
 
 export function SheetView({ bytes }: { bytes: Uint8Array }) {
-  const [sheets, setSheets] = useState<{ name: string; html: string }[] | null>(null);
+  const workbookRef = useRef<import("xlsx").WorkBook | null>(null);
+  const xlsxRef = useRef<typeof import("xlsx") | null>(null);
+  const [sheets, setSheets] = useState<string[] | null>(null);
+  const [generatedHtml, setGeneratedHtml] = useState("");
   const [active, setActive] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  // Sanitising a whole spreadsheet's generated <table> is not render-body work:
-  // this is the active tab's pane, so it was re-run on every ProjectView render
-  // — about twice a second while an agent is working. Every other HTML surface
-  // in the app already memoises this; this one was the outlier.
+  // Retain generated HTML for one visible sheet only. A workbook with dozens
+  // of large sheets previously materialised every table up front and kept all
+  // of those strings for the tab's lifetime.
   const sheetHtml = useMemo(
-    () => sanitizeHtml(sheets?.[active]?.html ?? ""),
-    [sheets, active],
+    () => sanitizeHtml(generatedHtml),
+    [generatedHtml],
   );
 
   useEffect(() => {
@@ -152,18 +154,29 @@ export function SheetView({ bytes }: { bytes: Uint8Array }) {
       .then((XLSX) => {
         const wb = XLSX.read(bytes, { type: "array" });
         if (cancelled) return;
-        setSheets(
-          wb.SheetNames.map((name) => ({
-            name,
-            html: XLSX.utils.sheet_to_html(wb.Sheets[name]),
-          })),
-        );
+        xlsxRef.current = XLSX;
+        workbookRef.current = wb;
+        setActive(0);
+        setSheets(wb.SheetNames);
       })
       .catch((e) => setError(String(e)));
     return () => {
       cancelled = true;
+      workbookRef.current = null;
+      xlsxRef.current = null;
     };
   }, [bytes]);
+
+  useEffect(() => {
+    const name = sheets?.[active];
+    const wb = workbookRef.current;
+    const XLSX = xlsxRef.current;
+    if (!name || !wb || !XLSX) {
+      setGeneratedHtml("");
+      return;
+    }
+    setGeneratedHtml(XLSX.utils.sheet_to_html(wb.Sheets[name]));
+  }, [sheets, active]);
 
   if (error) return <div className="viewer-error">Failed to parse sheet: {error}</div>;
   if (!sheets) return <div className="viewer-loading">Parsing workbook…</div>;
@@ -171,13 +184,13 @@ export function SheetView({ bytes }: { bytes: Uint8Array }) {
     <div className="sheet-view">
       {sheets.length > 1 && (
         <div className="tabs sheet-tabs">
-          {sheets.map((s, i) => (
+          {sheets.map((name, i) => (
             <div
-              key={s.name}
+              key={name}
               className={`tab ${i === active ? "tab-active" : ""}`}
               onClick={() => setActive(i)}
             >
-              {s.name}
+              {name}
             </div>
           ))}
         </div>

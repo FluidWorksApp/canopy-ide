@@ -15,6 +15,13 @@ use std::thread;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
+/// Protocol allocation boundaries. A malformed local server must not be able
+/// to ask the IDE for an arbitrary `vec![0; Content-Length]` or an unbounded
+/// header line before any JSON validation runs.
+const MAX_HEADER_LINE: usize = 8 * 1024;
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
 pub struct LspServer {
     stdin: Mutex<std::process::ChildStdin>,
     child: Mutex<Child>,
@@ -104,17 +111,34 @@ pub fn lsp_start(
             let mut reader = BufReader::new(stdout);
             loop {
                 let mut content_length: Option<usize> = None;
+                let mut header_bytes = 0usize;
                 // Headers
                 loop {
-                    let mut line = String::new();
-                    match reader.read_line(&mut line) {
+                    let mut raw = Vec::new();
+                    match (&mut reader)
+                        .take((MAX_HEADER_LINE + 1) as u64)
+                        .read_until(b'\n', &mut raw)
+                    {
                         Ok(0) | Err(_) => {
                             cleanup(&servers, id);
                             let _ = app.emit("lsp:exit", id);
                             return;
                         }
-                        Ok(_) => {}
+                        Ok(n) if n > MAX_HEADER_LINE => {
+                            log::warn!("lsp {id}: header line exceeded {MAX_HEADER_LINE} bytes");
+                            cleanup(&servers, id);
+                            let _ = app.emit("lsp:exit", id);
+                            return;
+                        }
+                        Ok(n) => header_bytes = header_bytes.saturating_add(n),
                     }
+                    if header_bytes > MAX_HEADER_BYTES {
+                        log::warn!("lsp {id}: headers exceeded {MAX_HEADER_BYTES} bytes");
+                        cleanup(&servers, id);
+                        let _ = app.emit("lsp:exit", id);
+                        return;
+                    }
+                    let line = String::from_utf8_lossy(&raw);
                     let line = line.trim_end();
                     if line.is_empty() {
                         break;
@@ -124,6 +148,12 @@ pub fn lsp_start(
                     }
                 }
                 let Some(len) = content_length else { continue };
+                if len > MAX_MESSAGE_BYTES {
+                    log::warn!("lsp {id}: message declared {len} bytes (max {MAX_MESSAGE_BYTES})");
+                    cleanup(&servers, id);
+                    let _ = app.emit("lsp:exit", id);
+                    return;
+                }
                 let mut body = vec![0u8; len];
                 if reader.read_exact(&mut body).is_err() {
                     cleanup(&servers, id);
@@ -153,6 +183,12 @@ fn cleanup(servers: &Arc<Mutex<HashMap<u32, Arc<LspServer>>>>, id: u32) {
 
 #[tauri::command]
 pub fn lsp_send(state: State<'_, LspManager>, id: u32, message: String) -> Result<(), String> {
+    if message.len() > MAX_MESSAGE_BYTES {
+        return Err(format!(
+            "LSP message is {} bytes; maximum is {MAX_MESSAGE_BYTES}",
+            message.len()
+        ));
+    }
     let server = state
         .servers
         .lock()
@@ -161,9 +197,10 @@ pub fn lsp_send(state: State<'_, LspManager>, id: u32, message: String) -> Resul
         .cloned()
         .ok_or_else(|| format!("no lsp server {id}"))?;
     let mut stdin = server.stdin.lock().unwrap();
-    let framed = format!("Content-Length: {}\r\n\r\n{}", message.len(), message);
+    let header = format!("Content-Length: {}\r\n\r\n", message.len());
     stdin
-        .write_all(framed.as_bytes())
+        .write_all(header.as_bytes())
+        .and_then(|_| stdin.write_all(message.as_bytes()))
         .map_err(|e| e.to_string())
 }
 

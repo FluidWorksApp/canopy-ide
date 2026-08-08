@@ -5,13 +5,50 @@ use std::process::Stdio;
 
 use tauri::ipc::Channel;
 use tauri::Manager;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex;
 
 use crate::winproc::NoConsoleWindow;
 
 const STDERR_KEEP: usize = 8 * 1024;
+const STDOUT_LINE_MAX: usize = 1024 * 1024;
+
+/// Drain one line completely while retaining at most `max` bytes. Stopping at
+/// the cap would leave the pipe full and deadlock the child, so oversize input
+/// is consumed and represented by an explicit marker.
+async fn capped_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max: usize,
+) -> std::io::Result<Option<(Vec<u8>, bool)>> {
+    let mut out = Vec::with_capacity(max.min(8 * 1024));
+    let mut truncated = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return if out.is_empty() && !truncated {
+                Ok(None)
+            } else {
+                Ok(Some((out, truncated)))
+            };
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(available.len());
+        if !truncated {
+            let keep = take.min(max.saturating_sub(out.len()));
+            out.extend_from_slice(&available[..keep]);
+            truncated = keep < take;
+        }
+        let done = available.get(take.saturating_sub(1)) == Some(&b'\n');
+        reader.consume(take);
+        if done {
+            return Ok(Some((out, truncated)));
+        }
+    }
+}
 
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -178,8 +215,12 @@ pub async fn structured_runner_spawn(
     {
         let sink = on_data.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(text)) = lines.next_line().await {
+            let mut reader = BufReader::new(stdout);
+            while let Ok(Some((bytes, truncated))) = capped_line(&mut reader, STDOUT_LINE_MAX).await {
+                let mut text = String::from_utf8_lossy(&bytes).trim_end().to_string();
+                if truncated {
+                    text.push_str("\n[Canopy: runner line truncated after 1 MiB]");
+                }
                 if !text.trim().is_empty() && sink.send(StructuredRunnerOut::Line { text }).is_err()
                 {
                     return;
@@ -190,10 +231,14 @@ pub async fn structured_runner_spawn(
     if let Some(stderr) = stderr {
         let sink = on_data.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
+            let mut reader = BufReader::new(stderr);
             let mut kept = 0usize;
-            while let Ok(Some(text)) = lines.next_line().await {
-                kept += text.len();
+            while let Ok(Some((bytes, truncated))) = capped_line(&mut reader, STDERR_KEEP).await {
+                let mut text = String::from_utf8_lossy(&bytes).trim_end().to_string();
+                if truncated {
+                    text.push_str("\n[Canopy: stderr line truncated]");
+                }
+                kept = kept.saturating_add(text.len());
                 if kept <= STDERR_KEEP && sink.send(StructuredRunnerOut::Stderr { text }).is_err() {
                     return;
                 }

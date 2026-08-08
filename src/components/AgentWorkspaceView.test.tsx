@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
-import { CommentComposer, sameJson, sameMap, workspaceLifeDigest } from "./AgentWorkspaceView";
+import {
+  CommentComposer,
+  loadAgentFileContents,
+  sameJson,
+  sameMap,
+  workspaceLifeDigest,
+} from "./AgentWorkspaceView";
 import { agentLife } from "../../shared/agentLife";
 import { resolve } from "../shortcuts";
 
@@ -143,5 +149,70 @@ describe("poll comparisons", () => {
     expect(
       sameMap(prev, new Map([["a.rs", "fn main() {}"], ["b.rs", ""]])),
     ).toBe(false);
+  });
+});
+
+describe("journal file loading bounds", () => {
+  it("never exceeds the configured read concurrency", async () => {
+    let active = 0;
+    let peak = 0;
+    const result = await loadAgentFileContents(
+      ["a", "b", "c", "d", "e"],
+      (path) => `/repo/${path}`,
+      {
+        stat: async () => ({ is_dir: false, size: 1 }),
+        readText: async (path) => {
+          active++;
+          peak = Math.max(peak, active);
+          await new Promise((resolve) => setTimeout(resolve, 2));
+          active--;
+          return path;
+        },
+      },
+      () => true,
+      { concurrency: 2, perFileBytes: 10, totalBytes: 10 },
+    );
+
+    expect(peak).toBe(2);
+    expect(result.size).toBe(5);
+  });
+
+  it("applies per-file and aggregate budgets before reading", async () => {
+    const sizes: Record<string, number> = { a: 4, b: 9, c: 4, d: 1 };
+    const read = vi.fn(async (path: string) => path);
+    const result = await loadAgentFileContents(
+      ["a", "b", "c", "d"],
+      (path) => path,
+      {
+        stat: async (path) => ({ is_dir: false, size: sizes[path] }),
+        readText: read,
+      },
+      () => true,
+      { concurrency: 1, perFileBytes: 5, totalBytes: 5 },
+    );
+
+    expect([...result.keys()]).toEqual(["a", "d"]);
+    expect(read.mock.calls.map(([path]) => path)).toEqual(["a", "d"]);
+  });
+
+  it("stops starting and retaining work after supersession", async () => {
+    let current = true;
+    const read = vi.fn(async () => {
+      current = false;
+      return "late";
+    });
+    const result = await loadAgentFileContents(
+      ["a", "b", "c"],
+      (path) => path,
+      {
+        stat: async () => ({ is_dir: false, size: 1 }),
+        readText: read,
+      },
+      () => current,
+      { concurrency: 1, perFileBytes: 5, totalBytes: 5 },
+    );
+
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(result.size).toBe(0);
   });
 });

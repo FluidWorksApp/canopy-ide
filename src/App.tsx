@@ -115,6 +115,7 @@ import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
+import { TerminalGovernorDialog } from "./components/TerminalGovernorDialog";
 import { shouldOnboard, markOnboarded } from "./onboarding";
 import { isSelftest, setSelftestMode } from "./selftest/mode";
 import { startBrowserWatchdog } from "./browserWatchdog";
@@ -249,12 +250,25 @@ export default function App() {
   // Host memory pressure (0 fine / 1 warn / 2 critical). Non-null while the
   // user should shed load — cleared by Dismiss or an "ok" reading.
   const [memPressure, setMemPressure] = useState<ipc.MemoryPressure | null>(null);
+  const [terminalGovernor, setTerminalGovernor] =
+    useState<ipc.TerminalGovernorSnapshot | null>(null);
+  const [governorBusy, setGovernorBusy] = useState(false);
+  const [governorError, setGovernorError] = useState<string | null>(null);
+  const [dismissedGovernorRequests, setDismissedGovernorRequests] = useState<
+    Set<string>
+  >(new Set());
   // Everything that has asked for the user's attention (attention.ts). One
   // queue, one urgency model, one rule for when something leaves the app for
   // the OS — replacing a single-slot toast that the next caller overwrote, and
   // eight call sites that each decided for themselves whether to raise a
   // native banner and what to call it.
   const attention = useAttention();
+  const refreshTerminalGovernor = useCallback(() => {
+    void ipc
+      .terminalGovernorStatus()
+      .then(setTerminalGovernor)
+      .catch(() => {});
+  }, []);
   /** Which project a path belongs to, as the `projectId` / `projectName` pair
    *  every posted item carries. The name is stamped in rather than looked up
    *  later, like TaskRun.projectName: the history outlives the project being
@@ -349,6 +363,19 @@ export default function App() {
         resolveAttentionByKey(key, "withdrawn");
     }
   }, []);
+
+  // Resource decisions are Rust-owned and rare. Subscribe to state changes
+  // rather than mirroring the 2s process scan in App; the prompt asks before a
+  // one-session allowance is raised and remains honest when the platform has
+  // measurement but no proven hard boundary.
+  useEffect(() => {
+    let unGovernor: (() => void) | undefined;
+    refreshTerminalGovernor();
+    void ipc.onTerminalGovernor(() => refreshTerminalGovernor()).then((un) => {
+      unGovernor = un;
+    });
+    return () => unGovernor?.();
+  }, [refreshTerminalGovernor]);
   // The one place anything leaves the app for the OS.
   //
   // Was `if (document.hasFocus()) return;` copied into every call site that
@@ -1641,7 +1668,13 @@ export default function App() {
   // that project, and hand the tab to its ProjectView. The desktop mirrors the
   // agent the phone started — same session, both surfaces driving one PTY.
   useEffect(() => {
-    const norm = (p: string) => p.replace(/\/+$/, "");
+    const norm = (p: string) => {
+      const normalized = p.replaceAll("\\", "/").replace(/\/+$/, "");
+      // Windows drive paths are case-insensitive; POSIX paths are not.
+      return /^[A-Za-z]:\//.test(normalized)
+        ? normalized.toLocaleLowerCase()
+        : normalized;
+    };
     // Deepest matching component path wins, so a broad root never steals an
     // agent from a nested project (mirrors model.ts bestProjectId).
     const projectForCwd = (cwd: string): string | undefined => {
@@ -1660,19 +1693,21 @@ export default function App() {
       return bestId;
     };
     let un: (() => void) | undefined;
-    void ipc
-      .onPtySpawned(async (e) => {
+    const routePty = async (
+      e: ipc.PtySpawned | ipc.PtySummary,
+      restored = false,
+    ) => {
         const projectId = projectForCwd(e.cwd);
         if (!projectId) {
           notify(
-            `A remote agent started in ${e.cwd}, outside any project.`,
+            `An active terminal is in ${e.cwd}, outside any project.`,
             "info",
           );
           return;
         }
         await prepareProjectForAgentAction(
           projectId,
-          getSettings().agentAskForAttention,
+          restored ? false : getSettings().agentAskForAttention,
         );
         // A beat so a not-yet-open project's ProjectView mounts and registers
         // its listener before the event fires; attachTerminal is idempotent by
@@ -1689,15 +1724,30 @@ export default function App() {
                   ptyId: e.id,
                   cwd: e.cwd,
                   title: e.title,
-                  activate: getSettings().agentAskForAttention,
+                  // Recovery must not steal focus or manufacture attention.
+                  activate: restored ? false : getSettings().agentAskForAttention,
+                  // Desktop-owned sessions were previously killed by their
+                  // tab. Preserve that ownership after converting the restored
+                  // tab into an attachment; remote sessions remain viewers.
+                  killOnClose: "kind" in e && e.kind === "desktop",
                 },
               }),
             ),
           80,
         );
-      })
+    };
+    void ipc
+      .onPtySpawned((e) => routePty(e))
       .then((u) => {
         un = u;
+      })
+      .catch(() => {})
+      .finally(() => {
+        // Listener first, then recovery: a remote spawn racing this pass is
+        // harmless because attachTerminal is idempotent by PTY id.
+        for (const session of ipc.rendererPtySessions()) {
+          if (session.kind !== "detached") void routePty(session, true);
+        }
       });
     return () => un?.();
   }, [notify, prepareProjectForAgentAction]);
@@ -2234,19 +2284,11 @@ export default function App() {
     return () => un?.();
   }, [projectIdentity]);
 
-  // The watchdog pings this webview to confirm it is alive; the Rust loop
-  // reloads the window if the answers stop (a jetsam-killed renderer leaves
-  // the app blank with no crash report otherwise — issue #488). Answer the
-  // pings, and surface host memory pressure so the user can shed load before
-  // the system takes the renderer itself.
+  // Liveness is installed in main.tsx before Monaco/React startup, so a slow
+  // editor boot cannot be mistaken for a dead renderer. This effect only
+  // surfaces host pressure once the UI exists.
   useEffect(() => {
-    let unPing: (() => void) | undefined;
     let unMem: (() => void) | undefined;
-    void ipc
-      .onWatchdogPing(() => void ipc.watchdogAck())
-      .then((u) => {
-        unPing = u;
-      });
     void ipc
       .onMemoryPressure((p) => setMemPressure(p.level > 0 ? p : null))
       .then((u) => {
@@ -2256,7 +2298,6 @@ export default function App() {
       .memoryInfo()
       .then((p) => p && p.level > 0 && setMemPressure(p));
     return () => {
-      unPing?.();
       unMem?.();
     };
   }, []);
@@ -3024,6 +3065,11 @@ export default function App() {
 
   if (!loaded) return null;
 
+  const pendingGovernor = terminalGovernor?.sessions.find((session) => {
+    const request = session.grant_request;
+    return request != null && !dismissedGovernorRequests.has(request.request_id);
+  });
+
   return (
     <div className={`app ${zen ? "zen" : ""}`}>
       {/* Focus mode: chrome slides away but stays reachable — hovering the top
@@ -3042,6 +3088,48 @@ export default function App() {
           </span>
           <button onClick={() => setMemPressure(null)}>Dismiss</button>
         </div>
+      )}
+      {pendingGovernor && terminalGovernor && (
+        <TerminalGovernorDialog
+          status={pendingGovernor}
+          capability={terminalGovernor.capability}
+          busy={governorBusy}
+          error={governorError}
+          onGrant={(incrementBytes) => {
+            const request = pendingGovernor.grant_request;
+            if (!request || governorBusy) return;
+            setGovernorBusy(true);
+            setGovernorError(null);
+            void ipc
+              .terminalGovernorGrant(
+                pendingGovernor.id,
+                request.budget_generation,
+                request.request_id,
+                incrementBytes,
+              )
+              .then(() => refreshTerminalGovernor())
+              .catch((error) => setGovernorError(String(error)))
+              .finally(() => setGovernorBusy(false));
+          }}
+          onStop={() => {
+            const request = pendingGovernor.grant_request;
+            if (request) {
+              setDismissedGovernorRequests((old) =>
+                new Set(old).add(request.request_id),
+              );
+            }
+            void ipc.ptyKill(pendingGovernor.id);
+            refreshTerminalGovernor();
+          }}
+          onDismiss={() => {
+            const request = pendingGovernor.grant_request;
+            if (!request) return;
+            setDismissedGovernorRequests((old) =>
+              new Set(old).add(request.request_id),
+            );
+            setGovernorError(null);
+          }}
+        />
       )}
       <TitleBar
         projects={ws.projects}
