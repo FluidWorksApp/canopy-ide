@@ -1195,6 +1195,27 @@ impl PtyManager {
         let cols = if cols == 0 { 80 } else { cols };
         let rows = if rows == 0 { 24 } else { rows };
 
+        // Refuse new work before allocating a PTY or process when the native
+        // host sample says doing so would spend the IDE's control-plane reserve.
+        // Existing sessions are untouched. Mock apps do not manage the governor,
+        // which keeps spawn tests independent of the machine running them.
+        let host = app
+            .try_state::<crate::governor::TerminalGovernor>()
+            .map(|_| crate::watchdog::memory_info());
+        if host.is_some_and(|memory| {
+            !crate::governor::allows_new_terminal(
+                memory.total_bytes,
+                memory.available_bytes,
+                memory.level,
+            )
+        }) {
+            let memory = host.expect("checked above");
+            return Err(format!(
+                "cannot start a new terminal while host memory is constrained ({} MiB available); Canopy is preserving memory for the IDE and existing terminals",
+                memory.available_bytes / (1024 * 1024)
+            ));
+        }
+
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -1292,6 +1313,22 @@ impl PtyManager {
         }
         cmd.cwd(&cwd);
 
+        // Platform containment is prepared before spawn. A supported backend
+        // may replace argv with a gate launcher, but it never changes the
+        // command's environment, cwd, terminal geometry, or stdio contract.
+        // Mock apps do not manage containment and therefore remain monitor-only.
+        let prepared_containment =
+            if let Some(containment) = app.try_state::<crate::containment::ContainmentManager>() {
+                let host = host.expect("the production app manages both governor and containment");
+                Some(containment.prepare(
+                    id,
+                    crate::governor::base_allowance(host.total_bytes),
+                    &mut cmd,
+                )?)
+            } else {
+                None
+            };
+
         // The credential was minted before the child so it could be in its
         // environment from the first instruction. Every failure between there
         // and the session being registered has to hand it back: nothing is
@@ -1310,6 +1347,16 @@ impl PtyManager {
                 return Err(e.to_string());
             }
         };
+        let pid = child.process_id();
+        if let Some(prepared) = prepared_containment {
+            let containment = app.state::<crate::containment::ContainmentManager>();
+            if let Err(failure) = containment.activate(id, pid, prepared) {
+                retire();
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(failure.cleanup_after_child_exit());
+            }
+        }
         drop(pair.slave);
 
         let (mut reader, mut writer) = match pair
@@ -1320,6 +1367,10 @@ impl PtyManager {
             Ok(pair) => pair,
             Err(e) => {
                 retire();
+                if let Some(containment) = app.try_state::<crate::containment::ContainmentManager>()
+                {
+                    containment.release(id);
+                }
                 // The command already exists and holds the task environment.
                 // Returning a launch failure without terminating it would leave
                 // real work running under an attempt recorded as failed.
@@ -1329,7 +1380,6 @@ impl PtyManager {
             }
         };
 
-        let pid = child.process_id();
         let killer = child.clone_killer();
 
         let desktop_renderer_generation = desktop.as_ref().map(|sink| sink.renderer_generation);
@@ -1393,6 +1443,10 @@ impl PtyManager {
                     let _ = child.wait();
                 }
                 retire();
+                if let Some(containment) = app.try_state::<crate::containment::ContainmentManager>()
+                {
+                    containment.release(id);
+                }
                 return Err(error);
             }
         }
@@ -1541,6 +1595,11 @@ impl PtyManager {
                     // woken by the pty:exit below can still read what ran.
                     reap_output(&reaped, session.id, &session);
                     sessions.lock().unwrap().remove(&session.id);
+                    if let Some(containment) =
+                        app.try_state::<crate::containment::ContainmentManager>()
+                    {
+                        containment.release(session.id);
+                    }
                     // The terminal's bridge credential dies with it, and so do
                     // the advisory claims it was holding. Nothing used to watch
                     // for this: an agent that crashed mid-edit held its files

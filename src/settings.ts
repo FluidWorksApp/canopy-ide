@@ -647,6 +647,22 @@ export const DEFAULTS: Settings = {
   crashReporting: false,
 };
 
+/** Hard renderer ownership boundary. The settings UI lets the user explicitly
+ * raise scrollback within this range, but persisted/hand-edited state must not
+ * turn xterm's row retention into an unbounded allocation. */
+export const TERMINAL_SCROLLBACK_MIN_ROWS = 1_000;
+export const TERMINAL_SCROLLBACK_MAX_ROWS = 100_000;
+
+const boundedScrollback = (value: unknown): number => {
+  const rows = typeof value === "number" && Number.isFinite(value)
+    ? Math.trunc(value)
+    : DEFAULTS.scrollback;
+  return Math.min(
+    TERMINAL_SCROLLBACK_MAX_ROWS,
+    Math.max(TERMINAL_SCROLLBACK_MIN_ROWS, rows),
+  );
+};
+
 const KEY = "canopy.settings";
 
 /** Parsed-settings cache, keyed on the raw stored string: getSettings is
@@ -663,6 +679,7 @@ export function getSettings(): Settings {
   try {
     const stored = JSON.parse(raw ?? "{}") as Partial<Settings>;
     value = { ...DEFAULTS, ...stored };
+    value.scrollback = boundedScrollback(stored.scrollback);
     if (stored.dictationTriggerRevision !== DICTATION_TRIGGER_REVISION) {
       // Full settings snapshots made the old combo look user-selected on every
       // existing install. Move only its unchanged default to the new gesture;
@@ -708,6 +725,7 @@ export function subscribeSettings(cb: () => void): () => void {
 
 export function updateSettings(patch: Partial<Settings>): Settings {
   const next = { ...getSettings(), ...patch };
+  next.scrollback = boundedScrollback(next.scrollback);
   localStorage.setItem(KEY, JSON.stringify(next));
   if (typeof window !== "undefined")
     window.dispatchEvent(new Event(SETTINGS_CHANGE_EVENT));

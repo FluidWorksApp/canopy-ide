@@ -295,9 +295,15 @@ fn listening_ports(_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
 /// deliberately does not create another process-table walker.
 fn update_terminal_governor(app: &AppHandle, sys: &mut System, stats: &[SessionStats]) {
     let host = crate::watchdog::memory_pressure(sys);
+    let containment = app.try_state::<crate::containment::ContainmentManager>();
     let observations: Vec<(u32, u64)> = stats
         .iter()
-        .map(|session| (session.id, session.total_mem_bytes))
+        .map(|session| {
+            let bytes = containment.as_ref().map_or(session.total_mem_bytes, |manager| {
+                manager.measured_bytes(session.id, session.total_mem_bytes)
+            });
+            (session.id, bytes)
+        })
         .collect();
     let Some(governor) = app.try_state::<crate::governor::TerminalGovernor>() else {
         return;
@@ -1464,7 +1470,7 @@ const WRITE_TOOLS_MATCHER: &str = "Write|Edit|MultiEdit|NotebookEdit";
 /// Where the hook helper lives once installed. Hooks reference this stable path
 /// rather than the app bundle, so they keep working across upgrades and don't
 /// break if the app is moved.
-fn helper_path() -> Result<std::path::PathBuf, String> {
+pub(crate) fn helper_path() -> Result<std::path::PathBuf, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     Ok(helper_path_in(&home))
 }

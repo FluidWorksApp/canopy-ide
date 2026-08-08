@@ -29,48 +29,78 @@ pub enum BudgetState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GovernorCapability {
-    pub platform: &'static str,
+    pub platform: String,
     /// Honest until platform containers are implemented and proven.
-    pub enforcement: &'static str,
-    pub measurement: &'static str,
+    pub enforcement: String,
+    pub measurement: String,
     pub hard_limit: bool,
     pub pause: bool,
+    pub soft_limit: bool,
+    pub dynamic_raise: bool,
+    pub mechanism: String,
+    pub detail: String,
 }
 
 impl GovernorCapability {
+    pub(crate) fn monitor_only(platform: &str, measurement: &str, detail: &str) -> Self {
+        Self {
+            platform: platform.into(),
+            enforcement: "monitor_only".into(),
+            measurement: measurement.into(),
+            hard_limit: false,
+            pause: false,
+            soft_limit: false,
+            dynamic_raise: false,
+            mechanism: "none".into(),
+            detail: detail.into(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn soft_limit(
+        platform: &str,
+        measurement: &str,
+        mechanism: &str,
+        detail: &str,
+    ) -> Self {
+        Self {
+            platform: platform.into(),
+            enforcement: "soft_limit".into(),
+            measurement: measurement.into(),
+            hard_limit: false,
+            pause: false,
+            soft_limit: true,
+            dynamic_raise: true,
+            mechanism: mechanism.into(),
+            detail: detail.into(),
+        }
+    }
+
     fn current() -> Self {
         #[cfg(target_os = "macos")]
-        return Self {
-            platform: "macos",
-            enforcement: "monitor_only",
-            measurement: "physical_footprint_sum",
-            hard_limit: false,
-            pause: false,
-        };
+        return Self::monitor_only(
+            "macos",
+            "physical_footprint_sum",
+            "no proven platform containment backend is active",
+        );
         #[cfg(target_os = "windows")]
-        return Self {
-            platform: "windows",
-            enforcement: "monitor_only",
-            measurement: "working_set_sum",
-            hard_limit: false,
-            pause: false,
-        };
+        return Self::monitor_only(
+            "windows",
+            "working_set_sum",
+            "no proven platform containment backend is active",
+        );
         #[cfg(target_os = "linux")]
-        return Self {
-            platform: "linux",
-            enforcement: "monitor_only",
-            measurement: "resident_set_sum",
-            hard_limit: false,
-            pause: false,
-        };
+        return Self::monitor_only(
+            "linux",
+            "resident_set_sum",
+            "no proven platform containment backend is active",
+        );
         #[allow(unreachable_code)]
-        Self {
-            platform: "other",
-            enforcement: "monitor_only",
-            measurement: "resident_set_sum",
-            hard_limit: false,
-            pause: false,
-        }
+        Self::monitor_only(
+            "other",
+            "resident_set_sum",
+            "no proven platform containment backend is active",
+        )
     }
 }
 
@@ -207,7 +237,7 @@ impl Default for GovernorInner {
 #[derive(Default)]
 pub struct TerminalGovernor(Mutex<GovernorInner>);
 
-fn base_allowance(total_bytes: u64) -> u64 {
+pub(crate) fn base_allowance(total_bytes: u64) -> u64 {
     if total_bytes <= 12 * GIB {
         GIB
     } else if total_bytes < 24 * GIB {
@@ -219,6 +249,17 @@ fn base_allowance(total_bytes: u64) -> u64 {
 
 fn protected_reserve(total_bytes: u64) -> u64 {
     (3 * GIB).max(total_bytes / 4).min(total_bytes)
+}
+
+/// Admission is the one host-critical action that cannot corrupt existing
+/// work: refuse a new process tree before it exists. Keep the IDE reserve
+/// intact and treat the watchdog's critical level as independently decisive.
+pub(crate) fn allows_new_terminal(
+    total_bytes: u64,
+    available_bytes: u64,
+    pressure_level: u8,
+) -> bool {
+    pressure_level < crate::watchdog::MEM_CRIT && available_bytes > protected_reserve(total_bytes)
 }
 
 fn now_ms() -> u64 {
@@ -412,14 +453,18 @@ impl TerminalGovernor {
         self.0.lock().unwrap().incidents.iter().cloned().collect()
     }
 
-    fn grant(
+    fn grant_with<F>(
         &self,
         id: u32,
         budget_generation: u64,
         request_id: &str,
         increment_bytes: u64,
         at_ms: u64,
-    ) -> Result<GrantOutcome, String> {
+        apply_boundary: F,
+    ) -> Result<GrantOutcome, String>
+    where
+        F: FnOnce(u64) -> Result<(), String>,
+    {
         let mut inner = self.0.lock().unwrap();
         let reserve_headroom = grantable_headroom(&inner);
         let Some(session) = inner.sessions.get(&id) else {
@@ -466,6 +511,24 @@ impl TerminalGovernor {
             };
             push_incident(&mut inner, incident);
             return Err(detail.to_string());
+        }
+
+        let next_allowance = session.allowance().saturating_add(increment_bytes);
+        if let Err(error) = apply_boundary(next_allowance) {
+            let incident = GovernorIncident {
+                at_ms,
+                id,
+                event: "grant_refused",
+                from: Some(session.state),
+                to: Some(session.state),
+                current_bytes: session.current_bytes,
+                allowance_bytes: session.allowance(),
+                detail: "platform boundary update failed",
+            };
+            push_incident(&mut inner, incident);
+            return Err(format!(
+                "could not raise terminal containment boundary: {error}"
+            ));
         }
 
         let mut session = inner.sessions.remove(&id).expect("checked above");
@@ -519,11 +582,35 @@ impl TerminalGovernor {
             status,
         })
     }
+
+    #[cfg(test)]
+    fn grant(
+        &self,
+        id: u32,
+        budget_generation: u64,
+        request_id: &str,
+        increment_bytes: u64,
+        at_ms: u64,
+    ) -> Result<GrantOutcome, String> {
+        self.grant_with(
+            id,
+            budget_generation,
+            request_id,
+            increment_bytes,
+            at_ms,
+            |_| Ok(()),
+        )
+    }
 }
 
 #[tauri::command]
-pub fn terminal_governor_status(state: State<'_, TerminalGovernor>) -> GovernorSnapshot {
-    state.snapshot()
+pub fn terminal_governor_status(
+    state: State<'_, TerminalGovernor>,
+    containment: State<'_, crate::containment::ContainmentManager>,
+) -> GovernorSnapshot {
+    let mut snapshot = state.snapshot();
+    snapshot.capability = containment.capability();
+    snapshot
 }
 
 #[tauri::command]
@@ -535,17 +622,19 @@ pub fn terminal_governor_incidents(state: State<'_, TerminalGovernor>) -> Vec<Go
 pub fn terminal_governor_grant(
     app: AppHandle,
     state: State<'_, TerminalGovernor>,
+    containment: State<'_, crate::containment::ContainmentManager>,
     id: u32,
     budget_generation: u64,
     request_id: String,
     increment_bytes: u64,
 ) -> Result<GrantOutcome, String> {
-    let outcome = state.grant(
+    let outcome = state.grant_with(
         id,
         budget_generation,
         &request_id,
         increment_bytes,
         now_ms(),
+        |allowance| containment.raise_allowance(id, allowance),
     )?;
     if outcome.applied {
         let _ = app.emit(
@@ -575,6 +664,17 @@ mod tests {
         assert_eq!(protected_reserve(gib(8)), gib(3));
         assert_eq!(protected_reserve(gib(32)), gib(8));
         assert_eq!(protected_reserve(gib(2)), gib(2));
+    }
+
+    #[test]
+    fn admission_preserves_host_reserve_and_refuses_critical_pressure() {
+        assert!(allows_new_terminal(gib(16), gib(5), 0));
+        assert!(!allows_new_terminal(gib(16), gib(4), 0));
+        assert!(!allows_new_terminal(
+            gib(16),
+            gib(8),
+            crate::watchdog::MEM_CRIT
+        ));
     }
 
     #[test]
@@ -672,6 +772,33 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, "stale budget generation");
         assert_eq!(governor.snapshot().sessions[0].granted_bytes, 0);
+    }
+
+    #[test]
+    fn failed_platform_raise_leaves_the_policy_grant_unspent() {
+        let governor = TerminalGovernor::default();
+        let request = awaiting(&governor, gib(6));
+        let error = governor
+            .grant_with(
+                3,
+                request.budget_generation,
+                &request.request_id,
+                512 * MIB,
+                4_000,
+                |_| Err("delegate revoked".into()),
+            )
+            .unwrap_err();
+        assert!(error.contains("delegate revoked"));
+        let status = &governor.snapshot().sessions[0];
+        assert_eq!(status.granted_bytes, 0);
+        assert_eq!(
+            status.grant_request.as_ref().unwrap().request_id,
+            request.request_id
+        );
+        assert_eq!(
+            governor.incidents().last().unwrap().detail,
+            "platform boundary update failed"
+        );
     }
 
     #[test]
@@ -778,5 +905,7 @@ mod tests {
         assert_eq!(capability.enforcement, "monitor_only");
         assert!(!capability.hard_limit);
         assert!(!capability.pause);
+        assert!(!capability.soft_limit);
+        assert!(!capability.dynamic_raise);
     }
 }

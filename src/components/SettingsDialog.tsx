@@ -20,6 +20,8 @@ import {
   THEMES,
   formatHotkey,
   modKeyLabel,
+  TERMINAL_SCROLLBACK_MAX_ROWS,
+  TERMINAL_SCROLLBACK_MIN_ROWS,
   DEFAULT_DICTATION_HOTKEY,
   DICTATION_WAVE_STYLES,
   type CursorStyle,
@@ -1885,13 +1887,20 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     type="number"
                     width="sm"
                     aria-label="Scrollback"
-                    min={1000}
-                    max={100000}
+                    min={TERMINAL_SCROLLBACK_MIN_ROWS}
+                    max={TERMINAL_SCROLLBACK_MAX_ROWS}
                     step={1000}
                     value={s.scrollback}
                     onChange={(e) => {
                       const v = Number(e.target.value);
-                      if (Number.isFinite(v) && v >= 1000) patch({ scrollback: v });
+                      if (Number.isFinite(v)) {
+                        patch({
+                          scrollback: Math.min(
+                            TERMINAL_SCROLLBACK_MAX_ROWS,
+                            Math.max(TERMINAL_SCROLLBACK_MIN_ROWS, v),
+                          ),
+                        });
+                      }
                     }}
                   />
                 </Item>

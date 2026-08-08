@@ -28,6 +28,10 @@ const capability = {
   measurement: "physical_footprint_sum",
   hard_limit: false,
   pause: false,
+  soft_limit: false,
+  dynamic_raise: false,
+  mechanism: "none",
+  detail: "no proven platform containment backend is active",
 };
 
 describe("TerminalGovernorDialog", () => {
@@ -60,5 +64,25 @@ describe("TerminalGovernorDialog", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Stop terminal" }));
     expect(onStop).toHaveBeenCalledOnce();
+  });
+
+  it("distinguishes a verified soft boundary from a hard memory limit", () => {
+    render(
+      <TerminalGovernorDialog
+        status={status}
+        capability={{
+          ...capability,
+          enforcement: "soft_limit",
+          soft_limit: true,
+          dynamic_raise: true,
+          mechanism: "cgroup_v2_memory_high",
+        }}
+        onGrant={() => {}}
+        onStop={() => {}}
+        onDismiss={() => {}}
+      />,
+    );
+    expect(screen.getByText(/soft boundary applies reclaim and throttling/i)).toBeTruthy();
+    expect(screen.getByText(/without a cgroup OOM kill/i)).toBeTruthy();
   });
 });

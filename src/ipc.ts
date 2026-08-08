@@ -2073,11 +2073,15 @@ export type TerminalBudgetState =
 
 export interface TerminalGovernorCapability {
   platform: string;
-  /** Currently always monitor_only: no platform hard boundary is claimed. */
-  enforcement: "monitor_only";
+  /** `soft_limit` is currently possible only for a verified Linux memory.high backend. */
+  enforcement: "monitor_only" | "soft_limit";
   measurement: string;
   hard_limit: boolean;
   pause: boolean;
+  soft_limit: boolean;
+  dynamic_raise: boolean;
+  mechanism: string;
+  detail: string;
 }
 
 export interface TerminalGrantRequest {

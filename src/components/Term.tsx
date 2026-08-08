@@ -8,6 +8,7 @@ import {
 } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
@@ -21,6 +22,8 @@ import { terminalTheme } from "../terminalThemes";
 import { createLinkHint, opensLink } from "../terminalLinks";
 import { matchesChord, resolve } from "../shortcuts";
 import { TerminalStreamLedger } from "../terminalStreamLedger";
+import { terminalRetentionRegistry } from "../terminalRetention";
+import { TerminalCompactionController } from "../terminalCompaction";
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -217,6 +220,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
 
     const fit = new FitAddon();
     term.loadAddon(fit);
+    const serializer = new SerializeAddon();
+    term.loadAddon(serializer);
     term.loadAddon(new Unicode11Addon());
     term.unicode.activeVersion = "11";
     // Links must go through the OS, not window.open(): WKWebView has no popup
@@ -258,6 +263,73 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       leave: () => linkHint.hide(),
     };
     term.open(el);
+
+    // xterm does not expose trustworthy heap-byte accounting: cell strings,
+    // attributes, links and engine overhead are variable. Keep content-free,
+    // constant-size aggregate shape metrics instead, so a soak can correlate
+    // renderer growth with the number of retained rows/cells without copying
+    // the scrollback (which would itself become another retention path).
+    const retentionSample = () => ({
+      visible: streamingRef.current,
+      normalRows: term.buffer.normal.length,
+      alternateRows: term.buffer.alternate.length,
+      cols: term.cols,
+      viewportRows: term.rows,
+      configuredScrollbackRows: settings.scrollback,
+    });
+    const retention = terminalRetentionRegistry.track(retentionSample());
+    const updateRetention = () => retention.update(retentionSample());
+    const retentionSubs = [
+      term.onWriteParsed(() => {
+        retention.parsedWrite();
+        updateRetention();
+      }),
+      term.onResize(updateRetention),
+      term.buffer.onBufferChange(updateRetention),
+    ];
+    let compactedViewportY: number | null = null;
+    const compaction = new TerminalCompactionController(
+      {
+        // An empty write is an xterm parser barrier: its callback runs only
+        // after every previously accepted PTY chunk has updated the buffer.
+        drain: (done) => term.write("", done),
+        serialize: () => {
+          compactedViewportY = term.buffer.active.viewportY;
+          return serializer.serialize({ scrollback: settings.scrollback });
+        },
+        clearCells: () => {
+          term.reset();
+          term.clear();
+          updateRetention();
+        },
+        restore: (snapshot, done) => {
+          // The controller does not resolve show() until this callback, so
+          // native replay can never overtake restoration of the older state.
+          term.write(snapshot, () => {
+            if (compactedViewportY != null) {
+              term.scrollToLine(
+                Math.min(compactedViewportY, term.buffer.active.baseY),
+              );
+              compactedViewportY = null;
+            }
+            updateRetention();
+            done();
+          });
+        },
+      },
+      {
+        metrics: {
+          attempted: retention.compactionAttempted,
+          reserve: retention.reserveCompaction,
+          release: retention.releaseCompaction,
+          compacted: retention.compacted,
+          rejectedTooLarge: retention.compactionRejected,
+          rejectedGlobalBudget: retention.compactionBudgetRejected,
+          failed: retention.compactionFailed,
+          restored: retention.restored,
+        },
+      },
+    );
 
     // No WebGL renderer. @xterm/addon-webgl 0.19.0 corrupts rendering on
     // WKWebView/macOS: a stale texture binding after an atlas page swap makes
@@ -561,12 +633,17 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
 
     streamVisibilityRef.current = (visible) => {
       setResizeObservation(visible);
+      updateRetention();
       if (visible) {
         if (deferredTheme) onThemeChange();
-        void attachViewer();
+        void (async () => {
+          await compaction.show();
+          if (!disposed && streamingRef.current) await attachViewer();
+        })();
       } else {
         linkHint.hide();
         detachViewer();
+        compaction.hide();
       }
     };
 
@@ -768,6 +845,9 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       linkHint.dispose();
       dataSub.dispose();
       titleSub.dispose();
+      compaction.dispose();
+      retentionSubs.forEach((s) => s.dispose());
+      retention.dispose();
       oscSubs.forEach((s) => s.dispose());
       unlistenDrop?.();
       unlistenExit?.();

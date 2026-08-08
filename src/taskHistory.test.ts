@@ -373,9 +373,11 @@ describe("durable output hydration bounds", () => {
     const first = loadTaskRunOutput(`run-${MAX_EAGER_OUTPUTS}`);
     const second = loadTaskRunOutput(`run-${MAX_EAGER_OUTPUTS}`);
     expect(first).toBe(second);
-    expect(
-      read.mock.calls.filter(([id]) => id === `artifact-${MAX_EAGER_OUTPUTS}`),
-    ).toHaveLength(1);
+    await vi.waitFor(() =>
+      expect(
+        read.mock.calls.filter(([id]) => id === `artifact-${MAX_EAGER_OUTPUTS}`),
+      ).toHaveLength(1),
+    );
     release?.("older tail");
     await first;
 

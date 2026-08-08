@@ -3,6 +3,8 @@ import {
   formatHotkey,
   getSettings,
   DEFAULT_DICTATION_HOTKEY,
+  TERMINAL_SCROLLBACK_MAX_ROWS,
+  TERMINAL_SCROLLBACK_MIN_ROWS,
   type Hotkey,
   keyLabel,
   matchesHotkey,
@@ -26,11 +28,17 @@ describe("getSettings / updateSettings", () => {
     expect(s.dictationModKey).toBe("ShiftLeft");
   });
 
-  it("overlays stored values on top of defaults", () => {
+  it("overlays stored values and clamps scrollback to its renderer bound", () => {
     updateSettings({ scrollback: 500 });
     const s = getSettings();
-    expect(s.scrollback).toBe(500);
+    expect(s.scrollback).toBe(TERMINAL_SCROLLBACK_MIN_ROWS);
     expect(s.fontSize).toBe(13); // untouched default still present
+
+    localStorage.setItem(
+      "canopy.settings",
+      JSON.stringify({ scrollback: Number.MAX_SAFE_INTEGER }),
+    );
+    expect(getSettings().scrollback).toBe(TERMINAL_SCROLLBACK_MAX_ROWS);
   });
 
   it("round-trips a patch through localStorage", () => {

@@ -16,6 +16,7 @@
 //     overlay.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  browserFrameMetrics,
   browserPageChanged,
   forgetBrowserView,
   registerBrowserView,
@@ -237,6 +238,13 @@ describe("frame resource lifetime", () => {
     expect(created).toHaveLength(2);
     expect(revoked).toContain(created[0]);
     expect(revoked).not.toContain(created[1]);
+    expect(browserFrameMetrics()).toMatchObject({
+      decode_count: 2,
+      retained_frames: 1,
+      retained_blob_bytes: 2,
+      retained_frames_high_water: 1,
+      retained_blob_bytes_high_water: 2,
+    });
   });
 
   it("releases the retained frame when the view is forgotten", async () => {
@@ -248,6 +256,10 @@ describe("frame resource lifetime", () => {
     forgetBrowserView(TAB);
 
     expect(revoked).toContain(current);
+    expect(browserFrameMetrics()).toMatchObject({
+      retained_frames: 0,
+      retained_blob_bytes: 0,
+    });
   });
 
   it("releases a decode that completes after the view was forgotten", async () => {

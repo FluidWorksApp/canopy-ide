@@ -29,6 +29,7 @@ import {
   type SpotAttachment,
 } from "../spotCompose";
 import { composerRows, insertNewlineAtCaret, isNewlineChord } from "../composer";
+import { MAX_CONTEXT_IMAGE_BYTES, readFileBase64 } from "../fileData";
 import {
   deferredRows,
   instantRows,
@@ -117,6 +118,7 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
    *  the text is what gets searched, and a base64 blob is not a search term. */
   const [shots, setShots] = useState<SpotAttachment[]>([]);
   const [attaching, setAttaching] = useState(false);
+  const attachmentAbortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   // Hover only takes the selection after the pointer has actually moved:
@@ -127,6 +129,11 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
 
   useEffect(() => {
     inputRef.current?.focus();
+    return () => {
+      const controller = attachmentAbortRef.current;
+      attachmentAbortRef.current = null;
+      controller?.abort();
+    };
   }, []);
 
   // On open: fetch the quick-open corpus once, and bring the persistent index
@@ -181,9 +188,16 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
     setBusy(true);
     const t = setTimeout(() => {
-      void deferredRows({ query, ctx: ctxRef.current, corpus, roots })
+      void deferredRows({
+        query,
+        ctx: ctxRef.current,
+        corpus,
+        roots,
+        signal: controller.signal,
+      })
         .then((rows) => {
           if (cancelled) return;
           // A transcript hit and a live session row can name the same session;
@@ -195,6 +209,7 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
     }, 180);
     return () => {
       cancelled = true;
+      controller.abort();
       clearTimeout(t);
     };
   }, [query, corpus, roots.join("\n"), composing]);
@@ -257,14 +272,16 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
   const attach = async (files: File[]) => {
     const dir = ctx.components[0]?.path;
     if (!dir || files.length === 0) return;
+    attachmentAbortRef.current?.abort();
+    const controller = new AbortController();
+    attachmentAbortRef.current = controller;
     setAttaching(true);
     for (const file of files) {
       try {
-        const base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onerror = () => reject(reader.error);
-          reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
-          reader.readAsDataURL(file);
+        const base64 = await readFileBase64(file, {
+          scope: ctx.projectId,
+          maxBytes: MAX_CONTEXT_IMAGE_BYTES,
+          signal: controller.signal,
         });
         if (!base64) continue;
         const path = await ipc.spotSaveContextImage(dir, base64);
@@ -279,11 +296,15 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
           )
           .catch(() => {});
       } catch (err) {
+        if (controller.signal.aborted) break;
         void ipc.jsLog("warn", `spot: could not attach a pasted image: ${String(err)}`);
       }
     }
-    setAttaching(false);
-    inputRef.current?.focus();
+    if (attachmentAbortRef.current === controller) {
+      attachmentAbortRef.current = null;
+      setAttaching(false);
+      inputRef.current?.focus();
+    }
   };
 
   /** Move the cursor by `d`, wrapping at both ends — a list this long is

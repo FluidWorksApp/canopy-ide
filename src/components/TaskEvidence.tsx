@@ -61,12 +61,17 @@ function ArtifactView({ artifact }: { artifact: EvidenceArtifact }) {
   useEffect(() => {
     if (!open || content !== null || error) return;
     let live = true;
-    void readEvidenceArtifact(artifact.id).then(
+    const controller = new AbortController();
+    void readEvidenceArtifact(artifact.id, controller.signal).then(
       (text) => live && setContent(text),
-      (cause) => live && setError(String(cause)),
+      (cause) =>
+        live &&
+        (!(cause instanceof Error) || cause.name !== "AbortError") &&
+        setError(String(cause)),
     );
     return () => {
       live = false;
+      controller.abort();
     };
   }, [open, artifact.id, content, error]);
 

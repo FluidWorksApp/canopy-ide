@@ -43,12 +43,18 @@ import {
 } from "./browserBounds";
 import {
   decodedFrame,
-  frameSrc,
+  frameResource,
   releaseFrameSrc,
   shouldCapture,
   type PaneState,
   paneState,
 } from "./browserFrame";
+import {
+  adoptBrowserFrame,
+  browserFrameMetrics,
+  releaseBrowserFrame,
+  resetBrowserFrameMetrics,
+} from "./browserFrameMetrics";
 import {
   PAINTED_OVERLAY_SELECTOR,
   isSurface,
@@ -88,6 +94,8 @@ interface Entry {
   shown: boolean | null;
   /** The last picture of the page, shown while the view is hidden. */
   frame: string | null;
+  /** Decoded bytes owned by `frame`; zero when no frame is adopted. */
+  frameBytes: number;
   lastCaptureAt: number;
   capturing: boolean;
   /** Invalidates an in-flight capture when the underlying page changes. */
@@ -455,8 +463,11 @@ function capture(tabId: string, e: Entry) {
       // the native view disappears, and an <img> still decoding paints the
       // pane's background instead of the page.
       let src: string;
+      let frameBytes: number;
       try {
-        src = frameSrc(base64);
+        const resource = frameResource(base64);
+        src = resource.src;
+        frameBytes = resource.bytes;
       } catch (err) {
         e.capturing = false;
         emitBrowserSignal({
@@ -469,6 +480,7 @@ function capture(tabId: string, e: Entry) {
         });
         return;
       }
+      const decodeAt = Date.now();
       void decodedFrame(src).then(() => {
         e.capturing = false;
         if (views.get(tabId) !== e || e.captureSeq !== captureSeq) {
@@ -477,9 +489,12 @@ function capture(tabId: string, e: Entry) {
           return;
         }
         const previous = e.frame;
+        const previousBytes = e.frameBytes;
         e.dirty = false;
         e.frame = src;
+        e.frameBytes = frameBytes;
         e.lastCaptureOkAt = now;
+        adoptBrowserFrame(previousBytes, frameBytes, Date.now() - decodeAt);
         emitBrowserSignal({ t: "capture", at: now, tabId, result: "ok", ms: now - at });
         publish(tabId, e);
         if (previous !== src) releaseFrameSrc(previous);
@@ -596,8 +611,11 @@ export function browserViewChanged(tabId: string, loading?: boolean) {
   // user just navigated away from.
   if (loading) {
     const previous = e.frame;
+    const previousBytes = e.frameBytes;
     e.frame = null;
+    e.frameBytes = 0;
     releaseFrameSrc(previous);
+    releaseBrowserFrame(previousBytes);
   }
   schedule();
 }
@@ -717,13 +735,16 @@ function watch(need: boolean) {
 const MOTION = ["transitionrun", "transitionstart", "transitionend", "animationstart", "animationend"];
 
 export function registerBrowserView(tabId: string, host: () => Element | null) {
-  releaseFrameSrc(views.get(tabId)?.frame);
+  const previous = views.get(tabId);
+  releaseFrameSrc(previous?.frame);
+  releaseBrowserFrame(previous?.frameBytes ?? 0);
   views.set(tabId, {
     host,
     wanted: false,
     bounds: null,
     shown: null,
     frame: null,
+    frameBytes: 0,
     lastCaptureAt: 0,
     capturing: false,
     captureSeq: 0,
@@ -740,7 +761,9 @@ export function registerBrowserView(tabId: string, host: () => Element | null) {
 }
 
 export function forgetBrowserView(tabId: string) {
-  releaseFrameSrc(views.get(tabId)?.frame);
+  const entry = views.get(tabId);
+  releaseFrameSrc(entry?.frame);
+  releaseBrowserFrame(entry?.frameBytes ?? 0);
   views.delete(tabId);
   emitBrowserSignal({ t: "forget", at: Date.now(), tabId });
   schedule();
@@ -969,9 +992,13 @@ export function useBrowserEngine(): BrowserEngine | null {
 export function resetBrowserHost() {
   for (const e of views.values()) releaseFrameSrc(e.frame);
   views.clear();
+  resetBrowserFrameMetrics();
   suppressed = 0;
   setNativeSurface(null);
   if (scheduled) window.clearTimeout(scheduled);
   scheduled = 0;
   watch(false);
 }
+
+/** Constant-size renderer-side ownership/decode metrics for diagnostics. */
+export { browserFrameMetrics };

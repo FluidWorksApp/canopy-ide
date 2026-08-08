@@ -38,9 +38,11 @@ export function TerminalGovernorDialog({
       onClick: onStop,
     },
   ];
-  const enforcement = capability.hard_limit
-    ? "The operating-system container will be raised only after you approve it."
-    : "This platform is currently monitor-only; choosing Stop is the immediate containment action, and an allowance grant does not create a hard OS limit.";
+  const enforcement = capability.soft_limit
+    ? "A verified operating-system soft boundary applies reclaim and throttling without a cgroup OOM kill; it is raised only after you approve the grant and may be exceeded under extreme conditions."
+    : capability.hard_limit
+      ? "The operating-system container will be raised only after you approve it."
+      : "This platform is currently monitor-only; choosing Stop is the immediate containment action, and an allowance grant does not create a hard OS limit.";
 
   return (
     <Dialog

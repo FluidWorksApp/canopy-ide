@@ -86,6 +86,15 @@ fn now_secs() -> u64 {
 }
 
 fn main() {
+    // Linux terminal containment launcher. This path must run before any mode
+    // that can spawn work: it joins the already-prepared cgroup, proves that to
+    // the parent through a private gate, waits for release, and only then execs
+    // the user's actual argv. The original program therefore cannot win a fork
+    // race against cgroup membership.
+    #[cfg(target_os = "linux")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--containment-launch")) {
+        containment_launcher_main();
+    }
     // Third job, distinct transport: `canopy-hook --mcp` speaks MCP over stdio
     // (registered in the CLI's user-scope MCP config by agents.rs) and serves
     // the IDE-context tools. Everything else is the hook contract below.
@@ -116,6 +125,61 @@ fn main() {
     if let Err(_e) = real_main() {
         std::process::exit(0);
     }
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+#[cfg_attr(all(test, not(target_os = "linux")), allow(dead_code))]
+fn containment_launcher_main() -> ! {
+    use std::fs::OpenOptions;
+    use std::os::unix::process::CommandExt;
+
+    let mut args = std::env::args_os().skip(2);
+    let Some(cgroup_procs) = args.next() else {
+        eprintln!("canopy containment: missing cgroup.procs path");
+        std::process::exit(125);
+    };
+    let Some(ready) = args.next() else {
+        eprintln!("canopy containment: missing ready gate");
+        std::process::exit(125);
+    };
+    let Some(release) = args.next() else {
+        eprintln!("canopy containment: missing release gate");
+        std::process::exit(125);
+    };
+    if args.next().as_deref() != Some(std::ffi::OsStr::new("--")) {
+        eprintln!("canopy containment: malformed command boundary");
+        std::process::exit(125);
+    }
+    let Some(program) = args.next() else {
+        eprintln!("canopy containment: missing program");
+        std::process::exit(126);
+    };
+    let program_args: Vec<_> = args.collect();
+
+    let joined = std::fs::write(&cgroup_procs, std::process::id().to_string());
+    if let Err(error) = joined {
+        eprintln!("canopy containment: could not join cgroup: {error}");
+        std::process::exit(125);
+    }
+    if let Err(error) = OpenOptions::new().write(true).create_new(true).open(&ready) {
+        eprintln!("canopy containment: could not signal readiness: {error}");
+        std::process::exit(125);
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !std::path::Path::new(&release).is_file() {
+        if std::time::Instant::now() >= deadline {
+            eprintln!("canopy containment: parent did not release spawn gate");
+            std::process::exit(125);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    let error = std::process::Command::new(program)
+        .args(program_args)
+        .exec();
+    eprintln!("canopy containment: exec failed: {error}");
+    std::process::exit(126);
 }
 
 // ---------- reminders: the alarm that outlives the app ----------
@@ -5257,7 +5321,10 @@ mod tests {
     fn irreversible_work_is_stopped_and_named_by_its_cost() {
         let cases = [
             ("rm -rf src/legacy", "deletes files for good"),
-            ("bash -lc \"npm ci && rm -rf ../../other\"", "deletes files for good"),
+            (
+                "bash -lc \"npm ci && rm -rf ../../other\"",
+                "deletes files for good",
+            ),
             ("git reset --hard HEAD~3", "haven't been saved"),
             ("git clean -fd", "haven't been saved"),
             ("git push --force origin main", "shared history"),

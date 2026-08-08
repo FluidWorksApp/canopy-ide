@@ -325,7 +325,8 @@ fn companion_store_path(name: &str) -> Result<std::path::PathBuf, String> {
 #[tauri::command]
 pub fn companion_save_attachment(name: String, base64: String) -> Result<String, String> {
     use base64::Engine;
-    const MAX_BYTES: usize = 25 * 1024 * 1024;
+    const MAX_BYTES: usize = 12 * 1024 * 1024;
+    const MAX_BASE64_CHARS: usize = ((MAX_BYTES + 2) / 3) * 4;
 
     let leaf = std::path::Path::new(&name)
         .file_name()
@@ -347,11 +348,17 @@ pub fn companion_save_attachment(name: String, base64: String) -> Result<String,
     } else {
         safe
     };
+    let encoded = base64.trim();
+    // Reject before decode: checking only the decoded Vec allowed an
+    // arbitrarily large IPC string to allocate a second large buffer first.
+    if encoded.len() > MAX_BASE64_CHARS {
+        return Err("attachments are limited to 12 MB each".into());
+    }
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(base64.trim())
+        .decode(encoded)
         .map_err(|e| format!("could not decode attachment: {e}"))?;
     if bytes.len() > MAX_BYTES {
-        return Err("attachments are limited to 25 MB each".into());
+        return Err("attachments are limited to 12 MB each".into());
     }
 
     let dir = companion_home().join("attachments");

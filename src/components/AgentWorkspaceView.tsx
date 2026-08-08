@@ -37,6 +37,7 @@ import { format, matches } from "../shortcuts";
 import { PROVENANCE_EVENT } from "../provenance";
 import { agentGitTrail } from "../agentGitTrail";
 import { sizeLimitFor } from "../fileOpen";
+import { type IoBudget, rendererIoBudget } from "../ioBudget";
 
 const fmtCost = (n: number) =>
   n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
@@ -308,6 +309,9 @@ interface AgentFileReadLimits {
   concurrency: number;
   perFileBytes: number;
   totalBytes: number;
+  scope?: string;
+  signal?: AbortSignal;
+  budget?: IoBudget;
 }
 
 interface AgentFileReader {
@@ -334,16 +338,17 @@ export async function loadAgentFileContents(
   const out = new Map<string, string>();
   let cursor = 0;
   let reservedBytes = 0;
+  const alive = () => current() && !limits.signal?.aborted;
 
   const worker = async () => {
-    while (current()) {
+    while (alive()) {
       const at = cursor++;
       const path = unique[at];
       if (path == null) return;
       const resolved = absolute(path);
       try {
         const stat = await reader.stat(resolved);
-        if (!current()) return;
+        if (!alive()) return;
         if (
           stat.is_dir ||
           stat.size > limits.perFileBytes ||
@@ -354,8 +359,15 @@ export async function loadAgentFileContents(
         // Reserve before the await. JavaScript runs this section atomically, so
         // sibling workers cannot all admit themselves against the same budget.
         reservedBytes += stat.size;
-        const text = await reader.readText(resolved);
-        if (!current()) return;
+        const text = await (limits.budget ?? rendererIoBudget).run(
+          {
+            scope: limits.scope ?? "agent-workspace",
+            bytes: stat.size,
+            signal: limits.signal,
+          },
+          () => reader.readText(resolved),
+        );
+        if (!alive()) return;
         out.set(path, text);
       } catch {
         // A file can disappear or be mid-write while the journal is settling.
@@ -369,7 +381,7 @@ export async function loadAgentFileContents(
       () => worker(),
     ),
   );
-  return current() ? out : new Map();
+  return alive() ? out : new Map();
 }
 
 /** The digest as this view hands it to the lifecycle ladder: the workspace
@@ -636,6 +648,7 @@ export function AgentWorkspaceView({
   );
   useEffect(() => {
     let live = true;
+    const controller = new AbortController();
     const paths = [
       ...new Set(edits.filter((e) => e.present).map((e) => e.path)),
     ];
@@ -645,12 +658,19 @@ export function AgentWorkspaceView({
     }
     const abs = (p: string) =>
       /^(?:[A-Za-z]:[\\/]|\/)/.test(p) ? p : repo ? `${repo}/${p}` : p;
-    void loadAgentFileContents(paths, abs, undefined, () => live).then((next) => {
+    void loadAgentFileContents(paths, abs, undefined, () => live, {
+      concurrency: AGENT_FILE_READ_CONCURRENCY,
+      perFileBytes: AGENT_FILE_MAX_BYTES,
+      totalBytes: AGENT_FILE_TOTAL_BYTES,
+      scope: repo ?? "agent-workspace",
+      signal: controller.signal,
+    }).then((next) => {
       if (!live) return;
       setFileContents((prev) => (sameMap(prev, next) ? prev : next));
     });
     return () => {
       live = false;
+      controller.abort();
     };
   }, [edits, repo]);
 

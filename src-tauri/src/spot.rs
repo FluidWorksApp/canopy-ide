@@ -901,11 +901,20 @@ pub async fn spot_save_context_image(
     base64_png: String,
 ) -> Result<String, String> {
     use base64::Engine;
+    const MAX_BYTES: usize = 12 * 1024 * 1024;
+    const MAX_BASE64_CHARS: usize = ((MAX_BYTES + 2) / 3) * 4;
     let target = PathBuf::from(&dir).join(".canopy/spot");
     check_scope(&ws, &target)?;
+    let encoded = base64_png.trim();
+    if encoded.len() > MAX_BASE64_CHARS {
+        return Err("context images are limited to 12 MB each".into());
+    }
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(base64_png.trim())
+        .decode(encoded)
         .map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_BYTES {
+        return Err("context images are limited to 12 MB each".into());
+    }
     std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
     let path = free_path(&target, now_secs(), "ctx", "png");
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;

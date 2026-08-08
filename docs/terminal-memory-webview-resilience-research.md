@@ -46,6 +46,33 @@ itself attribute all retained JavaScript objects to one feature; the bounded IO,
 hidden-terminal detachment, snapshot disposal, browser ownership, and renderer
 continuity changes address separate confirmed retention and blast-radius paths.
 
+### Follow-up event at 14:24 +0700: child WebContent launch, not an IDE restart
+
+A second read-only check was performed after the user reported another apparent
+restart in the installed pre-fix build. The OS timeline does **not** show a
+second native-app or main-renderer restart in the preceding 35 minutes:
+
+- native Canopy PID `49786` still had its 2026-08-07 14:40 start time;
+- main IDE WebContent PID `43665` still had its 13:44:26 replacement start time,
+  continued serving page id 8, and had no main-frame provisional/commit load in
+  the checked window;
+- no matching `ExceededMemoryLimit`, WebProcess termination, or replacement of
+  PID `43665` was logged.
+
+At 14:24:28, however, the production host created **another** WebContent PID
+`82170` for page id `272513`. WebKit logged a new page/process construction,
+made the view visible, completed its main-frame load, then made it invisible at
+14:24:31. The process remained alive at the 14:39 sample. No predecessor death
+was correlated with this launch. This is evidence of a newly created embedded
+browser/preview child that was quickly hidden—not evidence of the IDE renderer
+restarting. Its survival while hidden is consistent with the child-WebView
+lifecycle/retention class addressed by renderer-generation reconciliation and
+orphan cleanup, but the OS logs alone cannot prove whether that specific view
+still had a valid frontend owner. If the observed symptom included terminal or
+SPA state loss, release-owned lifecycle telemetry is still required to explain
+that application-level reset because it did not cross an OS process or main-
+frame navigation boundary.
+
 ### Implementation update — renderer continuity (2026-08-08)
 
 The current worktree now replaces destructive renderer boot cleanup with a
@@ -85,6 +112,25 @@ generation. Focused native tests cover process survival, stale acknowledgements,
 double registration, Remote/detached survival, bounded/truncated replay, and
 orphan browser teardown; the complete frontend suite passes. Runtime tests that
 kill real platform WebContent processes remain open below.
+
+### Implementation update — hidden xterm compaction (2026-08-08)
+
+After 60 seconds hidden, a terminal now queues an xterm parser barrier, serializes
+its configured scrollback plus cursor, attributes, terminal modes, and alternate
+screen through the official serialize addon, then resets and clears the live cell
+graph. Each VT snapshot has a 4 MiB UTF-8 cap and all snapshots share a 64 MiB
+renderer admission budget. A state above either cap is not cleared: it keeps the
+live xterm rather than exchanging fidelity for a memory bound. On show, the VT
+snapshot finishes parsing before the native PTY is allowed to reattach at its
+unchanged absolute output cursor, so Rust replays only the unseen suffix.
+
+Content-free aggregate counters expose retained rows/cells, visible and hidden
+instances, compacted payload bytes, attempts, failures, cap rejections, restores,
+and high-water marks without copying terminal content. Real xterm tests cover
+normal scrollback, Unicode, attributes, bracketed-paste mode, and the alternate
+screen; deterministic race tests cover show-before-parser-drain, hide during
+restore, dispose during restore, synchronous restore failure, cap/budget
+rejection, serialization failure, and restore-before-native-replay.
 
 ## Executive finding
 
@@ -657,6 +703,13 @@ xterm scrollback structures.
 > disposal is user-visible data loss. Serialization or a bounded server-side
 > parser must land first; bare disposal must not ship.
 
+The hidden-idle implementation satisfies this warning without bare disposal:
+only successfully serialized states admitted under both the 4 MiB per-terminal
+cap and 64 MiB renderer budget have their cell graph cleared. Oversized,
+budget-rejected, or failed serialization leaves the original xterm untouched.
+Open question 7 still applies to a whole-renderer loss, because an OOM also loses
+the JavaScript-owned VT snapshot and must fall back to the bounded Rust replay.
+
 ### Early heartbeat and coordinated reloads
 
 - Register the watchdog listener in `main.tsx` before Monaco initialization.
@@ -685,9 +738,39 @@ incident state. It consumes the existing PTY monitor's process-tree totals and
 refreshes only host memory counters. Temporary 512 MiB/1 GiB grants are
 single-use, generation-checked, idempotent on exact retry, and cannot promise
 headroom already held by earlier grants or the `max(3 GiB, 25%)` host reserve.
-This is policy accounting, not containment: it does not pause, kill, install a
-Job Object, write a cgroup, or enforce an allocation boundary. Capability output
-therefore reports `monitor_only` on macOS, Windows, and Linux.
+That first milestone was policy accounting, not containment: it did not pause,
+kill, install a Job Object, write a cgroup, or enforce an allocation boundary,
+and therefore reported `monitor_only` on all three desktop platforms.
+
+Platform-containment milestone (2026-08-08): the backend contract now reports
+runtime capability rather than inferring it from the target OS. Windows and
+macOS remain `monitor_only`. On Linux, Canopy can opt into a race-closed
+`memory.high` soft boundary only when `CANOPY_CGROUP_ROOT` names an explicit
+writable cgroup-v2 delegation and Canopy itself is already inside that subtree.
+For each future PTY it creates an empty child cgroup, writes the initial
+allowance, starts the shipped `canopy-hook` in launcher mode, waits until that
+same PID has joined and reports ready, verifies `/proc/<pid>/cgroup`, and only
+then releases the launcher to `exec` the user's original argv. Explicit grants
+raise `memory.high` before the policy grant commits. A failed boundary update
+leaves the grant unspent. Once active, governor decisions use the same cgroup's
+`memory.current` charge rather than a lower RSS estimate, so the user sees the
+warning/grant transition before the enforced boundary. It never writes
+`memory.max`: the kernel documents
+`memory.high` as reclaim/throttling which does not invoke the cgroup OOM killer,
+whereas a hard limit would give an agent allocation failures without a safe
+application-level recovery contract.
+
+This Linux path is deliberately opt-in rather than guessing a writable systemd
+scope. Automatic user-scope creation/delegation, Linux runner validation, cgroup
+event monitoring, cleanup retry for a daemonized descendant, and packaging
+instructions remain open. Windows' equivalent gate is architecturally possible:
+spawn the shipped helper waiting, open its PID, assign and verify a Job Object,
+then release it. It is not implemented yet because `portable-pty` does not
+expose its process handle, this environment cannot compile the Windows native
+dependency graph without the MSVC SDK, and `JOB_OBJECT_LIMIT_JOB_MEMORY` is a
+hard committed-memory failure boundary—not a safe analogue of `memory.high`.
+`KILL_ON_JOB_CLOSE` would also be an explicit process-tree lifetime decision,
+not something to introduce as an incidental memory-control flag.
 
 Suggested state model:
 
@@ -786,9 +869,10 @@ nearby implementation. Items marked **atomic** must ship together.
 - [x] Record native capture count, success/failure, encoded bytes, capture latency,
   active captures, payload bytes retained inside capture futures, and high-water
   marks using constant-size counters that retain no labels, URLs, or page content.
-- [ ] Record frontend image-decode latency and currently retained frame Blob bytes;
-  native metrics deliberately stop at IPC transfer and do not claim to measure
-  JavaScript ownership after command serialization.
+- [x] Record frontend image-decode count/last/max/average latency and currently
+  retained frame count/Blob bytes with high-water marks. The renderer ledger is
+  scalar-only and releases ownership on replacement, navigation, close, stale
+  completion, and host reset; native metrics still stop at IPC transfer.
 - [ ] Add a long-running replacement test that proves renderer footprint reaches
   a plateau on macOS, Windows, and Linux.
 - [ ] Compare reload, close, and close/recreate only after the frontend child-view
@@ -830,11 +914,22 @@ nearby implementation. Items marked **atomic** must ship together.
 - [x] Define a bounded replay policy and surface a visible truncation marker.
 - [x] Regression-test delayed xterm parsing across hide/show and verify every
   onscreen multiplex pane streams while keyboard focus remains single-owner.
+- [x] Publish constant-size, content-free renderer counters for live/visible/
+  hidden xterm instances, configured scrollback, normal/alternate buffer rows,
+  estimated buffer cells, parsed-write batches, compaction outcomes/payloads,
+  and high-water marks. These are shape diagnostics, not a false claim of exact
+  JavaScript heap-byte sizing.
+- [x] After a 60-second hidden idle interval, drain xterm parsing, serialize full
+  VT state under a 4 MiB per-terminal cap and 64 MiB renderer-wide admission
+  budget, clear the cell graph, and restore it before native replay. Oversized,
+  budget-rejected, or failed states remain live and are never destructively
+  compacted.
 - [ ] Measure typical and worst-case xterm bytes per row, long wrapped lines,
   hyperlinks, Unicode cells, and alternate-screen applications.
-- [ ] Preserve 5,000-line scrollback fidelity before disposing any inactive
-  xterm; choose serialization, a bounded Rust terminal parser, or durable
-  transcript integration.
+- [x] Preserve configured 5,000-line rendered scrollback during hidden-idle
+  compaction through VT serialization; real xterm round trips cover Unicode,
+  attributes, modes, and alternate-screen state. This does not claim that the
+  JavaScript snapshot survives a whole-renderer OOM.
 - [ ] Dispose inactive xterm renderers only after the chosen fidelity mechanism
   is verified.
 - [ ] Gate ResizeObserver, focus, drag/drop, theme, and global event listeners for
@@ -848,12 +943,24 @@ nearby implementation. Items marked **atomic** must ship together.
 
 - [ ] Define global and per-project concurrency budgets for filesystem reads,
   metadata calls, network requests, subprocess pipes, and decode/parse work.
+- [x] Add one renderer-wide admission controller with eight global/four
+  per-project active operations, 64 MiB/32 MiB active-byte ceilings, and a
+  bounded 96-item/64 MiB queue. Agent Workspace and LSP-provider file reads,
+  task-history/evidence artifacts, deferred project search, tracker/agent-tool
+  PR requests, and attachment decoding now share it; unwrapped metadata, Git and general
+  network call sites keep the broad
+  item above open.
 - [ ] Batch directory enumeration and metadata/stat requests; coalesce duplicate
   path work and cap each batch by both item count and estimated bytes.
 - [ ] Deduplicate identical in-flight network requests, cap concurrent sockets
   and response bodies per origin/project, and stream large downloads/uploads.
 - [ ] Abort superseded file reads, fetches, previews, searches, and decodes so
   their buffers cannot outlive the UI state that requested them.
+- [x] Remove aborted requests from the shared admission queue, discard late
+  active results without releasing their lease early, stop superseded tracker
+  loops before their next repository, and abort active FileReader attachment
+  encodes on replacement/unmount. Already-started Tauri invokes remain
+  non-interruptible, so the broad cancellation item stays open.
 - [x] Bound Agent Workspace journal-file hydration to three concurrent reads,
   8 MiB per file, and 16 MiB aggregate input; stop launching or retaining a
   superseded generation, and evict stale diff-data cache entries with a
@@ -886,6 +993,16 @@ nearby implementation. Items marked **atomic** must ship together.
   retain only the bounded display window, and compute patch statistics across
   the full stream; branch/network/Linear helpers remain open.
 - [ ] Enforce file-size budgets before decoders/parsers that read whole files.
+- [x] Reject SpotSearch images and companion attachments above 12 MiB before
+  FileReader/base64 work; admission charges the original plus its 4/3 encoded
+  representation so the peak fits the 32 MiB per-project ceiling. Both Rust
+  commands now reject oversized
+  encoded input before allocating the decoded byte buffer and recheck decoded
+  size before writing.
+- [x] Gate language-service and agent LSP-tool whole-file reads at 8 MiB before
+  IPC and reject a post-stat growth result instead of retaining it. The native general-purpose
+  read command still needs a caller-supplied atomic maximum to close the
+  stat/read allocation race for every frontend caller.
 - [ ] Avoid retaining raw bytes, decoded text, editor models, and unchanged
   baseline strings simultaneously.
 - [x] Transfer code-file content ownership to the Monaco model after decoding;
@@ -943,8 +1060,9 @@ nearby implementation. Items marked **atomic** must ship together.
   reserve or headroom already promised by an earlier grant.
 - [ ] Protect a native/Rust control-plane reserve that does not depend on renderer
   responsiveness; monitor-only accounting cannot yet enforce this boundary.
-- [x] Report platform measurement and enforcement capability honestly; all three
-  desktop platforms remain `monitor_only` until containment is proven.
+- [x] Report platform measurement and enforcement capability honestly; macOS and
+  Windows remain `monitor_only`, while Linux reports `soft_limit` only after a
+  gated cgroup-v2 launch completes membership verification.
 - [x] Implement monitor-only NORMAL, WARNED, AWAITING_GRANT, and OVER_ALLOWANCE
   transitions with two-sample warning debounce and clear hysteresis.
 - [ ] Define NORMAL, WARNED, RELIEF, AWAITING_GRANT, PAUSED, STOPPING, and EXITED
@@ -966,6 +1084,9 @@ nearby implementation. Items marked **atomic** must ship together.
 - [ ] On host-critical pressure, stop new heavy work, shed renderer caches and
   hidden attachments, then choose a bounded graceful-stop victim if pausing does
   not reclaim memory.
+- [x] Refuse new PTY process trees before spawn when native pressure is critical
+  or host availability has reached the protected IDE reserve; never disturb an
+  already-running session as an admission-control side effect.
 - [ ] Provide a non-renderer fallback decision policy when the UI cannot display
   the grant prompt.
 - [x] Emit a content-free native notification, deep-linked to the terminal, when
@@ -973,6 +1094,8 @@ nearby implementation. Items marked **atomic** must ship together.
 
 ### G. Platform containment
 
+- [x] Keep one platform backend/capability contract and report `monitor_only`
+  unless a runtime backend completes its own spawn-time verification.
 - [ ] Windows: create one Job Object per session and assign the PTY root before it
   can spawn descendants, using suspended spawn or a launcher gate.
 - [ ] Windows: use job-wide notification and committed-memory limits; allow live
@@ -981,6 +1104,15 @@ nearby implementation. Items marked **atomic** must ship together.
   escape, allocation failure, and user-grant increases.
 - [ ] Linux: create one delegated cgroup v2 subtree per session and apply
   `memory.high`, `memory.max`, `memory.current`, and `memory.events`.
+- [x] Linux opt-in path: create one child of an explicitly delegated cgroup per
+  future PTY, set `memory.high`, and prove launcher membership before user exec.
+- [x] Linux: drive the active governor from that session cgroup's
+  `memory.current` rather than comparing an RSS estimate to a different charge
+  boundary.
+- [x] Linux: raise `memory.high` atomically with an accepted explicit grant; a
+  failed OS update does not spend the policy grant.
+- [x] Linux: omit `memory.max` until allocation-failure/OOM semantics have an
+  explicit user-visible recovery contract.
 - [ ] Linux: support systemd user scopes/delegation and a clearly reported
   monitor-only fallback when no writable controller is available.
 - [ ] Linux: test descendant inheritance, OOM behavior, live grants, cleanup, and

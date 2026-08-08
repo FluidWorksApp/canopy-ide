@@ -9,6 +9,7 @@ mod cleanup;
 mod cli;
 mod clipboard;
 mod companion;
+mod containment;
 mod context;
 mod crash;
 #[cfg(feature = "dictation")]
@@ -431,6 +432,7 @@ pub fn run() {
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
         .manage(governor::TerminalGovernor::default())
+        .manage(containment::ContainmentManager::default())
         .manage(tunnel::TunnelManager::default())
         .manage(prwatch::PrWatcher::default())
         .manage(dictation::DictationManager::default())

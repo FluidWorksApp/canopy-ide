@@ -81,7 +81,13 @@ export function shouldCapture(c: CaptureInput): boolean {
  * Blob URLs have an explicit lifetime. The old data-URL implementation gave
  * every snapshot a new cache key that WebKit could retain indefinitely. Tests
  * and non-browser callers fall back to a data URL. */
-export function frameSrc(base64: string): string {
+export interface FrameResource {
+  src: string;
+  /** Decoded bytes retained by the Blob (or represented by the data URL). */
+  bytes: number;
+}
+
+export function frameResource(base64: string): FrameResource {
   if (
     typeof window !== "undefined" &&
     typeof window.atob === "function" &&
@@ -91,11 +97,23 @@ export function frameSrc(base64: string): string {
     const binary = window.atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return window.URL.createObjectURL(
-      new window.Blob([bytes], { type: "image/jpeg" }),
-    );
+    return {
+      src: window.URL.createObjectURL(
+        new window.Blob([bytes], { type: "image/jpeg" }),
+      ),
+      bytes: binary.length,
+    };
   }
-  return `data:image/jpeg;base64,${base64}`;
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return {
+    src: `data:image/jpeg;base64,${base64}`,
+    bytes: Math.max(0, Math.floor((base64.length * 3) / 4) - padding),
+  };
+}
+
+/** Compatibility convenience for consumers that do not own retained frames. */
+export function frameSrc(base64: string): string {
+  return frameResource(base64).src;
 }
 
 /** Release a frame created by frameSrc. Data URLs need no explicit cleanup. */

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { frameSrc, releaseFrameSrc } from "./browserFrame";
+import { frameResource, frameSrc, releaseFrameSrc } from "./browserFrame";
 
 describe("browser freeze-frame resources", () => {
   const created = vi.fn((_blob: Blob) => "blob:canopy-frame-1");
@@ -45,6 +45,13 @@ describe("browser freeze-frame resources", () => {
     const blob = created.mock.calls[0][0];
     expect(blob.type).toBe("image/jpeg");
     expect(blob.size).toBe(3);
+  });
+
+  it("reports the exact decoded bytes owned by the frame Blob", () => {
+    const resource = frameResource("QUJDRA==");
+
+    expect(resource).toEqual({ src: "blob:canopy-frame-1", bytes: 4 });
+    expect(created.mock.calls[0][0].size).toBe(resource.bytes);
   });
 
   it("releases Blob URLs and ignores non-Blob sources", () => {

@@ -7,6 +7,7 @@
 // TaskEnvelope is now the authority. localStorage below is read only as a
 // one-shot compatibility source and emptied after the Rust store adopts it.
 import * as ipc from "./ipc";
+import { rendererIoBudget } from "./ioBudget";
 import type { TaskEnvelopeSummary, TaskReservation } from "./taskEnvelope";
 import { TASK_ENVELOPES_EVENT } from "./taskEnvelopes";
 
@@ -102,6 +103,7 @@ export const OUTPUT_READ_CONCURRENCY = 2;
 export const MAX_SINGLE_OUTPUT_CHARS = 512 * 1024;
 export const MAX_RETAINED_OUTPUT_CHARS = 2 * 1024 * 1024;
 const OUTPUT_TRUNCATION_MARKER = "\n…(history output truncated for memory)";
+const ARTIFACT_READ_ADMISSION_BYTES = 2 * 1024 * 1024;
 
 /** Parsed-runs cache, keyed on the raw stored string. The blob can approach
  *  half a megabyte (transcript tails), and read() is called by every open PR
@@ -110,14 +112,18 @@ const OUTPUT_TRUNCATION_MARKER = "\n…(history output truncated for memory)";
 let cache: { raw: string | null; runs: TaskRun[] } | null = null;
 let authoritative: TaskRun[] | null = null;
 let hydrating: Promise<TaskRun[]> | null = null;
+let refreshAbort: AbortController | null = null;
 const persistQueues = new Map<string, Promise<void>>();
 const outputLoads = new Map<string, Promise<TaskRun | undefined>>();
 let refreshGeneration = 0;
 
 export function resetTaskHistoryForTests(): void {
+  refreshGeneration++;
   cache = null;
   authoritative = null;
   hydrating = null;
+  refreshAbort?.abort();
+  refreshAbort = null;
   outputLoads.clear();
 }
 
@@ -341,6 +347,9 @@ async function importLegacy(rows: TaskRun[], existing: TaskEnvelopeSummary[]) {
 
 export async function refreshTaskHistory(): Promise<TaskRun[]> {
   const generation = ++refreshGeneration;
+  refreshAbort?.abort();
+  const controller = new AbortController();
+  refreshAbort = controller;
   const projected = (await ipc.taskListHistory(MAX_RUNS))
     .map(rowFromSummary)
     .filter((row): row is TaskRun => Boolean(row));
@@ -363,7 +372,16 @@ export async function refreshTaskHistory(): Promise<TaskRun[]> {
     const batch = candidates.slice(at, at + OUTPUT_READ_CONCURRENCY);
     const loaded = await Promise.all(
       batch.map((run) =>
-        ipc.taskArtifactRead(run.outputArtifactId as string).catch(() => undefined),
+        rendererIoBudget
+          .run(
+            {
+              scope: run.projectId ?? "task-history",
+              bytes: ARTIFACT_READ_ADMISSION_BYTES,
+              signal: controller.signal,
+            },
+            () => ipc.taskArtifactRead(run.outputArtifactId as string),
+          )
+          .catch(() => undefined),
       ),
     );
     if (generation !== refreshGeneration) return authoritative ?? projected;
@@ -398,8 +416,14 @@ export function loadTaskRunOutput(runId: string): Promise<TaskRun | undefined> {
   const pending = outputLoads.get(runId);
   if (pending) return pending;
   const artifactId = current.outputArtifactId;
-  const load = ipc
-    .taskArtifactRead(artifactId)
+  const load = rendererIoBudget
+    .run(
+      {
+        scope: current.projectId ?? "task-history",
+        bytes: ARTIFACT_READ_ADMISSION_BYTES,
+      },
+      () => ipc.taskArtifactRead(artifactId),
+    )
     .then((raw) => {
       const stillCurrent = authoritative?.find(
         (run) => run.id === runId && run.outputArtifactId === artifactId,

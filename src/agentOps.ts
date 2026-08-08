@@ -27,11 +27,30 @@ import { flattenHover, type HoverContents } from "./lsp/hover";
 import { sortRows, symbolRows, type SymbolRow } from "./lsp/symbols";
 import { positionOf, type LspPosition } from "./lspPosition";
 import { TRACKERS } from "./trackers";
+import { readBoundedFile } from "./boundedFileRead";
+import { sizeLimitFor } from "./fileOpen";
+import { rendererIoBudget } from "./ioBudget";
 
 /** How long a first diagnostics call waits for the server to publish. A cold
  *  tsserver is doing real work; a warm one answers in a frame. */
 const DIAGNOSTIC_WAIT_MS = 8000;
 const MAX_LOCATIONS = 100;
+const sourceDecoder = new TextDecoder();
+const NETWORK_RESPONSE_ADMISSION_BYTES = 2 * 1024 * 1024;
+
+const runProjectNetwork = <T>(scope: string, operation: () => Promise<T>) =>
+  rendererIoBudget.run(
+    { scope, bytes: NETWORK_RESPONSE_ADMISSION_BYTES },
+    operation,
+  );
+
+const readSourceText = async (path: string, scope: string) =>
+  sourceDecoder.decode(
+    await readBoundedFile(path, {
+      scope,
+      maxBytes: sizeLimitFor("code"),
+    }),
+  );
 
 interface LspRange {
   start: LspPosition;
@@ -57,7 +76,7 @@ async function prime(path: string, roots: string[]): Promise<{ root: string; tex
   const root = rootFor(path, roots);
   if (!root) throw new Error(`${path} isn't inside any open Canopy project`);
   const existing = monaco.editor.getModel(monaco.Uri.file(path));
-  const text = existing ? existing.getValue() : await ipc.fsReadText(path);
+  const text = existing ? existing.getValue() : await readSourceText(path, root);
   modelFor(path, text);
   await ensureLanguageServer(path, root);
   if (!(await hasServerFor(path, root))) {
@@ -144,7 +163,7 @@ const pathOfUri = (uri: string) => decodeURIComponent(uri.replace(/^file:\/\//, 
 
 /** Locations with the line they point at — a bare file:line list makes the
  *  agent open every hit; the line text usually settles it without a read. */
-async function describeLocations(locations: LspLocation[]) {
+async function describeLocations(locations: LspLocation[], roots: string[]) {
   const cache = new Map<string, string[]>();
   const out = [];
   for (const loc of locations.slice(0, MAX_LOCATIONS)) {
@@ -152,7 +171,11 @@ async function describeLocations(locations: LspLocation[]) {
     let lines = cache.get(path);
     if (!lines) {
       const model = monaco.editor.getModel(monaco.Uri.file(path));
-      const text = model ? model.getValue() : await ipc.fsReadText(path).catch(() => "");
+      const text = model
+        ? model.getValue()
+        : await readSourceText(path, rootFor(path, roots) ?? "agent-ops").catch(
+            () => "",
+          );
       lines = text.split("\n");
       cache.set(path, lines);
     }
@@ -202,7 +225,7 @@ async function symbolQuery(
       ? { uri: r.targetUri, range: r.targetSelectionRange ?? r.targetRange }
       : r,
   );
-  const found = await describeLocations(locations);
+  const found = await describeLocations(locations, roots);
   return {
     of,
     count: locations.length,
@@ -292,23 +315,23 @@ async function symbols(op: ipc.AgentUiOp, roots: string[]) {
 async function tickets(repos: string[]) {
   const out: { source: string; ticket: ipc.TicketInfo }[] = [];
   const errors: string[] = [];
-  await Promise.all(
-    TRACKERS.map(async (provider) => {
-      const available = await provider.available(repos);
-      if (!available.ok) return;
-      for (const repo of repos) {
-        try {
-          const list = await provider.fetch(repo);
-          out.push(...list.map((ticket) => ({ source: provider.id, ticket })));
-        } catch (err) {
-          errors.push(`${provider.name}: ${String(err)}`);
-        }
-        // Global trackers answer the same list for every repo; asking once is
-        // enough (see TrackerProvider.scope).
-        if (provider.scope === "global") break;
+  for (const provider of TRACKERS) {
+    const available = await provider.available(repos);
+    if (!available.ok) continue;
+    for (const repo of repos) {
+      try {
+        const list = await runProjectNetwork(repo || provider.id, () =>
+          provider.fetch(repo),
+        );
+        out.push(...list.map((ticket) => ({ source: provider.id, ticket })));
+      } catch (err) {
+        errors.push(`${provider.name}: ${String(err)}`);
       }
-    }),
-  );
+      // Global trackers answer the same list for every repo; asking once is
+      // enough (see TrackerProvider.scope).
+      if (provider.scope === "global") break;
+    }
+  }
   return {
     tickets: out.map(({ source, ticket }) => ({
       source,
@@ -352,7 +375,9 @@ async function reviews(repos: string[], inbox: ipc.RelayCommandMsg[]) {
   const prs = (
     await Promise.all(
       repos.map(async (repo) => {
-        const list = await ipc.ghPrList(repo).catch(() => []);
+        const list = await runProjectNetwork(repo, () => ipc.ghPrList(repo)).catch(
+          () => [],
+        );
         return list.map((pr) => ({
           repo,
           number: pr.number,
@@ -459,7 +484,7 @@ async function workspacePrs(ctx: UiOpContext, project?: string | null) {
     await Promise.all(
       companionRepos(ctx, project).map(async ({ project: name, repo }) => {
         try {
-          const prs = await ipc.ghPrList(repo);
+          const prs = await runProjectNetwork(repo, () => ipc.ghPrList(repo));
           if (prs.length === 50) possiblyTruncatedRepos.add(repo);
           return prs.map((pr) => ({ project: name, repo, ...pr }));
         } catch (err) {
@@ -495,14 +520,19 @@ function checkedCompanionRepo(ctx: UiOpContext, repo: string | null | undefined)
 async function prDetails(op: ipc.AgentUiOp, ctx: UiOpContext) {
   const repo = checkedCompanionRepo(ctx, op.repo);
   if (!op.number) throw new Error("number is required");
+  const number = op.number;
   const [body, conversation, reviewers, diff, failingLogs] = await Promise.all([
-    ipc.ghPrBody(repo, op.number),
-    ipc.ghPrConversation(repo, op.number),
-    ipc.ghPrReviewerCandidates(repo).catch(() => []),
-    op.includeDiff ? ipc.ghPrDiff(repo, op.number) : Promise.resolve(undefined),
-    op.includeLogs ? ipc.ghPrFailingLogs(repo, op.number) : Promise.resolve(undefined),
+    runProjectNetwork(repo, () => ipc.ghPrBody(repo, number)),
+    runProjectNetwork(repo, () => ipc.ghPrConversation(repo, number)),
+    runProjectNetwork(repo, () => ipc.ghPrReviewerCandidates(repo)).catch(() => []),
+    op.includeDiff
+      ? runProjectNetwork(repo, () => ipc.ghPrDiff(repo, number))
+      : Promise.resolve(undefined),
+    op.includeLogs
+      ? runProjectNetwork(repo, () => ipc.ghPrFailingLogs(repo, number))
+      : Promise.resolve(undefined),
   ]);
-  return { repo, number: op.number, body, conversation, reviewers, diff, failingLogs };
+  return { repo, number, body, conversation, reviewers, diff, failingLogs };
 }
 
 async function prAction(op: ipc.AgentUiOp, ctx: UiOpContext) {

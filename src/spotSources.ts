@@ -21,6 +21,7 @@ import { toPrInfo } from "./prInbox";
 import { getSettings } from "./settings";
 import { heldBadge, heldBranches } from "./branchSwitch";
 import { getSnapshot as clipboardSnapshot } from "./clipboardStore";
+import { rendererIoBudget } from "./ioBudget";
 
 /** What Enter does on a row — ProjectView owns the dispatch, this names it. */
 export type SpotAction =
@@ -595,22 +596,30 @@ let ticketCache: {
 } | null = null;
 const TICKET_TTL = 60_000;
 
-export async function ticketRows(query: string, repos: string[]): Promise<SpotRow[]> {
+export async function ticketRows(
+  query: string,
+  repos: string[],
+  signal?: AbortSignal,
+): Promise<SpotRow[]> {
   if (!query.trim()) return [];
   const key = repos.join("\n");
   if (!ticketCache || ticketCache.key !== key || Date.now() - ticketCache.at > TICKET_TTL) {
     const rows: { source: string; ticket: ipc.TicketInfo }[] = [];
-    await Promise.all(
-      TRACKERS.map(async (provider) => {
-        const available = await provider.available(repos).catch(() => ({ ok: false }));
-        if (!available.ok) return;
-        for (const repo of repos) {
-          const list = await provider.fetch(repo).catch(() => [] as ipc.TicketInfo[]);
-          rows.push(...list.map((ticket) => ({ source: provider.id, ticket })));
-          if (provider.scope === "global") break;
-        }
-      }),
-    );
+    // This used to fan providers × repositories out at once. Search is cached
+    // for a minute, so bounded sequential launch is a better trade than a burst
+    // of CLI/network responses for a query the user may already have replaced.
+    for (const provider of TRACKERS) {
+      if (signal?.aborted) return [];
+      const available = await provider.available(repos).catch(() => ({ ok: false }));
+      if (!available.ok) continue;
+      for (const repo of repos) {
+        if (signal?.aborted) return [];
+        const list = await provider.fetch(repo).catch(() => [] as ipc.TicketInfo[]);
+        if (signal?.aborted) return [];
+        rows.push(...list.map((ticket) => ({ source: provider.id, ticket })));
+        if (provider.scope === "global") break;
+      }
+    }
     ticketCache = { at: Date.now(), key, rows };
   }
   return ranked(
@@ -641,25 +650,30 @@ let branchCache: {
 } | null = null;
 const BRANCH_TTL = 15_000;
 
-export async function branchRows(query: string, repos: string[]): Promise<SpotRow[]> {
+export async function branchRows(
+  query: string,
+  repos: string[],
+  signal?: AbortSignal,
+): Promise<SpotRow[]> {
   if (!query.trim()) return [];
   const key = repos.join("\n");
   if (!branchCache || branchCache.key !== key || Date.now() - branchCache.at > BRANCH_TTL) {
-    const lists = await Promise.all(
-      repos.map(async (repo) => {
-        const [branches, worktrees] = await Promise.all([
-          ipc.gitBranches(repo).catch(() => [] as ipc.BranchInfo[]),
-          ipc.gitWorktrees(repo).catch(() => [] as ipc.WorktreeInfo[]),
-        ]);
-        const held = heldBranches(worktrees, repo);
-        return (
-          branches
-            // Switching to where you already are is not a result.
-            .filter((branch) => !branch.current)
-            .map((branch) => ({ repo, branch, held: held.get(branch.name) }))
-        );
-      }),
-    );
+    const lists = [];
+    for (const repo of repos) {
+      if (signal?.aborted) return [];
+      const [branches, worktrees] = await Promise.all([
+        ipc.gitBranches(repo).catch(() => [] as ipc.BranchInfo[]),
+        ipc.gitWorktrees(repo).catch(() => [] as ipc.WorktreeInfo[]),
+      ]);
+      if (signal?.aborted) return [];
+      const held = heldBranches(worktrees, repo);
+      lists.push(
+        branches
+          // Switching to where you already are is not a result.
+          .filter((branch) => !branch.current)
+          .map((branch) => ({ repo, branch, held: held.get(branch.name) })),
+      );
+    }
     branchCache = { at: Date.now(), key, rows: lists.flat() };
   }
   return ranked(
@@ -733,6 +747,9 @@ export interface SpotQuery {
    *  ranking prose against filenames is work whose every row the palette is
    *  about to discard. */
   composing?: boolean;
+  /** Superseded keystrokes abort queued source admission and let cooperative
+   * sources stop before launching their next native/network request. */
+  signal?: AbortSignal;
 }
 
 export interface SpotSource {
@@ -780,9 +797,9 @@ const SOURCES: SpotSource[] = [
   // same argument research makes against tickets, one level further up.
   { id: "notes", group: "Scratchpad", blurb: "Your own captured thoughts, ideas and to-dos in this project.", timing: "instant", rows: (q) => noteRows(q.query, q.ctx.projectId) },
   { id: "research", group: "Research", blurb: "Findings recorded in this project — what was investigated, and what shipped from it.", timing: "instant", rows: (q) => researchRows(q.query, q.ctx.projectId) },
-  { id: "tickets", group: "Tickets", blurb: "Issues from the configured trackers. Fetches over the network, cached 60s.", timing: "deferred", rows: (q) => ticketRows(q.query, q.roots) },
+  { id: "tickets", group: "Tickets", blurb: "Issues from the configured trackers. Fetches over the network, cached 60s.", timing: "deferred", rows: (q) => ticketRows(q.query, q.roots, q.signal) },
   { id: "prs", group: "Pull Requests", blurb: "Open PRs the watcher has already fetched — no round trip here.", timing: "instant", rows: (q) => prRows(q.query) },
-  { id: "branches", group: "Branches", blurb: "Branches in this project's repos, local and remote. Enter switches this repo to one.", timing: "deferred", rows: (q) => branchRows(q.query, q.roots) },
+  { id: "branches", group: "Branches", blurb: "Branches in this project's repos, local and remote. Enter switches this repo to one.", timing: "deferred", rows: (q) => branchRows(q.query, q.roots, q.signal) },
   { id: "servers", group: "Servers", blurb: "Every command this project can run, and what's up right now.", timing: "instant", rows: (q) => serverRows(q.query, q.ctx) },
   { id: "tasks", group: "Task History", blurb: "One-shot tasks that have finished, and what they reported.", timing: "instant", rows: (q) => taskRows(q.query, q.ctx) },
 ];
@@ -864,11 +881,20 @@ export function instantRows(q: SpotQuery): SpotRow[] {
 /** The debounced ones, all in flight together. */
 export async function deferredRows(q: SpotQuery): Promise<SpotRow[]> {
   const off = disabled();
+  const estimatedResponseBytes = 512 * 1024;
   const lists = await Promise.all(
     SOURCES.filter((s) => s.timing === "deferred" && asks(s, q, off)).map((s) =>
-      Promise.resolve()
-        .then(() => s.rows(q))
+      rendererIoBudget
+        .run(
+          {
+            scope: q.ctx.projectId,
+            bytes: estimatedResponseBytes,
+            signal: q.signal,
+          },
+          () => Promise.resolve().then(() => s.rows(q)),
+        )
         .catch((err) => {
+          if (err instanceof Error && err.name === "AbortError") return [] as SpotRow[];
           if (import.meta.env?.DEV) console.warn(`[spot] source "${s.id}" failed`, err);
           return [] as SpotRow[];
         }),
