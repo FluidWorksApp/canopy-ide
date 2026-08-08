@@ -30,11 +30,13 @@ export interface TermSubTab {
   cwd: string;
   /** Auto title, tracked from the shell/OSC. Shown unless the user renamed. */
   title: string;
+  /** Canopy-owned stable session name. Display-only; PTY id/token remain the
+   *  authority for every privileged operation. */
+  name?: string;
   /** Agent-published one-line description, updated through canopy_name_task
    *  whenever the work changes. */
   description?: string;
-  /** User-set name (double-click the tab). Wins over `title` for display and
-   *  survives the shell repainting its own title; cleared by renaming to empty. */
+  /** Legacy/prespawn rename. Live sessions move this into native `name`. */
   customTitle?: string;
   ptyId: number | null;
   /** When set, this tab attaches to an already-running headless PTY (spawned
@@ -585,7 +587,7 @@ export function describeTab(tab: SubTab | undefined) {
     case "terminal":
       return {
         kind: tab.run ? "run" : "terminal",
-        label: tab.customTitle ?? tab.title,
+        label: tab.name ?? tab.customTitle ?? tab.title,
         cwd: tab.cwd,
         ptyId: tab.ptyId,
       };
@@ -655,7 +657,7 @@ export const tabId = () =>
 export function tabDisplayLabel(t: SubTab): string {
   switch (t.type) {
     case "terminal":
-      return t.multiplexTitle ?? t.customTitle ?? t.title;
+      return t.multiplexTitle ?? t.name ?? t.customTitle ?? t.title;
     case "file":
       return t.file.name;
     case "pr":

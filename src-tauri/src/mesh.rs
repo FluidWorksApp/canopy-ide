@@ -75,6 +75,8 @@ pub struct MeshMessage {
     pub from_pty_id: Option<u32>,
     #[serde(default)]
     pub from_cwd: Option<String>,
+    #[serde(default)]
+    pub from_name: Option<String>,
     /// Which CLI the sender was, and what its run was titled at send time —
     /// the "who is this and what are they working on" that a bare pty id
     /// stops answering the moment the app restarts.
@@ -85,6 +87,8 @@ pub struct MeshMessage {
     pub to_pty_id: u32,
     #[serde(default)]
     pub to_cwd: Option<String>,
+    #[serde(default)]
+    pub to_name: Option<String>,
     #[serde(default)]
     pub to_agent: Option<String>,
     #[serde(default)]
@@ -121,10 +125,12 @@ pub struct MeshMessage {
 pub struct NewMessage {
     pub from_pty_id: Option<u32>,
     pub from_cwd: Option<String>,
+    pub from_name: Option<String>,
     pub from_agent: Option<String>,
     pub from_task: Option<String>,
     pub to_pty_id: u32,
     pub to_cwd: Option<String>,
+    pub to_name: Option<String>,
     pub to_agent: Option<String>,
     pub to_task: Option<String>,
     pub text: String,
@@ -283,10 +289,12 @@ impl MeshStore {
             id,
             from_pty_id: new.from_pty_id,
             from_cwd: new.from_cwd,
+            from_name: new.from_name,
             from_agent: new.from_agent,
             from_task: new.from_task,
             to_pty_id: new.to_pty_id,
             to_cwd: new.to_cwd,
+            to_name: new.to_name,
             to_agent: new.to_agent,
             to_task: new.to_task,
             text: new.text,
@@ -755,10 +763,12 @@ mod tests {
         NewMessage {
             from_pty_id: Some(1),
             from_cwd: Some("/w".into()),
+            from_name: Some("Ember".into()),
             from_agent: Some("claude".into()),
             from_task: Some("mesh work".into()),
             to_pty_id: to,
             to_cwd: Some("/w".into()),
+            to_name: Some("Juniper".into()),
             to_agent: None,
             to_task: None,
             text: text.into(),

@@ -48,6 +48,7 @@ const claimOf = (over: Partial<ipcTypes.AgentClaim> = {}): ipcTypes.AgentClaim =
 
 const session = (over: Partial<ipcTypes.SessionStats> = {}): ipcTypes.SessionStats => ({
   id: 7,
+  name: "Ember",
   title: "shell",
   cwd: "/repo",
   total_cpu: 1,
@@ -76,16 +77,16 @@ const page = (over: Partial<React.ComponentProps<typeof AgentsView>> = {}) =>
   );
 
 describe("the agents page", () => {
-  it("names each running session by its tab, like the panel does", () => {
+  it("names each running session by its stable assigned name, like the panel does", () => {
     page({
-      stats: [session({ id: 7 }), session({ id: 8 })],
+      stats: [session({ id: 7, name: "Ember" }), session({ id: 8, name: "Juniper" })],
       tabNames: new Map([
-        [7, { title: "Fix the login redirect" }],
-        [8, { title: "Android preview" }],
+        [7, { title: "canopy" }],
+        [8, { title: "canopy" }],
       ]),
     });
-    expect(screen.getByText("Fix the login redirect")).toBeTruthy();
-    expect(screen.getByText("Android preview")).toBeTruthy();
+    expect(screen.getByText("Ember")).toBeTruthy();
+    expect(screen.getByText("Juniper")).toBeTruthy();
   });
 
   it("counts what is running", () => {
@@ -156,7 +157,10 @@ describe("the attention axis on the page", () => {
 
   it("counts an attention-blocked agent under 'waiting on you' and sorts it first", () => {
     const { container } = page({
-      stats: [session({ id: 7 }), session({ id: 8 })],
+      stats: [
+        session({ id: 7, name: "quiet one" }),
+        session({ id: 8, name: "blocked one" }),
+      ],
       tabNames: new Map([
         [7, { title: "quiet one" }],
         [8, { title: "blocked one" }],

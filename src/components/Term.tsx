@@ -94,7 +94,7 @@ interface TermProps {
    *  agent (it stays controllable from the phone). */
   attachId?: number;
   killAttachedOnClose?: boolean;
-  onSpawned: (ptyId: number) => void;
+  onSpawned: (ptyId: number, name?: string) => void;
   onExited: (event: ipc.PtyExit) => void;
   onTitle?: (title: string) => void;
   /** The program in this terminal asked for attention — see the OSC handlers. */
@@ -123,6 +123,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   streamingRef.current = streaming;
   const onExitedRef = useRef(onExited);
   onExitedRef.current = onExited;
+  const onSpawnedRef = useRef(onSpawned);
+  onSpawnedRef.current = onSpawned;
 
   const captureText = (maxChars = 8000) => {
     const term = termRef.current;
@@ -570,12 +572,12 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // Once the pty (fresh or attached) is bound: adopt its grid and announce
     // the id. Exit listening is installed before either spawn path, so a
     // command that fails immediately cannot disappear between spawn and listen.
-    const bound = (id: number, geom: { cols: number; rows: number }) => {
+    const bound = (id: number, geom: { cols: number; rows: number; name?: string }) => {
       ptyIdRef.current = id;
       applyGeometry(geom);
       if (!hasBound) {
         hasBound = true;
-        onSpawned(id);
+        onSpawnedRef.current(id, geom.name);
       }
       const early = earlyExits.get(id);
       if (early) {
@@ -738,6 +740,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         onSpawned(id);
         onExitedRef.current({
           id,
+          session_generation: ipc.rendererSessionGeneration(),
           exit_code: 127,
           requested: false,
           spawnError: String(err),

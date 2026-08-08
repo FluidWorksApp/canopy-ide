@@ -2,6 +2,27 @@ import { describe, expect, it } from "vitest";
 import { agentDisplayName, tabNamesByPty } from "./agentDisplayName";
 
 describe("agentDisplayName", () => {
+  it("uses the Canopy-assigned name ahead of CLI title and cwd", () => {
+    expect(
+      agentDisplayName({
+        tab: { name: "Juniper", title: "✳ Fix the login redirect" },
+        sessionName: "Ember",
+        sessionTitle: "codex",
+        cwd: "/work/canopy",
+      }),
+    ).toBe("Juniper");
+  });
+
+  it("uses the native session name when there is no mounted tab", () => {
+    expect(
+      agentDisplayName({
+        sessionName: "Ember",
+        sessionTitle: "codex",
+        cwd: "/work/canopy",
+      }),
+    ).toBe("Ember");
+  });
+
   it("shows the name the user typed on the tab", () => {
     expect(
       agentDisplayName({
@@ -49,6 +70,10 @@ describe("agentDisplayName", () => {
     expect(agentDisplayName({ sessionTitle: "npm run dev" })).toBe("npm run dev");
   });
 
+  it("falls back from a generic CLI title to the cwd basename", () => {
+    expect(agentDisplayName({ sessionTitle: "zsh", cwd: "/work/canopy" })).toBe("canopy");
+  });
+
   it("never renders an empty row", () => {
     expect(agentDisplayName({})).toBe("shell");
   });
@@ -62,7 +87,11 @@ describe("tabNamesByPty", () => {
       { type: "file", ptyId: 9, title: "README.md" },
       { type: "terminal", ptyId: 8, title: "zsh", customTitle: "api" },
     ]);
-    expect(map.get(7)).toEqual({ title: "✳ Fix tests", customTitle: undefined });
+    expect(map.get(7)).toEqual({
+      name: undefined,
+      title: "✳ Fix tests",
+      customTitle: undefined,
+    });
     expect(map.get(8)?.customTitle).toBe("api");
     expect(map.has(9)).toBe(false);
     expect(map.size).toBe(2);
