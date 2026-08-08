@@ -341,6 +341,74 @@ describe("VibeBuilderSession", () => {
     );
   });
 
+  it("retains the browser error that existed before verification reloads", async () => {
+    const order: string[] = [];
+    vi.spyOn(ipc, "browserHere").mockResolvedValue({
+      url: "http://localhost:5173/login",
+      title: "Login",
+    });
+    vi.spyOn(ipc, "browserNavigate").mockImplementation(async () => {
+      order.push("reload");
+    });
+    vi.spyOn(ipc, "browserPainted").mockResolvedValue(true);
+    let consoleReads = 0;
+    let evalCalls = 0;
+    vi.spyOn(ipc, "browserRunOp").mockImplementation(async (_tab, request) => {
+      if (request.op === "console") {
+        order.push("console");
+        return {
+          done: true,
+          ok: true,
+          data: {
+            messages: consoleReads++ === 0
+              ? [{ level: "error", text: "TypeError: auth.user is undefined" }]
+              : [],
+          },
+        };
+      }
+      if (request.op === "network") {
+        return {
+          done: true,
+          ok: true,
+          data: {
+            requests: [{ url: "/api/session", status: 500, ms: 18, bytes: 42 }],
+            total: 1,
+            pending: 0,
+            lastActivityAt: 0,
+          },
+        };
+      }
+      if (request.op === "eval") {
+        return {
+          done: true,
+          ok: true,
+          data: { result: evalCalls++ === 0 ? 100 : { ready: "complete", origin: 200 } },
+        };
+      }
+      return null;
+    });
+
+    const inspection = await DEFAULT_VIBE_BUILDER_DEPS.inspectBrowser(
+      "preview-1",
+      false,
+      10,
+      true,
+    );
+
+    expect(order.indexOf("console")).toBeLessThan(order.indexOf("reload"));
+    expect(inspection.consoleErrors).toEqual([
+      "TypeError: auth.user is undefined",
+    ]);
+    expect(inspection.consoleTail).toContain("auth.user is undefined");
+    expect(inspection.failedRequests).toContainEqual(
+      expect.objectContaining({ url: "/api/session", status: 500 }),
+    );
+    expect(inspection.pageUrl).toBe("http://localhost:5173/login");
+    expect(inspection.observations).toContainEqual(
+      expect.objectContaining({ kind: "console", verdict: "fail" }),
+    );
+  });
+
   // The scan itself is unit-tested next door; what this covers is the wiring
   // that made it dead code — `secretScanClean` was a hardcoded `false`, so no
   // turn could ever save itself however clean the diff, and no test noticed
@@ -528,6 +596,13 @@ describe("VibeBuilderSession", () => {
     );
     expect(h.deps.reserve).not.toHaveBeenCalled();
     expect(h.deps.runner.start).not.toHaveBeenCalled();
+    expect(h.session.state.question).toEqual(
+      expect.objectContaining({
+        kind: "question",
+        prompt: "I need a coding agent before I can make this change.",
+        detail: "claude: signed out",
+      }),
+    );
   });
 
   it("launches on the model the route asked for", async () => {
@@ -1201,6 +1276,76 @@ describe("VibeBuilderSession", () => {
     );
     expect(h.events.filter((event) => event.kind === "verification.observation"))
       .toHaveLength(5);
+  });
+
+  it("repairs a browser runtime error once, then re-inspects and re-judges", async () => {
+    const inspectBrowser = vi
+      .fn<VibeBuilderSessionDeps["inspectBrowser"]>()
+      .mockResolvedValueOnce({
+        observations: [
+          observation("server"),
+          { ...observation("console", "fail"), note: "auth.user is undefined" },
+          { ...observation("network", "fail"), note: "/api/session returned 500" },
+          observation("screenshot"),
+        ],
+        consoleErrors: ["TypeError: auth.user is undefined"],
+        consoleTail: "[error] TypeError: auth.user is undefined",
+        failedRequests: [{ url: "/api/session", status: 500, ms: 18, bytes: 42 }],
+        pageUrl: "http://localhost:5173/login",
+      })
+      .mockResolvedValueOnce({
+        observations: [
+          { ...observation("server"), at: 11 },
+          { ...observation("console"), at: 11 },
+          { ...observation("network"), at: 11 },
+          { ...observation("screenshot"), at: 11 },
+        ],
+        consoleErrors: [],
+        failedRequests: [],
+        pageUrl: "http://localhost:5173/login",
+      });
+    const repair = vi.fn<NonNullable<VibeBuilderSessionDeps["repair"]>>(async () => ({
+      ok: true,
+      verdict: {
+        diagnosis: "The login page read the session before it existed.",
+        actions: [{ did: "Guarded the session lookup." }],
+        fixed: true,
+      },
+      runId: "repair-1",
+    }));
+    const h = harness({ inspectBrowser, repair });
+    await h.session.send("Fix the runtime bug");
+    h.emit({ kind: "turnEnd" });
+
+    await vi.waitFor(() =>
+      expect(h.deps.settleAttempt).toHaveBeenCalledWith(
+        expect.objectContaining({ state: "completed" }),
+      ),
+    );
+    expect(inspectBrowser).toHaveBeenCalledTimes(2);
+    expect(repair).toHaveBeenCalledTimes(1);
+    expect(repair).toHaveBeenCalledWith({
+      problem: expect.objectContaining({
+        code: "runtime-error",
+        evidence: expect.objectContaining({
+          pageUrl: "http://localhost:5173/login",
+          consoleTail: "[error] TypeError: auth.user is undefined",
+          failedRequests: [
+            expect.objectContaining({ url: "/api/session", status: 500 }),
+          ],
+        }),
+      }),
+    });
+    const consoleEvents = h.events.filter(
+      (event) => event.kind === "verification.observation" && event.code === "console",
+    );
+    expect(consoleEvents).toHaveLength(2);
+    expect(consoleEvents.map((event) => (
+      event.metadata as VerificationObservation
+    ).verdict)).toEqual(["fail", "pass"]);
+    expect(h.events).toContainEqual(
+      expect.objectContaining({ kind: "verification.verdict", code: "verified" }),
+    );
   });
 
   it("records unknown evidence without surfacing checkpoint bookkeeping", async () => {

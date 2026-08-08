@@ -71,6 +71,49 @@ describe("a failed check is diagnosed, not reported", () => {
   });
 });
 
+describe("a browser runtime failure is repaired and independently re-inspected", () => {
+  const source = read("src/vibeBuilderSession.ts");
+  const verify = source.slice(
+    source.indexOf("private async verifyTurn"),
+    source.indexOf("private async repairRuntimeBrowserFailure"),
+  );
+  const repair = source.slice(
+    source.indexOf("private async repairRuntimeBrowserFailure"),
+    source.indexOf("private async repairFailedCheck"),
+  );
+
+  it("repairs before composing the final verification summary", () => {
+    const repairAt = verify.indexOf("repairRuntimeBrowserFailure(");
+    const summaryAt = verify.indexOf("verificationSummary(");
+    expect(repairAt).toBeGreaterThan(-1);
+    expect(summaryAt).toBeGreaterThan(repairAt);
+  });
+
+  it("re-inspects only after repair reports a fix", () => {
+    expect(repair.indexOf("result.verdict.fixed")).toBeGreaterThan(-1);
+    expect(repair.indexOf(".inspectBrowser(")).toBeGreaterThan(
+      repair.indexOf("result.verdict.fixed"),
+    );
+  });
+
+  it("uses the production lazy repair path for browser and check failures", () => {
+    expect(repair).toContain("this.repairDependency()");
+    const checkRepair = source.slice(
+      source.indexOf("private async repairFailedCheck"),
+      source.indexOf("private launchSpec"),
+    );
+    expect(checkRepair).toContain("this.repairDependency()");
+    expect(checkRepair).not.toContain("!this.deps.repair");
+  });
+
+  it("keeps the second browser observations in the ledger before re-judging", () => {
+    const repairAt = verify.indexOf("repairRuntimeBrowserFailure(");
+    const afterRepair = verify.slice(repairAt);
+    expect(afterRepair).toContain('kind: "verification.observation"');
+    expect(afterRepair).toContain("judgeVerification(contract, observations)");
+  });
+});
+
 describe("the Build executor can make its change actually run", () => {
   const source = read("src/vibeBuilderSession.ts");
 

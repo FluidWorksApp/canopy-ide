@@ -35,6 +35,18 @@ export interface RepairProblem {
     exitCode?: number | null;
     crashCount?: number;
     context?: string;
+    /** The route that was visibly broken in the embedded preview. */
+    pageUrl?: string;
+    /** Full browser messages, capped before they enter the prompt. */
+    consoleTail?: string;
+    /** Failed requests captured from the same preview turn. */
+    failedRequests?: Array<{
+      url?: string;
+      status?: number | null;
+      error?: string;
+      ms?: number;
+      bytes?: number;
+    }>;
   };
 }
 
@@ -82,6 +94,15 @@ const evidenceSection = (problem: RepairProblem): string => {
   }
   if (problem.evidence.context !== undefined) {
     lines.push(`Other context: ${problem.evidence.context}`);
+  }
+  if (problem.evidence.pageUrl !== undefined) {
+    lines.push(`Preview URL: ${problem.evidence.pageUrl}`);
+  }
+  if (problem.evidence.consoleTail !== undefined) {
+    lines.push(`Browser console:\n\`\`\`text\n${problem.evidence.consoleTail}\n\`\`\``);
+  }
+  if (problem.evidence.failedRequests?.length) {
+    lines.push(`Failed browser requests:\n\`\`\`json\n${JSON.stringify(problem.evidence.failedRequests, null, 2)}\n\`\`\``);
   }
   return lines.length ? lines.join("\n\n") : "No additional evidence was captured.";
 };
@@ -140,7 +161,7 @@ ${commandSection(problem)}
 The complete observed project topology is:
 ${topologySection(problem)}
 
-Diagnose first from the evidence given. Prefer the configured commands over inventing commands. For database failures, inspect the recorded schema and migration paths, compare the latest recorded migration with the configured status command, and test locally when possible. For a managed provider, prefer a linked account API/MCP route; ask the person to link the provider account when it is missing, and use its authenticated CLI only as the fallback. Never ask for a long-lived token in chat. Never apply a managed migration without explicit confirmation, regardless of whether it uses an API, MCP tool, or CLI. Verify that the fix actually works before claiming it is fixed: every affected required process must be ready, or the relevant command must exit cleanly.`;
+Diagnose first from the evidence given. Prefer the configured commands over inventing commands. For browser failures, reproduce the supplied preview URL in Canopy's embedded browser, inspect its console, failed requests, and page state, choose the debugging route that fits the observed stack, and reproduce the same route again after the fix. For database failures, inspect the recorded schema and migration paths, compare the latest recorded migration with the configured status command, and test locally when possible. For a managed provider, prefer a linked account API/MCP route; ask the person to link the provider account when it is missing, and use its authenticated CLI only as the fallback. Never ask for a long-lived token in chat. Never apply a managed migration without explicit confirmation, regardless of whether it uses an API, MCP tool, or CLI. Verify that the fix actually works before claiming it is fixed: every affected required process must be ready, or the relevant command must exit cleanly.`;
 
   return { system, user };
 }
