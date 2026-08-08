@@ -1028,18 +1028,91 @@ body,
   line-height: 1.4;
 }
 
-.vibe-builder-question-diff {
-  max-height: 180px;
-  margin: 6px 0 2px;
-  padding: 8px;
-  overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--bg-deep);
-  color: var(--text-dim);
-  font-size: 10px;
-  line-height: 1.45;
-  white-space: pre-wrap;
+.vibe-builder-card {
+  position: relative;
+  gap: 6px;
+  padding: 12px 13px 13px;
+  overflow: hidden;
+  border-color: color-mix(in srgb, var(--text-dim) 32%, var(--border));
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--bg-raised) 92%, transparent), transparent),
+    var(--bg-alt);
+  box-shadow: 0 8px 28px color-mix(in srgb, #000 18%, transparent);
+}
+
+.vibe-builder-card-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.vibe-builder-card-mark {
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--text-dim);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-dim) 12%, transparent);
+}
+
+.vibe-builder-card .companion-ask-what {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.vibe-builder-card .companion-ask-detail {
+  margin: 0 0 0 16px;
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  word-break: normal;
+}
+
+.vibe-builder-card-progress {
+  border-color: color-mix(in srgb, var(--accent) 44%, var(--border));
+}
+
+.vibe-builder-card-progress .vibe-builder-card-mark {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.vibe-builder-card-decision {
+  border-color: color-mix(in srgb, var(--warn) 58%, var(--border));
+}
+
+.vibe-builder-card-decision .vibe-builder-card-mark,
+.vibe-builder-card-warning .vibe-builder-card-mark {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 15%, transparent);
+}
+
+.vibe-builder-card-success .vibe-builder-card-mark {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 15%, transparent);
+}
+
+.vibe-builder-card .companion-ask-buttons {
+  margin: 5px 0 0 16px;
+  flex-wrap: wrap;
+}
+
+.vibe-builder-card-action-neutral {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text);
+}
+
+.vibe-builder-card-action-danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: white;
+}
+
+.vibe-builder-card .companion-needs-cta:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .project-view-vibe .project-main > .pane-bar {

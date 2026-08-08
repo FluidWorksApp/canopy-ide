@@ -1,16 +1,23 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   INITIAL_PERSONA,
   reducePersona,
   type PersonaState,
 } from "../personaBridge";
 import type {
-  BuilderQuestion,
+  BuilderCard,
   BuilderSession,
   BuilderSessionState,
 } from "../vibeBuilderSessionTypes";
 import type { Project } from "../projects";
 import { vibeRequestMode, type VibeRequestMode } from "../vibeRequestMode";
+import type { AttentionItem } from "../attention";
+import { targetOf } from "../attention";
+import { formatDeepLink } from "../deepLinks";
+import {
+  builderCardFromAttention,
+  builderCardFromQuestion,
+} from "../vibeBuilderCards";
 import { mascotDef } from "../mascots";
 import { Markdown } from "./Markdown";
 import { Mascot } from "./Mascot";
@@ -35,8 +42,8 @@ type BuilderItem =
 interface BuilderView {
   items: BuilderItem[];
   persona: PersonaState;
-  question: BuilderQuestion | null;
-  questionId: string | null;
+  card: BuilderCard | null;
+  decisionId: string | null;
   openReplyId: string | null;
   announcement: { sourceId: string; text: string } | null;
 }
@@ -171,8 +178,8 @@ function initialView(state: BuilderSessionState): BuilderView {
     {
       items: [],
       persona: INITIAL_PERSONA,
-      question: null,
-      questionId: null,
+      card: null,
+      decisionId: null,
       openReplyId: null,
       announcement: null,
     },
@@ -189,13 +196,13 @@ function initialView(state: BuilderSessionState): BuilderView {
 function applySessionState(
   current: BuilderView,
   state: BuilderSessionState,
-): Pick<BuilderView, "persona" | "question" | "questionId"> {
-  const questionId = state.question?.id ?? null;
-  const asksForAnswer = Boolean(state.question && state.question.kind !== "notice");
+): Pick<BuilderView, "persona" | "card" | "decisionId"> {
+  const card = state.card ?? (state.question ? builderCardFromQuestion(state.question) : null);
+  const decisionId = card?.kind === "decision" ? card.id : null;
   let base = current.persona;
-  if (asksForAnswer && !base.questionPending) {
+  if (decisionId && !base.questionPending) {
     base = reducePersona(base, { kind: "question-asked" });
-  } else if (!asksForAnswer && base.questionPending) {
+  } else if (!decisionId && base.questionPending) {
     base = reducePersona(base, { kind: "question-answered" });
   }
   let persona = reducePersona(base, state.persona);
@@ -213,10 +220,10 @@ function applySessionState(
   }
   // The visible card is authoritative even if a stale state input says the
   // question was answered. Blocked still wins because it keeps pending true.
-  if (asksForAnswer && !persona.questionPending) {
+  if (decisionId && !persona.questionPending) {
     persona = reducePersona(persona, { kind: "question-asked" });
   }
-  return { persona, question: state.question ?? null, questionId };
+  return { persona, card, decisionId };
 }
 
 /** Presentation-only builder chat. The session owns execution; this owns pixels. */
@@ -224,10 +231,15 @@ export function VibeBuilderPane({
   session,
   project,
   phase = "build",
+  attention = [],
+  onOpenAttention,
 }: {
   session: BuilderSession;
   project?: VibeBuilderProject;
   phase?: VibeBuilderPhase;
+  /** Project-scoped items from the shared attention channel. */
+  attention?: readonly AttentionItem[];
+  onOpenAttention?: (item: AttentionItem) => void;
 }) {
   const nextId = () => `builder-${++builderItemSequence}`;
   const [view, setView] = useState(() => {
@@ -239,12 +251,12 @@ export function VibeBuilderPane({
     () => (project ? projectConversations.get(project.id)?.hasSpoken : false) ?? false,
   );
   const [draft, setDraft] = useState("");
-  const [answeringQuestion, setAnsweringQuestion] = useState<string | null>(null);
+  const [answeringCard, setAnsweringCard] = useState<string | null>(null);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
   const [cushionDismissed, setCushionDismissed] = useState(false);
   const [composerFocused, setComposerFocused] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const questionCard = useRef<HTMLDivElement>(null);
+  const cardElement = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const transcript = useRef<HTMLDivElement>(null);
   const projectId = project?.id ?? null;
@@ -255,7 +267,7 @@ export function VibeBuilderPane({
   useEffect(() => {
     sessionVersion.current += 1;
     setDraft("");
-    setAnsweringQuestion(null);
+    setAnsweringCard(null);
     setComposerFocused(false);
     setStopping(false);
     const switchedProject = projectIdRef.current !== projectId;
@@ -277,7 +289,7 @@ export function VibeBuilderPane({
       };
     });
     return session.events$.subscribe((event) => {
-      if (event.kind === "error") setAnsweringQuestion(null);
+      if (event.kind === "error") setAnsweringCard(null);
       setView((current) => {
         const state = applySessionState(current, session.state);
         const items = current.items.slice();
@@ -322,7 +334,11 @@ export function VibeBuilderPane({
             openReplyId = null;
             break;
           case "error":
-            items.push({ id: nextId(), kind: "error", text: event.message });
+            items.push({
+              id: nextId(),
+              kind: "error",
+              text: "I hit a problem and I’m checking what to do next.",
+            });
             openReplyId = null;
             break;
           case "turnEnd": {
@@ -378,13 +394,13 @@ export function VibeBuilderPane({
   }, [session, snapshot]);
 
   useEffect(() => {
-    setAnsweringQuestion(null);
-    if (view.questionId) {
+    setAnsweringCard(null);
+    if (view.decisionId) {
       // A genuinely new ask gets one entrance. After that the person may tuck
       // it away without answering; its id and session state stay untouched.
       setCushionDismissed(false);
     }
-  }, [view.questionId]);
+  }, [view.decisionId]);
 
   useEffect(() => {
     if (!transcriptOpen) return;
@@ -394,7 +410,7 @@ export function VibeBuilderPane({
 
   const reportSendError = (error: unknown, version: number, itemId?: string) => {
     if (version !== sessionVersion.current) return;
-    setAnsweringQuestion(null);
+    setAnsweringCard(null);
     setView((current) => ({
       ...current,
       items: [
@@ -482,7 +498,30 @@ export function VibeBuilderPane({
   };
 
   const name = mascotDef().label;
-  const question = view.question;
+  const attentionItem = useMemo(
+    () =>
+      [...attention]
+        .reverse()
+        .find((item) => builderCardFromAttention(item) !== null) ?? null,
+    [attention],
+  );
+  const attentionCard = attentionItem
+    ? builderCardFromAttention(attentionItem)
+    : null;
+  const card = view.card ?? attentionCard;
+  const openAttention = (item: AttentionItem) => {
+    if (onOpenAttention) {
+      onOpenAttention(item);
+      return;
+    }
+    const target = targetOf(item);
+    if (!target) return;
+    window.dispatchEvent(
+      new CustomEvent("canopy:follow-deep-link", {
+        detail: { url: formatDeepLink(target) },
+      }),
+    );
+  };
   const starterIdeas = vibeStarterIdeas(project);
 
   const chooseStarter = (idea: string) => {
@@ -515,7 +554,7 @@ export function VibeBuilderPane({
   );
   const showWelcome = !hasSpoken && view.items.length === 0;
   const contextualCushion =
-    Boolean(question) || (showWelcome && starterIdeas.length > 0);
+    Boolean(card) || (showWelcome && starterIdeas.length > 0);
   const cushionOpen =
     transcriptOpen || (contextualCushion && !cushionDismissed);
   const composerOpen =
@@ -527,10 +566,10 @@ export function VibeBuilderPane({
   const showTurnReceipt =
     Boolean(activeUserRequest) &&
     !transcriptOpen &&
-    (status.busy || Boolean(question) || status.signal === "blocked");
+    (status.busy || Boolean(card) || status.signal === "blocked");
   useEffect(() => {
-    if (view.questionId && cushionOpen) questionCard.current?.focus();
-  }, [cushionOpen, view.questionId]);
+    if (view.decisionId && cushionOpen) cardElement.current?.focus();
+  }, [cushionOpen, view.decisionId]);
   const stopCurrentTurn = async () => {
     if (!session.cancelCurrentTurn || stopping) return;
     setStopping(true);
@@ -610,7 +649,7 @@ export function VibeBuilderPane({
     );
   });
 
-  const welcome = showWelcome && !question && (
+  const welcome = showWelcome && !card && (
     <div className="vibe-builder-welcome">
       <span className="vibe-builder-welcome-kicker">Your idea, in motion</span>
       <strong>What should we make?</strong>
@@ -639,7 +678,7 @@ export function VibeBuilderPane({
   // the runtime has reached the first point at which it can accept a request.
   if (
     phase === "waiting" &&
-    !question
+    !card
   ) {
     return null;
   }
@@ -696,7 +735,7 @@ export function VibeBuilderPane({
                   type="button"
                   aria-expanded="true"
                   aria-label={
-                    question ? "Collapse question" : "Collapse suggestions"
+                    card ? "Collapse card" : "Collapse suggestions"
                   }
                   title="Show more of the product"
                   onMouseDown={(event) => {
@@ -726,46 +765,56 @@ export function VibeBuilderPane({
               welcome
             )}
 
-            {question && (
+            {card && (
               <div
-                ref={questionCard}
-                className={`vibe-builder-question vibe-builder-question-${question.kind} companion-ask`}
-                role="group"
+                ref={cardElement}
+                className={`vibe-builder-card vibe-builder-card-${card.kind}${
+                  card.kind === "outcome" ? ` vibe-builder-card-${card.tone}` : ""
+                } companion-ask`}
+                role={card.kind === "decision" ? "group" : "status"}
                 tabIndex={-1}
-                aria-live="assertive"
+                aria-live={card.kind === "decision" ? "assertive" : "polite"}
                 aria-atomic="true"
-                aria-label={`${question.kind === "confirm" ? "Confirm" : question.kind === "notice" ? "Update" : "Question"}: ${question.prompt}`}
+                aria-label={`${
+                  card.kind === "decision"
+                    ? "Decision"
+                    : card.kind === "progress"
+                      ? "Progress"
+                      : "Outcome"
+                }: ${card.title}`}
               >
-                <div className="companion-ask-what">{question.prompt}</div>
-                {question.detail && (
-                  <div className="companion-ask-detail">{question.detail}</div>
+                <div className="vibe-builder-card-heading">
+                  <span className="vibe-builder-card-mark" aria-hidden />
+                  <div className="companion-ask-what">{card.title}</div>
+                </div>
+                {card.detail && (
+                  <div className="companion-ask-detail">{card.detail}</div>
                 )}
-                {question.diff && (
-                  <pre className="vibe-builder-question-diff">{question.diff}</pre>
-                )}
-                {(question.actions ?? []).length > 0 ? (
+                {"actions" in card && (card.actions ?? []).length > 0 ? (
                   <div className="companion-ask-buttons">
-                    {(question.actions ?? []).map((action) => (
+                    {(card.actions ?? []).map((action) => (
                       <button
-                        className="companion-needs-cta"
+                        className={`companion-needs-cta vibe-builder-card-action-${action.tone ?? "neutral"}`}
                         type="button"
                         key={action.response}
-                        disabled={answeringQuestion === question.id}
+                        disabled={answeringCard === card.id}
                         onClick={() => {
-                          setAnsweringQuestion(question.id);
-                          send(action.response);
+                          setAnsweringCard(card.id);
+                          if (attentionItem && card.id === attentionCard?.id) {
+                            openAttention(attentionItem);
+                            setAnsweringCard(null);
+                          } else {
+                            send(action.response);
+                          }
                         }}
                       >
                         {action.label}
                       </button>
                     ))}
                   </div>
-                ) : question.kind === "notice" ? null : (
-                  // A notice is Canopy reporting, not asking. "Reply below."
-                  // under "I'm reading its output to find out why" told the
-                  // person to act on the one thing Canopy had just taken over.
+                ) : card.kind === "decision" ? (
                   <span className="companion-ask-detail">Reply below.</span>
-                )}
+                ) : null}
               </div>
             )}
           </div>
@@ -822,7 +871,7 @@ export function VibeBuilderPane({
               type="button"
               aria-expanded="false"
               aria-label={
-                question ? "Show pending question" : "Show suggestions"
+                card ? "Show pending card" : "Show suggestions"
               }
               title="Show this again"
               onClick={toggleContextualCushion}

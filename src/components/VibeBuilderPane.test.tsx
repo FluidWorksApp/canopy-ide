@@ -277,7 +277,7 @@ describe("VibeBuilderPane", () => {
 
     expect(screen.getByText("The app server keeps stopping.")).toBeTruthy();
     expect(screen.queryByText("What should we make?")).toBeNull();
-    const collapse = screen.getByRole("button", { name: "Collapse question" });
+    const collapse = screen.getByRole("button", { name: "Collapse card" });
     expect(collapse.closest(".vibe-builder-cushion-body")).not.toBeNull();
     expect(
       collapse.parentElement?.classList.contains("vibe-builder-cushion-controls"),
@@ -293,13 +293,13 @@ describe("VibeBuilderPane", () => {
     expect(screen.queryByText("The app server keeps stopping.")).toBeNull();
     expect(h.send).not.toHaveBeenCalled();
 
-    const restore = screen.getByRole("button", { name: "Show pending question" });
+    const restore = screen.getByRole("button", { name: "Show pending card" });
     expect(restore.closest("form")).not.toBeNull();
     fireEvent.click(restore);
     expect(pane.classList.contains("is-cushion")).toBe(true);
     expect(screen.getByText("The app server keeps stopping.")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "Collapse question" }));
+    fireEvent.click(screen.getByRole("button", { name: "Collapse card" }));
     expect(pane.classList.contains("is-collapsed")).toBe(true);
     expect(h.send).not.toHaveBeenCalled();
   });
@@ -383,8 +383,8 @@ describe("VibeBuilderPane", () => {
       });
       h.emit({ kind: "ready" });
     });
-    const notice = screen.getByRole("group", {
-      name: "Update: The app server keeps stopping.",
+    const notice = screen.getByRole("status", {
+      name: "Progress: The app server keeps stopping.",
     });
     expect(within(notice).getByText("I'm reading its output to find out why.")).toBeTruthy();
     expect(within(notice).queryByText("Reply below.")).toBeNull();
@@ -411,7 +411,7 @@ describe("VibeBuilderPane", () => {
 
     expect(screen.getByRole("img", { name: "Ash is needs" })).toBeTruthy();
     const question = screen.getByRole("group", {
-      name: "Question: Which page should open first?",
+      name: "Decision: Which page should open first?",
     });
     expect(within(question).getByText("Reply below.")).toBeTruthy();
     expect(document.activeElement).toBe(question);
@@ -441,10 +441,10 @@ describe("VibeBuilderPane", () => {
     render(<VibeBuilderPane session={h.session} />);
 
     const confirm = screen.getByRole("group", {
-      name: "Confirm: Apply the database migration?",
+      name: "Decision: Apply the database migration?",
     });
     expect(within(confirm).getByText(/Adds an orders table/)).toBeTruthy();
-    expect(within(confirm).getByText("+ create table orders")).toBeTruthy();
+    expect(within(confirm).queryByText("+ create table orders")).toBeNull();
     const apply = within(confirm).getByRole("button", { name: "Apply it" });
     fireEvent.click(apply);
     expect(h.send).toHaveBeenCalledWith("approve");
@@ -527,7 +527,73 @@ describe("VibeBuilderPane", () => {
 
     act(() => h.emit({ kind: "error", message: "The runner stopped." }));
     expect(action.hasAttribute("disabled")).toBe(false);
-    expect(screen.getByRole("alert").textContent).toContain("runner stopped");
+    expect(screen.getByRole("alert").textContent).toBe(
+      "I hit a problem and I’m checking what to do next.",
+    );
+  });
+
+  it("renders truthful progress and repair outcomes without inviting a reply", () => {
+    const h = harness({
+      persona: { kind: "turn-progress" },
+      card: {
+        id: "compile",
+        kind: "progress",
+        stage: "compiling",
+        title: "Compiling — first run takes a few minutes",
+        detail: "I’ll open the preview as soon as it’s ready.",
+      },
+    });
+    const mounted = render(<VibeBuilderPane session={h.session} />);
+    const progress = screen.getByRole("status", {
+      name: "Progress: Compiling — first run takes a few minutes",
+    });
+    expect(within(progress).queryByText("Reply below.")).toBeNull();
+
+    h.setState({
+      persona: { kind: "incident-recovered" },
+      card: {
+        id: "fixed",
+        kind: "outcome",
+        tone: "success",
+        title: "Found it and fixed it",
+        detail: "A declared dependency was missing. I installed it and checked the app.",
+      },
+    });
+    mounted.rerender(<VibeBuilderPane session={h.session} />);
+    expect(
+      screen.getByRole("status", { name: "Outcome: Found it and fixed it" }),
+    ).toBeTruthy();
+    expect(screen.queryByText("Reply below.")).toBeNull();
+  });
+
+  it("shows a project attention ask as a card and opens its existing route", () => {
+    const h = harness(idle());
+    const open = vi.fn();
+    const attention = [{
+      id: "attention-1",
+      kind: "question" as const,
+      tone: "warn" as const,
+      title: "Link the hosting account",
+      body: "The repair can continue after this.",
+      source: "agent" as const,
+      projectId: "project-1",
+      where: { kind: "terminal" as const, ptyId: 7, projectId: "project-1" },
+      ts: 1,
+    }];
+    render(
+      <VibeBuilderPane
+        session={h.session}
+        attention={attention}
+        onOpenAttention={open}
+      />,
+    );
+
+    const card = screen.getByRole("group", {
+      name: "Decision: Link the hosting account",
+    });
+    fireEvent.click(within(card).getByRole("button", { name: "Open request" }));
+    expect(open).toHaveBeenCalledWith(attention[0]);
+    expect(h.send).not.toHaveBeenCalled();
   });
 
   it("keeps a person's turn through internal session swaps and a project remount", async () => {
