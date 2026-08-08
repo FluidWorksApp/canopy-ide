@@ -1399,7 +1399,9 @@ impl PtyManager {
         };
         // The caller's own variables go on first, so Canopy's identity vars below
         // always win however a caller spells them.
-        for (k, v) in extra_env.unwrap_or_default() {
+        let extra_env = extra_env.unwrap_or_default();
+        let caller_set_aider_read = extra_env.iter().any(|(k, _)| k == "AIDER_READ");
+        for (k, v) in extra_env {
             if matches!(k.as_str(), "CANOPY_RUN_ID" | "CANOPY_ATTEMPT_ID") {
                 continue;
             }
@@ -1416,6 +1418,19 @@ impl PtyManager {
         // #5" from another's — which silently binds one agent's digest to another's
         // terminal in the panel. This tag makes the pairing unambiguous.
         cmd.env("CANOPY_INSTANCE", instance_token());
+        // Aider has no MCP client or system-prompt hook. Its documented
+        // AIDER_READ channel adds a read-only conventions file without
+        // creating a fake opening user turn. Scope it to Canopy's PTYs and
+        // preserve an explicit value from either the app caller or the user's
+        // inherited environment.
+        let home = dirs_home();
+        if let Some(path) = canopy_aider_context(
+            caller_set_aider_read,
+            std::env::var_os("AIDER_READ").is_some(),
+            home.as_deref(),
+        ) {
+            cmd.env("AIDER_READ", path);
+        }
         if let Some(task) = &task_identity {
             // Reserved identity is stamped after caller env, alongside the
             // PTY/instance stamps. A surface cannot override or invent it.
@@ -1942,6 +1957,21 @@ fn dirs_home() -> Option<String> {
         .ok()
 }
 
+/// The read-only bootstrap Aider should inherit in a Canopy PTY. Explicit user
+/// configuration always wins; a missing generated file means startup has not
+/// installed it yet, so launching bare is safer than naming a nonexistent file.
+fn canopy_aider_context(
+    caller_set: bool,
+    inherited: bool,
+    home: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    if caller_set || inherited {
+        return None;
+    }
+    let path = crate::agent_instructions::context_path(home?);
+    path.is_file().then_some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1955,6 +1985,25 @@ mod tests {
         assert_eq!(manager.renderer_generation.load(Ordering::SeqCst), 0);
         manager.register_renderer();
         assert_eq!(manager.allocate_session_identity().unwrap(), (3, 3));
+    }
+
+    #[test]
+    fn aider_gets_canopy_context_without_overriding_user_context() {
+        let home =
+            std::env::temp_dir().join(format!("canopy-aider-context-{}", std::process::id()));
+        let path = crate::agent_instructions::install_context(&home).unwrap();
+        let home_text = home.to_string_lossy();
+
+        assert_eq!(
+            canopy_aider_context(false, false, Some(&home_text)),
+            Some(path.clone())
+        );
+        assert_eq!(canopy_aider_context(true, false, Some(&home_text)), None);
+        assert_eq!(canopy_aider_context(false, true, Some(&home_text)), None);
+
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(home.join(".canopy")).unwrap();
+        std::fs::remove_dir(home).unwrap();
     }
 
     #[test]
