@@ -2597,7 +2597,11 @@ const STRUCTURED_TOOLS: &[&str] = &[
 ///
 /// Duplicated from PER_PROJECT_TOOLS in companionTools.ts; the guard test holds
 /// the two identical.
-const COMPANION_BLIND_TOOLS: &[&str] = &["canopy_project", "canopy_component_files"];
+const COMPANION_BLIND_TOOLS: &[&str] = &[
+    "canopy_project",
+    "canopy_component_files",
+    "canopy_spawn_agent",
+];
 
 /// Shared tools that change something the user would have to undo.
 ///
@@ -2684,6 +2688,7 @@ fn tools_list() -> serde_json::Value {
     tools.extend(mesh_tool_defs());
     tools.extend(session_tool_defs());
     tools.extend(task_tool_defs());
+    tools.extend(agent_spawn_tool_defs());
     // The cross-project set, and only for the one session that is allowed to
     // think across projects. An ordinary coding agent never sees these exist.
     if is_companion_session() {
@@ -3476,6 +3481,21 @@ fn tool_defs() -> serde_json::Value {
     tools
 }
 
+fn agent_spawn_tool_defs() -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "name": "canopy_spawn_agent",
+        "description": "Delegate a bounded piece of this workspace's work to a new, ordinary agent tab. The child starts with no conversation memory: `brief` must be complete. Canopy reserves its durable task identity before spawning, records this parent→child brief in the mesh, and limits delegation depth and live children. Defaults to a plain tab; `placement: split` requires a live `relativeToPtyId` from canopy_agents and a direction.",
+        "inputSchema": { "type": "object", "properties": {
+            "brief": { "type": "string", "description": "Complete task, relevant context/files, constraints, and what done looks like" },
+            "title": { "type": "string", "description": "Short human-visible name for the child tab and task" },
+            "agent": { "type": "string", "description": "CLI id (codex, claude, …); omit to use Canopy's configured route" },
+            "placement": { "type": "string", "enum": ["tab", "split"], "description": "Plain tab (default) or a pane beside an existing terminal" },
+            "relativeToPtyId": { "type": "integer", "description": "Existing terminal ptyId from canopy_agents; required for split" },
+            "direction": { "type": "string", "enum": ["left", "right", "top", "bottom"], "description": "Side of the relative terminal; required for split" }
+        }, "required": ["brief"], "additionalProperties": false }
+    })]
+}
+
 /// The Android device tools. Same shape as the rest; kept in their own literal
 /// so neither array approaches the macro's expansion limit.
 fn device_tool_defs() -> serde_json::Value {
@@ -3604,6 +3624,10 @@ fn describe_action(name: &str, args: &serde_json::Value) -> (String, Option<Stri
         ),
         "canopy_stop_server" => ("Stop a server".into(), arg("ptyId")),
         "canopy_restart_server" => ("Restart a server".into(), arg("ptyId")),
+        "canopy_spawn_agent" => (
+            "Start a child coding agent".into(),
+            arg("brief").map(|brief| brief.chars().take(240).collect()),
+        ),
         // The `pr` form can reopen an ended conversation or start a fresh
         // agent, so it must not be described as typing into a terminal. What
         // the user is approving has to be what actually happens.
@@ -3825,6 +3849,28 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "text": body,
                 "level": args.get("level").and_then(|v| v.as_str()).unwrap_or("info"),
             })))
+        }
+        "canopy_spawn_agent" => {
+            let brief = args
+                .get("brief")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .ok_or("missing required argument: brief")?;
+            text(ctx_request_with_timeout(
+                "POST",
+                "/ctx/action",
+                Some(serde_json::json!({
+                    "kind": "spawn_agent",
+                    "cwd": cwd(),
+                    "text": brief,
+                    "title": args.get("title").and_then(|value| value.as_str()),
+                    "agent": args.get("agent").and_then(|value| value.as_str()),
+                    "placement": args.get("placement").and_then(|value| value.as_str()).unwrap_or("tab"),
+                    "relativeToPtyId": args.get("relativeToPtyId").and_then(|value| value.as_u64()),
+                    "direction": args.get("direction").and_then(|value| value.as_str()),
+                }).to_string()),
+                std::time::Duration::from_secs(80),
+            ))
         }
         "canopy_message_agent" => {
             let pty = args.get("ptyId").and_then(|v| v.as_u64());
@@ -5491,6 +5537,30 @@ mod tests {
         let props = &tool["inputSchema"]["properties"];
         assert!(props.get("pr").is_some());
         assert!(props.get("ptyId").is_some());
+    }
+
+    #[test]
+    fn spawn_agent_requires_a_complete_brief_and_exposes_both_placements() {
+        let defs = agent_spawn_tool_defs();
+        let tool = defs.first().expect("canopy_spawn_agent is registered");
+        assert_eq!(tool["name"], "canopy_spawn_agent");
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            serde_json::json!(["brief"])
+        );
+        assert_eq!(
+            tool["inputSchema"]["properties"]["placement"]["enum"],
+            serde_json::json!(["tab", "split"]),
+        );
+        let (action, detail) = describe_action(
+            "canopy_spawn_agent",
+            &serde_json::json!({ "brief": "Own the parser tests and report back" }),
+        );
+        assert_eq!(action, "Start a child coding agent");
+        assert_eq!(
+            detail.as_deref(),
+            Some("Own the parser tests and report back")
+        );
     }
 
     #[test]

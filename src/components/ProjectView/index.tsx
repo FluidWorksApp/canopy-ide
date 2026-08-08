@@ -141,6 +141,10 @@ import {
 } from "../../fleetSnapshot";
 import { pickLaunchCli, startCommandParked } from "../../agentSeed";
 import {
+  placeSpawnedTab,
+  type AgentSpawnPlacement,
+} from "../../agentSpawn";
+import {
   AGENT_CLIS,
   announceCliInstallsChanged,
   binName,
@@ -274,6 +278,7 @@ import {
 } from "../../taskHistory";
 import {
   reserveTask,
+  settleAttempt,
   taskGet,
   TASK_ENVELOPES_EVENT,
 } from "../../taskEnvelopes";
@@ -1490,6 +1495,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // actual PTY: timing this from addTerminal raced terminal mounting and could
   // silently leave a freshly opened agent with no context at all.
   const pendingTerminalPrompts = useRef(new Map<string, string>());
+  const pendingAgentSpawnOps = useRef(
+    new Map<
+      string,
+      {
+        opId: number;
+        runId: string;
+        attemptId: string;
+        cwd: string;
+        ready?: Promise<void>;
+      }
+    >(),
+  );
   useEffect(
     () => () => {
       for (const t of reapTimers.current.values()) window.clearTimeout(t);
@@ -1561,6 +1578,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       activate = true,
       paneGroup?: string,
       runIdentity?: { componentId: string; runCommandId: string },
+      spawnedTask?: TermSubTab["spawnedTask"],
     ) => {
       const id = tabId();
       // Every terminal opened inside a workspace gets that workspace's port,
@@ -1598,6 +1616,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           paneGroup,
           componentId: runIdentity?.componentId,
           runCommandId: runIdentity?.runCommandId,
+          spawnedTask,
         },
       ]);
       if (activate) setActiveTabId(id);
@@ -3064,6 +3083,151 @@ const ProjectViewBody = memo(function ProjectViewBody({
       return Boolean(id);
     },
     [addTerminal, onNotice, getInstalledForLaunch, gateManagedLaunch],
+  );
+
+  /** A coding agent's bounded delegation path. The task reservation happens
+   * before the tab exists, and the opening brief is acknowledged only after
+   * the child PTY is lineage-bound and (for TUI-seeded CLIs) submitted. */
+  const startSpawnedAgent = useCallback(
+    async (a: ipc.AgentAction): Promise<void> => {
+      if (
+        a.opId == null ||
+        a.parentPtyId == null ||
+        a.spawnDepth == null ||
+        !a.text ||
+        !a.brief
+      ) {
+        throw new Error("Canopy received an incomplete agent spawn request");
+      }
+      const placement: AgentSpawnPlacement =
+        a.placement === "split"
+          ? {
+              mode: "split",
+              relativeToPtyId: a.relativeToPtyId as number,
+              direction: a.direction as "left" | "right" | "top" | "bottom",
+            }
+          : { mode: "tab" };
+      if (
+        placement.mode === "split" &&
+        !tabsRef.current.some(
+          (tab) => tab.type === "terminal" && tab.ptyId === placement.relativeToPtyId,
+        )
+      ) {
+        throw new Error(
+          `terminal ${placement.relativeToPtyId} is no longer open; choose a ptyId from canopy_agents`,
+        );
+      }
+      const installed = await getInstalledForLaunch();
+      const cli = pickLaunchCli(a.agent, (bin) => Boolean(installed[bin]));
+      if (!cli) throw new Error(`Unknown agent "${a.agent}".`);
+      const fleet = await gateManagedLaunch(cli, installed);
+      if (!fleet.allowed) throw new Error("Canopy's fleet gate refused this agent launch");
+      const start = await startCommandParked(cli.id, a.text, a.route);
+      if (!start) throw new Error(`Agent CLI "${cli.id}" cannot be launched`);
+      const component = [...project.components]
+        .filter(
+          (candidate) =>
+            a.route === candidate.path || a.route.startsWith(`${candidate.path}/`),
+        )
+        .sort((left, right) => right.path.length - left.path.length)[0];
+      const title = a.title?.trim() || "Delegated task";
+      const reservation = await reserveTask({
+        kind: "agent-delegation",
+        projectId: project.id,
+        componentId: component?.id ?? project.id,
+        worktreePath: a.route,
+        goal: a.brief,
+        acceptance: ["Complete the brief and report the outcome to the parent or user."],
+        taskClasses: { agent_delegation: 1 },
+        contextSummary: `Delegated by terminal ${a.parentPtyId} at depth ${a.spawnDepth}.`,
+        riskClass: "writes",
+        authorityPolicy: { effect: "writes", source: "agent-delegation" },
+        failoverPolicy: { automatic: false },
+        attemptCap: 1,
+        title,
+        metadata: {
+          agentSpawn: {
+            parentPtyId: a.parentPtyId,
+            depth: a.spawnDepth,
+            placement,
+          },
+        },
+        route: {
+          cli: cli.id,
+          profileId: fleet.route.profile,
+          harnessVersion: "agent-spawn-v1",
+          promptVersion: "agent-spawn-v1",
+          toolPolicyVersion: "agent-spawn-v1",
+          executionMode: "pty",
+        },
+      });
+      const spawnedTask = {
+        runId: reservation.envelope.runId,
+        attemptId: reservation.attempt.attemptId,
+        parentPtyId: a.parentPtyId,
+        depth: a.spawnDepth,
+      };
+      const id = addTerminal(
+        a.route,
+        start.command,
+        `${title} · ${cli.name}`,
+        cli.icon,
+        false,
+        fleet.env,
+        fleet.route.profile === DEFAULT_PROFILE ? undefined : fleet.route.profile,
+        true,
+        undefined,
+        undefined,
+        spawnedTask,
+      );
+      try {
+        const placed = placeSpawnedTab(
+          terminalGroupsRef.current,
+          tabsRef.current.filter(
+            (tab): tab is TermSubTab => tab.type === "terminal",
+          ),
+          id,
+          placement,
+        );
+        if (placed.groupId) {
+          const relativeToPtyId =
+            placement.mode === "split" ? placement.relativeToPtyId : undefined;
+          terminalGroupsRef.current = placed.groups;
+          setTerminalGroups(placed.groups);
+          setTabs((tabs) =>
+            tabs.map((tab) =>
+              tab.type === "terminal" &&
+              (tab.id === id || tab.ptyId === relativeToPtyId)
+                ? { ...tab, paneGroup: placed.groupId }
+                : tab,
+            ),
+          );
+        }
+      } catch (error) {
+        closeTabRef.current(id);
+        await settleAttempt({
+          attemptId: spawnedTask.attemptId,
+          state: "cancelled",
+          failureClass: "route",
+          failureCode: "placement",
+        }).catch(() => {});
+        throw error;
+      }
+      pendingAgentSpawnOps.current.set(id, {
+        opId: a.opId,
+        runId: spawnedTask.runId,
+        attemptId: spawnedTask.attemptId,
+        cwd: a.route,
+      });
+      if (start.typePrompt) pendingTerminalPrompts.current.set(id, a.text);
+    },
+    [
+      addTerminal,
+      gateManagedLaunch,
+      getInstalledForLaunch,
+      project.components,
+      project.id,
+    ],
   );
 
   /** Micro-tasks running with no tab of their own. The Tasks panel is their
@@ -4828,6 +4992,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
         return;
       }
+      if (a.kind === "spawn_agent") {
+        const opId = a.opId;
+        void startSpawnedAgent(a).catch((error) => {
+          if (opId != null) void ipc.browserResult(opId, false, String(error));
+        });
+        return;
+      }
       if (a.kind === "open_preview" && a.url) {
         // Agent-owned browser activity is watched in the PiP, not by replacing
         // the tab the user is working in. A non-agent caller retains the normal
@@ -4914,6 +5085,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     updateMicroRuns,
     patchTabRaw,
     showBrowserPip,
+    startSpawnedAgent,
   ]);
 
   // The companion asking for a coding session on a brief (canopy_start_session).
@@ -5345,6 +5517,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // A no-op for a run that already reported done; otherwise it settles as
       // "blocked" if the agent had asked for the user, else "stopped".
       endAbandonedRun(runId, output);
+    }
+    if (
+      origin === "user" &&
+      closingTab?.type === "terminal" &&
+      closingTab.spawnedTask
+    ) {
+      void settleAttempt({
+        attemptId: closingTab.spawnedTask.attemptId,
+        state: "cancelled",
+        failureClass: "route",
+        failureCode: "user-closed",
+      }).catch(() => {});
     }
     termHandles.current.delete(id);
     const closingGroup =
@@ -11143,6 +11327,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 // loses its Enter to zsh's line editor — the task sat unrun at
                 // a prompt. As an argv it never touches the tty.
                 initialCommand={tab.run || tab.micro ? undefined : tab.command}
+                beforeInitialCommand={
+                  tab.spawnedTask
+                    ? (ptyId) => {
+                        const spawn = pendingAgentSpawnOps.current.get(tab.id);
+                        if (!spawn)
+                          return Promise.reject(
+                            new Error("agent spawn handshake is missing"),
+                          );
+                        spawn.ready ??= ipc.agentSpawnReady(spawn.opId, ptyId);
+                        return spawn.ready;
+                      }
+                    : undefined
+                }
                 runCommand={
                   (tab.run || tab.micro) && tab.command
                     ? tab.command
@@ -11157,8 +11354,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     : undefined
                 }
                 env={tab.env}
-                runId={tab.micro?.runId}
-                attemptId={tab.micro?.attemptId}
+                runId={tab.micro?.runId ?? tab.spawnedTask?.runId}
+                attemptId={tab.micro?.attemptId ?? tab.spawnedTask?.attemptId}
                 onSpawned={(ptyId) => {
                   livePtyByTab.current.set(tab.id, ptyId);
                   // A freshly spawned pty is alive by definition, so clear any
@@ -11173,20 +11370,57 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   });
                   if (tab.micro?.runId) updateTaskRun(tab.micro.runId, { ptyId });
                   const prompt = pendingTerminalPrompts.current.get(tab.id);
-                  if (prompt == null) return;
-                  pendingTerminalPrompts.current.delete(tab.id);
+                  const spawn = pendingAgentSpawnOps.current.get(tab.id);
+                  if (prompt == null && !spawn) return;
+                  if (spawn)
+                    spawn.ready ??= ipc.agentSpawnReady(spawn.opId, ptyId);
+                  const lineageReady = spawn?.ready;
+                  if (prompt != null) pendingTerminalPrompts.current.delete(tab.id);
                   // The shell has only just started the CLI. Give its TUI time
                   // to enter raw mode, then type and submit as separate writes
                   // so autocomplete cannot swallow the Enter.
-                  setTimeout(() => {
-                    void ipc.ptyWrite(ptyId, prompt);
-                    setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 250);
+                  setTimeout(async () => {
+                    try {
+                      await lineageReady;
+                      if (prompt != null) await ipc.ptyWrite(ptyId, prompt);
+                      if (prompt != null) {
+                        await new Promise((resolve) => setTimeout(resolve, 250));
+                        await ipc.ptyWrite(ptyId, "\r");
+                      }
+                      if (spawn)
+                        await ipc.browserResult(spawn.opId, true, {
+                          ptyId,
+                          cwd: spawn.cwd,
+                          runId: spawn.runId,
+                          attemptId: spawn.attemptId,
+                        });
+                      if (spawn) pendingAgentSpawnOps.current.delete(tab.id);
+                    } catch (error) {
+                      if (spawn) {
+                        pendingAgentSpawnOps.current.delete(tab.id);
+                        await settleAttempt({
+                          attemptId: spawn.attemptId,
+                          state: "failed",
+                          failureClass: "route",
+                          failureCode: "opening-brief",
+                        }).catch(() => {});
+                        await ipc.browserResult(spawn.opId, false, String(error));
+                      }
+                    }
                   }, 2500);
                 }}
                 onExited={(event) => {
                   if (livePtyByTab.current.get(tab.id) !== event.id) return;
                   livePtyByTab.current.delete(tab.id);
                   const code = event.exit_code;
+                  if (tab.spawnedTask) {
+                    void settleAttempt({
+                      attemptId: tab.spawnedTask.attemptId,
+                      state: code === 0 ? "completed" : "failed",
+                      failureClass: code === 0 ? null : "runtime",
+                      failureCode: code === 0 ? null : "process-exit",
+                    }).catch(() => {});
+                  }
                   // Shell tabs close on exit; run tabs stay so the output and
                   // exit status remain readable.
                   if (tab.run) {

@@ -68,6 +68,10 @@ interface TermProps {
   streaming: boolean;
   /** Typed into the shell right after spawn (e.g. launch an agent CLI). */
   initialCommand?: string;
+  /** Optional native handshake that must finish before `initialCommand` can
+   * start. Spawned agents use it to bind bridge-owned lineage before their CLI
+   * receives a brief and can call tools. */
+  beforeInitialCommand?: (ptyId: number) => Promise<void>;
   /** A run tab's one-shot command: the shell is spawned to run it and exit with
    *  its status (native, per-shell), rather than typing it in. Mutually
    *  exclusive with initialCommand. */
@@ -94,7 +98,7 @@ interface TermProps {
 }
 
 export const Term = forwardRef<TermHandle, TermProps>(function Term(
-  { cwd, active, streaming, initialCommand, runCommand, runArgv, env, runId, attemptId, attachId, killAttachedOnClose, onSpawned, onExited, onTitle, onNotify },
+  { cwd, active, streaming, initialCommand, beforeInitialCommand, runCommand, runArgv, env, runId, attemptId, attachId, killAttachedOnClose, onSpawned, onExited, onTitle, onNotify },
   ref,
 ) {
   // Frozen once: a Term never switches between spawn and attach mid-life, and
@@ -713,7 +717,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         // A run tab's command was handed to the shell at spawn (runCommand),
         // so it's already executing — only a typed initialCommand needs sending.
         if (initialCommand && !runCommand) {
-          void ipc.ptyWrite(result.id, `${initialCommand}\r`);
+          await beforeInitialCommand?.(result.id);
+          await ipc.ptyWrite(result.id, `${initialCommand}\r`);
         }
       } catch (err) {
         term.writeln(`\r\n\x1b[31mfailed to spawn shell: ${err}\x1b[0m`);
