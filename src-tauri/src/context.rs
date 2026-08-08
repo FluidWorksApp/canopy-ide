@@ -39,6 +39,97 @@ const SKIP_DIRS: &[&str] = &[
 const MAX_FILES_DEFAULT: usize = 500;
 const MAX_OUTPUT_BYTES: usize = 512 * 1024;
 
+/// The executable contract implemented by this running bridge. The hook is a
+/// separately installed binary, so it must negotiate this list instead of
+/// assuming the app underneath it was rebuilt at the same time.
+const SUPPORTED_ACTIONS: &[&str] = &[
+    "start_server",
+    "open_preview",
+    "stop_server",
+    "restart_server",
+    "job_done",
+    "task_named",
+    "close_session",
+    "open_file",
+    "show_diff",
+    "notify",
+    "message_agent",
+    "mesh_send",
+];
+
+const SUPPORTED_TOOLS: &[&str] = &[
+    "canopy_agents",
+    "canopy_annotations",
+    "canopy_ask_user",
+    "canopy_browser_click",
+    "canopy_browser_console",
+    "canopy_browser_eval",
+    "canopy_browser_navigate",
+    "canopy_browser_network",
+    "canopy_browser_point",
+    "canopy_browser_resize",
+    "canopy_browser_snapshot",
+    "canopy_browser_type",
+    "canopy_claim",
+    "canopy_close_session",
+    "canopy_component_files",
+    "canopy_confirm",
+    "canopy_definition",
+    "canopy_device_describe",
+    "canopy_device_key",
+    "canopy_device_list",
+    "canopy_device_logcat",
+    "canopy_device_run",
+    "canopy_device_screenshot",
+    "canopy_device_snapshot",
+    "canopy_device_start",
+    "canopy_device_swipe",
+    "canopy_device_tap",
+    "canopy_device_type",
+    "canopy_diagnostics",
+    "canopy_editor_state",
+    "canopy_hover",
+    "canopy_job_done",
+    "canopy_mesh",
+    "canopy_mesh_send",
+    "canopy_message_agent",
+    "canopy_name_task",
+    "canopy_notes",
+    "canopy_notes_write",
+    "canopy_notify",
+    "canopy_open_file",
+    "canopy_open_preview",
+    "canopy_open_project",
+    "canopy_pr_action",
+    "canopy_pr_details",
+    "canopy_project",
+    "canopy_recall",
+    "canopy_references",
+    "canopy_remember",
+    "canopy_research",
+    "canopy_research_write",
+    "canopy_resources",
+    "canopy_restart_server",
+    "canopy_reviews",
+    "canopy_screenshot",
+    "canopy_server_output",
+    "canopy_show_diff",
+    "canopy_start_server",
+    "canopy_start_session",
+    "canopy_stop_server",
+    "canopy_symbols",
+    "canopy_tickets",
+    "canopy_vault_fill",
+    "canopy_vault_list",
+    "canopy_vault_read",
+    "canopy_wait_for",
+    "canopy_workspace",
+    "canopy_workspace_agents",
+    "canopy_workspace_git",
+    "canopy_workspace_prs",
+    "canopy_workspace_search",
+];
+
 pub struct ContextBridge {
     /// Per-project snapshots the frontend publishes, keyed by project id.
     snapshots: Mutex<HashMap<String, serde_json::Value>>,
@@ -1285,9 +1376,9 @@ async fn notes_op(
     }
 }
 
-/// The tool switches from Settings → Agents. Answered even when nothing has
-/// been published (nothing disabled), so the sidecar can treat any error as
-/// "everything is on" rather than hiding tools on a hiccup.
+/// Tool switches plus the running bridge's exact capability contract. A hook
+/// built after the app can now suppress tools this process cannot service
+/// instead of advertising calls that are guaranteed to 404.
 async fn tools(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
     if !authorized(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
@@ -1301,7 +1392,13 @@ async fn tools(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (Stat
         .unwrap_or_default();
     (
         StatusCode::OK,
-        serde_json::json!({ "disabled": disabled }).to_string(),
+        serde_json::json!({
+            "disabled": disabled,
+            "buildId": env!("CANOPY_CONTEXT_BUILD_ID"),
+            "supportedActions": SUPPORTED_ACTIONS,
+            "supportedTools": SUPPORTED_TOOLS,
+        })
+        .to_string(),
     )
 }
 
@@ -2879,7 +2976,7 @@ async fn action(
                         "cwd": act.cwd,
                         "pr": pr,
                         "opId": id,
-                        "text": format!("{} {body}", sender_tag(&who)),
+                        "text": body,
                     }),
                 );
                 // Generous, because the honest answers are the slow ones:
@@ -2887,7 +2984,88 @@ async fn action(
                 // and a PR with nothing left to reopen gets a fresh agent in a
                 // workspace that has to be prepared first.
                 return match tokio::time::timeout(MESSAGE_PR_TIMEOUT, rx).await {
-                    Ok(Ok((true, data))) => (StatusCode::OK, body_text(data)),
+                    Ok(Ok((true, data))) => {
+                        // Starting a fresh task is already a durable task-store
+                        // operation, not terminal delivery. Every existing or
+                        // resumed conversation comes back with a pty id and is
+                        // delivered here through the same role-checked mesh
+                        // door as the direct form.
+                        if data.get("started").and_then(|v| v.as_bool()) == Some(true)
+                            && data.get("ptyId").is_none()
+                        {
+                            return (StatusCode::OK, body_text(data));
+                        }
+                        let Some(target_id) = data
+                            .get("ptyId")
+                            .and_then(|v| v.as_u64())
+                            .and_then(|v| u32::try_from(v).ok())
+                        else {
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "Canopy resolved the PR without a target terminal".into(),
+                            );
+                        };
+                        let manager = app.state::<crate::pty::PtyManager>();
+                        let Some(target) = manager.get(target_id) else {
+                            return (
+                                StatusCode::NOT_FOUND,
+                                format!("The agent for {pr} stopped before delivery"),
+                            );
+                        };
+                        if let Err(e) =
+                            may_message_terminal(target_id, terminal_role(&app, target_id))
+                        {
+                            return (StatusCode::FORBIDDEN, e);
+                        }
+                        if who.agent().is_some_and(|a| a.pty_id == target_id) {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                "That's your own terminal — say it to the user instead.".into(),
+                            );
+                        }
+                        let routed = data
+                            .get("line")
+                            .and_then(|v| v.as_str())
+                            .map(sanitize_message)
+                            .filter(|v| !v.is_empty())
+                            .unwrap_or_else(|| body.clone());
+                        let record = snaps.mesh.record(new_message(
+                            &app,
+                            &who,
+                            target_id,
+                            target.cwd.clone(),
+                            body.clone(),
+                            Vec::new(),
+                            None,
+                            Some(crate::mesh::MeshRef {
+                                kind: "pr".into(),
+                                id: pr.to_string(),
+                            }),
+                        ));
+                        let line = format!("{} {routed}", sender_tag(&who));
+                        if let Err(e) =
+                            deliver_line(
+                                &app,
+                                target_id,
+                                target.cwd.clone(),
+                                record.id.clone(),
+                                &line,
+                            )
+                        {
+                            return (StatusCode::BAD_REQUEST, e);
+                        }
+                        snaps.mesh.note_delivery(&record.id, &line);
+                        (
+                            StatusCode::OK,
+                            format!(
+                                "Sent to the agent for {pr} as mesh message {}. {}",
+                                record.id,
+                                data.get("note").and_then(|v| v.as_str()).unwrap_or("")
+                            )
+                            .trim()
+                            .to_string(),
+                        )
+                    }
                     Ok(Ok((false, data))) => (StatusCode::BAD_REQUEST, body_text(data)),
                     Ok(Err(_)) => (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -3055,10 +3233,13 @@ async fn action(
                     record.items.len()
                 )
             );
-            snaps.mesh.note_delivery(&record.id, &notice);
             if let Err(e) = deliver_line(&app, id, target_cwd, record.id.clone(), &notice) {
                 return (StatusCode::BAD_REQUEST, e);
             }
+            // A failed first PTY write means nothing was delivered. Record the
+            // concrete notice only after that write succeeds; `submitted`
+            // remains the separate truth about the delayed Return.
+            snaps.mesh.note_delivery(&record.id, &notice);
             format!(
                 "Sent mesh message {rid} to terminal {id}: a one-line notice with the id was \
                  typed into its session, and the full message ({}between you on the mesh). It \

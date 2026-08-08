@@ -4993,8 +4993,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (a.kind === "message_agent" && a.pr && a.text) {
         const opId = a.opId;
         void routeToRaiser(a.pr, a.text).then(
-          ({ delivered, note }) => {
-            if (opId != null) void ipc.browserResult(opId, delivered, note);
+          (result) => {
+            if (opId != null)
+              void ipc.browserResult(opId, result.delivered, result);
           },
           (err) => {
             if (opId != null) void ipc.browserResult(opId, false, String(err));
@@ -7022,6 +7023,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       agentId?: string;
       cwd: string;
       text: string;
+      /** Resolve/reopen the terminal but leave the write to the Rust mesh
+       *  bridge. Used by canopy_message_agent({pr}) so there is one audited
+       *  delivery door rather than a frontend bypass. */
+      deliver?: boolean;
     }): Promise<{ delivered: boolean; note: string; ptyId?: number }> => {
       const { sessionId, cwd, text } = opts;
       const agentId = opts.agentId ?? "agent";
@@ -7037,18 +7042,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
         )?.[0];
       // 1) The workspace's own terminal, if it's still live.
       if (alive(opts.ptyId)) {
-        typeInto(opts.ptyId);
+        if (opts.deliver !== false) typeInto(opts.ptyId);
         return {
           delivered: true,
-          note: `Sent to ${agentId}.`,
+          note: opts.deliver === false ? `Found ${agentId}.` : `Sent to ${agentId}.`,
           ptyId: opts.ptyId,
         };
       }
       // 2) Any live terminal running this session (it may have moved tabs).
       const moved = sessionId ? livePtyForSession() : undefined;
       if (moved != null) {
-        typeInto(moved);
-        return { delivered: true, note: `Sent to ${agentId}.`, ptyId: moved };
+        if (opts.deliver !== false) typeInto(moved);
+        return {
+          delivered: true,
+          note: opts.deliver === false ? `Found ${agentId}.` : `Sent to ${agentId}.`,
+          ptyId: moved,
+        };
       }
       // 3) Ended: resume, wait for the session to report a PTY, then deliver.
       if (!sessionId) {
@@ -7101,10 +7110,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (back != null) {
           // A moment past first paint before pasting into the resumed TUI.
           await new Promise((r) => setTimeout(r, 800));
-          typeInto(back);
+          if (opts.deliver !== false) typeInto(back);
           return {
             delivered: true,
-            note: `Resumed ${agentId} and sent the comments.`,
+            note:
+              opts.deliver === false
+                ? `Resumed ${agentId}.`
+                : `Resumed ${agentId} and sent the comments.`,
             ptyId: back,
           };
         }
@@ -7132,7 +7144,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       pr: ipc.PrInfo,
       to: PrAgent,
       text: string,
-    ): Promise<{ delivered: boolean; note: string }> => {
+      deliver = true,
+    ): Promise<{
+      delivered: boolean;
+      note: string;
+      ptyId?: number;
+      line?: string;
+      started?: boolean;
+    }> => {
       const brief =
         `About pull request #${pr.number} "${pr.title}" (${pr.url}), which you opened from ` +
         `${pr.branch}: ${text}\n\nWhen the change is made, push so the PR updates.`;
@@ -7146,17 +7165,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ? `No conversation left to reopen — started a fresh agent on #${pr.number}.`
           : `Couldn't start an agent for #${pr.number}.`;
         onNotice(note);
-        return { delivered: started, note };
+        return { delivered: started, note, started };
       }
-      const { delivered, note } = await messageAgent({
+      const { delivered, note, ptyId } = await messageAgent({
         ptyId: to.ptyId,
         sessionId: to.sessionId,
         agentId: to.agent ?? undefined,
         cwd: to.cwd ?? "",
         text: brief,
+        deliver,
       });
       onNotice(note);
-      return { delivered, note };
+      return { delivered, note, ptyId, line: brief };
     },
     [messageAgent, onNotice, startMicroTask],
   );
@@ -7164,7 +7184,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** The same, entered by PR number or url rather than from the PR's own tab —
    *  which is how the companion asks (`canopy_message_agent({pr})`). */
   const routeToRaiser = useCallback(
-    async (pr: string, text: string): Promise<{ delivered: boolean; note: string }> => {
+    async (pr: string, text: string) => {
       const number = Number(parsePrUrl(pr)?.number ?? pr.replace(/^#/, ""));
       if (!Number.isSafeInteger(number) || number <= 0) {
         const note = `"${pr}" isn't a pull request I can look up.`;
@@ -7194,7 +7214,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         live: liveSessionsRef.current,
         dirExists: (dir) => alive.has(dir),
       });
-      return sendToRaiser(row.repo, toPrInfo(row), to, text);
+      // Resolve/reopen only. Rust receives the pty id through browserResult
+      // and performs the role check, mesh record and two-write delivery.
+      return sendToRaiser(row.repo, toPrInfo(row), to, text, false);
     },
     [onNotice, sendToRaiser],
   );
