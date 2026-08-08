@@ -9,6 +9,9 @@ export interface TabName {
   title?: string;
   /** Legacy/prespawn rename, promoted into `name` once the PTY exists. */
   customTitle?: string;
+  /** Agent-published current focus, transiently available before the digest
+   *  store-change round trip lands. */
+  description?: string;
 }
 
 /** Auto titles that name a terminal rather than the work in it. A shell that
@@ -97,6 +100,26 @@ export function agentDisplayName({
   return dir || agentLabel || "shell";
 }
 
+export interface TerminalNameSource {
+  id: number;
+  name?: string;
+  agent: boolean;
+  title?: string;
+}
+
+/** One terminal label for system-owned surfaces. Agent sessions use the live
+ *  naming substrate; ordinary shells deliberately keep the neutral numbered
+ *  fallback instead of borrowing an OSC title that may name a cwd or process. */
+export function terminalDisplayName({
+  id,
+  name,
+  agent,
+  title,
+}: TerminalNameSource): string {
+  if (!agent) return `Terminal ${id}`;
+  return clean(name) || clean(title) || `Terminal ${id}`;
+}
+
 /** ptyId -> the tab showing it, for every terminal tab that has spawned. The
  *  Agents panel keys rows by pty, so that is what the map is keyed by. */
 export function tabNamesByPty(
@@ -106,12 +129,18 @@ export function tabNamesByPty(
     name?: string;
     title?: string;
     customTitle?: string;
+    description?: string;
   }[],
 ): Map<number, TabName> {
   const out = new Map<number, TabName>();
   for (const t of tabs) {
     if (t.type !== "terminal" || t.ptyId == null) continue;
-    out.set(t.ptyId, { name: t.name, title: t.title, customTitle: t.customTitle });
+    out.set(t.ptyId, {
+      name: t.name,
+      title: t.title,
+      customTitle: t.customTitle,
+      description: t.description,
+    });
   }
   return out;
 }

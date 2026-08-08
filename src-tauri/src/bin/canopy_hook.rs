@@ -3030,9 +3030,9 @@ fn tools_list() -> serde_json::Value {
     // core product), and inside a micro-task session (CANOPY_MICRO_TASK=1 on
     // the launch command) it survives even the Settings disable list — a
     // completion tool the user switched off would strand the ephemeral tab
-    // open forever. canopy_name_task rides with it for a smaller reason: the
-    // micro-task protocol instructs every run to call it, and a brief that
-    // names a tool the session doesn't have is a brief that lies.
+    // open forever. canopy_name_task survives for every agent session: live
+    // status is mesh etiquette and the Agents table's data source, not an
+    // optional capability whose absence an instruction can work around.
     // See the matching note in agentTools.ts.
     let micro = std::env::var("CANOPY_MICRO_TASK").is_ok();
     apply_companion_authority(&mut tools);
@@ -3045,9 +3045,9 @@ fn tools_list() -> serde_json::Value {
         });
     }
     tools.retain(|t| {
-        t.get("name").and_then(|n| n.as_str()).is_some_and(|n| {
-            !disabled.iter().any(|d| d == n) || (micro && MICRO_ALWAYS_TOOLS.contains(&n))
-        })
+        t.get("name")
+            .and_then(|n| n.as_str())
+            .is_some_and(|n| tool_is_enabled(n, disabled, micro))
     });
     for tool in &mut tools {
         let Some(name) = tool
@@ -3079,11 +3079,19 @@ fn tools_list() -> serde_json::Value {
     serde_json::json!({ "tools": tools })
 }
 
-/// The tools a micro-task session keeps whatever the user switched off. Both
-/// are things the micro-task protocol instructs every run to call: without the
-/// first the ephemeral tab is never told the job ended, and without the second
-/// the brief names a tool that isn't there.
-const MICRO_ALWAYS_TOOLS: &[&str] = &["canopy_job_done", "canopy_name_task"];
+/// Every MCP-capable coding session keeps the live-status tool. A user can
+/// still disable unrelated mutation tools; this one is the session's own
+/// retained presence in the mesh.
+const ALWAYS_AGENT_TOOLS: &[&str] = &["canopy_name_task"];
+
+/// A micro-task additionally keeps its ending tool so it cannot be stranded.
+const MICRO_ALWAYS_TOOLS: &[&str] = &["canopy_job_done"];
+
+fn tool_is_enabled(name: &str, disabled: &[String], micro: bool) -> bool {
+    !disabled.iter().any(|disabled| disabled == name)
+        || ALWAYS_AGENT_TOOLS.contains(&name)
+        || (micro && MICRO_ALWAYS_TOOLS.contains(&name))
+}
 
 /// Tools that only look. Everything else changes something the user can see.
 const READ_ONLY_TOOLS: &[&str] = &[
@@ -5161,6 +5169,7 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
             "recentRequests": d["prompts"].as_array().map(|p| {
                 p.iter().rev().take(3).cloned().collect::<Vec<_>>()
             }),
+            "workingOn": d["working_on"],
             "filesEdited": d["files"].as_array().map(|f| {
                 f.iter().rev().take(10).cloned().collect::<Vec<_>>()
             }),
@@ -5238,6 +5247,7 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
             "ptyId": pty_id,
             "local": true,
             "recentRequests": null,
+            "workingOn": a.get("description").cloned().unwrap_or(serde_json::Value::Null),
             "filesEdited": null,
             "saying": null,
         });
@@ -6706,8 +6716,15 @@ mod tests {
         // Naming is not an outcome: nothing about it is required, so an agent
         // with a title and no glyph yet can still say the title.
         assert!(tool["inputSchema"].get("required").is_none());
-        assert!(MICRO_ALWAYS_TOOLS.contains(&"canopy_name_task"));
+        assert!(ALWAYS_AGENT_TOOLS.contains(&"canopy_name_task"));
         assert!(MICRO_ALWAYS_TOOLS.contains(&"canopy_job_done"));
+        let disabled = vec![
+            "canopy_name_task".to_string(),
+            "canopy_job_done".to_string(),
+        ];
+        assert!(tool_is_enabled("canopy_name_task", &disabled, false));
+        assert!(!tool_is_enabled("canopy_job_done", &disabled, false));
+        assert!(tool_is_enabled("canopy_job_done", &disabled, true));
 
         // The ending carries the same three, for a job short enough that one
         // call is the whole run — plus the ask, restated.

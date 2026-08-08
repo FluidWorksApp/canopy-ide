@@ -414,6 +414,10 @@ export interface Settings {
    * whatever the user is doing. Questions and notices still reach the shared
    * attention queue; this only controls automatic focus changes. */
   agentAskForAttention: boolean;
+  /** Allow coding agents to create child agent tabs through
+   *  `canopy_spawn_agent`. On by default; turning it off removes the tool from
+   *  the bridge contract and rejects calls from already-initialized clients. */
+  agentsMaySpawn: boolean;
   /** Show attention items outside the notification centre: corner cards,
    * companion notices, native banners, and the remote companion channel. Off
    * is a presentation preference only — every item stays in the shared queue
@@ -599,6 +603,7 @@ export const DEFAULTS: Settings = {
   idleGroupDelaySeconds: 60,
   customMicroTasks: [],
   agentAskForAttention: false,
+  agentsMaySpawn: true,
   notificationPopupsEnabled: true,
   disabledTools: [],
   autoImportMarkdownResearch: true,

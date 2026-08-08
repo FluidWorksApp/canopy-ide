@@ -18,7 +18,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 
@@ -168,6 +168,10 @@ pub struct ContextBridge {
     /// Tools the user switched off in Settings → Agents. `None` until the
     /// frontend publishes, which is the same as "everything is on".
     disabled_tools: Mutex<Option<Vec<String>>>,
+    /// Strong bridge-side delegation gate. Tool-list filtering covers clients
+    /// that initialize after a settings change; this also refuses a call from
+    /// a client that cached the descriptor while delegation was still on.
+    agents_may_spawn: AtomicBool,
     /// The one cross-session switch. This is the same per-project value the UI
     /// calls "Shared context"; the mesh is that shared context substrate, so
     /// roster, claims, history and sends all consult this one predicate.
@@ -373,6 +377,7 @@ impl Default for ContextBridge {
             next_op: AtomicU64::new(1),
             claims: crate::mesh::ClaimStore::load(),
             disabled_tools: Mutex::new(None),
+            agents_may_spawn: AtomicBool::new(true),
             mesh_scopes: Mutex::new(Vec::new()),
             mesh: crate::mesh::MeshStore::load(),
         }
@@ -826,8 +831,15 @@ pub fn context_remove(state: tauri::State<'_, ContextBridge>, project_id: String
 /// change and at startup; the sidecar filters its `tools/list` against this, so
 /// a disabled tool never even reaches the agent's context window.
 #[tauri::command]
-pub fn context_tools(state: tauri::State<'_, ContextBridge>, disabled: Vec<String>) {
+pub fn context_tools(
+    state: tauri::State<'_, ContextBridge>,
+    disabled: Vec<String>,
+    agents_may_spawn: bool,
+) {
     *state.disabled_tools.lock().unwrap() = Some(disabled);
+    state
+        .agents_may_spawn
+        .store(agents_may_spawn, Ordering::Release);
 }
 
 /// Every advisory claim currently held, for the Agents panel. Held only: the
@@ -1793,17 +1805,26 @@ async fn notes_op(
 /// Tool switches plus the running bridge's exact capability contract. A hook
 /// built after the app can now suppress tools this process cannot service
 /// instead of advertising calls that are guaranteed to 404.
-async fn tools(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
-    if !authorized(&app, &headers) {
-        return (StatusCode::UNAUTHORIZED, "bad token".into());
-    }
-    let disabled = app
-        .state::<ContextBridge>()
+fn bridge_disabled_tools(state: &ContextBridge) -> Vec<String> {
+    let mut disabled = state
         .disabled_tools
         .lock()
         .unwrap()
         .clone()
         .unwrap_or_default();
+    if !state.agents_may_spawn.load(Ordering::Acquire)
+        && !disabled.iter().any(|tool| tool == "canopy_spawn_agent")
+    {
+        disabled.push("canopy_spawn_agent".into());
+    }
+    disabled
+}
+
+async fn tools(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let disabled = bridge_disabled_tools(&app.state::<ContextBridge>());
     (
         StatusCode::OK,
         serde_json::json!({
@@ -3233,25 +3254,43 @@ async fn action(
                         .into(),
                 );
             }
-            let stale = act
-                .instance
-                .as_deref()
-                .is_some_and(|i| i != crate::pty::instance_token());
-            if !stale {
-                let _ = app.emit(
-                    "agent:action",
-                    serde_json::json!({
-                        "kind": "task_named",
-                        "route": "",
-                        "ptyId": act.pty_id,
-                        "cwd": act.cwd,
-                        "title": act.title,
-                        "description": act.description,
-                        "icon": act.icon,
-                        "tags": act.tags,
-                    }),
+            let Some(identity) = who.agent() else {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Only a Canopy agent terminal can publish live working status.".into(),
                 );
+            };
+            if let Some(description) = act.description.as_deref() {
+                if description.trim().is_empty() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "working-on status needs a non-empty description".into(),
+                    );
+                }
+                if let Err(error) = crate::agents::update_session_working_on(
+                    &identity.instance,
+                    identity.pty_id,
+                    description,
+                ) {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, error);
+                }
             }
+            // The credential supplies terminal, instance and cwd. Body fields
+            // are intentionally ignored: a display label or claimed pty id is
+            // never allowed to become identity.
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({
+                    "kind": "task_named",
+                    "route": "",
+                    "ptyId": identity.pty_id,
+                    "cwd": identity.cwd,
+                    "title": act.title,
+                    "description": act.description,
+                    "icon": act.icon,
+                    "tags": act.tags,
+                }),
+            );
             "Noted — the run name and live description are updated. Carry on with the job."
                 .to_string()
         }
@@ -3353,6 +3392,13 @@ async fn action(
             "Told the user.".to_string()
         }
         "spawn_agent" => {
+            if !snaps.agents_may_spawn.load(Ordering::Acquire) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Agent delegation is off in Settings → Agents; ask the user to enable ‘Agents may spawn new agent tabs’."
+                        .into(),
+                );
+            }
             let Some(parent) = who.agent().cloned() else {
                 return (
                     StatusCode::FORBIDDEN,
@@ -5804,6 +5850,20 @@ mod tests {
         assert!(next_agent_spawn_depth(0, 3, 1)
             .unwrap_err()
             .contains("4 live or starting children"));
+    }
+
+    #[test]
+    fn agent_spawn_permission_defaults_on_and_changes_at_the_bridge() {
+        let bridge = ContextBridge::default();
+        assert!(bridge.agents_may_spawn.load(Ordering::Acquire));
+        assert!(!bridge_disabled_tools(&bridge)
+            .iter()
+            .any(|tool| tool == "canopy_spawn_agent"));
+        bridge.agents_may_spawn.store(false, Ordering::Release);
+        assert!(!bridge.agents_may_spawn.load(Ordering::Acquire));
+        assert!(bridge_disabled_tools(&bridge)
+            .iter()
+            .any(|tool| tool == "canopy_spawn_agent"));
     }
 
     /// The registry is what makes "who is calling" answerable, and what tells

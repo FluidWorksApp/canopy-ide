@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { agentDisplayName, tabNamesByPty } from "./agentDisplayName";
+import {
+  agentDisplayName,
+  tabNamesByPty,
+  terminalDisplayName,
+} from "./agentDisplayName";
 
 describe("agentDisplayName", () => {
   it("uses the Canopy-assigned name ahead of CLI title and cwd", () => {
@@ -79,6 +83,15 @@ describe("agentDisplayName", () => {
   });
 });
 
+describe("terminalDisplayName", () => {
+  it("uses assigned names for agents and numbered labels for shells", () => {
+    expect(terminalDisplayName({ id: 7, name: "Piper", agent: true })).toBe("Piper");
+    expect(terminalDisplayName({ id: 7, name: "Piper", agent: false })).toBe(
+      "Terminal 7",
+    );
+  });
+});
+
 describe("tabNamesByPty", () => {
   it("keys tabs that have spawned by their pty, skipping the rest", () => {
     const map = tabNamesByPty([
@@ -91,6 +104,7 @@ describe("tabNamesByPty", () => {
       name: undefined,
       title: "✳ Fix tests",
       customTitle: undefined,
+      description: undefined,
     });
     expect(map.get(8)?.customTitle).toBe("api");
     expect(map.has(9)).toBe(false);

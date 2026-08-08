@@ -28,7 +28,7 @@ describe("TerminalMemoryFlyout", () => {
     const onHibernate = vi.fn();
     render(
       <TerminalMemoryFlyout
-        title="Juniper"
+        session={{ name: "Juniper", agent: true }}
         status={status}
         onPurge={onPurge}
         onRestart={onRestart}

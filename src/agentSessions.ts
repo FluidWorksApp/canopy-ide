@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import * as ipc from "./ipc";
 import { basename } from "./paths";
 import { identifyAgent, observeForLearning, type AgentIdentity } from "./agentIdentity";
+import type { TabName } from "./agentDisplayName";
 import { POLICY, agentLife } from "../shared/agentLife";
 import type { Life } from "../shared/agentLife";
 import { ptyEvidenceFor, useFirstSeen } from "./agentLifeStore";
@@ -28,6 +29,17 @@ export const lastHumanPrompt = (prompts?: string[]) =>
   [...(prompts ?? [])]
     .reverse()
     .find((p) => p.trim().length > 0 && !p.trimStart().startsWith("<"));
+
+/** Current focus, distinct from the retained initial prompt. The digest is the
+ *  cross-project source of truth; the tab description closes the event-to-disk
+ *  paint gap for the ProjectView that owns the terminal. */
+export const workingOnNow = (
+  row: SessionRow,
+  tabNames?: Map<number, TabName>,
+) =>
+  row.digest?.working_on ??
+  tabNames?.get(row.session.id)?.description ??
+  lastHumanPrompt(row.digest?.prompts);
 
 /** Pair each terminal (by the PTY `surface` id the hook recorded from our spawn
  *  env) with the newest digest tagged for this app launch — an exact identity,

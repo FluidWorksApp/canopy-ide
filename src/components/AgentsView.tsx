@@ -20,13 +20,19 @@ import { LIFE_META, NO_ATTENTION, bucketFor, reclaimable, silenceLabel } from ".
 import type { Attention, LifeState } from "../../shared/agentLife";
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
-import { lastHumanPrompt, useAgentSessions, type SessionRow } from "../agentSessions";
+import {
+  lastHumanPrompt,
+  useAgentSessions,
+  workingOnNow,
+  type SessionRow,
+} from "../agentSessions";
 import { claimOwnerName } from "../claims";
 import { IntegrationsList, useIntegrations } from "./AgentIntegrations";
 import { AgentControlPanel, type ControlPanelMode } from "./AgentControlPanel";
 import { PendingCard } from "./PendingCard";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
+import { AgentNameEditor } from "./AgentNameEditor";
 import { sessionCost } from "../pricing";
 import { fmtTokens } from "../format";
 import {
@@ -292,7 +298,7 @@ export function AgentsView({
     // Only reclaim an agent that has *provably* finished — never one mid-turn,
     // never one blocked, and never one we have merely lost track of.
     const canHibernate = reclaimable(life, attention);
-    const task = lastHumanPrompt(digest?.prompts);
+    const task = workingOnNow(row, tabNames);
     const name = agentDisplayName({
       tab: tabNames?.get(s.id),
       sessionName: s.name,
@@ -319,7 +325,7 @@ export function AgentsView({
               ) : (
                 <TerminalIcon size={13} className="agv-card-mark" />
               )}
-              {name}
+              <AgentNameEditor ptyId={s.id} name={s.name ?? name} />
             </span>
             <span className={`agv-card-state ${st.cls}`} title={stTitle}>
               {st.label}

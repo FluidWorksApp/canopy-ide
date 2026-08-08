@@ -578,8 +578,8 @@ export const onAgentUi = (cb: (op: AgentUiOp) => void): Promise<UnlistenFn> =>
 
 /** Which canopy_* tools are switched off (Settings → Agents), pushed to the
  *  bridge so the sidecar can hide them from the agent entirely. */
-export const contextTools = (disabled: string[]) =>
-  invoke<void>("context_tools", { disabled }).catch(() => {});
+export const contextTools = (disabled: string[], agentsMaySpawn: boolean) =>
+  invoke<void>("context_tools", { disabled, agentsMaySpawn }).catch(() => {});
 
 /** A claim Canopy turned away because it overlapped one already held. */
 export interface AgentClaimRefusal {
@@ -3488,6 +3488,10 @@ export interface SessionDigest {
    *  window rotates, and on a long session the reason the session exists was
    *  the first thing it dropped. Absent on pre-upgrade digests. */
   first_prompt?: string;
+  /** Agent-published current focus. Kept apart from prompts so updating status
+   *  never rewrites what the human asked or why the session was started. */
+  working_on?: string;
+  working_on_updated?: number;
   files?: string[];
   /** Where the session was launched. Pinned at first sighting and never
    *  updated, unlike `cwd`, which follows the agent as it cds. */

@@ -78,6 +78,7 @@ import { companionName, summonCompanion } from "./companion";
 import type { CompanionProposal } from "./companionSession";
 import { personaBinding } from "./personaBinding";
 import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
+import { spawnedAgentTakesFocus } from "./agentSpawn";
 import { readRemoteThemeTokens } from "./remoteTheme";
 import { useTabDrag } from "./tabDrag";
 import * as prWatch from "./prWatchStore";
@@ -125,6 +126,7 @@ import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
 import { TerminalGovernorDialog } from "./components/TerminalGovernorDialog";
+import { identifyAgent } from "./agentIdentity";
 import { shouldOnboard, markOnboarded } from "./onboarding";
 import { isSelftest, setSelftestMode } from "./selftest/mode";
 import { startBrowserWatchdog } from "./browserWatchdog";
@@ -261,6 +263,20 @@ export default function App() {
   const [memPressure, setMemPressure] = useState<ipc.MemoryPressure | null>(null);
   const [terminalGovernor, setTerminalGovernor] =
     useState<ipc.TerminalGovernorSnapshot | null>(null);
+  const [terminalStats, setTerminalStats] = useState<ipc.SessionStats[]>([]);
+  useEffect(() => {
+    void ipc.ptyStats().then(setTerminalStats).catch(() => {});
+    let cancelled = false;
+    let un: (() => void) | undefined;
+    void ipc.onPtyStats(setTerminalStats).then((stop) => {
+      if (cancelled) stop();
+      else un = stop;
+    });
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, []);
   const [governorBusy, setGovernorBusy] = useState(false);
   const [governorError, setGovernorError] = useState<string | null>(null);
   const [dismissedGovernorRequests, setDismissedGovernorRequests] = useState<
@@ -1162,7 +1178,10 @@ export default function App() {
   // Republished on every settings write, because the sidecar reads it when an
   // agent asks for its tool list — which can be at any moment.
   useEffect(() => {
-    const publish = () => void ipc.contextTools(getSettings().disabledTools);
+    const publish = () => {
+      const settings = getSettings();
+      void ipc.contextTools(settings.disabledTools, settings.agentsMaySpawn);
+    };
     publish();
     window.addEventListener(THEME_CHANGE_EVENT, publish);
     return () => window.removeEventListener(THEME_CHANGE_EVENT, publish);
@@ -2115,9 +2134,12 @@ export default function App() {
           );
           return;
         }
+        const askForAttention = getSettings().agentAskForAttention;
         await prepareProjectForAgentAction(
           projectId,
-          getSettings().agentAskForAttention,
+          a.kind === "spawn_agent"
+            ? spawnedAgentTakesFocus(askForAttention)
+            : askForAttention,
         );
         // Timer, not rAF — see the attach-terminal dispatch above.
         window.setTimeout(
@@ -3126,6 +3148,9 @@ export default function App() {
     const request = session.grant_request;
     return request != null && !dismissedGovernorRequests.has(request.request_id);
   });
+  const pendingGovernorSession = pendingGovernor
+    ? terminalStats.find((session) => session.id === pendingGovernor.id)
+    : undefined;
 
   return (
     <div className={`app ${zen ? "zen" : ""}`}>
@@ -3145,6 +3170,15 @@ export default function App() {
       {pendingGovernor && terminalGovernor && (
         <TerminalGovernorDialog
           status={pendingGovernor}
+          session={
+            pendingGovernorSession
+              ? {
+                  name: pendingGovernorSession.name,
+                  title: pendingGovernorSession.title,
+                  agent: identifyAgent(pendingGovernorSession.agent_hint) != null,
+                }
+              : undefined
+          }
           capability={terminalGovernor.capability}
           busy={governorBusy}
           error={governorError}

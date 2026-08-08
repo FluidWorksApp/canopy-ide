@@ -18,7 +18,7 @@ import { basename } from "../paths";
 import { LIFE_META } from "../../shared/agentLife";
 import type { Life } from "../../shared/agentLife";
 import { agentDisplayName, type TabName } from "../agentDisplayName";
-import { useAgentSessions, lastHumanPrompt, type SessionRow } from "../agentSessions";
+import { useAgentSessions, workingOnNow, type SessionRow } from "../agentSessions";
 import {
   checkoutKey,
   deriveEdges,
@@ -30,6 +30,7 @@ import {
   type MeshEdge,
 } from "../meshLinks";
 import { AgentIcon, TerminalIcon } from "./icons";
+import { AgentNameEditor } from "./AgentNameEditor";
 
 export type ControlPanelMode = "graph" | "table";
 
@@ -246,7 +247,11 @@ export function AgentControlPanel({
                     ) : (
                       <TerminalIcon size={13} />
                     )}
-                    <span className="acp-agent-name">{label.primary}</span>
+                    <AgentNameEditor
+                      ptyId={row.session.id}
+                      name={row.session.name ?? label.primary}
+                      className="acp-agent-name"
+                    />
                     {label.detail && <span className="acp-dim">{label.detail}</span>}
                   </span>
                 </td>
@@ -259,7 +264,7 @@ export function AgentControlPanel({
                   {initialPrompt(row.digest) ?? <em>none recorded</em>}
                 </td>
                 <td className="acp-prompt">
-                  {lastHumanPrompt(row.digest?.prompts) ?? <em>{life.note}</em>}
+                  {workingOnNow(row, tabNames) ?? <em>{life.note}</em>}
                 </td>
               </tr>
             );

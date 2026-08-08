@@ -379,7 +379,7 @@ fn update_terminal_governor(app: &AppHandle, sys: &mut System, stats: &[SessionS
         ) {
             crate::notify::notify_native(
                 app.clone(),
-                format!("Terminal {} needs a memory decision", event.status.id),
+                "A terminal needs a memory decision".into(),
                 format!(
                     "Using {} MiB of a {} MiB one-session allowance. Open Canopy to allow more or stop it.",
                     event.status.current_bytes / (1024 * 1024),
@@ -1873,6 +1873,95 @@ fn tail_of(file: &std::path::Path, max: u64) -> Option<(String, bool)> {
 /// through them (gemini files chats under a hash of the project path, aider
 /// writes into the repo), and passing them also keeps the walk to what the
 /// caller is going to show.
+fn status_line(raw: &str) -> Option<String> {
+    let flat = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return None;
+    }
+    let mut out = flat.chars().take(160).collect::<String>();
+    if flat.chars().count() > 160 {
+        while out.ends_with(char::is_whitespace) {
+            out.pop();
+        }
+        out.push('…');
+    }
+    Some(out)
+}
+
+/// Update the existing session digest owned by one authenticated PTY.
+///
+/// A terminal can have old digests carrying the same surface after the user
+/// starts a second CLI in it, so newest wins. The initial prompt and rotating
+/// prompt history are deliberately untouched: current focus is a separate
+/// fact, not a rewrite of what started the session.
+fn update_working_on_in_dir(
+    dir: &std::path::Path,
+    instance: &str,
+    pty_id: u32,
+    raw: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(working_on) = status_line(raw) else {
+        return Err("working-on status needs a non-empty description".into());
+    };
+    let surface = pty_id.to_string();
+    let mut candidates = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        if value["instance"].as_str() != Some(instance)
+            || value["surface"].as_str() != Some(surface.as_str())
+        {
+            continue;
+        }
+        candidates.push((value["updated"].as_u64().unwrap_or(0), path, value));
+    }
+    let Some((_, path, mut digest)) = candidates.into_iter().max_by_key(|row| row.0) else {
+        return Ok(None);
+    };
+    digest["working_on"] = serde_json::json!(working_on);
+    digest["working_on_updated"] = serde_json::json!(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0));
+    let tmp = path.with_extension(format!("json.status-{}", std::process::id()));
+    std::fs::write(
+        &tmp,
+        serde_json::to_vec(&digest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|error| error.to_string())?;
+    Ok(Some(path))
+}
+
+pub fn update_session_working_on(
+    instance: &str,
+    pty_id: u32,
+    description: &str,
+) -> Result<bool, String> {
+    let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
+    let dir = std::path::PathBuf::from(home)
+        .join(".canopy")
+        .join("sessions");
+    let changed = update_working_on_in_dir(&dir, instance, pty_id, description)?.is_some();
+    if changed {
+        crate::change::pulse(crate::change::Store::Sessions, "", "");
+    }
+    Ok(changed)
+}
+
 #[tauri::command]
 pub async fn session_digests(roots: Option<Vec<String>>) -> Result<Vec<serde_json::Value>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
@@ -5404,8 +5493,58 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        clear_stale_stats, http_readiness_status, http_readiness_url, SessionStats, StatsCache,
+        clear_stale_stats, http_readiness_status, http_readiness_url, update_working_on_in_dir,
+        SessionStats, StatsCache,
     };
+
+    #[test]
+    fn live_status_updates_the_current_digest_without_rewriting_the_initial_prompt() {
+        let dir = std::env::temp_dir().join(format!("canopy-working-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.json");
+        let current = dir.join("current.json");
+        std::fs::write(
+            &old,
+            serde_json::json!({
+                "session_id": "old", "instance": "app", "surface": "7",
+                "updated": 1, "working_on": "old focus"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &current,
+            serde_json::json!({
+                "session_id": "current", "instance": "app", "surface": "7",
+                "updated": 2, "first_prompt": "build the panel",
+                "prompts": ["build the panel", "keep going"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            update_working_on_in_dir(&dir, "app", 7, "  Wiring the status\nthrough the digest  ",)
+                .unwrap(),
+            Some(current.clone())
+        );
+        let changed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(current).unwrap()).unwrap();
+        assert_eq!(
+            changed["working_on"],
+            "Wiring the status through the digest"
+        );
+        assert_eq!(changed["first_prompt"], "build the panel");
+        assert_eq!(
+            changed["prompts"],
+            serde_json::json!(["build the panel", "keep going"])
+        );
+        let untouched: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(old).unwrap()).unwrap();
+        assert_eq!(untouched["working_on"], "old focus");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn http_readiness_is_pinned_to_localhost_and_the_declared_path() {
