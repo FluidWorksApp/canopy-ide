@@ -697,7 +697,10 @@ impl TaskStore {
         })
     }
 
-    fn settle_attempt(&self, input: TaskAttemptSettlement) -> Result<TaskAttempt, String> {
+    pub(crate) fn settle_attempt(
+        &self,
+        input: TaskAttemptSettlement,
+    ) -> Result<TaskAttempt, String> {
         validate_id(&input.attempt_id, "attempt id")?;
         if !matches!(
             input.state.as_str(),
@@ -809,7 +812,7 @@ impl TaskStore {
         })
     }
 
-    fn get(&self, run_id: &str) -> Result<Option<TaskEnvelopeDetail>, String> {
+    pub(crate) fn get(&self, run_id: &str) -> Result<Option<TaskEnvelopeDetail>, String> {
         validate_id(run_id, "run id")?;
         self.with_conn(|conn| read_detail(conn, run_id))
     }
@@ -852,7 +855,7 @@ impl TaskStore {
         })
     }
 
-    fn update_metadata(
+    pub(crate) fn update_metadata(
         &self,
         run_id: String,
         metadata: Value,
@@ -891,6 +894,47 @@ impl TaskStore {
             tx.commit().map_err(|e| e.to_string())?;
             Ok((project_id, run_id, summary))
         })
+    }
+
+    /// Cooperatively cancel the current durable attempt for an MCP Tasks
+    /// request. The frontend receives a separate opaque action so it can stop
+    /// the live runner too; this write is the authority when no surface is
+    /// mounted to receive that action.
+    pub(crate) fn cancel_run(&self, run_id: &str) -> Result<TaskEnvelopeDetail, String> {
+        let detail = self
+            .get(run_id)?
+            .ok_or_else(|| "task not found".to_string())?;
+        if detail.envelope.summary.status == "cancelled" {
+            return Ok(detail);
+        }
+        if matches!(
+            detail.envelope.summary.status.as_str(),
+            "completed" | "failed"
+        ) {
+            return Err(format!(
+                "task is already {}",
+                detail.envelope.summary.status
+            ));
+        }
+        let attempt = detail
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| {
+                matches!(
+                    attempt.state.as_str(),
+                    "reserved" | "launching" | "running" | "waiting"
+                )
+            })
+            .ok_or_else(|| "task has no active attempt to cancel".to_string())?;
+        self.settle_attempt(TaskAttemptSettlement {
+            attempt_id: attempt.attempt_id.clone(),
+            state: "cancelled".into(),
+            failure_class: Some("user".into()),
+            failure_code: Some("mcp-task-cancelled".into()),
+        })?;
+        self.get(run_id)?
+            .ok_or_else(|| "task disappeared after cancellation".to_string())
     }
 
     fn interrupt_stale(&self, current_instance: &str) -> Result<usize, String> {
@@ -2207,6 +2251,26 @@ mod tests {
         assert_eq!(
             detail.attempts[0].attempt_id,
             reservation.attempt.attempt_id
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_cancellation_settles_the_durable_attempt_and_is_idempotent() {
+        let root = root();
+        let store = TaskStore::at(root.clone());
+        let reservation = store.reserve(input()).unwrap();
+        let cancelled = store.cancel_run(&reservation.envelope.run_id).unwrap();
+        assert_eq!(cancelled.envelope.summary.status, "cancelled");
+        assert_eq!(cancelled.attempts[0].state, "cancelled");
+        assert_eq!(
+            store
+                .cancel_run(&reservation.envelope.run_id)
+                .unwrap()
+                .envelope
+                .summary
+                .status,
+            "cancelled"
         );
         let _ = std::fs::remove_dir_all(root);
     }

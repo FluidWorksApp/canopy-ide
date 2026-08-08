@@ -344,6 +344,8 @@ export interface AgentAction {
     | "close_session"
     | "spawn_agent"
     | "message_agent"
+    | "mcp_task_update"
+    | "mcp_task_cancel"
     /** Internal second phase: the bridge has authorized the resolved PR's
      *  mesh scope and asks the owning ProjectView to create the cold task. */
     | "message_agent_start";
@@ -363,6 +365,10 @@ export interface AgentAction {
   /** Durable task attribution resolved from the PTY's live TaskEnvelope row. */
   runId?: string;
   attemptId?: string;
+  /** MCP Tasks: the stable input request and its already-validated opaque
+   * response. Execution details never travel on this action. */
+  inputKey?: string;
+  response?: string;
   path?: string;
   line?: number;
   text?: string;
@@ -2609,6 +2615,9 @@ export interface McpCallResult {
   content: McpContent[];
   is_error: boolean;
   structured: unknown | null;
+  /** Native asynchronous result. The Build surface maps this structural task
+   *  to a card; it never renders server output as progress. */
+  task: import("./mcpTasks").McpTask | null;
   elapsed_ms: number;
 }
 
@@ -2636,6 +2645,23 @@ export const mcpCallTool = (
   tool: string,
   args: Record<string, unknown>,
 ) => invoke<McpCallResult>("mcp_call_tool", { key, tool, arguments: args });
+
+export const mcpTaskGet = (key: string, taskId: string) =>
+  invoke<import("./mcpTasks").McpTask>("mcp_task_get", { key, taskId });
+
+export const mcpTaskUpdate = (
+  key: string,
+  taskId: string,
+  inputResponses: Record<string, unknown>,
+) =>
+  invoke<{ resultType: "complete" }>("mcp_task_update", {
+    key,
+    taskId,
+    inputResponses,
+  });
+
+export const mcpTaskCancel = (key: string, taskId: string) =>
+  invoke<{ resultType: "complete" }>("mcp_task_cancel", { key, taskId });
 
 /** Stop the server — for stdio, kill the process. */
 export const mcpDisconnect = (key: string) =>
