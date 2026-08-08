@@ -4,6 +4,17 @@ export const MANAGED_PROCESS_ALIVE_SETTLE_MS = 2_500;
 export const MANAGED_PROCESS_STALL_MS = 45_000;
 export const MANAGED_PROMPT_RESPONSE_TIMEOUT_MS = 10_000;
 
+export type ManagedProcessKind = NonNullable<RunCommand["purpose"]>;
+const MANAGED_PROCESS_KIND_SET = {
+  setup: true,
+  serve: true,
+  worker: true,
+  check: true,
+} as const satisfies Record<ManagedProcessKind, true>;
+export const MANAGED_PROCESS_KINDS = Object.keys(
+  MANAGED_PROCESS_KIND_SET,
+) as ManagedProcessKind[];
+
 /** Baseline for every unattended process the app owns. Command-specific
  * supported flags are still preferred; these cover package/update notifiers
  * that otherwise decide to ask merely because a PTY is attached. */
@@ -21,6 +32,19 @@ export type ManagedProcessState =
   | "exited-ok"
   | "failed"
   | "hung";
+
+const MANAGED_PROCESS_STATE_SET = {
+  spawning: true,
+  working: true,
+  "waiting-on-input": true,
+  ready: true,
+  "exited-ok": true,
+  failed: true,
+  hung: true,
+} as const satisfies Record<ManagedProcessState, true>;
+export const MANAGED_PROCESS_STATES = Object.keys(
+  MANAGED_PROCESS_STATE_SET,
+) as ManagedProcessState[];
 
 export type ManagedProcessExit =
   | "observe"
@@ -42,12 +66,19 @@ export type ManagedProcessPrompt =
     };
 
 export interface ManagedProcessObservation {
+  kind?: ManagedProcessKind;
   now: number;
   spawnedAt: number;
   outputBytes: number;
   quietMs: number | null;
   ports: readonly number[];
   readinessKind?: "port" | "http" | "process-alive" | "one-shot";
+  /** Result of probing the declared HTTP path on the process-owned ports.
+   * A listening socket by itself is deliberately not HTTP readiness. */
+  httpReady?: boolean;
+  /** A one-shot command may declare a longer bounded window. Long-lived
+   * processes use the shared startup deadline. */
+  readinessTimeoutMs?: number;
   rawOutput: string;
   exited?: boolean;
   exitCode?: number | null;
@@ -57,11 +88,53 @@ export interface ManagedProcessObservation {
 }
 
 export interface ManagedProcessClassification {
+  kind: ManagedProcessKind;
   state: ManagedProcessState;
   exit: ManagedProcessExit;
+  /** The contract-level way out of this state. The supervisor is the first
+   * responder for every current process state; it may later produce a human
+   * decision card when repair proves that a real decision is required. */
+  surface: "agent-exit" | "chat-card-exit";
   deadlineAt: number | null;
   prompt: ManagedProcessPrompt | null;
 }
+
+const managedProcessSurface = (
+  state: ManagedProcessState,
+): ManagedProcessClassification["surface"] => {
+  // Intentionally exhaustive. Adding a state without choosing one of the two
+  // Build exits fails typecheck, while MANAGED_PROCESS_STATES makes the same
+  // omission visible to the behavioural matrix.
+  switch (state) {
+    case "spawning":
+    case "working":
+    case "waiting-on-input":
+    case "ready":
+    case "exited-ok":
+    case "failed":
+    case "hung":
+      return "agent-exit";
+    default: {
+      const missingState: never = state;
+      return missingState;
+    }
+  }
+};
+
+const classification = (
+  kind: ManagedProcessKind,
+  state: ManagedProcessState,
+  exit: ManagedProcessExit,
+  deadlineAt: number | null,
+  prompt: ManagedProcessPrompt | null,
+): ManagedProcessClassification => ({
+  kind,
+  state,
+  exit,
+  surface: managedProcessSurface(state),
+  deadlineAt,
+  prompt,
+});
 
 // Prompt matching does not need a full terminal emulator: the questions we
 // care about are printable text. Remove CSI/OSC escapes and carriage-return
@@ -133,13 +206,11 @@ export function detectManagedProcessPrompt(raw: string): ManagedProcessPrompt | 
 export function classifyManagedProcess(
   observation: ManagedProcessObservation,
 ): ManagedProcessClassification {
+  const kind = observation.kind ?? "serve";
   if (observation.exited) {
-    return {
-      state: observation.exitCode === 0 ? "exited-ok" : "failed",
-      exit: observation.exitCode === 0 ? "complete" : "repair",
-      deadlineAt: null,
-      prompt: null,
-    };
+    return observation.exitCode === 0
+      ? classification(kind, "exited-ok", "complete", null, null)
+      : classification(kind, "failed", "repair", observation.now, null);
   }
 
   const prompt = detectManagedProcessPrompt(observation.rawOutput);
@@ -149,19 +220,17 @@ export function classifyManagedProcess(
       observation.safePromptHandledAt != null &&
       observation.now - observation.safePromptHandledAt >=
         MANAGED_PROMPT_RESPONSE_TIMEOUT_MS;
-    return {
-      state: "waiting-on-input",
-      exit:
-        prompt.kind === "safe-confirmation" && !responseExpired
-          ? "auto-answer"
-          : "repair",
-      deadlineAt:
-        prompt.kind === "safe-confirmation" && !responseExpired
-          ? (observation.safePromptHandledAt ?? observation.now) +
-            MANAGED_PROMPT_RESPONSE_TIMEOUT_MS
-          : null,
+    const mayAnswer = prompt.kind === "safe-confirmation" && !responseExpired;
+    return classification(
+      kind,
+      "waiting-on-input",
+      mayAnswer ? "auto-answer" : "repair",
+      mayAnswer
+        ? (observation.safePromptHandledAt ?? observation.now) +
+          MANAGED_PROMPT_RESPONSE_TIMEOUT_MS
+        : observation.now,
       prompt,
-    };
+    );
   }
 
   const readiness = observation.readinessKind ?? "process-alive";
@@ -169,22 +238,28 @@ export function classifyManagedProcess(
     observation.outputBytes > 0 &&
     observation.now - observation.spawnedAt >= MANAGED_PROCESS_ALIVE_SETTLE_MS;
   if (
-    ((readiness === "port" || readiness === "http") && observation.ports.length > 0) ||
+    (readiness === "port" && observation.ports.length > 0) ||
+    (readiness === "http" && observation.httpReady === true) ||
     (readiness === "process-alive" && aliveLongEnough)
   ) {
-    return { state: "ready", exit: "complete", deadlineAt: null, prompt: null };
+    return classification(kind, "ready", "complete", null, null);
   }
 
-  const quietMs = observation.quietMs ?? observation.now - observation.spawnedAt;
-  if (quietMs >= MANAGED_PROCESS_STALL_MS) {
-    return { state: "hung", exit: "repair", deadlineAt: null, prompt: null };
+  const readinessTimeoutMs =
+    readiness === "one-shot" && observation.readinessTimeoutMs != null
+      ? observation.readinessTimeoutMs
+      : MANAGED_PROCESS_STALL_MS;
+  const deadlineAt = observation.spawnedAt + readinessTimeoutMs;
+  if (observation.now >= deadlineAt) {
+    return classification(kind, "hung", "repair", deadlineAt, null);
   }
-  return {
-    state: observation.outputBytes > 0 ? "working" : "spawning",
-    exit: "observe",
-    deadlineAt: observation.now + (MANAGED_PROCESS_STALL_MS - quietMs),
-    prompt: null,
-  };
+  return classification(
+    kind,
+    observation.outputBytes > 0 ? "working" : "spawning",
+    "observe",
+    deadlineAt,
+    null,
+  );
 }
 
 const hasFlag = (command: string, flag: string) =>
