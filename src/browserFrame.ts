@@ -9,13 +9,13 @@
 // page appears frozen under the overlay, which is what a still image of a page
 // looks like, rather than gone.
 //
-// The frame is deliberately allowed to be slightly stale. Capturing at the
-// moment of hiding would mean waiting on an async snapshot with the overlay
-// already painted underneath the webview — trading a blank flash for a torn
-// one. Capturing while the view is visible and quiet costs nothing anybody
-// sees, and a page that has not changed since is the overwhelming majority of
-// them. A page mid-animation freezes a frame or two behind; that is what a
-// freeze-frame is.
+// A frame is captured when the view first appears, whenever Canopy knows the
+// page changed, and once more as the native view is hidden. Do not photograph a
+// quiet page on a timer: every capture crosses the native/renderer boundary as
+// a fresh base64 string and used to become a unique decoded data URL. WebKit
+// can retain those resources long after JavaScript drops the last reference;
+// that cadence is the leading candidate for the observed double-digit-GiB
+// footprint.
 
 /** What the placeholder div should be showing. */
 export type PaneState =
@@ -43,27 +43,24 @@ export function paneState({ native, wanted, shown, frame }: PaneInput): PaneStat
   return frame ? "frozen" : "empty";
 }
 
-/** Least time between two captures of the same view. A capture is a real
- *  render plus a JPEG encode plus an IPC hop, and nothing needs it faster than
- *  this — the frame only has to be right at the moment something covers it. */
-export const CAPTURE_INTERVAL_MS = 5_000;
-
 export interface CaptureInput {
   native: boolean;
-  /** Economy, not necessity: a hidden WKWebView still answers a snapshot (the
-   *  web process paints it fresh, see snapshot.rs), but a view off screen has
-   *  no overlay to feed, so the periodic refresh only runs while it is up.
-   *  The hide transition itself takes one more picture — browserHost calls
-   *  capture directly for it, past this gate. */
+  /** A view off screen has no frame to prepare. The hide transition itself
+   *  takes one final picture directly in browserHost. */
   shown: boolean;
   lastCaptureAt: number;
   now: number;
   /** Set when the page navigated or an agent acted on it — the held frame is
-   *  known to be wrong, so the interval doesn't apply. */
+   *  known to be wrong. New views start dirty, so this is also the initial
+   *  capture gate. */
   dirty: boolean;
   /** A capture already in flight; two at once would just queue renders. */
   inFlight: boolean;
 }
+
+/** A failed/empty capture leaves the view dirty. Bound retries so a broken
+ * platform snapshot API cannot become a render/encode/IPC hot loop. */
+export const CAPTURE_RETRY_MS = 1_000;
 
 /** Whether to take a picture now.
  *
@@ -75,13 +72,41 @@ export interface CaptureInput {
  *  next pass replaces it; a gate that can stick costs the entire feature. */
 export function shouldCapture(c: CaptureInput): boolean {
   if (!c.native || !c.shown || c.inFlight) return false;
-  if (c.dirty) return true;
-  return c.now - c.lastCaptureAt >= CAPTURE_INTERVAL_MS;
+  if (!c.dirty) return false;
+  return c.lastCaptureAt === 0 || c.now - c.lastCaptureAt >= CAPTURE_RETRY_MS;
 }
 
-/** A captured JPEG as something an <img> can show. */
+/** A captured JPEG as something an <img> can show.
+ *
+ * Blob URLs have an explicit lifetime. The old data-URL implementation gave
+ * every snapshot a new cache key that WebKit could retain indefinitely. Tests
+ * and non-browser callers fall back to a data URL. */
 export function frameSrc(base64: string): string {
+  if (
+    typeof window !== "undefined" &&
+    typeof window.atob === "function" &&
+    typeof window.Blob === "function" &&
+    typeof window.URL?.createObjectURL === "function"
+  ) {
+    const binary = window.atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return window.URL.createObjectURL(
+      new window.Blob([bytes], { type: "image/jpeg" }),
+    );
+  }
   return `data:image/jpeg;base64,${base64}`;
+}
+
+/** Release a frame created by frameSrc. Data URLs need no explicit cleanup. */
+export function releaseFrameSrc(src: string | null | undefined): void {
+  if (
+    src?.startsWith("blob:") &&
+    typeof window !== "undefined" &&
+    typeof window.URL?.revokeObjectURL === "function"
+  ) {
+    window.URL.revokeObjectURL(src);
+  }
 }
 
 /** The frame decoded ahead of the swap. An <img> whose src just changed paints

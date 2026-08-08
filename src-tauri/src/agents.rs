@@ -64,12 +64,19 @@ fn process_memory_bytes(_pid: u32, rss_bytes: u64) -> u64 {
     rss_bytes
 }
 
-/// Whole-app resource usage: this process and every descendant.
+/// App resource usage from the native process tree.
+///
+/// On Windows and Linux the webview helpers are descendants and land in this
+/// tree. macOS launches WKWebView's WebContent/GPU/Networking helpers as XPC
+/// services parented to launchd; there is no public WKWebView API that lists
+/// all of their pids. `includes_webviews` makes that missing layer explicit so
+/// the frontend never presents this lower bound as an exact app total.
 #[derive(Serialize, Clone)]
 pub struct AppStats {
     pub cpu: f32,
     pub mem_bytes: u64,
     pub procs: u32,
+    pub includes_webviews: bool,
 }
 
 /// A live terminal as the monitor sees it before it walks any processes.
@@ -361,10 +368,10 @@ pub fn start_monitor(app: AppHandle) {
                     }
                 }
 
-                // Our own footprint: this process plus everything under it —
-                // WebView helpers, language servers, PTY children and all. That
-                // total is what "the app is using" honestly means, and it's the
-                // number the memory-light claim has to answer to.
+                // Our native process-tree footprint: core, language servers,
+                // PTY children and every descendant. Windows/Linux webview
+                // helpers are descendants too. macOS WKWebView helpers are XPC
+                // services parented to launchd, so this is a lower bound there.
                 let mut app_cpu = 0.0_f32;
                 let mut app_mem = 0_u64;
                 let mut app_procs = 0_u32;
@@ -390,6 +397,7 @@ pub fn start_monitor(app: AppHandle) {
                         cpu: app_cpu,
                         mem_bytes: app_mem,
                         procs: app_procs,
+                        includes_webviews: !cfg!(target_os = "macos"),
                     },
                 );
 

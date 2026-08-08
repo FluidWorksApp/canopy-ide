@@ -852,12 +852,17 @@ export const StatusBar = memo(function StatusBar({
           <button
             className="status-model-btn"
             title={withLoadNote(
-              `canopy: ${app.procs} process${app.procs === 1 ? "" : "es"} — ` +
+              `${app.includes_webviews ? "canopy" : "canopy lower bound"}: ` +
+                `${app.procs} process${app.procs === 1 ? "" : "es"} — ` +
                 `Rust core, language servers, terminals and everything they spawned. ` +
                 `Memory is charged physical footprint on macOS (resident memory elsewhere). ` +
                 `Click for the per-project breakdown.\n\n` +
-                `Does not include the WebView: macOS runs it in system-owned WebKit ` +
-                `processes parented to launchd, which can't be attributed back to us.`,
+                (app.includes_webviews
+                  ? `Includes WebView helper processes on this platform.`
+                  : `Does not include WebContent, Graphics or Networking: macOS runs ` +
+                    `those as system-owned WebKit processes parented to launchd. ` +
+                    `Activity Monitor shows them as separate rows; add them to this ` +
+                    `lower bound for the OS-level Canopy total.`),
               appLoad ? loadNote("app", appLoad) : "",
             )}
             onClick={(e) => {
@@ -866,10 +871,12 @@ export const StatusBar = memo(function StatusBar({
             }}
           >
             <span className={appLoad?.cpu ? "bd-hot" : undefined}>
+              {!app.includes_webviews && "≥"}
               {app.cpu.toFixed(0)}% cpu
             </span>{" "}
             ·{" "}
             <span className={appLoad?.mem ? "bd-hot" : undefined}>
+              {!app.includes_webviews && "≥"}
               {fmtMem(app.mem_bytes)}
             </span>
           </button>
@@ -929,6 +936,15 @@ export const StatusBar = memo(function StatusBar({
                 }
                 return (
                   <>
+                    {!app.includes_webviews && (
+                      <div
+                        className="bd-head"
+                        title="macOS WebContent, Graphics and Networking are XPC processes outside Canopy's native process tree. Activity Monitor reports those rows separately."
+                      >
+                        <span>WebKit layers</span>
+                        <span className="bd-nums">OS-owned · add separately</span>
+                      </div>
+                    )}
                     {/* Memory and CPU are what this popup has always shown, and
                         disk is the resource next door: the same projects, the
                         same "what is this costing me", one click away. */}

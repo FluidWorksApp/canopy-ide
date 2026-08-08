@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  CAPTURE_INTERVAL_MS,
+  CAPTURE_RETRY_MS,
   frameSrc,
   paneState,
+  releaseFrameSrc,
   shouldCapture,
   type CaptureInput,
   type PaneInput,
@@ -51,8 +52,8 @@ const cap = (o: Partial<CaptureInput> = {}): CaptureInput => ({
 });
 
 describe("shouldCapture", () => {
-  it("captures a settled, visible page", () => {
-    expect(shouldCapture(cap())).toBe(true);
+  it("does not recapture a clean, visible page on every host pass", () => {
+    expect(shouldCapture(cap())).toBe(false);
   });
 
   // A hidden WKWebView snapshots to nothing, so the moment the frame is needed
@@ -65,10 +66,10 @@ describe("shouldCapture", () => {
   // a single navigation event. A listener that missed that event — which a
   // re-subscribing effect does — latched the view as forever-loading, so it
   // never captured again and every overlay showed a blank pane instead of the
-  // page. A frame of a half-loaded page is replaced on the next pass; a gate
-  // that sticks is not.
+  // page. A frame of a half-loaded page is replaced on the next known change or
+  // hide transition; a gate that sticks is not.
   it("captures a page that may still be loading, rather than risk never capturing", () => {
-    expect(shouldCapture(cap({ dirty: false, lastCaptureAt: 0, now: 50 }))).toBe(false);
+    expect(shouldCapture(cap({ dirty: false }))).toBe(false);
     expect(shouldCapture(cap({ dirty: true }))).toBe(true);
   });
 
@@ -80,15 +81,18 @@ describe("shouldCapture", () => {
     expect(shouldCapture(cap({ native: false }))).toBe(false);
   });
 
-  it("holds off until the interval has passed", () => {
-    const now = 10_000;
-    expect(shouldCapture(cap({ now, lastCaptureAt: now - CAPTURE_INTERVAL_MS + 1 }))).toBe(false);
-    expect(shouldCapture(cap({ now, lastCaptureAt: now - CAPTURE_INTERVAL_MS }))).toBe(true);
+  it("captures when the held frame is known to be wrong", () => {
+    expect(shouldCapture(cap({ dirty: true }))).toBe(true);
   });
 
-  it("ignores the interval when the held frame is known to be wrong", () => {
+  it("bounds retries when a dirty capture fails or comes back empty", () => {
     const now = 10_000;
-    expect(shouldCapture(cap({ now, lastCaptureAt: now, dirty: true }))).toBe(true);
+    expect(
+      shouldCapture(cap({ dirty: true, now, lastCaptureAt: now - CAPTURE_RETRY_MS + 1 })),
+    ).toBe(false);
+    expect(
+      shouldCapture(cap({ dirty: true, now, lastCaptureAt: now - CAPTURE_RETRY_MS })),
+    ).toBe(true);
   });
 
   it("still refuses a dirty frame it cannot take", () => {
@@ -98,7 +102,13 @@ describe("shouldCapture", () => {
 });
 
 describe("frameSrc", () => {
-  it("wraps the capture as something an img can show", () => {
-    expect(frameSrc("QUJD")).toBe("data:image/jpeg;base64,QUJD");
+  it("wraps the capture as a releasable image source", () => {
+    const src = frameSrc("QUJD");
+    expect(src.startsWith("blob:") || src === "data:image/jpeg;base64,QUJD").toBe(true);
+    releaseFrameSrc(src);
+  });
+
+  it("does not try to revoke fallback data URLs", () => {
+    expect(() => releaseFrameSrc("data:image/jpeg;base64,QUJD")).not.toThrow();
   });
 });

@@ -10,13 +10,14 @@
 //     page has a frame of its own — bounded, so a mute page can't hold it
 //     forever.
 //
-//   * hiding: the frame in hand is up to CAPTURE_INTERVAL_MS old, and a page
-//     that moved in that window jumps backwards when the still replaces it. A
-//     hidden WKWebView still answers a snapshot (snapshot.rs), so the hide
-//     itself takes one more picture and the still catches up under the
+//   * hiding: the frame in hand may predate the page's latest self-directed
+//     change. A hidden WKWebView still answers a snapshot (snapshot.rs), so the
+//     hide itself takes one more picture and the still catches up under the
 //     overlay.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  browserPageChanged,
+  forgetBrowserView,
   registerBrowserView,
   resetBrowserHost,
   setBrowserViewWanted,
@@ -164,10 +165,161 @@ describe("hiding: the still catches up under the overlay", () => {
     const before = frames;
 
     cover();
-    // Short of CAPTURE_INTERVAL_MS since the last periodic capture, so a new
-    // frame here can only be the hide-transition one.
+    // Clean pages are not recaptured periodically, so a new frame here can
+    // only be the hide-transition one.
     await settle(3);
     expect(pane.state()).toBe("frozen");
     expect(frames).toBeGreaterThan(before);
+  });
+});
+
+describe("capture retention", () => {
+  it("does not keep photographing a clean visible page on the heartbeat", async () => {
+    painted = true;
+    setBrowserViewWanted(TAB, true);
+    await settle();
+    const settledFrames = frames;
+
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(settledFrames).toBeGreaterThan(0);
+    expect(frames).toBe(settledFrames);
+  });
+});
+
+describe("frame resource lifetime", () => {
+  const created: string[] = [];
+  const revoked: string[] = [];
+  let createDescriptor: PropertyDescriptor | undefined;
+  let revokeDescriptor: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    created.length = 0;
+    revoked.length = 0;
+    createDescriptor = Object.getOwnPropertyDescriptor(window.URL, "createObjectURL");
+    revokeDescriptor = Object.getOwnPropertyDescriptor(window.URL, "revokeObjectURL");
+    Object.defineProperty(window.URL, "createObjectURL", {
+      configurable: true,
+      value: () => {
+        const url = `blob:canopy-frame-${created.length + 1}`;
+        created.push(url);
+        return url;
+      },
+    });
+    Object.defineProperty(window.URL, "revokeObjectURL", {
+      configurable: true,
+      value: (url: string) => revoked.push(url),
+    });
+  });
+
+  afterEach(() => {
+    if (createDescriptor) {
+      Object.defineProperty(window.URL, "createObjectURL", createDescriptor);
+    } else {
+      Reflect.deleteProperty(window.URL, "createObjectURL");
+    }
+    if (revokeDescriptor) {
+      Object.defineProperty(window.URL, "revokeObjectURL", revokeDescriptor);
+    } else {
+      Reflect.deleteProperty(window.URL, "revokeObjectURL");
+    }
+  });
+
+  it("releases the previous frame after adopting a replacement", async () => {
+    painted = true;
+    setBrowserViewWanted(TAB, true);
+    await settle();
+    expect(created).toHaveLength(1);
+
+    browserPageChanged(TAB);
+    await vi.advanceTimersByTimeAsync(1_100);
+
+    expect(created).toHaveLength(2);
+    expect(revoked).toContain(created[0]);
+    expect(revoked).not.toContain(created[1]);
+  });
+
+  it("releases the retained frame when the view is forgotten", async () => {
+    painted = true;
+    setBrowserViewWanted(TAB, true);
+    await settle();
+    const current = created[0];
+
+    forgetBrowserView(TAB);
+
+    expect(revoked).toContain(current);
+  });
+
+  it("releases a decode that completes after the view was forgotten", async () => {
+    let finishDecode: (() => void) | undefined;
+    const OriginalImage = globalThis.Image;
+    class DeferredImage {
+      src = "";
+      decode() {
+        return new Promise<void>((resolve) => {
+          finishDecode = resolve;
+        });
+      }
+    }
+    Object.defineProperty(globalThis, "Image", {
+      configurable: true,
+      value: DeferredImage,
+    });
+
+    try {
+      painted = true;
+      setBrowserViewWanted(TAB, true);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(created).toHaveLength(1);
+      expect(finishDecode).toBeTypeOf("function");
+
+      forgetBrowserView(TAB);
+      finishDecode?.();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(revoked).toContain(created[0]);
+    } finally {
+      Object.defineProperty(globalThis, "Image", {
+        configurable: true,
+        value: OriginalImage,
+      });
+    }
+  });
+
+  it("rejects a pre-change decode and retries for the current page", async () => {
+    const pending: Array<() => void> = [];
+    const OriginalImage = globalThis.Image;
+    class DeferredImage {
+      src = "";
+      decode() {
+        return new Promise<void>((resolve) => pending.push(resolve));
+      }
+    }
+    Object.defineProperty(globalThis, "Image", {
+      configurable: true,
+      value: DeferredImage,
+    });
+
+    try {
+      painted = true;
+      setBrowserViewWanted(TAB, true);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(created).toHaveLength(1);
+
+      browserPageChanged(TAB);
+      pending.shift()?.();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(revoked).toContain(created[0]);
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(created).toHaveLength(2);
+    } finally {
+      Object.defineProperty(globalThis, "Image", {
+        configurable: true,
+        value: OriginalImage,
+      });
+    }
   });
 });

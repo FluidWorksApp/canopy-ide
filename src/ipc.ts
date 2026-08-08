@@ -1927,9 +1927,13 @@ export interface AppStats {
   cpu: number;
   mem_bytes: number;
   procs: number;
+  /** False when the OS hosts WebView helpers outside Canopy's process tree.
+   *  The native total is then a lower bound, not whole-app usage. */
+  includes_webviews: boolean;
 }
 
-/** Whole-app footprint (this process + every descendant), emitted every 2s. */
+/** Native process-tree footprint, emitted every 2s. `includes_webviews` says
+ * whether that tree is also a whole-app footprint on the current platform. */
 export const onAppStats = (cb: (s: AppStats) => void): Promise<UnlistenFn> =>
   listen<AppStats>("app:stats", (e) => cb(e.payload));
 
