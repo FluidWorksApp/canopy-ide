@@ -3430,9 +3430,10 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_agents",
-            "description": "What the other agent sessions in this project are doing — often where the context behind a request already is. Read it when the user refers to work you can't see, or when you need background another session has: what each was asked, its branch and files, the last thing it said; pass ptyId or session for that agent's full conversation. Also: terminal ids (canopy_message_agent types into them) and held file claims, for a shared checkout.",
+            "description": "What the other agent sessions in this project are doing — often where the context behind a request already is. Each live row has a stable Canopy-assigned name plus its terminal id; pass name, ptyId, or session for that agent's full conversation. Also includes held file claims for the shared checkout.",
             "inputSchema": { "type": "object", "properties": {
                 "ptyId": { "type": "integer", "description": "One agent, by terminal — adds its conversation" },
+                "name": { "type": "string", "description": "One agent, by its stable Canopy-assigned name — adds its conversation" },
                 "session": { "type": "string", "description": "One agent, by session id (prefix is enough)" },
                 "transcript": { "type": "integer", "description": "Turns to include (default 12, max 100)" }
             }, "additionalProperties": false }
@@ -3448,9 +3449,10 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_message_agent",
-            "description": "Send a message to another agent session by typing it into its terminal. Hand off work, warn about a shared file, ask what it's doing; ids come from canopy_agents. It replies in its own session — read that with canopy_server_output. The message is tagged with where it came from, so the other agent knows it is talking to you and not to its user.\n\nThis genuinely interrupts: it arrives as keystrokes in whatever the other agent is doing. Check canopy_agents first and prefer a session that is waiting or idle over one mid-task, keep it to one line, and don't expect an acknowledgement — nothing here confirms it was read. Only agent sessions can be messaged; a shell or a dev-server terminal is refused, because typing into one would run what you sent.\n\nPass `pr` instead of `ptyId` to reach whoever raised a pull request, without knowing who that was: Canopy holds the record of which session produced which PR, and routes to it — typing into it if it is still running, reopening its conversation if it has ended, and starting a fresh agent told what it is picking up if there is nothing left to reopen. This is the right way to act on \"change something about PR #N\": the session that wrote it already has the context a new one would have to rediscover. Note that the `pr` form is handed to Canopy to resolve and is not confirmed back to you — if no such PR is open here, the user is told and nothing is delivered.",
+            "description": "Send a one-line message to another agent session by its stable Canopy name or terminal id from canopy_agents. The name is only a label: Canopy resolves it inside this project and still delivers through the authenticated PTY. This genuinely interrupts the target. Pass `pr` instead to reach whoever raised a pull request.",
             "inputSchema": { "type": "object", "properties": {
                 "ptyId": { "type": "integer", "description": "Terminal id of the agent to message (from canopy_agents). Must be an agent session, not a shell or a run" },
+                "name": { "type": "string", "description": "Stable Canopy-assigned agent name from canopy_agents, instead of ptyId" },
                 "pr": { "type": "string", "description": "A pull request number (\"323\") or url, instead of ptyId — Canopy finds the session that raised it" },
                 "text": { "type": "string", "description": "What to say — one line, sent as if typed. Line breaks and control characters are stripped before it is delivered" }
             }, "required": ["text"], "additionalProperties": false }
@@ -3828,19 +3830,18 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
         }
         "canopy_message_agent" => {
             let pty = args.get("ptyId").and_then(|v| v.as_u64());
+            let name = args.get("name").and_then(|v| v.as_str());
             let pr = args.get("pr").and_then(|v| v.as_str());
             // One of the two, never neither. `pr` is the indirect form: Canopy
             // looks up which session produced that PR and applies the ladder
             // (running here -> reopen its conversation -> a fresh agent told
             // what it is picking up). An agent cannot work that out itself —
             // the record lives in Canopy's provenance store.
-            if pty.is_none() && pr.is_none() {
-                return Err(
-                    "say who to message: ptyId (a terminal id from canopy_agents) \
+            if pty.is_none() && name.is_none() && pr.is_none() {
+                return Err("say who to message: name or ptyId (from canopy_agents) \
                             or pr (a pull request number or url, and Canopy finds whoever \
                             raised it)"
-                        .into(),
-                );
+                    .into());
             }
             let body = args
                 .get("text")
@@ -3850,6 +3851,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "kind": "message_agent",
                 "cwd": cwd(),
                 "ptyId": pty,
+                "name": name,
                 "pr": pr,
                 "text": body,
             });
@@ -4544,8 +4546,9 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
     let cwd = cwd();
 
     let want_pty = args.get("ptyId").and_then(|v| v.as_u64());
+    let want_name = args.get("name").and_then(|v| v.as_str());
     let want_session = args.get("session").and_then(|v| v.as_str());
-    let detail = want_pty.is_some() || want_session.is_some();
+    let detail = want_pty.is_some() || want_name.is_some() || want_session.is_some();
     // A roster row shows only the last thing the agent said — but the final
     // turn is often the user's, so read back a few to find one.
     let turns = args
@@ -4733,6 +4736,14 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
                 continue;
             }
         }
+        if let Some(want) = want_name {
+            if !live
+                .and_then(|agent| agent["name"].as_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(want))
+            {
+                continue;
+            }
+        }
         // Prefix match: session ids are uuids, and no one should have to paste
         // one back in full to ask a follow-up about the same agent.
         if let Some(want) = want_session {
@@ -4749,6 +4760,7 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
             "session": session_id,
             "cwd": peer_cwd,
             "agent": live.and_then(|a| a["agent"].as_str()).or(d["agent"].as_str()),
+            "name": live.and_then(|a| a["name"].as_str()),
             // What the user calls this session: the label on its tab, which is
             // the only name they can point at when they say "the other one".
             "title": live.and_then(|a| a["title"].as_str()),
@@ -4815,6 +4827,14 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
         if want_pty.is_some() && pty_id != want_pty {
             continue;
         }
+        if let Some(want) = want_name {
+            if !a["name"]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(want))
+            {
+                continue;
+            }
+        }
         // Nothing published a session id for this one, so it can't answer a
         // question asked by session id.
         if want_session.is_some() {
@@ -4824,6 +4844,7 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
             "session": null,
             "cwd": a.get("cwd").cloned().unwrap_or_else(|| a["dir"].clone()),
             "agent": a["agent"],
+            "name": a["name"],
             "title": a["title"],
             "branch": null,
             "state": "unknown",
@@ -4890,8 +4911,8 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
              state is as of their last hook event, not this instant: \"stale\" means the tab is \
              still open but has published nothing for half an hour, \"unknown\" that Canopy \
              shows an agent there which has published nothing at all. Both are running and both \
-             can be messaged. Pass ptyId or session for one agent's conversation; \
-             canopy_message_agent(ptyId) types into it. A row with a null ptyId belongs to \
+             can be messaged. Pass name, ptyId, or session for one agent's conversation; \
+             canopy_message_agent(name) resolves it to the authenticated terminal. A row with a null ptyId belongs to \
              another Canopy window and can be read but not messaged."
         },
     })
@@ -5469,11 +5490,11 @@ mod tests {
         assert_eq!(detail.as_deref(), Some("drop the retry"));
     }
 
-    /// Either form is enough, neither is not. The old schema required `ptyId`;
+    /// Any address form is enough, none is not. The old schema required `ptyId`;
     /// an agent that passes only `pr` must not be told it is missing an
     /// argument it should never have had to know.
     #[test]
-    fn message_agent_takes_a_terminal_or_a_pr_but_needs_one_of_them() {
+    fn message_agent_takes_a_name_terminal_or_pr_but_needs_one_of_them() {
         let def = tool_defs();
         let tool = def
             .as_array()
@@ -5491,6 +5512,7 @@ mod tests {
         let props = &tool["inputSchema"]["properties"];
         assert!(props.get("pr").is_some());
         assert!(props.get("ptyId").is_some());
+        assert!(props.get("name").is_some());
     }
 
     #[test]

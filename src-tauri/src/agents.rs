@@ -84,6 +84,7 @@ struct SessionMeta {
     id: u32,
     /// The process we spawned the terminal with — usually the shell.
     root: Option<u32>,
+    name: String,
     title: String,
     cwd: String,
     /// Process group the pty currently has in the foreground.
@@ -101,6 +102,7 @@ struct SessionMeta {
 #[derive(Serialize, Clone)]
 pub struct SessionStats {
     pub id: u32,
+    pub name: String,
     pub title: String,
     pub cwd: String,
     pub total_cpu: f32,
@@ -383,6 +385,7 @@ pub fn start_monitor(app: AppHandle) {
                     .map(|s| SessionMeta {
                         id: s.id,
                         root: s.pid,
+                        name: s.name.lock().unwrap().clone(),
                         title: s.title.lock().unwrap().clone(),
                         cwd: s.cwd.clone(),
                         foreground: s.foreground_pid(),
@@ -484,6 +487,7 @@ pub fn start_monitor(app: AppHandle) {
                     let SessionMeta {
                         id,
                         root,
+                        name,
                         title,
                         cwd,
                         foreground,
@@ -536,6 +540,7 @@ pub fn start_monitor(app: AppHandle) {
                     }
                     stats.push(SessionStats {
                         id,
+                        name,
                         title,
                         cwd,
                         total_cpu: procs.iter().map(|p| p.cpu).sum(),
@@ -5366,6 +5371,7 @@ mod tests {
     fn final_pty_clears_cached_stats_and_ports_once() {
         let cache = StatsCache(std::sync::Mutex::new(vec![SessionStats {
             id: 7,
+            name: "Ember".into(),
             title: "agent".into(),
             cwd: "/tmp/project".into(),
             total_cpu: 1.0,

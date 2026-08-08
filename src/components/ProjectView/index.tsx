@@ -1636,6 +1636,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       icon = "📱",
       activate = true,
       killOnClose = false,
+      name?: string,
     ): string => {
       const existing = tabsRef.current.find(
         (t): t is TermSubTab => t.type === "terminal" && t.attachId === ptyId,
@@ -1651,6 +1652,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           id,
           type: "terminal",
           cwd,
+          name,
           title: title || "agent",
           ptyId,
           attachId: ptyId,
@@ -1674,6 +1676,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ptyId: number;
         cwd: string;
         title: string;
+        name?: string;
         activate?: boolean;
         killOnClose?: boolean;
       };
@@ -1685,6 +1688,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         d.killOnClose ? "⌨" : "📱",
         d.activate !== false,
         d.killOnClose === true,
+        d.name,
       );
     };
     window.addEventListener("canopy:attach-terminal", onAttach);
@@ -7793,14 +7797,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const startRename = useCallback((tab: TermSubTab) => {
     setRenamingTabId(tab.id);
-    setRenameDraft(tab.customTitle ?? tab.title);
+    setRenameDraft(tab.name ?? tab.customTitle ?? tab.title);
   }, []);
-  // Empty draft clears the custom name and falls back to the auto title.
+  // Native owns live session names. The tab mirrors the accepted value, while
+  // the PTY id/token remains the authority for every operation.
   const commitRename = useCallback(() => {
-    if (renamingTabId)
-      patchTab(renamingTabId, { customTitle: renameDraft.trim() || undefined });
+    if (renamingTabId) {
+      const tab = tabsRef.current.find(
+        (candidate): candidate is TermSubTab =>
+          candidate.id === renamingTabId && candidate.type === "terminal",
+      );
+      if (tab?.ptyId != null) {
+        void ipc
+          .ptySetName(tab.ptyId, renameDraft)
+          .then((name) => patchTab(tab.id, { name, customTitle: undefined }))
+          .catch((error) => onNotice(String(error), "error"));
+      } else if (tab) {
+        // The spawn callback promotes this pending value into native state.
+        patchTab(tab.id, { customTitle: renameDraft.trim() || undefined });
+      }
+    }
     setRenamingTabId(null);
-  }, [renamingTabId, renameDraft, patchTab]);
+  }, [renamingTabId, renameDraft, patchTab, onNotice]);
   const cancelRename = useCallback(() => setRenamingTabId(null), []);
 
   // Agents are the crux of this IDE, so they own the main strip. Detection is
@@ -7908,6 +7926,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         tabId: tab.id,
         label: agentDisplayName({
           tab,
+          sessionName: statsByPty.get(tab.ptyId)?.name,
+          sessionTitle: statsByPty.get(tab.ptyId)?.title,
+          cwd: tab.cwd,
           agentLabel: life.agent ?? undefined,
         }),
         path: tab.cwd,
@@ -8659,7 +8680,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
       return {
         tabId: t.id,
-        title: t.customTitle ?? t.title,
+        name:
+          t.name ??
+          projectStats.find((session) => session.id === t.ptyId)?.name ??
+          t.customTitle,
+        title: t.title,
         ptyId: t.ptyId as number,
         agentId: (byProc ?? byCommand)?.id ?? "agent",
         dir: basename(t.cwd) ?? "",
@@ -9658,7 +9683,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           .filter((t): t is TermSubTab => t.type === "terminal" && !!t.run)
           .map((t) => ({
             ptyId: t.ptyId,
-            title: t.customTitle ?? t.title,
+            title: t.name ?? t.customTitle ?? t.title,
             command: t.command ?? "",
             cwd: t.cwd,
             component:
@@ -9672,6 +9697,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           })),
         agents: agentTargets.map((a) => ({
           ptyId: a.ptyId,
+          name: a.name,
           agent: a.agentId,
           title: a.title,
           dir: a.dir,
@@ -11078,7 +11104,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     aria-hidden
                   />
                   <span className="multiplex-pane-title">
-                    {tab.customTitle ?? tab.title}
+                    {tab.name ?? tab.customTitle ?? tab.title}
                   </span>
                   <span className="multiplex-pane-path" title={tab.cwd}>
                     {basename(tab.cwd)}
@@ -11168,7 +11194,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 env={tab.env}
                 runId={tab.micro?.runId}
                 attemptId={tab.micro?.attemptId}
-                onSpawned={(ptyId) => {
+                onSpawned={(ptyId, assignedName) => {
                   livePtyByTab.current.set(tab.id, ptyId);
                   // A freshly spawned pty is alive by definition, so clear any
                   // stale exited/failed state. Restart kills the old pty and
@@ -11177,9 +11203,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   // process is the one now running (a red ✕ on a live server).
                   patchTab(tab.id, {
                     ptyId,
+                    name: assignedName,
                     exited: false,
                     exitCode: undefined,
                   });
+                  if (tab.customTitle) {
+                    void ipc
+                      .ptySetName(ptyId, tab.customTitle)
+                      .then((name) =>
+                        patchTab(tab.id, { name, customTitle: undefined }),
+                      )
+                      .catch((error) => onNotice(String(error), "error"));
+                  }
                   if (tab.micro?.runId) updateTaskRun(tab.micro.runId, { ptyId });
                   const prompt = pendingTerminalPrompts.current.get(tab.id);
                   if (prompt == null) return;

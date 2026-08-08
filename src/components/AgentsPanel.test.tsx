@@ -47,6 +47,7 @@ beforeEach(() => {
 
 const session = (over: Partial<ipcTypes.SessionStats> = {}): ipcTypes.SessionStats => ({
   id: 7,
+  name: "Ember",
   title: "shell",
   cwd: "/repo",
   total_cpu: 1,
@@ -74,40 +75,44 @@ const panel = (over: Partial<React.ComponentProps<typeof AgentsPanel>> = {}) =>
   );
 
 describe("what a running agent is called", () => {
-  it("takes the title the CLI gave its tab", () => {
+  it("takes the stable Canopy name over the title the CLI gave its tab", () => {
     panel({ tabNames: new Map([[7, { title: "✳ Fix browser screenshots" }]]) });
-    expect(screen.getByText("✳ Fix browser screenshots")).toBeTruthy();
+    expect(screen.getByText("Ember")).toBeTruthy();
+    expect(screen.queryByText("✳ Fix browser screenshots")).toBeNull();
     expect(screen.queryByText("claude")).toBeNull();
   });
 
-  it("takes the user's rename over the CLI's title", () => {
+  it("takes the user's accepted session rename over the CLI's title", () => {
     panel({
-      tabNames: new Map([[7, { title: "✳ Fix browser screenshots", customTitle: "screenshots" }]]),
+      tabNames: new Map([[7, { title: "✳ Fix browser screenshots", name: "Screenshots" }]]),
     });
-    expect(screen.getByText("screenshots")).toBeTruthy();
+    expect(screen.getByText("Screenshots")).toBeTruthy();
   });
 
-  it("names the CLI when its tab is still an untitled shell", () => {
-    panel({ tabNames: new Map([[7, { title: "shell" }]]) });
-    expect(screen.getByText("claude")).toBeTruthy();
+  it("falls back to the cwd for an old session with only an untitled shell", () => {
+    panel({
+      stats: [session({ name: undefined })],
+      tabNames: new Map([[7, { title: "shell" }]]),
+    });
+    expect(screen.getAllByText("repo").length).toBeGreaterThan(0);
   });
 
-  it("names the CLI when the session has no tab at all", () => {
+  it("keeps the assigned name when the session has no tab at all", () => {
     // A detached micro-task runs with no tab in this window.
     panel({ tabNames: new Map() });
-    expect(screen.getByText("claude")).toBeTruthy();
+    expect(screen.getByText("Ember")).toBeTruthy();
   });
 
-  it("keeps rows apart when only their tab names differ", () => {
+  it("keeps otherwise identical rows apart by their assigned names", () => {
     panel({
-      stats: [session({ id: 7 }), session({ id: 8 })],
+      stats: [session({ id: 7, name: "Ember" }), session({ id: 8, name: "Juniper" })],
       tabNames: new Map([
-        [7, { title: "Fix the login redirect" }],
-        [8, { title: "Android preview" }],
+        [7, { title: "canopy" }],
+        [8, { title: "canopy" }],
       ]),
     });
-    expect(screen.getByText("Fix the login redirect")).toBeTruthy();
-    expect(screen.getByText("Android preview")).toBeTruthy();
+    expect(screen.getByText("Ember")).toBeTruthy();
+    expect(screen.getByText("Juniper")).toBeTruthy();
   });
 });
 
