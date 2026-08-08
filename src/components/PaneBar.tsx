@@ -56,6 +56,7 @@ function HoverPreview({
   paneRef,
   termText,
   state,
+  showAssignedName,
 }: {
   tab: SubTab;
   left: number;
@@ -63,6 +64,7 @@ function HoverPreview({
   paneRef: React.RefObject<HTMLDivElement | null>;
   termText: (id: string) => string | null;
   state?: LifeState;
+  showAssignedName: boolean;
 }) {
   const [tick, setTick] = useState(0);
   const everyRef = useRef(PREVIEW_TICK_MS);
@@ -88,7 +90,7 @@ function HoverPreview({
     >
       <div className="tab-hover-preview-head">
         <span className="tab-hover-preview-icon">{tabPreviewIcon(tab)}</span>
-        <span className="tab-hover-preview-title">{tabText(tab)}</span>
+        <span className="tab-hover-preview-title">{tabText(tab, showAssignedName)}</span>
       </div>
       {tab.type === "terminal" && tab.description && (
         <div className="tab-hover-preview-activity">
@@ -143,9 +145,13 @@ function tabTitle(tab: SubTab): string {
   }
 }
 
-function tabText(tab: SubTab): string {
+function tabText(tab: SubTab, showAssignedName = false): string {
   switch (tab.type) {
-    case "terminal": return tab.multiplexTitle ?? tab.customTitle ?? tab.title;
+    case "terminal":
+      return tab.multiplexTitle ??
+        (showAssignedName ? tab.name : undefined) ??
+        tab.customTitle ??
+        tab.title;
     case "pr": return `#${tab.pr.number} ${tab.pr.title}`;
     case "ticket": return `${tab.ticket.id} ${tab.ticket.title}`;
     case "research": return tabDisplayLabel(tab);
@@ -633,7 +639,7 @@ function PaneBarImpl({
                       className="tab-title"
                       title={tab.type === "terminal" ? "Double-click or right-click to rename" : undefined}
                     >
-                      {tabText(tab)}
+                      {tabText(tab, tab.type === "terminal" && isAgentTab(tab))}
                     </span>
                   )}
                   {/* Non-default accounts only — the point is telling two
@@ -677,6 +683,7 @@ function PaneBarImpl({
           paneRef={paneRef}
           termText={termText}
           state={hoverTab.type === "terminal" ? tabState(hoverTab) : undefined}
+          showAssignedName={hoverTab.type === "terminal" && isAgentTab(hoverTab)}
         />
       )}
 

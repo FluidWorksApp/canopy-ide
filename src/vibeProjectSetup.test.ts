@@ -6,6 +6,10 @@ import {
   observeVibeSetupRepository,
   setupAgentInventory,
   parseVibeSetupOutput,
+  extractVibeSetupComponentEvidence,
+  vibeSetupRetryUserMessage,
+  VIBE_SETUP_COMPONENT_CHECKPOINT,
+  VIBE_SETUP_FINAL_MARKER,
   validateVibeSetupProposal,
   runVibeProjectSetupTask,
   createVibeProjectSetupSession,
@@ -146,6 +150,11 @@ const context = (): VibeSetupValidationContext => ({
   existingComponents: project().components,
 });
 
+const verifiedSessionDeps = {
+  verify: vi.fn(async () => ({ ok: true as const })),
+  repair: vi.fn(async () => false),
+};
+
 describe("project setup repository observation", () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -216,6 +225,51 @@ describe("project setup structured output", () => {
   it("extracts the single JSON object from a fenced agent response", () => {
     const value = proposal();
     expect(parseVibeSetupOutput(`\n\`\`\`json\n${JSON.stringify(value)}\n\`\`\``)).toEqual(value);
+  });
+
+  it("parses the marked final object without mistaking component checkpoints for it", () => {
+    const value = proposal();
+    const output = [
+      `${VIBE_SETUP_COMPONENT_CHECKPOINT} ${JSON.stringify(value.components[0])}`,
+      VIBE_SETUP_FINAL_MARKER,
+      JSON.stringify(value),
+    ].join("\n");
+    expect(parseVibeSetupOutput(output)).toEqual(value);
+  });
+
+  it("retains only bounded, secret-free checkpoints for configured roots", () => {
+    const value = proposal();
+    const foreign = { ...value.components[1], root: "/tmp/other" };
+    const secret = {
+      ...value.components[1],
+      label: `AKIA${"A".repeat(16)}`,
+    };
+    const evidence = extractVibeSetupComponentEvidence([
+      `${VIBE_SETUP_COMPONENT_CHECKPOINT} ${JSON.stringify(value.components[0])}`,
+      `${VIBE_SETUP_COMPONENT_CHECKPOINT} not-json`,
+      `${VIBE_SETUP_COMPONENT_CHECKPOINT} ${JSON.stringify(foreign)}`,
+      `${VIBE_SETUP_COMPONENT_CHECKPOINT} ${JSON.stringify(secret)}`,
+    ].join("\n"), ["/repo/apps/web", "/repo/services/api"]);
+
+    expect(evidence).toEqual([{
+      root: "/repo/apps/web",
+      component: value.components[0],
+    }]);
+  });
+
+  it("narrows retry instructions to unresolved components while carrying prior evidence", () => {
+    const value = proposal();
+    const message = vibeSetupRetryUserMessage(
+      ["/repo/apps/web", "/repo/services/api"],
+      ["/repo/apps/web/package.json", "/repo/services/api/go.mod"],
+      [{ root: "/repo/apps/web", component: value.components[0] }],
+    );
+    const narrowed = message.slice(message.indexOf("Narrow this attempt"));
+
+    expect(message).toContain(JSON.stringify(value.components[0]));
+    expect(message).toContain("do not search these completed component directories again");
+    expect(narrowed).toContain("/repo/services/api");
+    expect(narrowed).not.toContain("/repo/apps/web");
   });
 
   it("accepts a complete multi-component preview graph", () => {
@@ -456,15 +510,17 @@ const routes = (): RouteCandidate[] => [{
 
 function taskDeps(events: Array<Array<{ kind: string; text?: string; message?: string; tool?: string }>>): VibeProjectSetupTaskDeps & {
   launches: Array<{ cli: string; launch: import("./structuredRunners").StructuredRunnerLaunch }>;
+  messages: string[];
   killed: string[];
   settlements: Array<{ state: string; failureCode?: string | null }>;
 } {
   let ordinal = 1;
   const launches: Array<{ cli: string; launch: import("./structuredRunners").StructuredRunnerLaunch }> = [];
+  const messages: string[] = [];
   const killed: string[] = [];
   const settlements: Array<{ state: string; failureCode?: string | null }> = [];
   return {
-    launches, killed, settlements,
+    launches, messages, killed, settlements,
     listRoutes: async () => routes(),
     cliVersion: async () => "selftest",
     binFor: (cli) => cli,
@@ -481,7 +537,8 @@ function taskDeps(events: Array<Array<{ kind: string; text?: string; message?: s
         launches.push({ cli, launch });
         const mine = events.shift() ?? [];
         return {
-          send: async () => {
+          send: async (message) => {
+            messages.push(message);
             queueMicrotask(() => mine.forEach((event) => host.emit(event as never)));
           },
           stop: async () => { killed.push(attemptId); },
@@ -504,6 +561,7 @@ describe("bounded setup agent task", () => {
       cli: "claude",
       launch: { policy: {
         authority: "read-only",
+        systemPromptAppend: expect.stringContaining(VIBE_SETUP_COMPONENT_CHECKPOINT),
         // The whole sidecar, so a reader nobody listed cannot raise a prompt
         // with no one to answer it. Read-only is still enforced — by plan mode
         // and by what disallowedTools withholds, not by the canopy_* names.
@@ -511,6 +569,8 @@ describe("bounded setup agent task", () => {
         disallowedTools: expect.arrayContaining(["Bash", "Edit", "Write"]),
       } },
     });
+    expect(deps.launches[0].launch.policy.systemPromptAppend)
+      .toContain(VIBE_SETUP_FINAL_MARKER);
     expect(deps.settlements).toContainEqual(expect.objectContaining({ state: "completed" }));
   });
 
@@ -606,6 +666,58 @@ describe("bounded setup agent task", () => {
     expect(deps.killed).toEqual(["attempt-1"]);
   });
 
+  it("keeps completed component evidence and narrows the retry after a timeout", async () => {
+    vi.useFakeTimers();
+    const value = proposal();
+    const checkpoint = `${VIBE_SETUP_COMPONENT_CHECKPOINT} ${JSON.stringify(value.components[0])}\n`;
+    const deps = taskDeps([
+      [{ kind: "delta", text: checkpoint }],
+      [{
+        kind: "delta",
+        text: `${VIBE_SETUP_FINAL_MARKER}\n${JSON.stringify(value)}`,
+      }, { kind: "turnEnd" }],
+    ]);
+    const pending = runVibeProjectSetupTask({
+      ...taskInput,
+      componentRoots: ["/repo/apps/web", "/repo/services/api"],
+      inventory: ["/repo/apps/web/package.json", "/repo/services/api/go.mod"],
+    }, deps);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(pending).resolves.toMatchObject({ ok: true, attempts: 2 });
+    expect(deps.killed).toEqual(["attempt-1"]);
+    expect(deps.messages).toHaveLength(2);
+    const narrowed = deps.messages[1].slice(deps.messages[1].indexOf("Narrow this attempt"));
+    expect(deps.messages[1]).toContain(JSON.stringify(value.components[0]));
+    expect(deps.messages[1]).not.toContain("/repo/apps/web/package.json\n/repo/services/api/go.mod");
+    expect(narrowed).toContain("/repo/services/api");
+    expect(narrowed).not.toContain("/repo/apps/web");
+    expect(deps.launches[1].launch.additionalDirectories)
+      .toEqual(["/repo/services/api"]);
+  });
+
+  it("returns retained evidence when the bounded survey cannot finish", async () => {
+    vi.useFakeTimers();
+    const value = proposal();
+    const checkpoint = `${VIBE_SETUP_COMPONENT_CHECKPOINT} ${JSON.stringify(value.components[0])}\n`;
+    const deps = taskDeps([[{ kind: "delta", text: checkpoint }]]);
+    const pending = runVibeProjectSetupTask({
+      ...taskInput,
+      attemptCap: 1,
+      componentRoots: ["/repo/apps/web", "/repo/services/api"],
+    }, deps);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      reason: "timeout",
+      partialEvidence: [{
+        root: "/repo/apps/web",
+        component: value.components[0],
+      }],
+    });
+  });
+
   it("kills and interrupts an attempt when its project closes", async () => {
     const deps = taskDeps([[]]);
     const abort = new AbortController();
@@ -669,6 +781,7 @@ describe("non-technical setup surface", () => {
           runId: null,
           attempts: 0,
         }),
+        ...verifiedSessionDeps,
         providerIds: context().providerIds,
       },
     );
@@ -696,6 +809,7 @@ describe("non-technical setup surface", () => {
             paths: context().existingPaths,
           }),
           run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
+          ...verifiedSessionDeps,
           providerIds: context().providerIds,
         },
       );
@@ -708,6 +822,106 @@ describe("non-technical setup surface", () => {
     await ready;
     expect(configured).toHaveLength(1);
     expect(configured[0].vibe?.version).toBe(1);
+  });
+
+  it("repairs a missing environment, re-verifies it, and only then persists", async () => {
+    const order: string[] = [];
+    const verify = vi.fn(async (configured: Project) => {
+      order.push("verify");
+      if (verify.mock.calls.length > 1) return { ok: true as const };
+      const component = configured.components[0];
+      return {
+        ok: false as const,
+        failure: {
+          code: "environment-missing" as const,
+          statement: "A tool this project needs is not installed yet.",
+          target: {
+            component,
+            command: component.commands![0],
+            argv: component.commands![0].argv!,
+          },
+          missingExecutables: ["pnpm"],
+          context: "pnpm did not resolve on the login-shell PATH.",
+        },
+      };
+    });
+    const repair = vi.fn(async () => { order.push("repair"); return true; });
+    let observations = 0;
+    const persist = vi.fn(async () => { order.push("persist"); return true; });
+    const session = createVibeProjectSetupSession(project(), persist, {
+      observe: async () => {
+        observations += 1;
+        return {
+          projectRoot: root,
+          componentRoots: ["/repo/apps/web", "/repo/services/api"],
+          fingerprint: "tree-1",
+          paths: context().existingPaths,
+        };
+      },
+      run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
+      verify,
+      repair,
+      providerIds: context().providerIds,
+    });
+    const ready = new Promise<void>((resolve) => {
+      session.events$.subscribe((event) => {
+        if (event.kind === "ready") resolve();
+      });
+    });
+
+    await ready;
+    expect(order).toEqual(["verify", "repair", "verify", "persist"]);
+    expect(observations).toBe(3);
+    expect(repair).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: "environment-missing",
+        evidence: { context: expect.stringContaining("login-shell PATH") },
+      }),
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+  });
+
+  it("does not persist when a repair verdict is not followed by a successful proof", async () => {
+    const persist = vi.fn(async () => true);
+    const verify = vi.fn(async (configured: Project) => {
+      const component = configured.components[0];
+      return {
+        ok: false as const,
+        failure: {
+          code: "readiness-failed" as const,
+          statement: "Website did not become ready.",
+          target: {
+            component,
+            command: component.commands![0],
+            argv: component.commands![0].argv!,
+          },
+          missingExecutables: [] as [],
+          context: "The readiness deadline expired.",
+        },
+      };
+    });
+    const session = createVibeProjectSetupSession(project(), persist, {
+      observe: async () => ({
+        projectRoot: root,
+        componentRoots: ["/repo/apps/web", "/repo/services/api"],
+        fingerprint: "tree-1",
+        paths: context().existingPaths,
+      }),
+      run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
+      verify,
+      repair: async () => true,
+      providerIds: context().providerIds,
+    });
+    const failed = new Promise<void>((resolve) => {
+      session.events$.subscribe((event) => {
+        if (event.kind === "reply" && event.text.includes("couldn't finish preparing")) resolve();
+      });
+    });
+
+    await failed;
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(persist).not.toHaveBeenCalled();
   });
 
   it("keeps a correct survey when an unrelated file was saved while it ran", async () => {
@@ -732,6 +946,7 @@ describe("non-technical setup surface", () => {
             paths: context().existingPaths,
           }),
           run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
+          ...verifiedSessionDeps,
           providerIds: context().providerIds,
         },
       );
@@ -764,6 +979,7 @@ describe("non-technical setup surface", () => {
         runId: "setup-run",
         attempts: 2,
       })),
+      ...verifiedSessionDeps,
       providerIds: context().providerIds,
     };
 
@@ -801,6 +1017,7 @@ describe("non-technical setup surface", () => {
         paths: context().existingPaths,
       })),
       run: vi.fn(async () => pendingRun),
+      ...verifiedSessionDeps,
       providerIds: context().providerIds,
     };
     const persisted: Project[] = [];
@@ -860,6 +1077,7 @@ describe("non-technical setup surface", () => {
             paths: context().existingPaths,
           }),
           run: async () => ({ ok: true, output: { nope: true }, runId: "setup-run", attempts: 1 }),
+          ...verifiedSessionDeps,
           providerIds: context().providerIds,
         },
       );

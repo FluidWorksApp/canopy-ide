@@ -1760,6 +1760,7 @@ export default function App() {
                   projectId,
                   ptyId: e.id,
                   cwd: e.cwd,
+                  name: e.name,
                   title: e.title,
                   // Recovery must not steal focus or manufacture attention.
                   activate: restored ? false : getSettings().agentAskForAttention,

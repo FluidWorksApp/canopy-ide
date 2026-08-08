@@ -32,6 +32,10 @@ const SAFE_PATH = /^[A-Za-z0-9_\-./~+@%:=,]+$/;
 const shellQuote = (p: string) =>
   SAFE_PATH.test(p) ? p : `'${p.replaceAll("'", `'\\''`)}'`;
 
+/** Ids announced for spawns that were refused. Real pty ids from Rust are
+ *  non-negative, so counting down from -1 can never name a live session. */
+let nextSpawnFailureId = -1;
+
 /** The active skin's terminal palette, with the user's accent substituted in
  *  when they set one. Always fully opaque: xterm's DOM renderer paints cell
  *  backgrounds, and a transparent background makes a cleared cell show
@@ -90,7 +94,7 @@ interface TermProps {
    *  agent (it stays controllable from the phone). */
   attachId?: number;
   killAttachedOnClose?: boolean;
-  onSpawned: (ptyId: number) => void;
+  onSpawned: (ptyId: number, name?: string) => void;
   onExited: (event: ipc.PtyExit) => void;
   onTitle?: (title: string) => void;
   /** The program in this terminal asked for attention — see the OSC handlers. */
@@ -119,6 +123,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   streamingRef.current = streaming;
   const onExitedRef = useRef(onExited);
   onExitedRef.current = onExited;
+  const onSpawnedRef = useRef(onSpawned);
+  onSpawnedRef.current = onSpawned;
 
   const captureText = (maxChars = 8000) => {
     const term = termRef.current;
@@ -566,12 +572,12 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // Once the pty (fresh or attached) is bound: adopt its grid and announce
     // the id. Exit listening is installed before either spawn path, so a
     // command that fails immediately cannot disappear between spawn and listen.
-    const bound = (id: number, geom: { cols: number; rows: number }) => {
+    const bound = (id: number, geom: { cols: number; rows: number; name?: string }) => {
       ptyIdRef.current = id;
       applyGeometry(geom);
       if (!hasBound) {
         hasBound = true;
-        onSpawned(id);
+        onSpawnedRef.current(id, geom.name);
       }
       const early = earlyExits.get(id);
       if (early) {
@@ -722,6 +728,23 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         }
       } catch (err) {
         term.writeln(`\r\n\x1b[31mfailed to spawn shell: ${err}\x1b[0m`);
+        // A refused spawn produces no pty and therefore no pty:exit, which
+        // left run tabs reading as "running" forever (and Build's auto-start
+        // dedupe never retrying them). Send the failure down the same
+        // spawn->exit path a crashed process takes: announce a pty id no real
+        // session can own, then retire it. Interactive tabs stay out — their
+        // consumers close the tab on exit, which would take the error text
+        // above with it.
+        if (disposed || (!runCommand && !runArgv?.length)) return;
+        const id = nextSpawnFailureId--;
+        onSpawned(id);
+        onExitedRef.current({
+          id,
+          session_generation: ipc.rendererSessionGeneration(),
+          exit_code: 127,
+          requested: false,
+          spawnError: String(err),
+        });
       }
     };
     void start();

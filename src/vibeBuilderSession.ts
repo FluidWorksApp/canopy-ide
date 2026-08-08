@@ -18,7 +18,7 @@ import {
 import type { TaskReservation } from "./taskEnvelope";
 import type { TaskAttemptSettlement } from "./taskEnvelope";
 import { appendTranscript } from "./taskTranscript";
-import { fleetGate } from "./fleetState";
+import { fleetGate, fleetState } from "./fleetState";
 import { redactSecrets } from "./vibeSecretScan";
 import {
   proposeAbstraction,
@@ -87,6 +87,13 @@ import type {
   BuilderSessionState,
 } from "./vibeBuilderSessionTypes";
 import { mcpInputRequestForCard } from "./mcpTasks";
+import {
+  buildRouteRecoveryActions,
+  parseRouteRecoveryResponse,
+  routeRecoveryResponse,
+  type VibeRouteRecoveryAction,
+  type VibeRouteRecoveryResult,
+} from "./vibeRouteRecovery";
 
 const SAVE_CHECKPOINT = "Save this version";
 /** Sentinels a question's own buttons send back. Deliberately not words anyone
@@ -135,6 +142,12 @@ export interface VibeBuilderSessionOptions {
   dataStores?: NonNullable<VibeConfig["dataStores"]>;
   externalServices?: NonNullable<VibeConfig["externalServices"]>;
   previewTabId(): string | null;
+  /** Perform a recovery offered by the no-route card. ProjectView owns the UI
+   * side effects (terminal tabs, profiles and Settings); the session owns the
+   * decision and outcome card so every pipeline state still exits visibly. */
+  recoverRoute?(
+    action: VibeRouteRecoveryAction,
+  ): Promise<VibeRouteRecoveryResult>;
 }
 
 export interface TurnBaseline {
@@ -734,14 +747,19 @@ async function listNativeRoutes(): Promise<RouteCandidate[]> {
   const candidates = await Promise.all(
     families.map(async ([cli, family]) => {
       const def = AGENT_CLIS.find((c) => c.id === cli);
-      if (!def || installed[def.bin] !== true) return null;
+      if (!def) return null;
       const profileId = launchProfile(cli) ?? DEFAULT_PROFILE;
-      const snapshot = await inspectFleetRoute(def, profileId, installed);
+      // A missing binary's verdict is complete from the install probe alone.
+      // Do not add account, plan and hook IPC to the path whose whole job is
+      // to make the Install action appear quickly.
+      const state = installed[def.bin] === true
+        ? (await inspectFleetRoute(def, profileId, installed)).state
+        : fleetState({ agent: cli, profile: profileId, installed: false });
       return {
         cli,
         profileId,
         family,
-        state: snapshot.state,
+        state,
         choices: choicesFor(family),
       } satisfies RouteCandidate;
     }),
@@ -1259,6 +1277,7 @@ export class VibeBuilderSession implements BuilderSession {
             })
             .join("\n")
         : "No supported coding agent is installed and ready yet.";
+      const actions = buildRouteRecoveryActions(candidates, AGENT_CLIS);
       this.present(
         { kind: "idle" },
         {
@@ -1266,6 +1285,7 @@ export class VibeBuilderSession implements BuilderSession {
           kind: "question",
           prompt: "I need a coding agent before I can make this change.",
           detail,
+          actions,
         },
       );
       throw new Error(message);
@@ -1380,9 +1400,58 @@ export class VibeBuilderSession implements BuilderSession {
     return queued;
   }
 
+  private async recoverRoute(action: VibeRouteRecoveryAction): Promise<void> {
+    const recover = this.options.recoverRoute;
+    if (!recover) {
+      this.present(
+        { kind: "idle" },
+        {
+          id: `vibe-route-recovery-unavailable-${this.deps.now()}`,
+          kind: "question",
+          prompt: "I couldn't open that recovery action.",
+          detail: "Open Settings → Agents to install, sign in, or repair the coding agent.",
+        },
+      );
+      return;
+    }
+
+    this.present({ kind: "turn-progress" }, null);
+    let result: VibeRouteRecoveryResult;
+    try {
+      result = await recover(action);
+    } catch (error) {
+      result = {
+        ok: false,
+        prompt: "I couldn't finish that agent setup step.",
+        detail: String(error),
+      };
+    }
+    this.present(
+      { kind: "idle" },
+      {
+        id: `vibe-route-recovery-${this.deps.now()}`,
+        kind: result.ok ? "notice" : "question",
+        prompt: result.prompt,
+        detail: result.detail,
+        actions: result.ok
+          ? undefined
+          : [
+              {
+                label: "Agent settings & binary path",
+                response: routeRecoveryResponse({ kind: "agent-settings" }),
+              },
+            ],
+      },
+    );
+  }
+
   send(text: string, options?: BuilderSendOptions): Promise<void> {
     const message = text.trim();
     if (!message || this.stopped) return Promise.resolve();
+    const routeRecovery = parseRouteRecoveryResponse(message);
+    if (routeRecovery) {
+      return this.enqueue(() => this.recoverRoute(routeRecovery));
+    }
     if (message === SAVE_CHECKPOINT && this.pendingCheckpoint) {
       return this.enqueue(() => this.saveCheckpoint());
     }

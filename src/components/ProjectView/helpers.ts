@@ -30,11 +30,13 @@ export interface TermSubTab {
   cwd: string;
   /** Auto title, tracked from the shell/OSC. Shown unless the user renamed. */
   title: string;
+  /** Canopy-owned stable session name. Display-only; PTY id/token remain the
+   *  authority for every privileged operation. */
+  name?: string;
   /** Agent-published one-line description, updated through canopy_name_task
    *  whenever the work changes. */
   description?: string;
-  /** User-set name (double-click the tab). Wins over `title` for display and
-   *  survives the shell repainting its own title; cleared by renaming to empty. */
+  /** Legacy/prespawn rename. Live sessions move this into native `name`. */
   customTitle?: string;
   ptyId: number | null;
   /** When set, this tab attaches to an already-running headless PTY (spawned
@@ -557,20 +559,22 @@ export function vibeRunReady(
   tab: Pick<TermSubTab, "ptyId" | "exited"> | undefined,
   command: Pick<RunCommand, "readiness">,
   stats: Pick<ipc.SessionStats, "id" | "ports">[],
-  verifiedProcessPtys?: ReadonlySet<number>,
+  verifiedReadinessPtys: ReadonlySet<number>,
 ): boolean {
   if (!tab || tab.exited || tab.ptyId == null) return false;
-  if (command.readiness?.kind === "port" || command.readiness?.kind === "http") {
+  const readiness = command.readiness?.kind ?? "process-alive";
+  if (readiness === "port") {
     return Boolean(stats.find((sample) => sample.id === tab.ptyId)?.ports.length);
   }
-  // A worker can be alive while npx/pnpm/auth is waiting at a prompt. Build's
-  // output supervisor grants this only after the PTY has produced prompt-free
-  // output and stayed alive for a short settling window. The optional fallback
-  // preserves the helper's legacy callers outside Build supervision.
-  if (command.readiness?.kind === "process-alive" && verifiedProcessPtys) {
-    return verifiedProcessPtys.has(tab.ptyId);
+  // A socket is not proof of an HTTP endpoint, and a process can be alive while
+  // npx/pnpm/auth is waiting at a prompt. The one supervisor grants both kinds
+  // only after their declared evidence has been verified.
+  if (readiness === "http" || readiness === "process-alive") {
+    return verifiedReadinessPtys.has(tab.ptyId);
   }
-  return true;
+  // One-shot commands become ready by exiting successfully; they cannot
+  // release a dependent while their PTY is still running.
+  return false;
 }
 
 /** One tab as canopy_editor_state describes it: enough for an agent to know
@@ -583,7 +587,7 @@ export function describeTab(tab: SubTab | undefined) {
     case "terminal":
       return {
         kind: tab.run ? "run" : "terminal",
-        label: tab.customTitle ?? tab.title,
+        label: tab.name ?? tab.customTitle ?? tab.title,
         cwd: tab.cwd,
         ptyId: tab.ptyId,
       };
@@ -653,7 +657,7 @@ export const tabId = () =>
 export function tabDisplayLabel(t: SubTab): string {
   switch (t.type) {
     case "terminal":
-      return t.multiplexTitle ?? t.customTitle ?? t.title;
+      return t.multiplexTitle ?? t.name ?? t.customTitle ?? t.title;
     case "file":
       return t.file.name;
     case "pr":

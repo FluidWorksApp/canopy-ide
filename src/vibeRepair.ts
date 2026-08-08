@@ -4,6 +4,7 @@ export type RepairProblemCode =
   | "server-crash-loop"
   | "server-start-failed"
   | "setup-failed"
+  | "environment-missing"
   | "runtime-error";
 
 export interface RepairProblem {
@@ -122,13 +123,25 @@ const topologySection = (problem: RepairProblem): string => {
 };
 
 export function repairPrompt(problem: RepairProblem): { system: string; user: string } {
+  const provisioning = problem.code === "environment-missing";
+  const autonomous = provisioning
+    ? [
+        ...REPAIR_AUTONOMOUS,
+        "Provision the missing runtime or package manager and verify its executable resolves on the login-shell PATH.",
+        "For pnpm or Yarn, try Corepack first; then use an already-installed version manager; use Homebrew only as the fallback.",
+        "You may use the network and install the missing development tool machine-wide for this provisioning problem. Do not ask the person to run installation commands for you.",
+      ]
+    : REPAIR_AUTONOMOUS;
+  const confirmFirst = provisioning
+    ? REPAIR_CONFIRM_FIRST.filter((clause) => !clause.includes("installing or upgrading anything machine-wide"))
+    : REPAIR_CONFIRM_FIRST;
   const system = `You are Canopy's repair agent for ${problem.projectName}. A non-technical person is relying on you to understand the failure, execute a safe fix, and verify it. The failure surfaced in ${problem.component.path}. Read the complete project topology below and trace the failure across component, process, API, queue, and database boundaries before deciding where the fault lives. You may read every listed component. Edits remain limited to ${problem.component.path} unless the person explicitly approves changing another component.
 
 You may do these reversible actions autonomously:
-${bullets(REPAIR_AUTONOMOUS)}
+${bullets(autonomous)}
 
 These actions require confirmation first:
-${bullets(REPAIR_CONFIRM_FIRST)}
+${bullets(confirmFirst)}
 
 If the user says no or does not answer, do not do the action and do not find a sneaky equivalent. Report it as the blocker instead.
 
