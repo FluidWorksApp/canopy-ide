@@ -271,6 +271,11 @@ export default function App() {
   // eight call sites that each decided for themselves whether to raise a
   // native banner and what to call it.
   const attention = useAttention();
+  const notificationPopupsEnabled = useSyncExternalStore(
+    subscribeSettings,
+    () => getSettings().notificationPopupsEnabled,
+    () => true,
+  );
   const refreshTerminalGovernor = useCallback(() => {
     void ipc
       .terminalGovernorStatus()
@@ -416,6 +421,10 @@ export default function App() {
     for (const item of attention) {
       if (notifiedIds.current.has(item.id)) continue;
       notifiedIds.current.add(item.id);
+      // Count notices seen while delivery is disabled so switching the setting
+      // back on does not unleash a backlog of stale system banners. The item
+      // itself remains untouched in the notification centre.
+      if (!notificationPopupsEnabled) continue;
       if (!shouldReachOS(item, document.hasFocus())) continue;
       const { title, body } = osPayload(item);
       void ipc
@@ -431,7 +440,7 @@ export default function App() {
         // Notifications are a garnish — never fail anything over them.
         .catch(() => {});
     }
-  }, [attention]);
+  }, [attention, notificationPopupsEnabled]);
   // Toasts fade on a clock the store knows nothing about, so a tick drives the
   // re-render that retires them. Only while something is actually on screen:
   // an idle app should not hold a repeating timer for an empty overlay. The
@@ -1192,7 +1201,9 @@ export default function App() {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const publish = () =>
-      void ipc.remoteSetAttention(remoteAttentionSnapshot()).catch(() => {});
+      void ipc
+        .remoteSetAttention(notificationPopupsEnabled ? remoteAttentionSnapshot() : [])
+        .catch(() => {});
     publish();
     const unsub = subscribeAttention(() => {
       if (timer) clearTimeout(timer);
@@ -1202,7 +1213,7 @@ export default function App() {
       if (timer) clearTimeout(timer);
       unsub();
     };
-  }, []);
+  }, [notificationPopupsEnabled]);
 
   // Remote launches from the same resolved registry as desktop: custom CLIs,
   // binary overrides, availability and verified resume syntax included.
@@ -2671,11 +2682,14 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [attention, askedInDialog, toastTick],
   );
+  // Delivery surfaces use this view; the notification bell intentionally uses
+  // `visibleAttention` below so disabling pop-ups never loses a notice.
+  const deliveredToasts = notificationPopupsEnabled ? toasts : [];
   // Depend on the *fact* that something is timed, not on the array. `toasts` is
   // a fresh array every tick, so `[toasts]` tore the interval down and built a
   // new one on each of its own ticks — nine teardown/setup cycles for a 4.5s
   // toast, on top of nine full App re-renders.
-  const toastsAreTimed = toasts.some((t) => toastMs(t) != null);
+  const toastsAreTimed = deliveredToasts.some((t) => toastMs(t) != null);
   useEffect(() => {
     if (!toastsAreTimed) return;
     const t = window.setInterval(() => setToastTick((n) => n + 1), 500);
@@ -3308,9 +3322,9 @@ export default function App() {
           whether something reaches the OS are still decided in attention.ts,
           and a question is still outstanding until it is answered rather than
           until its card is closed. */}
-      {toasts.length > 0 && attentionFallbackVisible && (
+      {deliveredToasts.length > 0 && attentionFallbackVisible && (
         <div className="notice-stack">
-          {toasts.map((t) => (
+          {deliveredToasts.map((t) => (
             <NoticeToast
               key={t.id}
               item={t}
@@ -3323,7 +3337,7 @@ export default function App() {
 
       {companionVisible && (
         <Companion
-          notices={toasts}
+          notices={deliveredToasts}
           onDismissNotice={dismissToast}
           onFollowNotice={(item) => void followAttention(item)}
           onInstallCli={() => setSettingsOpen({ tab: "agents" })}

@@ -1560,6 +1560,21 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item
+                  name="Notification pop-ups"
+                  desc="Choose whether agent and project notices interrupt your work or wait in the bell."
+                >
+                  <Checkbox
+                    checked={s.notificationPopupsEnabled}
+                    onChange={(v) => patch({ notificationPopupsEnabled: v })}
+                    label="Show notification pop-ups"
+                    hint={
+                      s.notificationPopupsEnabled
+                        ? "Shows corner cards, companion notices, and system banners."
+                        : "Off keeps every notice in the top-right bell."
+                    }
+                  />
+                </Item>
+                <Item
                   name="Default agent"
                   desc="What the Start button launches; pick another per ticket."
                 >
