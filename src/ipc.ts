@@ -343,7 +343,10 @@ export interface AgentAction {
     | "task_named"
     | "close_session"
     | "spawn_agent"
-    | "message_agent";
+    | "message_agent"
+    /** Internal second phase: the bridge has authorized the resolved PR's
+     *  mesh scope and asks the owning ProjectView to create the cold task. */
+    | "message_agent_start";
   route: string;
   dir?: string;
   /** Where the calling agent was standing. Sent on every action by the sidecar
