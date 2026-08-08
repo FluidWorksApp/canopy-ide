@@ -37,6 +37,13 @@ export interface VibePreviewContext {
 
 const active = new Map<string, VibePreviewContext>();
 const listeners = new Map<string, Set<() => void>>();
+/** Browser identity owned by a durable Build/repair attempt.
+ *
+ * The active project preview is presentation state: it can change when the
+ * person closes or replaces a tab. An agent attempt must not follow that
+ * mutable pointer halfway through a turn, so its tab id is copied here at the
+ * attempt boundary and only that exact attempt can release it. */
+const attemptPreviews = new Map<string, { projectId: string; tabId: string | null }>();
 
 const notify = (projectId: string) => {
   for (const listener of listeners.get(projectId) ?? []) listener();
@@ -55,6 +62,32 @@ export function removeVibePreviewContext(projectId: string, tabId: string): void
 
 export function getVibePreviewContext(projectId: string): VibePreviewContext | null {
   return active.get(projectId) ?? null;
+}
+
+export function bindVibePreviewAttempt(
+  projectId: string,
+  attemptId: string,
+  tabId: string | null,
+): void {
+  attemptPreviews.set(attemptId, { projectId, tabId });
+}
+
+/** `undefined` means this is not a Build-owned attempt. `null` means it was
+ * bound when no preview existed; neither case may float onto another tab. */
+export function getVibePreviewAttemptTabId(
+  projectId: string,
+  attemptId: string,
+): string | null | undefined {
+  const binding = attemptPreviews.get(attemptId);
+  return binding?.projectId === projectId ? binding.tabId : undefined;
+}
+
+export function releaseVibePreviewAttempt(
+  projectId: string,
+  attemptId: string,
+): void {
+  const binding = attemptPreviews.get(attemptId);
+  if (binding?.projectId === projectId) attemptPreviews.delete(attemptId);
 }
 
 export function subscribeVibePreviewContext(

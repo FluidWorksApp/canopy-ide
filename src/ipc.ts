@@ -450,6 +450,9 @@ export interface AgentBrowserOp {
   route: string;
   /** Agent terminal that initiated this browser session, when there is one. */
   ptyId?: number | null;
+  /** Durable Build/repair attempt authenticated by the bridge. Unlike a tab
+   * argument, this cannot be chosen by the agent making the tool call. */
+  attemptId?: string | null;
   scope?: "browser" | "ide" | null;
   url?: string | null;
   action?: string | null;

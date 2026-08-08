@@ -765,9 +765,17 @@ export function pickBrowserTab<
     /** The tab this session is on — where its pip points. Ignored when it names
      *  a tab that is gone or was never this session's. */
     currentTabId?: string | null;
+    /** A Build/repair attempt's immutable preview. Undefined means ordinary
+     * browser routing; null means the attempt began with no preview. */
+    attemptTabId?: string | null;
   },
   activeTabId: string | null,
 ): T | undefined {
+  if (op.attemptTabId !== undefined) {
+    return op.attemptTabId
+      ? previews.find((tab) => tab.id === op.attemptTabId)
+      : undefined;
+  }
   const origin = (u: string): string | null => {
     try {
       return new URL(u).origin;

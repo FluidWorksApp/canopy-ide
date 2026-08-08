@@ -24,6 +24,10 @@ import {
   type RepairVerdict,
 } from "./vibeRepair";
 import type { VibeProjectSetupTaskDeps } from "./vibeProjectSetup";
+import {
+  bindVibePreviewAttempt,
+  releaseVibePreviewAttempt,
+} from "./vibePreviewContext";
 
 /** Repair reserves, launches and settles through the same surface as project
  *  setup — one dependency shape means one fake in tests and no second wiring
@@ -47,6 +51,10 @@ const REPAIR_TIMEOUT_MS = 900_000;
 
 export interface VibeRepairTaskInput {
   problem: RepairProblem;
+  /** Preview inherited from the Build attempt that observed this problem.
+   * Undefined means this repair has no browser identity; null is an explicit
+   * snapshot that no preview existed. */
+  previewTabId?: string | null;
   timeoutMs?: number;
   /** Already in the person's language — plainRepairActivity has run. A raw
    *  command line must never reach a Build pane. */
@@ -137,6 +145,21 @@ export async function runVibeRepairTask(
   const runId = reservation.envelope.runId;
   const attempt = reservation.attempt;
   await deps.startAttempt(attempt.attemptId);
+  const previewBound = input.previewTabId !== undefined;
+  if (previewBound) {
+    bindVibePreviewAttempt(problem.projectId, attempt.attemptId, input.previewTabId ?? null);
+  }
+  const settleRepairAttempt = async (
+    settlement: Parameters<VibeRepairTaskDeps["settleAttempt"]>[0],
+  ) => {
+    try {
+      return await deps.settleAttempt(settlement);
+    } finally {
+      if (previewBound) {
+        releaseVibePreviewAttempt(problem.projectId, attempt.attemptId);
+      }
+    }
+  };
 
   const prompt = repairPrompt(problem);
   const launch: StructuredRunnerLaunch = {
@@ -250,7 +273,7 @@ export async function runVibeRepairTask(
         "error",
         `vibe-repair: ${chosen.cli} returned no parseable verdict; it said: ${result.text.slice(0, 500) || "(nothing)"}`,
       );
-      await deps.settleAttempt({
+      await settleRepairAttempt({
         attemptId: attempt.attemptId, state: "blocked",
         failureClass: "task", failureCode: "invalid-structured-output",
       });
@@ -259,7 +282,7 @@ export async function runVibeRepairTask(
         message: "I looked into the problem but couldn't put together a clear answer.",
       };
     }
-    await deps.settleAttempt({
+    await settleRepairAttempt({
       attemptId: attempt.attemptId,
       state: verdict.fixed ? "completed" : "blocked",
       ...(verdict.fixed ? {} : { failureClass: "task", failureCode: "repair-blocked" }),
@@ -268,7 +291,7 @@ export async function runVibeRepairTask(
   }
 
   if (input.signal?.aborted) {
-    await deps.settleAttempt({
+    await settleRepairAttempt({
       attemptId: attempt.attemptId, state: "interrupted",
       failureClass: "lifecycle", failureCode: "project-closed",
     });
@@ -278,7 +301,7 @@ export async function runVibeRepairTask(
     "error",
     `vibe-repair: attempt on ${chosen.cli} failed (timedOut=${result.timedOut}): ${result.text.slice(0, 600)}`,
   );
-  await deps.settleAttempt({
+  await settleRepairAttempt({
     attemptId: attempt.attemptId, state: "failed",
     failureClass: result.timedOut ? "timeout" : "runner",
     failureCode: result.timedOut ? "repair-timeout" : "repair-agent-failed",

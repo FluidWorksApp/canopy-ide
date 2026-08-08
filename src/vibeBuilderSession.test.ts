@@ -1331,6 +1331,7 @@ describe("VibeBuilderSession", () => {
   });
 
   it("repairs a browser runtime error once, then re-inspects and re-judges", async () => {
+    let previewTabId = "preview-1";
     const inspectBrowser = vi
       .fn<VibeBuilderSessionDeps["inspectBrowser"]>()
       .mockResolvedValueOnce({
@@ -1365,8 +1366,14 @@ describe("VibeBuilderSession", () => {
       },
       runId: "repair-1",
     }));
-    const h = harness({ inspectBrowser, repair });
+    const h = harness(
+      { inspectBrowser, repair },
+      { previewTabId: () => previewTabId },
+    );
     await h.session.send("Fix the runtime bug");
+    // Closing/replacing the project-level preview during the turn must not
+    // redirect verification or the repair attempt onto the new page.
+    previewTabId = "preview-2";
     h.emit({ kind: "turnEnd" });
 
     await vi.waitFor(() =>
@@ -1375,8 +1382,14 @@ describe("VibeBuilderSession", () => {
       ),
     );
     expect(inspectBrowser).toHaveBeenCalledTimes(2);
+    expect(inspectBrowser.mock.calls.map(([tabId]) => tabId)).toEqual([
+      "preview-1",
+      "preview-1",
+    ]);
+    expect(h.deps.beginBrowserTurn).toHaveBeenCalledWith("preview-1");
     expect(repair).toHaveBeenCalledTimes(1);
     expect(repair).toHaveBeenCalledWith({
+      previewTabId: "preview-1",
       problem: expect.objectContaining({
         code: "runtime-error",
         evidence: expect.objectContaining({
