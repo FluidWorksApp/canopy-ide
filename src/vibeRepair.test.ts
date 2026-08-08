@@ -88,6 +88,28 @@ describe("repair prompt", () => {
     expect(user).toContain("Diagnose first from the evidence given");
     expect(user).toContain("Verify that the fix actually works");
   });
+
+  it("hands browser failures their full reproducible evidence", () => {
+    const browserProblem: RepairProblem = {
+      ...problem(),
+      code: "runtime-error",
+      evidence: {
+        pageUrl: "http://localhost:5173/login",
+        consoleTail: "[error] TypeError: auth.user is undefined",
+        failedRequests: [
+          { url: "/api/session", status: 500, ms: 18, bytes: 42 },
+        ],
+      },
+    };
+
+    const { user } = repairPrompt(browserProblem);
+    expect(user).toContain("Preview URL: http://localhost:5173/login");
+    expect(user).toContain("TypeError: auth.user is undefined");
+    expect(user).toContain('"url": "/api/session"');
+    expect(user).toContain("reproduce the supplied preview URL");
+    expect(user).toContain("console, failed requests, and page state");
+    expect(user).toContain("reproduce the same route again after the fix");
+  });
 });
 
 describe("repair verdict", () => {

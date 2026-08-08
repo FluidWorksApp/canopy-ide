@@ -419,6 +419,10 @@ export function VibeBuilderPane({
     setAnsweringQuestion(null);
     setView((current) => ({
       ...current,
+      // send() advances the local persona before the async session accepts the
+      // turn. A rejected launch must leave that busy state; when the session
+      // also supplied a question, reducePersona preserves its waiting state.
+      persona: reducePersona(current.persona, { kind: "idle" }),
       items: [
         ...current.items.map((item) =>
           item.id === itemId && item.kind === "you"

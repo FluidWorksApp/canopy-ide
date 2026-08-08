@@ -620,6 +620,8 @@ describe("VibeBuilderPane", () => {
     await waitFor(() => {
       expect(screen.getByRole("alert").textContent).toContain("session stopped");
     });
+    expect(screen.getByRole("img", { name: "Ash is idle" })).toBeTruthy();
+    expect(screen.queryByText("Making your change…")).toBeNull();
   });
 
   it("re-enables a confirm card when the runner reports an error", () => {
