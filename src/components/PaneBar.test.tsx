@@ -160,6 +160,25 @@ describe("PaneBar tab rename", () => {
     render(paneBar({ tabGroups: [run("all", [term("t1", "zsh")])] }));
     expect(screen.getByText("zsh")).toHaveClass("tab-title");
   });
+
+  it("shows the stable assigned name ahead of the CLI title", () => {
+    const tab = { ...term("t1", "canopy"), name: "Juniper" };
+    render(paneBar({ tabGroups: [run("all", [tab])] }));
+    expect(screen.getByText("Juniper")).toHaveClass("tab-title");
+    expect(screen.queryByText("canopy")).toBeNull();
+  });
+
+  it("keeps a non-agent run's command title", () => {
+    const tab = { ...term("t1", "npm run dev"), name: "Juniper" };
+    render(
+      paneBar({
+        tabGroups: [run("all", [tab])],
+        isAgentTab: (_tab): _tab is TermSubTab => false,
+      }),
+    );
+    expect(screen.getByText("npm run dev")).toHaveClass("tab-title");
+    expect(screen.queryByText("Juniper")).toBeNull();
+  });
 });
 
 describe("multiplexed terminal tab", () => {

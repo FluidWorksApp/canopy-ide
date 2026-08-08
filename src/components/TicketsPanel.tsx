@@ -25,6 +25,8 @@ import { Button, TextInput } from "./ui";
 
 export interface AgentTarget {
   tabId: string;
+  /** Stable Canopy-assigned session name. */
+  name?: string;
   title: string;
   ptyId: number;
   /** Registry id of the CLI running in it, for its brand mark. */

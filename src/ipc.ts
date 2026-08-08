@@ -70,6 +70,8 @@ export interface SpawnResult extends PtyGeometry {
   /** Rust-owned lifetime identity; independent of renderer/stream generations. */
   session_generation: number;
   pid: number | null;
+  /** Canopy-owned display name. It never replaces the PTY credential. */
+  name?: string;
   /** Native output-stream generation. Null for detached/headless sessions. */
   generation: number | null;
 }
@@ -81,6 +83,7 @@ export interface PtySummary extends PtyGeometry {
   session_generation: number;
   pid: number | null;
   cwd: string;
+  name?: string;
   title: string;
   kind: PtySessionKind;
   replay_start: number;
@@ -203,6 +206,8 @@ export const ptyResize = (id: number, cols: number, rows: number) =>
 export const ptyKill = (id: number) => gone(invoke<void>("pty_kill", { id }));
 export const ptySetTitle = (id: number, title: string) =>
   gone(invoke<void>("pty_set_title", { id, title }));
+export const ptySetName = (id: number, name: string) =>
+  invoke<string>("pty_set_name", { id, name });
 
 /** Spawn a detached PTY from an argv array, with no shell anywhere in the path.
  *  `argv[0]` is the program; every later element stays exactly one argument,
@@ -308,6 +313,7 @@ export interface PtySpawned {
   id: number;
   session_generation: number;
   cwd: string;
+  name?: string;
   title: string;
   cols: number;
   rows: number;
@@ -647,11 +653,13 @@ export interface MeshMessage {
   /** The terminal it came from; null for the companion. */
   from_pty_id: number | null;
   from_cwd: string | null;
+  from_name?: string | null;
   /** Which CLI each end was, and what its run was titled at send time. */
   from_agent?: string | null;
   from_task?: string | null;
   to_pty_id: number;
   to_cwd?: string | null;
+  to_name?: string | null;
   to_agent?: string | null;
   to_task?: string | null;
   /** The message as the sender wrote it. For a plain message_agent send this
@@ -2173,6 +2181,8 @@ export interface AgentHint {
 }
 export interface SessionStats {
   id: number;
+  /** Canopy-owned stable display name for this PTY lifetime. */
+  name?: string;
   title: string;
   cwd: string;
   total_cpu: number;

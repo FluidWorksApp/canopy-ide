@@ -118,6 +118,12 @@ pub struct Session {
     pub session_generation: u64,
     pub pid: Option<u32>,
     pub kind: SessionKind,
+    /// Canopy's stable, human-facing name for this terminal. This is display
+    /// metadata only: bridge credentials and every privileged operation remain
+    /// keyed by the PTY id + private token.
+    pub name: Mutex<String>,
+    /// The generated name restored when the user clears a rename.
+    default_name: String,
     pub title: Mutex<String>,
     pub cwd: String,
     /// Input queued for the writer thread, and the signal that wakes it. The
@@ -366,6 +372,7 @@ pub struct PtySpawned {
     pub id: u32,
     pub session_generation: u64,
     pub cwd: String,
+    pub name: String,
     pub title: String,
     pub cols: u16,
     pub rows: u16,
@@ -379,6 +386,7 @@ pub struct PtySummary {
     pub session_generation: u64,
     pub pid: Option<u32>,
     pub cwd: String,
+    pub name: String,
     pub title: String,
     pub cols: u16,
     pub rows: u16,
@@ -392,6 +400,7 @@ pub struct SpawnResult {
     pub id: u32,
     pub session_generation: u64,
     pub pid: Option<u32>,
+    pub name: String,
     /// The size the pty was actually opened at — see PtyGeometry.
     pub cols: u16,
     pub rows: u16,
@@ -459,6 +468,7 @@ impl PtyManager {
                     session_generation: s.session_generation,
                     pid: s.pid,
                     cwd: s.cwd.clone(),
+                    name: s.name.lock().unwrap().clone(),
                     title: s.title.lock().unwrap().clone(),
                     cols,
                     rows,
@@ -1298,6 +1308,7 @@ impl PtyManager {
                     id: res.id,
                     session_generation: res.session_generation,
                     cwd: s.cwd.clone(),
+                    name: s.name.lock().unwrap().clone(),
                     title: s.title.lock().unwrap().clone(),
                     cols: res.cols,
                     rows: res.rows,
@@ -1540,11 +1551,14 @@ impl PtyManager {
             None => (None, None),
         };
 
+        let default_name = default_session_name(id);
         let session = Arc::new(Session {
             id,
             session_generation,
             pid,
             kind,
+            name: Mutex::new(default_name.clone()),
+            default_name,
             title: Mutex::new(shell.clone()),
             cwd,
             input: Mutex::new(Vec::new()),
@@ -1773,6 +1787,7 @@ impl PtyManager {
             id,
             session_generation,
             pid,
+            name: default_session_name(id),
             cols,
             rows,
             generation,
@@ -1907,6 +1922,57 @@ pub fn pty_set_title(state: State<'_, PtyManager>, id: u32, title: String) -> Re
     Ok(())
 }
 
+/// Rename the human-facing session label without changing its credential.
+/// Names are process-wide unique, which is a stronger form of the UI contract
+/// (unique within one project) and keeps name-based routing unambiguous even
+/// while project snapshots are still warming up.
+#[tauri::command]
+pub fn pty_set_name(state: State<'_, PtyManager>, id: u32, name: String) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.chars().count() > 48 {
+        return Err("agent name must be 48 characters or fewer".into());
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("agent name cannot contain control characters".into());
+    }
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| format!("no pty session {id}"))?;
+    let next = if trimmed.is_empty() {
+        session.default_name.clone()
+    } else {
+        trimmed.to_string()
+    };
+    let duplicate = sessions
+        .values()
+        .any(|other| other.id != id && other.name.lock().unwrap().eq_ignore_ascii_case(&next));
+    if duplicate {
+        return Err(format!("another live session is already named \"{next}\""));
+    }
+    *session.name.lock().unwrap() = next.clone();
+    drop(sessions);
+    Ok(next)
+}
+
+const SESSION_NAMES: &[&str] = &[
+    "Ember", "Juniper", "Lumen", "Moss", "Nova", "Orbit", "Piper", "Quill", "Rook", "Sage",
+    "Tango", "Umber", "Vega", "Willow", "Xeno", "Yarrow", "Zephyr", "Aster", "Birch", "Cinder",
+    "Drift", "Echo", "Flint", "Grove",
+];
+
+fn default_session_name(id: u32) -> String {
+    let index = id.saturating_sub(1) as usize;
+    let base = SESSION_NAMES[index % SESSION_NAMES.len()];
+    let round = index / SESSION_NAMES.len();
+    if round == 0 {
+        base.to_string()
+    } else {
+        format!("{base} {}", round + 1)
+    }
+}
+
 fn get_session(state: &State<'_, PtyManager>, id: u32) -> Result<Arc<Session>, String> {
     state
         .sessions
@@ -1975,6 +2041,15 @@ fn canopy_aider_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_session_names_are_human_readable_and_unique() {
+        let names = (1..=72).map(default_session_name).collect::<Vec<_>>();
+        assert_eq!(names[0], "Ember");
+        assert_eq!(names[24], "Ember 2");
+        let unique = names.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), names.len());
+    }
     use std::time::Instant;
 
     #[test]
