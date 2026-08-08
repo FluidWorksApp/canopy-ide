@@ -1266,6 +1266,17 @@ fn update_digest(
         if let Some(p) = event["prompt"].as_str() {
             let p = p.trim();
             if !p.is_empty() {
+                // The prompt that started the session, kept apart from the
+                // rotating window above: `prompts` drops its oldest entries,
+                // so on a long session the reason it exists at all was the
+                // first thing lost.
+                if digest
+                    .get("first_prompt")
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
+                    digest["first_prompt"] = serde_json::json!(truncate(p, 220));
+                }
                 if let Some(arr) = digest["prompts"].as_array_mut() {
                     arr.push(serde_json::json!(truncate(p, 220)));
                     while arr.len() > MAX_PROMPTS {
@@ -2851,17 +2862,38 @@ fn apply_companion_authority(tools: &mut Vec<serde_json::Value>) {
     });
 }
 
-/// The tools this session gets: everything below, minus whatever the user
-/// switched off in Settings → Agents. A disabled tool is filtered here rather
-/// than refused on call, so it costs the agent no context at all. The bridge
-/// being unreachable means "not inside Canopy" — offer everything and let the
-/// individual calls explain themselves.
+#[derive(Default, serde::Deserialize)]
+struct BridgeToolContract {
+    #[serde(default)]
+    disabled: Vec<String>,
+    /// Absent means a legacy bridge. It is not safe to infer support from a
+    /// newer hook's descriptors: that is the version-skew failure this
+    /// handshake exists to prevent.
+    #[serde(rename = "supportedTools")]
+    supported_tools: Option<Vec<String>>,
+    #[allow(dead_code)]
+    #[serde(rename = "buildId")]
+    build_id: Option<String>,
+}
+
+fn bridge_tool_contract(body: Option<&str>) -> Option<BridgeToolContract> {
+    // No bridge at all is the supported outside-Canopy mode: keep publishing
+    // the descriptors so a call can explain that Canopy is not connected.
+    // A bridge that answered but omitted/malformed the contract is different:
+    // it is an older running app, and no tool is honestly known reachable.
+    body.map(|raw| serde_json::from_str(raw).unwrap_or_default())
+}
+
+/// The tools this session gets: everything below, intersected with the running
+/// bridge's advertised contract, then minus whatever the user switched off in
+/// Settings → Agents. A separately updated hook can therefore never publish a
+/// call the still-running app does not implement.
 fn tools_list() -> serde_json::Value {
-    let disabled: Vec<String> = ctx_get("/ctx/tools".into())
-        .ok()
-        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
-        .and_then(|v| v.get("disabled").cloned())
-        .and_then(|v| serde_json::from_value(v).ok())
+    let bridge_body = ctx_get("/ctx/tools".into()).ok();
+    let contract = bridge_tool_contract(bridge_body.as_deref());
+    let disabled = contract
+        .as_ref()
+        .map(|c| c.disabled.as_slice())
         .unwrap_or_default();
 
     let mut tools = match tool_defs() {
@@ -2889,6 +2921,14 @@ fn tools_list() -> serde_json::Value {
     // See the matching note in agentTools.ts.
     let micro = std::env::var("CANOPY_MICRO_TASK").is_ok();
     apply_companion_authority(&mut tools);
+    if let Some(contract) = &contract {
+        let supported = contract.supported_tools.as_deref().unwrap_or_default();
+        tools.retain(|t| {
+            t.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|n| supported.iter().any(|s| s == n))
+        });
+    }
     tools.retain(|t| {
         t.get("name").and_then(|n| n.as_str()).is_some_and(|n| {
             !disabled.iter().any(|d| d == n) || (micro && MICRO_ALWAYS_TOOLS.contains(&n))
@@ -5689,6 +5729,47 @@ mod tests {
         assert_ne!(fnv1a(""), fnv1a("a"));
     }
 
+    /// `prompts` is a rotating window, so on a long session the prompt that
+    /// started it — the one thing that says why the session exists — was the
+    /// first thing dropped. It is retained separately, once, at this same
+    /// write boundary.
+    #[test]
+    fn the_first_prompt_outlives_the_rotating_window() {
+        let session = "first-prompt-test-session";
+        let path = format!("{}/.canopy/sessions/{session}.json", home());
+        let _ = std::fs::remove_file(&path);
+
+        let cwd = std::env::temp_dir().join("canopy-first-prompt-test");
+        let _ = std::fs::create_dir_all(&cwd);
+        let cwd = cwd.to_string_lossy().to_string();
+        for n in 1..=MAX_PROMPTS + 2 {
+            let event = serde_json::json!({
+                "session_id": session,
+                "prompt": format!("p{n}"),
+            });
+            update_digest(session, &cwd, &event, "UserPromptSubmit", None).unwrap();
+        }
+
+        let digest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(digest["first_prompt"].as_str(), Some("p1"));
+        // The window still rotates exactly as before: newest MAX_PROMPTS,
+        // oldest gone.
+        let prompts: Vec<&str> = digest["prompts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect();
+        assert_eq!(prompts.len(), MAX_PROMPTS);
+        assert_eq!(prompts.first().copied(), Some("p3"));
+        assert_eq!(
+            prompts.last().copied(),
+            Some(format!("p{}", MAX_PROMPTS + 2).as_str())
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The environment is ours to read, so this is the easy half. The half that
     /// matters — recovering the address from a parent when a CLI scrubbed ours
     /// — is a property of the process tree and is verified by running the
@@ -6437,6 +6518,29 @@ mod tests {
         };
         assert_eq!(hint("canopy_notes"), true);
         assert_eq!(hint("canopy_notes_write"), false);
+    }
+
+    #[test]
+    fn bridge_capabilities_distinguish_unreachable_from_legacy() {
+        assert!(bridge_tool_contract(None).is_none());
+
+        let legacy = bridge_tool_contract(Some(r#"{"disabled":[]}"#)).unwrap();
+        assert_eq!(legacy.supported_tools, None);
+
+        let current = bridge_tool_contract(Some(
+            r#"{"buildId":"abc","supportedTools":["canopy_project"],"disabled":["canopy_notify"]}"#,
+        ))
+        .unwrap();
+        assert_eq!(current.build_id.as_deref(), Some("abc"));
+        assert_eq!(current.supported_tools.unwrap(), ["canopy_project"]);
+        assert_eq!(current.disabled, ["canopy_notify"]);
+    }
+
+    #[test]
+    fn a_bridge_that_answered_without_capabilities_is_not_assumed_current() {
+        let contract = bridge_tool_contract(Some(r#"{"disabled":[]}"#)).unwrap();
+        let supported = contract.supported_tools.as_deref().unwrap_or_default();
+        assert!(supported.is_empty());
     }
 
     #[test]

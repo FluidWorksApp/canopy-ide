@@ -13,6 +13,7 @@ import { AGENT_TOOL_GROUPS, ALL_AGENT_TOOLS } from "./agentTools";
 // Vitest runs from the repo root; import.meta.url is not a file: URL here
 // (same note as branchSwitchGuard.test.ts).
 const HOOK = join(process.cwd(), "src-tauri/src/bin/canopy_hook.rs");
+const BRIDGE = join(process.cwd(), "src-tauri/src/context.rs");
 
 /** Every `"name": "canopy_…"` in the sidecar's tool descriptors. */
 const sidecarTools = (): Set<string> => {
@@ -22,12 +23,22 @@ const sidecarTools = (): Set<string> => {
   );
 };
 
+const bridgeTools = (): Set<string> => {
+  const src = readFileSync(BRIDGE, "utf8");
+  const block = src.match(/const SUPPORTED_TOOLS:[\s\S]*?=\s*&\[([\s\S]*?)\];/)?.[1] ?? "";
+  return new Set([...block.matchAll(/"(canopy_[a-z_]+)"/g)].map((m) => m[1]));
+};
+
 describe("the agent tool list", () => {
   it("only offers switches for tools the sidecar actually has", () => {
     const known = sidecarTools();
     expect(known.size).toBeGreaterThan(20);
     const unknown = ALL_AGENT_TOOLS.filter((t) => !known.has(t));
     expect(unknown, "a switch naming no tool silently does nothing").toEqual([]);
+  });
+
+  it("keeps the bridge capability handshake equal to the sidecar descriptors", () => {
+    expect([...bridgeTools()].sort()).toEqual([...sidecarTools()].sort());
   });
 
   // The reverse is deliberately not asserted. A dozen tools — the Android

@@ -343,7 +343,10 @@ export interface AgentAction {
     | "task_named"
     | "close_session"
     | "spawn_agent"
-    | "message_agent";
+    | "message_agent"
+    /** Internal second phase: the bridge has authorized the resolved PR's
+     *  mesh scope and asks the owning ProjectView to create the cold task. */
+    | "message_agent_start";
   route: string;
   dir?: string;
   /** Where the calling agent was standing. Sent on every action by the sidecar
@@ -684,6 +687,23 @@ export interface MeshMessage {
 
 /** Every kept agent-to-agent message, oldest first. */
 export const contextMessages = () => invoke<MeshMessage[]>("context_messages");
+
+/** One severed terminal pair (lower pty id first): the user cut this edge in
+ *  the agent control panel, and sends between the two are refused until it is
+ *  reconnected. Keyed to the app launch whose pty ids these are. */
+export interface SeveredPair {
+  a: number;
+  b: number;
+  instance: string;
+  at_ms: number;
+}
+
+/** Every severed pair the mesh store holds. */
+export const meshSevered = () => invoke<SeveredPair[]>("context_mesh_severed");
+
+/** Sever or reconnect one pair; answers with the updated list. */
+export const meshSever = (a: number, b: number, severed: boolean) =>
+  invoke<SeveredPair[]>("context_mesh_sever", { a, b, severed });
 
 /** PNG (base64) of a rectangle of the app's own webview, via the webview's own
  *  snapshot API — a picture of the preview under the proxy engine, where the
@@ -3435,6 +3455,10 @@ export interface SessionDigest {
    *  then is wall clock, which is the thing these fields exist to replace. */
   run_started?: number;
   prompts?: string[];
+  /** The prompt that started the session, kept apart from `prompts` — that
+   *  window rotates, and on a long session the reason the session exists was
+   *  the first thing it dropped. Absent on pre-upgrade digests. */
+  first_prompt?: string;
   files?: string[];
   /** Where the session was launched. Pinned at first sighting and never
    *  updated, unlike `cwd`, which follows the agent as it cds. */
