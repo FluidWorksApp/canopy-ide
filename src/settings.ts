@@ -94,6 +94,11 @@ export type CursorStyle = "block" | "underline" | "bar";
  * Next/Previous Tab commands stay positional whichever mode is selected. */
 export type TabSwitchMode = "recent" | "order" | "items";
 
+/** The lens used when a project has not made its own choice yet. Once the
+ * user switches a project, `Project.vibe.enabled` remains the per-project
+ * source of truth. */
+export type DefaultProjectLens = "build" | "engineer";
+
 /** A dictation hotkey as captured from a keydown: the modifier flags plus the
  *  physical `KeyboardEvent.code` (layout-independent, so it survives non-US
  *  keyboards). */
@@ -225,6 +230,9 @@ export interface Settings {
   /** Workbench shortcut preset. Imported editor-specific customizations can be
    * layered above this later without changing the semantic command catalog. */
   keymapProfile: ShortcutProfile;
+  /** First-run persona chooses this default; individual projects still store
+   * and keep their own Build/Engineer switch. */
+  defaultProjectLens: DefaultProjectLens;
   /** Terminal font size — kept under its original name for backward compat
    *  with everyone who already has it in localStorage. */
   fontSize: number;
@@ -571,6 +579,7 @@ export interface Settings {
 export const DEFAULTS: Settings = {
   scrollback: 5_000,
   keymapProfile: "canopy",
+  defaultProjectLens: "engineer",
   fontSize: 13,
   runawayCpuPercent: 300,
   runawayMemBytes: 4 * 1024 * 1024 * 1024,

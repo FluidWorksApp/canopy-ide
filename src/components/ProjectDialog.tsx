@@ -8,6 +8,7 @@ import { newComponentId, newProjectId, newRunCommandId } from "../projects";
 import { useEscape } from "../useEscape";
 import { FilesIcon } from "./icons";
 import { Button } from "./ui";
+import { getSettings } from "../settings";
 
 interface ProjectDialogProps {
   existing?: Project;
@@ -335,7 +336,14 @@ export function ProjectDialog({ existing, onSave, onCancel }: ProjectDialogProps
                         runCommandId: vibeRunCommandId || undefined,
                       },
                     }
-                  : {}),
+                  : existing
+                    ? {}
+                    : {
+                        vibe: {
+                          version: 1,
+                          enabled: getSettings().defaultProjectLens === "build",
+                        },
+                      }),
               })
             }>
             {existing ? "Save" : "Create & open"}

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   adoptLegacyCustomTasks,
+  adoptDefaultProjectLens,
   adoptProjectStructureIds,
   AGENT_CLIS,
   agentForBin,
@@ -41,8 +42,33 @@ const addClis = (clis: CustomAgentCli[]) => {
 };
 
 afterEach(() => {
-  updateSettings({ cliBins: {}, customClis: [] });
+  updateSettings({ cliBins: {}, customClis: [], defaultProjectLens: "engineer" });
   refreshAgentClis();
+});
+
+describe("default project lens adoption", () => {
+  const legacy = (): Project => ({
+    id: "legacy-lens",
+    name: "Legacy",
+    components: [{ id: "cmp", label: "app", path: "/repo" }],
+  });
+
+  it("adopts the onboarding choice once for an uninitialized project", () => {
+    updateSettings({ defaultProjectLens: "build" });
+    expect(adoptDefaultProjectLens(legacy()).vibe).toEqual({
+      version: 1,
+      enabled: true,
+    });
+  });
+
+  it("never overrides a project's explicit lens", () => {
+    updateSettings({ defaultProjectLens: "build" });
+    const project = {
+      ...legacy(),
+      vibe: { version: 1 as const, enabled: false },
+    };
+    expect(adoptDefaultProjectLens(project)).toBe(project);
+  });
 });
 
 describe("shellQuote", () => {
@@ -624,7 +650,7 @@ describe("project vibe serialization", () => {
     expect(project.vibe).toEqual({ version: 1, enabled: true });
   });
 
-  it("adopts deterministic IDs in a pre-vibe workspace without inventing vibe", async () => {
+  it("adopts deterministic IDs and the selected default lens in a pre-vibe workspace", async () => {
     mockCommands({
       store_load: JSON.stringify({
         projects: [
@@ -649,7 +675,7 @@ describe("project vibe serialization", () => {
     const state = adoptProjectStructureIds(loaded);
     const again = adoptProjectStructureIds(state);
 
-    expect(state.projects[0].vibe).toBeUndefined();
+    expect(state.projects[0].vibe).toEqual({ version: 1, enabled: false });
     expect(state.projects[0].components[0].id).toMatch(/^cmp_/);
     expect(state.projects[0].components[0].commands?.[0].id).toMatch(/^run_/);
     expect(again).toBe(state);

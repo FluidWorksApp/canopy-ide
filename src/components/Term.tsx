@@ -46,6 +46,10 @@ function themeFor(settings: Settings) {
 
 export interface TermHandle {
   clearScrollback: () => void;
+  /** Reclaim this terminal's reconstructable renderer state. Hidden terminals
+   * compact losslessly; a visible terminal purges scrollback while keeping the
+   * live screen and PTY. */
+  releaseMemory: () => "compacting" | "purged" | "unavailable";
   hardReset: () => void;
   focus: () => void;
   /** The text currently selected in the terminal, "" when none. */
@@ -125,6 +129,9 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   onExitedRef.current = onExited;
   const onSpawnedRef = useRef(onSpawned);
   onSpawnedRef.current = onSpawned;
+  const releaseMemoryRef = useRef<() => "compacting" | "purged" | "unavailable">(
+    () => "unavailable",
+  );
 
   const captureText = (maxChars = 8000) => {
     const term = termRef.current;
@@ -158,6 +165,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
 
   useImperativeHandle(ref, () => ({
     clearScrollback: () => termRef.current?.clear(),
+    releaseMemory: () => releaseMemoryRef.current(),
     hardReset: () => {
       termRef.current?.reset();
       // \x0c: ask the shell to repaint its prompt after the hard reset
@@ -340,6 +348,18 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     const unregisterPressureShedder = registerTerminalPressureShedder(() =>
       compaction.compactNow(),
     );
+    releaseMemoryRef.current = () => {
+      if (compaction.compactNow()) return "compacting";
+      // Compaction deliberately refuses a visible terminal: serializing and
+      // immediately restoring it saves nothing. Purge only scrollback there;
+      // the viewport and live PTY remain intact.
+      if (streamingRef.current) {
+        term.clear();
+        updateRetention();
+        return "purged";
+      }
+      return "unavailable";
+    };
 
     // No WebGL renderer. @xterm/addon-webgl 0.19.0 corrupts rendering on
     // WKWebView/macOS: a stale texture binding after an atlas page swap makes
@@ -846,6 +866,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       dataSub.dispose();
       titleSub.dispose();
       unregisterPressureShedder();
+      releaseMemoryRef.current = () => "unavailable";
       compaction.dispose();
       retentionSubs.forEach((s) => s.dispose());
       retention.dispose();

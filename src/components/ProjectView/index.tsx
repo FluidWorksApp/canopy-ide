@@ -457,6 +457,11 @@ import { loadVibePackageFacts } from "../../vibePackageScripts";
 import { inferVibeCheck } from "../../vibeCheckInference";
 import { TabSwitcher } from "../TabSwitcher";
 import { switchRowKey, tabKind } from "../../tabKind";
+import {
+  strongestTerminalMemoryWarning,
+  terminalGovernorByPty,
+} from "../../terminalMemoryPressure";
+import { TerminalMemoryFlyout } from "../TerminalMemoryFlyout";
 
 /** Work items join PRs through the provenance cache — synchronous on purpose,
  *  like every read the gesture path makes. A PR tab loads its edges on open,
@@ -680,6 +685,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   zen,
   events,
   hookPath,
+  terminalGovernor,
   allProjects,
   dismissedPending,
   onDismissPending,
@@ -1216,6 +1222,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const contentRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  const governorByPty = useMemo(
+    () => terminalGovernorByPty(terminalGovernor),
+    [terminalGovernor],
+  );
+  const terminalMemoryMembers = useCallback(
+    (tab: TermSubTab) =>
+      tab.paneGroup
+        ? tabs.filter(
+            (candidate): candidate is TermSubTab =>
+              candidate.type === "terminal" && candidate.paneGroup === tab.paneGroup,
+          )
+        : [tab],
+    [tabs],
+  );
+  const terminalMemoryWarning = useCallback(
+    (tab: TermSubTab) =>
+      strongestTerminalMemoryWarning(
+        terminalMemoryMembers(tab).map((member) =>
+          member.ptyId == null ? null : governorByPty.get(member.ptyId),
+        ),
+      ),
+    [governorByPty, terminalMemoryMembers],
+  );
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
   /** Committed activity, newest first. This is session memory rather than a
@@ -2226,6 +2255,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  see, covering the terminal you did. A Set also means A stays open when you
    *  duck over to B and come back. */
   const [wsOpenPtys, setWsOpenPtys] = useState<ReadonlySet<number>>(new Set());
+  const [memoryFlyoutTabId, setMemoryFlyoutTabId] = useState<string | null>(null);
   // Mirrored for the agent-action handler, which is mounted once and must not
   // re-subscribe every time a digest poll lands.
   const wsDigestsRef = useRef(wsDigests);
@@ -8756,6 +8786,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       shellTabs.map((tab) => ({
         id: tab.id,
         active: tab.id === activeVisualTabId,
+        className: terminalMemoryWarning(tab) ? "run-chip-memory-warning" : undefined,
         dot: <TerminalIcon size={11} className="run-chip-shell-dot" />,
         title: tab.multiplexTitle ?? tab.customTitle ?? tab.title,
         tooltip: `${tab.command ?? "shell"} — ${tab.cwd}`,
@@ -8764,6 +8795,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ? terminalGroupsRef.current[tab.paneGroup]
             : undefined;
           setActiveTabId(group?.activeTabId ?? tab.id);
+          if (terminalMemoryWarning(tab)) setMemoryFlyoutTabId(tab.id);
+          else setMemoryFlyoutTabId(null);
         },
         onClose: () =>
           tab.paneGroup
@@ -8771,7 +8804,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             : closeTab(tab.id, "user"),
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [shellTabs, activeVisualTabId, closeTab, closeTerminalGroup],
+    [shellTabs, activeVisualTabId, closeTab, closeTerminalGroup, terminalMemoryWarning],
   );
   const runChips: RailChip[] = useMemo(
     () =>
@@ -8781,7 +8814,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return {
           id: tab.id,
           active: tab.id === activeTabId,
-          className: `run-chip-${state}`,
+          className: `run-chip-${state}${terminalMemoryWarning(tab) ? " run-chip-memory-warning" : ""}`,
           dot: !tab.exited ? (
             <LiveDot size={7} className="run-chip-dot" />
           ) : ok ? (
@@ -8803,12 +8836,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
               <RestartIcon size={11} />
             </Button>
           ) : undefined,
-          onSelect: () => setActiveTabId(tab.id),
+          onSelect: () => {
+            setActiveTabId(tab.id);
+            if (terminalMemoryWarning(tab)) setMemoryFlyoutTabId(tab.id);
+            else setMemoryFlyoutTabId(null);
+          },
           onClose: () => closeTab(tab.id, "user"),
         };
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [runTabs, activeTabId, closeTab, restartRun],
+    [runTabs, activeTabId, closeTab, restartRun, terminalMemoryWarning],
   );
   // Which pane-bar section owns the active tab. The other sections recede
   // (dimmed + softly blurred) so it's unmistakable where you are: closing a
@@ -10329,6 +10366,33 @@ const ProjectViewBody = memo(function ProjectViewBody({
     () => (activeTab?.type === "terminal" ? activeTab : null),
     [activeTab],
   );
+  const memoryFlyoutTab = useMemo(
+    () =>
+      tabs.find(
+        (tab): tab is TermSubTab =>
+          tab.type === "terminal" && tab.id === memoryFlyoutTabId,
+      ) ?? null,
+    [memoryFlyoutTabId, tabs],
+  );
+  const memoryFlyoutStatus = memoryFlyoutTab
+    ? terminalMemoryWarning(memoryFlyoutTab)
+    : null;
+  const previousActiveMemoryTab = useRef<string | null>(null);
+  useEffect(() => {
+    if (!visible) return;
+    if (previousActiveMemoryTab.current === activeTabId) return;
+    previousActiveMemoryTab.current = activeTabId;
+    const selected = tabs.find(
+      (tab): tab is TermSubTab =>
+        tab.type === "terminal" && tab.id === activeTabId,
+    );
+    setMemoryFlyoutTabId(
+      selected && terminalMemoryWarning(selected) ? selected.id : null,
+    );
+  }, [activeTabId, tabs, terminalMemoryWarning, visible]);
+  useEffect(() => {
+    if (memoryFlyoutTabId && !memoryFlyoutStatus) setMemoryFlyoutTabId(null);
+  }, [memoryFlyoutStatus, memoryFlyoutTabId]);
 
   // Stable PaneBar callbacks — identity only changes when their actual deps change,
   // not on every 4s stats sample, so the memoized PaneBar stays put between samples.
@@ -10346,6 +10410,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const onSelectTab = useCallback(
     (id: string, clickCount?: number) => {
       const tab = tabsRef.current.find((t) => t.id === id);
+      if (tab?.type === "terminal" && terminalMemoryWarning(tab))
+        setMemoryFlyoutTabId(tab.id);
+      else setMemoryFlyoutTabId(null);
       if (tab?.type === "terminal" && clickCount === 2) startRename(tab);
       else {
         const group =
@@ -10355,7 +10422,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         setActiveTabId(group?.activeTabId ?? id);
       }
     },
-    [startRename],
+    [startRename, terminalMemoryWarning],
   );
   const closeVisualTab = useCallback(
     (id: string) => {
@@ -11353,6 +11420,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         collabPaths={collabPaths}
         isAgentTab={isAgentTab}
         tabState={tabState}
+        tabMemoryWarning={(tab) => Boolean(terminalMemoryWarning(tab))}
         tabRing={(t) =>
           tabs.some(
             (member) =>
@@ -11815,6 +11883,46 @@ const ProjectViewBody = memo(function ProjectViewBody({
               height: `${paneDrop.rect.height * 100}%`,
             }}
             aria-hidden
+          />
+        )}
+        {!vibe && memoryFlyoutTab && memoryFlyoutStatus && (
+          <TerminalMemoryFlyout
+            title={memoryFlyoutTab.name ?? memoryFlyoutTab.customTitle ?? memoryFlyoutTab.title}
+            status={memoryFlyoutStatus}
+            onClose={() => setMemoryFlyoutTabId(null)}
+            onPurge={() => {
+              const outcomes = terminalMemoryMembers(memoryFlyoutTab).map(
+                (member) => termHandles.current.get(member.id)?.releaseMemory(),
+              );
+              const acted = outcomes.filter(
+                (outcome) => outcome === "purged" || outcome === "compacting",
+              ).length;
+              onNotice(
+                acted > 0
+                  ? `Released reconstructable terminal memory for ${acted} pane${acted === 1 ? "" : "s"}.`
+                  : "This terminal has no reconstructable memory to release.",
+              );
+            }}
+            onRestart={() => {
+              const members = terminalMemoryMembers(memoryFlyoutTab);
+              if (members.some((member) => member.attachId != null)) {
+                onNotice("An attached terminal cannot be restarted from this window.", "info");
+                return;
+              }
+              setMemoryFlyoutTabId(null);
+              for (const member of members) restartRun(member.id);
+            }}
+            onHibernate={() => {
+              setMemoryFlyoutTabId(null);
+              for (const member of terminalMemoryMembers(memoryFlyoutTab)) {
+                if (member.ptyId != null) void ipc.ptyKill(member.ptyId);
+                // Run tabs intentionally remain after exit to show their
+                // status, so remove them explicitly when the user asks to
+                // hibernate the visual tab. Agent/shell tabs close themselves
+                // on exit, preserving the agent session's resumable record.
+                if (member.run) closeTab(member.id, "user");
+              }
+            }}
           />
         )}
         {/* Doc tabs, mounted for as long as they're open and shown by display

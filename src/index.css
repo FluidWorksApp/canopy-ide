@@ -5196,6 +5196,18 @@ body.resizing-side * {
   background: color-mix(in srgb, var(--bg-raised) 55%, transparent);
 }
 
+/* Native governor state, not a frontend byte heuristic. The warning belongs
+   to the tab even while inactive, so it remains findable without moving it. */
+.tabs-harbor .tab-memory-warning {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  box-shadow: inset 0 2px 0 var(--danger);
+}
+
+.tabs-harbor .tab-memory-warning:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
 /* A browser-style live peek, mounted only after hover intent. Fixed positioning
    escapes the horizontally clipped strip; pointer-events keeps it a preview,
    not a second interactive copy of the pane. */
@@ -6206,6 +6218,104 @@ body.dragging-tab * {
   color: var(--text);
   border-color: rgba(158, 206, 106, 0.5);
   background: rgba(158, 206, 106, 0.16);
+}
+
+.run-chip-memory-warning,
+.run-chip-memory-warning.run-chip-active {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg));
+  border-color: color-mix(in srgb, var(--danger) 62%, transparent);
+  box-shadow: inset 2px 0 0 var(--danger);
+}
+
+/* The warning tab opens this contextual pane over the right side of its live
+   terminal. It never changes the pane layout or unmounts the PTY beneath it. */
+.terminal-memory-flyout {
+  position: absolute;
+  z-index: 22;
+  top: 12px;
+  right: 12px;
+  display: grid;
+  gap: 12px;
+  width: min(340px, calc(100% - 24px));
+  padding: 16px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--bg-raised) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  border-radius: var(--r-lg);
+  corner-shape: squircle;
+  box-shadow: var(--shadow-3), inset 3px 0 0 var(--danger);
+  backdrop-filter: blur(18px) saturate(145%);
+  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  animation: terminal-memory-flyout-in var(--dur-fast) var(--ease-out);
+}
+
+.terminal-memory-flyout-head,
+.terminal-memory-reading,
+.terminal-memory-actions {
+  display: flex;
+  align-items: center;
+}
+
+.terminal-memory-flyout-head {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.terminal-memory-flyout-head > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.terminal-memory-flyout-head strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-memory-kicker {
+  color: var(--danger);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.terminal-memory-flyout p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+.terminal-memory-reading {
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--danger) 7%, var(--bg));
+  border: 1px solid color-mix(in srgb, var(--danger) 20%, var(--border));
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.terminal-memory-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+@keyframes terminal-memory-flyout-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-memory-flyout { animation: none; }
 }
 
 .run-chip-dot {
@@ -18033,6 +18143,42 @@ a.btn-sm {
   font-weight: 600;
   letter-spacing: 0.03em;
   text-transform: uppercase;
+}
+
+.onboarding-persona {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  width: min(100%, 480px);
+}
+
+.onboarding-persona-choice {
+  display: grid;
+  gap: 3px;
+  padding: 9px 11px;
+  text-align: left;
+  color: var(--text-dim);
+  background: color-mix(in srgb, var(--bg-raised) 72%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  cursor: pointer;
+}
+
+.onboarding-persona-choice strong {
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+
+.onboarding-persona-choice span {
+  font-size: var(--fs-xs);
+}
+
+.onboarding-persona-choice.selected {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 13%, var(--bg-raised));
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
 .onboarding-config .ctl-select-wrap {

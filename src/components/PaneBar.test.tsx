@@ -196,6 +196,22 @@ describe("multiplexed terminal tab", () => {
   });
 });
 
+describe("terminal memory warning", () => {
+  it("accents only tabs selected by the governor-backed predicate", () => {
+    const warned = term("warned", "claude");
+    const normal = term("normal", "codex");
+    render(
+      paneBar({
+        tabGroups: [run("all", [warned, normal])],
+        tabMemoryWarning: (tab) => tab.id === warned.id,
+      }),
+    );
+
+    expect(screen.getByText("claude").closest(".tab")).toHaveClass("tab-memory-warning");
+    expect(screen.getByText("codex").closest(".tab")).not.toHaveClass("tab-memory-warning");
+  });
+});
+
 describe("tab hover preview", () => {
   it("waits for hover intent, then shows the agent's live description", () => {
     vi.useFakeTimers();

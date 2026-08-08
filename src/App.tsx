@@ -627,6 +627,10 @@ export default function App() {
       id: newProjectId(),
       name,
       components: [{ id: newComponentId(), label: name, path: dir, commands: [] }],
+      vibe: {
+        version: 1,
+        enabled: getSettings().defaultProjectLens === "build",
+      },
     });
   }, []);
 
@@ -3267,6 +3271,7 @@ export default function App() {
               allProjects={allProjectRoots}
               events={agentEvents}
               hookPath={hookPath}
+              terminalGovernor={terminalGovernor}
               relay={relay}
               dismissedPending={dismissedPending}
               onDismissPending={dismissPending}
