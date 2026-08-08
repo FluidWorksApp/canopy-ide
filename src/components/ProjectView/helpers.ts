@@ -421,6 +421,9 @@ export interface ProjectViewProps {
   zen: boolean;
   events: AgentEventEntry[];
   hookPath: string | null;
+  /** App's one native-governor snapshot. ProjectView only joins its terminal
+   * PTY ids onto it; it does not calculate a second memory policy. */
+  terminalGovernor: import("../../ipc").TerminalGovernorSnapshot | null;
   /** Every open project (name + roots) — the resource breakdown groups the
    *  machine-wide session stats by project, which one project can't know. */
   allProjects: { name: string; roots: string[]; asleep?: boolean }[];

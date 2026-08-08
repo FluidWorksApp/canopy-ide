@@ -20,6 +20,7 @@ describe("Onboarding", () => {
     const user = userEvent.setup();
     render(<Onboarding onClose={vi.fn()} onCreateProject={vi.fn()} />);
 
+    await user.click(screen.getByRole("radio", { name: /i build with ai/i }));
     await user.selectOptions(screen.getByRole("combobox", { name: "Keyboard shortcut profile" }), "vscode");
 
     await user.click(screen.getByRole("tab", { name: /slide 2: agents are the hero/i }));
@@ -36,11 +37,23 @@ describe("Onboarding", () => {
 
     expect(getSettings()).toMatchObject({
       keymapProfile: "vscode",
+      defaultProjectLens: "build",
       defaultAgent: "codex",
       dictationTriggerMode: "doubleTap",
       spotSearchAllProjects: true,
       autoImportMarkdownResearch: false,
     });
+  });
+
+  it("asks for a persona and maps it to the default project lens", async () => {
+    const user = userEvent.setup();
+    render(<Onboarding onClose={vi.fn()} onCreateProject={vi.fn()} />);
+
+    expect(screen.getByRole("radio", { name: /i'm an engineer/i })).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByRole("radio", { name: /i build with ai/i }));
+
+    expect(getSettings().defaultProjectLens).toBe("build");
+    expect(screen.getByRole("radio", { name: /i build with ai/i })).toHaveAttribute("aria-checked", "true");
   });
 
   it("previews the selected shortcut profile for the current platform", async () => {

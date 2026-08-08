@@ -353,12 +353,26 @@ export function normalizeProjectStructure(project: Project): Project {
   return changed ? { ...project, components, vibe, integrations } : project;
 }
 
-/** State-level migration seam, mirroring adoptLegacyCustomTasks: unchanged
- * workspaces keep identity; a legacy workspace is saved once by App. */
+/** A missing lens means this project predates the per-project switch. Adopt
+ * the onboarding choice once, then persist it with the project so later global
+ * changes never override an individual project's selection. */
+export function adoptDefaultProjectLens(project: Project): Project {
+  if (project.vibe) return project;
+  return {
+    ...project,
+    vibe: {
+      version: 1,
+      enabled: getSettings().defaultProjectLens === "build",
+    },
+  };
+}
+
+/** State-level migration seam, mirroring adoptLegacyCustomTasks: stable
+ * structure IDs and an initial lens are both adopted once and saved by App. */
 export function adoptProjectStructureIds(state: WorkspaceState): WorkspaceState {
   let changed = false;
   const projects = state.projects.map((project) => {
-    const normalized = normalizeProjectStructure(project);
+    const normalized = adoptDefaultProjectLens(normalizeProjectStructure(project));
     if (normalized !== project) changed = true;
     return normalized;
   });
@@ -491,12 +505,14 @@ export async function importFile(
     openIds?: string[];
   };
   if (obj?.kind === "canopy.project" && obj.project) {
-    const project = normalizeProjectStructure(obj.project);
+    const project = adoptDefaultProjectLens(normalizeProjectStructure(obj.project));
     return { projects: [project], openIds: [project.id] };
   }
   if (obj?.kind === "canopy.workspace" && Array.isArray(obj.projects)) {
     return {
-      projects: obj.projects.map(normalizeProjectStructure),
+      projects: obj.projects.map((project) =>
+        adoptDefaultProjectLens(normalizeProjectStructure(project)),
+      ),
       openIds: Array.isArray(obj.openIds) ? obj.openIds : [],
     };
   }

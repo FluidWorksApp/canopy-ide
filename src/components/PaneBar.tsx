@@ -247,6 +247,9 @@ export interface PaneBarProps {
   collabPaths: Set<string>;
   isAgentTab: (t: SubTab) => t is TermSubTab;
   tabState: (t: TermSubTab) => LifeState;
+  /** The native governor says this terminal is relatively high against its
+   * own allowance. This is intentionally not inferred from frontend bytes. */
+  tabMemoryWarning?: (t: TermSubTab) => boolean;
   /** Unseen activity on this terminal — an additive ring, never a state of its
    *  own and never a reason to move the tab. */
   tabRing?: (t: TermSubTab) => boolean;
@@ -329,7 +332,7 @@ export interface PaneBarProps {
 function PaneBarImpl({
   tabGroups, stripDrag, stripRef, paneRef, termText, openStacks, onToggleStack,
   stripTabs, activeTabId, flashTabId, renamingTabId, renameDraft,
-  collabPaths, isAgentTab, tabState, tabRing, showHints,
+  collabPaths, isAgentTab, tabState, tabRing, tabMemoryWarning, showHints,
   shellChips, runChips, runSummary, shellMenuOpen, setShellMenuOpen,
   runMenuOpen, setRunMenuOpen, activeSection,
   activeFileKind, activeFileView,
@@ -561,6 +564,8 @@ function PaneBarImpl({
                     tab.type === "terminal" && (tab.multiplexCount ?? 0) > 1 ? "tab-multiplexed" : ""
                   } ${tab.id === flashTabId ? "tab-flash" : ""} ${
                     tab.id === stripDrag.dragId ? "tab-dragging" : ""
+                  } ${
+                    tab.type === "terminal" && tabMemoryWarning?.(tab) ? "tab-memory-warning" : ""
                   }`}
                   {...stripDrag.itemProps(tab.id)}
                   onMouseEnter={(e) => armHoverPreview(tab, e.currentTarget)}
