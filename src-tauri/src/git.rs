@@ -3080,6 +3080,26 @@ pub async fn gh_pr_request_review(
     ))
 }
 
+/// Put a PR on top of another branch. This changes the public PR diff, so it is
+/// intentionally a separate click-only command rather than part of probing.
+#[tauri::command]
+pub async fn gh_pr_retarget(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    number: u32,
+    base: String,
+) -> Result<String, String> {
+    let base = base.trim();
+    if base.is_empty() || base.starts_with('-') {
+        return Err("choose a valid base branch".into());
+    }
+    let top = repo_path(&state, &repo)?;
+    let mut cmd = gh_in(&top);
+    cmd.args(["pr", "edit", &number.to_string(), "--base", base]);
+    run_net(&mut cmd)?;
+    Ok(format!("Stacked #{number} on {base}"))
+}
+
 /// Logins worth offering as reviewers: everyone with access to the repository.
 /// Without this "Ask for review" can only re-request people who already
 /// reviewed, which on a PR nobody has looked at yet is an empty menu.
