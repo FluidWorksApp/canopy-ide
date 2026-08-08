@@ -740,6 +740,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         onSpawned(id);
         onExitedRef.current({
           id,
+          session_generation: ipc.rendererSessionGeneration(),
           exit_code: 127,
           requested: false,
           spawnError: String(err),

@@ -151,6 +151,10 @@ const rendererGeneration = (): number => {
  * creation remains strict through rendererGeneration() above. */
 const browserRendererGeneration = (): number => renderer?.generation ?? 0;
 
+/** For renderer-synthesized PtyExit events (spawn refusals): the live session
+ * generation, so a stale-generation filter never drops the synthetic exit. */
+export const rendererSessionGeneration = (): number => renderer?.generation ?? 0;
+
 export async function ptySpawn(
   opts: {
     cols: number;
