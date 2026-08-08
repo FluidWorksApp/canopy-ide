@@ -18,6 +18,7 @@ Antigravity, OpenCode, and Amp).
 | Hook auto-setup | full | full | plugin | notification | full | plugin | extension |
 | Event stream (stamped w/ pty) | yes | yes | yes | limited | yes | yes | yes |
 | MCP auto-setup | yes | yes | yes | no native MCP | yes | yes | no native MCP |
+| Canopy bootstrap | MCP system instructions | MCP system instructions | MCP system instructions | read-only context | MCP system instructions | MCP system instructions | system-prompt hook |
 | Session digests (powers restore + shared context) | yes | yes | yes | limited | yes | yes | yes |
 | Resume command in registry | yes | yes | yes | – | yes | yes | yes |
 | Token/cost/model tray | yes | model only | – | – | model only | model only | model only |
@@ -47,6 +48,13 @@ The load-bearing pieces every feature hangs off:
 
 - Every Canopy PTY exports `CANOPY=1` and `CANOPY_PTY=<id>` (pty.rs). This is
   the identity/trust basis for everything.
+- `agent_instructions.rs` is the canonical bootstrap. MCP-capable clients get
+  its complete workspace/tool routing through the MCP `instructions` field;
+  Aider gets the capability-neutral portion through `AIDER_READ`, and the
+  oh-my-pi extension appends that portion to its real system prompt. The split
+  is intentional: a client without Canopy tools is never instructed to invent
+  them. The MCP prompt starts with `canopy_project` and checks
+  `canopy_agents`/`canopy_mesh history` before shared-checkout edits.
 - `~/.canopy/bin/canopy-hook` reads hook JSON on stdin, gates on `$CANOPY`,
   stamps `canopy_pty` from `$CANOPY_PTY`, appends to
   `~/.canopy/agent-events.jsonl`, maintains per-session digests

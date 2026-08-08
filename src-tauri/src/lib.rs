@@ -1,3 +1,4 @@
+mod agent_instructions;
 mod agent_life;
 mod agentid;
 mod agents;
@@ -514,6 +515,14 @@ pub fn run() {
             // this one, so "main" is a default we would be relying on.
             for w in app.webview_windows().values() {
                 webview_keys::disable_browser_accelerators(w);
+            }
+            // Refresh the capability-neutral context used by CLIs without MCP.
+            // It lives in Canopy's own state, never in the repository, so a CLI
+            // opened outside this IDE does not inherit IDE-specific rules.
+            if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+                if let Err(e) = agent_instructions::install_context(home) {
+                    log::warn!("agent context not installed: {e}");
+                }
             }
             // Install the hook helper before hooks are (re)written, so the
             // path they point at exists.

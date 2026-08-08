@@ -33,6 +33,8 @@ use std::process::{Command, ExitStatus, Stdio};
 // imported because this binary is standalone by design — but it must decide
 // state exactly as the app does, and `shared/agentLife/fixtures.json` is
 // replayed on both sides to prove it.
+#[path = "../agent_instructions.rs"]
+mod agent_instructions;
 #[path = "../agent_life.rs"]
 mod agent_life;
 
@@ -2082,72 +2084,6 @@ fn relocate_stray_research(session_id: &str, entry_dir: &std::path::Path) {
     }
 }
 
-/// Server instructions, injected into the agent's system prompt by the client.
-/// Deliberately a routing table, not a feature tour: the failure it exists to
-/// stop is an agent defaulting to the shell (`npm run dev`, `open <url>`,
-/// `kill`) when the IDE it is running inside can do the same thing visibly,
-/// with the output and the preview staying available afterwards.
-const INSTRUCTIONS: &str = "\
-This session runs inside the Canopy IDE. Prefer these tools over shell or \
-system equivalents — they act in the IDE the user is watching, and their \
-results stay inspectable:
-
-- Start a dev server / build / worker -> canopy_start_server (not `npm run dev` \
-  in bash; it runs in Canopy's RUNS rail, with logs via canopy_server_output)
-- Open or look at a page -> canopy_browser_navigate, then canopy_browser_snapshot \
-  (not `open`/`xdg-open`, and never an external browser; the embedded preview is \
-  what the user annotates and what you can drive)
-- Test responsive layouts -> canopy_browser_resize, then reset it when finished \
-  (do not open Playwright just to change the viewport)
-- Interact with a page -> canopy_browser_click / _type / _eval; diagnose with \
-  canopy_browser_console / _network
-- Stop or restart a server -> canopy_stop_server / canopy_restart_server (not \
-  kill/pkill)
-- See what's running, CPU, memory -> canopy_resources (not ps/top/lsof)
-- Read a running server's logs -> canopy_server_output (don't re-run the command)
-- The user's marked-up feedback on a page or a device -> canopy_annotations
-- Run or look at an Android app -> canopy_device_list first, then \
-  canopy_device_run / _screenshot / _snapshot (not adb in bash; these pick the \
-  device and the launcher activity for you)
-- Interact with an Android app -> canopy_device_tap / _type / _key / _swipe \
-  (coordinates from canopy_device_snapshot, never guessed off a screenshot); \
-  diagnose with canopy_device_logcat
-
-- \"this\", \"here\", \"the other one\" in the user's request -> canopy_editor_state \
-  (the file they have open, their caret and selection) before guessing
-- Check your own edit compiles -> canopy_diagnostics (the warm language server, \
-  not a full `tsc --noEmit`); before changing a shared signature -> \
-  canopy_references
-- What a symbol's type and docs are -> canopy_hover; where a symbol by that \
-  name is -> canopy_symbols (not grep)
-- Wait for a server to come up, a build to finish -> canopy_wait_for (don't poll \
-  canopy_server_output in a loop)
-- How something LOOKS -> canopy_screenshot (the DOM snapshot can't see overlap \
-  or contrast)
-- Working in a checkout that other agents share -> canopy_agents first, \
-  canopy_claim on the files you're taking
-- Handing another agent more than one line, or files, or a message it should \
-  be able to find again -> canopy_mesh_send (persistent, by message id); \
-  what you've sent and received, or a message id someone gave you -> \
-  canopy_mesh
-
-- Investigating anything worth writing down (how does X work, which approach, \
-  what would break) -> canopy_research search FIRST, someone may already have \
-  answered it; then canopy_research_write start, and put the findings there as \
-  you go. Never leave research in a scratch markdown file — it is lost the \
-  moment the session ends. Long raw material (file dumps, logs, fetched pages) \
-  goes in `source`, not in the body: the body is what the next agent reads.
-- Noticing something real that is NOT the job you were given (a bug beside the \
-  one you were sent for, a refactor the code obviously wants, a missing test) \
-  -> canopy_notes_write create. Park it and carry on: writing it down is how it \
-  survives, and chasing it is how you deliver the wrong change. Search \
-  canopy_notes first so the same observation is not recorded twice. This is not \
-  a progress log — do not narrate the work you were asked to do into it.
-
-Call canopy_project first for component paths, configured run commands, \
-terminal ids, and the ports servers are listening on. Fall back to the shell \
-only for work these tools don't cover.";
-
 /// The bridge address, from our own environment or from the process that
 /// spawned us.
 ///
@@ -2342,7 +2278,8 @@ fn mcp_main() {
                 // Only sent inside Canopy — elsewhere the tools can't work, and
                 // telling an agent to prefer them would be actively wrong.
                 if in_canopy() {
-                    result["instructions"] = serde_json::json!(INSTRUCTIONS);
+                    result["instructions"] =
+                        serde_json::json!(agent_instructions::mcp_instructions());
                 }
                 rpc_ok(id, result)
             }
@@ -6383,9 +6320,10 @@ mod tests {
     fn the_instructions_send_research_to_the_store_and_not_to_a_file() {
         // This block is the only channel that makes the tools *chosen*. Without
         // the "never a scratch file" clause an agent still reaches for Write.
-        assert!(INSTRUCTIONS.contains("canopy_research search FIRST"));
-        assert!(INSTRUCTIONS.contains("canopy_research_write start"));
-        assert!(INSTRUCTIONS.contains("scratch markdown file"));
+        let instructions = agent_instructions::mcp_instructions();
+        assert!(instructions.contains("canopy_research search FIRST"));
+        assert!(instructions.contains("canopy_research_write start"));
+        assert!(instructions.contains("scratch markdown file"));
     }
 
     #[test]

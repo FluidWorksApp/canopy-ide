@@ -923,6 +923,8 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
         .all(|part| raw.contains(part)),
         "omp" => [
             "before_agent_start",
+            "CANOPY_CONTEXT",
+            "systemPrompt:",
             "agent_end",
             "session_shutdown",
             "event?.toolName",
@@ -1194,6 +1196,7 @@ fn setup_omp_hook(cfg: &str, home: &str) -> Result<String, String> {
 import { spawn } from "node:child_process"
 
 const HELPER = "__HELPER__"
+const CANOPY_CONTEXT = __CANOPY_CONTEXT__
 let pending = Promise.resolve()
 
 const send = (obj) => {
@@ -1228,15 +1231,19 @@ export default function canopyBridge(pi) {
       model: ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
     }),
   )
-  on("before_agent_start", (event, ctx) =>
+  on("before_agent_start", (event, ctx) => {
     send({
       ...base(ctx),
       hook_event_name: "UserPromptSubmit",
       canopy_signal: "turn-start",
       prompt: event?.prompt ?? "",
       model: ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
-    }),
-  )
+    })
+    if (process.env.CANOPY !== "1") return
+    return {
+      systemPrompt: `${event?.systemPrompt ?? ""}\n\n${CANOPY_CONTEXT}`,
+    }
+  })
   on("agent_end", (event, ctx) => {
     if (event?.willContinue) {
       send({ ...base(ctx), hook_event_name: "AgentContinue", canopy_signal: "turn-progress" })
@@ -1275,7 +1282,11 @@ export default function canopyBridge(pi) {
   )
 }
 "#;
-    let source = TEMPLATE.replace("__HELPER__", &helper.to_string_lossy());
+    let context = serde_json::to_string(crate::agent_instructions::SESSION_CONTEXT)
+        .map_err(|e| e.to_string())?;
+    let source = TEMPLATE
+        .replace("__HELPER__", &helper.to_string_lossy())
+        .replace("__CANOPY_CONTEXT__", &context);
     // Builds before 0.3.3 wrote the bridge to hooks/. A root-level file there
     // is not auto-discovered by 17.0.5 (native hooks live under hooks/pre and
     // hooks/post), but `--hook <path>` can still load it explicitly. Remove our
@@ -4815,6 +4826,13 @@ mod integration_tests {
         let path = home.join(".omp/agent/extensions/canopy.ts");
         let src = std::fs::read_to_string(path).unwrap();
         assert!(src.contains("before_agent_start"));
+        assert!(src.contains("systemPrompt:"));
+        let encoded_context = src
+            .lines()
+            .find_map(|line| line.strip_prefix("const CANOPY_CONTEXT = "))
+            .expect("generated extension carries its Canopy context");
+        let context: String = serde_json::from_str(encoded_context).unwrap();
+        assert_eq!(context, crate::agent_instructions::SESSION_CONTEXT);
         assert!(src.contains("agent_end"));
         assert!(!src.contains("agent_settled"));
         assert!(src.contains("event?.willContinue"));
