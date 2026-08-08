@@ -68,6 +68,7 @@ import {
   toastMs,
   type AttentionItem,
 } from "./attention";
+import { fidelityFor, POLICY } from "../shared/agentLife";
 import { remoteAttentionSnapshot } from "./remoteAttention";
 import { useAttention } from "./useAttention";
 import { NotificationCenter } from "./components/NotificationCenter";
@@ -2928,25 +2929,36 @@ export default function App() {
     const blocked = allPending.filter((i) => i.kind !== "idle");
     const live = new Set(blocked.map((i) => `agent:${i.sessionId}`));
     for (const p of blocked) {
-      postAttention({
-        kind: "question",
-        tone: "info",
-        title:
-          p.kind === "question"
-            ? (p.questions?.[0]?.question ?? `${p.agent} is asking`)
-            : (p.message ?? `${p.agent} needs your attention`),
-        body: p.agent,
-        source: "agent",
-        ...projectIdentity(p.cwd),
-        // The terminal it is blocked in is the only place the answer can be
-        // typed. Without a pty stamp (codex, an agent outside a Canopy tab)
-        // the Agents panel is the nearest true answer.
-        where:
-          p.pty != null
-            ? { kind: "terminal", ptyId: p.pty, path: p.cwd }
-            : { kind: "panel", panel: "agents", path: p.cwd },
-        dedupeKey: `agent:${p.sessionId}`,
-      });
+      const transientPermission =
+        p.kind === "notification" &&
+        fidelityFor(p.agent).dwellStructuredBlock;
+      postAttention(
+        {
+          kind: "question",
+          tone: "info",
+          title:
+            p.kind === "question"
+              ? (p.questions?.[0]?.question ?? `${p.agent} is asking`)
+              : (p.message ?? `${p.agent} needs your attention`),
+          body: p.agent,
+          source: "agent",
+          ...projectIdentity(p.cwd),
+          // The terminal it is blocked in is the only place the answer can be
+          // typed. Without a pty stamp (codex, an agent outside a Canopy tab)
+          // the Agents panel is the nearest true answer.
+          where:
+            p.pty != null
+              ? { kind: "terminal", ptyId: p.pty, path: p.cwd }
+              : { kind: "panel", panel: "agents", path: p.cwd },
+          dedupeKey: `agent:${p.sessionId}`,
+        },
+        transientPermission
+          ? {
+              dwellMs: POLICY.structuredBlockDwellMs,
+              collapseMs: POLICY.permissionNoticeCooldownMs,
+            }
+          : undefined,
+      );
     }
     for (const key of bridgedAgentKeys.current) {
       if (!live.has(key)) resolveAttentionByKey(key, "withdrawn");
