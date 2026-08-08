@@ -128,6 +128,9 @@ pub struct McpCallResult {
     pub is_error: bool,
     /// `structuredContent`, when the tool declared an output schema.
     pub structured: Option<Value>,
+    /// Modern MCP may return a task handle or an input-required result instead
+    /// of pretending a long operation completed synchronously.
+    pub task: Option<Value>,
     pub elapsed_ms: u64,
 }
 
@@ -368,7 +371,11 @@ fn attach_modern_meta(params: &mut Value, protocol_version: &str) {
     );
     meta.insert(
         "io.modelcontextprotocol/clientCapabilities".into(),
-        json!({}),
+        json!({
+            "extensions": {
+                "io.modelcontextprotocol/tasks": {}
+            }
+        }),
     );
     meta.insert(
         "io.modelcontextprotocol/clientInfo".into(),
@@ -376,12 +383,9 @@ fn attach_modern_meta(params: &mut Value, protocol_version: &str) {
     );
 }
 
-fn validate_modern_result(method: &str, result: &Value) -> Result<(), String> {
+fn validate_modern_result(_method: &str, result: &Value) -> Result<(), String> {
     match result.get("resultType").and_then(Value::as_str) {
-        Some("complete") => Ok(()),
-        Some("input_required") | Some("task") => Err(format!(
-            "{method} returned an asynchronous result; MCP Tasks support is not enabled yet"
-        )),
+        Some("complete") | Some("input_required") | Some("task") => Ok(()),
         Some(other) => Err(format!("unknown MCP result type `{other}`")),
         None => Err("the modern MCP result omitted resultType".into()),
     }
@@ -625,6 +629,7 @@ fn modern_request_name<'a>(method: &str, body: &'a Value) -> Option<&'a str> {
     match method {
         "tools/call" | "prompts/get" => body.pointer("/params/name")?.as_str(),
         "resources/read" => body.pointer("/params/uri")?.as_str(),
+        "tasks/get" | "tasks/update" | "tasks/cancel" => body.pointer("/params/taskId")?.as_str(),
         _ => None,
     }
 }
@@ -1286,8 +1291,46 @@ pub async fn mcp_call_tool(
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         structured: result.get("structuredContent").cloned(),
+        task: matches!(
+            result.get("resultType").and_then(Value::as_str),
+            Some("task" | "input_required")
+        )
+        .then_some(result),
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+async fn mcp_task_request(key: String, method: &str, params: Value) -> Result<Value, String> {
+    let (conn, _) = acquire(&key).await?;
+    let mut held = conn.lock().await;
+    if held.era != ProtocolEra::Modern {
+        return Err("this MCP server does not support the Tasks extension".into());
+    }
+    held.request(method, params, CALL_TIMEOUT).await
+}
+
+#[tauri::command]
+pub async fn mcp_task_get(key: String, task_id: String) -> Result<Value, String> {
+    mcp_task_request(key, "tasks/get", json!({ "taskId": task_id })).await
+}
+
+#[tauri::command]
+pub async fn mcp_task_update(
+    key: String,
+    task_id: String,
+    input_responses: Value,
+) -> Result<Value, String> {
+    mcp_task_request(
+        key,
+        "tasks/update",
+        json!({ "taskId": task_id, "inputResponses": input_responses }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn mcp_task_cancel(key: String, task_id: String) -> Result<Value, String> {
+    mcp_task_request(key, "tasks/cancel", json!({ "taskId": task_id })).await
 }
 
 /// Stop a server. Dropping the connection kills the child (`kill_on_drop`), so
@@ -1358,12 +1401,20 @@ mod tests {
             params.pointer("/_meta/io.modelcontextprotocol~1protocolVersion"),
             Some(&json!(MODERN_PROTOCOL_VERSION))
         );
+        assert_eq!(
+            params.pointer("/_meta/io.modelcontextprotocol~1clientCapabilities/extensions/io.modelcontextprotocol~1tasks"),
+            Some(&json!({}))
+        );
         assert!(validate_modern_result("tools/call", &json!({ "resultType": "complete" })).is_ok());
         assert!(validate_modern_result("tools/call", &json!({})).is_err());
         assert!(
             validate_modern_result("tools/call", &json!({ "resultType": "input_required" }))
-                .unwrap_err()
-                .contains("Tasks support is not enabled")
+                .is_ok()
+        );
+        assert!(validate_modern_result("tools/call", &json!({ "resultType": "task" })).is_ok());
+        assert_eq!(
+            modern_request_name("tasks/get", &json!({ "params": { "taskId": "run-7" } })),
+            Some("run-7")
         );
     }
 

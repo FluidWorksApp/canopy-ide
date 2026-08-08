@@ -86,6 +86,7 @@ import type {
   BuilderSession,
   BuilderSessionState,
 } from "./vibeBuilderSessionTypes";
+import { mcpInputRequestForCard } from "./mcpTasks";
 
 const SAVE_CHECKPOINT = "Save this version";
 /** Sentinels a question's own buttons send back. Deliberately not words anyone
@@ -1099,7 +1100,78 @@ export class VibeBuilderSession implements BuilderSession {
     question: BuilderQuestion | null = this.snapshot.question ?? null,
   ): void {
     this.snapshot = { persona, question };
+    this.recordMcpTaskPresentation(persona, question);
     this.publish({ kind: "ready" });
+  }
+
+  /** Persist only the card's plain-language choice surface for MCP Tasks.
+   * Commands and diffs deliberately stay out of task metadata; the accepted
+   * response is an opaque value that returns through `answerMcpTaskInput`. */
+  private recordMcpTaskPresentation(
+    persona: BuilderSessionState["persona"],
+    question: BuilderQuestion | null,
+  ): void {
+    const reservation = this.reservation;
+    const metadata = this.turnMetadata;
+    if (!reservation || !metadata) return;
+    const text = `${question?.prompt ?? ""} ${question?.detail ?? ""}`.toLowerCase();
+    const reason = /payment|billing|charge/.test(text)
+      ? "payment"
+      : /credential|secret|token|api key|sign[ -]?in|log[ -]?in/.test(text)
+        ? "credentials"
+        : /account|workspace|team|project|environment/.test(text)
+          ? "account-link"
+          : question?.kind === "confirm"
+            ? "destructive"
+            : "choice";
+    const stage = persona.kind === "verify-running"
+      ? "compiling"
+      : persona.kind === "incident"
+        ? "repairing"
+        : "starting";
+    const statusMessage = question?.prompt ??
+      (persona.kind === "verify-running"
+        ? "Checking that everything works"
+        : "Working on your change");
+    const inputRequests = question
+      ? mcpInputRequestForCard({
+          id: question.id,
+          kind: "decision",
+          reason,
+          title: question.prompt,
+          detail: question.detail,
+          actions: question.actions,
+        })
+      : null;
+    const mcpTask = {
+      stage,
+      statusMessage,
+      ...(inputRequests ? { inputRequests } : {}),
+    };
+    this.turnMetadata = { ...metadata, mcpTask };
+    const next = this.turnMetadata;
+    void this.persist(() =>
+      this.deps.updateMetadata(reservation.envelope.runId, next),
+    ).catch(() => {});
+  }
+
+  /** Accept one response that the MCP server already validated against the
+   * recorded card. Exact run + input ids prevent a late answer from crossing
+   * into a later turn. */
+  answerMcpTaskInput(runId: string, inputKey: string, response: string): boolean {
+    if (this.reservation?.envelope.runId !== runId) return false;
+    const question = this.snapshot.question;
+    if (question?.id !== inputKey) return false;
+    if (!question.actions?.some((action) => action.response === response)) return false;
+    this.present(this.snapshot.persona, null);
+    void this.send(response);
+    return true;
+  }
+
+  cancelMcpTask(runId: string): boolean {
+    if (this.reservation?.envelope.runId !== runId) return false;
+    void this.cancelCurrentTurn();
+    return true;
   }
 
   private persist(work: () => Promise<unknown>): Promise<void> {

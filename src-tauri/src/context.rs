@@ -418,10 +418,246 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/mesh", post(mesh_op))
             .route("/ctx/research", post(research_op))
             .route("/ctx/notes", post(notes_op))
+            .route("/ctx/mcp-task", post(mcp_task_op))
             .route("/ctx/tools", get(tools))
             .with_state(app.clone());
         let _ = axum::serve(listener, router).await;
     });
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpTaskOp {
+    op: String,
+    task_id: String,
+    #[serde(default)]
+    input_responses: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+fn task_timestamp(millis: i64) -> Result<String, String> {
+    use chrono::TimeZone;
+    chrono::Utc
+        .timestamp_millis_opt(millis)
+        .single()
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .ok_or_else(|| "task timestamp is outside the supported range".to_string())
+}
+
+fn recorded_input_requests(
+    detail: &crate::tasks::TaskEnvelopeDetail,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    detail
+        .envelope
+        .summary
+        .metadata
+        .pointer("/mcpTask/inputRequests")
+        .and_then(serde_json::Value::as_object)
+        .filter(|requests| !requests.is_empty())
+        .cloned()
+}
+
+fn recorded_rpc_error(detail: &crate::tasks::TaskEnvelopeDetail) -> Option<serde_json::Value> {
+    detail
+        .envelope
+        .summary
+        .metadata
+        .pointer("/mcpTask/rpcError")
+        .filter(|error| error.is_object())
+        .cloned()
+}
+
+fn mcp_task_result(detail: &crate::tasks::TaskEnvelopeDetail) -> Result<serde_json::Value, String> {
+    let envelope = &detail.envelope;
+    let input_requests = recorded_input_requests(detail);
+    let rpc_error = recorded_rpc_error(detail);
+    let status = match envelope.summary.status.as_str() {
+        "completed" => "completed",
+        // MCP reserves `failed` for a JSON-RPC execution error. A compiler,
+        // process or verification failure is a completed CallToolResult with
+        // `isError`, not a made-up protocol failure.
+        "failed" if rpc_error.is_some() => "failed",
+        "failed" => "completed",
+        "cancelled" => "cancelled",
+        // A recorded question is evidence that input is required even while
+        // the live attempt remains running. `blocked` alone is not: it may be
+        // waiting on a network or process and must not invent a human decision.
+        _ if input_requests.is_some() => "input_required",
+        "running" | "ready" | "blocked" => "working",
+        other => return Err(format!("unknown durable task status {other}")),
+    };
+    let terminal = matches!(status, "completed" | "failed" | "cancelled");
+    let message = envelope
+        .summary
+        .metadata
+        .pointer("/mcpTask/statusMessage")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| envelope.summary.title.clone())
+        .unwrap_or_else(|| envelope.goal.clone());
+    let mut result = serde_json::json!({
+        "resultType": "complete",
+        "taskId": envelope.summary.run_id,
+        "status": status,
+        "statusMessage": message,
+        "createdAt": task_timestamp(envelope.summary.created_at)?,
+        "lastUpdatedAt": task_timestamp(envelope.summary.updated_at)?,
+        "ttlMs": serde_json::Value::Null,
+    });
+    if !terminal {
+        result["pollIntervalMs"] = serde_json::json!(750);
+    }
+    if let Some(requests) = input_requests {
+        result["inputRequests"] = serde_json::Value::Object(requests);
+    }
+    match status {
+        "completed" => {
+            result["result"] = if envelope.summary.status == "failed" {
+                serde_json::json!({
+                    "content": [{
+                        "type": "text",
+                        "text": "The recorded task attempt did not complete."
+                    }],
+                    "isError": true
+                })
+            } else {
+                serde_json::json!({ "content": [], "isError": false })
+            };
+        }
+        "failed" => {
+            result["error"] = rpc_error.expect("failed status requires a recorded RPC error");
+        }
+        _ => {}
+    }
+    Ok(result)
+}
+
+fn accepted_input_value(response: &serde_json::Value) -> Option<&serde_json::Value> {
+    let object = response.as_object()?;
+    match object.get("action").and_then(serde_json::Value::as_str) {
+        Some("accept") => object
+            .get("content")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|content| content.get("response")),
+        _ => None,
+    }
+}
+
+/// MCP Tasks' write boundary. `tasks/update` validates an opaque response
+/// against the recorded card action and hands only that value to Build;
+/// commands, logs, environment and diffs never cross this interface.
+async fn mcp_task_op(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(op): Json<McpTaskOp>,
+) -> (StatusCode, String) {
+    if caller(&app, &headers).is_none() {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let store = app.state::<crate::tasks::TaskStore>();
+    let Some(detail) = (match store.get(&op.task_id) {
+        Ok(detail) => detail,
+        Err(error) => return (StatusCode::BAD_REQUEST, error),
+    }) else {
+        return (StatusCode::NOT_FOUND, "task not found".into());
+    };
+    match op.op.as_str() {
+        "get" => match mcp_task_result(&detail) {
+            Ok(result) => (StatusCode::OK, result.to_string()),
+            Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error),
+        },
+        "update" => {
+            let Some(responses) = op.input_responses.filter(|value| !value.is_empty()) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "tasks/update needs inputResponses".into(),
+                );
+            };
+            let recorded = recorded_input_requests(&detail).unwrap_or_default();
+            for (key, response) in responses {
+                let Some(request) = recorded.get(&key) else {
+                    // The extension requires unknown and already-satisfied
+                    // keys to be idempotent no-ops, so a retry after a status
+                    // notification cannot turn into a spurious failure.
+                    continue;
+                };
+                let Some(value) = accepted_input_value(&response) else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("input response {key} was not accepted"),
+                    );
+                };
+                let allowed = request
+                    .pointer("/_meta/actions")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|actions| {
+                        actions
+                            .iter()
+                            .any(|action| action.get("response") == Some(value))
+                    });
+                if !allowed {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("input response {key} is not one of the recorded actions"),
+                    );
+                }
+                let Some(response) = value.as_str() else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "card responses must be strings".into(),
+                    );
+                };
+                let _ = app.emit(
+                    "agent:action",
+                    serde_json::json!({
+                        "kind": "mcp_task_update",
+                        "route": detail.envelope.worktree_path,
+                        "runId": op.task_id,
+                        "inputKey": key,
+                        "response": response,
+                    }),
+                );
+            }
+            (
+                StatusCode::OK,
+                serde_json::json!({ "resultType": "complete" }).to_string(),
+            )
+        }
+        "cancel" => {
+            let active_attempt = detail
+                .attempts
+                .iter()
+                .rev()
+                .find(|attempt| {
+                    matches!(
+                        attempt.state.as_str(),
+                        "reserved" | "launching" | "running" | "waiting"
+                    )
+                })
+                .map(|attempt| attempt.attempt_id.clone());
+            if let Err(error) = store.cancel_run(&op.task_id) {
+                return (StatusCode::CONFLICT, error);
+            }
+            if let Some(attempt_id) = active_attempt {
+                let _ = release_claims_for_attempt(&app, &attempt_id, "mcp-task-cancelled");
+            }
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({
+                    "kind": "mcp_task_cancel",
+                    "route": detail.envelope.worktree_path,
+                    "runId": op.task_id,
+                }),
+            );
+            (
+                StatusCode::OK,
+                serde_json::json!({ "resultType": "complete" }).to_string(),
+            )
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            format!("unknown MCP task op {}", op.op),
+        ),
+    }
 }
 
 // ---- commands the frontend feeds the bridge with --------------------------
@@ -4320,6 +4556,115 @@ fn strip_ansi(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn task_detail(status: &str, metadata: serde_json::Value) -> crate::tasks::TaskEnvelopeDetail {
+        crate::tasks::TaskEnvelopeDetail {
+            envelope: crate::tasks::TaskEnvelope {
+                summary: crate::tasks::TaskEnvelopeSummary {
+                    run_id: "run-1".into(),
+                    project_id: "project-1".into(),
+                    component_id: "app".into(),
+                    kind: "vibe-turn".into(),
+                    title: Some("Installing dependencies".into()),
+                    status: status.into(),
+                    attempt_count: 1,
+                    created_at: 1_700_000_000_000,
+                    updated_at: 1_700_000_001_000,
+                    metadata,
+                },
+                schema_version: 1,
+                worktree_path: "/project".into(),
+                goal: "Make the app work".into(),
+                acceptance: Vec::new(),
+                task_classes: serde_json::json!({}),
+                context_summary: String::new(),
+                risk_class: "reversible".into(),
+                authority_policy: serde_json::json!({}),
+                failover_policy: serde_json::json!({}),
+                deadline_at: None,
+                attempt_cap: 1,
+                base_baseline_id: None,
+                last_green_baseline_id: None,
+            },
+            attempts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mcp_task_status_never_improves_ready_or_generic_blocked_evidence() {
+        let ready = mcp_task_result(&task_detail("ready", serde_json::json!({}))).unwrap();
+        assert_eq!(ready["status"], "working");
+        assert_eq!(ready["resultType"], "complete");
+        let blocked = mcp_task_result(&task_detail("blocked", serde_json::json!({}))).unwrap();
+        assert_eq!(blocked["status"], "working");
+    }
+
+    #[test]
+    fn mcp_task_input_required_needs_a_recorded_plain_language_card() {
+        let task = mcp_task_result(&task_detail(
+            "running",
+            serde_json::json!({
+                "mcpTask": {
+                    "statusMessage": "Choose an account",
+                    "inputRequests": {
+                        "account": {
+                            "method": "elicitation/create",
+                            "params": {
+                                "mode": "form", "message": "Choose an account",
+                                "requestedSchema": { "type": "object" }
+                            },
+                            "_meta": { "reason": "account-link",
+                                "actions": [{ "label": "Team", "response": "team" }] }
+                        }
+                    }
+                }
+            }),
+        ))
+        .unwrap();
+        assert_eq!(task["status"], "input_required");
+        assert_eq!(
+            task["inputRequests"]["account"]["_meta"]["reason"],
+            "account-link"
+        );
+        assert!(task.get("output").is_none());
+    }
+
+    #[test]
+    fn mcp_task_reserves_failed_for_recorded_json_rpc_errors() {
+        let build_failure = mcp_task_result(&task_detail("failed", serde_json::json!({}))).unwrap();
+        assert_eq!(build_failure["status"], "completed");
+        assert_eq!(build_failure["result"]["isError"], true);
+
+        let rpc_failure = mcp_task_result(&task_detail(
+            "failed",
+            serde_json::json!({
+                "mcpTask": {
+                    "rpcError": { "code": -32603, "message": "Internal error" }
+                }
+            }),
+        ))
+        .unwrap();
+        assert_eq!(rpc_failure["status"], "failed");
+        assert_eq!(rpc_failure["error"]["code"], -32603);
+        assert!(rpc_failure.get("result").is_none());
+    }
+
+    #[test]
+    fn mcp_task_updates_accept_only_standard_accepted_form_responses() {
+        let accepted = serde_json::json!({
+            "action": "accept",
+            "content": { "response": "opaque:team" }
+        });
+        assert_eq!(
+            accepted_input_value(&accepted),
+            Some(&serde_json::json!("opaque:team"))
+        );
+        assert!(accepted_input_value(&serde_json::json!({
+            "action": "decline"
+        }))
+        .is_none());
+        assert!(accepted_input_value(&serde_json::json!("opaque:team")).is_none());
+    }
 
     #[test]
     fn configured_server_resolution_carries_stable_ids() {

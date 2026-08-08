@@ -2276,6 +2276,23 @@ fn mcp_main() {
         }
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let modern = request_is_modern(&msg);
+        if method == "subscriptions/listen"
+            && msg
+                .pointer("/params/notifications/taskIds")
+                .and_then(|value| value.as_array())
+                .is_some_and(|task_ids| !task_ids.is_empty())
+            && !request_supports_tasks(&msg)
+        {
+            write_message(
+                &out,
+                &rpc_err(
+                    id,
+                    -32003,
+                    "MCP Tasks extension was not declared by the client",
+                ),
+            );
+            continue;
+        }
         let reply = match method {
             "server/discover" => {
                 if request_protocol(&msg) != Some("2026-07-28") {
@@ -2287,6 +2304,9 @@ fn mcp_main() {
                             "tools": { "listChanged": false },
                             "resources": { "listChanged": false },
                             "prompts": { "listChanged": false },
+                            "extensions": {
+                                "io.modelcontextprotocol/tasks": {}
+                            },
                         },
                     });
                     if in_canopy() {
@@ -2356,6 +2376,41 @@ fn mcp_main() {
                     Err(e) => rpc_err(id, if modern { -32602 } else { -32002 }, &e),
                 }
             }
+            "tasks/get" | "tasks/update" | "tasks/cancel" if modern => {
+                if !request_supports_tasks(&msg) {
+                    rpc_err(
+                        id,
+                        -32003,
+                        "MCP Tasks extension was not declared by the client",
+                    )
+                } else {
+                    let task_id = msg
+                        .pointer("/params/taskId")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    if task_id.is_empty() {
+                        rpc_err(id, -32602, "tasks method needs taskId")
+                    } else {
+                        let op = method.strip_prefix("tasks/").unwrap_or("");
+                        let mut body = serde_json::json!({ "op": op, "taskId": task_id });
+                        if method == "tasks/update" {
+                            body["inputResponses"] = msg
+                                .pointer("/params/inputResponses")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({}));
+                        }
+                        match ctx_request("POST", "/ctx/mcp-task", Some(body.to_string())).and_then(
+                            |body| {
+                                serde_json::from_str::<serde_json::Value>(&body)
+                                    .map_err(|error| format!("invalid task response: {error}"))
+                            },
+                        ) {
+                            Ok(result) => rpc_ok(id, result),
+                            Err(error) => rpc_err(id, -32602, &error),
+                        }
+                    }
+                }
+            }
             "subscriptions/listen" if modern => {
                 let requested = msg
                     .pointer("/params/notifications/resourceSubscriptions")
@@ -2370,16 +2425,31 @@ fn mcp_main() {
                 for uri in &requested {
                     bodies.insert(uri.clone(), read_resource(uri).unwrap_or_default());
                 }
+                let requested_tasks = msg
+                    .pointer("/params/notifications/taskIds")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.as_str())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                let mut task_bodies = HashMap::new();
+                for task_id in &requested_tasks {
+                    if let Ok(body) = mcp_task_body(task_id) {
+                        task_bodies.insert(task_id.clone(), body);
+                    }
+                }
                 let first = modern_subscriptions.lock().unwrap().is_empty();
                 modern_subscriptions.lock().unwrap().insert(
                     id.to_string(),
                     ModernSubscription {
                         id: id.clone(),
                         bodies,
+                        task_bodies,
                     },
                 );
                 if first {
-                    watch_modern_resources(out.clone(), modern_subscriptions.clone());
+                    watch_modern_subscriptions(out.clone(), modern_subscriptions.clone());
                 }
                 write_message(
                     &out,
@@ -2387,7 +2457,10 @@ fn mcp_main() {
                         "jsonrpc": "2.0",
                         "method": "notifications/subscriptions/acknowledged",
                         "params": {
-                            "notifications": { "resourceSubscriptions": requested },
+                            "notifications": {
+                                "resourceSubscriptions": requested,
+                                "taskIds": requested_tasks,
+                            },
                             "_meta": { "io.modelcontextprotocol/subscriptionId": id },
                         }
                     }),
@@ -2445,6 +2518,7 @@ type Subscriptions = std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>;
 struct ModernSubscription {
     id: serde_json::Value,
     bodies: HashMap<String, String>,
+    task_bodies: HashMap<String, String>,
 }
 
 type ModernSubscriptions = std::sync::Arc<std::sync::Mutex<HashMap<String, ModernSubscription>>>;
@@ -2505,7 +2579,7 @@ fn watch_resources(
     });
 }
 
-fn watch_modern_resources(
+fn watch_modern_subscriptions(
     out: std::sync::Arc<std::sync::Mutex<std::io::Stdout>>,
     subscriptions: ModernSubscriptions,
 ) {
@@ -2533,6 +2607,32 @@ fn watch_modern_resources(
                                 "io.modelcontextprotocol/subscriptionId": subscription.id,
                             }
                         }
+                    }));
+                }
+                let task_ids = subscription.task_bodies.keys().cloned().collect::<Vec<_>>();
+                for task_id in task_ids {
+                    let Ok(body) = mcp_task_body(&task_id) else {
+                        continue;
+                    };
+                    if subscription.task_bodies.get(&task_id) == Some(&body) {
+                        continue;
+                    }
+                    subscription.task_bodies.insert(task_id, body.clone());
+                    let Ok(mut task) = serde_json::from_str::<serde_json::Value>(&body) else {
+                        continue;
+                    };
+                    if let Some(object) = task.as_object_mut() {
+                        object.insert(
+                            "_meta".into(),
+                            serde_json::json!({
+                                "io.modelcontextprotocol/subscriptionId": subscription.id,
+                            }),
+                        );
+                    }
+                    notifications.push(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/tasks",
+                        "params": task,
                     }));
                 }
             }
@@ -2656,6 +2756,21 @@ fn request_protocol(msg: &serde_json::Value) -> Option<&str> {
 
 fn request_is_modern(msg: &serde_json::Value) -> bool {
     request_protocol(msg) == Some("2026-07-28")
+}
+
+fn request_supports_tasks(msg: &serde_json::Value) -> bool {
+    msg.pointer(
+        "/params/_meta/io.modelcontextprotocol~1clientCapabilities/extensions/io.modelcontextprotocol~1tasks",
+    )
+    .is_some()
+}
+
+fn mcp_task_body(task_id: &str) -> Result<String, String> {
+    ctx_request(
+        "POST",
+        "/ctx/mcp-task",
+        Some(serde_json::json!({ "op": "get", "taskId": task_id }).to_string()),
+    )
 }
 
 fn cacheable(mut result: serde_json::Value, ttl_ms: u64) -> serde_json::Value {
@@ -5548,6 +5663,21 @@ mod tests {
         });
         assert!(request_is_modern(&modern));
         assert!(!request_is_modern(&serde_json::json!({ "params": {} })));
+    }
+
+    #[test]
+    fn task_methods_require_the_client_extension_on_each_request() {
+        let declared = serde_json::json!({
+            "params": { "_meta": {
+                "io.modelcontextprotocol/clientCapabilities": {
+                    "extensions": { "io.modelcontextprotocol/tasks": {} }
+                }
+            }}
+        });
+        assert!(request_supports_tasks(&declared));
+        assert!(!request_supports_tasks(
+            &serde_json::json!({ "params": {} })
+        ));
     }
 
     /// These carry the same cases as `judgeCommand` in

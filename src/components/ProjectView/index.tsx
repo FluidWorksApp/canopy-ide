@@ -1322,6 +1322,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // tab instead of letting it reappear as a shell.
   const agentLife = useRef(new Map<number, number>());
   const visibleRef = useRef(visible);
+  const vibeSessionRef = useRef<ReturnType<typeof createVibeBuilderSession> | null>(null);
   visibleRef.current = visible;
   useEffect(() => {
     const sub = ipc.onPtyStats((all) => {
@@ -4986,6 +4987,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return;
       }
       if (d?.projectId !== project.id) return;
+      if (a.kind === "mcp_task_update") {
+        if (a.runId && a.inputKey && a.response) {
+          vibeSessionRef.current?.answerMcpTaskInput(
+            a.runId,
+            a.inputKey,
+            a.response,
+          );
+        }
+        return;
+      }
+      if (a.kind === "mcp_task_cancel") {
+        if (a.runId) vibeSessionRef.current?.cancelMcpTask(a.runId);
+        return;
+      }
       // The companion asking to reach whoever raised a PR, without knowing who
       // that was. Rust hands it over here because only this side holds the
       // pty→session binding and can reopen an ended conversation or open a tab
@@ -9263,6 +9278,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       vibePrimaryCli?.bin,
     ],
   );
+  vibeSessionRef.current = vibeSession;
   useEffect(() => () => void vibeSession?.stop(), [vibeSession]);
   vibeServerWatch.current =
     vibe && vibeSession
