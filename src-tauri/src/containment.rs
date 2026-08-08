@@ -661,7 +661,11 @@ impl LinuxBackend {
         lease.write_limit(allowance_bytes)?;
         command.env_remove(CGROUP_ROOT_ENV);
         lease.wrap_command(&self.helper, command);
-        Ok(PreparedContainment { linux: Some(lease) })
+        Ok(PreparedContainment {
+            linux: Some(lease),
+            #[cfg(target_os = "windows")]
+            windows: None,
+        })
     }
 }
 
