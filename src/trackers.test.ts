@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { ticketResearchQuestion } from "./trackers";
-import type * as ipc from "./ipc";
+import { describe, expect, it, vi } from "vitest";
+import * as ipc from "./ipc";
+import { TRACKERS, ticketResearchQuestion, trackerIoSnapshot } from "./trackers";
 
 const ticket: ipc.TicketInfo = {
   id: "#42",
@@ -34,5 +34,29 @@ describe("ticketResearchQuestion", () => {
     const q = ticketResearchQuestion({ ...ticket, body: "  " });
     expect(q).toContain("#42");
     expect(q).not.toContain("The ticket says");
+  });
+});
+
+describe("tracker request ownership", () => {
+  it("shares one in-flight repository request and releases it at settlement", async () => {
+    let release!: (rows: ipc.TicketInfo[]) => void;
+    const load = vi.spyOn(ipc, "ghIssueList").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const github = TRACKERS.find((provider) => provider.id === "github")!;
+    const first = github.fetch("/repo");
+    const second = github.fetch("/repo");
+    expect(first).toBe(second);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(trackerIoSnapshot().activeFetches).toBe(1);
+    release([]);
+    await first;
+    expect(trackerIoSnapshot().activeFetches).toBe(0);
+    load.mockResolvedValue([]);
+    await github.fetch("/repo");
+    expect(load).toHaveBeenCalledTimes(2);
   });
 });

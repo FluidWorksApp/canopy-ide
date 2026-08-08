@@ -36,6 +36,8 @@ import { Button } from "./ui";
 import { format, matches } from "../shortcuts";
 import { PROVENANCE_EVENT } from "../provenance";
 import { agentGitTrail } from "../agentGitTrail";
+import { sizeLimitFor } from "../fileOpen";
+import { type IoBudget, rendererIoBudget } from "../ioBudget";
 
 const fmtCost = (n: number) =>
   n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
@@ -293,6 +295,115 @@ export const sameJson = (a: unknown, b: unknown) =>
   JSON.stringify(a) === JSON.stringify(b);
 export const sameMap = (a: Map<string, string>, b: Map<string, string>) =>
   a.size === b.size && [...b].every(([k, v]) => a.get(k) === v);
+
+/** Reading every journaled file at once made one review tab a filesystem and
+ * renderer-memory fan-out. Keep the familiar editor per-file ceiling, then add
+ * a much smaller aggregate budget for this derived view: Monaco remains the
+ * place to open a large file deliberately. */
+export const AGENT_FILE_READ_CONCURRENCY = 3;
+export const AGENT_FILE_MAX_BYTES = sizeLimitFor("code");
+export const AGENT_FILE_TOTAL_BYTES = 16 * 1024 * 1024;
+const MAX_DIFF_DATA_CACHE = 128;
+
+interface AgentFileReadLimits {
+  concurrency: number;
+  perFileBytes: number;
+  totalBytes: number;
+  scope?: string;
+  signal?: AbortSignal;
+  budget?: IoBudget;
+}
+
+interface AgentFileReader {
+  stat: (path: string) => Promise<{ is_dir: boolean; size: number }>;
+  statMany?: (
+    paths: string[],
+  ) => Promise<Array<{ path: string; is_dir: boolean; size: number }>>;
+  readText: (path: string, maxBytes?: number) => Promise<string>;
+}
+
+/** A bounded, supersedable loader split out for a real concurrency test. The
+ * native invoke cannot currently be aborted once it starts, but `current`
+ * prevents a superseded generation from starting more work or retaining what
+ * finishes late. */
+export async function loadAgentFileContents(
+  paths: string[],
+  absolute: (path: string) => string,
+  reader: AgentFileReader = {
+    stat: ipc.fsStat,
+    statMany: ipc.fsStatMany,
+    readText: ipc.fsReadText,
+  },
+  current: () => boolean = () => true,
+  limits: AgentFileReadLimits = {
+    concurrency: AGENT_FILE_READ_CONCURRENCY,
+    perFileBytes: AGENT_FILE_MAX_BYTES,
+    totalBytes: AGENT_FILE_TOTAL_BYTES,
+  },
+): Promise<Map<string, string>> {
+  const unique = [...new Set(paths)];
+  const out = new Map<string, string>();
+  const resolved = new Map(unique.map((path) => [path, absolute(path)]));
+  const prefetched = new Map<string, { is_dir: boolean; size: number }>();
+  let cursor = 0;
+  let reservedBytes = 0;
+  const alive = () => current() && !limits.signal?.aborted;
+
+  if (reader.statMany && unique.length > 1 && alive()) {
+    try {
+      for (const stat of await reader.statMany([...resolved.values()])) {
+        prefetched.set(stat.path, stat);
+      }
+    } catch {
+      // Compatibility with an older native core: individual stat calls below
+      // retain the same bounded behaviour.
+    }
+  }
+
+  const worker = async () => {
+    while (alive()) {
+      const at = cursor++;
+      const path = unique[at];
+      if (path == null) return;
+      const absolutePath = resolved.get(path)!;
+      try {
+        const stat =
+          prefetched.get(absolutePath) ?? (await reader.stat(absolutePath));
+        if (!alive()) return;
+        if (
+          stat.is_dir ||
+          stat.size > limits.perFileBytes ||
+          reservedBytes + stat.size > limits.totalBytes
+        ) {
+          continue;
+        }
+        // Reserve before the await. JavaScript runs this section atomically, so
+        // sibling workers cannot all admit themselves against the same budget.
+        reservedBytes += stat.size;
+        const text = await (limits.budget ?? rendererIoBudget).run(
+          {
+            scope: limits.scope ?? "agent-workspace",
+            bytes: stat.size,
+            signal: limits.signal,
+          },
+          () => reader.readText(absolutePath, limits.perFileBytes),
+        );
+        if (!alive()) return;
+        out.set(path, text);
+      } catch {
+        // A file can disappear or be mid-write while the journal is settling.
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(Math.max(1, limits.concurrency), unique.length) },
+      () => worker(),
+    ),
+  );
+  return alive() ? out : new Map();
+}
 
 /** The digest as this view hands it to the lifecycle ladder: the workspace
  *  join's fresher copy of each field over the digest the panel opened the tab
@@ -558,6 +669,7 @@ export function AgentWorkspaceView({
   );
   useEffect(() => {
     let live = true;
+    const controller = new AbortController();
     const paths = [
       ...new Set(edits.filter((e) => e.present).map((e) => e.path)),
     ];
@@ -566,23 +678,20 @@ export function AgentWorkspaceView({
       return;
     }
     const abs = (p: string) =>
-      p.startsWith("/") ? p : repo ? `${repo}/${p}` : p;
-    void Promise.all(
-      paths.map(async (p) => {
-        try {
-          return [p, await ipc.fsReadText(abs(p))] as const;
-        } catch {
-          return [p, null] as const;
-        }
-      }),
-    ).then((pairs) => {
+      /^(?:[A-Za-z]:[\\/]|\/)/.test(p) ? p : repo ? `${repo}/${p}` : p;
+    void loadAgentFileContents(paths, abs, undefined, () => live, {
+      concurrency: AGENT_FILE_READ_CONCURRENCY,
+      perFileBytes: AGENT_FILE_MAX_BYTES,
+      totalBytes: AGENT_FILE_TOTAL_BYTES,
+      scope: repo ?? "agent-workspace",
+      signal: controller.signal,
+    }).then((next) => {
       if (!live) return;
-      const m = new Map<string, string>();
-      for (const [p, c] of pairs) if (c != null) m.set(p, c);
-      setFileContents((prev) => (sameMap(prev, m) ? prev : m));
+      setFileContents((prev) => (sameMap(prev, next) ? prev : next));
     });
     return () => {
       live = false;
+      controller.abort();
     };
   }, [edits, repo]);
 
@@ -979,8 +1088,36 @@ export function AgentWorkspaceView({
   // drops any open composer — whenever `data` changes identity, so we hand back
   // the same object until the hunk actually changes.
   const dataCache = useRef(
-    new Map<string, { sig: string; data: DiffViewData }>(),
+    new Map<
+      string,
+      {
+        hunk: string;
+        before?: string;
+        after?: string;
+        data: DiffViewData;
+      }
+    >(),
   );
+  // Only the currently rendered pane owns diff-view data. Keeping prior panes'
+  // whole-file before/after strings made switching panes an append-only cache.
+  useEffect(() => {
+    const live = new Set<string>();
+    if (pane === "edits") {
+      for (const group of editsByFile) {
+        if (mergedEdits.get(group.path) && fileContents.has(group.path)) {
+          live.add(`edits:${group.path}`);
+        } else {
+          group.items.forEach((_, index) => live.add(`edits:${group.path}:${index}`));
+        }
+      }
+    } else if (pane === "uncommitted" || pane === "diff") {
+      for (const file of mine) live.add(`${pane}:${file.path}`);
+    }
+    for (const key of dataCache.current.keys()) {
+      if (!live.has(key)) dataCache.current.delete(key);
+    }
+  }, [pane, editsByFile, mergedEdits, fileContents, mine]);
+
   const dataFor = (
     key: string,
     path: string,
@@ -988,15 +1125,29 @@ export function AgentWorkspaceView({
     before?: string,
     after?: string,
   ): DiffViewData => {
-    const sig = `${hunk}\0${before?.length ?? -1}\0${after?.length ?? -1}`;
     const hit = dataCache.current.get(key);
-    if (hit && hit.sig === sig) return hit.data;
+    // Compare the strings directly. The old signature interpolated the entire
+    // hunk into a second retained string and only compared baseline lengths,
+    // which both doubled large patches and could return stale equal-size text.
+    if (
+      hit &&
+      hit.hunk === hunk &&
+      hit.before === before &&
+      hit.after === after
+    ) {
+      return hit.data;
+    }
     const data: DiffViewData = {
       hunks: [hunk],
       oldFile: { fileName: path, content: before },
       newFile: { fileName: path, content: after },
     };
-    dataCache.current.set(key, { sig, data });
+    dataCache.current.set(key, { hunk, before, after, data });
+    while (dataCache.current.size > MAX_DIFF_DATA_CACHE) {
+      const oldest = dataCache.current.keys().next().value;
+      if (oldest == null) break;
+      dataCache.current.delete(oldest);
+    }
     return data;
   };
 

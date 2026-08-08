@@ -7,6 +7,10 @@ import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
 import { currentPlatform, type Platform } from "./shortcuts";
 import { SESSION_ID_TOKEN, type RemoteCli } from "../shared/model";
+import {
+  normalizeProjectIntegrationState,
+  type ProjectIntegrationState,
+} from "./projectIntegrations";
 
 export interface RunCommand {
   id: string;
@@ -17,7 +21,25 @@ export interface RunCommand {
   argv?: string[];
   cwd?: string;
   purpose?: "serve" | "check" | "worker" | "setup";
+  /** Setup discovered by Build is automatic only when it is local and
+   * reversible (installing declared dependencies, applying a local migration).
+   * A managed database migration is deliberately recorded but never run just
+   * because the project was opened. */
+  automatic?: boolean;
+  readiness?:
+    | { kind: "http"; path: string }
+    | { kind: "port" }
+    | { kind: "process-alive" }
+    | { kind: "one-shot"; timeoutMs: number };
 }
+
+/** What a component is, as established by project setup rather than guessed
+ *  from its directory name. Optional because most projects predate setup and
+ *  because a person may add a component by hand; absent means unknown, which
+ *  callers must treat as "say nothing", never as "web". */
+export type ComponentRole =
+  | "web" | "api" | "worker" | "database" | "mobile"
+  | "library" | "tooling" | "other";
 
 export interface Component {
   id: string;
@@ -25,6 +47,7 @@ export interface Component {
   path: string;
   /** Named run commands (dev server, worker, ...) launched in this dir. */
   commands?: RunCommand[];
+  role?: ComponentRole;
 }
 
 export interface VibeConfig {
@@ -33,7 +56,35 @@ export interface VibeConfig {
   componentId?: string;
   runCommandId?: string;
   setupRevision?: string;
-  requiredProcesses?: Array<{ componentId: string; runCommandId: string }>;
+  requiredProcesses?: Array<{
+    componentId: string;
+    runCommandId: string;
+    /** Other long-lived runs that must be ready before this one starts. */
+    dependsOn?: Array<{ componentId: string; runCommandId: string }>;
+    reason?: string;
+    requiredFor?: "preview" | "project";
+  }>;
+  /** Observed runtime/data flow. This is evidence for Build and repair, not a
+   * permission to edit the other component. */
+  componentLinks?: Array<{
+    fromComponentId: string;
+    toComponentId: string;
+    kind: "http" | "queue" | "database" | "library" | "other";
+    description: string;
+  }>;
+  dataStores?: Array<{
+    id: string;
+    label: string;
+    engine: "postgresql" | "mysql" | "sqlite" | "other";
+    mode: "local" | "managed";
+    providerId: string | null;
+    componentIds: string[];
+    schemaPaths: string[];
+    migrationPaths: string[];
+    latestMigration: string | null;
+    migrate?: { componentId: string; runCommandId: string };
+    status?: { componentId: string; runCommandId: string };
+  }>;
   externalServices?: Array<{
     id: string;
     providerId: string | null;
@@ -61,6 +112,10 @@ export interface Project {
   customTasks?: CustomMicroTask[];
   /** Portable, non-secret configuration for the project's Build lens. */
   vibe?: VibeConfig;
+  /** Durable operational facts for linked providers and environments. Secrets
+   * stay in the provider/credential store; only safe identifiers, endpoints,
+   * observations and deployment history travel with the project. */
+  integrations?: ProjectIntegrationState;
 }
 
 export interface WorkspaceState {
@@ -132,6 +187,14 @@ export function normalizeProjectStructure(project: Project): Project {
   const reservedComponentIds = new Set(componentCounts.keys());
   const reservedCommandIds = new Set(commandCounts.keys());
   let changed = false;
+
+  const integrations = project.integrations == null
+    ? undefined
+    : normalizeProjectIntegrationState(project.integrations);
+  if (
+    project.integrations != null &&
+    JSON.stringify(integrations) !== JSON.stringify(project.integrations)
+  ) changed = true;
 
   const components = rawComponents.map((component, componentIndex) => {
     const existingComponentId = nonBlankId(component.id);
@@ -238,6 +301,31 @@ export function normalizeProjectStructure(project: Project): Project {
   // and every project/component/run command intact. App persists this
   // normalization before rendering the workspace.
   if (vibe) {
+    const required = Array.isArray(vibe.requiredProcesses)
+      ? vibe.requiredProcesses
+      : [];
+    const runnableComponents = components.filter((component) =>
+      component.commands?.some(
+        (command) => command.purpose === "serve" || command.purpose === "worker",
+      ),
+    );
+    const completeRuntime = runnableComponents.every((component) =>
+      required.some((process) => process.componentId === component.id),
+    ) && required.every((process) => {
+      const component = components.find((candidate) => candidate.id === process.componentId);
+      const command = component?.commands?.find(
+        (candidate) => candidate.id === process.runCommandId,
+      );
+      if (!component || !command) return false;
+      return (process.dependsOn ?? []).every((dependency) => {
+        const dependencyComponent = components.find(
+          (candidate) => candidate.id === dependency.componentId,
+        );
+        return dependencyComponent?.commands?.some(
+          (candidate) => candidate.id === dependency.runCommandId,
+        ) === true;
+      });
+    });
     const complete =
       vibe.version === 1 &&
       Boolean(nonBlankId(vibe.setupRevision)) &&
@@ -245,6 +333,9 @@ export function normalizeProjectStructure(project: Project): Project {
       Boolean(nonBlankId(vibe.runCommandId)) &&
       Array.isArray(vibe.requiredProcesses) &&
       vibe.requiredProcesses.length > 0 &&
+      completeRuntime &&
+      Array.isArray(vibe.componentLinks) &&
+      Array.isArray(vibe.dataStores) &&
       Array.isArray(vibe.externalServices);
     if (!complete) {
       const reset: VibeConfig = { version: 1, enabled: vibe.enabled === true };
@@ -259,7 +350,7 @@ export function normalizeProjectStructure(project: Project): Project {
     }
   }
 
-  return changed ? { ...project, components, vibe } : project;
+  return changed ? { ...project, components, vibe, integrations } : project;
 }
 
 /** State-level migration seam, mirroring adoptLegacyCustomTasks: unchanged
@@ -600,6 +691,9 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     install: "npm install -g @anthropic-ai/claude-code",
     pkgs: ["npm:@anthropic-ai/claude-code"],
     latestUrl: "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
+    // Registry argv re-verified against Claude Code 2.1.226 local --help on
+    // 2026-08-09. This stamps syntax only; Build's security caveat lives with
+    // the structured runner that consumes the flags.
     // Verified: `claude update` self-updates both the npm and native installs.
     update: "claude update",
     // Verified: `-r, --resume [value]  Resume a conversation by session ID`.
@@ -638,6 +732,8 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     install: "npm install -g @openai/codex",
     pkgs: ["npm:@openai/codex"],
     latestUrl: "https://registry.npmjs.org/@openai/codex/latest",
+    // Registry argv re-verified against codex-cli 0.147.0 local help on
+    // 2026-08-09 (`codex --help`, `exec --help`, and `exec resume --help`).
     // Verified: `codex resume <SESSION_ID>` — subcommand, id is positional and
     // takes a UUID or a session name.
     resume: (id, bin) => `${bin} resume ${id}`,
@@ -656,7 +752,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // "keep going, inside this workspace".
     //
     // NOT `--full-auto`, which every guide still names: it is gone from codex
-    // 0.146's --help, and a flag clap doesn't know refuses to launch at all.
+    // 0.147.0's --help, and a flag clap doesn't know refuses to launch at all.
     unattended: "--ask-for-approval never --sandbox workspace-write",
   },
   {
@@ -691,6 +787,10 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // distribution name, which nothing on disk states.
     pkgs: ["py:aider"],
     latestUrl: "https://pypi.org/pypi/aider-chat/json",
+    // Registry flags (`--read`, `--restore-chat-history`, `--yes-always`, and
+    // `--notifications-command`) re-verified together against aider 0.86.2
+    // local --help on 2026-08-09. This reconciles the launcher and notification
+    // halves against one installed release.
     // Verified: `--yes-always  Always say yes to every confirmation`.
     skipPermissions: "--yes-always",
     // No `unattended`, and not for want of looking: aider's help offers
@@ -713,6 +813,9 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     bin: "agy",
     icon: "◇",
     install: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+    // Registry flags re-verified against Antigravity 1.1.11 local --help on
+    // 2026-08-09 (`--conversation`, permission bypass, mode, model, add-dir,
+    // sandbox, and stream-json output).
     // Verified: `--conversation <uuid>` resumes by id (`-c` takes the most
     // recent). It is NOT `--resume`.
     resume: (id, bin) => `${bin} --conversation ${id}`,

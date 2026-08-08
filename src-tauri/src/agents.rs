@@ -64,12 +64,19 @@ fn process_memory_bytes(_pid: u32, rss_bytes: u64) -> u64 {
     rss_bytes
 }
 
-/// Whole-app resource usage: this process and every descendant.
+/// App resource usage from the native process tree.
+///
+/// On Windows and Linux the webview helpers are descendants and land in this
+/// tree. macOS launches WKWebView's WebContent/GPU/Networking helpers as XPC
+/// services parented to launchd; there is no public WKWebView API that lists
+/// all of their pids. `includes_webviews` makes that missing layer explicit so
+/// the frontend never presents this lower bound as an exact app total.
 #[derive(Serialize, Clone)]
 pub struct AppStats {
     pub cpu: f32,
     pub mem_bytes: u64,
     pub procs: u32,
+    pub includes_webviews: bool,
 }
 
 /// A live terminal as the monitor sees it before it walks any processes.
@@ -88,6 +95,7 @@ struct SessionMeta {
     quiet_ms: Option<u64>,
     since_input_ms: Option<u64>,
     output_bytes: u64,
+    delivery: crate::pty::DesktopDeliveryMetrics,
 }
 
 #[derive(Serialize, Clone)]
@@ -124,6 +132,18 @@ pub struct SessionStats {
     pub quiet_ms: Option<u64>,
     pub since_input_ms: Option<u64>,
     pub output_bytes: u64,
+    pub desktop_attached: bool,
+    pub desktop_outstanding_bytes: u64,
+    pub replay_bytes: u64,
+    pub dropped_output_bytes: u64,
+    pub desktop_delivery_chunks: u64,
+    pub desktop_delivery_bytes: u64,
+    pub desktop_acked_bytes: u64,
+    pub desktop_delivery_chunk_bytes_max: u64,
+    pub desktop_ack_latency_last_ms: u64,
+    pub desktop_ack_latency_max_ms: u64,
+    pub desktop_ack_latency_total_ms: u64,
+    pub desktop_ack_latency_samples: u64,
 }
 
 /// The one process worth identifying in a terminal.
@@ -218,6 +238,45 @@ pub fn pty_stats(app: tauri::AppHandle) -> Vec<SessionStats> {
         .unwrap_or_default()
 }
 
+fn http_readiness_url(port: u16, path: &str) -> Result<String, String> {
+    if path.is_empty()
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || path.len() > 2_048
+        || path.contains(['\r', '\n'])
+    {
+        return Err("HTTP readiness path must be a local absolute path".into());
+    }
+    Ok(format!("http://127.0.0.1:{port}{path}"))
+}
+
+fn http_readiness_status(status: reqwest::StatusCode) -> bool {
+    status.is_success() || status.is_redirection()
+}
+
+/// Prove the HTTP readiness contract a Build setup declared. Listening on a
+/// port is only a transport fact: another endpoint (or another service in the
+/// same process tree) must not release dependent processes. Native reqwest
+/// avoids browser CORS policy turning a healthy local endpoint into a false
+/// negative. Redirects count as a response from the declared path but are not
+/// followed outside localhost.
+#[tauri::command]
+pub async fn probe_http_readiness(port: u16, path: String) -> Result<bool, String> {
+    let url = http_readiness_url(port, &path)?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(750))
+        .timeout(Duration::from_millis(1_500))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .map_err(|error| format!("could not create readiness probe: {error}"))?;
+    let response = match client.get(url).send().await {
+        Ok(response) => response,
+        Err(_) => return Ok(false),
+    };
+    Ok(http_readiness_status(response.status()))
+}
+
 static MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// TCP listening ports for `pids`, as pid -> ports.
@@ -241,10 +300,9 @@ fn listening_ports(pids: &[u32]) -> HashMap<u32, Vec<u16>> {
         .map(|p| p.to_string())
         .collect::<Vec<_>>()
         .join(",");
-    let Ok(res) = std::process::Command::new("lsof")
-        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &list, "-Fpn"])
-        .output()
-    else {
+    let mut command = std::process::Command::new("lsof");
+    command.args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &list, "-Fpn"]);
+    let Ok(res) = crate::process_capture::output(&mut command, 1024 * 1024) else {
         return out;
     };
     let mut pid = 0_u32;
@@ -273,6 +331,63 @@ fn listening_ports(pids: &[u32]) -> HashMap<u32, Vec<u16>> {
 #[cfg(not(unix))]
 fn listening_ports(_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
     HashMap::new()
+}
+
+/// Feed the terminal governor from this monitor's already-refreshed process
+/// tree. The only additional refresh is the host-wide memory counters; this
+/// deliberately does not create another process-table walker.
+fn update_terminal_governor(app: &AppHandle, sys: &mut System, stats: &[SessionStats]) {
+    let host = crate::watchdog::memory_pressure(sys);
+    let containment = app.try_state::<crate::containment::ContainmentManager>();
+    let observations: Vec<crate::governor::TerminalObservation> = stats
+        .iter()
+        .map(|session| {
+            let bytes = containment
+                .as_ref()
+                .map_or(session.total_mem_bytes, |manager| {
+                    manager.measured_bytes(session.id, session.total_mem_bytes)
+                });
+            crate::governor::TerminalObservation {
+                id: session.id,
+                bytes,
+                cli_key: crate::governor::cli_key(session.agent_hint.as_ref()),
+            }
+        })
+        .collect();
+    let Some(governor) = app.try_state::<crate::governor::TerminalGovernor>() else {
+        return;
+    };
+    for event in governor.observe_detailed(
+        &observations,
+        host.total_bytes,
+        host.available_bytes,
+        crate::pty::now_ms(),
+        |id, allowance| {
+            if let Some(containment) = containment.as_ref() {
+                containment.raise_allowance(id, allowance)
+            } else {
+                Ok(())
+            }
+        },
+    ) {
+        if matches!(
+            event.status.state,
+            crate::governor::BudgetState::AwaitingGrant
+                | crate::governor::BudgetState::OverAllowance
+        ) {
+            crate::notify::notify_native(
+                app.clone(),
+                format!("Terminal {} needs a memory decision", event.status.id),
+                format!(
+                    "Using {} MiB of a {} MiB one-session allowance. Open Canopy to allow more or stop it.",
+                    event.status.current_bytes / (1024 * 1024),
+                    event.status.allowance_bytes / (1024 * 1024),
+                ),
+                Some(format!("canopy://terminal?pty={}", event.status.id)),
+            );
+        }
+        let _ = app.emit("terminal:governor", event);
+    }
 }
 
 pub fn start_monitor(app: AppHandle) {
@@ -314,6 +429,7 @@ pub fn start_monitor(app: AppHandle) {
                         quiet_ms: s.quiet_ms(now_ms),
                         since_input_ms: s.since_input_ms(now_ms),
                         output_bytes: s.output_bytes(),
+                        delivery: s.desktop_delivery_metrics(),
                     })
                     .collect();
                 // Publish the transition to zero once. Otherwise the final
@@ -361,10 +477,10 @@ pub fn start_monitor(app: AppHandle) {
                     }
                 }
 
-                // Our own footprint: this process plus everything under it —
-                // WebView helpers, language servers, PTY children and all. That
-                // total is what "the app is using" honestly means, and it's the
-                // number the memory-light claim has to answer to.
+                // Our native process-tree footprint: core, language servers,
+                // PTY children and every descendant. Windows/Linux webview
+                // helpers are descendants too. macOS WKWebView helpers are XPC
+                // services parented to launchd, so this is a lower bound there.
                 let mut app_cpu = 0.0_f32;
                 let mut app_mem = 0_u64;
                 let mut app_procs = 0_u32;
@@ -390,6 +506,7 @@ pub fn start_monitor(app: AppHandle) {
                         cpu: app_cpu,
                         mem_bytes: app_mem,
                         procs: app_procs,
+                        includes_webviews: !cfg!(target_os = "macos"),
                     },
                 );
 
@@ -397,6 +514,7 @@ pub fn start_monitor(app: AppHandle) {
                 // app stats above must keep flowing regardless — a project with
                 // no terminal open still shows its footprint.
                 if sessions.is_empty() {
+                    update_terminal_governor(&app, &mut sys, &[]);
                     continue;
                 }
 
@@ -412,6 +530,7 @@ pub fn start_monitor(app: AppHandle) {
                         quiet_ms,
                         since_input_ms,
                         output_bytes,
+                        delivery,
                     } = meta;
                     let Some(root) = root else { continue };
                     // What this terminal is running, identified once from the
@@ -466,6 +585,18 @@ pub fn start_monitor(app: AppHandle) {
                         quiet_ms,
                         since_input_ms,
                         output_bytes,
+                        desktop_attached: delivery.attached,
+                        desktop_outstanding_bytes: delivery.outstanding_bytes,
+                        replay_bytes: delivery.replay_bytes,
+                        dropped_output_bytes: delivery.dropped_output_bytes,
+                        desktop_delivery_chunks: delivery.delivery_chunks,
+                        desktop_delivery_bytes: delivery.delivery_bytes,
+                        desktop_acked_bytes: delivery.acked_bytes,
+                        desktop_delivery_chunk_bytes_max: delivery.delivery_chunk_bytes_max,
+                        desktop_ack_latency_last_ms: delivery.ack_latency_last_ms,
+                        desktop_ack_latency_max_ms: delivery.ack_latency_max_ms,
+                        desktop_ack_latency_total_ms: delivery.ack_latency_total_ms,
+                        desktop_ack_latency_samples: delivery.ack_latency_samples,
                     });
                 }
 
@@ -504,6 +635,7 @@ pub fn start_monitor(app: AppHandle) {
                         }
                     }
                 }
+                update_terminal_governor(&app, &mut sys, &stats);
                 if let Some(cache) = app.try_state::<StatsCache>() {
                     *cache.0.lock().unwrap() = stats.clone();
                 }
@@ -830,6 +962,8 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
         .all(|part| raw.contains(part)),
         "omp" => [
             "before_agent_start",
+            "CANOPY_CONTEXT",
+            "systemPrompt:",
             "agent_end",
             "session_shutdown",
             "event?.toolName",
@@ -1101,6 +1235,7 @@ fn setup_omp_hook(cfg: &str, home: &str) -> Result<String, String> {
 import { spawn } from "node:child_process"
 
 const HELPER = "__HELPER__"
+const CANOPY_CONTEXT = __CANOPY_CONTEXT__
 let pending = Promise.resolve()
 
 const send = (obj) => {
@@ -1135,15 +1270,19 @@ export default function canopyBridge(pi) {
       model: ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
     }),
   )
-  on("before_agent_start", (event, ctx) =>
+  on("before_agent_start", (event, ctx) => {
     send({
       ...base(ctx),
       hook_event_name: "UserPromptSubmit",
       canopy_signal: "turn-start",
       prompt: event?.prompt ?? "",
       model: ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
-    }),
-  )
+    })
+    if (process.env.CANOPY !== "1") return
+    return {
+      systemPrompt: `${event?.systemPrompt ?? ""}\n\n${CANOPY_CONTEXT}`,
+    }
+  })
   on("agent_end", (event, ctx) => {
     if (event?.willContinue) {
       send({ ...base(ctx), hook_event_name: "AgentContinue", canopy_signal: "turn-progress" })
@@ -1182,7 +1321,11 @@ export default function canopyBridge(pi) {
   )
 }
 "#;
-    let source = TEMPLATE.replace("__HELPER__", &helper.to_string_lossy());
+    let context = serde_json::to_string(crate::agent_instructions::SESSION_CONTEXT)
+        .map_err(|e| e.to_string())?;
+    let source = TEMPLATE
+        .replace("__HELPER__", &helper.to_string_lossy())
+        .replace("__CANOPY_CONTEXT__", &context);
     // Builds before 0.3.3 wrote the bridge to hooks/. A root-level file there
     // is not auto-discovered by 17.0.5 (native hooks live under hooks/pre and
     // hooks/post), but `--hook <path>` can still load it explicitly. Remove our
@@ -1399,7 +1542,7 @@ const WRITE_TOOLS_MATCHER: &str = "Write|Edit|MultiEdit|NotebookEdit";
 /// Where the hook helper lives once installed. Hooks reference this stable path
 /// rather than the app bundle, so they keep working across upgrades and don't
 /// break if the app is moved.
-fn helper_path() -> Result<std::path::PathBuf, String> {
+pub(crate) fn helper_path() -> Result<std::path::PathBuf, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     Ok(helper_path_in(&home))
 }
@@ -1412,7 +1555,11 @@ fn helper_path_in(home: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(home)
         .join(".canopy")
         .join("bin")
-        .join("canopy-hook")
+        .join(if cfg!(windows) {
+            "canopy-hook.exe"
+        } else {
+            "canopy-hook"
+        })
 }
 
 /// Copy the helper next to our own binary into ~/.canopy/bin. Called at
@@ -3803,10 +3950,9 @@ fn which_installed(commands: &[String]) -> HashMap<String, bool> {
             })
             .collect::<Vec<_>>()
             .join("; ");
-        if let Ok(out) = std::process::Command::new(shell)
-            .args(["-lc", &script])
-            .output()
-        {
+        let mut command = std::process::Command::new(shell);
+        command.args(["-lc", &script]);
+        if let Ok(out) = crate::process_capture::output(&mut command, 1024 * 1024) {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 if let Some(found) = result.get_mut(line.trim()) {
                     *found = true;
@@ -3838,10 +3984,9 @@ fn which_installed(commands: &[String]) -> HashMap<String, bool> {
                         .filter(|e| !e.is_empty())
                         .any(|ext| std::path::Path::new(&format!("{target}{ext}")).is_file())
             } else {
-                std::process::Command::new("where")
-                    .no_console_window()
-                    .arg(&target)
-                    .output()
+                let mut command = std::process::Command::new("where");
+                command.no_console_window().arg(&target);
+                crate::process_capture::output(&mut command, 1024 * 1024)
                     .map(|o| o.status.success())
                     .unwrap_or(false)
             };
@@ -3924,15 +4069,16 @@ fn run_donor(target: &str, argv: &[String]) -> Option<String> {
                 .chain(a.iter().map(|s| sh_quote(s)))
                 .collect::<Vec<_>>()
                 .join(" ");
-            std::process::Command::new(shell)
-                .args(["-lc", &line])
-                .output()
+            let mut command = std::process::Command::new(shell);
+            command.args(["-lc", &line]);
+            crate::process_capture::output(&mut command, 1024 * 1024)
         };
         #[cfg(windows)]
-        let out = std::process::Command::new(&t)
-            .no_console_window()
-            .args(&a)
-            .output();
+        let out = {
+            let mut command = std::process::Command::new(&t);
+            command.no_console_window().args(&a);
+            crate::process_capture::output(&mut command, 1024 * 1024)
+        };
         let _ = tx.send(
             out.ok()
                 .filter(|o| o.status.success())
@@ -4075,15 +4221,17 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                     // One login shell (the costly part) yields both the version
                     // string and the resolved binary path, split on a sentinel —
                     // the path is how we learn who installed it.
-                    let probe = tokio::process::Command::new(&shell)
+                    let mut probe_command = tokio::process::Command::new(&shell);
+                    probe_command
                         .args([
                             "-lc",
                             &format!(
                                 "{qb} --version 2>&1; echo '@@P@@'; command -v {qb} 2>/dev/null"
                             ),
                         ])
-                        .kill_on_drop(true)
-                        .output();
+                        .kill_on_drop(true);
+                    let probe =
+                        crate::process_capture::tokio_output(&mut probe_command, 1024 * 1024);
                     if let Ok(Ok(o)) = tokio::time::timeout(Duration::from_secs(10), probe).await {
                         let out = String::from_utf8_lossy(&o.stdout);
                         let (ver, path) = out.split_once("@@P@@").unwrap_or((out.as_ref(), ""));
@@ -4103,13 +4251,17 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                             // the frontend asks — same gate as the registry path.
                             if q.latest_url.is_some() {
                                 let flag = if is_cask { "--cask " } else { "" };
-                                let info = tokio::process::Command::new(&shell)
+                                let mut info_command = tokio::process::Command::new(&shell);
+                                info_command
                                     .args([
                                         "-lc",
                                         &format!("brew info --json=v2 {flag}{pkg} 2>/dev/null"),
                                     ])
-                                    .kill_on_drop(true)
-                                    .output();
+                                    .kill_on_drop(true);
+                                let info = crate::process_capture::tokio_output(
+                                    &mut info_command,
+                                    4 * 1024 * 1024,
+                                );
                                 if let Ok(Ok(o)) =
                                     tokio::time::timeout(Duration::from_secs(10), info).await
                                 {
@@ -4142,10 +4294,14 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                 // Homebrew has its own version stream, populated above.
                 if v.managed_by.as_deref() != Some("homebrew") {
                     if let Some(url) = q.latest_url.filter(|u| u.starts_with("https://")) {
-                        let fetch = tokio::process::Command::new("curl")
+                        let mut fetch_command = tokio::process::Command::new("curl");
+                        fetch_command
                             .args(["-fsSL", "-m", "8", url.as_str()])
-                            .kill_on_drop(true)
-                            .output();
+                            .kill_on_drop(true);
+                        let fetch = crate::process_capture::tokio_output(
+                            &mut fetch_command,
+                            4 * 1024 * 1024,
+                        );
                         if let Ok(Ok(o)) =
                             tokio::time::timeout(Duration::from_secs(10), fetch).await
                         {
@@ -4709,6 +4865,13 @@ mod integration_tests {
         let path = home.join(".omp/agent/extensions/canopy.ts");
         let src = std::fs::read_to_string(path).unwrap();
         assert!(src.contains("before_agent_start"));
+        assert!(src.contains("systemPrompt:"));
+        let encoded_context = src
+            .lines()
+            .find_map(|line| line.strip_prefix("const CANOPY_CONTEXT = "))
+            .expect("generated extension carries its Canopy context");
+        let context: String = serde_json::from_str(encoded_context).unwrap();
+        assert_eq!(context, crate::agent_instructions::SESSION_CONTEXT);
         assert!(src.contains("agent_end"));
         assert!(!src.contains("agent_settled"));
         assert!(src.contains("event?.willContinue"));
@@ -5226,7 +5389,28 @@ mod integration_tests {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{clear_stale_stats, SessionStats, StatsCache};
+    use super::{
+        clear_stale_stats, http_readiness_status, http_readiness_url, SessionStats, StatsCache,
+    };
+
+    #[test]
+    fn http_readiness_is_pinned_to_localhost_and_the_declared_path() {
+        assert_eq!(
+            http_readiness_url(4173, "/health/ready?deep=1").unwrap(),
+            "http://127.0.0.1:4173/health/ready?deep=1"
+        );
+        for path in ["", "health", "//example.com/", "/ok\r\nHost: example.com"] {
+            assert!(http_readiness_url(4173, path).is_err(), "accepted {path:?}");
+        }
+        assert!(http_readiness_status(reqwest::StatusCode::NO_CONTENT));
+        assert!(http_readiness_status(
+            reqwest::StatusCode::TEMPORARY_REDIRECT
+        ));
+        assert!(!http_readiness_status(reqwest::StatusCode::NOT_FOUND));
+        assert!(!http_readiness_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -5252,6 +5436,18 @@ mod tests {
             quiet_ms: None,
             since_input_ms: None,
             output_bytes: 0,
+            desktop_attached: false,
+            desktop_outstanding_bytes: 0,
+            replay_bytes: 0,
+            dropped_output_bytes: 0,
+            desktop_delivery_chunks: 0,
+            desktop_delivery_bytes: 0,
+            desktop_acked_bytes: 0,
+            desktop_delivery_chunk_bytes_max: 0,
+            desktop_ack_latency_last_ms: 0,
+            desktop_ack_latency_max_ms: 0,
+            desktop_ack_latency_total_ms: 0,
+            desktop_ack_latency_samples: 0,
         }]));
         let mut ports = HashMap::from([(7, vec![4321])]);
 

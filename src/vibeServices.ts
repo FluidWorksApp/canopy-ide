@@ -29,6 +29,10 @@ export interface ServiceProvider {
   label: string;
   /** How Canopy can drive it without a browser. */
   reach: ServiceReach[];
+  /** Account-backed access is preferred to copied credentials. The account
+   *  name is what Build asks the person to link when no authenticated API/MCP
+   *  route is visible yet. */
+  account?: { label: string; mcpAliases: string[] };
   /** The CLI that would do the work, when reach includes "cli". */
   cli?: { bin: string; install: string };
   secrets: ServiceSecret[];
@@ -48,6 +52,7 @@ export const SERVICE_PROVIDERS: readonly ServiceProvider[] = [
     id: "supabase",
     label: "Supabase",
     reach: ["cli", "api", "mcp"],
+    account: { label: "Supabase", mcpAliases: ["supabase"] },
     cli: { bin: "supabase", install: "npm install -g supabase" },
     secrets: [
       { name: "SUPABASE_URL", purpose: "which project to talk to", publishable: true },
@@ -66,6 +71,7 @@ export const SERVICE_PROVIDERS: readonly ServiceProvider[] = [
     id: "neon",
     label: "Neon",
     reach: ["cli", "api", "mcp"],
+    account: { label: "Neon", mcpAliases: ["neon"] },
     cli: { bin: "neonctl", install: "npm install -g neonctl" },
     secrets: [
       { name: "DATABASE_URL", purpose: "the Postgres connection string", publishable: false },
@@ -77,6 +83,7 @@ export const SERVICE_PROVIDERS: readonly ServiceProvider[] = [
     id: "firebase",
     label: "Firebase",
     reach: ["cli", "api"],
+    account: { label: "Google", mcpAliases: ["firebase"] },
     cli: { bin: "firebase", install: "npm install -g firebase-tools" },
     secrets: [
       { name: "FIREBASE_PROJECT_ID", purpose: "which project to talk to", publishable: true },
@@ -95,6 +102,7 @@ export const SERVICE_PROVIDERS: readonly ServiceProvider[] = [
     id: "stripe",
     label: "Stripe",
     reach: ["cli", "api", "mcp"],
+    account: { label: "Stripe", mcpAliases: ["stripe"] },
     cli: { bin: "stripe", install: "brew install stripe/stripe-cli/stripe" },
     secrets: [
       {
@@ -118,6 +126,8 @@ export const providerById = (id: string): ServiceProvider | undefined =>
   SERVICE_PROVIDERS.find((p) => p.id === id);
 
 export type LinkStep =
+  | { kind: "use-linked-account"; reach: "api" | "mcp"; why: string }
+  | { kind: "link-account"; accountLabel: string; why: string }
   | { kind: "install-cli"; bin: string; command: string; why: string }
   | { kind: "authenticate"; bin: string; command: string; why: string }
   | { kind: "collect-secret"; secret: ServiceSecret; why: string }
@@ -130,6 +140,14 @@ export type LinkPlan =
 export type LinkRefusal = "unknown-provider" | "env-file-is-tracked";
 
 export interface LinkContext {
+  /** Authenticated provider access Canopy can already reach. API/MCP wins over
+   *  CLI so a managed operation does not begin by asking for copied keys. */
+  linkedReaches?: readonly ServiceReach[];
+  /** Exact external MCP prefixes observed in enabled agent configuration.
+   *  These contain names only; credentials remain in the provider server. */
+  toolAllowances?: readonly string[];
+  /** The host can pause and ask the person to connect this provider account. */
+  accountLinkAvailable?: boolean;
   /** Whether the provider's CLI is on PATH. */
   cliInstalled: boolean;
   /** Whether that CLI already holds a session. */
@@ -161,7 +179,23 @@ export function planLink(providerId: string, context: LinkContext): LinkPlan {
   }
 
   const steps: LinkStep[] = [];
-  if (provider.cli && !context.cliInstalled) {
+  const linked = provider.reach.find(
+    (reach): reach is "api" | "mcp" =>
+      (reach === "api" || reach === "mcp") && context.linkedReaches?.includes(reach) === true,
+  );
+  if (linked) {
+    steps.push({
+      kind: "use-linked-account",
+      reach: linked,
+      why: `use the linked ${provider.account?.label ?? provider.label} account without copying a long-lived access token`,
+    });
+  } else if (provider.account && context.accountLinkAvailable) {
+    steps.push({
+      kind: "link-account",
+      accountLabel: provider.account.label,
+      why: `account-backed API access is preferred; ${provider.cli?.bin ?? "the provider CLI"} remains the fallback if linking is unavailable`,
+    });
+  } else if (provider.cli && !context.cliInstalled) {
     steps.push({
       kind: "install-cli",
       bin: provider.cli.bin,
@@ -169,7 +203,7 @@ export function planLink(providerId: string, context: LinkContext): LinkPlan {
       why: `${provider.label} is driven by its CLI, which isn't installed yet`,
     });
   }
-  if (provider.cli && !context.authenticated) {
+  if (!linked && !context.accountLinkAvailable && provider.cli && !context.authenticated) {
     steps.push({
       kind: "authenticate",
       bin: provider.cli.bin,
@@ -207,6 +241,35 @@ export function planLink(providerId: string, context: LinkContext): LinkPlan {
         ? `${provider.label} is already linked.`
         : `Linking ${provider.label}: ${steps.length} step${steps.length === 1 ? "" : "s"}.`,
   };
+}
+
+/** Enabled MCP configs are the account/API route Build can use immediately.
+ * Match provider-owned names and URLs only; a generic Google Drive server must
+ * not gain Firebase authority merely because both accounts belong to Google. */
+export function providerMcpToolAllowances(
+  providerId: string,
+  servers: readonly {
+    name: string;
+    url: string | null;
+    enabled: boolean;
+    sources: readonly { name: string; status: "enabled" | "disabled" | "pending" }[];
+  }[],
+): string[] {
+  const aliases = providerById(providerId)?.account?.mcpAliases ?? [];
+  if (aliases.length === 0) return [];
+  const matches = (value: string) => {
+    const words = value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    return aliases.some((alias) => words.includes(alias));
+  };
+  const allowances = new Set<string>();
+  for (const server of servers) {
+    if (!server.enabled || (!matches(server.name) && !matches(server.url ?? ""))) continue;
+    for (const source of server.sources) {
+      if (source.status !== "enabled" || !/^[A-Za-z0-9_-]+$/.test(source.name)) continue;
+      allowances.add(`mcp__${source.name}`);
+    }
+  }
+  return [...allowances];
 }
 
 /** What a client-exposed variable must be called for this project's framework

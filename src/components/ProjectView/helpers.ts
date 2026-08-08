@@ -12,6 +12,7 @@ import { basename } from "../../paths";
 export type SideTab =
   | "files"
   | "servers"
+  | "integrations"
   | "changes"
   | "git"
   | "prs"
@@ -81,6 +82,15 @@ export interface TermSubTab {
    *  `runId` keys this run's entry in the task history — the record outlives
    *  the tab, which is the point. */
   micro?: { taskId: string; runId?: string; attemptId?: string };
+  /** A long-lived child delegated by another agent. Unlike `micro`, it is an
+   * ordinary visible/restorable terminal; these ids only bind its PTY and
+   * settle the durable attempt when it exits or the user closes it. */
+  spawnedTask?: {
+    runId: string;
+    attemptId: string;
+    parentPtyId: number;
+    depth: number;
+  };
   /** Visual-only grouping. Every member remains a normal terminal tab with its
    * own PTY; ProjectView lays members of the same group into one split surface. */
   paneGroup?: string;
@@ -421,6 +431,10 @@ export interface ProjectViewProps {
   /** Persist this project's custom tasks — they live on the project record, so
    *  writing one is a workspace save. */
   onSaveCustomTasks: (tasks: import("../../microTasks").CustomMicroTask[]) => void;
+  /** Persist non-secret provider, resource and deployment observations. */
+  onSaveIntegrations: (
+    state: import("../../projectIntegrations").ProjectIntegrationState,
+  ) => void;
   /** Persist an inferred Build target without opening or closing Engineer UI. */
   onPersistVibeTarget: (
     selection: import("../../vibeTargetInference").VibeTargetSelection,
@@ -484,6 +498,81 @@ export function matchesVibeRun(
   return tab.runCommandId
     ? tab.componentId === component.id && tab.runCommandId === runCommand.id
     : tab.command === runCommand.command;
+}
+
+/** Whether a required Build run may start yet, given its component's setup
+ *  commands (`purpose: "setup"`) and the runs already on the rail.
+ *
+ *  Starting a server into a checkout its setup never prepared hands a
+ *  non-engineer a stack trace for a problem Canopy already knew how to
+ *  prevent — the survey found the install command; it has to run first.
+ *
+ *  `started` is the auto-start ledger: a setup with no tab whose start IS
+ *  recorded is a chore that succeeded and reaped itself, which counts as
+ *  done. One that exited non-zero blocks the server and is reported in
+ *  `failed` so the caller can say so (and, eventually, hand it to repair). */
+export function vibeSetupGate(
+  command: RunCommand,
+  component: Pick<Component, "id" | "commands">,
+  tabs: Pick<TermSubTab, "componentId" | "runCommandId" | "exited" | "exitCode">[],
+  started: (setupId: string) => boolean,
+): { ready: boolean; start: RunCommand[]; failed: RunCommand[] } {
+  const start: RunCommand[] = [];
+  const failed: RunCommand[] = [];
+  let ready = true;
+  if (command.purpose === "setup") return { ready, start, failed };
+  for (const setup of (component.commands ?? []).filter(
+    (candidate) =>
+      candidate.purpose === "setup" &&
+      candidate.id !== command.id &&
+      candidate.automatic !== false,
+  )) {
+    const tab = tabs.find(
+      (candidate) =>
+        candidate.componentId === component.id &&
+        candidate.runCommandId === setup.id,
+    );
+    if (tab && !tab.exited) {
+      ready = false;
+      break;
+    } else if (tab?.exited && tab.exitCode !== 0) {
+      ready = false;
+      failed.push(setup);
+      break;
+    } else if (!tab && !started(setup.id)) {
+      ready = false;
+      start.push(setup);
+      // Setup order is declaration order. Starting install and migrate in the
+      // same render races the migration against its own dependencies.
+      break;
+    }
+  }
+  return { ready, start, failed };
+}
+
+/** A dependency is ready, not merely allocated a tab. This distinction is what
+ * makes `database -> API -> web` startup deterministic: a tab exists before
+ * its child process has bound a port. */
+export function vibeRunReady(
+  tab: Pick<TermSubTab, "ptyId" | "exited"> | undefined,
+  command: Pick<RunCommand, "readiness">,
+  stats: Pick<ipc.SessionStats, "id" | "ports">[],
+  verifiedReadinessPtys: ReadonlySet<number>,
+): boolean {
+  if (!tab || tab.exited || tab.ptyId == null) return false;
+  const readiness = command.readiness?.kind ?? "process-alive";
+  if (readiness === "port") {
+    return Boolean(stats.find((sample) => sample.id === tab.ptyId)?.ports.length);
+  }
+  // A socket is not proof of an HTTP endpoint, and a process can be alive while
+  // npx/pnpm/auth is waiting at a prompt. The one supervisor grants both kinds
+  // only after their declared evidence has been verified.
+  if (readiness === "http" || readiness === "process-alive") {
+    return verifiedReadinessPtys.has(tab.ptyId);
+  }
+  // One-shot commands become ready by exiting successfully; they cannot
+  // release a dependent while their PTY is still running.
+  return false;
 }
 
 /** One tab as canopy_editor_state describes it: enough for an agent to know

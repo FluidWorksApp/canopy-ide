@@ -52,6 +52,10 @@ import {
 } from "../pageCapture";
 import { getSettings, updateSettings } from "../settings";
 import { registerBrowserTarget } from "../previewAgent";
+import {
+  publishVibePreviewContext,
+  removeVibePreviewContext,
+} from "../vibePreviewContext";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { LiveDot } from "./icons";
@@ -70,6 +74,9 @@ const SHOOT_WIDTH = 2400;
 interface PreviewViewProps {
   /** The owning SubTab's id — how agent browser ops address this view. */
   tabId: string;
+  /** Which project this page is being previewed for. The proxy origin is scoped
+   *  to it, so two projects previewing the same target never share cookies. */
+  projectId: string;
   url: string;
   annotations: PreviewAnnotation[];
   /** Screenshots taken of this page, awaiting a note and a destination. */
@@ -84,6 +91,9 @@ interface PreviewViewProps {
    *  this only tunes the agent-cursor choreography; under the webview engine it
    *  is what puts the native view on screen at all. */
   visible: boolean;
+  /** Build mode speaks in outcomes and opens the configured preview itself;
+   * Engineer mode keeps the explicit server picker for manual browser tabs. */
+  buildMode?: boolean;
   /** A passive PiP is pulling frames from this page. This also creates a native
    *  browser that has never been shown full-size, so an attention-free agent can
    *  work without first taking over the user's tab. */
@@ -147,12 +157,14 @@ const normalize = (raw: string): string | null => {
 
 export function PreviewView({
   tabId,
+  projectId,
   url,
   annotations,
   shots,
   feedbackPanelHidden = false,
   dir,
   visible,
+  buildMode = false,
   streaming = false,
   onPatch,
   servers,
@@ -164,7 +176,24 @@ export function PreviewView({
   onRunOneOff,
   onNotice,
 }: PreviewViewProps) {
-  const engine = useBrowserEngine();
+  const chosenEngine = useBrowserEngine();
+  // Build floats its composer over the page, and that decides the engine — it is
+  // not a preference here.
+  //
+  // A native webview is composited above the window: nothing in the DOM can be
+  // painted on top of it. browserHost's only answer is to hide the whole view
+  // the moment any element overlaps it (browserOcclusion.occludes — "covers any
+  // part of the view"), so the small glass island at the bottom blanked the
+  // entire preview, and because the island is present from the first render the
+  // view never painted a frame to fall back to. The person was shown a black
+  // rectangle where their app should be.
+  //
+  // The proxy engine is an iframe — ordinary DOM the island can genuinely float
+  // over while the page stays live and interactive. It was not safe to force
+  // until the proxy's origin became project-scoped and stable, because its
+  // cookies were host-shared and its port ephemeral; that is what preview.rs
+  // now provides.
+  const engine = buildMode && chosenEngine !== null ? "proxy" : chosenEngine;
   const native = engine === "webview";
   // What the placeholder stands in with while the native view is out of the
   // way: a still of the page, or the app's own background — never a white hole.
@@ -241,11 +270,11 @@ export function PreviewView({
     let stale = false;
     setProxyError(null);
     ipc
-      .previewStart(origin)
+      .previewStart(projectId, origin)
       .then((p) => {
         if (stale) return;
         setProxy(p);
-        setFrameSrc(`http://127.0.0.1:${p.port}${restOf(urlRef.current)}`);
+        setFrameSrc(`http://${p.host}:${p.port}${restOf(urlRef.current)}`);
       })
       .catch((err) => {
         if (!stale) setProxyError(String(err));
@@ -386,7 +415,7 @@ export function PreviewView({
     if (!p) return null;
     try {
       const u = new URL(pageUrl);
-      if (u.host !== `127.0.0.1:${p.port}`) return null;
+      if (u.host !== `${p.host}:${p.port}`) return null;
       return `${p.origin}${u.pathname}${u.search}${u.hash}`;
     } catch {
       return null;
@@ -396,7 +425,7 @@ export function PreviewView({
   unproxiedRef.current = unproxied;
 
   /** Answer one op, mapping the page's own idea of its address back to the real
-   *  one. Under the proxy the page knows itself as 127.0.0.1:<port>, and agents
+   *  one. Under the proxy the page knows itself as <project-host>:<port>, and agents
    *  must never be told that is where the server lives. */
   const answer = useCallback(
     (id: number, ok: boolean, data: unknown) => {
@@ -498,7 +527,7 @@ export function PreviewView({
       }
       const p = proxyRef.current;
       if (p && p.origin === originOf(target)) {
-        setFrameSrc(`http://127.0.0.1:${p.port}${restOf(target)}`);
+        setFrameSrc(`http://${p.host}:${p.port}${restOf(target)}`);
       }
       // A different origin re-runs the proxy effect via the `origin` dep.
     },
@@ -592,13 +621,13 @@ export function PreviewView({
         };
         onPatchRef.current({
           annotations: [...annotationsRef.current, next],
-          feedbackPanelHidden: false,
+          feedbackPanelHidden: buildMode,
         });
       }
     },
     // Every entry here is now identity-stable, so this callback is too — which
     // is what stops the listener effects below re-registering per render.
-    [answer, navigate, post, postAgentOp, restoreFocus, unproxied],
+    [answer, buildMode, navigate, post, postAgentOp, restoreFocus, unproxied],
   );
 
   // The picker inside a proxied page talks postMessage; accept only messages
@@ -790,7 +819,7 @@ export function PreviewView({
   const togglePicking = () => {
     const on = !picking;
     setPicking(on);
-    if (on) onPatch({ feedbackPanelHidden: false });
+    if (on && !buildMode) onPatch({ feedbackPanelHidden: false });
     post({ canopy: "mode", on });
   };
 
@@ -891,7 +920,7 @@ export function PreviewView({
           thumbnail(image.png),
         ]);
         onPatchRef.current({
-          feedbackPanelHidden: false,
+          feedbackPanelHidden: buildMode,
           shots: [
             ...shotsRef.current,
             {
@@ -913,7 +942,7 @@ export function PreviewView({
         setCapturing(false);
       }
     },
-    [askRegion, dir, onNotice, shootPane],
+    [askRegion, buildMode, dir, onNotice, shootPane],
   );
 
   /** Take one, and remember the mode as the button's one-click default. */
@@ -1032,6 +1061,43 @@ export function PreviewView({
     }
   };
 
+  useEffect(() => {
+    if (!buildMode || !visible) {
+      removeVibePreviewContext(projectId, tabId);
+      return;
+    }
+    publishVibePreviewContext({
+      projectId,
+      tabId,
+      url,
+      server: linked,
+      annotations,
+      shots,
+      picking,
+      capturing,
+      captureMode,
+      go,
+      navigate,
+      togglePicking,
+      capture: runCapture,
+      setAnnotationComment: setComment,
+      removeAnnotation,
+      clearAnnotations,
+      setShotNote,
+      removeShot,
+      clearShots: () => onPatch({ shots: [] }),
+      markSent: (sentAnnotations, sentShots) => {
+        if (sentAnnotations.length > 0) {
+          markAnnotationsSent(new Set(sentAnnotations.map(annotationVersion)));
+        }
+        if (sentShots.length > 0) {
+          markShotsSent(new Set(sentShots.map(shotVersion)));
+        }
+      },
+    });
+    return () => removeVibePreviewContext(projectId, tabId);
+  });
+
   const body = useMemo(() => {
     if (engine === null) return null;
     if (native) {
@@ -1070,6 +1136,44 @@ export function PreviewView({
   // Once a page is open the URL bar (and canopy_browser_navigate) will go
   // anywhere, remote origins included; those pages just have no component link.
   if (!origin) {
+    if (buildMode) {
+      return (
+        <div className="preview-empty preview-empty-vibe">
+          <div className="vibe-preview-copy">
+            <span className="vibe-preview-kicker">Live preview</span>
+            <h2>Your idea is taking shape</h2>
+            <p>
+              Your first look will appear here automatically. You can keep
+              describing changes while it gets ready.
+            </p>
+          </div>
+          <div className="vibe-preview-mockup" aria-hidden>
+            <div className="vibe-preview-mockup-bar">
+              <span />
+              <span />
+              <span />
+            </div>
+            <div className="vibe-preview-mockup-body">
+              <div className="vibe-preview-mockup-rail" />
+              <div className="vibe-preview-mockup-page">
+                <div className="vibe-preview-skeleton vibe-preview-skeleton-title" />
+                <div className="vibe-preview-skeleton vibe-preview-skeleton-copy" />
+                <div className="vibe-preview-skeleton vibe-preview-skeleton-action" />
+                <div className="vibe-preview-mockup-cards">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="vibe-preview-status" role="status">
+            <span aria-hidden />
+            Preparing your preview
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="preview-empty">
         <h2>Preview a running server</h2>
@@ -1118,7 +1222,7 @@ export function PreviewView({
           onClose={captureMenu.close}
         />
       )}
-      <div className="preview-toolbar">
+      {!buildMode && <div className="preview-toolbar">
         <Button icon title="Back" onClick={() => go(-1)}>
           ‹
         </Button>
@@ -1191,7 +1295,7 @@ export function PreviewView({
             ▾
           </Button>
         </span>
-      </div>
+      </div>}
       <div className="preview-body">
         {/* The emulated viewport scrolls inside this box, not in .preview-body:
             a page wider than the window has to push against a scrollbar, not
@@ -1216,7 +1320,7 @@ export function PreviewView({
             {body}
           </div>
         </div>
-        {!feedbackPanelHidden && (annotations.length > 0 || picking || shots.length > 0) && (
+        {!buildMode && !feedbackPanelHidden && (annotations.length > 0 || picking || shots.length > 0) && (
           <div className="preview-panel">
             {shots.length > 0 && (
               <>

@@ -45,6 +45,41 @@ describe("the vibe MVP wiring boundaries", () => {
     expect(projectView).toContain("{mainArea}");
   });
 
+  it("keeps raw run output mounted for Engineer but presents only the preview in Build", () => {
+    const projectView = read("src/components/ProjectView/index.tsx");
+    const autoStartAt = projectView.indexOf("const autoStartedVibeRuns");
+    const firstEffect = projectView.indexOf("useEffect(", autoStartAt);
+    const autoStart = projectView.slice(
+      autoStartAt,
+      projectView.indexOf("useEffect(", firstEffect + 1),
+    );
+    const ownershipNote = autoStart.indexOf("Build owns a preview surface");
+    const launch = autoStart.slice(
+      autoStart.lastIndexOf("addTerminal(", ownershipNote),
+      autoStart.indexOf("{ componentId:", ownershipNote),
+    );
+    expect(launch).toContain("run mounted for Engineer");
+    expect(launch.indexOf("false,")).toBeGreaterThan(
+      launch.indexOf("run mounted for Engineer"),
+    );
+
+    const main = projectView.slice(
+      projectView.indexOf("const surfaceTabId"),
+      projectView.indexOf("// ---------- side panels ----------"),
+    );
+    expect(main).toContain(
+      "const surfaceTabId = vibe ? vibePreview?.id ?? null : activeTabId;",
+    );
+    expect(main).toContain("const shown =\n              !vibe &&");
+    expect(main).toContain(
+      "!vibe && !softClosed && tab.id === activeTabId && visible",
+    );
+    expect(main).toContain("tab.id === surfaceTabId && visible");
+    expect(main).toContain("{!vibe && activeTerminalGroup &&");
+    expect(main).toContain("{!vibe && agentTermWs &&");
+    expect(projectView).not.toContain("Open the failed run to inspect its output");
+  });
+
   it("never sends Build mode to the target setup modal", () => {
     const projectView = read("src/components/ProjectView/index.tsx");
     const chat = projectView.indexOf('<aside className="vibe-chat-placeholder"');
@@ -70,10 +105,20 @@ describe("the vibe MVP wiring boundaries", () => {
 
   it("never asks a Build user to configure or start a server", () => {
     const preview = read("src/components/PreviewView.tsx");
+    const buildPreview = preview.slice(
+      preview.indexOf("if (buildMode)"),
+      preview.indexOf('<div className="preview-empty">', preview.indexOf("if (buildMode)")),
+    );
+    const projectView = read("src/components/ProjectView/index.tsx");
+    expect(projectView).toContain("buildMode={vibe}");
+    expect(buildPreview).toContain("Your idea is taking shape");
+    expect(buildPreview).toContain("will appear here automatically");
+    expect(buildPreview).not.toContain("server");
+    expect(buildPreview).not.toContain("component");
+    expect(buildPreview).not.toContain("localhost");
     expect(preview).not.toContain("Add a run command to a component");
     expect(preview).not.toContain("project settings");
     expect(preview).not.toContain("Once it's listening");
-    expect(preview).toContain("I'm getting your project ready.");
   });
 
   it("persists inferred target data before publishing it to ProjectView", () => {
@@ -90,10 +135,14 @@ describe("the vibe MVP wiring boundaries", () => {
   it("hides only Companion's renderer in Build while attention keeps rendering", () => {
     const app = read("src/App.tsx");
     expect(app).toContain("personaBinding(");
-    expect(app).toContain("toasts.length > 0 && attentionFallbackVisible");
+    expect(app).toContain("deliveredToasts.length > 0 && attentionFallbackVisible");
+    expect(app).toContain("!activeBuildMode && updateAvail");
+    expect(app).toContain("!activeBuildMode && releaseNotes && !updateAvail");
     expect(app).toContain("companionVisible && (");
     const binding = read("src/personaBinding.ts");
-    expect(binding).toContain("attentionFallbackVisible: !companionVisible");
+    expect(binding).toContain(
+      "attentionFallbackVisible: !companionVisible && !buildMode",
+    );
   });
 
   // Textual, and knowingly weak — ProjectView is 12k lines with no render
@@ -139,6 +188,8 @@ describe("the vibe MVP wiring boundaries", () => {
     expect(session).toContain("secretScanClean: secrets.clean");
     expect(session).not.toMatch(/secretScanClean:\s*(true|false)/);
     expect(session).toContain('kind: "turn-diff"');
-    expect(session).toContain('response: SAVE_CHECKPOINT');
+    expect(session).not.toContain('prompt: "Your changes are still here."');
+    expect(session).not.toContain("diff: review.diff");
+    expect(session).not.toContain("response: SAVE_CHECKPOINT");
   });
 });

@@ -108,6 +108,11 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
       { name: "canopy_agents", label: "Agents", note: "What the other sessions are doing" },
       { name: "canopy_claim", label: "Claim files", note: "Advisory claim over paths" },
       {
+        name: "canopy_spawn_agent",
+        label: "Spawn agent",
+        note: "Delegate a bounded brief to a new visible agent tab",
+      },
+      {
         name: "canopy_message_agent",
         label: "Message agent",
         note: "Type into another session, or into whoever raised a PR",

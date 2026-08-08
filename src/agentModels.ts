@@ -57,6 +57,9 @@ const AIDER_MODELS: ModelChoice[] = [
 /**
  * Keyed by agent id — the same ids identifyAgent() reports, which includes the
  * bare binaries in EXTRA_AGENT_BINS (gemini) as well as registry entries.
+ * Terminal model control is not Build eligibility: Gemini stays here for an
+ * already-running legacy terminal, while FAMILY_FOR_CLI deliberately excludes
+ * it until a dated structured runner exists.
  */
 export const MODEL_SWITCH: Record<string, ModelSwitch> = {
   // Verified: `/model <alias>` is documented by `claude --help`'s slash command

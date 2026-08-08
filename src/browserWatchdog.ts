@@ -176,11 +176,12 @@ export function conditionsFor(s: Sample, limits: WatchdogLimits): Condition[] {
     });
   }
 
-  // I5 — the capture path is dead. Costs nothing while it works, and would
-  // have named the fault within ten seconds of the build that broke it. The
-  // clock starts at whichever came last: the frame in hand, or the moment
-  // this view could first have been photographed.
-  if (s.visible && s.settled) {
+  // I5 — a settled page still has no first frame. Clean pages deliberately do
+  // not keep photographing themselves: once a frame exists, navigation and
+  // agent actions mark it dirty and the hide transition takes a final fresh
+  // picture. The watchdog therefore guards availability, not periodic churn.
+  // The clock starts when this view could first have been photographed.
+  if (s.visible && s.settled && !s.hasFrame) {
     const since = s.at - Math.max(s.lastCaptureOkAt, s.capturableSince);
     if (since > limits.captureMs) {
       out.push({

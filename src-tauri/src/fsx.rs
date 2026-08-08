@@ -8,9 +8,11 @@
 use crate::winproc::NoConsoleWindow;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
 #[derive(Default)]
@@ -27,10 +29,19 @@ pub struct DirEntry {
 }
 
 #[derive(Serialize, Clone)]
+pub struct FsStatEntry {
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified_ms: Option<u64>,
+}
+
+#[derive(Serialize, Clone)]
 pub struct FsChange {
     pub root: String,
     pub paths: Vec<String>,
     pub kind: String,
+    pub overflow: bool,
 }
 
 /// "Whatever git would say about this root just changed." One event, one
@@ -42,21 +53,58 @@ pub struct GitChange {
 
 // ---------- git state: watched, not polled ----------
 
-/// How long the watcher waits for the writes to stop before saying so.
-///
-/// A single `git commit` is a burst: index.lock, index, COMMIT_EDITMSG, the
-/// ref, the reflog. Emitting per event would run `git status` five times
-/// against a repo that is still mid-write; the debounce turns the burst into
-/// one refresh, after it settles. (Zed uses 100ms for the same job in
-/// `git_store.rs`; 150 buys a little more room for a rebase's ref churn.)
-const GIT_SETTLE_MS: u64 = 150;
+/// One quiet-period timer serves both filesystem and git state. A package
+/// install can produce tens of thousands of notify callbacks; retaining one
+/// task and one bounded, deduplicated path set per root keeps that burst from
+/// becoming renderer IPC and timer pressure.
+const WATCH_SETTLE_MS: u64 = 150;
+const MAX_PENDING_WATCH_PATHS: usize = 2_048;
+const MAX_PENDING_WATCH_BYTES: usize = 512 * 1024;
 
-/// Root -> how many bursts we have seen. The delayed emit compares the
-/// generation it captured against this; a later event supersedes it, so a long
-/// operation emits once at the end instead of once per file it touched.
-fn git_pulse() -> &'static Mutex<HashMap<String, u64>> {
-    static PULSE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
-    PULSE.get_or_init(|| Mutex::new(HashMap::new()))
+struct PendingWatch {
+    paths: HashSet<String>,
+    path_bytes: usize,
+    kind: Option<String>,
+    overflow: bool,
+    git_dirty: bool,
+    last_change: Instant,
+}
+
+impl PendingWatch {
+    fn new() -> Self {
+        Self {
+            paths: HashSet::new(),
+            path_bytes: 0,
+            kind: None,
+            overflow: false,
+            git_dirty: false,
+            last_change: Instant::now(),
+        }
+    }
+
+    fn push(&mut self, path: String, kind: &str) {
+        self.kind = Some(match self.kind.take() {
+            None => kind.to_string(),
+            Some(current) if current == kind => current,
+            Some(_) => "other".to_string(),
+        });
+        if self.paths.contains(&path) || self.overflow {
+            return;
+        }
+        if self.paths.len() >= MAX_PENDING_WATCH_PATHS
+            || self.path_bytes.saturating_add(path.len()) > MAX_PENDING_WATCH_BYTES
+        {
+            self.overflow = true;
+            return;
+        }
+        self.path_bytes += path.len();
+        self.paths.insert(path);
+    }
+}
+
+fn watch_pending() -> &'static Mutex<HashMap<String, PendingWatch>> {
+    static PENDING: OnceLock<Mutex<HashMap<String, PendingWatch>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Does this path mean git's own state moved?
@@ -69,7 +117,10 @@ fn git_pulse() -> &'static Mutex<HashMap<String, u64>> {
 /// `index.lock` before `index`, and reacting to the lock means asking a repo
 /// that is mid-write, and racing the very write we are watching.
 pub(crate) fn touches_git_state(path: &str) -> bool {
-    let Some((_, rest)) = path.rsplit_once("/.git/") else {
+    // notify yields native separators. Normalize only for matching so Windows
+    // `.git` and `node_modules` churn gets the same filtering as Unix.
+    let normalized = path.replace('\\', "/");
+    let Some((_, rest)) = normalized.rsplit_once("/.git/") else {
         return false;
     };
     // A linked worktree's HEAD and index live at
@@ -101,24 +152,84 @@ pub(crate) fn touches_git_state(path: &str) -> bool {
         )
 }
 
-/// Note that this root's git state moved, and say so once the writes stop.
-fn pulse_git<R: tauri::Runtime>(app: &AppHandle<R>, root: &str) {
-    let generation = {
-        let mut pulse = git_pulse().lock().unwrap();
-        let counter = pulse.entry(root.to_string()).or_insert(0);
-        *counter = counter.wrapping_add(1);
-        *counter
+fn ignored_watch_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized
+        .split('/')
+        .any(|component| component == "node_modules" || component == ".git")
+}
+
+/// Merge a native callback into the root's single bounded pending batch. Only
+/// the caller that creates the entry creates a timer; later callbacks merely
+/// move its quiet-period boundary and add deduplicated paths.
+fn queue_watch_event<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    root: &str,
+    paths: Vec<String>,
+    kind: &str,
+    git_dirty: bool,
+) {
+    let start_timer = {
+        let mut pending = watch_pending().lock().unwrap();
+        let start = !pending.contains_key(root);
+        let batch = pending
+            .entry(root.to_string())
+            .or_insert_with(PendingWatch::new);
+        batch.last_change = Instant::now();
+        batch.git_dirty |= git_dirty;
+        for path in paths {
+            batch.push(path, kind);
+        }
+        start
     };
+    if !start_timer {
+        return;
+    }
+
     let app = app.clone();
     let root = root.to_string();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(GIT_SETTLE_MS)).await;
-        // Something newer is already waiting its turn — let that one speak.
-        if git_pulse().lock().unwrap().get(&root) != Some(&generation) {
+        loop {
+            tokio::time::sleep(Duration::from_millis(WATCH_SETTLE_MS)).await;
+            let batch = {
+                let mut pending = watch_pending().lock().unwrap();
+                let Some(batch) = pending.get(&root) else {
+                    return;
+                };
+                if batch.last_change.elapsed() < Duration::from_millis(WATCH_SETTLE_MS) {
+                    None
+                } else {
+                    pending.remove(&root)
+                }
+            };
+            let Some(batch) = batch else {
+                continue;
+            };
+
+            if batch.git_dirty {
+                let _ = app.emit("git:change", GitChange { root: root.clone() });
+            }
+            if !batch.paths.is_empty() || batch.overflow {
+                let mut paths: Vec<String> = batch.paths.into_iter().collect();
+                paths.sort_unstable();
+                let _ = app.emit(
+                    "fs:change",
+                    FsChange {
+                        root: root.clone(),
+                        paths,
+                        kind: batch.kind.unwrap_or_else(|| "other".into()),
+                        overflow: batch.overflow,
+                    },
+                );
+            }
             return;
         }
-        let _ = app.emit("git:change", GitChange { root });
     });
+}
+
+/// Test and call-site shorthand for git-only changes.
+fn pulse_git<R: tauri::Runtime>(app: &AppHandle<R>, root: &str) {
+    queue_watch_event(app, root, Vec::new(), "other", true);
 }
 
 pub(crate) fn check_scope(
@@ -199,25 +310,16 @@ pub async fn workspace_add(
             let paths: Vec<String> = touched
                 .iter()
                 // node_modules / .git churn would flood the UI
-                .filter(|p| !p.contains("/node_modules/") && !p.contains("/.git/"))
+                .filter(|p| !ignored_watch_path(p))
                 .cloned()
                 .collect();
             // The panels that used to poll git want both halves: a write to a
             // tracked file changes what `status` says, and a write inside .git
-            // is a commit, a stage or a branch switch — the half that never
-            // reaches fs:change at all.
-            if !paths.is_empty() || touched.iter().any(|p| touches_git_state(p)) {
-                pulse_git(&app, &emit_root);
-            }
-            if !paths.is_empty() {
-                let _ = app.emit(
-                    "fs:change",
-                    FsChange {
-                        root: emit_root.clone(),
-                        paths,
-                        kind: kind.into(),
-                    },
-                );
+            // is a commit, a stage or a branch switch. Both now share one
+            // bounded per-root coalescer and one quiet-period task.
+            let git_dirty = !paths.is_empty() || touched.iter().any(|p| touches_git_state(p));
+            if !paths.is_empty() || git_dirty {
+                queue_watch_event(&app, &emit_root, paths, kind, git_dirty);
             }
         }
     })
@@ -252,6 +354,10 @@ pub async fn workspace_remove(
     state.roots.lock().unwrap().retain(|r| r != &canonical);
     // Dropping the watcher stops it.
     state.watchers.lock().unwrap().remove(&canonical);
+    watch_pending()
+        .lock()
+        .unwrap()
+        .remove(&canonical.to_string_lossy().to_string());
     Ok(())
 }
 
@@ -275,24 +381,41 @@ pub(crate) fn roots_of(state: &State<'_, WorkspaceManager>) -> Vec<PathBuf> {
     state.roots.lock().unwrap().clone()
 }
 
+const READ_DIR_MAX_ENTRIES: usize = 4096;
+const READ_DIR_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+fn read_dir_bounded(
+    dir: &Path,
+    max_entries: usize,
+    max_bytes: usize,
+) -> Result<Vec<DirEntry>, String> {
+    let mut entries = Vec::new();
+    let mut retained = 0usize;
+    for result in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let Ok(entry) = result else { continue };
+        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path().to_string_lossy().to_string();
+        let charge = name.len().saturating_add(path.len()).saturating_add(32);
+        if entries.len() >= max_entries || retained.saturating_add(charge) > max_bytes {
+            return Err(format!(
+                "directory listing exceeds its {max_entries}-entry/{max_bytes}-byte limit"
+            ));
+        }
+        retained += charge;
+        entries.push(DirEntry { name, path, is_dir });
+    }
+    Ok(entries)
+}
+
 #[tauri::command]
 pub async fn fs_read_dir(
     state: State<'_, WorkspaceManager>,
     path: String,
 ) -> Result<Vec<DirEntry>, String> {
     let dir = check_scope(&state, Path::new(&path))?;
-    let mut entries: Vec<DirEntry> = std::fs::read_dir(&dir)
-        .map_err(|e| e.to_string())?
-        .filter_map(|e| e.ok())
-        .map(|e| {
-            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            DirEntry {
-                name: e.file_name().to_string_lossy().to_string(),
-                path: e.path().to_string_lossy().to_string(),
-                is_dir,
-            }
-        })
-        .collect();
+    let mut entries =
+        crate::blocking::io(|| read_dir_bounded(&dir, READ_DIR_MAX_ENTRIES, READ_DIR_MAX_BYTES))?;
     entries.sort_by(|a, b| {
         (b.is_dir, a.name.to_lowercase())
             .partial_cmp(&(a.is_dir, b.name.to_lowercase()))
@@ -309,22 +432,56 @@ pub async fn fs_read_dir(
 /// provider, an agent tool — from moving a DVD image into the WebView.
 const MAX_READ_BYTES: u64 = 512 * 1024 * 1024;
 
+fn read_file_capped(source: std::fs::File, requested_max: Option<u64>) -> Result<Vec<u8>, String> {
+    let max = requested_max.unwrap_or(MAX_READ_BYTES).min(MAX_READ_BYTES);
+    let initial_len = source.metadata().map_err(|e| e.to_string())?.len();
+    if initial_len > max {
+        return Err(format!(
+            "file is too large to load ({initial_len} bytes; limit {max})"
+        ));
+    }
+
+    // Read through the already-open handle and stop after max+1 bytes. A path
+    // replacement cannot switch this handle underneath us, and concurrent file
+    // growth can allocate at most one byte past the caller's limit before it is
+    // rejected. This closes the old metadata(path) -> read(path) race that could
+    // allocate the generic 512 MiB backstop for an 8 MiB frontend request.
+    let mut bytes = Vec::new();
+    source
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > max {
+        return Err(format!(
+            "file grew past the read limit ({} bytes; limit {max})",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
 /// Returns raw file bytes (no base64) via tauri::ipc::Response.
 #[tauri::command]
 pub async fn fs_read_file(
     state: State<'_, WorkspaceManager>,
     path: String,
+    max_bytes: Option<u64>,
 ) -> Result<tauri::ipc::Response, String> {
     let file = check_scope(&state, Path::new(&path))?;
-    // Checked before the read, not after: the point is to never allocate it.
-    let len = std::fs::metadata(&file).map_err(|e| e.to_string())?.len();
-    if len > MAX_READ_BYTES {
-        return Err(format!(
-            "file is too large to load ({:.1} GB)",
-            len as f64 / (1024.0 * 1024.0 * 1024.0)
-        ));
+    let source = std::fs::File::open(&file).map_err(|e| e.to_string())?;
+    let opened_identity =
+        same_file::Handle::from_file(source.try_clone().map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    // Re-authorize after open and compare the live path with the stable handle.
+    // If an agent replaces a scoped path with a symlink (or swaps it back) in
+    // the check-to-open window, either scope validation or identity comparison
+    // fails. The bytes always come from the already-validated handle.
+    let current = check_scope(&state, Path::new(&path))?;
+    let current_identity = same_file::Handle::from_path(&current).map_err(|e| e.to_string())?;
+    if opened_identity != current_identity {
+        return Err("file changed while opening; retry the read".into());
     }
-    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+    let bytes = read_file_capped(source, max_bytes)?;
     Ok(tauri::ipc::Response::new(bytes))
 }
 
@@ -380,22 +537,29 @@ pub async fn git_status(
     // run it on every `git:change`. `blocking::io` is what git.rs already uses
     // ~15 times for exactly this; fsx.rs had none.
     crate::blocking::io(move || {
-        let top = match git_ro(&dir).args(["rev-parse", "--show-toplevel"]).output() {
+        let top = match crate::process_capture::output(
+            git_ro(&dir).args(["rev-parse", "--show-toplevel"]),
+            crate::process_capture::DEFAULT_STREAM_MAX,
+        ) {
             Ok(out) if out.status.success() => {
                 PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
             }
             _ => return Ok(GitStatus::default()),
         };
-        let branch = git_ro(&dir)
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-        let out = git_ro(&dir)
-            .args(["status", "--porcelain", "-z", "--ignored"])
-            .output()
-            .map_err(|e| e.to_string())?;
+        let mut branch_command = git_ro(&dir);
+        branch_command.args(["rev-parse", "--abbrev-ref", "HEAD"]);
+        let branch = crate::process_capture::output(
+            &mut branch_command,
+            crate::process_capture::DEFAULT_STREAM_MAX,
+        )
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        let out = crate::process_capture::output(
+            git_ro(&dir).args(["status", "--porcelain", "-z", "--ignored"]),
+            crate::process_capture::DEFAULT_STREAM_MAX,
+        )?;
+        crate::process_capture::reject_truncated(&out, "workspace git status")?;
         let raw = String::from_utf8_lossy(&out.stdout);
         let mut entries = Vec::new();
         let mut parts = raw.split('\0').peekable();
@@ -431,10 +595,10 @@ pub async fn git_head_content(
 ) -> Result<Option<String>, String> {
     let file = check_scope(&state, Path::new(&path))?;
     let parent = file.parent().ok_or("no parent dir")?;
-    let top = match git_ro(parent)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-    {
+    let top = match crate::process_capture::output(
+        git_ro(parent).args(["rev-parse", "--show-toplevel"]),
+        crate::process_capture::DEFAULT_STREAM_MAX,
+    ) {
         Ok(out) if out.status.success() => {
             PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
         }
@@ -444,11 +608,11 @@ pub async fn git_head_content(
         Ok(r) => r.to_string_lossy().to_string(),
         Err(_) => return Ok(None),
     };
-    let out = git_ro(&top)
-        .arg("show")
-        .arg(format!("HEAD:{rel}"))
-        .output()
-        .map_err(|e| e.to_string())?;
+    let out = crate::process_capture::output(
+        git_ro(&top).arg("show").arg(format!("HEAD:{rel}")),
+        crate::process_capture::DEFAULT_STREAM_MAX,
+    )?;
+    crate::process_capture::reject_truncated(&out, "git HEAD content")?;
     if out.status.success() {
         Ok(Some(String::from_utf8_lossy(&out.stdout).to_string()))
     } else {
@@ -810,6 +974,63 @@ pub async fn fs_stat(
     }))
 }
 
+const STAT_BATCH_MAX_PATHS: usize = 256;
+const STAT_BATCH_MAX_PATH_BYTES: usize = 256 * 1024;
+
+/// Resolve and stat a set of journal/diff paths in one IPC operation. Scope is
+/// checked for every input before any metadata is returned; files that vanish
+/// between scope resolution and metadata lookup are omitted so one editor
+/// save cannot invalidate the rest of the batch.
+#[tauri::command]
+pub async fn fs_stat_many(
+    state: State<'_, WorkspaceManager>,
+    paths: Vec<String>,
+) -> Result<Vec<FsStatEntry>, String> {
+    if paths.len() > STAT_BATCH_MAX_PATHS {
+        return Err(format!(
+            "metadata batch exceeds its {STAT_BATCH_MAX_PATHS}-path limit"
+        ));
+    }
+    let path_bytes = paths
+        .iter()
+        .try_fold(0usize, |total, path| total.checked_add(path.len()))
+        .ok_or_else(|| "metadata batch path bytes overflowed".to_string())?;
+    if path_bytes > STAT_BATCH_MAX_PATH_BYTES {
+        return Err(format!(
+            "metadata batch exceeds its {STAT_BATCH_MAX_PATH_BYTES}-byte path limit"
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    let mut scoped = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let file = check_scope(&state, Path::new(&path))?;
+        scoped.push((path, file));
+    }
+
+    Ok(crate::blocking::io(move || {
+        scoped
+            .into_iter()
+            .filter_map(|(path, file)| {
+                let meta = std::fs::metadata(file).ok()?;
+                Some(FsStatEntry {
+                    path,
+                    is_dir: meta.is_dir(),
+                    size: meta.len(),
+                    modified_ms: meta
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_millis() as u64),
+                })
+            })
+            .collect()
+    }))
+}
+
 // ---------- file management (context menu) ----------
 
 /// Create an empty file. Fails if it already exists rather than truncating —
@@ -968,14 +1189,32 @@ mod tests {
         }
         // Long enough for every one of the five to have fired had they not
         // superseded each other.
-        std::thread::sleep(std::time::Duration::from_millis(GIT_SETTLE_MS * 5));
+        std::thread::sleep(std::time::Duration::from_millis(WATCH_SETTLE_MS * 5));
         assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         // And the next burst is still heard: the generation supersedes, it
         // doesn't latch.
         pulse_git(app.handle(), root);
-        std::thread::sleep(std::time::Duration::from_millis(GIT_SETTLE_MS * 5));
+        std::thread::sleep(std::time::Duration::from_millis(WATCH_SETTLE_MS * 5));
         assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn watcher_batch_deduplicates_and_has_item_and_byte_backstops() {
+        let mut batch = PendingWatch::new();
+        batch.push("/w/repo/src/main.rs".into(), "modify");
+        batch.push("/w/repo/src/main.rs".into(), "modify");
+        assert_eq!(batch.paths.len(), 1);
+        assert_eq!(batch.kind.as_deref(), Some("modify"));
+
+        batch.push("/w/repo/src/new.rs".into(), "create");
+        assert_eq!(batch.kind.as_deref(), Some("other"));
+        for i in 0..=MAX_PENDING_WATCH_PATHS {
+            batch.push(format!("/w/repo/generated/{i}.js"), "modify");
+        }
+        assert!(batch.overflow);
+        assert!(batch.paths.len() <= MAX_PENDING_WATCH_PATHS);
+        assert!(batch.path_bytes <= MAX_PENDING_WATCH_BYTES);
     }
 
     /// What the panels stopped polling for. Everything a commit, a stage, a
@@ -996,9 +1235,16 @@ mod tests {
             // A linked worktree's own HEAD, in the main checkout's .git.
             "/w/repo/.git/worktrees/feature/HEAD",
             "/w/repo/.git/worktrees/feature/index",
+            r"C:\w\repo\.git\HEAD",
+            r"C:\w\repo\.git\worktrees\feature\index",
         ] {
             assert!(touches_git_state(p), "should have noticed {p}");
         }
+        assert!(ignored_watch_path(r"C:\w\repo\node_modules\pkg\index.js"));
+        assert!(ignored_watch_path(r"C:\w\repo\node_modules"));
+        assert!(ignored_watch_path(r"C:\w\repo\.git\objects\ab\cd"));
+        assert!(ignored_watch_path(r"C:\w\repo\.git"));
+        assert!(!ignored_watch_path(r"C:\w\repo\src\main.rs"));
 
         for p in [
             // The lock is written *before* the file it guards: reacting to it
@@ -1101,6 +1347,57 @@ mod tests {
         assert_eq!(snapshots[0].path, file.to_string_lossy());
         assert_eq!(snapshots[0].size, 10);
         assert!(snapshots[0].modified_ms.is_some());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn directory_enumeration_refuses_to_retain_past_its_item_budget() {
+        let root = std::env::temp_dir().join(format!("canopy-capped-dir-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        for name in ["a", "b", "c"] {
+            write(&root.join(name), name);
+        }
+        let error = match read_dir_bounded(&root, 2, usize::MAX) {
+            Ok(_) => panic!("directory enumeration should have exceeded the entry limit"),
+            Err(error) => error,
+        };
+        assert!(error.contains("2-entry"));
+        assert_eq!(read_dir_bounded(&root, 3, usize::MAX).unwrap().len(), 3);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn native_file_reader_obeys_the_caller_limit_before_full_allocation() {
+        let root = std::env::temp_dir().join(format!("canopy-capped-read-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let file = root.join("payload.bin");
+        write(&file, "0123456789");
+
+        let open = || std::fs::File::open(&file).unwrap();
+        assert_eq!(read_file_capped(open(), Some(10)).unwrap(), b"0123456789");
+        let error = read_file_capped(open(), Some(8)).unwrap_err();
+        assert!(error.contains("limit 8"));
+        assert_eq!(read_file_capped(open(), Some(u64::MAX)).unwrap().len(), 10);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn open_file_identity_detects_path_replacement() {
+        let root =
+            std::env::temp_dir().join(format!("canopy-file-identity-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let path = root.join("payload.bin");
+        let old = root.join("opened.bin");
+        write(&path, "authorized");
+        let opened = std::fs::File::open(&path).unwrap();
+        std::fs::rename(&path, &old).unwrap();
+        write(&path, "replacement");
+
+        let opened = same_file::Handle::from_file(opened).unwrap();
+        let current = same_file::Handle::from_path(&path).unwrap();
+        assert_ne!(opened, current);
 
         std::fs::remove_dir_all(&root).ok();
     }

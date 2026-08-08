@@ -18,6 +18,7 @@ pub mod verbs;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::io::Read;
 use tauri::{AppHandle, Manager};
 
 use crate::pty::PtyManager;
@@ -322,8 +323,13 @@ fn read_text_capped(app: &AppHandle, path: &str) -> Result<Value, String> {
     const MAX: usize = 512 * 1024;
     let state = app.state::<crate::fsx::WorkspaceManager>();
     let file = crate::fsx::check_scope(&state, std::path::Path::new(path))?;
-    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
-    let total = bytes.len();
+    let total = std::fs::metadata(&file).map_err(|e| e.to_string())?.len();
+    let mut bytes = Vec::with_capacity((total as usize).min(MAX + 4));
+    std::fs::File::open(&file)
+        .map_err(|e| e.to_string())?
+        .take((MAX + 4) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
     // A NUL in the head is the cheap, conventional binary test. Saying so beats
     // rendering a screenful of replacement characters.
     if bytes.iter().take(8000).any(|b| *b == 0) {
@@ -338,7 +344,7 @@ fn read_text_capped(app: &AppHandle, path: &str) -> Result<Value, String> {
     Ok(json!({
         "binary": false,
         "bytes": total,
-        "truncated": cut < total,
+        "truncated": (cut as u64) < total,
         "text": String::from_utf8_lossy(&bytes[..cut]),
     }))
 }

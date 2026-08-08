@@ -118,6 +118,16 @@ export type AttentionInput = Omit<
   "id" | "ts" | "readAt" | "resolvedAt" | "resolution" | "toastDismissedAt"
 > & { ts?: number };
 
+/** Timing policy for a post that is already entering the one attention queue.
+ *  A dwell stages the item without exposing it to any reader; resolving its
+ *  dedupe key during that window cancels it. `collapseMs` reuses the identity
+ *  of a recently withdrawn identical question, which also means the OS bridge
+ *  (id-keyed by design) cannot announce the same request twice. */
+export interface AttentionPostPolicy {
+  dwellMs?: number;
+  collapseMs?: number;
+}
+
 const TONE_URGENCY: Record<NoticeKind, Urgency> = {
   info: "low",
   success: "low",
@@ -349,6 +359,33 @@ const newId = () =>
     ? crypto.randomUUID()
     : `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
+interface StagedAttentionPost {
+  id: string;
+  input: AttentionInput;
+  collapseMs: number;
+  signature: string;
+  timer: number;
+}
+
+/** Dwell episodes keyed by asker identity. These are candidates, not queue
+ *  items: no subscriber, toast, badge or OS bridge can see one until its timer
+ *  fires. A progress event resolves the session key and cancels the candidate
+ *  before that happens. */
+const stagedPosts = new Map<string, StagedAttentionPost>();
+
+function postSignature(input: AttentionInput): string {
+  return JSON.stringify({
+    kind: input.kind,
+    tone: input.tone,
+    title: input.title,
+    body: input.body,
+    source: input.source,
+    projectId: input.projectId,
+    projectName: input.projectName,
+    where: input.where ?? null,
+  });
+}
+
 /** Put something in the channel. Returns the item's id — a question's asker
  *  keeps it so it can resolve or withdraw the question later.
  *
@@ -357,7 +394,11 @@ const newId = () =>
  *  one exception is `dedupeKey`, which is not replacement but identity: the
  *  same question re-posted is still one question, and the same keyed FYI
  *  re-posted is still one announcement, made again. */
-export function postAttention(input: AttentionInput): string {
+function commitAttention(
+  input: AttentionInput,
+  fixedId?: string,
+  collapseMs = 0,
+): string {
   const items = read();
   const ts = input.ts ?? Date.now();
   if (input.dedupeKey) {
@@ -401,9 +442,99 @@ export function postAttention(input: AttentionInput): string {
         return refreshed.id;
       }
     }
+
+    // A real prompt may recur after the previous episode withdrew. Inside the
+    // cooldown, identical agent questions from the same session are one
+    // attention identity, not a new toast and OS banner each time. Reopening
+    // restores the outstanding state but keeps the id the OS bridge has
+    // already seen.
+    if (input.kind === "question" && collapseMs > 0) {
+      const j = items.findIndex((x) => {
+        if (
+          x.kind !== "question" ||
+          x.dedupeKey !== input.dedupeKey ||
+          x.resolvedAt == null ||
+          x.resolution !== "withdrawn" ||
+          ts - x.resolvedAt > collapseMs
+        ) {
+          return false;
+        }
+        return same(x, { ...x, ...input });
+      });
+      if (j !== -1) {
+        const reopened: AttentionItem = {
+          ...items[j],
+          ...input,
+          id: items[j].id,
+          ts,
+          readAt: undefined,
+          resolvedAt: undefined,
+          resolution: undefined,
+          toastDismissedAt: undefined,
+        };
+        write([reopened, ...items.filter((_, k) => k !== j)]);
+        return reopened.id;
+      }
+    }
   }
-  const id = newId();
+  const id = fixedId ?? newId();
   write([{ ...input, id, ts }, ...items]);
+  return id;
+}
+
+export function postAttention(
+  input: AttentionInput,
+  policy: AttentionPostPolicy = {},
+): string {
+  const dwellMs = Math.max(0, policy.dwellMs ?? 0);
+  if (dwellMs === 0) {
+    return commitAttention(input, undefined, policy.collapseMs);
+  }
+
+  const key = input.dedupeKey;
+  if (!key) {
+    // Dwell cancellation is identity-based. A caller without an asker key
+    // cannot retract the candidate safely, so retain the queue's normal
+    // immediate behavior rather than inventing anonymous pending state.
+    return commitAttention(input, undefined, policy.collapseMs);
+  }
+
+  const signature = postSignature(input);
+  const previous = stagedPosts.get(key);
+  if (previous && previous.signature === signature) {
+    previous.input = { ...input, ts: previous.input.ts };
+    return previous.id;
+  }
+  if (previous) window.clearTimeout(previous.timer);
+
+  const collapseMs = Math.max(0, policy.collapseMs ?? 0);
+  const stagedInput = { ...input, ts: input.ts ?? Date.now() };
+  const reusable =
+    input.kind === "question" && collapseMs > 0
+      ? read().find(
+          (x) =>
+            x.kind === "question" &&
+            x.dedupeKey === input.dedupeKey &&
+            x.resolvedAt != null &&
+            x.resolution === "withdrawn" &&
+            stagedInput.ts! - x.resolvedAt <= collapseMs &&
+            same(x, { ...x, ...input }),
+        )
+      : undefined;
+  const id = previous?.id ?? reusable?.id ?? newId();
+  const staged: StagedAttentionPost = {
+    id,
+    input: stagedInput,
+    collapseMs,
+    signature,
+    timer: 0,
+  };
+  staged.timer = window.setTimeout(() => {
+    if (stagedPosts.get(key) !== staged) return;
+    stagedPosts.delete(key);
+    commitAttention(staged.input, staged.id, staged.collapseMs);
+  }, dwellMs);
+  stagedPosts.set(key, staged);
   return id;
 }
 
@@ -411,6 +542,11 @@ export function postAttention(input: AttentionInput): string {
  *  one already resolved — the withdraw path (an agent moving on) and the
  *  answer path race by nature, and first writer wins. */
 export function resolveAttention(id: string, resolution: Resolution): void {
+  for (const [key, staged] of stagedPosts) {
+    if (staged.id !== id) continue;
+    window.clearTimeout(staged.timer);
+    stagedPosts.delete(key);
+  }
   const items = read();
   const i = items.findIndex((x) => x.id === id);
   if (i === -1 || items[i].resolvedAt != null) return;
@@ -426,6 +562,11 @@ export function resolveAttentionByKey(
   dedupeKey: string,
   resolution: Resolution,
 ): void {
+  const staged = stagedPosts.get(dedupeKey);
+  if (staged) {
+    window.clearTimeout(staged.timer);
+    stagedPosts.delete(dedupeKey);
+  }
   const items = read();
   if (!items.some((x) => x.dedupeKey === dedupeKey && isOutstanding(x))) return;
   write(
@@ -543,6 +684,11 @@ export function badgeFor(items: AttentionItem[]): {
       : "low";
   return { count: unread.length, urgency };
 }
+
+/** Build mode is a product surface, not an activity feed. Only something the
+ * person must answer, or an error they can act on, belongs behind its bell. */
+export const buildAttentionItems = (items: AttentionItem[]): AttentionItem[] =>
+  items.filter((item) => item.kind === "question" || item.tone === "error");
 
 /** The same badge, for one project. What a project tab shows: its own waiting
  *  work, not the workspace's. */

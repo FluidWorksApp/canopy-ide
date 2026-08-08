@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Project } from "./projects";
 import {
   materializeVibeSetup,
+  plainSetupActivity,
   observeVibeSetupRepository,
+  setupAgentInventory,
   parseVibeSetupOutput,
   validateVibeSetupProposal,
   runVibeProjectSetupTask,
@@ -13,7 +15,12 @@ import {
 import * as ipc from "./ipc";
 import type { RouteCandidate } from "./vibeFailover";
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
-import type { VibeProjectSetupTaskDeps } from "./vibeProjectSetup";
+import { streamsStructured } from "./structuredRunners";
+import type {
+  VibeProjectSetupSessionDeps,
+  VibeProjectSetupTaskDeps,
+  VibeProjectSetupTaskResult,
+} from "./vibeProjectSetup";
 
 const launchEnvSync = vi.fn((_cliId: string) => [] as [string, string][]);
 // Only launchEnvSync is faked. DEFAULT_PROFILE and launchProfile stay real, so
@@ -41,6 +48,7 @@ const proposal = (): VibeProjectSetupProposal => ({
         argv: ["pnpm", "dev"],
         cwd: "/repo/apps/web",
         requiredEnvNames: ["API_URL"],
+        automatic: true,
         readiness: { kind: "http", path: "/" },
       }, {
         key: "check",
@@ -49,6 +57,7 @@ const proposal = (): VibeProjectSetupProposal => ({
         argv: ["pnpm", "typecheck"],
         cwd: "/repo/apps/web",
         requiredEnvNames: [],
+        automatic: true,
         readiness: { kind: "one-shot", timeoutMs: 120_000 },
       }],
       evidence: ["/repo/apps/web/package.json"],
@@ -65,6 +74,7 @@ const proposal = (): VibeProjectSetupProposal => ({
         argv: ["go", "run", "./cmd/api"],
         cwd: "/repo/services/api",
         requiredEnvNames: ["DATABASE_URL"],
+        automatic: true,
         readiness: { kind: "http", path: "/health" },
       }],
       evidence: ["/repo/services/api/go.mod"],
@@ -72,9 +82,36 @@ const proposal = (): VibeProjectSetupProposal => ({
   ],
   preview: { componentKey: "web", commandKey: "dev" },
   requiredProcesses: [
-    { componentKey: "web", commandKey: "dev", reason: "serves the page", requiredFor: "preview" },
-    { componentKey: "api", commandKey: "serve", reason: "the page loads its data here", requiredFor: "preview" },
+    {
+      componentKey: "web", commandKey: "dev", reason: "serves the page",
+      requiredFor: "preview", dependsOn: [{ componentKey: "api", commandKey: "serve" }],
+    },
+    {
+      componentKey: "api", commandKey: "serve", reason: "the page loads its data here",
+      requiredFor: "project", dependsOn: [],
+    },
   ],
+  componentLinks: [{
+    fromComponentKey: "web",
+    toComponentKey: "api",
+    kind: "http",
+    description: "the website loads application data from the API",
+    evidence: ["/repo/apps/web/package.json"],
+  }],
+  dataStores: [{
+    key: "database",
+    label: "Database",
+    engine: "postgresql",
+    mode: "managed",
+    providerId: "neon",
+    usedByComponentKeys: ["api"],
+    schemaPaths: [],
+    migrationPaths: [],
+    latestMigration: null,
+    migrate: null,
+    status: null,
+    evidence: ["/repo/services/api/go.mod"],
+  }],
   externalServices: [{
     key: "database",
     providerId: "neon",
@@ -108,6 +145,11 @@ const context = (): VibeSetupValidationContext => ({
   providerIds: new Set(["neon", "stripe"]),
   existingComponents: project().components,
 });
+
+const verifiedSessionDeps = {
+  verify: vi.fn(async () => ({ ok: true as const })),
+  repair: vi.fn(async () => false),
+};
 
 describe("project setup repository observation", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -148,6 +190,30 @@ describe("project setup repository observation", () => {
     const before = await observeVibeSetupRepository(project());
     const after = await observeVibeSetupRepository(project());
     expect(after.fingerprint).not.toBe(before.fingerprint);
+  });
+
+  it("bounds the agent prompt inventory while retaining setup evidence", () => {
+    const paths = new Set<string>([
+      "/repo/apps/web",
+      "/repo/apps/web/package.json",
+      "/repo/apps/web/vercel.json",
+      "/repo/services/api",
+      "/repo/services/api/schema.prisma",
+      "/repo/services/api/migrations/0042_sessions.sql",
+      ...Array.from({ length: 1_500 }, (_, index) => `/repo/apps/web/src/generated/file-${index}.ts`),
+    ]);
+
+    const inventory = setupAgentInventory(paths, ["/repo/apps/web", "/repo/services/api"]);
+
+    expect(inventory).toHaveLength(800);
+    expect(inventory).toEqual(expect.arrayContaining([
+      "/repo/apps/web",
+      "/repo/apps/web/package.json",
+      "/repo/apps/web/vercel.json",
+      "/repo/services/api",
+      "/repo/services/api/schema.prisma",
+      "/repo/services/api/migrations/0042_sessions.sql",
+    ]));
   });
 });
 
@@ -192,6 +258,56 @@ describe("project setup structured output", () => {
     const result = validateVibeSetupProposal(value, context());
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors).toContain("requiredProcesses[1] names an unknown command");
+  });
+
+  it("rejects a runnable worker that startup would otherwise leave behind", () => {
+    const value = proposal();
+    value.components.push({
+      key: "worker",
+      root: "/repo/services/worker",
+      label: "Worker",
+      role: "worker",
+      commands: [{
+        key: "work",
+        purpose: "worker",
+        label: "Start worker",
+        argv: ["go", "run", "./cmd/worker"],
+        cwd: "/repo/services/worker",
+        requiredEnvNames: [],
+        automatic: true,
+        readiness: { kind: "process-alive" },
+      }],
+      evidence: ["/repo/services/worker/go.mod"],
+    });
+    const validationContext = context();
+    validationContext.existingPaths = new Set([
+      ...validationContext.existingPaths,
+      "/repo/services/worker",
+      "/repo/services/worker/go.mod",
+    ]);
+    const result = validateVibeSetupProposal(value, validationContext);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toContain("components[2] has no selected required process");
+  });
+
+  it("rejects a startup dependency cycle", () => {
+    const value = proposal();
+    value.requiredProcesses[1].dependsOn = [{ componentKey: "web", commandKey: "dev" }];
+    const result = validateVibeSetupProposal(value, context());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toContain("requiredProcesses contains a dependency cycle");
+  });
+
+  it("never marks a managed database migration automatic", () => {
+    const value = proposal();
+    value.dataStores[0].migrate = { componentKey: "web", commandKey: "check" };
+    const result = validateVibeSetupProposal(value, context());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain(
+        "dataStores[0].migrate must not run automatically against a managed database",
+      );
+    }
   });
 
   it("rejects filesystem escapes and unobserved evidence", () => {
@@ -244,11 +360,74 @@ describe("setup identity materialization", () => {
       version: 1,
       componentId: "cmp-web",
       requiredProcesses: [
-        { componentId: "cmp-web", runCommandId: expect.any(String) },
-        { componentId: "cmp-api", runCommandId: expect.any(String) },
+        {
+          componentId: "cmp-web",
+          runCommandId: expect.any(String),
+          dependsOn: [{ componentId: "cmp-api", runCommandId: expect.any(String) }],
+        },
+        { componentId: "cmp-api", runCommandId: expect.any(String), dependsOn: [] },
       ],
+      componentLinks: [expect.objectContaining({
+        fromComponentId: "cmp-web",
+        toComponentId: "cmp-api",
+      })],
+      dataStores: [expect.objectContaining({
+        engine: "postgresql",
+        mode: "managed",
+        latestMigration: null,
+      })],
     });
     expect(result.project.components[0].commands?.[0].argv).toEqual(["pnpm", "dev"]);
+  });
+
+  it("keeps what each component is, so nothing downstream has to guess it", () => {
+    // The survey establishes a role per component and materialization dropped
+    // it, so the only surviving record of "this is an API with no UI" was the
+    // proposal, which is not persisted. Anything reading the project later —
+    // Build's starter suggestions were the case that caught this — could then
+    // only infer a role from the directory name, which is the guessing this
+    // whole survey exists to replace.
+    const result = materializeVibeSetup(project(), proposal());
+    expect(result.project.components.map((item) => item.role)).toEqual(["web", "api"]);
+  });
+
+  it("never overwrites what the person configured themselves", () => {
+    // What setup did to this repository: "canopy-website" was renamed to
+    // "server" after its run command, and the Local Instance command —
+    // `cd … && ORT_DYLIB_PATH=… && pnpm tauri dev` — was replaced by the argv
+    // spelling, dropping the environment variable the app needs and taking a
+    // new id that no longer matched the run already on the rail.
+    const configured: Project = {
+      ...project(),
+      components: [
+        {
+          id: "cmp-web",
+          label: "canopy-website",
+          path: "/repo/apps/web",
+          commands: [
+            {
+              id: "run-hand-written",
+              name: "Local Instance",
+              command: 'cd /repo/apps/web && ORT_DYLIB_PATH="$PWD/lib.dylib" && pnpm dev',
+            },
+            { id: "run-untouched", name: "relay", command: "pnpm run relay" },
+          ],
+        },
+        { id: "cmp-api", label: "API", path: "/repo/services/api", commands: [] },
+      ],
+    };
+    const web = materializeVibeSetup(configured, proposal()).project.components[0];
+
+    expect(web.label).toBe("canopy-website");
+    const kept = web.commands?.find((command) => command.id === "run-hand-written");
+    expect(kept?.name).toBe("Local Instance");
+    expect(kept?.command).toContain("ORT_DYLIB_PATH");
+    // The one thing the survey does add.
+    expect(kept?.purpose).toBe("serve");
+    // Silence about a configured command is not a finding that it should go.
+    expect(web.commands?.some((command) => command.id === "run-untouched")).toBe(true);
+    // And the role the survey established still lands.
+    expect(web.role).toBe("web");
   });
 
   it("keeps ids stable across label-only changes", () => {
@@ -348,6 +527,21 @@ describe("bounded setup agent task", () => {
     expect(reserve).not.toHaveBeenCalled();
   });
 
+  it("rechecks routes once when Build races agent discovery at startup", async () => {
+    const deps = taskDeps([[
+      { kind: "delta", text: JSON.stringify(proposal()) },
+      { kind: "turnEnd" },
+    ]]);
+    const probes = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(routes());
+    deps.listRoutes = probes;
+
+    await expect(runVibeProjectSetupTask(taskInput, deps)).resolves.toMatchObject({ ok: true });
+    expect(probes).toHaveBeenCalledTimes(2);
+    expect(deps.launches).toHaveLength(1);
+  });
+
   it("treats invalid structured output as a task failure without model shopping", async () => {
     const deps = taskDeps([[{ kind: "delta", text: "I think it is web" }, { kind: "turnEnd" }]]);
     const result = await runVibeProjectSetupTask(taskInput, deps);
@@ -364,14 +558,48 @@ describe("bounded setup agent task", () => {
     expect(deps.settlements).not.toContainEqual(expect.objectContaining({ state: "completed" }));
   });
 
-  it("uses existing failover for a route failure", async () => {
+  it("never fails over to a CLI it cannot launch", async () => {
+    // The fixture runner will start anything; production cannot. Setup reads
+    // its result off a JSON stream, and startStructured throws "has no verified
+    // streaming runner" before a process exists for any CLI without one —
+    // ranked anyway, every attempt in the cap died on that throw and Build
+    // reported it as the agent failing to understand the project, with no
+    // transcript, because no agent ever ran.
+    //
+    // Asserted against the capability rather than a name on purpose. This test
+    // used to say "not codex", which was true only while codex had no runner —
+    // so the day it got one the test failed for the wrong reason and the real
+    // rule went unguarded. `amp` stands in for the CLIs that still have none.
+    const deps = taskDeps([
+      [{ kind: "error", message: "usage limit reached for your plan" }, { kind: "exit" }],
+      [{ kind: "delta", text: JSON.stringify(proposal()) }, { kind: "turnEnd" }],
+    ]);
+    deps.listRoutes = async () => [
+      ...routes(),
+      {
+        cli: "amp", profileId: "default", family: "anthropic",
+        state: { agent: "amp", profile: "default", kind: "ready", reasons: [] },
+        choices: [{ id: "claude-fable-5", label: "Fable", hint: "" }],
+      },
+    ];
+    await runVibeProjectSetupTask(taskInput, deps);
+    expect(deps.launches.length).toBeGreaterThan(0);
+    for (const { cli } of deps.launches) expect(streamsStructured(cli)).toBe(true);
+    expect(deps.launches.map((item) => item.cli)).not.toContain("amp");
+  });
+
+  it("fails over to codex, which now has a runner of its own", async () => {
+    // The point of the whole one-shot runner: a person whose default agent is
+    // codex, or whose claude route is rate-limited, gets a second place to go.
+    // Before it existed the only eligible CLI was claude, so a route failure
+    // had nowhere to go and retried the same exhausted account.
     const deps = taskDeps([
       [{ kind: "error", message: "usage limit reached for your plan" }, { kind: "exit" }],
       [{ kind: "delta", text: JSON.stringify(proposal()) }, { kind: "turnEnd" }],
     ]);
     const result = await runVibeProjectSetupTask(taskInput, deps);
-    expect(result).toMatchObject({ ok: true, attempts: 2 });
     expect(deps.launches.map((item) => item.cli)).toEqual(["claude", "codex"]);
+    expect(result).toMatchObject({ ok: true });
   });
 
   it("kills a timed-out attempt and returns a plain-language failure", async () => {
@@ -430,6 +658,7 @@ describe("non-technical setup surface", () => {
   it("does not begin repository work until the Build surface owns the session", async () => {
     const observe = vi.fn(async () => ({
       projectRoot: root,
+      componentRoots: ["/repo/apps/web", "/repo/services/api"],
       fingerprint: "tree-1",
       paths: context().existingPaths,
     }));
@@ -445,6 +674,7 @@ describe("non-technical setup surface", () => {
           runId: null,
           attempts: 0,
         }),
+        ...verifiedSessionDeps,
         providerIds: context().providerIds,
       },
     );
@@ -465,8 +695,14 @@ describe("non-technical setup surface", () => {
         project(),
         async (next) => { configured.push(next); return true; },
         {
-          observe: async () => ({ projectRoot: root, fingerprint: "tree-1", paths: context().existingPaths }),
+          observe: async () => ({
+            projectRoot: root,
+            componentRoots: ["/repo/apps/web", "/repo/services/api"],
+            fingerprint: "tree-1",
+            paths: context().existingPaths,
+          }),
           run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
+          ...verifiedSessionDeps,
           providerIds: context().providerIds,
         },
       );
@@ -481,6 +717,245 @@ describe("non-technical setup surface", () => {
     expect(configured[0].vibe?.version).toBe(1);
   });
 
+  it("repairs a missing environment, re-verifies it, and only then persists", async () => {
+    const order: string[] = [];
+    const verify = vi.fn(async (configured: Project) => {
+      order.push("verify");
+      if (verify.mock.calls.length > 1) return { ok: true as const };
+      const component = configured.components[0];
+      return {
+        ok: false as const,
+        failure: {
+          code: "environment-missing" as const,
+          statement: "A tool this project needs is not installed yet.",
+          target: {
+            component,
+            command: component.commands![0],
+            argv: component.commands![0].argv!,
+          },
+          missingExecutables: ["pnpm"],
+          context: "pnpm did not resolve on the login-shell PATH.",
+        },
+      };
+    });
+    const repair = vi.fn(async () => { order.push("repair"); return true; });
+    let observations = 0;
+    const persist = vi.fn(async () => { order.push("persist"); return true; });
+    const session = createVibeProjectSetupSession(project(), persist, {
+      observe: async () => {
+        observations += 1;
+        return {
+          projectRoot: root,
+          componentRoots: ["/repo/apps/web", "/repo/services/api"],
+          fingerprint: "tree-1",
+          paths: context().existingPaths,
+        };
+      },
+      run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
+      verify,
+      repair,
+      providerIds: context().providerIds,
+    });
+    const ready = new Promise<void>((resolve) => {
+      session.events$.subscribe((event) => {
+        if (event.kind === "ready") resolve();
+      });
+    });
+
+    await ready;
+    expect(order).toEqual(["verify", "repair", "verify", "persist"]);
+    expect(observations).toBe(3);
+    expect(repair).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: "environment-missing",
+        evidence: { context: expect.stringContaining("login-shell PATH") },
+      }),
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
+  });
+
+  it("does not persist when a repair verdict is not followed by a successful proof", async () => {
+    const persist = vi.fn(async () => true);
+    const verify = vi.fn(async (configured: Project) => {
+      const component = configured.components[0];
+      return {
+        ok: false as const,
+        failure: {
+          code: "readiness-failed" as const,
+          statement: "Website did not become ready.",
+          target: {
+            component,
+            command: component.commands![0],
+            argv: component.commands![0].argv!,
+          },
+          missingExecutables: [] as [],
+          context: "The readiness deadline expired.",
+        },
+      };
+    });
+    const session = createVibeProjectSetupSession(project(), persist, {
+      observe: async () => ({
+        projectRoot: root,
+        componentRoots: ["/repo/apps/web", "/repo/services/api"],
+        fingerprint: "tree-1",
+        paths: context().existingPaths,
+      }),
+      run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
+      verify,
+      repair: async () => true,
+      providerIds: context().providerIds,
+    });
+    const failed = new Promise<void>((resolve) => {
+      session.events$.subscribe((event) => {
+        if (event.kind === "reply" && event.text.includes("couldn't finish preparing")) resolve();
+      });
+    });
+
+    await failed;
+    expect(verify).toHaveBeenCalledTimes(2);
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it("keeps a correct survey when an unrelated file was saved while it ran", async () => {
+    // Setup runs while the person is in Build, and a Build turn edits files —
+    // so comparing the proposal's fingerprint against a FRESH observation made
+    // Canopy invalidate its own setup by working. Observed against this
+    // repository: a correct survey rejected for a stylesheet saved a minute
+    // earlier. The echo check must stay pinned to what the agent was handed.
+    const configured: Project[] = [];
+    let observations = 0;
+    const ready = new Promise<void>((resolve) => {
+      const session = createVibeProjectSetupSession(
+        project(),
+        async (next) => { configured.push(next); return true; },
+        {
+          observe: async () => ({
+            projectRoot: root,
+            componentRoots: ["/repo/apps/web", "/repo/services/api"],
+            // The second observation sees a changed tree, as it would after
+            // any save anywhere in the project.
+            fingerprint: (observations += 1) === 1 ? "tree-1" : "tree-2",
+            paths: context().existingPaths,
+          }),
+          run: async () => ({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 }),
+          ...verifiedSessionDeps,
+          providerIds: context().providerIds,
+        },
+      );
+      session.events$.subscribe((event) => {
+        if (event.kind === "ready") resolve();
+      });
+    });
+    await ready;
+    expect(observations).toBe(2);
+    expect(configured).toHaveLength(1);
+  });
+
+  it("does not buy a new model call every time a failed project is remounted", async () => {
+    // A failure used to drop the flight, so the next mount started a fresh
+    // run — and ProjectView remounts on every render pass, HMR update and
+    // switch back. Against a project whose setup keeps failing that is an
+    // unbounded loop of billed model calls, each able to run the full timeout
+    // first. Sixty launches in twenty minutes were observed before this.
+    const deps: VibeProjectSetupSessionDeps = {
+      observe: vi.fn(async () => ({
+        projectRoot: root,
+        componentRoots: ["/repo/apps/web", "/repo/services/api"],
+        fingerprint: "tree-1",
+        paths: context().existingPaths,
+      })),
+      run: vi.fn(async () => ({
+        ok: false as const,
+        reason: "agent-failed" as const,
+        message: "I couldn't determine a safe complete setup for this project.",
+        runId: "setup-run",
+        attempts: 2,
+      })),
+      ...verifiedSessionDeps,
+      providerIds: context().providerIds,
+    };
+
+    const first = createVibeProjectSetupSession(project(), async () => true, deps);
+    const failed = new Promise<void>((resolve) => {
+      first.events$.subscribe((event) => {
+        if (event.kind === "reply" && event.text.includes("couldn't determine")) resolve();
+      });
+    });
+    await failed;
+    expect(deps.run).toHaveBeenCalledTimes(1);
+
+    // Three remounts inside the cooldown. Each one replays the incident; none
+    // of them spends anything.
+    await first.stop();
+    for (let mount = 0; mount < 3; mount += 1) {
+      const again = createVibeProjectSetupSession(project(), async () => true, deps);
+      again.events$.subscribe(() => {});
+      await Promise.resolve();
+      await again.stop();
+    }
+    expect(deps.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps one project-owned setup flight across view switches and an unchanged completed revision", async () => {
+    let finishRun!: (result: VibeProjectSetupTaskResult) => void;
+    const pendingRun = new Promise<VibeProjectSetupTaskResult>((resolve) => {
+      finishRun = resolve;
+    });
+    const deps: VibeProjectSetupSessionDeps = {
+      observe: vi.fn(async () => ({
+        projectRoot: root,
+        componentRoots: ["/repo/apps/web", "/repo/services/api"],
+        fingerprint: "tree-1",
+        paths: context().existingPaths,
+      })),
+      run: vi.fn(async () => pendingRun),
+      ...verifiedSessionDeps,
+      providerIds: context().providerIds,
+    };
+    const persisted: Project[] = [];
+    const persist = vi.fn(async (configured: Project) => {
+      persisted.push(configured);
+      return true;
+    });
+
+    const firstView = createVibeProjectSetupSession(project(), persist, deps);
+    firstView.events$.subscribe(() => {});
+    await vi.waitFor(() => expect(deps.run).toHaveBeenCalledTimes(1));
+
+    // ProjectView cleanup represents both a Strict Mode replay and switching
+    // away. Returning while discovery is live must attach to that same task,
+    // not reserve and launch another one.
+    await firstView.stop();
+    const secondView = createVibeProjectSetupSession(project(), persist, deps);
+    const ready = new Promise<void>((resolve) => {
+      secondView.events$.subscribe((event) => {
+        if (event.kind === "ready") resolve();
+      });
+    });
+    await Promise.resolve();
+    expect(deps.run).toHaveBeenCalledTimes(1);
+
+    finishRun({ ok: true, output: proposal(), runId: "setup-run", attempts: 1 });
+    await ready;
+    expect(persist).toHaveBeenCalledTimes(1);
+
+    // A render with the just-persisted project and the same repository
+    // revision can replay the terminal result, but cannot spend another model
+    // call or race a second persist against the first.
+    const completedProject = persisted[0];
+    expect(completedProject.vibe?.setupRevision).toBe("tree-1");
+    const thirdView = createVibeProjectSetupSession(completedProject, persist, deps);
+    const replayed = new Promise<void>((resolve) => {
+      thirdView.events$.subscribe((event) => {
+        if (event.kind === "ready") resolve();
+      });
+    });
+    await replayed;
+    expect(deps.run).toHaveBeenCalledTimes(1);
+    expect(persist).toHaveBeenCalledTimes(1);
+  });
+
   it("stops plainly on invalid setup instead of falling back to a picker", async () => {
     const replies: string[] = [];
     const done = new Promise<void>((resolve) => {
@@ -488,8 +963,14 @@ describe("non-technical setup surface", () => {
         project(),
         async () => true,
         {
-          observe: async () => ({ projectRoot: root, fingerprint: "tree-1", paths: context().existingPaths }),
+          observe: async () => ({
+            projectRoot: root,
+            componentRoots: ["/repo/apps/web", "/repo/services/api"],
+            fingerprint: "tree-1",
+            paths: context().existingPaths,
+          }),
           run: async () => ({ ok: true, output: { nope: true }, runId: "setup-run", attempts: 1 }),
+          ...verifiedSessionDeps,
           providerIds: context().providerIds,
         },
       );
@@ -502,5 +983,19 @@ describe("non-technical setup surface", () => {
     });
     await done;
     expect(replies.at(-1)).toBe("I couldn't determine a safe complete setup for this project.");
+  });
+});
+
+describe("what the person is told a setup run is doing", () => {
+  it("never puts a shell invocation in a pane that promises no technical steps", () => {
+    // Codex reports a command as its literal argv — /bin/zsh -lc "sed -n
+    // '1,220p' /Users/…" — and forwarding the tool event verbatim printed that
+    // as a chip in Build, directly above the words "No technical steps needed".
+    expect(plainSetupActivity("Shell")).toBe("Looking through your project");
+    expect(plainSetupActivity("canopy_project")).toBe("Checking what Canopy already knows");
+    // Silence for anything unnamed: a tool we have no phrasing for is more
+    // likely jargon than not, and saying nothing beats leaking it.
+    expect(plainSetupActivity("NotebookEdit")).toBeNull();
+    expect(plainSetupActivity("mcp__someone_elses__tool")).toBeNull();
   });
 });

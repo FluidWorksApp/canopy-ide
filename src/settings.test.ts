@@ -3,6 +3,8 @@ import {
   formatHotkey,
   getSettings,
   DEFAULT_DICTATION_HOTKEY,
+  TERMINAL_SCROLLBACK_MAX_ROWS,
+  TERMINAL_SCROLLBACK_MIN_ROWS,
   type Hotkey,
   keyLabel,
   matchesHotkey,
@@ -22,15 +24,22 @@ describe("getSettings / updateSettings", () => {
     expect(s.tabSwitchMode).toBe("recent");
     expect(s.restoreUserClosedSessions).toBe(false);
     expect(s.agentAskForAttention).toBe(false);
+    expect(s.notificationPopupsEnabled).toBe(true);
     expect(s.dictationTriggerMode).toBe("hold");
     expect(s.dictationModKey).toBe("ShiftLeft");
   });
 
-  it("overlays stored values on top of defaults", () => {
+  it("overlays stored values and clamps scrollback to its renderer bound", () => {
     updateSettings({ scrollback: 500 });
     const s = getSettings();
-    expect(s.scrollback).toBe(500);
+    expect(s.scrollback).toBe(TERMINAL_SCROLLBACK_MIN_ROWS);
     expect(s.fontSize).toBe(13); // untouched default still present
+
+    localStorage.setItem(
+      "canopy.settings",
+      JSON.stringify({ scrollback: Number.MAX_SAFE_INTEGER }),
+    );
+    expect(getSettings().scrollback).toBe(TERMINAL_SCROLLBACK_MAX_ROWS);
   });
 
   it("round-trips a patch through localStorage", () => {
@@ -40,6 +49,7 @@ describe("getSettings / updateSettings", () => {
       tabSwitchMode: "order",
       restoreUserClosedSessions: true,
       agentAskForAttention: false,
+      notificationPopupsEnabled: false,
     });
     const s = getSettings();
     expect(s.theme).toBe("gotham");
@@ -47,6 +57,7 @@ describe("getSettings / updateSettings", () => {
     expect(s.tabSwitchMode).toBe("order");
     expect(s.restoreUserClosedSessions).toBe(true);
     expect(s.agentAskForAttention).toBe(false);
+    expect(s.notificationPopupsEnabled).toBe(false);
   });
 
   it("merges successive patches rather than replacing the whole object", () => {

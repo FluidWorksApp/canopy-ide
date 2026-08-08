@@ -32,6 +32,7 @@
 // `recoveryFromAttemptId` so the failover reads as the story it was.
 
 import * as ipc from "./ipc";
+import { rendererIoBudget } from "./ioBudget";
 import { taskEvents, taskGet } from "./taskEnvelopes";
 import type { TaskAttempt, TaskEvent, TaskRouteSnapshot } from "./taskEnvelope";
 import { listTranscript, type TaskTranscriptEntry } from "./taskTranscript";
@@ -371,5 +372,11 @@ export async function loadTaskEvidence(
 /** Read one stored artifact. Separate from `loadTaskEvidence` on purpose: a
  *  turn diff and a screenshot are capped but not small, and fetching every one
  *  of them to render a collapsed row would be paying for what nobody opened. */
-export const readEvidenceArtifact = (id: string): Promise<string> =>
-  ipc.taskArtifactRead(id);
+export const readEvidenceArtifact = (
+  id: string,
+  signal?: AbortSignal,
+): Promise<string> =>
+  rendererIoBudget.run(
+    { scope: "task-evidence", bytes: 2 * 1024 * 1024, signal },
+    () => ipc.taskArtifactRead(id),
+  );

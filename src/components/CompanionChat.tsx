@@ -25,6 +25,10 @@ import {
 } from "../companionContext";
 import { toolDetail, toolLabel } from "../companion";
 import { composerRows, insertNewlineAtCaret, isNewlineChord } from "../composer";
+import {
+  MAX_COMPANION_ATTACHMENT_BYTES,
+  readFileBase64,
+} from "../fileData";
 import { Markdown } from "./Markdown";
 
 interface Props {
@@ -71,6 +75,7 @@ export function CompanionChat({
   const [attaching, setAttaching] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const attachingRef = useRef(false);
+  const attachmentAbortRef = useRef<AbortController | null>(null);
   const log = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
 
@@ -83,6 +88,11 @@ export function CompanionChat({
   // and a click-then-click-again is the one thing a summon must not cost.
   useEffect(() => {
     input.current?.focus();
+    return () => {
+      const controller = attachmentAbortRef.current;
+      attachmentAbortRef.current = null;
+      controller?.abort();
+    };
   }, []);
 
   // Follow the stream.
@@ -114,31 +124,36 @@ export function CompanionChat({
   const attach = async (files: File[]) => {
     if (files.length === 0 || attachingRef.current) return;
     attachingRef.current = true;
+    const controller = new AbortController();
+    attachmentAbortRef.current = controller;
     setAttaching(true);
     setAttachmentError(null);
     const failed: string[] = [];
     try {
       for (const file of files) {
         try {
-          const base64 = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onerror = () => reject(reader.error);
-            reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
-            reader.readAsDataURL(file);
+          const base64 = await readFileBase64(file, {
+            scope: `companion:${spot?.project ?? "global"}`,
+            maxBytes: MAX_COMPANION_ATTACHMENT_BYTES,
+            signal: controller.signal,
           });
           if (!base64) throw new Error("the file was empty");
           const path = await ipc.companionSaveAttachment(file.name, base64);
           setAttachments((prev) => [...prev, { name: file.name, path, type: file.type }]);
         } catch (err) {
+          if (controller.signal.aborted) break;
           failed.push(`${file.name}: ${String(err)}`);
           void ipc.jsLog("warn", `companion: could not attach ${file.name}: ${String(err)}`);
         }
       }
     } finally {
-      attachingRef.current = false;
-      setAttaching(false);
-      setAttachmentError(failed.length ? failed.join("; ") : null);
-      input.current?.focus();
+      if (attachmentAbortRef.current === controller) {
+        attachmentAbortRef.current = null;
+        attachingRef.current = false;
+        setAttaching(false);
+        setAttachmentError(failed.length ? failed.join("; ") : null);
+        input.current?.focus();
+      }
     }
   };
 

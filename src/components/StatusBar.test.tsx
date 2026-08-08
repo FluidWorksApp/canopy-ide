@@ -479,6 +479,43 @@ describe("the tray's branch chip", () => {
   });
 });
 
+describe("the app resource boundary", () => {
+  const publish = (includesWebviews: boolean) => {
+    vi.mocked(ipc.onAppStats).mockImplementation(async (cb) => {
+      cb({
+        cpu: 44,
+        mem_bytes: 2.4 * 1024 ** 3,
+        procs: 93,
+        includes_webviews: includesWebviews,
+      });
+      return () => {};
+    });
+  };
+
+  it("marks the macOS descendant reading as a lower bound and names WebKit", async () => {
+    publish(false);
+    render(<StatusBar {...base} events={[]} />);
+
+    const chip = await screen.findByTitle(/canopy lower bound/);
+    expect(chip.textContent).toContain("≥44% cpu · ≥2.4 GB");
+    expect(chip.getAttribute("title")).toContain("Activity Monitor");
+
+    fireEvent.click(chip);
+    expect(screen.getByText("WebKit layers")).toBeTruthy();
+    expect(screen.getByText("OS-owned · add separately")).toBeTruthy();
+  });
+
+  it("keeps an exact total when the platform process tree includes WebViews", async () => {
+    publish(true);
+    render(<StatusBar {...base} events={[]} />);
+
+    const chip = await screen.findByTitle(/^canopy:/);
+    expect(chip.textContent).toContain("44% cpu · 2.4 GB");
+    expect(chip.textContent).not.toContain("≥");
+    expect(chip.getAttribute("title")).toContain("Includes WebView helper processes");
+  });
+});
+
 // The tray is one line, and this is the only chip whose length is set by how
 // much work is running. Twenty-five agents spelled out ran the width of the
 // window and pushed the branch, the model and the cost off the bar.

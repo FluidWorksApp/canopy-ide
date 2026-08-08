@@ -164,12 +164,6 @@ const JUSTIFYING_FUNCTIONS = [
     enabled: true,
     cost: "the checkpoint gate reads a hardcoded secretScanClean instead of a real scan, so auto-checkpoint is dead code that looks alive",
   },
-  {
-    module: "vibeSecretScan.ts",
-    symbol: "describeSecretFindings",
-    enabled: true,
-    cost: "the sentence explaining that a secret is why a turn was not saved is never said, so the refusal has no reason attached",
-  },
   // The `reconcileCheckpoint` entry that stood here is gone with the function.
   // It was the one case this table could not decide, because the missing piece
   // was not a caller but the whole two-phase protocol; the design call was to
@@ -203,6 +197,28 @@ const JUSTIFYING_FUNCTIONS = [
     symbol: "detectDeployProvider",
     enabled: true,
     cost: "the deploy provider is never detected, because nothing calls the detector",
+  },
+  // The read chain, guarded link by link to the surface. `taskEvents` having a
+  // consumer proves only that taskEvidence.ts exists; unmounting the panel from
+  // TaskHistoryView would leave every guard above green while the ledger went
+  // back to being write-only.
+  {
+    module: "taskEvidence.ts",
+    symbol: "loadTaskEvidence",
+    enabled: true,
+    cost: "the evidence projection exists but no surface mounts it, so the ledger is readable in principle and read by nothing",
+  },
+  {
+    module: "taskEvidence.ts",
+    symbol: "readEvidenceArtifact",
+    enabled: true,
+    cost: "stored artifacts — turn diffs, screenshots, log tails — can never be opened, so kept evidence is kept from everyone",
+  },
+  {
+    module: "components/TaskEvidence.tsx",
+    symbol: "TaskEvidenceFold",
+    enabled: true,
+    cost: "the evidence panel is built but hangs under no row, so nothing a person can click reaches the record",
   },
 ] as const;
 

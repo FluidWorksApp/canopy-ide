@@ -586,6 +586,8 @@ describe("project vibe serialization", () => {
         componentId: "cmp-app",
         runCommandId: "run-dev",
         requiredProcesses: [{ componentId: "cmp-app", runCommandId: "run-dev" }],
+        componentLinks: [],
+        dataStores: [],
         externalServices: [],
       },
     };
@@ -716,11 +718,50 @@ describe("project vibe serialization", () => {
         componentId: "cmp-web",
         runCommandId: "run-dev",
         requiredProcesses: [{ componentId: "cmp-web", runCommandId: "run-dev" }],
+        componentLinks: [],
+        dataStores: [],
         externalServices: [],
       },
     };
 
     expect(normalizeProjectStructure(complete)).toBe(complete);
+  });
+
+  it("resurveys an old setup that omitted a runnable component", () => {
+    const incomplete: Project = {
+      id: "missing-worker",
+      name: "Missing worker",
+      components: [
+        {
+          id: "cmp-web",
+          label: "web",
+          path: "/repo/web",
+          commands: [{ id: "run-web", name: "dev", command: "npm run dev", purpose: "serve" }],
+        },
+        {
+          id: "cmp-worker",
+          label: "worker",
+          path: "/repo/worker",
+          commands: [{ id: "run-worker", name: "work", command: "npm run worker", purpose: "worker" }],
+        },
+      ],
+      vibe: {
+        version: 1,
+        enabled: true,
+        setupRevision: "old-survey",
+        componentId: "cmp-web",
+        runCommandId: "run-web",
+        requiredProcesses: [{ componentId: "cmp-web", runCommandId: "run-web" }],
+        componentLinks: [],
+        dataStores: [],
+        externalServices: [],
+      },
+    };
+
+    expect(normalizeProjectStructure(incomplete).vibe).toEqual({
+      version: 1,
+      enabled: true,
+    });
   });
 
   it("leaves ambiguous legacy references in needs-setup shape", () => {
@@ -827,6 +868,33 @@ describe("project vibe serialization", () => {
 
     expect(normalized.vibe).toEqual({ version: 1, enabled: true });
     expect(normalized.components[0].commands?.[0].id).not.toBe("run-dev");
+  });
+
+  it("normalizes persisted integration observations without dropping them from the project", () => {
+    const project = {
+      id: "integrated",
+      name: "Integrated",
+      components: [],
+      integrations: {
+        version: 1,
+        connections: [{ providerId: "supabase", status: "connected", token: "drop-me" }],
+        resources: [],
+        deployments: [{
+          providerId: "vercel",
+          deploymentId: "deploy-1",
+          status: "connected",
+          url: "https://example.test",
+        }],
+      },
+    } as unknown as Project;
+
+    const normalized = normalizeProjectStructure(project);
+    expect(normalized.integrations?.connections).toEqual([
+      { providerId: "supabase", status: "connected" },
+    ]);
+    expect(normalized.integrations?.deployments[0].url).toBe("https://example.test/");
+    expect(JSON.stringify(normalized.integrations)).not.toContain("drop-me");
+    expect(normalizeProjectStructure(normalized)).toBe(normalized);
   });
 });
 

@@ -43,11 +43,18 @@ import {
 } from "./browserBounds";
 import {
   decodedFrame,
-  frameSrc,
+  frameResource,
+  releaseFrameSrc,
   shouldCapture,
   type PaneState,
   paneState,
 } from "./browserFrame";
+import {
+  adoptBrowserFrame,
+  browserFrameMetrics,
+  releaseBrowserFrame,
+  resetBrowserFrameMetrics,
+} from "./browserFrameMetrics";
 import {
   PAINTED_OVERLAY_SELECTOR,
   isSurface,
@@ -87,8 +94,12 @@ interface Entry {
   shown: boolean | null;
   /** The last picture of the page, shown while the view is hidden. */
   frame: string | null;
+  /** Decoded bytes owned by `frame`; zero when no frame is adopted. */
+  frameBytes: number;
   lastCaptureAt: number;
   capturing: boolean;
+  /** Invalidates an in-flight capture when the underlying page changes. */
+  captureSeq: number;
   /** The page moved on and the held frame is known to be wrong. */
   dirty: boolean;
   told: PaneView | null;
@@ -365,8 +376,8 @@ function apply() {
       if (!visible) {
         e.settled = false;
         // The view just came off screen for an overlay, and the frame in hand
-        // is up to CAPTURE_INTERVAL_MS old. A hidden WKWebView still answers a
-        // snapshot — the web process paints it fresh, on or off screen (see
+        // may predate a page's self-directed changes. A hidden WKWebView still
+        // answers a snapshot — the web process paints it fresh, on or off screen (see
         // snapshot.rs) — so photograph the page as the overlay found it, and
         // the freeze-frame catches up while the overlay is still opening.
         if (e.wanted && !e.capturing) {
@@ -430,24 +441,63 @@ function capture(tabId: string, e: Entry) {
   e.capturing = true;
   e.lastCaptureAt = Date.now();
   const at = e.lastCaptureAt;
+  const captureSeq = e.captureSeq;
   void ipc.browserFrame(tabId).then(
     (base64) => {
-      e.capturing = false;
       const now = Date.now();
+      if (views.get(tabId) !== e) {
+        e.capturing = false;
+        return;
+      }
+      if (e.captureSeq !== captureSeq) {
+        e.capturing = false;
+        schedule();
+        return;
+      }
       if (!base64) {
+        e.capturing = false;
         emitBrowserSignal({ t: "capture", at: now, tabId, result: "empty", ms: now - at });
         return;
       }
       // Decoded before it is adopted: the frame is swapped in at the moment
       // the native view disappears, and an <img> still decoding paints the
       // pane's background instead of the page.
-      const src = frameSrc(base64);
+      let src: string;
+      let frameBytes: number;
+      try {
+        const resource = frameResource(base64);
+        src = resource.src;
+        frameBytes = resource.bytes;
+      } catch (err) {
+        e.capturing = false;
+        emitBrowserSignal({
+          t: "capture",
+          at: now,
+          tabId,
+          result: "failed",
+          ms: now - at,
+          error: String(err),
+        });
+        return;
+      }
+      const decodeAt = Date.now();
       void decodedFrame(src).then(() => {
+        e.capturing = false;
+        if (views.get(tabId) !== e || e.captureSeq !== captureSeq) {
+          releaseFrameSrc(src);
+          if (views.get(tabId) === e) schedule();
+          return;
+        }
+        const previous = e.frame;
+        const previousBytes = e.frameBytes;
         e.dirty = false;
         e.frame = src;
+        e.frameBytes = frameBytes;
         e.lastCaptureOkAt = now;
+        adoptBrowserFrame(previousBytes, frameBytes, Date.now() - decodeAt);
         emitBrowserSignal({ t: "capture", at: now, tabId, result: "ok", ms: now - at });
         publish(tabId, e);
+        if (previous !== src) releaseFrameSrc(previous);
       });
     },
     (err) => {
@@ -456,6 +506,11 @@ function capture(tabId: string, e: Entry) {
       // than nothing is. But a capture that ALWAYS fails is the difference
       // between a frozen page and a blank one, so it is never silent.
       e.capturing = false;
+      if (views.get(tabId) !== e) return;
+      if (e.captureSeq !== captureSeq) {
+        schedule();
+        return;
+      }
       const now = Date.now();
       emitBrowserSignal({
         t: "capture",
@@ -524,9 +579,8 @@ function publish(tabId: string, e: Entry) {
   const frameChanged = !e.told || e.told.frame !== next.frame;
   e.told = next;
   // A fresh frame only matters to a pane that is showing frames. While the
-  // page is live the captures keep arriving every CAPTURE_INTERVAL_MS, and
-  // forwarding each one re-rendered the whole preview for a picture nobody
-  // was looking at.
+  // page is live, an initial/navigation capture is retained for the next hide;
+  // forwarding it would re-render the preview for a picture nobody sees.
   if (!stateChanged && (!frameChanged || next.state !== "frozen")) return;
   if (stateChanged) {
     emitBrowserSignal({
@@ -548,13 +602,21 @@ function publish(tabId: string, e: Entry) {
 export function browserViewChanged(tabId: string, loading?: boolean) {
   const e = views.get(tabId);
   if (!e) return;
+  e.captureSeq++;
   e.dirty = true;
   e.lastNavAt = Date.now();
   emitBrowserSignal({ t: "nav", at: e.lastNavAt, tabId, loading: !!loading });
   if (loading !== undefined) e.loading = loading;
   // A new page's old frame is worse than none — it would freeze the page the
   // user just navigated away from.
-  if (loading) e.frame = null;
+  if (loading) {
+    const previous = e.frame;
+    const previousBytes = e.frameBytes;
+    e.frame = null;
+    e.frameBytes = 0;
+    releaseFrameSrc(previous);
+    releaseBrowserFrame(previousBytes);
+  }
   schedule();
 }
 
@@ -617,9 +679,9 @@ function tick() {
  *  --peek-in, which is the slowest transition in the app. */
 const SWEEP_MS = 600;
 const SWEEP_STEP_MS = 60;
-/** A page nobody is touching still has to be captured, and the DOM is silent
- *  while it is being read. Slow, because all it guards against is a frame going
- *  stale — and it only runs while a view is actually on screen. */
+/** A page nobody is touching still needs its host geometry and occlusion state
+ *  checked because native child views can outlive DOM signals. Slow, and only
+ *  armed while a view is actually on screen. */
 const HEARTBEAT_MS = 1000;
 
 let sweepUntil = 0;
@@ -673,14 +735,19 @@ function watch(need: boolean) {
 const MOTION = ["transitionrun", "transitionstart", "transitionend", "animationstart", "animationend"];
 
 export function registerBrowserView(tabId: string, host: () => Element | null) {
+  const previous = views.get(tabId);
+  releaseFrameSrc(previous?.frame);
+  releaseBrowserFrame(previous?.frameBytes ?? 0);
   views.set(tabId, {
     host,
     wanted: false,
     bounds: null,
     shown: null,
     frame: null,
+    frameBytes: 0,
     lastCaptureAt: 0,
     capturing: false,
+    captureSeq: 0,
     dirty: true,
     told: null,
     forced: 0,
@@ -694,9 +761,39 @@ export function registerBrowserView(tabId: string, host: () => Element | null) {
 }
 
 export function forgetBrowserView(tabId: string) {
+  const entry = views.get(tabId);
+  releaseFrameSrc(entry?.frame);
+  releaseBrowserFrame(entry?.frameBytes ?? 0);
   views.delete(tabId);
   emitBrowserSignal({ t: "forget", at: Date.now(), tabId });
   schedule();
+}
+
+/** Drop only reconstructable freeze-frame copies owned by views that are
+ * already hidden. Native pages and visible placeholders are untouched; a
+ * future show captures a fresh frame. */
+export function releaseHiddenBrowserFrames(): {
+  frames: number;
+  bytes: number;
+} {
+  let frames = 0;
+  let bytes = 0;
+  for (const [tabId, entry] of views) {
+    if (entry.wanted && entry.shown !== false) continue;
+    if (!entry.frame && entry.frameBytes === 0) continue;
+    entry.captureSeq += 1;
+    entry.dirty = true;
+    const previous = entry.frame;
+    const previousBytes = entry.frameBytes;
+    entry.frame = null;
+    entry.frameBytes = 0;
+    releaseFrameSrc(previous);
+    releaseBrowserFrame(previousBytes);
+    publish(tabId, entry);
+    frames += 1;
+    bytes += previousBytes;
+  }
+  return { frames, bytes };
 }
 
 /** What every registered view believes about itself, for anything watching.
@@ -736,6 +833,7 @@ provideViewSnapshots((): ViewSnapshot[] => {
 export function browserPageChanged(tabId: string) {
   const e = views.get(tabId);
   if (!e) return;
+  e.captureSeq++;
   e.dirty = true;
   schedule();
 }
@@ -919,10 +1017,15 @@ export function useBrowserEngine(): BrowserEngine | null {
 
 /** Test seam: drop all state between cases. */
 export function resetBrowserHost() {
+  for (const e of views.values()) releaseFrameSrc(e.frame);
   views.clear();
+  resetBrowserFrameMetrics();
   suppressed = 0;
   setNativeSurface(null);
   if (scheduled) window.clearTimeout(scheduled);
   scheduled = 0;
   watch(false);
 }
+
+/** Constant-size renderer-side ownership/decode metrics for diagnostics. */
+export { browserFrameMetrics };

@@ -20,10 +20,11 @@
       "startsTurn": ["UserPromptSubmit"],
       "toolActivity": ["PostToolUse"],
       "structuredBlock": ["PermissionRequest"],
+      "dwellStructuredBlock": true,
       "notification": "none",
       "needsTrust": true,
       "verifiedAt": "2026-08-03",
-      "$note": "PermissionRequest is structural. Native hooks need one-time /hooks trust; the legacy notify fallback now routes through canopy-hook, so it is gated, normalized and pty-stamped rather than writing the bus directly."
+      "$note": "PermissionRequest is structural, but Codex auto mode may resolve it immediately; the shared ladder therefore requires the configured dwell before promoting it. Native hooks need one-time /hooks trust; the legacy notify fallback now routes through canopy-hook, so it is gated, normalized and pty-stamped rather than writing the bus directly."
     },
     {
       "id": "agy",

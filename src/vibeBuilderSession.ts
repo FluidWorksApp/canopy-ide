@@ -18,7 +18,7 @@ import {
 import type { TaskReservation } from "./taskEnvelope";
 import type { TaskAttemptSettlement } from "./taskEnvelope";
 import { appendTranscript } from "./taskTranscript";
-import { fleetGate } from "./fleetState";
+import { fleetGate, fleetState } from "./fleetState";
 import { redactSecrets } from "./vibeSecretScan";
 import {
   proposeAbstraction,
@@ -31,13 +31,17 @@ import {
 } from "./vibeAbstractionRunner";
 import { parseVibeIntent, type VibeIntent } from "./vibeIntent";
 import { PUBLISH_CONFIRMATION, detectDeployProvider } from "./vibeDeploy";
-import { providerById } from "./vibeServices";
+import { providerById, providerMcpToolAllowances } from "./vibeServices";
 import { probeCli, type CliProbeDeps } from "./vibeCliProbe";
 import { inspectFleetRoute } from "./fleetSnapshot";
 import { choicesFor } from "./modelCatalog";
 import { AGENT_CLIS, checkCliUpdates, checkInstalledClis } from "./projects";
+import type { Component, ComponentRole, RunCommand, VibeConfig } from "./projects";
+import type { RepairProblem } from "./vibeRepair";
+import type { VibeRepairTaskInput, VibeRepairTaskResult } from "./vibeRepairSession";
 import { DEFAULT_PROFILE, launchEnvSync, launchProfile } from "./profiles";
-import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
+import { getSettings } from "./settings";
+import { grantFor } from "./workspaceAuthority";
 import {
   FAMILY_FOR_CLI,
   failoverDecision,
@@ -54,10 +58,14 @@ import {
   recordAutoCheckpointObserved,
 } from "./vibeAutoCheckpoint";
 import {
-  describeSecretFindings,
   scanDiffForSecrets,
   type SecretScanResult,
 } from "./vibeSecretScan";
+import {
+  vibeRequestMode,
+  vibeToolChangesProject,
+  type VibeRequestMode,
+} from "./vibeRequestMode";
 import {
   checkpointDecision,
   type CheckpointContext,
@@ -65,6 +73,7 @@ import {
 import {
   capturedNetworkObservation,
   judgeVerification,
+  type CapturedNetworkRequest,
   type ObservationKind,
   type VerificationContract,
   type VerificationObservation,
@@ -73,9 +82,17 @@ import {
 import type {
   BuilderQuestion,
   BuilderQuestionAction,
+  BuilderSendOptions,
   BuilderSession,
   BuilderSessionState,
 } from "./vibeBuilderSessionTypes";
+import {
+  buildRouteRecoveryActions,
+  parseRouteRecoveryResponse,
+  routeRecoveryResponse,
+  type VibeRouteRecoveryAction,
+  type VibeRouteRecoveryResult,
+} from "./vibeRouteRecovery";
 
 const SAVE_CHECKPOINT = "Save this version";
 /** Sentinels a question's own buttons send back. Deliberately not words anyone
@@ -87,6 +104,7 @@ const HARNESS_VERSION = "vibe-mvp-1";
 const PROMPT_VERSION = "vibe-builder-1";
 const TOOL_POLICY_VERSION = "workspace-write-no-shell-1";
 const VIBE_ATTEMPT_CAP = 3;
+const BROWSER_EVIDENCE_TAIL_CHARS = 8_000;
 const ROUTE_VERSIONS = {
   harnessVersion: HARNESS_VERSION,
   promptVersion: PROMPT_VERSION,
@@ -107,7 +125,28 @@ export interface VibeBuilderSessionOptions {
    *  leaves a permanently `incomplete` turn looking like a Canopy fault rather
    *  than a missing script the user can add in one line. */
   checkCaveat?: string | null;
+  /** The project's other component directories. Writable alongside the
+   *  component's own root: a monorepo change that stops at one package is not
+   *  a change, and a project's own components are not "somewhere else". */
+  siblingPaths?: readonly string[];
+  /** Everything the survey established this component can run, so a repair
+   *  agent prefers the project's own commands over inventing its own. */
+  componentCommands?: readonly RunCommand[];
+  /** Complete setup graph. Build and repair use it to follow work across UI,
+   * API, worker and data boundaries instead of treating the preview folder as
+   * the whole application. */
+  projectComponents?: readonly Component[];
+  requiredProcesses?: NonNullable<VibeConfig["requiredProcesses"]>;
+  componentLinks?: NonNullable<VibeConfig["componentLinks"]>;
+  dataStores?: NonNullable<VibeConfig["dataStores"]>;
+  externalServices?: NonNullable<VibeConfig["externalServices"]>;
   previewTabId(): string | null;
+  /** Perform a recovery offered by the no-route card. ProjectView owns the UI
+   * side effects (terminal tabs, profiles and Settings); the session owns the
+   * decision and outcome card so every pipeline state still exits visibly. */
+  recoverRoute?(
+    action: VibeRouteRecoveryAction,
+  ): Promise<VibeRouteRecoveryResult>;
 }
 
 export interface TurnBaseline {
@@ -125,6 +164,12 @@ export interface CheckRunResult {
 export interface BrowserInspection {
   observations: VerificationObservation[];
   screenshot?: string | null;
+  /** Full error messages, not the one-line observation summary. */
+  consoleErrors?: string[];
+  /** Capped console transcript from before and after verification's reload. */
+  consoleTail?: string;
+  failedRequests?: CapturedNetworkRequest[];
+  pageUrl?: string;
 }
 
 export interface VibeServerIncidentInput {
@@ -143,6 +188,34 @@ export interface VibeServerIncidentInput {
   present?: boolean;
   /** Captured once at observation time and retained across persistence retries. */
   activeAttempt?: { runId: string; attemptId: string } | null;
+  /** What the caller knows about the crashing component, handed to repair so
+   *  the troubleshooter starts from facts rather than rediscovery. Optional:
+   *  an incident with no context still gets repaired, from the log alone. */
+  component?: { label: string; path: string; role?: ComponentRole };
+  /** Every command the survey attached to that component — the repair agent
+   *  must prefer these over inventing its own. */
+  commands?: RunCommand[];
+  /** The crashing command itself, by name and spelling. */
+  command?: { name: string; command: string };
+}
+
+export interface VibeServerStartupInput
+  extends Omit<
+    VibeServerIncidentInput,
+    "exitCode" | "crashTimes" | "automaticRestarts"
+  > {
+  reason: "interactive-prompt" | "readiness-timeout";
+  /** The prompt class is evidence for the repair agent, never an instruction
+   * to type a guessed answer. */
+  promptCode?: string;
+}
+
+export interface VibeManagedProcessFailureInput
+  extends Omit<
+    VibeServerIncidentInput,
+    "crashTimes" | "automaticRestarts"
+  > {
+  kind: "setup" | "runtime";
 }
 
 export interface CheckpointReview {
@@ -209,6 +282,11 @@ export interface VibeBuilderSessionDeps {
   reserveAttempt: typeof reserveAttempt;
   /** Every route Canopy could launch this turn on, with its fleet state. */
   listRoutes(): Promise<RouteCandidate[]>;
+  /** Runs one repair task for a reported problem. Injectable so tests never
+   *  launch an agent; the default dynamic-imports the runtime, because a
+   *  static import of vibeRepairSession → vibeProjectSetup → this module
+   *  would close a cycle at init time. */
+  repair?(input: VibeRepairTaskInput): Promise<VibeRepairTaskResult>;
   /** Installed version of a CLI, or null when it cannot be probed. */
   cliVersion(cli: string): Promise<string | null>;
   /** Everything the managed-abstraction planners need to judge a request:
@@ -349,12 +427,18 @@ async function inspectNativeBrowser(
   if (!tabId) return unknownBrowser(at, visual, "no project preview is available");
   const before = await ipc.browserHere(tabId).catch(() => null);
   if (!before?.url) return unknownBrowser(at, visual, "the project preview has not loaded a route");
-  const turnNetwork = networkScoped
-    ? await ipc.browserRunOp(tabId, { op: "network", lines: 300 }).catch(() => null)
-    : null;
-  const beforeDocument = await ipc
-    .browserRunOp(tabId, { op: "eval", code: "performance.timeOrigin" })
-    .catch(() => null);
+  // Snapshot both volatile rings before reload. The page owns these buffers;
+  // navigation destroys them, which used to erase the exact error the person
+  // had just seen before verification could judge it.
+  const [turnNetwork, beforeConsole, beforeDocument] = await Promise.all([
+    networkScoped
+      ? ipc.browserRunOp(tabId, { op: "network", lines: 300 }).catch(() => null)
+      : null,
+    ipc.browserRunOp(tabId, { op: "console", lines: 300 }).catch(() => null),
+    ipc
+      .browserRunOp(tabId, { op: "eval", code: "performance.timeOrigin" })
+      .catch(() => null),
+  ]);
   const beforeOrigin = (beforeDocument?.data as { result?: number } | undefined)
     ?.result;
   const reloaded = await ipc.browserNavigate(tabId, null, "reload").then(
@@ -427,12 +511,33 @@ async function inspectNativeBrowser(
   ];
 
   const consoleAck = await ipc
-    .browserRunOp(tabId, { op: "console", lines: 100 })
+    .browserRunOp(tabId, { op: "console", lines: 300 })
     .catch(() => null);
-  const consoleData = consoleAck?.data as
-    | { messages?: { level?: string; text?: string }[] }
-    | undefined;
-  if (!consoleAck?.done || !consoleAck.ok || !Array.isArray(consoleData?.messages)) {
+  type ConsoleMessage = { level?: string; text?: string };
+  const readConsole = (ack: typeof consoleAck): ConsoleMessage[] | null => {
+    const data = ack?.data as { messages?: ConsoleMessage[] } | undefined;
+    return ack?.done && ack.ok && Array.isArray(data?.messages) ? data.messages : null;
+  };
+  const beforeMessages = readConsole(beforeConsole);
+  const afterMessages = readConsole(consoleAck);
+  const consoleMessages = [...(beforeMessages ?? []), ...(afterMessages ?? [])];
+  const consoleErrors = [...new Set(
+    consoleMessages
+      .filter((message) => message.level === "error")
+      .map((message) => message.text?.trim() || "Unknown browser error"),
+  )];
+  const consoleTail = consoleMessages
+    .map((message) => `[${message.level ?? "log"}] ${message.text ?? ""}`.trimEnd())
+    .join("\n")
+    .slice(-BROWSER_EVIDENCE_TAIL_CHARS);
+  if (consoleErrors.length > 0) {
+    observations.push({
+      kind: "console",
+      verdict: "fail",
+      note: `${consoleErrors.length} console error${consoleErrors.length === 1 ? "" : "s"} (first: ${consoleErrors[0]})`,
+      at,
+    });
+  } else if (!beforeMessages || !afterMessages) {
     observations.push({
       kind: "console",
       verdict: "unknown",
@@ -440,13 +545,10 @@ async function inspectNativeBrowser(
       at,
     });
   } else {
-    const errors = consoleData.messages.filter((message) => message.level === "error");
     observations.push({
       kind: "console",
-      verdict: errors.length ? "fail" : "pass",
-      note: errors.length
-        ? `${errors.length} console error${errors.length === 1 ? "" : "s"} (first: ${errors[0].text ?? "unknown"})`
-        : "no console errors",
+      verdict: "pass",
+      note: "no console errors",
       at,
     });
   }
@@ -476,6 +578,12 @@ async function inspectNativeBrowser(
         data!.total! <= data!.requests!.length,
     );
   const requests = captures.flatMap(({ data }) => data?.requests ?? []);
+  const failedRequests = requests.filter(
+    (request) =>
+      Boolean(request.error) ||
+      request.status === 0 ||
+      (typeof request.status === "number" && request.status >= 400),
+  );
   observations.push(
     networkComplete
       ? capturedNetworkObservation(requests, at)
@@ -508,7 +616,14 @@ async function inspectNativeBrowser(
       });
     }
   }
-  return { observations, screenshot };
+  return {
+    observations,
+    screenshot,
+    consoleErrors,
+    consoleTail,
+    failedRequests,
+    pageUrl: here.url,
+  };
 }
 
 const normalized = (path: string) => path.replaceAll("\\", "/").replace(/\/$/, "");
@@ -619,17 +734,31 @@ async function reviewGitCheckpoint(args: {
  *  are candidates — a route whose family we cannot name cannot be ranked. */
 async function listNativeRoutes(): Promise<RouteCandidate[]> {
   const installed = await checkInstalledClis();
+  const preferred = getSettings().defaultAgent;
+  // rankFleet is deliberately stable within a health tier. Put the person's
+  // preferred agent first here, at the only native candidate source, so Build
+  // turns, project discovery, and repair all share the same primary route.
+  // Fleet health can still demote an exhausted/unhealthy preference, and
+  // evidence-classified route failure can still fail over afterwards.
+  const families = Object.entries(FAMILY_FOR_CLI).sort(
+    ([left], [right]) => Number(right === preferred) - Number(left === preferred),
+  );
   const candidates = await Promise.all(
-    Object.entries(FAMILY_FOR_CLI).map(async ([cli, family]) => {
+    families.map(async ([cli, family]) => {
       const def = AGENT_CLIS.find((c) => c.id === cli);
-      if (!def || installed[def.bin] !== true) return null;
+      if (!def) return null;
       const profileId = launchProfile(cli) ?? DEFAULT_PROFILE;
-      const snapshot = await inspectFleetRoute(def, profileId, installed);
+      // A missing binary's verdict is complete from the install probe alone.
+      // Do not add account, plan and hook IPC to the path whose whole job is
+      // to make the Install action appear quickly.
+      const state = installed[def.bin] === true
+        ? (await inspectFleetRoute(def, profileId, installed)).state
+        : fleetState({ agent: cli, profile: profileId, installed: false });
       return {
         cli,
         profileId,
         family,
-        state: snapshot.state,
+        state,
         choices: choicesFor(family),
       } satisfies RouteCandidate;
     }),
@@ -677,13 +806,16 @@ async function nativeAbstractionContext(
   cwd: string,
   intent: VibeIntent,
 ): Promise<AbstractionContext> {
-  const [entries, status, worktrees, pkg] = await Promise.all([
+  const [entries, status, worktrees, pkg, mcpServers] = await Promise.all([
     ipc.fsReadDir(cwd).then((list) => list.map((e) => e.name)),
     ipc.gitStatus(cwd).catch(() => null),
     ipc.gitWorktrees(cwd).catch(() => []),
     ipc.fsReadFile(`${cwd}/package.json`)
       .then((bytes) => JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>)
       .catch(() => null),
+    intent.kind === "link"
+      ? ipc.mcpServers([cwd]).catch(() => [])
+      : Promise.resolve([]),
   ]);
 
   const record = (value: unknown): Record<string, string> =>
@@ -762,6 +894,10 @@ async function nativeAbstractionContext(
     linkBin ? probeCli(linkBin, nativeCliProbeDeps) : Promise.resolve(false),
     deployBin ? probeCli(deployBin, nativeCliProbeDeps) : Promise.resolve(false),
   ]);
+  const linkProvider = intent.kind === "link" ? providerById(intent.provider) : undefined;
+  const toolAllowances = intent.kind === "link"
+    ? providerMcpToolAllowances(intent.provider, mcpServers)
+    : [];
 
   return {
     cwd,
@@ -771,6 +907,11 @@ async function nativeAbstractionContext(
     dependencies: record(pkg?.dependencies),
     devDependencies: record(pkg?.devDependencies),
     link: {
+      linkedReaches: toolAllowances.length > 0
+        ? [linkProvider?.reach.includes("mcp") ? "mcp" : "api"]
+        : [],
+      toolAllowances,
+      accountLinkAvailable: Boolean(linkProvider?.account),
       cliInstalled: linkCliPresent,
       authenticated: false,
       presentSecrets: [],
@@ -869,23 +1010,6 @@ function verificationSummary(
   }`;
 }
 
-const refusalText: Record<string, string> = {
-  "shared-or-converted-dirty": "this is not a dedicated isolated worktree",
-  "dirty-at-start": "the checkout already had changes when the turn began",
-  "lineage-moved": "the branch moved during the turn",
-  "paths-contested": "another session claims one of the changed paths",
-  "secrets-flagged": "the changed lines look like they contain a credential",
-  "incident-open": "a safety incident is still open",
-  "not-verified": "the required verification is not fully green",
-};
-
-/** What the reader is told when the policy said yes and the gate still held.
- *  Deliberately about Canopy, not about their change: nothing is wrong with the
- *  turn, and a message that implied otherwise would train someone to distrust a
- *  verified result. */
-const FIRST_CHECKPOINT_DETAIL =
-  "everything required passed, but Canopy has never saved a version automatically on this computer — the first one is yours to confirm, and after that verified turns save themselves";
-
 export class VibeBuilderSession implements BuilderSession {
   private pendingAbstraction: {
     proposal: Extract<AbstractionProposal, { kind: "run" }>;
@@ -900,6 +1024,16 @@ export class VibeBuilderSession implements BuilderSession {
    *  session that is stopped mid-`vercel --prod` leaves that deploy running
    *  with no owner left to stop it. */
   private runningAbstraction: AbstractionHandle | null = null;
+  /** Provider tools are admitted only after an explicit link request and only
+   *  when an enabled MCP config names that provider. The account server keeps
+   *  the credential; Build receives a tool prefix, never a token. */
+  private linkedServiceToolAllowances = new Set<string>();
+  private activeServiceAccess: {
+    provider: string;
+    accountLabel: string;
+    linked: boolean;
+    cliFallback: string | null;
+  } | null = null;
   private snapshot: BuilderSessionState = { persona: { kind: "idle" }, question: null };
   private listeners = new Set<(event: StructuredRunnerEvent) => void>();
   private reservation: TaskReservation | null = null;
@@ -913,6 +1047,10 @@ export class VibeBuilderSession implements BuilderSession {
   private runtimeIncidentOpen = false;
   private settled = false;
   private stopped = false;
+  /** Changes whenever a new turn starts or the current one is cancelled. Async
+   * verification and launch work must still belong to this value before they
+   * are allowed to present anything. */
+  private turnEpoch = 0;
   private closedAttempts = new Set<string>();
   private hasRun = false;
   private cliSessionId: string;
@@ -938,6 +1076,10 @@ export class VibeBuilderSession implements BuilderSession {
   private lastVerification: VerificationOutcome = "incomplete";
   /** The message being worked on, replayed verbatim onto a reseeded attempt. */
   private currentGoal: string | null = null;
+  /** A question does not become build work merely because it was asked in
+   * Build mode. Explicit editor events can still promote it to a change. */
+  private currentTurnMode: VibeRequestMode = "change";
+  private currentTurnChanged = false;
   /** The surface metadata this run was reserved with. Held whole because
    *  `taskUpdateMetadata` replaces the blob rather than patching it, so the
    *  summary can only be added by rewriting what was there. */
@@ -1043,19 +1185,38 @@ export class VibeBuilderSession implements BuilderSession {
    *  nothing and the route tuple is a literal. */
   private async resolveRouteForLaunch(): Promise<SelectedRoute> {
     const candidates = await this.deps.listRoutes();
-    const eligible = rankRoutes(candidates, "build");
+    const eligible = rankRoutes(candidates, "build", this.options.cliId);
     const chosen = eligible[0];
     if (!chosen) {
       // Say which of the two reasons it was, because "no agent available" sends
       // someone to the wrong place half the time.
       const gated = candidates.filter((c) => !fleetGate(c.state).allowed);
-      throw new Error(
+      const message =
         gated.length === candidates.length && candidates.length > 0
           ? `No agent is ready to build right now: ${gated
               .map((c) => `${c.cli} (${fleetGate(c.state).why})`)
               .join(", ")}`
-          : "No agent with a usable model is available to build right now.",
+          : "No agent with a usable model is available to build right now.";
+      const detail = candidates.length > 0
+        ? candidates
+            .map((candidate) => {
+              const gate = fleetGate(candidate.state);
+              return `${candidate.cli}: ${gate.why ?? "no usable model is configured"}`;
+            })
+            .join("\n")
+        : "No supported coding agent is installed and ready yet.";
+      const actions = buildRouteRecoveryActions(candidates, AGENT_CLIS);
+      this.present(
+        { kind: "idle" },
+        {
+          id: `vibe-no-route-${this.deps.now()}`,
+          kind: "question",
+          prompt: "I need a coding agent before I can make this change.",
+          detail,
+          actions,
+        },
       );
+      throw new Error(message);
     }
     const cliVersion = await this.deps
       .cliVersion(chosen.cli)
@@ -1075,6 +1236,7 @@ export class VibeBuilderSession implements BuilderSession {
       // exist in the store at all.
       const chosen = await this.resolveRouteForLaunch();
       const contract = contractFor(goal);
+      const requestMode = vibeRequestMode(goal);
       const route = this.routeSnapshot();
       this.turnMetadata = this.historyMetadata(goal, chosen.cli);
       const reservation = await this.deps.reserve({
@@ -1083,14 +1245,20 @@ export class VibeBuilderSession implements BuilderSession {
         componentId: this.options.componentId,
         worktreePath: this.options.componentPath,
         goal,
-        acceptance: [
-          "Implement the requested change in the selected component.",
-          "Report configured-check and local-preview evidence independently.",
-        ],
+        acceptance:
+          requestMode === "question"
+            ? [
+                "Answer the question using the project and preview as evidence.",
+                "Do not change the project unless the person asks for a change.",
+              ]
+            : [
+                "Implement the requested change in the selected component.",
+                "Report configured-check and local-preview evidence independently.",
+              ],
         contextSummary: `Build mode in ${this.options.projectName}`,
         riskClass: "reversible",
         authorityPolicy: {
-          writes: "workspace",
+          writes: requestMode === "question" ? "denied" : "workspace",
           shell: "denied",
           verification: contract,
         },
@@ -1114,7 +1282,11 @@ export class VibeBuilderSession implements BuilderSession {
         if (this.stopped) throw new Error("the builder session was closed during launch");
         const transport = await this.deps.runner.start(
           reservation.attempt.attemptId,
-          "claude",
+          // The route's CLI, not a fixed one. launch.bin already comes from
+          // chosen.cli, so naming a different id here ran one CLI's binary
+          // under another's argv the moment the fleet resolved to anything but
+          // Claude.
+          chosen.cli,
           launch,
           {
             emit: (event) =>
@@ -1156,9 +1328,58 @@ export class VibeBuilderSession implements BuilderSession {
     return queued;
   }
 
-  send(text: string): Promise<void> {
+  private async recoverRoute(action: VibeRouteRecoveryAction): Promise<void> {
+    const recover = this.options.recoverRoute;
+    if (!recover) {
+      this.present(
+        { kind: "idle" },
+        {
+          id: `vibe-route-recovery-unavailable-${this.deps.now()}`,
+          kind: "question",
+          prompt: "I couldn't open that recovery action.",
+          detail: "Open Settings → Agents to install, sign in, or repair the coding agent.",
+        },
+      );
+      return;
+    }
+
+    this.present({ kind: "turn-progress" }, null);
+    let result: VibeRouteRecoveryResult;
+    try {
+      result = await recover(action);
+    } catch (error) {
+      result = {
+        ok: false,
+        prompt: "I couldn't finish that agent setup step.",
+        detail: String(error),
+      };
+    }
+    this.present(
+      { kind: "idle" },
+      {
+        id: `vibe-route-recovery-${this.deps.now()}`,
+        kind: result.ok ? "notice" : "question",
+        prompt: result.prompt,
+        detail: result.detail,
+        actions: result.ok
+          ? undefined
+          : [
+              {
+                label: "Agent settings & binary path",
+                response: routeRecoveryResponse({ kind: "agent-settings" }),
+              },
+            ],
+      },
+    );
+  }
+
+  send(text: string, options?: BuilderSendOptions): Promise<void> {
     const message = text.trim();
     if (!message || this.stopped) return Promise.resolve();
+    const routeRecovery = parseRouteRecoveryResponse(message);
+    if (routeRecovery) {
+      return this.enqueue(() => this.recoverRoute(routeRecovery));
+    }
     if (message === SAVE_CHECKPOINT && this.pendingCheckpoint) {
       return this.enqueue(() => this.saveCheckpoint());
     }
@@ -1173,6 +1394,12 @@ export class VibeBuilderSession implements BuilderSession {
       return this.enqueue(() => this.answerAbstraction(message));
     }
     const intent = parseVibeIntent(message);
+    // Linking a service changes the application, so the Build agent owns the
+    // actual turn. Canopy still performs the secret-safety preflight below,
+    // but the old path stopped at a generated five-step guide and never sent
+    // the person's request anywhere. The guide then appeared as a question
+    // even though it contained no single thing a person could answer.
+    if (intent?.kind === "link") return this.sendLinkTurn(intent, message);
     if (intent) {
       return this.enqueue(() => this.proposeIntent(intent, message));
     }
@@ -1182,7 +1409,79 @@ export class VibeBuilderSession implements BuilderSession {
       sent = resolve;
       failed = reject;
     });
-    const queued = this.sendQueue.then(() => this.runTurn(message, sent, failed));
+    const queued = this.sendQueue.then(() =>
+      this.runTurn(message, sent, failed, options?.context),
+    );
+    this.sendQueue = queued.catch(() => {});
+    return accepted;
+  }
+
+  /** Preflight a service link, then give the original request to the agent.
+   *
+   * A tracked env file remains a hard stop: the agent must not get a turn that
+   * can write credentials into git. A safe project continues as an ordinary
+   * Build turn instead of rendering the planner's internal checklist. */
+  private sendLinkTurn(
+    intent: Extract<VibeIntent, { kind: "link" }>,
+    message: string,
+  ): Promise<void> {
+    let sent!: () => void;
+    let failed!: (error: unknown) => void;
+    const accepted = new Promise<void>((resolve, reject) => {
+      sent = resolve;
+      failed = reject;
+    });
+    const queued = this.sendQueue.then(async () => {
+      if (this.stopped) {
+        sent();
+        return;
+      }
+      let proposal: AbstractionProposal;
+      try {
+        const context = await this.deps.abstractionContext(this.options.componentPath, intent);
+        proposal = proposeAbstraction(
+          intent,
+          context,
+          this.lastVerification,
+        );
+        for (const allowance of context.link.toolAllowances ?? []) {
+          this.linkedServiceToolAllowances.add(allowance);
+        }
+        const provider = providerById(intent.provider);
+        this.activeServiceAccess = {
+          provider: intent.provider,
+          accountLabel: provider?.account?.label ?? provider?.label ?? intent.provider,
+          linked: (context.link.linkedReaches?.length ?? 0) > 0,
+          cliFallback: provider?.cli?.bin ?? null,
+        };
+      } catch {
+        this.present(
+          { kind: "idle" },
+          {
+            id: `vibe-link-preflight-${this.deps.now()}`,
+            kind: "notice",
+            prompt: "I couldn't check whether this project can store the connection safely.",
+            detail: `Nothing has changed. You asked: "${message}"`,
+          },
+        );
+        sent();
+        return;
+      }
+      if (proposal.kind === "refuse") {
+        this.present(
+          { kind: "idle" },
+          {
+            id: `vibe-link-refused-${this.deps.now()}`,
+            kind: "notice",
+            prompt: proposal.title,
+            detail: proposal.detail,
+          },
+        );
+        sent();
+        return;
+      }
+      await this.runTurn(message, sent, failed);
+    });
     this.sendQueue = queued.catch(() => {});
     return accepted;
   }
@@ -1212,7 +1511,7 @@ export class VibeBuilderSession implements BuilderSession {
         { kind: "idle" },
         {
           id: `vibe-abstraction-${this.deps.now()}`,
-          kind: "question",
+          kind: "notice",
           prompt: "I couldn't read enough about this project to plan that.",
           detail: `Nothing has changed. You asked: "${message}"`,
         },
@@ -1229,7 +1528,7 @@ export class VibeBuilderSession implements BuilderSession {
         { kind: "idle" },
         {
           id: `vibe-abstraction-${this.deps.now()}`,
-          kind: "question",
+          kind: "notice",
           prompt: proposal.title,
           detail: proposal.detail,
         },
@@ -1385,9 +1684,9 @@ export class VibeBuilderSession implements BuilderSession {
         { kind: "incident" },
         {
           id: `vibe-server-${input.componentId}-${input.runCommandId}`,
-          kind: "question",
-          prompt: "The app server keeps stopping.",
-          detail: "I stopped restarting it. The failed run keeps the server output for inspection.",
+          kind: "notice",
+          prompt: `The ${input.component?.label ?? "project"} process keeps stopping.`,
+          detail: "I'm reading its output to find out why.",
         },
       );
     }
@@ -1475,6 +1774,14 @@ export class VibeBuilderSession implements BuilderSession {
         failureClass: "watchdog",
         failureCode: "vibe-server-crash-loop",
       });
+      // Recording is not the response — it is the evidence for one. The log
+      // tail now goes to a repair agent that reads it, acts inside the
+      // component, and asks before anything destructive. Not awaited: the
+      // incident is recorded either way, and repair reports through present().
+      if (input.present !== false) void this.repairServerProblem(input, logTail, {
+        code: "server-crash-loop",
+        statement: (label) => `The ${label} process keeps stopping moments after it starts.`,
+      });
       if (input.present === false) this.serverIncidentKeys.delete(input.key);
       return settled ? "recorded" : "recorded-unsettled";
     } catch {
@@ -1488,6 +1795,244 @@ export class VibeBuilderSession implements BuilderSession {
         });
       }
       return "failed";
+    }
+  }
+
+  /** A live PTY can still be a failed start: package runners, authentication,
+   * and project pickers all wait forever while the process remains healthy.
+   * The supervisor passes the terminal tail here so the same repair agent that
+   * handles crashes can research a supported unattended path and verify it. */
+  async reportServerStartupStall(input: VibeServerStartupInput): Promise<void> {
+    if (this.serverIncidentKeys.has(input.key)) return;
+    this.serverIncidentKeys.add(input.key);
+    this.serverIncidentOpen = true;
+    this.incidentOpen = true;
+    this.present(
+      { kind: "incident" },
+      {
+        id: `vibe-startup-${input.componentId}-${input.runCommandId}`,
+        kind: "notice",
+        prompt: `The ${input.component?.label ?? "project"} process is waiting instead of starting.`,
+        detail: "I'm reading its terminal output and checking the supported unattended setup.",
+      },
+    );
+    const logTail = await Promise.resolve(input.logTail).catch(() => "");
+    if (this.stopped) return;
+    void this.repairServerProblem(
+      {
+        ...input,
+        exitCode: null,
+        crashTimes: [],
+        automaticRestarts: 0,
+      },
+      logTail,
+      {
+        code: "server-start-failed",
+        statement: (label) =>
+          input.reason === "interactive-prompt"
+            ? `The ${label} process is alive but its terminal is waiting for interactive input instead of becoming ready.`
+            : `The ${label} process stayed alive but did not reach its declared readiness signal.`,
+        context: [
+          `Startup observation: ${input.reason}`,
+          input.promptCode ? `Prompt class: ${input.promptCode}` : null,
+          "Research the CLI's supported non-interactive flags or API path before responding. Do not guess account, project, environment, credential, or destructive answers.",
+        ].filter(Boolean).join(". "),
+      },
+    );
+  }
+
+  /** A managed command exiting non-zero is already a repair problem. Waiting
+   * for two blind restarts loses the first failure's evidence, while treating
+   * setup as a toast leaves the server permanently gated. Both enter the same
+   * repair loop as startup stalls, with the supervisor's terminal tail. */
+  async reportManagedProcessFailure(
+    input: VibeManagedProcessFailureInput,
+  ): Promise<void> {
+    this.serverIncidentOpen = true;
+    this.incidentOpen = true;
+    const label = input.component?.label ?? "project";
+    this.present(
+      { kind: "incident" },
+      {
+        id: `vibe-process-${input.componentId}-${input.runCommandId}`,
+        kind: "notice",
+        prompt: "Something needed fixing — I'm on it.",
+        detail:
+          input.kind === "setup"
+            ? `I'm reading why ${label} couldn't finish getting ready.`
+            : `I'm reading why the ${label} process stopped.`,
+      },
+    );
+    const logTail = await Promise.resolve(input.logTail).catch(() => "");
+    if (this.stopped) return;
+    void this.repairServerProblem(
+      {
+        ...input,
+        crashTimes: [],
+        automaticRestarts: 0,
+      },
+      logTail,
+      {
+        code: input.kind === "setup" ? "setup-failed" : "runtime-error",
+        statement: (componentLabel) =>
+          input.kind === "setup"
+            ? `The ${componentLabel} setup command exited before it finished successfully.`
+            : `The ${componentLabel} process exited with an error.`,
+        context: `Managed process state: failed. This was the first observed non-zero exit; diagnose it before attempting another start.`,
+      },
+    );
+  }
+
+  /** Keys with a repair underway, so a re-reported incident cannot stack a
+   *  second agent onto the same broken server. */
+  private repairsInFlight = new Set<string>();
+
+  private repairTopology(): NonNullable<RepairProblem["topology"]> {
+    return {
+      components: (this.options.projectComponents ?? []).map((component) => ({
+        id: component.id,
+        label: component.label,
+        path: component.path,
+        ...(component.role ? { role: component.role } : {}),
+        commands: component.commands ?? [],
+      })),
+      requiredProcesses: [...(this.options.requiredProcesses ?? [])],
+      componentLinks: [...(this.options.componentLinks ?? [])],
+      dataStores: [...(this.options.dataStores ?? [])],
+      externalServices: [...(this.options.externalServices ?? [])],
+    };
+  }
+
+  /** Resolve repair through one production-safe seam. Keeping the import lazy
+   *  avoids vibeRepairSession → vibeProjectSetup → this module closing a cycle
+   *  during initialization, while still letting tests inject a deterministic
+   *  repair agent. */
+  private repairDependency(): NonNullable<VibeBuilderSessionDeps["repair"]> {
+    if (this.deps.repair) return this.deps.repair;
+    return async (repairInput: VibeRepairTaskInput): Promise<VibeRepairTaskResult> => {
+      const [runtime, setup] = await Promise.all([
+        import("./vibeRepairSession"),
+        import("./vibeProjectSetup"),
+      ]);
+      return runtime.runVibeRepairTask(
+        repairInput,
+        setup.DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS,
+      );
+    };
+  }
+
+  /** The troubleshooter. Where reportServerIncident files evidence, this
+   *  spends it: a repair agent gets the log tail, the component, and every
+   *  command the survey found, diagnoses, acts inside the component, and asks
+   *  the person (canopy_ask_user) before anything destructive. Its verdict is
+   *  spoken in Build's own voice — never "the server keeps stopping" with
+   *  nothing behind it. */
+  private async repairServerProblem(
+    input: VibeServerIncidentInput,
+    logTail: string,
+    incident: {
+      code: RepairProblem["code"];
+      statement: (label: string) => string;
+      context?: string;
+    },
+  ): Promise<void> {
+    if (this.stopped || this.repairsInFlight.has(input.key)) return;
+    this.repairsInFlight.add(input.key);
+    try {
+      const component = {
+        id: input.componentId,
+        label: input.component?.label ?? this.options.projectName,
+        path: input.component?.path ?? this.options.componentPath,
+        ...(input.component?.role ? { role: input.component.role } : {}),
+      };
+      const problem: RepairProblem = {
+        code: incident.code,
+        statement: incident.statement(component.label),
+        projectId: this.options.projectId,
+        projectName: this.options.projectName,
+        component,
+        ...(input.command
+          ? { runCommand: { id: input.runCommandId, ...input.command } }
+          : {}),
+        commands: input.commands ?? [],
+        topology: this.repairTopology(),
+        evidence: {
+          logTail,
+          exitCode: input.exitCode,
+          crashCount: input.crashTimes.length,
+          ...(incident.context ? { context: incident.context } : {}),
+        },
+      };
+      const repair = this.repairDependency();
+      let result: VibeRepairTaskResult;
+      try {
+        result = await repair({ problem });
+      } catch {
+        // A runner rejection is a failed repair, not an unhandled rejection
+        // from this fire-and-forget path. Let the next crash try again.
+        this.serverIncidentKeys.delete(input.key);
+        result = {
+          ok: false,
+          reason: "agent-failed",
+          message: "I tried to fix it and couldn't finish.",
+          runId: null,
+        };
+      }
+      if (this.stopped) return;
+      if (result.ok && result.verdict.fixed) {
+        this.serverIncidentOpen = false;
+        this.incidentOpen = false;
+        this.resolveServerIncident(input.key);
+        this.present(
+          { kind: "idle" },
+          {
+            id: `vibe-repair-fixed-${input.componentId}-${this.deps.now()}`,
+            kind: "notice",
+            prompt: "Found it and fixed it.",
+            detail: [
+              result.verdict.diagnosis,
+              ...result.verdict.actions.map((action) => action.did),
+            ].join(" "),
+          },
+        );
+      } else if (result.ok) {
+        this.present(
+          { kind: "incident" },
+          {
+            id: `vibe-repair-blocked-${input.componentId}-${this.deps.now()}`,
+            kind: "question",
+            prompt: "I found what's wrong, and I need your help with one thing.",
+            detail: [result.verdict.diagnosis, result.verdict.blocker]
+              .filter(Boolean)
+              .join(" "),
+          },
+        );
+      } else {
+        const failedPrompt =
+          incident.code === "server-start-failed"
+            ? "The project process still hasn't started."
+            : incident.code === "setup-failed"
+              ? "The project still isn't ready."
+              : incident.code === "runtime-error"
+                ? "The project process still isn't running."
+                : "The app server keeps stopping.";
+        this.present(
+          { kind: "incident" },
+          {
+            id: `vibe-repair-failed-${input.componentId}-${this.deps.now()}`,
+            kind: "question",
+            prompt: failedPrompt,
+            detail:
+              incident.code === "server-start-failed" ||
+              incident.code === "setup-failed" ||
+              incident.code === "runtime-error"
+                ? `${result.message} The run keeps its terminal output for inspection.`
+                : `${result.message} The failed run keeps the server output for inspection.`,
+          },
+        );
+      }
+    } finally {
+      this.repairsInFlight.delete(input.key);
     }
   }
 
@@ -1549,19 +2094,35 @@ export class VibeBuilderSession implements BuilderSession {
     message: string,
     sent: () => void,
     failed: (error: unknown) => void,
+    context?: string,
   ): Promise<void> {
+    const evidence = context?.trim();
+    const agentMessage = evidence
+      ? `${message}\n\nLive preview context:\n${evidence}`
+      : message;
+    const turnEpoch = ++this.turnEpoch;
     try {
       if (this.verifying) await this.verifying;
+      if (turnEpoch !== this.turnEpoch) {
+        sent();
+        return;
+      }
       if (this.stopped) throw new Error("the builder session is closed");
       this.pendingCheckpoint = null;
       // Held so a reseeded attempt replays the same request verbatim. A
       // failover that paraphrased the goal would be solving a different
       // problem than the one that failed.
-      this.currentGoal = message;
+      this.currentGoal = agentMessage;
+      this.currentTurnMode = vibeRequestMode(message);
+      this.currentTurnChanged = false;
       this.attemptsUsed = 1;
       this.attemptHistory = [];
       this.lastRunnerError = "";
       const transport = await this.ensureStarted(message);
+      if (turnEpoch !== this.turnEpoch) {
+        sent();
+        return;
+      }
       if (this.stopped) throw new Error("the builder session is closed");
       const reservation = this.reservation;
       if (!reservation) throw new Error("the builder task was not reserved");
@@ -1591,12 +2152,16 @@ export class VibeBuilderSession implements BuilderSession {
       const completed = new Promise<void>((resolve) => {
         this.finishTurn = resolve;
       });
-      await transport.send(message);
+      await transport.send(agentMessage);
       sent();
       await completed;
     } catch (error) {
       this.finishTurn?.();
       this.finishTurn = null;
+      if (turnEpoch !== this.turnEpoch) {
+        sent();
+        return;
+      }
       failed(error);
       throw error;
     }
@@ -1619,6 +2184,7 @@ export class VibeBuilderSession implements BuilderSession {
         this.snapshot = { ...this.snapshot, persona: { kind: "turn-progress" } };
         break;
       case "tool":
+        if (vibeToolChangesProject(event.name)) this.currentTurnChanged = true;
         this.snapshot = { ...this.snapshot, persona: { kind: "turn-progress" } };
         if (reservation) {
           void this.persist(() =>
@@ -1686,8 +2252,15 @@ export class VibeBuilderSession implements BuilderSession {
         if (this.verifying) return;
         this.hasRun = true;
         this.publish(event);
-        this.verifying = this.verifyTurn()
+        const turnEpoch = this.turnEpoch;
+        let verification!: Promise<void>;
+        verification = (
+          this.currentTurnMode === "question" && !this.currentTurnChanged
+            ? this.finishQuestionTurn(turnEpoch)
+            : this.verifyTurn(turnEpoch)
+        )
           .catch((error) => {
+            if (turnEpoch !== this.turnEpoch) return;
             this.runtimeIncidentOpen = true;
             this.incidentOpen = true;
             this.snapshot = {
@@ -1703,10 +2276,12 @@ export class VibeBuilderSession implements BuilderSession {
             void this.finishAttempt("failed", "verification", "verification-error");
           })
           .finally(() => {
-            this.verifying = null;
+            if (this.verifying === verification) this.verifying = null;
+            if (turnEpoch !== this.turnEpoch) return;
             this.finishTurn?.();
             this.finishTurn = null;
           });
+        this.verifying = verification;
         return;
       case "exit":
         this.transport = null;
@@ -1724,16 +2299,57 @@ export class VibeBuilderSession implements BuilderSession {
     this.publish(event);
   }
 
-  private async verifyTurn(): Promise<void> {
+  /** Finish an explanation without pretending it changed the product. */
+  private async finishQuestionTurn(turnEpoch: number): Promise<void> {
+    const reservation = this.reservation;
+    if (!reservation || this.stopped || turnEpoch !== this.turnEpoch) return;
+    const answerSummary = this.assistant.trim().replace(/\s+/g, " ").slice(0, 240);
+    await this.flushAssistant();
+    if (this.stopped || turnEpoch !== this.turnEpoch) return;
+    await this.recordTurnSummary(
+      reservation.envelope.runId,
+      answerSummary || "Answered the question.",
+    );
+    this.present({ kind: "verify-passed" }, null);
+    this.publish({ kind: "turnEnd" });
+    await this.finishAttempt("completed");
+  }
+
+  private async retainBrowserScreenshot(
+    browser: BrowserInspection,
+    runId: string,
+    attemptId: string,
+  ): Promise<void> {
+    if (!browser.screenshot) return;
+    const screenshot = await this.deps
+      .writeArtifact({
+        runId,
+        attemptId,
+        kind: "preview-screenshot-base64",
+        content: browser.screenshot,
+      })
+      .catch(() => null);
+    const observation = browser.observations.find(
+      (candidate) => candidate.kind === "screenshot",
+    );
+    if (observation && screenshot) observation.evidence = screenshot.id;
+    else if (observation) {
+      observation.verdict = "unknown";
+      observation.note = "the screenshot could not be retained as evidence";
+    }
+  }
+
+  private async verifyTurn(turnEpoch: number): Promise<void> {
     const reservation = this.reservation;
     const baseline = this.baseline;
-    if (!reservation || !baseline || this.stopped) return;
+    if (!reservation || !baseline || this.stopped || turnEpoch !== this.turnEpoch) return;
     const runId = reservation.envelope.runId;
     const attemptId = reservation.attempt.attemptId;
     const goal = reservation.envelope.title ?? reservation.envelope.runId;
     const contract = contractFor(goal);
 
     await this.flushAssistant();
+    if (turnEpoch !== this.turnEpoch) return;
 
     this.present({ kind: "verify-running" }, null);
     const at = this.deps.now();
@@ -1742,6 +2358,7 @@ export class VibeBuilderSession implements BuilderSession {
       this.options.componentPath,
       at,
     );
+    if (turnEpoch !== this.turnEpoch) return;
     // With no command to run, the default note ("no configured check command is
     // available") describes Canopy's state rather than the user's: it never
     // says the turn stays unverified until a check script exists, which is the
@@ -1762,26 +2379,11 @@ export class VibeBuilderSession implements BuilderSession {
       at,
       this.networkScoped,
     );
-    if (browser.screenshot) {
-      const screenshot = await this.deps
-        .writeArtifact({
-          runId,
-          attemptId,
-          kind: "preview-screenshot-base64",
-          content: browser.screenshot,
-        })
-        .catch(() => null);
-      const observation = browser.observations.find(
-        (candidate) => candidate.kind === "screenshot",
-      );
-      if (observation && screenshot) observation.evidence = screenshot.id;
-      else if (observation) {
-        observation.verdict = "unknown";
-        observation.note = "the screenshot could not be retained as evidence";
-      }
-    }
+    if (turnEpoch !== this.turnEpoch) return;
+    await this.retainBrowserScreenshot(browser, runId, attemptId);
+    if (this.stopped || turnEpoch !== this.turnEpoch) return;
     const observations = [check.observation, ...browser.observations];
-    if (this.stopped) return;
+    if (this.stopped || turnEpoch !== this.turnEpoch) return;
     for (const observation of observations) {
       await this.deps.appendEvent({
         runId,
@@ -1794,7 +2396,82 @@ export class VibeBuilderSession implements BuilderSession {
         occurredAt: observation.at,
       });
     }
-    const verdict = judgeVerification(contract, observations);
+    let verdict = judgeVerification(contract, observations);
+    const browserFailed = browser.observations.some(
+      (observation) =>
+        (observation.kind === "console" || observation.kind === "network") &&
+        observation.verdict === "fail",
+    );
+    if (verdict.outcome === "failed" && browserFailed) {
+      const reinspected = await this.repairRuntimeBrowserFailure(
+        browser,
+        goal,
+        at,
+        turnEpoch,
+      );
+      if (this.stopped || turnEpoch !== this.turnEpoch) return;
+      if (reinspected) {
+        await this.retainBrowserScreenshot(reinspected, runId, attemptId);
+        if (this.stopped || turnEpoch !== this.turnEpoch) return;
+        for (const observation of reinspected.observations) {
+          const current = observations.findIndex(
+            (candidate) => candidate.kind === observation.kind,
+          );
+          if (current >= 0) observations[current] = observation;
+          else observations.push(observation);
+          await this.deps.appendEvent({
+            runId,
+            attemptId,
+            kind: "verification.observation",
+            code: observation.kind,
+            source: "canopy",
+            confidence: observation.verdict,
+            metadata: observation,
+            occurredAt: observation.at,
+          });
+        }
+        this.runtimeIncidentOpen = reinspected.observations.some(
+          (observation) => observation.verdict === "fail",
+        );
+        this.incidentOpen = this.serverIncidentOpen || this.runtimeIncidentOpen;
+        verdict = judgeVerification(contract, observations);
+      }
+    }
+    // A failed check is not a result to report. It is a problem to solve.
+    //
+    // This is the hole the person kept falling into: Canopy ran `pnpm run
+    // build`, it exited 1, the captured output said in plain English
+    // "node_modules missing, did you mean to install?" — and Canopy wrote that
+    // to an artifact and told them "Verification found a problem". It had the
+    // fault, the fix and the authority, and used none of them, because repair
+    // was wired only to a server crashing three times.
+    if (verdict.outcome === "failed" && check.observation.verdict === "fail" && check.output) {
+      const retried = await this.repairFailedCheck(check.output, at, turnEpoch);
+      if (turnEpoch !== this.turnEpoch || this.stopped) return;
+      if (retried) {
+        observations[0] = retried.observation;
+        if (retried.output) {
+          const artifact = await this.deps
+            .writeArtifact({ runId, attemptId, kind: "check-output", content: retried.output })
+            .catch(() => null);
+          if (artifact) retried.observation.evidence = artifact.id;
+        }
+        // The second observation is filed alongside the first rather than
+        // replacing it. Both happened, and a ledger that only kept the ending
+        // could not show that anything was repaired.
+        await this.deps.appendEvent({
+          runId,
+          attemptId,
+          kind: "verification.observation",
+          code: retried.observation.kind,
+          source: "canopy",
+          confidence: retried.observation.verdict,
+          metadata: retried.observation,
+          occurredAt: retried.observation.at,
+        });
+        verdict = judgeVerification(contract, observations);
+      }
+    }
     // Held so a later "deploy this" is judged against evidence that actually
     // exists. Without it the deploy planner is handed a constant, and a
     // constant is a claim nothing observed.
@@ -1815,7 +2492,7 @@ export class VibeBuilderSession implements BuilderSession {
       verification: verdict.outcome,
       noOpenIncident: !this.incidentOpen,
     });
-    if (this.stopped) return;
+    if (this.stopped || turnEpoch !== this.turnEpoch) return;
     const safeReview = {
       ...review,
       context: {
@@ -1824,14 +2501,6 @@ export class VibeBuilderSession implements BuilderSession {
       },
     };
     const decision = checkpointDecision(safeReview.context);
-    // The policy is one gate; whether the unattended commit has ever run here
-    // is another. "Never executed" and "unverified" are the same state — see
-    // vibeAutoCheckpoint — so until a checkpoint has actually happened on this
-    // machine the commit is PROPOSED rather than made. The decision, the paths,
-    // the baseline and the reasons are recorded either way: this holds the git
-    // write, it does not weaken the evidence.
-    const armed = this.deps.autoCheckpointObserved();
-    const held = decision.checkpoint && !armed;
     let summary = verificationSummary(
       contract,
       observations,
@@ -1840,12 +2509,17 @@ export class VibeBuilderSession implements BuilderSession {
     );
     this.pendingCheckpoint = null;
 
-    if (decision.checkpoint && armed && review.paths.length > 0) {
+    // A reversible checkpoint that passed every policy gate is Canopy's job,
+    // not a Git decision to delegate to someone in Build mode. The successful
+    // commit itself arms future observations; no first-run confirmation card
+    // is needed.
+    if (decision.checkpoint && review.paths.length > 0) {
       const commit = await this.deps.commit(
         review.repoRoot,
         review.paths,
         `vibe: ${goal.slice(0, 72)}`,
       );
+      if (turnEpoch !== this.turnEpoch) return;
       await this.deps.appendEvent({
         runId,
         attemptId,
@@ -1855,6 +2529,7 @@ export class VibeBuilderSession implements BuilderSession {
         confidence: "independent",
         metadata: { commit, paths: review.paths },
       });
+      this.deps.recordAutoCheckpointObserved();
       summary += " Saved this verified version automatically.";
       this.present({ kind: "checkpoint-saved" }, null);
     } else if (review.paths.length > 0) {
@@ -1875,10 +2550,8 @@ export class VibeBuilderSession implements BuilderSession {
       await this.deps.appendEvent({
         runId,
         attemptId,
-        // A held checkpoint is not a refused one: the policy said yes. Recording
-        // it as `refused` would put a reason in the ledger that nothing found.
-        kind: held ? "checkpoint.held" : "checkpoint.refused",
-        code: held ? "auto-checkpoint-never-observed" : (reasons[0] ?? "policy"),
+        kind: "checkpoint.refused",
+        code: reasons[0] ?? "policy",
         source: "canopy",
         confidence: "independent",
         metadata: {
@@ -1899,31 +2572,14 @@ export class VibeBuilderSession implements BuilderSession {
           paths: review.paths,
         },
       });
-      const secretDetail =
-        !decision.checkpoint && review.secrets && !review.secrets.clean
-          ? describeSecretFindings(review.secrets.findings)
-          : "";
+      // A refused checkpoint remains fully auditable in Engineer mode, but it
+      // is not a product decision and offers no useful action in Build. Retry
+      // it after later work without turning internal Git bookkeeping into a
+      // conversation card.
       this.present(
         verdict.outcome === "failed" ? { kind: "verify-failed" } : { kind: "verify-passed" },
-        {
-          id: `checkpoint-${attemptId}-${this.deps.now()}`,
-          kind: "confirm",
-          prompt: held
-            ? "This is the first version I'd save here."
-            : "This turn was not auto-saved.",
-          detail: held
-            ? FIRST_CHECKPOINT_DETAIL
-            : [
-                reasons.map((reason) => refusalText[reason] ?? reason).join("; "),
-                secretDetail,
-              ]
-                .filter(Boolean)
-                .join(" "),
-          diff: review.diff,
-          actions: [{ label: "Save this version", response: SAVE_CHECKPOINT }],
-        },
+        null,
       );
-      if (held) summary += ` I haven't saved it — ${FIRST_CHECKPOINT_DETAIL}.`;
     } else {
       this.present(
         verdict.outcome === "verified"
@@ -1939,6 +2595,7 @@ export class VibeBuilderSession implements BuilderSession {
       kind: "system",
       body: summary,
     });
+    if (turnEpoch !== this.turnEpoch) return;
     // The task panels show a run by its summary line; without this a Build turn
     // reads "No summary reported." next to a full evidence ledger.
     await this.recordTurnSummary(runId, summary);
@@ -1947,6 +2604,198 @@ export class VibeBuilderSession implements BuilderSession {
     await this.finishAttempt(
       verdict.outcome === "verified" ? "completed" : "blocked",
     );
+  }
+
+  /** Give a browser failure to the same repair agent used for setup and
+   *  server failures, then inspect the exact preview route once more. The
+   *  caller keeps both inspections in the ledger and independently re-judges
+   *  them; a repair agent's `fixed` field is never treated as proof. */
+  private async repairRuntimeBrowserFailure(
+    browser: BrowserInspection,
+    goal: string,
+    at: number,
+    turnEpoch: number,
+  ): Promise<BrowserInspection | null> {
+    if (this.stopped || turnEpoch !== this.turnEpoch) return null;
+    const failed = browser.observations.filter(
+      (observation) =>
+        (observation.kind === "console" || observation.kind === "network") &&
+        observation.verdict === "fail",
+    );
+    if (failed.length === 0) return null;
+
+    this.present(
+      { kind: "incident" },
+      {
+        id: `vibe-browser-repair-${this.deps.now()}`,
+        kind: "notice",
+        prompt: "Something in the preview broke.",
+        detail: "I'm checking the browser evidence to find out why.",
+      },
+    );
+    const component = this.options.projectComponents?.find(
+      (candidate) => candidate.id === this.options.componentId,
+    );
+    const problem: RepairProblem = {
+      code: "runtime-error",
+      statement: `The embedded preview for ${this.options.projectName} showed a runtime error.`,
+      projectId: this.options.projectId,
+      projectName: this.options.projectName,
+      component: {
+        id: this.options.componentId,
+        label: component?.label ?? this.options.projectName,
+        path: component?.path ?? this.options.componentPath,
+        ...(component?.role ? { role: component.role } : {}),
+      },
+      commands: [...(component?.commands ?? this.options.componentCommands ?? [])],
+      topology: this.repairTopology(),
+      evidence: {
+        ...(browser.pageUrl ? { pageUrl: browser.pageUrl } : {}),
+        ...(browser.consoleTail ? { consoleTail: browser.consoleTail } : {}),
+        ...(browser.failedRequests?.length
+          ? { failedRequests: browser.failedRequests }
+          : {}),
+        context: failed.map((observation) => observation.note).join(" "),
+      },
+    };
+    const result = await this.repairDependency()({ problem }).catch(() => null);
+    if (this.stopped || turnEpoch !== this.turnEpoch) return null;
+    if (!result?.ok || !result.verdict.fixed) {
+      this.runtimeIncidentOpen = true;
+      this.incidentOpen = true;
+      const detail = result?.ok
+        ? [result.verdict.diagnosis, result.verdict.blocker].filter(Boolean).join(" ")
+        : result?.message ?? "I couldn't finish diagnosing the preview error.";
+      this.present(
+        { kind: "incident" },
+        {
+          id: `vibe-browser-repair-blocked-${this.deps.now()}`,
+          kind: "question",
+          prompt: "I found a preview problem that still needs attention.",
+          detail,
+        },
+      );
+      return null;
+    }
+
+    this.present(
+      { kind: "verify-running" },
+      {
+        id: `vibe-browser-repair-fixed-${this.deps.now()}`,
+        kind: "notice",
+        prompt: "Fixed it — checking the preview again.",
+        detail: result.verdict.diagnosis,
+      },
+    );
+    const reinspectAt = Math.max(at + 1, this.deps.now());
+    const reinspected = await this.deps
+      .inspectBrowser(
+        this.options.previewTabId(),
+        visualTask(goal),
+        reinspectAt,
+        this.networkScoped,
+      )
+      .catch(() => null);
+    if (!reinspected && !this.stopped && turnEpoch === this.turnEpoch) {
+      this.runtimeIncidentOpen = true;
+      this.incidentOpen = true;
+      this.present(
+        { kind: "incident" },
+        {
+          id: `vibe-browser-reinspect-blocked-${this.deps.now()}`,
+          kind: "question",
+          prompt: "I made a fix, but couldn't check the preview again.",
+          detail: "The preview inspection stopped before it could confirm the result.",
+        },
+      );
+    }
+    return reinspected;
+  }
+
+  /** Hand a failed check to a repair agent, and if it says it fixed something,
+   *  run the check again so the claim is tested rather than believed.
+   *
+   *  Returns the second check when one was run, or null when repair did not
+   *  happen or reported that it could not fix it. The caller re-judges; this
+   *  never decides the turn's verdict itself.
+   *
+   *  Nothing here is a retry of the same command in the hope of a different
+   *  answer — that is the pattern the person named as the whole problem
+   *  ("run the command, it fails three times, say it failed"). The command is
+   *  only run a second time because something in between actually changed. */
+  private async repairFailedCheck(
+    output: string,
+    at: number,
+    turnEpoch: number,
+  ): Promise<CheckRunResult | null> {
+    if (this.stopped) return null;
+    this.present(
+      { kind: "incident" },
+      {
+        id: `vibe-check-repair-${this.deps.now()}`,
+        kind: "notice",
+        prompt: "That didn't work yet.",
+        detail: "I'm reading the error to find out why.",
+      },
+    );
+    const problem: RepairProblem = {
+      code: "setup-failed",
+      statement: `The project's own check command failed for ${this.options.projectName}.`,
+      projectId: this.options.projectId,
+      projectName: this.options.projectName,
+      component: {
+        id: this.options.componentId,
+        label: this.options.projectName,
+        path: this.options.componentPath,
+      },
+      commands: [...(this.options.componentCommands ?? [])],
+      topology: this.repairTopology(),
+      evidence: {
+        logTail: output,
+        context: this.options.checkCommand
+          ? `The command was: ${
+              Array.isArray(this.options.checkCommand)
+                ? this.options.checkCommand.join(" ")
+                : this.options.checkCommand
+            }`
+          : undefined,
+      },
+    };
+    const repair = this.repairDependency();
+    const result = await repair({ problem }).catch(() => null);
+    if (this.stopped || turnEpoch !== this.turnEpoch) return null;
+    if (!result?.ok || !result.verdict.fixed) {
+      // Say what was learned even when it could not be fixed. "It failed" and
+      // "it failed, here is why, and here is what stopped me" are different
+      // messages to someone who cannot read the log themselves.
+      const verdictText = result?.ok
+        ? [result.verdict.diagnosis, result.verdict.blocker].filter(Boolean).join(" ")
+        : null;
+      if (verdictText) {
+        this.present(
+          { kind: "incident" },
+          {
+            id: `vibe-check-repair-blocked-${this.deps.now()}`,
+            kind: "question",
+            prompt: "I found what's wrong, and I need your help with one thing.",
+            detail: verdictText,
+          },
+        );
+      }
+      return null;
+    }
+    this.present(
+      { kind: "verify-running" },
+      {
+        id: `vibe-check-repair-fixed-${this.deps.now()}`,
+        kind: "notice",
+        prompt: "Fixed it — checking again.",
+        detail: result.verdict.diagnosis,
+      },
+    );
+    return this.deps
+      .runCheck(this.options.checkCommand ?? null, this.options.componentPath, at)
+      .catch(() => null);
   }
 
   /** One launch spec for both the first attempt and any reseeded one, so a
@@ -1958,27 +2807,64 @@ export class VibeBuilderSession implements BuilderSession {
     model: string | null,
     cli: string,
   ): StructuredRunnerLaunch {
+    // Authority is not decided here any more — see workspaceAuthority.ts. It
+    // was, and the answer was wrong in a way that capped what Build could be:
+    // "do not use a shell" meant a turn could add a dependency to package.json
+    // and had no way on earth to install it, so the change it had just written
+    // could not run and the person was shown `node_modules missing, did you
+    // mean to install?`. Making something work is the job, and a job whose
+    // tools stop at editing text cannot do it.
+    const workspace = {
+      root: this.options.componentPath,
+      siblings: this.options.siblingPaths ?? [],
+    };
+    const grant =
+      this.currentTurnMode === "question"
+        ? grantFor("survey", workspace)
+        : grantFor("build", workspace);
     return {
       bin: AGENT_CLIS.find((c) => c.id === cli)?.bin ?? this.options.cliBin,
       policy: {
         systemPromptAppend:
-          `You are the Build-mode executor for ${this.options.projectName}. ` +
-          `Work only inside ${this.options.componentPath}. Use Edit, Write, Read, Grep and Glob; ` +
-          "do not use a shell. Explain outcomes in plain language. Canopy runs verification independently.",
-        permissionMode: "acceptEdits",
+          `You are the Build-mode collaborator for ${this.options.projectName}. ` +
+          `The project components and their observed runtime/data topology are ${JSON.stringify({
+            components: (this.options.projectComponents ?? []).map((component) => ({
+              id: component.id,
+              label: component.label,
+              path: component.path,
+              role: component.role,
+              commands: component.commands,
+            })),
+            requiredProcesses: this.options.requiredProcesses ?? [],
+            componentLinks: this.options.componentLinks ?? [],
+            dataStores: this.options.dataStores ?? [],
+            externalServices: this.options.externalServices ?? [],
+            activeServiceAccess: this.activeServiceAccess,
+          })}. Follow the person's intent exactly across the listed components. ` +
+          "If they ask a question, investigate and answer it without changing the project. " +
+          "If they ask for a change, make it actually run: create or update every affected component, preserve database schema changes as migrations, install what it needs, build it, and check your own work. " +
+          "Test database changes locally when a local workflow exists. For a managed provider, prefer an already-linked account API or provider MCP tool over a shell CLI. If no account route is linked, use canopy_ask_user to ask the person to link their provider account; if account linking is unavailable or they decline, use the provider's authenticated CLI as the fallback. Never ask them to paste a long-lived provider access token into chat. Never push a managed database migration merely because Build opened; inspect migration status and ask explicitly before changing remote schema or data, whether the operation uses an API, MCP tool, or CLI. " +
+          "Explain outcomes in plain language — the person reading you does not read stack traces. " +
+          "Canopy runs verification independently.",
+        permissionMode: grant.permissionMode,
         // The whole sidecar, not the three tools someone thought of. Nobody is
         // sitting in this session to answer a prompt, and a Build turn reaches
         // well past starting a server — it waits on a port, restarts, opens the
         // preview and reads the console back. See agentTools.ts.
-        allowedTools: [CANOPY_MCP_ALLOWANCE],
-        disallowedTools: ["Bash", "KillShell", "NotebookEdit"],
+        allowedTools: [...new Set([
+          ...grant.allowedTools,
+          ...this.linkedServiceToolAllowances,
+        ])],
+        disallowedTools: grant.disallowedTools,
+        network: grant.network,
+        writableRoots: grant.writableRoots,
         // The model the route asked for, actually applied — it becomes
         // `--model`/`-m` at launch. Recording a requestedModel we never passed
         // would make the attempt record fiction.
         model: model ?? "",
         sessionId: this.cliSessionId,
         cwd: this.options.componentPath,
-        authority: "workspace-write",
+        authority: grant.authority,
       },
       env: [
         // The route this attempt is recorded against names a profile
@@ -2174,11 +3060,9 @@ export class VibeBuilderSession implements BuilderSession {
         this.pendingCheckpoint = { review: refreshed, verification: pending.verification };
         this.present(this.snapshot.persona, {
           id: `checkpoint-changed-${reservation.attempt.attemptId}-${this.deps.now()}`,
-          kind: "confirm",
-          prompt: "The diff changed after you reviewed it.",
-          detail: "Review the updated diff, then choose Save this version again.",
-          diff: refreshed.diff,
-          actions: [{ label: "Save this version", response: SAVE_CHECKPOINT }],
+          kind: "notice",
+          prompt: "The project changed while I was saving it.",
+          detail: "I left everything as-is. Canopy will try the checkpoint again after the next change.",
         });
         return;
       }
@@ -2233,6 +3117,63 @@ export class VibeBuilderSession implements BuilderSession {
       .then(() => true)
       .catch(() => false);
     if (settled) this.settled = true;
+  }
+
+  async cancelCurrentTurn(): Promise<void> {
+    if (this.stopped) return;
+    const reservation = this.reservation;
+    const launching = this.launching;
+    const transport = this.transport;
+    const abstraction = this.runningAbstraction;
+    if (
+      !reservation &&
+      !launching &&
+      !transport &&
+      !abstraction &&
+      !this.finishTurn &&
+      !this.verifying
+    ) {
+      return;
+    }
+
+    // Invalidate first. A check, browser read or slow launch already past its
+    // cancellation boundary may still resolve, but it no longer owns the
+    // presentation and cannot turn a stopped request green afterwards.
+    this.turnEpoch += 1;
+    this.pendingAbstraction = null;
+    this.pendingCheckpoint = null;
+    this.currentGoal = null;
+    this.finishTurn?.();
+    this.finishTurn = null;
+    this.verifying = null;
+    if (reservation) this.closedAttempts.add(reservation.attempt.attemptId);
+
+    this.runningAbstraction = null;
+    if (abstraction) await abstraction.kill().catch(() => {});
+    const launched = launching ? await launching.catch(() => null) : null;
+    await (transport ?? launched)?.stop().catch(() => {});
+    if (this.transport === transport || this.transport === launched) {
+      this.transport = null;
+    }
+
+    if (reservation && this.reservation === reservation) {
+      await this.flushAssistant().catch(() => {});
+      await this.deps
+        .appendTranscript({
+          runId: reservation.envelope.runId,
+          attemptId: reservation.attempt.attemptId,
+          kind: "system",
+          body: "Stopped by the person in Build.",
+        })
+        .catch(() => {});
+      await this.settle("cancelled", "user", "user-stopped");
+      this.reservation = null;
+    }
+    this.baseline = null;
+    this.assistant = "";
+    this.snapshot = { persona: { kind: "idle" }, question: null };
+    this.publish({ kind: "reply", text: "Stopped." });
+    this.publish({ kind: "turnEnd" });
   }
 
   async stop(): Promise<void> {

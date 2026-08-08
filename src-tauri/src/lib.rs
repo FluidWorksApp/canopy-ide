@@ -1,14 +1,17 @@
+mod agent_instructions;
 mod agent_life;
 mod agentid;
 mod agents;
 mod android;
 mod blocking;
+mod bounded_file;
 mod browser;
 mod change;
 mod cleanup;
 mod cli;
 mod clipboard;
 mod companion;
+mod containment;
 mod context;
 mod crash;
 #[cfg(feature = "dictation")]
@@ -20,6 +23,7 @@ mod dictation;
 mod dictation;
 mod fsx;
 mod git;
+mod governor;
 mod instructions;
 mod lsp;
 mod maintenance;
@@ -31,6 +35,7 @@ mod notify;
 mod portal;
 mod preview;
 mod procenv;
+mod process_capture;
 mod profiles;
 mod provenance;
 mod prwatch;
@@ -385,6 +390,14 @@ pub fn run() {
     crash::install_panic_hook();
 
     let builder = tauri::Builder::default();
+    // Apple exposes an explicit renderer-termination notification. Use it for
+    // every WebKit view so an OS memory kill becomes an immediate refresh;
+    // the main-view heartbeat remains the cross-platform backstop for hangs
+    // and for terminations that do not produce this callback.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let builder = builder.on_web_content_process_terminate(|webview| {
+        watchdog::web_content_terminated(webview);
+    });
     // Must be first: a second `canopy <dir>` invocation forwards its argv
     // here and exits, instead of starting an app that would fight this one
     // over the hook bridge and PTY ownership.
@@ -421,6 +434,8 @@ pub fn run() {
         .manage(browser::BrowserManager::default())
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
+        .manage(governor::TerminalGovernor::default())
+        .manage(containment::ContainmentManager::default())
         .manage(tunnel::TunnelManager::default())
         .manage(prwatch::PrWatcher::default())
         .manage(dictation::DictationManager::default())
@@ -472,6 +487,25 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            } else {
+                // Release builds retain one small, content-free resilience log
+                // across renderer and native-host exits. Do not widen this
+                // filter: ordinary application logs may contain paths, URLs or
+                // user-authored text that do not belong in incident telemetry.
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::default()
+                        .level(log::LevelFilter::Info)
+                        .max_file_size(1024 * 1024)
+                        .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+                        .clear_targets()
+                        .target(
+                            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                                file_name: Some("resilience".into()),
+                            })
+                            .filter(|metadata| metadata.target().contains("watchdog")),
+                        )
+                        .build(),
+                )?;
             }
             // Edge's built-in shortcuts are not Canopy's to hand out — see
             // webview_keys.rs. Done here rather than at window creation
@@ -481,6 +515,14 @@ pub fn run() {
             // this one, so "main" is a default we would be relying on.
             for w in app.webview_windows().values() {
                 webview_keys::disable_browser_accelerators(w);
+            }
+            // Refresh the capability-neutral context used by CLIs without MCP.
+            // It lives in Canopy's own state, never in the repository, so a CLI
+            // opened outside this IDE does not inherit IDE-specific rules.
+            if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+                if let Err(e) = agent_instructions::install_context(home) {
+                    log::warn!("agent context not installed: {e}");
+                }
             }
             // Install the hook helper before hooks are (re)written, so the
             // path they point at exists.
@@ -555,12 +597,14 @@ pub fn run() {
             pty::pty_spawn_argv,
             pty::pty_spawn_attached_argv,
             pty::pty_output,
-            pty::pty_attach,
+            pty::pty_attach_desktop,
+            pty::pty_detach_desktop,
+            pty::pty_renderer_register,
             pty::pty_write,
             pty::pty_ack,
             pty::pty_resize,
             pty::pty_kill,
-            pty::pty_kill_all,
+            pty::pty_dev_reap_all,
             pty::pty_set_title,
             pty::instance_id,
             android::android_sdk_status,
@@ -648,6 +692,7 @@ pub fn run() {
             fsx::fs_read_file,
             fsx::fs_write_file,
             fsx::fs_stat,
+            fsx::fs_stat_many,
             fsx::fs_list_files,
             fsx::fs_snapshot_files,
             fsx::fs_search,
@@ -659,6 +704,7 @@ pub fn run() {
             fsx::fs_duplicate,
             fsx::workspace_export,
             fsx::workspace_import,
+            process_capture::process_capture_metrics,
             instructions::instructions_scan,
             instructions::instructions_read,
             instructions::instructions_write,
@@ -682,6 +728,7 @@ pub fn run() {
             sync::git_sync_probe,
             sync::git_sync_apply,
             sync::git_sync_abort,
+            sync::git_pr_merge_probe,
             git::git_clone,
             git::git_diff,
             git::git_log,
@@ -721,6 +768,7 @@ pub fn run() {
             git::gh_pr_review_batch,
             git::gh_pr_update_branch,
             git::gh_pr_request_review,
+            git::gh_pr_retarget,
             git::gh_pr_auto_merge,
             git::gh_pr_failing_logs,
             git::gh_pr_diff_since,
@@ -763,6 +811,12 @@ pub fn run() {
             agents::set_context_scopes,
             agents::session_digests,
             agents::pty_stats,
+            agents::probe_http_readiness,
+            governor::terminal_governor_status,
+            governor::terminal_governor_incidents,
+            governor::terminal_governor_grant,
+            governor::terminal_governor_stop,
+            governor::terminal_governor_remember_default,
             agents::session_forget,
             profiles::profiles_list,
             profiles::profile_create,
@@ -791,6 +845,8 @@ pub fn run() {
             browser::browser_set_bounds,
             browser::browser_set_visible,
             browser::browser_close,
+            browser::browser_close_metrics,
+            browser::browser_pressure_reload_metrics,
             browser::browser_run_op,
             browser::browser_command,
             browser::browser_here,
@@ -808,13 +864,16 @@ pub fn run() {
             context::context_messages,
             context::context_mesh_severed,
             context::context_mesh_sever,
+            context::context_agent_spawn_ready,
             context::browser_result,
             snapshot::webview_snapshot,
             snapshot::browser_snapshot,
             snapshot::browser_frame,
+            snapshot::snapshot_capture_metrics,
             portal::remote_enable,
             portal::remote_disable,
             portal::remote_status,
+            portal::remote_socket_metrics,
             portal::remote_rotate_pin,
             portal::remote_set_theme,
             portal::remote_set_clis,
@@ -835,6 +894,7 @@ pub fn run() {
             dictation::dictation_supported,
             watchdog::watchdog_ack,
             watchdog::memory_info,
+            watchdog::watchdog_incidents,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -844,8 +904,13 @@ pub fn run() {
                 // the app quit mid-dictation. Cheap, and the one piece of state
                 // here that outlives the process.
                 sysaudio::restore();
+                let pty = app.state::<pty::PtyManager>();
+                app.state::<std::sync::Arc<watchdog::WatchdogState>>()
+                    .app_exiting(pty.live_count() as u64);
                 // Guarantee no child processes outlive the app.
-                app.state::<pty::PtyManager>().kill_all();
+                let pty_cleanup = pty.kill_all();
+                app.state::<std::sync::Arc<watchdog::WatchdogState>>()
+                    .app_exit_cleanup_returned(pty_cleanup.requested, pty_cleanup.force_signals);
                 app.state::<lsp::LspManager>().kill_all();
                 // ... and no relay socket either.
                 app.state::<relay::RelayManager>().shutdown();

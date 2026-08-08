@@ -21,6 +21,7 @@ import { openLink } from "./links";
 import { matchesModifierClick } from "./shortcuts";
 import App from "./App.tsx";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { installEarlyWatchdogHeartbeat, ptyRendererRegister } from "./ipc";
 
 // Before first paint, so there's no flash of the wrong palette.
 applyTheme(getSettings().theme, getSettings().customAccent);
@@ -79,9 +80,16 @@ window.addEventListener("unhandledrejection", (e) =>
   jsLog("error", `unhandled rejection: ${e.reason}`),
 );
 jsLog("info", "webview booting");
-// Reap PTY sessions orphaned by a previous page of this webview (reloads
-// destroy JS state without running React cleanup).
-void invoke("pty_kill_all").catch(() => {});
+// Replace the prior page's native attachments before any terminal can mount.
+// PTY children survive and keep draining into bounded Rust rings; orphaned
+// native browser views are closed because their React owners cannot survive a
+// page replacement. App reconciles the returned sessions after projects mount.
+const rendererReady = ptyRendererRegister()
+  .then(async (registration) => {
+    await installEarlyWatchdogHeartbeat();
+    return registration;
+  })
+  .catch((err) => jsLog("error", `renderer registration failed: ${err}`));
 // A native panic from a previous run parks a report on disk; flush it now if
 // the user is opted in (the backend clears it either way, so it's offered once).
 void import("./crash").then(({ flushPendingCrash }) => flushPendingCrash());
@@ -91,9 +99,12 @@ void import("./crash").then(({ flushPendingCrash }) => flushPendingCrash());
 // heart of the app) works without Monaco.
 // No StrictMode: its dev-mode double-mount would spawn and kill a real PTY for
 // every terminal on each mount, which churns native child processes.
-monacoReady
-  .then(() => jsLog("info", "monaco services initialized"))
-  .catch((err) => jsLog("error", `monaco services failed to initialize: ${err}`))
+Promise.all([
+  monacoReady
+    .then(() => jsLog("info", "monaco services initialized"))
+    .catch((err) => jsLog("error", `monaco services failed to initialize: ${err}`)),
+  rendererReady,
+])
   .finally(() => {
     createRoot(document.getElementById("root")!).render(
       <ErrorBoundary label="Canopy">

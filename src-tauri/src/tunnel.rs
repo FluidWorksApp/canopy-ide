@@ -108,10 +108,9 @@ fn resolve_command(cmd: &str) -> String {
             .unwrap_or(false);
         if !in_path {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-            if let Ok(out) = Command::new(shell)
-                .args(["-lc", &format!("command -v {cmd}")])
-                .output()
-            {
+            let mut command = Command::new(shell);
+            command.args(["-lc", &format!("command -v {cmd}")]);
+            if let Ok(out) = crate::process_capture::output(&mut command, 64 * 1024) {
                 if out.status.success() {
                     let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     if !path.is_empty() {

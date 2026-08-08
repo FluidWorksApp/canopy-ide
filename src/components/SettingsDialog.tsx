@@ -20,6 +20,8 @@ import {
   THEMES,
   formatHotkey,
   modKeyLabel,
+  TERMINAL_SCROLLBACK_MAX_ROWS,
+  TERMINAL_SCROLLBACK_MIN_ROWS,
   DEFAULT_DICTATION_HOTKEY,
   DICTATION_WAVE_STYLES,
   type CursorStyle,
@@ -74,11 +76,11 @@ import {
   type AgentCliDef,
   type CustomAgentCli,
 } from "../projects";
-import { FLEET_REASON_LABELS } from "../fleetState";
 import {
   inspectFleetTable,
   type FleetRouteSnapshot,
 } from "../fleetSnapshot";
+import { FleetReadinessPanel } from "./FleetReadinessPanel";
 import {
   loginCommand,
   supportsProfiles,
@@ -709,7 +711,15 @@ function AgentBinaries({
   );
 }
 
-function AgentFleetReadout() {
+function AgentFleetReadout({
+  open,
+  trigger,
+  onOpenChange,
+}: {
+  open: boolean;
+  trigger: RefObject<HTMLButtonElement | null>;
+  onOpenChange: (open: boolean) => void;
+}) {
   const [rows, setRows] = useState<FleetRouteSnapshot[]>([]);
   const [profiles, setProfiles] = useState<ipc.AgentProfile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -764,56 +774,15 @@ function AgentFleetReadout() {
   }, [refresh]);
 
   return (
-    <div className="fleet-readout">
-      <table>
-        <thead>
-          <tr>
-            <th>Route</th>
-            <th>State</th>
-            <th>Reasons</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={`${row.cli.id}:${row.profile}`}>
-              <td>
-                <span className="fleet-route-name">
-                  <AgentIcon id={row.cli.id} size={14} />
-                  {row.cli.name}
-                </span>
-                <span className="fleet-route-profile">
-                  {profiles.find((profile) => profile.id === row.profile)?.label ??
-                    row.profile}
-                </span>
-              </td>
-              <td>
-                <span className={`fleet-state fleet-state-${row.state.kind}`}>
-                  {row.state.kind}
-                </span>
-              </td>
-              <td className="fleet-reasons">
-                {row.state.reasons.length
-                  ? row.state.reasons
-                      .map((reason) => FLEET_REASON_LABELS[reason])
-                      .join(" · ")
-                  : "all checks ready"}
-              </td>
-            </tr>
-          ))}
-          {!loading && rows.length === 0 && (
-            <tr>
-              <td colSpan={3}>No agent routes found.</td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-      {loading && <div className="fleet-readout-loading">Checking fleet…</div>}
-      {error && (
-        <div className="fleet-readout-error" role="alert">
-          Fleet check unavailable: {error}
-        </div>
-      )}
-    </div>
+    <FleetReadinessPanel
+      rows={rows}
+      profiles={profiles}
+      loading={loading}
+      error={error}
+      open={open}
+      trigger={trigger}
+      onOpenChange={onOpenChange}
+    />
   );
 }
 
@@ -1230,6 +1199,8 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   const [clearing, setClearing] = useState<null | "busy" | "done" | string>(null);
   const [skinPickerOpen, setSkinPickerOpen] = useState(false);
   const skinPickerTrigger = useRef<HTMLButtonElement>(null);
+  const [fleetReadoutOpen, setFleetReadoutOpen] = useState(false);
+  const fleetReadoutTrigger = useRef<HTMLButtonElement>(null);
   const fonts = availableMonoFonts();
 
   useEffect(() => {
@@ -1309,6 +1280,9 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
     if (skinPickerOpen) {
       skinPickerTrigger.current?.focus();
       setSkinPickerOpen(false);
+    } else if (fleetReadoutOpen) {
+      fleetReadoutTrigger.current?.focus();
+      setFleetReadoutOpen(false);
     } else {
       onClose();
     }
@@ -1408,7 +1382,11 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 )}
                 <button
                   className={`settings-nav-item ${tab === t.id ? "settings-nav-active" : ""}`}
-                  onClick={() => setTab(t.id)}
+                  onClick={() => {
+                    setSkinPickerOpen(false);
+                    setFleetReadoutOpen(false);
+                    setTab(t.id);
+                  }}
                 >
                   <span>{t.label}</span>
                   {i < shortcutTabs.length && (
@@ -1544,7 +1522,11 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   name="Fleet readiness"
                   desc="What can launch now, composed from install, account, plan, and integration signals."
                 >
-                  <AgentFleetReadout />
+                  <AgentFleetReadout
+                    open={fleetReadoutOpen}
+                    trigger={fleetReadoutTrigger}
+                    onOpenChange={setFleetReadoutOpen}
+                  />
                 </Item>
                 <Item
                   name="Ask for attention"
@@ -1555,6 +1537,21 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     onChange={(v) => patch({ agentAskForAttention: v })}
                     label="Let agents switch focus to files, previews, and run tabs"
                     hint="Off keeps their work in the background; questions and notices still appear."
+                  />
+                </Item>
+                <Item
+                  name="Notification pop-ups"
+                  desc="Choose whether agent and project notices interrupt your work or wait in the bell."
+                >
+                  <Checkbox
+                    checked={s.notificationPopupsEnabled}
+                    onChange={(v) => patch({ notificationPopupsEnabled: v })}
+                    label="Show notification pop-ups"
+                    hint={
+                      s.notificationPopupsEnabled
+                        ? "Shows corner cards, companion notices, and system banners."
+                        : "Off keeps every notice in the top-right bell."
+                    }
                   />
                 </Item>
                 <Item
@@ -1885,13 +1882,20 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     type="number"
                     width="sm"
                     aria-label="Scrollback"
-                    min={1000}
-                    max={100000}
+                    min={TERMINAL_SCROLLBACK_MIN_ROWS}
+                    max={TERMINAL_SCROLLBACK_MAX_ROWS}
                     step={1000}
                     value={s.scrollback}
                     onChange={(e) => {
                       const v = Number(e.target.value);
-                      if (Number.isFinite(v) && v >= 1000) patch({ scrollback: v });
+                      if (Number.isFinite(v)) {
+                        patch({
+                          scrollback: Math.min(
+                            TERMINAL_SCROLLBACK_MAX_ROWS,
+                            Math.max(TERMINAL_SCROLLBACK_MIN_ROWS, v),
+                          ),
+                        });
+                      }
                     }}
                   />
                 </Item>

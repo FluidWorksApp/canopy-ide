@@ -35,10 +35,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, EventId, Listener, Manager};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, OwnedSemaphorePermit, Semaphore};
 
 use crate::pty::{PtyEvent, PtyManager};
 use crate::remote::verbs::{Answer, Begin, VerbRouter};
@@ -55,6 +56,60 @@ const DEFAULT_PORT: u16 = 6680;
 const AUTH_TARPIT: Duration = Duration::from_secs(2);
 /// App events we mirror to every connected portal client.
 const FORWARDED_EVENTS: [&str; 3] = ["pty:stats", "agent:events", "pty:exit"];
+
+/// A portal client is allowed a useful terminal catch-up, but never an
+/// unbounded number of arbitrarily large JSON strings. Count-only channels do
+/// not constrain memory: 512 multi-megabyte messages could otherwise sit
+/// behind a slow phone connection.
+const PORTAL_OUTBOUND_BYTES: usize = 8 * 1024 * 1024;
+const PORTAL_MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+const PORTAL_MAX_INBOUND_BYTES: usize = 1024 * 1024;
+
+struct OutboundMessage {
+    text: String,
+    // The byte reservation is released only after the socket writer consumes
+    // this queue entry (or the connection drops it).
+    _permit: OwnedSemaphorePermit,
+}
+
+#[derive(Clone)]
+struct PortalOut {
+    tx: mpsc::Sender<OutboundMessage>,
+    bytes: Arc<Semaphore>,
+}
+
+impl PortalOut {
+    fn channel() -> (Self, mpsc::Receiver<OutboundMessage>) {
+        let (tx, rx) = mpsc::channel(64);
+        (
+            Self {
+                tx,
+                bytes: Arc::new(Semaphore::new(PORTAL_OUTBOUND_BYTES)),
+            },
+            rx,
+        )
+    }
+
+    async fn send(&self, text: String) -> Result<(), ()> {
+        let len = text.len().max(1);
+        if len > PORTAL_MAX_MESSAGE_BYTES {
+            return Err(());
+        }
+        let permit = self
+            .bytes
+            .clone()
+            .acquire_many_owned(len as u32)
+            .await
+            .map_err(|_| ())?;
+        self.tx
+            .send(OutboundMessage {
+                text,
+                _permit: permit,
+            })
+            .await
+            .map_err(|_| ())
+    }
+}
 
 /// Live bearer tokens for the *current* enable session. The set is created fresh
 /// in `remote_enable` and dropped on disable/rotate, so a token is valid for
@@ -90,6 +145,78 @@ pub struct RemoteManager {
     attention: Mutex<Value>,
     /// The session scope, cached — see `open_scope`.
     roots: RootsCache,
+    sockets: Arc<SocketMetrics>,
+}
+
+#[derive(Default)]
+struct SocketMetrics {
+    active: AtomicUsize,
+    high_water: AtomicUsize,
+    accepted_total: AtomicU64,
+    rejected_total: AtomicU64,
+}
+
+#[derive(Clone, Serialize)]
+pub struct RemoteSocketMetrics {
+    pub active: usize,
+    pub high_water: usize,
+    pub accepted_total: u64,
+    pub rejected_total: u64,
+}
+
+struct SocketOwnership(Arc<SocketMetrics>);
+const REMOTE_SOCKET_MAX: usize = 16;
+
+impl SocketOwnership {
+    fn try_acquire(metrics: Arc<SocketMetrics>) -> Option<Self> {
+        let mut active = metrics.active.load(Ordering::Relaxed);
+        loop {
+            if active >= REMOTE_SOCKET_MAX {
+                metrics.rejected_total.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            match metrics.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => active = actual,
+            }
+        }
+        let active = active + 1;
+        metrics.accepted_total.fetch_add(1, Ordering::Relaxed);
+        let mut seen = metrics.high_water.load(Ordering::Relaxed);
+        while active > seen {
+            match metrics.high_water.compare_exchange_weak(
+                seen,
+                active,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => seen = actual,
+            }
+        }
+        Some(Self(metrics))
+    }
+}
+
+impl Drop for SocketOwnership {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[tauri::command]
+pub fn remote_socket_metrics(mgr: tauri::State<'_, RemoteManager>) -> RemoteSocketMetrics {
+    RemoteSocketMetrics {
+        active: mgr.sockets.active.load(Ordering::Relaxed),
+        high_water: mgr.sockets.high_water.load(Ordering::Relaxed),
+        accepted_total: mgr.sockets.accepted_total.load(Ordering::Relaxed),
+        rejected_total: mgr.sockets.rejected_total.load(Ordering::Relaxed),
+    }
 }
 
 #[derive(Clone, Default)]
@@ -153,6 +280,7 @@ struct Portal {
     /// across sockets on purpose: a phone that reconnects mid-action gets the
     /// first answer back rather than starting a second run.
     verbs: Arc<VerbRouter>,
+    sockets: Arc<SocketMetrics>,
 }
 
 /// What a PIN-minted token may do. Drive, not admin: it matches the surface
@@ -256,6 +384,7 @@ pub async fn remote_enable(
         companion: mgr.companion.clone(),
         roots: mgr.roots.clone(),
         verbs: Arc::new(VerbRouter::default()),
+        sockets: mgr.sockets.clone(),
     };
     let router = Router::new()
         .route("/remote/auth", post(auth_handler))
@@ -463,7 +592,10 @@ async fn ws_handler(
     if !valid_token(&p.tokens, &q.token) {
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }
-    ws.on_upgrade(move |socket| ws_conn(socket, p))
+    let Some(socket_owner) = SocketOwnership::try_acquire(p.sockets.clone()) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many remote sockets").into_response();
+    };
+    ws.on_upgrade(move |socket| ws_conn(socket, p, socket_owner))
 }
 
 /// Team relay ingress on the shared server. Unlike `/remote/*`, this carries the
@@ -475,8 +607,11 @@ async fn team_ws_handler(ws: WebSocketUpgrade, AxumState(p): AxumState<Portal>) 
     if !crate::relay::is_hosting(&p.app) {
         return (StatusCode::FORBIDDEN, "team hosting is off").into_response();
     }
+    let Some(socket_owner) = SocketOwnership::try_acquire(p.sockets.clone()) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many remote sockets").into_response();
+    };
     let app = p.app.clone();
-    ws.on_upgrade(move |socket| crate::relay::accept_ws_peer(app, socket))
+    ws.on_upgrade(move |socket| crate::relay::accept_ws_peer(app, socket, socket_owner))
 }
 
 /// Serve the SPA: any path under `/remote` maps to a baked asset, with an
@@ -553,10 +688,11 @@ fn etag_of(bytes: &[u8]) -> String {
 
 // ---- WebSocket session ----------------------------------------------------
 
-async fn ws_conn(mut socket: WebSocket, p: Portal) {
+async fn ws_conn(mut socket: WebSocket, p: Portal, _socket_owner: SocketOwnership) {
     // Single writer: every outbound message (snapshot, forwarded events, pty
-    // chunks) funnels through this mpsc so we never contend on the socket.
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(512);
+    // chunks) funnels through this byte-accounted queue so we never contend on
+    // the socket or retain unlimited strings behind a slow client.
+    let (out_tx, mut out_rx) = PortalOut::channel();
 
     // Initial snapshot.
     let theme0 = p.theme.lock().unwrap().clone();
@@ -591,6 +727,9 @@ async fn ws_conn(mut socket: WebSocket, p: Portal) {
             inbound = socket.recv() => {
                 match inbound {
                     Some(Ok(Message::Text(t))) => {
+                        if t.len() > PORTAL_MAX_INBOUND_BYTES {
+                            break;
+                        }
                         handle_client_msg(&t, &p, &out_tx, &mut attaches);
                     }
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
@@ -600,7 +739,7 @@ async fn ws_conn(mut socket: WebSocket, p: Portal) {
             outbound = out_rx.recv() => {
                 match outbound {
                     Some(msg) => {
-                        if socket.send(Message::Text(msg)).await.is_err() {
+                        if socket.send(Message::Text(msg.text.into())).await.is_err() {
                             break;
                         }
                     }
@@ -618,7 +757,7 @@ async fn ws_conn(mut socket: WebSocket, p: Portal) {
 fn handle_client_msg(
     text: &str,
     p: &Portal,
-    out: &mpsc::Sender<String>,
+    out: &PortalOut,
     attaches: &mut HashMap<u32, tokio::task::JoinHandle<()>>,
 ) {
     let Ok(v) = serde_json::from_str::<Value>(text) else {
@@ -724,7 +863,7 @@ fn handle_client_msg(
 /// Every action goes through the router first, commands included. A phone
 /// retries on reconnect, and `pty_spawn_detached` replayed is a second agent
 /// nobody asked for.
-fn act(v: &Value, p: &Portal, out: &mpsc::Sender<String>) {
+fn act(v: &Value, p: &Portal, out: &PortalOut) {
     let (Some(id), Some(action)) = (
         v.get("id").and_then(|x| x.as_str()),
         v.get("action").and_then(|x| x.as_str()),
@@ -794,7 +933,7 @@ fn ack_err(id: &str, error: String) -> String {
 /// Stream one PTY's output to the socket: a catch-up snapshot, then the live
 /// tail. On broadcast lag we re-attach for a fresh snapshot rather than let the
 /// terminal render torn output.
-async fn stream_pty(app: AppHandle, id: u32, out: mpsc::Sender<String>) {
+async fn stream_pty(app: AppHandle, id: u32, out: PortalOut) {
     loop {
         // Through the stream registry rather than PtyManager directly, so `pty`
         // is one provider among the kinds a future module can add rather than a
@@ -1278,6 +1417,36 @@ fn local_ips() -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn portal_outbound_queue_is_bounded_by_bytes() {
+        let (out, mut rx) = PortalOut::channel();
+        out.send("a".repeat(PORTAL_MAX_MESSAGE_BYTES))
+            .await
+            .unwrap();
+        out.send("b".repeat(PORTAL_MAX_MESSAGE_BYTES))
+            .await
+            .unwrap();
+
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(10), out.send("c".to_string())).await;
+        assert!(blocked.is_err(), "a full byte budget must backpressure");
+
+        drop(rx.recv().await.unwrap());
+        tokio::time::timeout(Duration::from_millis(100), out.send("c".to_string()))
+            .await
+            .expect("releasing a queued message releases its bytes")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn portal_rejects_one_message_larger_than_its_wire_budget() {
+        let (out, _rx) = PortalOut::channel();
+        assert!(out
+            .send("x".repeat(PORTAL_MAX_MESSAGE_BYTES + 1))
+            .await
+            .is_err());
+    }
+
     #[test]
     fn ct_eq_accepts_equal_rejects_different_and_length() {
         assert!(ct_eq(b"481920", b"481920"));
@@ -1510,5 +1679,32 @@ mod tests {
         let out = trimmed["prompts"].as_array().unwrap();
         assert_eq!(out.len(), MAX_PROMPTS);
         assert_eq!(out.last().unwrap(), "p39", "the newest prompt must survive");
+    }
+
+    #[test]
+    fn socket_ownership_releases_and_preserves_only_scalar_high_water() {
+        let metrics = Arc::new(SocketMetrics::default());
+        {
+            let _first = SocketOwnership::try_acquire(metrics.clone()).unwrap();
+            let _second = SocketOwnership::try_acquire(metrics.clone()).unwrap();
+            assert_eq!(metrics.active.load(Ordering::Relaxed), 2);
+            assert_eq!(metrics.high_water.load(Ordering::Relaxed), 2);
+            assert_eq!(metrics.accepted_total.load(Ordering::Relaxed), 2);
+        }
+        assert_eq!(metrics.active.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.high_water.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn remote_socket_admission_refuses_the_seventeenth_owner() {
+        let metrics = Arc::new(SocketMetrics::default());
+        let owners: Vec<_> = (0..REMOTE_SOCKET_MAX)
+            .map(|_| SocketOwnership::try_acquire(metrics.clone()).unwrap())
+            .collect();
+        assert!(SocketOwnership::try_acquire(metrics.clone()).is_none());
+        assert_eq!(metrics.active.load(Ordering::Relaxed), REMOTE_SOCKET_MAX);
+        assert_eq!(metrics.rejected_total.load(Ordering::Relaxed), 1);
+        drop(owners);
+        assert_eq!(metrics.active.load(Ordering::Relaxed), 0);
     }
 }

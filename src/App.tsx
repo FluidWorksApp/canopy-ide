@@ -27,6 +27,14 @@ import {
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, Notify, RelayHandle } from "./types";
 import type { CustomMicroTask } from "./microTasks";
+import type { ProjectIntegrationState } from "./projectIntegrations";
+import { shedRendererPressure } from "./rendererPressureRelief";
+import { bindMemoryPressure } from "./memoryPressureBinding";
+import {
+  memoryPressureMessage,
+  RECOVERY_NOTICE_SESSION_KEY,
+  rendererRecoveryNotice,
+} from "./memoryResilienceMessages";
 import {
   applyVibeTargetSelection,
   type VibeTargetSelection,
@@ -45,6 +53,7 @@ import {
 import {
   attentionItems,
   badgeFor,
+  buildAttentionItems,
   dismissToast,
   forProject,
   isOutstanding,
@@ -59,6 +68,7 @@ import {
   toastMs,
   type AttentionItem,
 } from "./attention";
+import { fidelityFor, POLICY } from "../shared/agentLife";
 import { remoteAttentionSnapshot } from "./remoteAttention";
 import { useAttention } from "./useAttention";
 import { NotificationCenter } from "./components/NotificationCenter";
@@ -114,6 +124,7 @@ import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
+import { TerminalGovernorDialog } from "./components/TerminalGovernorDialog";
 import { shouldOnboard, markOnboarded } from "./onboarding";
 import { isSelftest, setSelftestMode } from "./selftest/mode";
 import { startBrowserWatchdog } from "./browserWatchdog";
@@ -248,12 +259,30 @@ export default function App() {
   // Host memory pressure (0 fine / 1 warn / 2 critical). Non-null while the
   // user should shed load — cleared by Dismiss or an "ok" reading.
   const [memPressure, setMemPressure] = useState<ipc.MemoryPressure | null>(null);
+  const [terminalGovernor, setTerminalGovernor] =
+    useState<ipc.TerminalGovernorSnapshot | null>(null);
+  const [governorBusy, setGovernorBusy] = useState(false);
+  const [governorError, setGovernorError] = useState<string | null>(null);
+  const [dismissedGovernorRequests, setDismissedGovernorRequests] = useState<
+    Set<string>
+  >(new Set());
   // Everything that has asked for the user's attention (attention.ts). One
   // queue, one urgency model, one rule for when something leaves the app for
   // the OS — replacing a single-slot toast that the next caller overwrote, and
   // eight call sites that each decided for themselves whether to raise a
   // native banner and what to call it.
   const attention = useAttention();
+  const notificationPopupsEnabled = useSyncExternalStore(
+    subscribeSettings,
+    () => getSettings().notificationPopupsEnabled,
+    () => true,
+  );
+  const refreshTerminalGovernor = useCallback(() => {
+    void ipc
+      .terminalGovernorStatus()
+      .then(setTerminalGovernor)
+      .catch(() => {});
+  }, []);
   /** Which project a path belongs to, as the `projectId` / `projectName` pair
    *  every posted item carries. The name is stamped in rather than looked up
    *  later, like TaskRun.projectName: the history outlives the project being
@@ -326,6 +355,23 @@ export default function App() {
     },
     [projectIdentity, projectNameFor],
   );
+  useEffect(() => {
+    let cancelled = false;
+    void ipc.watchdogIncidents().then((incidents) => {
+      if (cancelled) return;
+      const seen = sessionStorage.getItem(RECOVERY_NOTICE_SESSION_KEY);
+      const recovery = rendererRecoveryNotice(incidents, seen);
+      if (!recovery) return;
+      sessionStorage.setItem(RECOVERY_NOTICE_SESSION_KEY, recovery.key);
+      notify(recovery.title, "info", {
+        body: recovery.body,
+        dedupe: recovery.key,
+      });
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [notify]);
   // A micro-task in flight when Canopy last quit has no terminal to come back
   // to — its tab is ephemeral and never restored — so it can never report.
   // Settle those before anything new is recorded, or they stay "running"
@@ -348,6 +394,19 @@ export default function App() {
         resolveAttentionByKey(key, "withdrawn");
     }
   }, []);
+
+  // Resource decisions are Rust-owned and rare. Subscribe to state changes
+  // rather than mirroring the 2s process scan in App; the prompt asks before a
+  // one-session allowance is raised and remains honest when the platform has
+  // measurement but no proven hard boundary.
+  useEffect(() => {
+    let unGovernor: (() => void) | undefined;
+    refreshTerminalGovernor();
+    void ipc.onTerminalGovernor(() => refreshTerminalGovernor()).then((un) => {
+      unGovernor = un;
+    });
+    return () => unGovernor?.();
+  }, [refreshTerminalGovernor]);
   // The one place anything leaves the app for the OS.
   //
   // Was `if (document.hasFocus()) return;` copied into every call site that
@@ -363,6 +422,10 @@ export default function App() {
     for (const item of attention) {
       if (notifiedIds.current.has(item.id)) continue;
       notifiedIds.current.add(item.id);
+      // Count notices seen while delivery is disabled so switching the setting
+      // back on does not unleash a backlog of stale system banners. The item
+      // itself remains untouched in the notification centre.
+      if (!notificationPopupsEnabled) continue;
       if (!shouldReachOS(item, document.hasFocus())) continue;
       const { title, body } = osPayload(item);
       void ipc
@@ -378,7 +441,7 @@ export default function App() {
         // Notifications are a garnish — never fail anything over them.
         .catch(() => {});
     }
-  }, [attention]);
+  }, [attention, notificationPopupsEnabled]);
   // Toasts fade on a clock the store knows nothing about, so a tick drives the
   // re-render that retires them. Only while something is actually on screen:
   // an idle app should not hold a repeating timer for an empty overlay. The
@@ -1139,7 +1202,9 @@ export default function App() {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const publish = () =>
-      void ipc.remoteSetAttention(remoteAttentionSnapshot()).catch(() => {});
+      void ipc
+        .remoteSetAttention(notificationPopupsEnabled ? remoteAttentionSnapshot() : [])
+        .catch(() => {});
     publish();
     const unsub = subscribeAttention(() => {
       if (timer) clearTimeout(timer);
@@ -1149,7 +1214,7 @@ export default function App() {
       if (timer) clearTimeout(timer);
       unsub();
     };
-  }, []);
+  }, [notificationPopupsEnabled]);
 
   // Remote launches from the same resolved registry as desktop: custom CLIs,
   // binary overrides, availability and verified resume syntax included.
@@ -1640,7 +1705,13 @@ export default function App() {
   // that project, and hand the tab to its ProjectView. The desktop mirrors the
   // agent the phone started — same session, both surfaces driving one PTY.
   useEffect(() => {
-    const norm = (p: string) => p.replace(/\/+$/, "");
+    const norm = (p: string) => {
+      const normalized = p.replaceAll("\\", "/").replace(/\/+$/, "");
+      // Windows drive paths are case-insensitive; POSIX paths are not.
+      return /^[A-Za-z]:\//.test(normalized)
+        ? normalized.toLocaleLowerCase()
+        : normalized;
+    };
     // Deepest matching component path wins, so a broad root never steals an
     // agent from a nested project (mirrors model.ts bestProjectId).
     const projectForCwd = (cwd: string): string | undefined => {
@@ -1659,19 +1730,21 @@ export default function App() {
       return bestId;
     };
     let un: (() => void) | undefined;
-    void ipc
-      .onPtySpawned(async (e) => {
+    const routePty = async (
+      e: ipc.PtySpawned | ipc.PtySummary,
+      restored = false,
+    ) => {
         const projectId = projectForCwd(e.cwd);
         if (!projectId) {
           notify(
-            `A remote agent started in ${e.cwd}, outside any project.`,
+            `An active terminal is in ${e.cwd}, outside any project.`,
             "info",
           );
           return;
         }
         await prepareProjectForAgentAction(
           projectId,
-          getSettings().agentAskForAttention,
+          restored ? false : getSettings().agentAskForAttention,
         );
         // A beat so a not-yet-open project's ProjectView mounts and registers
         // its listener before the event fires; attachTerminal is idempotent by
@@ -1688,15 +1761,30 @@ export default function App() {
                   ptyId: e.id,
                   cwd: e.cwd,
                   title: e.title,
-                  activate: getSettings().agentAskForAttention,
+                  // Recovery must not steal focus or manufacture attention.
+                  activate: restored ? false : getSettings().agentAskForAttention,
+                  // Desktop-owned sessions were previously killed by their
+                  // tab. Preserve that ownership after converting the restored
+                  // tab into an attachment; remote sessions remain viewers.
+                  killOnClose: "kind" in e && e.kind === "desktop",
                 },
               }),
             ),
           80,
         );
-      })
+    };
+    void ipc
+      .onPtySpawned((e) => routePty(e))
       .then((u) => {
         un = u;
+      })
+      .catch(() => {})
+      .finally(() => {
+        // Listener first, then recovery: a remote spawn racing this pass is
+        // harmless because attachTerminal is idempotent by PTY id.
+        for (const session of ipc.rendererPtySessions()) {
+          if (session.kind !== "detached") void routePty(session, true);
+        }
       });
     return () => un?.();
   }, [notify, prepareProjectForAgentAction]);
@@ -2233,31 +2321,18 @@ export default function App() {
     return () => un?.();
   }, [projectIdentity]);
 
-  // The watchdog pings this webview to confirm it is alive; the Rust loop
-  // reloads the window if the answers stop (a jetsam-killed renderer leaves
-  // the app blank with no crash report otherwise — issue #488). Answer the
-  // pings, and surface host memory pressure so the user can shed load before
-  // the system takes the renderer itself.
+  // Liveness is installed in main.tsx before Monaco/React startup, so a slow
+  // editor boot cannot be mistaken for a dead renderer. This effect only
+  // surfaces host pressure once the UI exists.
   useEffect(() => {
-    let unPing: (() => void) | undefined;
-    let unMem: (() => void) | undefined;
-    void ipc
-      .onWatchdogPing(() => void ipc.watchdogAck())
-      .then((u) => {
-        unPing = u;
-      });
-    void ipc
-      .onMemoryPressure((p) => setMemPressure(p.level > 0 ? p : null))
-      .then((u) => {
-        unMem = u;
-      });
-    void ipc
-      .memoryInfo()
-      .then((p) => p && p.level > 0 && setMemPressure(p));
-    return () => {
-      unPing?.();
-      unMem?.();
-    };
+    return bindMemoryPressure(
+      ipc.onMemoryPressure,
+      ipc.memoryInfo,
+      (p) => {
+        shedRendererPressure(p.level);
+        setMemPressure(p.level > 0 ? p : null);
+      },
+    );
   }, []);
 
   const saveProject = useCallback(
@@ -2396,7 +2471,13 @@ export default function App() {
     [followDeepLink],
   );
   const [notifOpen, setNotifOpen] = useState(false);
-  const notifBadge = useMemo(() => badgeFor(attention), [attention]);
+  const activeBuildMode =
+    ws.projects.find((project) => project.id === ws.activeId)?.vibe?.enabled === true;
+  const visibleAttention = useMemo(
+    () => (activeBuildMode ? buildAttentionItems(attention) : attention),
+    [activeBuildMode, attention],
+  );
+  const notifBadge = useMemo(() => badgeFor(visibleAttention), [visibleAttention]);
   // Stable, so TitleBar's memo isn't defeated by a fresh closure every tick.
   const openNotifications = useCallback(() => setNotifOpen(true), []);
 
@@ -2573,8 +2654,6 @@ export default function App() {
     () => getSettings().companionEnabled,
     () => false,
   );
-  const activeBuildMode =
-    ws.projects.find((project) => project.id === ws.activeId)?.vibe?.enabled === true;
   const { companionVisible, attentionFallbackVisible } = personaBinding(
     companionOn,
     activeBuildMode,
@@ -2604,11 +2683,14 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [attention, askedInDialog, toastTick],
   );
+  // Delivery surfaces use this view; the notification bell intentionally uses
+  // `visibleAttention` below so disabling pop-ups never loses a notice.
+  const deliveredToasts = notificationPopupsEnabled ? toasts : [];
   // Depend on the *fact* that something is timed, not on the array. `toasts` is
   // a fresh array every tick, so `[toasts]` tore the interval down and built a
   // new one on each of its own ticks — nine teardown/setup cycles for a 4.5s
   // toast, on top of nine full App re-renders.
-  const toastsAreTimed = toasts.some((t) => toastMs(t) != null);
+  const toastsAreTimed = deliveredToasts.some((t) => toastMs(t) != null);
   useEffect(() => {
     if (!toastsAreTimed) return;
     const t = window.setInterval(() => setToastTick((n) => n + 1), 500);
@@ -2847,25 +2929,36 @@ export default function App() {
     const blocked = allPending.filter((i) => i.kind !== "idle");
     const live = new Set(blocked.map((i) => `agent:${i.sessionId}`));
     for (const p of blocked) {
-      postAttention({
-        kind: "question",
-        tone: "info",
-        title:
-          p.kind === "question"
-            ? (p.questions?.[0]?.question ?? `${p.agent} is asking`)
-            : (p.message ?? `${p.agent} needs your attention`),
-        body: p.agent,
-        source: "agent",
-        ...projectIdentity(p.cwd),
-        // The terminal it is blocked in is the only place the answer can be
-        // typed. Without a pty stamp (codex, an agent outside a Canopy tab)
-        // the Agents panel is the nearest true answer.
-        where:
-          p.pty != null
-            ? { kind: "terminal", ptyId: p.pty, path: p.cwd }
-            : { kind: "panel", panel: "agents", path: p.cwd },
-        dedupeKey: `agent:${p.sessionId}`,
-      });
+      const transientPermission =
+        p.kind === "notification" &&
+        fidelityFor(p.agent).dwellStructuredBlock;
+      postAttention(
+        {
+          kind: "question",
+          tone: "info",
+          title:
+            p.kind === "question"
+              ? (p.questions?.[0]?.question ?? `${p.agent} is asking`)
+              : (p.message ?? `${p.agent} needs your attention`),
+          body: p.agent,
+          source: "agent",
+          ...projectIdentity(p.cwd),
+          // The terminal it is blocked in is the only place the answer can be
+          // typed. Without a pty stamp (codex, an agent outside a Canopy tab)
+          // the Agents panel is the nearest true answer.
+          where:
+            p.pty != null
+              ? { kind: "terminal", ptyId: p.pty, path: p.cwd }
+              : { kind: "panel", panel: "agents", path: p.cwd },
+          dedupeKey: `agent:${p.sessionId}`,
+        },
+        transientPermission
+          ? {
+              dwellMs: POLICY.structuredBlockDwellMs,
+              collapseMs: POLICY.permissionNoticeCooldownMs,
+            }
+          : undefined,
+      );
     }
     for (const key of bridgedAgentKeys.current) {
       if (!live.has(key)) resolveAttentionByKey(key, "withdrawn");
@@ -2925,6 +3018,7 @@ export default function App() {
         onEdit: () => void;
         onShareContext: (on: boolean) => void;
         onSaveCustomTasks: (tasks: CustomMicroTask[]) => void;
+        onSaveIntegrations: (state: ProjectIntegrationState) => void;
         onPersistVibeTarget: (selection: VibeTargetSelection) => Promise<boolean>;
         onPersistVibeSetup: (project: Project) => Promise<boolean>;
       }
@@ -2949,6 +3043,10 @@ export default function App() {
         onSaveCustomTasks: (tasks) => {
           const p = find();
           if (p) void saveProject({ ...p, customTasks: tasks });
+        },
+        onSaveIntegrations: (integrations) => {
+          const p = find();
+          if (p) void saveProject({ ...p, integrations });
         },
         onPersistVibeTarget: async (selection) => {
           // Re-read after every awaited write. A teammate/project event may
@@ -3019,6 +3117,11 @@ export default function App() {
 
   if (!loaded) return null;
 
+  const pendingGovernor = terminalGovernor?.sessions.find((session) => {
+    const request = session.grant_request;
+    return request != null && !dismissedGovernorRequests.has(request.request_id);
+  });
+
   return (
     <div className={`app ${zen ? "zen" : ""}`}>
       {/* Focus mode: chrome slides away but stays reachable — hovering the top
@@ -3030,15 +3133,69 @@ export default function App() {
         <div
           className={`mem-banner ${memPressure.level === 2 ? "critical" : "warning"}`}
         >
-          <span>
-            Your Mac is low on memory — {fmtBytes(memPressure.free_bytes)} of{" "}
-            {fmtBytes(memPressure.total_bytes)} free. Close preview tabs or
-            agent terminals before the system force-quits this app.
-          </span>
+          <span>{memoryPressureMessage(memPressure, fmtBytes)}</span>
           <button onClick={() => setMemPressure(null)}>Dismiss</button>
         </div>
       )}
+      {pendingGovernor && terminalGovernor && (
+        <TerminalGovernorDialog
+          status={pendingGovernor}
+          capability={terminalGovernor.capability}
+          busy={governorBusy}
+          error={governorError}
+          onGrant={(incrementBytes, rememberForCli) => {
+            const request = pendingGovernor.grant_request;
+            if (!request || governorBusy) return;
+            setGovernorBusy(true);
+            setGovernorError(null);
+            void ipc
+              .terminalGovernorGrant(
+                pendingGovernor.id,
+                request.budget_generation,
+                request.request_id,
+                incrementBytes,
+              )
+              .then(async () => {
+                if (rememberForCli) {
+                  await ipc.terminalGovernorRememberDefault(
+                    pendingGovernor.id,
+                    request.request_id,
+                    request.budget_generation,
+                    incrementBytes,
+                    true,
+                  );
+                }
+                await refreshTerminalGovernor();
+              })
+              .catch((error) => setGovernorError(String(error)))
+              .finally(() => setGovernorBusy(false));
+          }}
+          onStop={() => {
+            if (governorBusy) return;
+            setGovernorBusy(true);
+            setGovernorError(null);
+            void ipc
+              .terminalGovernorStop(
+                pendingGovernor.id,
+                pendingGovernor.budget_generation,
+                pendingGovernor.stop_request_id,
+              )
+              .then(() => refreshTerminalGovernor())
+              .catch((error) => setGovernorError(String(error)))
+              .finally(() => setGovernorBusy(false));
+          }}
+          onDismiss={() => {
+            const request = pendingGovernor.grant_request;
+            if (!request) return;
+            setDismissedGovernorRequests((old) =>
+              new Set(old).add(request.request_id),
+            );
+            setGovernorError(null);
+          }}
+        />
+      )}
       <TitleBar
+        projects={ws.projects}
         openProjects={openProjects}
         activeId={ws.activeId}
         pendingCount={pendingCount}
@@ -3051,6 +3208,7 @@ export default function App() {
         notifCount={notifBadge.count}
         notifUrgency={notifBadge.urgency}
         onOpenNotifications={openNotifications}
+        onOpenProject={(id) => void openProject(id)}
         onSelectProject={selectProject}
         onCloseProject={handleCloseProject}
         onHibernateProject={hibernateProject}
@@ -3115,6 +3273,7 @@ export default function App() {
               onNotice={notify}
               onShareContext={handlersFor(p.id).onShareContext}
               onSaveCustomTasks={handlersFor(p.id).onSaveCustomTasks}
+              onSaveIntegrations={handlersFor(p.id).onSaveIntegrations}
               onPersistVibeTarget={handlersFor(p.id).onPersistVibeTarget}
               onPersistVibeSetup={handlersFor(p.id).onPersistVibeSetup}
             />
@@ -3147,7 +3306,7 @@ export default function App() {
         })}
       </div>
 
-      {updateAvail && (
+      {!activeBuildMode && updateAvail && (
         <UpdateToast
           update={updateAvail}
           progress={updateProgress}
@@ -3157,7 +3316,7 @@ export default function App() {
           onDismiss={dismissUpdate}
         />
       )}
-      {releaseNotes && !updateAvail && (
+      {!activeBuildMode && releaseNotes && !updateAvail && (
         <ReleaseNotesToast
           release={releaseNotes}
           onOpen={() => openReleaseNotes(releaseNotes)}
@@ -3175,9 +3334,9 @@ export default function App() {
           whether something reaches the OS are still decided in attention.ts,
           and a question is still outstanding until it is answered rather than
           until its card is closed. */}
-      {toasts.length > 0 && attentionFallbackVisible && (
+      {deliveredToasts.length > 0 && attentionFallbackVisible && (
         <div className="notice-stack">
-          {toasts.map((t) => (
+          {deliveredToasts.map((t) => (
             <NoticeToast
               key={t.id}
               item={t}
@@ -3190,7 +3349,7 @@ export default function App() {
 
       {companionVisible && (
         <Companion
-          notices={toasts}
+          notices={deliveredToasts}
           onDismissNotice={dismissToast}
           onFollowNotice={(item) => void followAttention(item)}
           onInstallCli={() => setSettingsOpen({ tab: "agents" })}
@@ -3212,7 +3371,7 @@ export default function App() {
 
       {notifOpen && (
         <NotificationCenter
-          items={attention}
+          items={visibleAttention}
           onFollow={(item) => void followAttention(item)}
           onClose={() => setNotifOpen(false)}
         />

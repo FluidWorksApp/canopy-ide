@@ -16,12 +16,46 @@ import type {
   TaskReserveInput,
 } from "./taskEnvelope";
 import type { TaskTranscriptEntry, TaskTranscriptKind } from "./taskTranscript";
+import { rendererIoBudget } from "./ioBudget";
 
 // ---------- App shell ----------
 
 /** Rebuild the native menu so its accelerators match the live webview profile. */
 export const setShortcutProfile = (profile: ShortcutProfile) =>
   invoke<void>("set_shortcut_profile", { profile });
+
+export interface ProcessCaptureMetrics {
+  active_children: number;
+  active_pipes: number;
+  active_captures: number;
+  queued_captures: number;
+  active_capture_bytes: number;
+  capture_bytes_high_water: number;
+  capture_high_water: number;
+  queue_high_water: number;
+  rejected_captures: number;
+  queue_wait_ms_total: number;
+  child_high_water: number;
+  pipe_high_water: number;
+  completed_children: number;
+  retained_bytes_current: number;
+  retained_bytes_high_water: number;
+  retained_bytes_total: number;
+  truncated_streams: number;
+}
+
+export const processCaptureMetrics = () =>
+  invoke<ProcessCaptureMetrics>("process_capture_metrics");
+
+export interface RemoteSocketMetrics {
+  active: number;
+  high_water: number;
+  accepted_total: number;
+  rejected_total: number;
+}
+
+export const remoteSocketMetrics = () =>
+  invoke<RemoteSocketMetrics>("remote_socket_metrics");
 
 // ---------- PTY ----------
 
@@ -33,8 +67,86 @@ export interface PtyGeometry {
 
 export interface SpawnResult extends PtyGeometry {
   id: number;
+  /** Rust-owned lifetime identity; independent of renderer/stream generations. */
+  session_generation: number;
   pid: number | null;
+  /** Native output-stream generation. Null for detached/headless sessions. */
+  generation: number | null;
 }
+
+export type PtySessionKind = "desktop" | "remote" | "detached";
+
+export interface PtySummary extends PtyGeometry {
+  id: number;
+  session_generation: number;
+  pid: number | null;
+  cwd: string;
+  title: string;
+  kind: PtySessionKind;
+  replay_start: number;
+  replay_end: number;
+}
+
+export interface RendererRegistration {
+  generation: number;
+  sessions: PtySummary[];
+}
+
+export interface PtyChunk {
+  bytes: Uint8Array;
+  /** Absolute byte range in the native session output stream. */
+  start: number;
+  end: number;
+  /** True when bytes before `start` fell out of the bounded replay ring. */
+  gap: boolean;
+}
+
+const PTY_HEADER = 16;
+export const decodePtyChunk = (payload: ArrayBuffer | number[]): PtyChunk => {
+  const framed = payload instanceof ArrayBuffer
+    ? new Uint8Array(payload)
+    : Uint8Array.from(payload);
+  if (
+    framed.length < PTY_HEADER ||
+    framed[0] !== 0x43 || framed[1] !== 0x50 ||
+    framed[2] !== 0x54 || framed[3] !== 0x59
+  ) {
+    // Compatibility with a native core from before cursor envelopes. It cannot
+    // be resumed incrementally, so mark it as a gap from offset zero.
+    return { bytes: framed, start: 0, end: framed.length, gap: true };
+  }
+  const start = Number(new DataView(
+    framed.buffer,
+    framed.byteOffset + 8,
+    8,
+  ).getBigUint64(0, true));
+  const bytes = framed.subarray(PTY_HEADER);
+  return { bytes, start, end: start + bytes.length, gap: (framed[4] & 1) !== 0 };
+};
+
+let renderer: RendererRegistration | null = null;
+
+/** Make this page authoritative before mounting anything that can spawn a PTY.
+ * Rust detaches predecessor channels and returns the children that survived it. */
+export async function ptyRendererRegister(): Promise<RendererRegistration> {
+  const registration = await invoke<RendererRegistration>("pty_renderer_register");
+  renderer = registration;
+  return registration;
+}
+
+/** Snapshot returned by the boot handshake, consumed idempotently by App. */
+export const rendererPtySessions = (): PtySummary[] => renderer?.sessions ?? [];
+
+const rendererGeneration = (): number => {
+  if (renderer == null) throw new Error("terminal renderer is not registered");
+  return renderer.generation;
+};
+
+/** Browser cleanup can be requested while the renderer is still booting or
+ * already tearing down. Keep those calls promise-shaped so callers can safely
+ * catch them; Rust treats generation 0 as stale and performs no mutation. PTY
+ * creation remains strict through rendererGeneration() above. */
+const browserRendererGeneration = (): number => renderer?.generation ?? 0;
 
 export async function ptySpawn(
   opts: {
@@ -55,18 +167,17 @@ export async function ptySpawn(
     runId?: string;
     attemptId?: string;
   },
-  onData: (bytes: Uint8Array) => void,
+  onData: (chunk: PtyChunk) => void,
 ): Promise<SpawnResult> {
   const channel = new Channel<ArrayBuffer | number[]>();
   // Raw channel payloads arrive as ArrayBuffer for large chunks but as plain
   // number[] below Tauri's internal direct-execute threshold — handle both.
-  channel.onmessage = (data) =>
-    onData(
-      data instanceof ArrayBuffer
-        ? new Uint8Array(data)
-        : Uint8Array.from(data),
-    );
-  return invoke("pty_spawn", { ...opts, onData: channel });
+  channel.onmessage = (data) => onData(decodePtyChunk(data));
+  return invoke("pty_spawn", {
+    ...opts,
+    rendererGeneration: rendererGeneration(),
+    onData: channel,
+  });
 }
 
 // Write/ack/kill/set-title can always lose a race with the session's own exit:
@@ -79,13 +190,17 @@ export async function ptySpawn(
 const gone = (p: Promise<void>) => p.catch(() => {});
 export const ptyWrite = (id: number, data: string) =>
   gone(invoke<void>("pty_write", { id, data }));
-export const ptyAck = (id: number, bytes: number) =>
-  gone(invoke<void>("pty_ack", { id, bytes }));
+export const ptyAck = (id: number, generation: number, bytes: number) =>
+  gone(invoke<void>("pty_ack", {
+    id,
+    rendererGeneration: rendererGeneration(),
+    generation,
+    bytes,
+  }));
 /** Resize the pty; resolves with the size it actually took (clamped to >= 1). */
 export const ptyResize = (id: number, cols: number, rows: number) =>
   invoke<PtyGeometry>("pty_resize", { id, cols, rows });
 export const ptyKill = (id: number) => gone(invoke<void>("pty_kill", { id }));
-export const ptyKillAll = () => invoke<void>("pty_kill_all");
 export const ptySetTitle = (id: number, title: string) =>
   gone(invoke<void>("pty_set_title", { id, title }));
 
@@ -116,19 +231,21 @@ export async function ptySpawnAttachedArgv(
     runId?: string;
     attemptId?: string;
   },
-  onData: (bytes: Uint8Array) => void,
+  onData: (chunk: PtyChunk) => void,
 ): Promise<SpawnResult> {
   const channel = new Channel<ArrayBuffer | number[]>();
-  channel.onmessage = (data) => onData(
-    data instanceof ArrayBuffer ? new Uint8Array(data) : Uint8Array.from(data),
-  );
-  return invoke<SpawnResult>("pty_spawn_attached_argv", { ...opts, onData: channel });
+  channel.onmessage = (data) => onData(decodePtyChunk(data));
+  return invoke<SpawnResult>("pty_spawn_attached_argv", {
+    ...opts,
+    rendererGeneration: rendererGeneration(),
+    onData: channel,
+  });
 }
 
 /** Spawn a PTY with no tab attached to it: a micro-task's agent, which runs its
  *  one job and reports through canopy_job_done. Nothing is announced, so no tab
- *  opens; the Tasks panel watches it by pty id, and `ptyAttach` is how the user
- *  looks at it if they want to. `command` runs as the shell's argument, so the
+ *  opens; the Tasks panel watches it by pty id, and `ptyAttachDesktop` is how
+ *  the user looks at it if they want to. `command` runs as the shell's argument, so the
  *  PTY exits when the agent does. */
 export const ptySpawnDetached = (opts: {
   cwd?: string;
@@ -144,30 +261,43 @@ export const ptySpawnDetached = (opts: {
 export const ptyOutput = (id: number, max?: number) =>
   invoke<string | null>("pty_output", { id, max }).catch(() => null);
 
-/** Attach to a PTY that already exists (spawned headless from the remote
- *  portal). Streams the scrollback snapshot first, then live output — the same
- *  byte contract as ptySpawn's onData, but no ack/backpressure: a headless PTY
- *  fans out over a lossy broadcast, so the desktop just consumes. Resolves with
- *  the size the pty is running at, so the tab renders at the same grid. */
-export async function ptyAttach(
+/** Attach this page to an existing PTY, including one that survived renderer loss.
+ * The returned generation must accompany every ack; stale pages are ignored. */
+export async function ptyAttachDesktop(
   id: number,
-  onData: (bytes: Uint8Array) => void,
-): Promise<PtyGeometry> {
+  after: number | null,
+  onData: (chunk: PtyChunk) => void,
+): Promise<PtyGeometry & {
+  generation: number;
+  replay_start: number;
+  replay_end: number;
+}> {
   const channel = new Channel<ArrayBuffer | number[]>();
-  channel.onmessage = (data) =>
-    onData(
-      data instanceof ArrayBuffer
-        ? new Uint8Array(data)
-        : Uint8Array.from(data),
-    );
-  return invoke("pty_attach", { id, onData: channel });
+  channel.onmessage = (data) => onData(decodePtyChunk(data));
+  return invoke("pty_attach_desktop", {
+    id,
+    rendererGeneration: rendererGeneration(),
+    after,
+    onData: channel,
+  });
 }
+
+export const ptyDetachDesktop = (id: number, generation: number) =>
+  gone(invoke<void>("pty_detach_desktop", {
+    id,
+    rendererGeneration: rendererGeneration(),
+    generation,
+  }));
 
 export interface PtyExit {
   id: number;
+  session_generation: number;
   exit_code: number | null;
   /** True when Canopy requested shutdown; false for a process that died itself. */
   requested: boolean;
+  /** Present only on events synthesized in the renderer when the spawn itself
+   *  was refused (no process ever existed); the Rust event never carries it. */
+  spawnError?: string;
 }
 export const onPtyExit = (cb: (e: PtyExit) => void): Promise<UnlistenFn> =>
   listen<PtyExit>("pty:exit", (event) => cb(event.payload));
@@ -176,6 +306,7 @@ export const onPtyExit = (cb: (e: PtyExit) => void): Promise<UnlistenFn> =>
  *  open a tab attached to it (via ptyAttach) in the matching project. */
 export interface PtySpawned {
   id: number;
+  session_generation: number;
   cwd: string;
   title: string;
   cols: number;
@@ -201,6 +332,7 @@ export interface AgentAction {
     | "job_done"
     | "task_named"
     | "close_session"
+    | "spawn_agent"
     | "message_agent";
   route: string;
   dir?: string;
@@ -235,6 +367,14 @@ export interface AgentAction {
    *  with `browserResult` — delivered or not, exactly once, on every path.
    *  Without one the agent is told the outcome by a toast it cannot read. */
   opId?: number;
+  /** spawn_agent: bridge-owned delegation lineage and launch request. */
+  parentPtyId?: number;
+  spawnDepth?: number;
+  brief?: string;
+  agent?: string;
+  placement?: "tab" | "split";
+  relativeToPtyId?: number;
+  direction?: "left" | "right" | "top" | "bottom";
   /** job_done / task_named: what the agent calls this run. Straight from the
    *  model and clamped where it is read (taskIdentity.ts) — nothing here has
    *  been checked for length, for being one glyph, or for being a string. */
@@ -323,6 +463,11 @@ export const browserResult = (id: number, ok: boolean, data: unknown) =>
     ok,
     data: JSON.stringify(data ?? null),
   }).catch((err) => console.warn("browser_result failed", id, err));
+
+/** Bind a just-created child PTY to its bridge-owned parent/depth before its
+ * opening brief is submitted and it can make its own tool call. */
+export const agentSpawnReady = (id: number, ptyId: number) =>
+  invoke<void>("context_agent_spawn_ready", { id, ptyId });
 
 /** An op only the running UI can answer: a language-server question, the
  *  trackers it holds keys for, a question for the user. Same ticketing as
@@ -597,6 +742,24 @@ export interface BrowserShot {
   mimeType: string;
 }
 
+/** Constant-size native capture counters for diagnostics and soak tests. */
+export interface SnapshotCaptureMetrics {
+  attempts: number;
+  successes: number;
+  failures: number;
+  encodedBytes: number;
+  active: number;
+  activeHighWater: number;
+  retainedBytes: number;
+  retainedHighWater: number;
+  latencyMsAverage: number;
+  latencyMsLast: number;
+  latencyMsMax: number;
+}
+
+export const snapshotCaptureMetrics = () =>
+  invoke<SnapshotCaptureMetrics>("snapshot_capture_metrics");
+
 export const browserSnapshot = (
   tabId: string,
   maxWidth?: number,
@@ -626,13 +789,18 @@ export const browserOpen = (
   height: number,
   background?: [number, number, number],
   visible = true,
-) => invoke<void>("browser_open", { tabId, url, x, y, width, height, background, visible });
+) => invoke<void>("browser_open", {
+  tabId, url, x, y, width, height, background, visible,
+  rendererGeneration: browserRendererGeneration(),
+});
 
 export const browserNavigate = (
   tabId: string,
   url?: string | null,
   action?: string | null,
-) => invoke<void>("browser_navigate", { tabId, url, action });
+) => invoke<void>("browser_navigate", {
+  tabId, url, action, rendererGeneration: browserRendererGeneration(),
+});
 
 export const browserSetBounds = (
   tabId: string,
@@ -640,19 +808,39 @@ export const browserSetBounds = (
   y: number,
   width: number,
   height: number,
-) => invoke<void>("browser_set_bounds", { tabId, x, y, width, height });
+) => invoke<void>("browser_set_bounds", {
+  tabId, x, y, width, height, rendererGeneration: browserRendererGeneration(),
+});
 
 export const browserSetVisible = (tabId: string, visible: boolean) =>
-  invoke<void>("browser_set_visible", { tabId, visible });
+  invoke<void>("browser_set_visible", {
+    tabId, visible, rendererGeneration: browserRendererGeneration(),
+  });
 
 /** Whether the page has ever rendered a frame — which "loaded" does not
  *  imply. A page that loads while its view is hidden never paints, and shows
  *  blank when the view finally appears. */
 export const browserPainted = (tabId: string) =>
-  invoke<boolean>("browser_painted", { tabId });
+  invoke<boolean>("browser_painted", {
+    tabId, rendererGeneration: browserRendererGeneration(),
+  });
 
 export const browserClose = (tabId: string) =>
-  invoke<void>("browser_close", { tabId }).catch(() => {});
+  invoke<void>("browser_close", {
+    tabId, rendererGeneration: browserRendererGeneration(),
+  }).catch(() => {});
+
+export interface BrowserCloseMetrics {
+  pending: number;
+  retryRunning: boolean;
+  attempts: number;
+  successes: number;
+  failures: number;
+}
+
+/** Content-free native orphan-close/retry counters. */
+export const browserCloseMetrics = () =>
+  invoke<BrowserCloseMetrics>("browser_close_metrics");
 
 /** Run one agent browser op against the page. Read-only ops answer here;
  *  anything cursor-led reports `done: false` and lands on `onBrowserEvents`. */
@@ -662,19 +850,27 @@ export interface BrowserOpAck {
   data?: unknown;
 }
 export const browserRunOp = (tabId: string, op: Record<string, unknown>) =>
-  invoke<BrowserOpAck | null>("browser_run_op", { tabId, op });
+  invoke<BrowserOpAck | null>("browser_run_op", {
+    tabId, op, rendererGeneration: browserRendererGeneration(),
+  });
 
 /** A host->page command with no answer: annotate mode, badge sync, navigate. */
 export const browserCommand = (tabId: string, message: Record<string, unknown>) =>
-  invoke<void>("browser_command", { tabId, message });
+  invoke<void>("browser_command", {
+    tabId, message, rendererGeneration: browserRendererGeneration(),
+  });
 
 /** Where the page thinks it is, for in-page navigations the load hook can't
  *  see. */
 export const browserHere = (tabId: string) =>
-  invoke<{ url: string; title: string } | null>("browser_here", { tabId });
+  invoke<{ url: string; title: string } | null>("browser_here", {
+    tabId, rendererGeneration: browserRendererGeneration(),
+  });
 
 /** Wipe the shared browser profile — cookies, storage, caches, every site. */
-export const browserClearData = () => invoke<void>("browser_clear_data");
+export const browserClearData = () => invoke<void>("browser_clear_data", {
+  rendererGeneration: browserRendererGeneration(),
+});
 
 /** Messages a page pushed up: agent-op results, annotations, in-page
  *  navigations, the ready announcement after every load. */
@@ -714,31 +910,111 @@ export interface DirEntry {
   is_dir: boolean;
 }
 
+const statFlights = new Map<
+  string,
+  Promise<{ is_dir: boolean; size: number; modified_ms: number | null }>
+>();
+const dirFlights = new Map<string, Promise<DirEntry[]>>();
+const statBatchFlights = new Map<string, Promise<FsStatEntry[]>>();
+let statFlightHighWater = 0;
+let dirFlightHighWater = 0;
+
+function sharedIpc<T>(
+  flights: Map<string, Promise<T>>,
+  key: string,
+  load: () => Promise<T>,
+): Promise<T> {
+  const active = flights.get(key);
+  if (active) return active;
+  const next = load().finally(() => {
+    if (flights.get(key) === next) flights.delete(key);
+  });
+  flights.set(key, next);
+  statFlightHighWater = Math.max(
+    statFlightHighWater,
+    statFlights.size + statBatchFlights.size,
+  );
+  dirFlightHighWater = Math.max(dirFlightHighWater, dirFlights.size);
+  return next;
+}
+
+/** Scalar-only diagnostics: counts and high-water marks, never paths. */
+export const fsMetadataIoSnapshot = () => ({
+  statFlights: statFlights.size + statBatchFlights.size,
+  dirFlights: dirFlights.size,
+  statFlightHighWater,
+  dirFlightHighWater,
+});
+
 export const workspaceAdd = (path: string) =>
   invoke<string>("workspace_add", { path });
 export const workspaceRemove = (path: string) =>
   invoke<void>("workspace_remove", { path });
 export const workspaceList = () => invoke<string[]>("workspace_list");
 export const fsReadDir = (path: string) =>
-  invoke<DirEntry[]>("fs_read_dir", { path });
+  sharedIpc(dirFlights, path, () =>
+    rendererIoBudget.run(
+      { scope: "fs-metadata", bytes: 2 * 1024 * 1024 },
+      () => invoke<DirEntry[]>("fs_read_dir", { path }),
+    ),
+  );
 export const fsWriteFile = (path: string, content: string) =>
   invoke<void>("fs_write_file", { path, content });
 export const fsStat = (path: string) =>
-  invoke<{ is_dir: boolean; size: number; modified_ms: number | null }>(
-    "fs_stat",
-    { path },
+  sharedIpc(statFlights, path, () =>
+    rendererIoBudget.run(
+      { scope: "fs-metadata", bytes: 4 * 1024 },
+      () =>
+        invoke<{ is_dir: boolean; size: number; modified_ms: number | null }>(
+          "fs_stat",
+          { path },
+        ),
+    ),
   );
 
-export async function fsReadFile(path: string): Promise<Uint8Array> {
-  const data = await invoke<ArrayBuffer | number[]>("fs_read_file", { path });
+export interface FsStatEntry {
+  path: string;
+  is_dir: boolean;
+  size: number;
+  modified_ms: number | null;
+}
+
+export const fsStatMany = (paths: string[]): Promise<FsStatEntry[]> => {
+  const unique = [...new Set(paths)];
+  if (unique.length === 0) return Promise.resolve([]);
+  // Sorting only defines the single-flight identity; native results retain the
+  // submitted order and callers address them by path.
+  const key = JSON.stringify([...unique].sort());
+  return sharedIpc(statBatchFlights, key, () =>
+    rendererIoBudget.run(
+      {
+        scope: "fs-metadata",
+        bytes: Math.min(2 * 1024 * 1024, unique.length * 4096),
+      },
+      () => invoke<FsStatEntry[]>("fs_stat_many", { paths: unique }),
+    ),
+  );
+};
+
+export async function fsReadFile(
+  path: string,
+  maxBytes?: number,
+): Promise<Uint8Array> {
+  const data = await invoke<ArrayBuffer | number[]>("fs_read_file", {
+    path,
+    maxBytes,
+  });
   return data instanceof ArrayBuffer
     ? new Uint8Array(data)
     : Uint8Array.from(data);
 }
 
 const textDecoder = new TextDecoder();
-export async function fsReadText(path: string): Promise<string> {
-  return textDecoder.decode(await fsReadFile(path));
+export async function fsReadText(
+  path: string,
+  maxBytes?: number,
+): Promise<string> {
+  return textDecoder.decode(await fsReadFile(path, maxBytes));
 }
 
 // ---------- agent instructions ----------
@@ -1655,6 +1931,10 @@ export interface FsChange {
   root: string;
   paths: string[];
   kind: "create" | "modify" | "remove" | "other";
+  /** Native watcher burst exceeded its item/byte budget. `paths` is the
+   * bounded prefix; consumers that retain open files must rescan their own
+   * small owner set for this root. */
+  overflow?: boolean;
 }
 export const onFsChange = (cb: (e: FsChange) => void): Promise<UnlistenFn> =>
   listen<FsChange>("fs:change", (event) => cb(event.payload));
@@ -1845,13 +2125,25 @@ export const contextRemove = (projectId: string) =>
 
 export interface PreviewInfo {
   port: number;
+  /** Browser-facing project-isolated hostname, without the port. The iframe
+   *  must be pointed at THIS and not at 127.0.0.1: the host is what gives the
+   *  project its own cookie jar, and loading the same proxy through the loopback
+   *  literal would put every project back on one shared host. */
+  host: string;
+  /** Target origin, retained as the identity preview_stop and the network log
+   *  are keyed by. */
   origin: string;
 }
-/** Start (or reuse) the annotating reverse proxy for a target origin. */
-export const previewStart = (target: string) =>
-  invoke<PreviewInfo>("preview_start", { target });
-export const previewStop = (origin: string) =>
-  invoke<void>("preview_stop", { origin });
+/** Start (or reuse) the annotating reverse proxy for a target origin.
+ *
+ *  The project is required, not optional: the proxy's origin is scoped to it so
+ *  two projects previewing the same target get different hosts and cannot see
+ *  each other's cookies. Passing nothing here would put every project back on
+ *  one shared jar. The native side refuses an empty id rather than guessing. */
+export const previewStart = (projectId: string, target: string) =>
+  invoke<PreviewInfo>("preview_start", { projectId, target });
+export const previewStop = (projectId: string, origin: string) =>
+  invoke<void>("preview_stop", { projectId, origin });
 
 // ---------- LSP ----------
 
@@ -1917,24 +2209,197 @@ export interface SessionStats {
   quiet_ms: number | null;
   since_input_ms: number | null;
   output_bytes: number;
+  /** Content-free native delivery diagnostics; optional for older native cores. */
+  desktop_attached?: boolean;
+  desktop_outstanding_bytes?: number;
+  replay_bytes?: number;
+  dropped_output_bytes?: number;
+  desktop_delivery_chunks?: number;
+  desktop_delivery_bytes?: number;
+  desktop_acked_bytes?: number;
+  desktop_delivery_chunk_bytes_max?: number;
+  desktop_ack_latency_last_ms?: number;
+  desktop_ack_latency_max_ms?: number;
+  desktop_ack_latency_total_ms?: number;
+  desktop_ack_latency_samples?: number;
 }
 /** The latest process reading for every live terminal, on demand — for a caller
  *  that needs one now and has no `onPtyStats` subscription. Reads the cache the
  *  monitor already fills. */
 export const ptyStats = (): Promise<SessionStats[]> => invoke<SessionStats[]>("pty_stats");
 
+/** Verify the exact path declared by a Build run on one of that PTY's local
+ * listening ports. Native transport keeps browser CORS out of process health. */
+export const probeHttpReadiness = (port: number, path: string): Promise<boolean> =>
+  invoke<boolean>("probe_http_readiness", { port, path });
+
 export const onPtyStats = (
   cb: (stats: SessionStats[]) => void,
 ): Promise<UnlistenFn> =>
   listen<SessionStats[]>("pty:stats", (event) => cb(event.payload));
 
+// ---------- Terminal resource governor ----------
+
+export type TerminalBudgetState =
+  | "normal"
+  | "warned"
+  | "relief"
+  | "awaiting_grant"
+  | "over_allowance"
+  | "stopping"
+  | "exited";
+
+export interface TerminalGovernorCapability {
+  platform: string;
+  /** `soft_limit` is currently possible only for a verified Linux memory.high backend. */
+  enforcement: "monitor_only" | "soft_limit" | "notification_limit";
+  measurement: string;
+  hard_limit: boolean;
+  pause: boolean;
+  soft_limit: boolean;
+  dynamic_raise: boolean;
+  mechanism: string;
+  detail: string;
+}
+
+export interface TerminalGrantRequest {
+  request_id: string;
+  budget_generation: number;
+  increments: number[];
+}
+
+export interface TerminalBudgetStatus {
+  id: number;
+  budget_generation: number;
+  state: TerminalBudgetState;
+  base_allowance_bytes: number;
+  granted_bytes: number;
+  remembered_default_bytes: number;
+  allowance_bytes: number;
+  current_bytes: number;
+  peak_bytes: number;
+  ema_bytes: number;
+  growth_bytes_per_second: number;
+  samples: number;
+  grant_request: TerminalGrantRequest | null;
+  stop_request_id: string;
+  /** Content-free package/bin identity; never an executable path. */
+  cli_key: string | null;
+}
+
+export interface TerminalGovernorSnapshot {
+  capability: TerminalGovernorCapability;
+  host_total_bytes: number;
+  host_available_bytes: number;
+  protected_reserve_bytes: number;
+  aggregate_terminal_bytes: number;
+  grantable_headroom_bytes: number;
+  fallback_policy: "notify_natively_and_refuse_automatic_grant_pause_or_stop";
+  sessions: TerminalBudgetStatus[];
+}
+
+export interface TerminalGovernorIncident {
+  at_ms: number;
+  id: number;
+  event: string;
+  from: TerminalBudgetState | null;
+  to: TerminalBudgetState | null;
+  current_bytes: number;
+  allowance_bytes: number;
+  detail: string;
+}
+
+export interface TerminalGovernorEvent {
+  kind:
+    | "state_changed"
+    | "grant_applied"
+    | "stop_requested"
+    | "remembered_default_applied";
+  status: TerminalBudgetStatus;
+}
+
+export interface TerminalGrantOutcome {
+  applied: boolean;
+  idempotent: boolean;
+  status: TerminalBudgetStatus;
+}
+
+export interface TerminalStopOutcome {
+  requested: boolean;
+  idempotent: boolean;
+  status: TerminalBudgetStatus;
+}
+
+export interface TerminalRememberDefaultOutcome {
+  persisted: boolean;
+  idempotent: boolean;
+  cli_key: string;
+  increment_bytes: number;
+}
+
+export const terminalGovernorStatus = (): Promise<TerminalGovernorSnapshot> =>
+  invoke<TerminalGovernorSnapshot>("terminal_governor_status");
+
+export const terminalGovernorIncidents = (): Promise<TerminalGovernorIncident[]> =>
+  invoke<TerminalGovernorIncident[]>("terminal_governor_incidents");
+
+export const terminalGovernorGrant = (
+  id: number,
+  budgetGeneration: number,
+  requestId: string,
+  incrementBytes: number,
+): Promise<TerminalGrantOutcome> =>
+  invoke<TerminalGrantOutcome>("terminal_governor_grant", {
+    id,
+    budgetGeneration,
+    requestId,
+    incrementBytes,
+  });
+
+export const terminalGovernorStop = (
+  id: number,
+  budgetGeneration: number,
+  requestId: string,
+): Promise<TerminalStopOutcome> =>
+  invoke<TerminalStopOutcome>("terminal_governor_stop", {
+    id,
+    budgetGeneration,
+    requestId,
+  });
+
+/** Persist only after a separate confirmation UI. Native code verifies this
+ * exact increment was already granted to the currently identified CLI. */
+export const terminalGovernorRememberDefault = (
+  id: number,
+  grantRequestId: string,
+  grantBudgetGeneration: number,
+  incrementBytes: number,
+  confirmed: boolean,
+): Promise<TerminalRememberDefaultOutcome> =>
+  invoke<TerminalRememberDefaultOutcome>("terminal_governor_remember_default", {
+    id,
+    grantRequestId,
+    grantBudgetGeneration,
+    incrementBytes,
+    confirmed,
+  });
+
+export const onTerminalGovernor = (
+  cb: (event: TerminalGovernorEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<TerminalGovernorEvent>("terminal:governor", (event) => cb(event.payload));
+
 export interface AppStats {
   cpu: number;
   mem_bytes: number;
   procs: number;
+  /** False when the OS hosts WebView helpers outside Canopy's process tree.
+   *  The native total is then a lower bound, not whole-app usage. */
+  includes_webviews: boolean;
 }
 
-/** Whole-app footprint (this process + every descendant), emitted every 2s. */
+/** Native process-tree footprint, emitted every 2s. `includes_webviews` says
+ * whether that tree is also a whole-app footprint on the current platform. */
 export const onAppStats = (cb: (s: AppStats) => void): Promise<UnlistenFn> =>
   listen<AppStats>("app:stats", (e) => cb(e.payload));
 
@@ -1957,7 +2422,25 @@ export interface MemoryPressure {
 export const onWatchdogPing = (cb: () => void): Promise<UnlistenFn> =>
   listen("watchdog:ping", () => cb());
 
-export const watchdogAck = () => invoke<void>("watchdog_ack").catch(() => {});
+export const watchdogAck = () =>
+  invoke<void>("watchdog_ack", { generation: rendererGeneration() }).catch(() => {});
+
+/** Install liveness before Monaco/React startup can delay the App effect. */
+export const installEarlyWatchdogHeartbeat = async (): Promise<UnlistenFn> => {
+  await watchdogAck();
+  return onWatchdogPing(() => void watchdogAck());
+};
+
+export interface RecoveryIncident {
+  at_ms: number;
+  kind: string;
+  generation: number;
+  /** Content-free numeric context, such as heartbeat age in milliseconds. */
+  detail: number;
+  outcome: string;
+}
+export const watchdogIncidents = () =>
+  invoke<RecoveryIncident[]>("watchdog_incidents");
 
 export const onMemoryPressure = (
   cb: (p: MemoryPressure) => void,
@@ -2502,6 +2985,32 @@ export interface SyncOutcome {
   message: string;
 }
 
+/** One PR head for the dashboard's object-store-only merge probe. */
+export interface PrMergeCandidate {
+  number: number;
+  branch: string;
+  base: string;
+  base_sha: string;
+  head_sha: string;
+}
+
+/** Whether two PR heads can coexist, plus ancestry for real stack detection. */
+export interface PrMergePairProbe {
+  first: number;
+  second: number;
+  clean: boolean | null;
+  conflicts: string[];
+  first_ancestor_second: boolean;
+  second_ancestor_first: boolean;
+}
+
+export interface PrMergePlanProbe {
+  repo: string;
+  pairs: PrMergePairProbe[];
+  unavailable: number[];
+  fetch_error: string | null;
+}
+
 /** Non-destructive: dry-runs the merge in the object store, so it is safe to
  *  call on a timer while the user is mid-edit. `fetch` refreshes the remote. */
 export const gitSyncProbe = (repo: string, fetch: boolean, base?: string | null) =>
@@ -2512,6 +3021,14 @@ export const gitSyncApply = (repo: string, base: string) =>
   invoke<SyncOutcome>("git_sync_apply", { repo, base });
 
 export const gitSyncAbort = (repo: string) => invoke<string>("git_sync_abort", { repo });
+
+/** Pairwise PR compatibility using the same merge-tree law as branch sync:
+ *  object database only; never the worktree, index, HEAD or a branch ref. */
+export const gitPrMergeProbe = (
+  repo: string,
+  candidates: PrMergeCandidate[],
+  fetch = true,
+) => invoke<PrMergePlanProbe>("git_pr_merge_probe", { repo, candidates, fetch });
 
 export const gitWorkAudit = (repo: string) =>
   invoke<WorkAudit>("git_work_audit", { repo });
@@ -2799,6 +3316,9 @@ export const ghPrRequestReview = (
   number: number,
   reviewers: string[],
 ) => invoke<string>("gh_pr_request_review", { repo, number, reviewers });
+/** Change a PR's base only on an explicit dashboard click. */
+export const ghPrRetarget = (repo: string, number: number, base: string) =>
+  invoke<string>("gh_pr_retarget", { repo, number, base });
 export const ghPrAutoMerge = (
   repo: string,
   number: number,
@@ -2828,6 +3348,8 @@ export interface PrRow {
   url: string;
   branch: string;
   base: string;
+  head_sha?: string;
+  base_sha?: string;
   draft: boolean;
   created: string;
   updated: string;
@@ -3573,6 +4095,8 @@ export async function structuredRunnerSpawn(
     args: string[];
     cwd?: string;
     env?: [string, string][];
+    /** Whether the child gets a writable stdin. See ProjectRunnerProcess. */
+    keepStdin?: boolean;
   },
   onData: (out: StructuredRunnerOut) => void,
 ): Promise<void> {
@@ -3584,6 +4108,7 @@ export async function structuredRunnerSpawn(
     controlToken,
     ...opts,
     cwd: opts.cwd,
+    keepStdin: opts.keepStdin !== false,
     onData: channel,
   });
 }

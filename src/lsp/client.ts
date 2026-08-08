@@ -4,12 +4,8 @@
 // No WebSocket, no Node sidecar for the bridge. Adding a language = one more
 // entry in SERVERS (servers.ts).
 import {
-  AbstractMessageReader,
   AbstractMessageWriter,
-  type DataCallback,
-  type Disposable,
   type Message,
-  type MessageReader,
   type MessageWriter,
 } from "vscode-jsonrpc";
 import * as ipc from "../ipc";
@@ -24,32 +20,7 @@ import {
   type ServerSpec,
 } from "./servers";
 import { basename } from "../paths";
-
-class IpcMessageReader extends AbstractMessageReader implements MessageReader {
-  private callback: DataCallback | null = null;
-  private buffered: Message[] = [];
-
-  push(raw: string) {
-    try {
-      const message = JSON.parse(raw) as Message;
-      if (this.callback) this.callback(message);
-      else this.buffered.push(message);
-    } catch (err) {
-      this.fireError(err);
-    }
-  }
-
-  notifyClosed() {
-    this.fireClose();
-  }
-
-  listen(callback: DataCallback): Disposable {
-    this.callback = callback;
-    for (const m of this.buffered) callback(m);
-    this.buffered = [];
-    return { dispose: () => (this.callback = null) };
-  }
-}
+import { IpcMessageReader } from "./ipcMessageReader";
 
 class IpcMessageWriter extends AbstractMessageWriter implements MessageWriter {
   private serverId: () => number | null;
@@ -131,6 +102,7 @@ const exists = (path: string) =>
 // One stat walk per (spec, root, directory); the answer can't change while the
 // project is open, and every agent tool call would otherwise re-walk it.
 const rootCache = new Map<string, Promise<string>>();
+const ROOT_CACHE_MAX = 512;
 
 function serverRootFor(spec: ServerSpec, path: string, root: string): Promise<string> {
   if (!spec.rootMarkers?.length) return Promise.resolve(root);
@@ -139,6 +111,10 @@ function serverRootFor(spec: ServerSpec, path: string, root: string): Promise<st
   if (!hit) {
     hit = resolveServerRoot(path, root, spec, exists);
     rootCache.set(key, hit);
+    if (rootCache.size > ROOT_CACHE_MAX) {
+      const oldest = rootCache.keys().next().value as string | undefined;
+      if (oldest != null && oldest !== key) rootCache.delete(oldest);
+    }
   }
   return hit;
 }
@@ -167,25 +143,41 @@ async function launchFor(spec: ServerSpec, root: string): Promise<ServerLaunch> 
 
 /** Fold a raw `$/progress` frame into the server's busy state. Cheap enough to
  *  run on every message because the substring test rejects almost all of them. */
-function observeProgress(state: ProgressState, raw: string) {
-  if (!raw.includes("$/progress")) return;
-  try {
-    const m = JSON.parse(raw) as {
-      method?: string;
-      params?: { token?: unknown; value?: { kind?: string } };
-    };
-    if (m.method !== "$/progress") return;
-    const token = String(m.params?.token ?? "");
-    const kind = m.params?.value?.kind;
-    if (kind === "begin") state.active.add(token);
-    else if (kind === "end") {
-      state.active.delete(token);
-      state.lastEnd = Date.now();
-    }
-  } catch {
-    // A frame we can't parse tells us nothing about progress; the reader will
-    // complain about it on its own.
+function observeProgress(state: ProgressState, message: Message) {
+  const m = message as Message & {
+    method?: string;
+    params?: { token?: unknown; value?: { kind?: string } };
+  };
+  if (m.method !== "$/progress") return;
+  const token = String(m.params?.token ?? "");
+  const kind = m.params?.value?.kind;
+  if (kind === "begin") state.active.add(token);
+  else if (kind === "end") {
+    state.active.delete(token);
+    state.lastEnd = Date.now();
   }
+}
+
+/** Scalar-only protocol/cache diagnostics; no paths, tokens, or payloads. */
+export function lspIoSnapshot() {
+  let bufferedMessages = 0;
+  let bufferedBytes = 0;
+  let failedReaders = 0;
+  for (const reader of readers.values()) {
+    const snapshot = reader.snapshot();
+    bufferedMessages += snapshot.bufferedMessages;
+    bufferedBytes += snapshot.bufferedBytes;
+    if (snapshot.failed) failedReaders++;
+  }
+  return {
+    readers: readers.size,
+    bufferedMessages,
+    bufferedBytes,
+    failedReaders,
+    rootCacheEntries: rootCache.size,
+    startingServers: starting.size,
+    runningServers: running.size,
+  };
 }
 
 function startWithTimeout(start: Promise<void>, spec: ServerSpec): Promise<void> {
@@ -283,8 +275,7 @@ async function startLanguageServer(
     await ensureExitListener();
     const launch = await launchFor(spec, serverRoot);
     serverId = await ipc.lspStart(launch.command, launch.args, serverRoot, (msg) => {
-      observeProgress(progress, msg);
-      reader.push(msg);
+      reader.push(msg, (message) => observeProgress(progress, message));
     });
     readers.set(serverId, reader);
     if (exitedBeforeRegistration.delete(serverId)) {

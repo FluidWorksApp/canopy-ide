@@ -102,6 +102,10 @@ import { contentLeft, expandedStackScroll, GROUP_ATTR, revealScroll } from "../.
 import { clearActiveTab, setActiveTab } from "../../activeView";
 import { useFlipStrip } from "../../tabFlip";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
+import {
+  closeEditorModelOwner,
+  retainedEditorModelText,
+} from "../../editorModelRetention";
 import { getCaret, subscribeCaret } from "../../editorState";
 import { setCompanionSpotlight } from "../../companionContext";
 import { useEscapeBackstop, useEscapeLayer } from "../../useEscape";
@@ -127,6 +131,7 @@ import {
   launchEnvSync,
   launchProfile,
   primeLaunchEnv,
+  setActiveProfile,
   supportsProfiles,
   PROFILE_CHANGE_EVENT,
 } from "../../profiles";
@@ -136,6 +141,10 @@ import {
   type FleetRouteSnapshot,
 } from "../../fleetSnapshot";
 import { pickLaunchCli, startCommandParked } from "../../agentSeed";
+import {
+  placeSpawnedTab,
+  type AgentSpawnPlacement,
+} from "../../agentSpawn";
 import {
   AGENT_CLIS,
   announceCliInstallsChanged,
@@ -163,6 +172,7 @@ import {
   PlayIcon,
   PullRequestIcon,
   RestartIcon,
+  SettingsIcon,
   StopIcon,
   TeamIcon,
   TerminalIcon,
@@ -199,6 +209,12 @@ import {
   vibeServerLogTail,
   type VibeServerHealthState,
 } from "../../vibeServerHealth";
+import {
+  classifyManagedProcess,
+  MANAGED_PROCESS_ENV,
+  plainManagedOutput,
+  unattendedManagedRunCommand,
+} from "../../managedProcessSupervisor";
 import { watchFailedRestore } from "../../restoreReap";
 import { followLink, type DeepLink } from "../../deepLinks";
 import {
@@ -263,6 +279,7 @@ import {
 } from "../../taskHistory";
 import {
   reserveTask,
+  settleAttempt,
   taskGet,
   TASK_ENVELOPES_EVENT,
 } from "../../taskEnvelopes";
@@ -332,11 +349,20 @@ import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
 import { PrsPanel } from "../PrsPanel";
 import { ServersPanel } from "../ServersPanel";
 import {
+  IntegrationsPanel,
+  type LocalIntegrationService,
+} from "../IntegrationsPanel";
+import {
   groupServers,
   runningCount,
   type ComponentWorkspace,
   type ServerEntry,
 } from "../../servers";
+import {
+  integrationProviderById,
+  normalizeProjectIntegrations,
+  type IntegrationProviderId,
+} from "../../projectIntegrations";
 import {
   agentsIn,
   ensureLeases,
@@ -414,11 +440,19 @@ import { PaneBar } from "../PaneBar";
 import { VibeBuilderPane } from "../VibeBuilderPane";
 import {
   createVibeBuilderSession,
+  type VibeManagedProcessFailureInput,
   type VibeServerIncidentInput,
 } from "../../vibeBuilderSession";
+import {
+  executeVibeRouteRecovery,
+  type VibeRouteRecoveryAction,
+} from "../../vibeRouteRecovery";
 import type { VibePackageFacts } from "../../vibeTargetInference";
 import { createVibeTargetStatusSession } from "../../vibeTargetInference";
-import { createVibeProjectSetupSession } from "../../vibeProjectSetup";
+import {
+  createVibeProjectSetupSession,
+  retryVibeProjectSetup,
+} from "../../vibeProjectSetup";
 import { loadVibePackageFacts } from "../../vibePackageScripts";
 import { inferVibeCheck } from "../../vibeCheckInference";
 import { TabSwitcher } from "../TabSwitcher";
@@ -478,8 +512,14 @@ import {
   matchesVibeRun,
   pickBrowserTab,
   resolveVibeTarget,
+  vibeRunReady,
+  vibeSetupGate,
 } from "./helpers";
 import { Button } from "../ui";
+import {
+  documentResourceActive,
+  shouldReuseInactiveDocumentPane,
+} from "../../documentResourceActive";
 export { tabDisplayLabel, previewLabel, deviceLabel };
 export type {
   SideTab,
@@ -618,6 +658,7 @@ const PEEK_CLOSE_MS = 1500;
 const PEEK_LEAVE_MS = 220;
 const SIDE_DEFAULT_W = 300;
 const SIDE_MIN_W = 200;
+const BUILD_SETTINGS_W = 360;
 const SIDE_MAX_W = 560;
 
 /** How the body hands its "point the files at this workspace" action up to the
@@ -646,6 +687,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   onNotice: onNoticeRaw,
   onShareContext,
   onSaveCustomTasks,
+  onSaveIntegrations,
   onPersistVibeSetup,
   relay,
   restore,
@@ -721,6 +763,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT_W);
   const sideWidthRef = useRef(SIDE_DEFAULT_W);
   const vibe = project.vibe?.enabled === true;
+  const [buildSettingsOpen, setBuildSettingsOpen] = useState(false);
+  const [vibeSetupAttempt, setVibeSetupAttempt] = useState(0);
   const vibeTarget = resolveVibeTarget(project);
   const vibePackageKey = project.components
     .map((component) => `${component.id}:${component.path}`)
@@ -760,12 +804,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return () => {
       void session.stop();
     };
-  }, [vibe, vibeTarget.kind, project, onPersistVibeSetup]);
+  }, [vibe, vibeTarget.kind, project, onPersistVibeSetup, vibeSetupAttempt]);
   const vibeWaitingSession = useMemo(
     () => createVibeTargetStatusSession("I'm getting your project ready."),
     [],
   );
   const sideOpen = !zen && !vibe && (pinned || peeking);
+
+  useEffect(() => {
+    if (!vibe) setBuildSettingsOpen(false);
+  }, [vibe]);
 
   // The overlay peek slides over the pane, and a child webview cannot be drawn
   // under it — so the panel has to be announced, not discovered. The occlusion
@@ -790,6 +838,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
       window.setTimeout(release, PEEK_EXIT_MS);
     };
   }, [sidePrefs.overlay, sideOpen]);
+  useEffect(() => {
+    if (!vibe || !buildSettingsOpen) return;
+    const release = suppressBrowserViewsOver({
+      x: Math.max(0, window.innerWidth - BUILD_SETTINGS_W),
+      y: 0,
+      width: BUILD_SETTINGS_W,
+      height: window.innerHeight,
+    });
+    return () => {
+      window.setTimeout(release, PEEK_EXIT_MS);
+    };
+  }, [buildSettingsOpen, vibe]);
   const [tabs, setTabs] = useState<SubTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [pendingAgentCloses, setPendingAgentCloses] = useState(
@@ -1107,22 +1167,35 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const wakeWorktreeEnvRef = useRef(wakeWorktreeEnv);
   wakeWorktreeEnvRef.current = wakeWorktreeEnv;
 
-  const baselines = useRef(new Map<string, string>());
   const recentSaves = useRef(new Map<string, number>());
+  const viewerByteReads = useRef(
+    new Map<string, Promise<Uint8Array | null>>(),
+  );
   const termHandles = useRef(new Map<string, TermHandle | null>());
   const livePtyByTab = useRef(new Map<string, number>());
-  const vibeServerHealth = useRef<VibeServerHealthState>(
-    INITIAL_VIBE_SERVER_HEALTH,
+  const vibeServerHealth = useRef(new Map<string, VibeServerHealthState>());
+  const openVibeServerIncident = useRef(new Set<string>());
+  const [vibeVerifiedReadinessPtys, setVibeVerifiedReadinessPtys] = useState<Set<number>>(
+    () => new Set(),
   );
-  const openVibeServerIncident = useRef<string | null>(null);
-  const vibeServerWatch = useRef<{
+  const vibeRunSupervision = useRef(new Map<number, {
+    startedAt: number;
+    lastChangedAt: number;
+    outputBytes: number;
+    handledPrompt: string | null;
+    handledPromptAt: number | null;
+    readinessVerified: boolean;
+    reported: boolean;
+  }>());
+  const vibeServerWatch = useRef<Array<{
     targetKey: string;
     componentId: string;
     runCommandId: string;
     path: string;
     command: string;
+    kind: "serve" | "worker";
     session: ReturnType<typeof createVibeBuilderSession>;
-  } | null>(null);
+  }>>([]);
   const vibeServerExit = useRef<
     (tabId: string, event: ipc.PtyExit) => void
   >(() => {});
@@ -1346,18 +1419,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   // A worktree mirrors its repo's tree, so a component inside the repo maps to
   // the same relative path inside the worktree.
-  const components = project.components.map((c) => {
-    if (
-      worktreeEnv &&
-      (c.path === worktreeEnv.repo || c.path.startsWith(worktreeEnv.repo + "/"))
-    ) {
-      return {
-        ...c,
-        path: worktreeEnv.path + c.path.slice(worktreeEnv.repo.length),
-      };
-    }
-    return c;
-  });
+  // This identity is a lifecycle boundary: `vibeSession` depends on it below.
+  // Mapping on every render recreated and stopped the live Build session on a
+  // routine stats tick, which cleared a half-typed composer and orphaned the
+  // turn the person had just sent. Only the project/worktree inputs may replace
+  // the component view and therefore the session that owns it.
+  const components = useMemo(
+    () =>
+      project.components.map((c) => {
+        if (
+          worktreeEnv &&
+          (c.path === worktreeEnv.repo || c.path.startsWith(worktreeEnv.repo + "/"))
+        ) {
+          return {
+            ...c,
+            path: worktreeEnv.path + c.path.slice(worktreeEnv.repo.length),
+          };
+        }
+        return c;
+      }),
+    [project.components, worktreeEnv],
+  );
   const roots = components.map((c) => c.path);
   const rootsKey = roots.join("\n");
   // Cmd+T's listener is registered once; without this it closes over the
@@ -1398,7 +1480,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (
         !belongs ||
         event.kind === "remove" ||
-        !event.paths.some((path) => path.toLowerCase().endsWith(".md"))
+        (!event.overflow &&
+          !event.paths.some((path) => path.toLowerCase().endsWith(".md")))
       ) {
         return;
       }
@@ -1429,6 +1512,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // actual PTY: timing this from addTerminal raced terminal mounting and could
   // silently leave a freshly opened agent with no context at all.
   const pendingTerminalPrompts = useRef(new Map<string, string>());
+  const pendingAgentSpawnOps = useRef(
+    new Map<
+      string,
+      {
+        opId: number;
+        runId: string;
+        attemptId: string;
+        cwd: string;
+        ready?: Promise<void>;
+      }
+    >(),
+  );
   useEffect(
     () => () => {
       for (const t of reapTimers.current.values()) window.clearTimeout(t);
@@ -1500,6 +1595,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       activate = true,
       paneGroup?: string,
       runIdentity?: { componentId: string; runCommandId: string },
+      spawnedTask?: TermSubTab["spawnedTask"],
     ) => {
       const id = tabId();
       // Every terminal opened inside a workspace gets that workspace's port,
@@ -1518,7 +1614,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
         profile ??
         (launchedCli && accountEnv.length ? launchProfile(launchedCli) : undefined) ??
         undefined;
-      const env = [...portEnv(portForPath(cwd)), ...accountEnv];
+      const managedEnv = runIdentity ? [...MANAGED_PROCESS_ENV] : [];
+      const env = [...portEnv(portForPath(cwd)), ...managedEnv, ...accountEnv];
       setTabs((prev) => [
         ...prev,
         {
@@ -1536,6 +1633,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           paneGroup,
           componentId: runIdentity?.componentId,
           runCommandId: runIdentity?.runCommandId,
+          spawnedTask,
         },
       ]);
       if (activate) setActiveTabId(id);
@@ -1604,9 +1702,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
         cwd: string;
         title: string;
         activate?: boolean;
+        killOnClose?: boolean;
       };
       if (d?.projectId !== project.id) return;
-      attachTerminal(d.ptyId, d.cwd, d.title, "📱", d.activate !== false);
+      attachTerminal(
+        d.ptyId,
+        d.cwd,
+        d.title,
+        d.killOnClose ? "⌨" : "📱",
+        d.activate !== false,
+        d.killOnClose === true,
+      );
     };
     window.addEventListener("canopy:attach-terminal", onAttach);
     return () => window.removeEventListener("canopy:attach-terminal", onAttach);
@@ -1754,6 +1860,34 @@ const ProjectViewBody = memo(function ProjectViewBody({
   collabRef.current = relay.collab;
   const ownerCursorAt = useRef(0);
 
+  // A normal project close unmounts this view directly (hibernation closes
+  // tabs first). Release collaboration owners here as the project boundary;
+  // FileView independently releases each project:tab Monaco owner.
+  useEffect(
+    () => () => {
+      for (const session of shared.current.values()) {
+        collabRef.current.close(session.doc);
+      }
+      shared.current.clear();
+      for (const tab of tabsRef.current) {
+        if (tab.type === "collab") {
+          collabRef.current.close(tab.doc);
+          monaco.editor
+            .getModels()
+            .find(
+              (model) =>
+                model.uri.scheme === "canopy-collab" &&
+                model.uri.path.startsWith(`/${tab.doc}/`),
+            )
+            ?.dispose();
+        } else if (tab.type === "shared-project") {
+          collabRef.current.leaveProject(tab.doc);
+        }
+      }
+    },
+    [project.id],
+  );
+
   const sharedDocFor = useCallback(
     (path: string) => shared.current.get(path),
     [],
@@ -1820,7 +1954,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           let model = monaco.editor.getModel(monaco.Uri.file(abs));
           if (!model) {
             try {
-              model = modelFor(abs, await ipc.fsReadText(abs));
+              model = modelFor(abs, await ipc.fsReadText(abs, sizeLimitFor("code")));
             } catch {
               onNotice(`Couldn't open ${relPath} to share.`, "error");
               return;
@@ -2968,6 +3102,151 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [addTerminal, onNotice, getInstalledForLaunch, gateManagedLaunch],
   );
 
+  /** A coding agent's bounded delegation path. The task reservation happens
+   * before the tab exists, and the opening brief is acknowledged only after
+   * the child PTY is lineage-bound and (for TUI-seeded CLIs) submitted. */
+  const startSpawnedAgent = useCallback(
+    async (a: ipc.AgentAction): Promise<void> => {
+      if (
+        a.opId == null ||
+        a.parentPtyId == null ||
+        a.spawnDepth == null ||
+        !a.text ||
+        !a.brief
+      ) {
+        throw new Error("Canopy received an incomplete agent spawn request");
+      }
+      const placement: AgentSpawnPlacement =
+        a.placement === "split"
+          ? {
+              mode: "split",
+              relativeToPtyId: a.relativeToPtyId as number,
+              direction: a.direction as "left" | "right" | "top" | "bottom",
+            }
+          : { mode: "tab" };
+      if (
+        placement.mode === "split" &&
+        !tabsRef.current.some(
+          (tab) => tab.type === "terminal" && tab.ptyId === placement.relativeToPtyId,
+        )
+      ) {
+        throw new Error(
+          `terminal ${placement.relativeToPtyId} is no longer open; choose a ptyId from canopy_agents`,
+        );
+      }
+      const installed = await getInstalledForLaunch();
+      const cli = pickLaunchCli(a.agent, (bin) => Boolean(installed[bin]));
+      if (!cli) throw new Error(`Unknown agent "${a.agent}".`);
+      const fleet = await gateManagedLaunch(cli, installed);
+      if (!fleet.allowed) throw new Error("Canopy's fleet gate refused this agent launch");
+      const start = await startCommandParked(cli.id, a.text, a.route);
+      if (!start) throw new Error(`Agent CLI "${cli.id}" cannot be launched`);
+      const component = [...project.components]
+        .filter(
+          (candidate) =>
+            a.route === candidate.path || a.route.startsWith(`${candidate.path}/`),
+        )
+        .sort((left, right) => right.path.length - left.path.length)[0];
+      const title = a.title?.trim() || "Delegated task";
+      const reservation = await reserveTask({
+        kind: "agent-delegation",
+        projectId: project.id,
+        componentId: component?.id ?? project.id,
+        worktreePath: a.route,
+        goal: a.brief,
+        acceptance: ["Complete the brief and report the outcome to the parent or user."],
+        taskClasses: { agent_delegation: 1 },
+        contextSummary: `Delegated by terminal ${a.parentPtyId} at depth ${a.spawnDepth}.`,
+        riskClass: "writes",
+        authorityPolicy: { effect: "writes", source: "agent-delegation" },
+        failoverPolicy: { automatic: false },
+        attemptCap: 1,
+        title,
+        metadata: {
+          agentSpawn: {
+            parentPtyId: a.parentPtyId,
+            depth: a.spawnDepth,
+            placement,
+          },
+        },
+        route: {
+          cli: cli.id,
+          profileId: fleet.route.profile,
+          harnessVersion: "agent-spawn-v1",
+          promptVersion: "agent-spawn-v1",
+          toolPolicyVersion: "agent-spawn-v1",
+          executionMode: "pty",
+        },
+      });
+      const spawnedTask = {
+        runId: reservation.envelope.runId,
+        attemptId: reservation.attempt.attemptId,
+        parentPtyId: a.parentPtyId,
+        depth: a.spawnDepth,
+      };
+      const id = addTerminal(
+        a.route,
+        start.command,
+        `${title} · ${cli.name}`,
+        cli.icon,
+        false,
+        fleet.env,
+        fleet.route.profile === DEFAULT_PROFILE ? undefined : fleet.route.profile,
+        true,
+        undefined,
+        undefined,
+        spawnedTask,
+      );
+      try {
+        const placed = placeSpawnedTab(
+          terminalGroupsRef.current,
+          tabsRef.current.filter(
+            (tab): tab is TermSubTab => tab.type === "terminal",
+          ),
+          id,
+          placement,
+        );
+        if (placed.groupId) {
+          const relativeToPtyId =
+            placement.mode === "split" ? placement.relativeToPtyId : undefined;
+          terminalGroupsRef.current = placed.groups;
+          setTerminalGroups(placed.groups);
+          setTabs((tabs) =>
+            tabs.map((tab) =>
+              tab.type === "terminal" &&
+              (tab.id === id || tab.ptyId === relativeToPtyId)
+                ? { ...tab, paneGroup: placed.groupId }
+                : tab,
+            ),
+          );
+        }
+      } catch (error) {
+        closeTabRef.current(id);
+        await settleAttempt({
+          attemptId: spawnedTask.attemptId,
+          state: "cancelled",
+          failureClass: "route",
+          failureCode: "placement",
+        }).catch(() => {});
+        throw error;
+      }
+      pendingAgentSpawnOps.current.set(id, {
+        opId: a.opId,
+        runId: spawnedTask.runId,
+        attemptId: spawnedTask.attemptId,
+        cwd: a.route,
+      });
+      if (start.typePrompt) pendingTerminalPrompts.current.set(id, a.text);
+    },
+    [
+      addTerminal,
+      gateManagedLaunch,
+      getInstalledForLaunch,
+      project.components,
+      project.id,
+    ],
+  );
+
   /** Micro-tasks running with no tab of their own. The Tasks panel is their
    *  surface; ProjectView owns their PTYs, which is why the list lives here.
    *  Ref and state move together so an event arriving between renders (a
@@ -3955,17 +4234,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
   ) => {
     const tab = tabsRef.current.find((t) => t.id === id);
     if (tab?.type !== "terminal") return;
-    const watched = vibeServerWatch.current;
-    if (
-      origin === "explicit" &&
-      watched &&
-      tab.cwd === watched.path &&
-      (tab.runCommandId
-        ? tab.componentId === watched.componentId &&
-          tab.runCommandId === watched.runCommandId
-        : tab.command === watched.command)
-    ) {
-      vibeServerHealth.current = resetVibeServerHealth(watched.targetKey);
+    const watched = vibeServerWatch.current.find(
+      (candidate) =>
+        tab.cwd === candidate.path &&
+        (tab.runCommandId
+          ? tab.componentId === candidate.componentId &&
+            tab.runCommandId === candidate.runCommandId
+          : tab.command === candidate.command),
+    );
+    if (origin === "explicit" && watched) {
+      vibeServerHealth.current.set(
+        watched.targetKey,
+        resetVibeServerHealth(watched.targetKey),
+      );
     }
     const component = tab.componentId
       ? componentsRef.current.find((item) => item.id === tab.componentId)
@@ -3976,7 +4257,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const current =
       component && command
         ? {
-            command: command.command,
+            command: unattendedManagedRunCommand(command),
             name: command.name || command.command,
             componentId: component.id,
             runCommandId: command.id,
@@ -4728,6 +5009,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
         return;
       }
+      if (a.kind === "spawn_agent") {
+        const opId = a.opId;
+        void startSpawnedAgent(a).catch((error) => {
+          if (opId != null) void ipc.browserResult(opId, false, String(error));
+        });
+        return;
+      }
       if (a.kind === "open_preview" && a.url) {
         // Agent-owned browser activity is watched in the PiP, not by replacing
         // the tab the user is working in. A non-agent caller retains the normal
@@ -4814,6 +5102,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     updateMicroRuns,
     patchTabRaw,
     showBrowserPip,
+    startSpawnedAgent,
   ]);
 
   // The companion asking for a coding session on a brief (canopy_start_session).
@@ -5246,6 +5535,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // "blocked" if the agent had asked for the user, else "stopped".
       endAbandonedRun(runId, output);
     }
+    if (
+      origin === "user" &&
+      closingTab?.type === "terminal" &&
+      closingTab.spawnedTask
+    ) {
+      void settleAttempt({
+        attemptId: closingTab.spawnedTask.attemptId,
+        state: "cancelled",
+        failureClass: "route",
+        failureCode: "user-closed",
+      }).catch(() => {});
+    }
     termHandles.current.delete(id);
     const closingGroup =
       closingTab?.type === "terminal" && closingTab.paneGroup
@@ -5303,8 +5604,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
           collabRef.current.close(share.doc);
           shared.current.delete(closing.file.path);
         }
-        monaco.editor.getModel(monaco.Uri.file(closing.file.path))?.dispose();
-        baselines.current.delete(closing.file.path);
+        const uri = monaco.Uri.file(closing.file.path);
+        closeEditorModelOwner(
+          `${project.id}:${closing.id}`,
+          uri.toString(),
+          monaco.editor.getModel(uri) ?? undefined,
+        );
       }
       if (closing?.type === "collab") {
         collabRef.current.close(closing.doc);
@@ -5834,7 +6139,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
         const stat = await ipc.fsStat(path);
         blocked = opts?.force ? null : blockForOpen(path, kind, stat.size);
         if (!blocked) {
-          bytes = await ipc.fsReadFile(path);
+          bytes = await ipc.fsReadFile(
+            path,
+            opts?.force ? stat.size : sizeLimitFor(kind),
+          );
           // Extensions that claim nothing (.dat, .pack, no extension at all)
           // only give themselves away in the bytes.
           if (kind === "code" && looksBinary(bytes)) {
@@ -5874,14 +6182,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       if (bytes && (kind === "code" || diffOriginal != null)) {
         const text = decoder.decode(bytes);
-        if (!baselines.current.has(path)) baselines.current.set(path, text);
         modelFor(path, text);
         const root = roots.find((r) => path.startsWith(r + "/"));
         if (root && kind === "code") void ensureLanguageServer(path, root);
       }
+      // Once Monaco owns the decoded document, keeping the IPC Uint8Array as
+      // well is a second complete representation that no code path reads.
+      // Native viewers (including a temporary diff of one) still own their
+      // bytes until their decoder lifecycle is made independently lazy.
+      const retainedBytes = kind === "code" ? null : bytes;
       if (existing) {
         patchFile(path, {
-          bytes,
+          bytes: retainedBytes,
           blocked,
           ...(diffOriginal != null
             ? { view: "diff" as const, diffOriginal }
@@ -5909,7 +6221,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             diffOriginal,
             dirty: false,
             external: null,
-            bytes,
+            bytes: retainedBytes,
             blocked,
           },
         },
@@ -5973,7 +6285,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
       recentSaves.current.set(path, Date.now());
       try {
         await ipc.fsWriteFile(path, content);
-        baselines.current.set(path, content);
         patchFile(path, { dirty: false });
       } catch (err) {
         console.error("save failed", path, err);
@@ -5989,12 +6300,60 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return tab?.file;
   };
 
+  const reloadViewerBytes = useCallback(
+    async (path: string) => {
+      const initialTab = tabsRef.current.find(
+        (item): item is FileSubTab =>
+          item.type === "file" && item.file.path === path,
+      );
+      if (!initialTab) return null;
+      const readKey = `${initialTab.id}\0${path}`;
+      const current = viewerByteReads.current.get(readKey);
+      if (current) return current;
+      const read = (async (): Promise<Uint8Array | null> => {
+        const ownerTabId = initialTab.id;
+        const ownedTab = () =>
+          ownerTabId
+            ? tabsRef.current.find(
+                (item): item is FileSubTab =>
+                  item.type === "file" && item.id === ownerTabId,
+              )
+            : undefined;
+        const file = ownedTab()?.file;
+        if (!file || file.blocked || file.kind === "code") return null;
+        if (file.bytes) return file.bytes;
+        try {
+          const stat = await ipc.fsStat(path);
+          if (!ownedTab()) return null;
+          const blocked = blockForOpen(path, file.kind, stat.size);
+          if (blocked) {
+            patchFile(path, { blocked, bytes: null });
+            return null;
+          }
+          const bytes = await ipc.fsReadFile(path, sizeLimitFor(file.kind));
+          if (!ownedTab()) return null;
+          patchFile(path, { bytes });
+          return bytes;
+        } catch (error) {
+          console.warn("viewer byte rehydrate failed", path, error);
+          return null;
+        }
+      })();
+      viewerByteReads.current.set(readKey, read);
+      try {
+        return await read;
+      } finally {
+        viewerByteReads.current.delete(readKey);
+      }
+    },
+    [patchFile],
+  );
+
   const acceptExternal = useCallback(
     (path: string) => {
       const file = findFile(path);
       if (!file?.external) return;
       monaco.editor.getModel(monaco.Uri.file(path))?.setValue(file.external);
-      baselines.current.set(path, file.external);
       patchFile(path, { external: null, dirty: false });
     },
     [patchFile],
@@ -6004,19 +6363,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
     (path: string) => {
       const file = findFile(path);
       if (!file?.external) return;
-      baselines.current.set(path, file.external);
       patchFile(path, { external: null, dirty: true });
     },
     [patchFile],
   );
 
   const toggleView = useCallback(
-    (path: string) => {
+    async (path: string) => {
       const file = findFile(path);
       if (!file) return;
-      if (file.view === "preview" && file.bytes) {
-        const text = decoder.decode(file.bytes);
-        if (!baselines.current.has(path)) baselines.current.set(path, text);
+      if (file.view === "preview") {
+        const bytes = file.bytes ?? (await reloadViewerBytes(path));
+        if (!bytes || !findFile(path)) return;
+        const text = decoder.decode(bytes);
         modelFor(path, text);
       }
       patchFile(path, {
@@ -6024,7 +6383,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         diffOriginal: null,
       });
     },
-    [patchFile],
+    [patchFile, reloadViewerBytes],
   );
 
   // ---------- diff-first: external changes scoped to this project ----------
@@ -6106,8 +6465,31 @@ const ProjectViewBody = memo(function ProjectViewBody({
     });
     const unlisten = ipc.onFsChange(async (e) => {
       const now = Date.now();
-      for (const path of e.paths) {
-        if (!roots.some((r) => path.startsWith(r + "/"))) continue;
+      // A huge watcher burst deliberately stops retaining every native path.
+      // Re-read only this view's already-open files in that root — a bounded
+      // owner set — instead of asking Rust to queue the whole directory storm.
+      const paths = e.overflow
+        ? tabsRef.current
+            .filter((tab): tab is FileSubTab => tab.type === "file")
+            .map((tab) => tab.file.path)
+            .filter(
+              (path) =>
+                path === e.root ||
+                path.startsWith(e.root + "/") ||
+                path.startsWith(e.root + "\\"),
+            )
+        : e.paths;
+      for (const path of new Set(paths)) {
+        const normalizedPath = path.replaceAll("\\", "/");
+        if (
+          !roots.some((r) => {
+            const normalizedRoot = r.replaceAll("\\", "/").replace(/\/$/, "");
+            return (
+              normalizedPath === normalizedRoot ||
+              normalizedPath.startsWith(normalizedRoot + "/")
+            );
+          })
+        ) continue;
         const saved = recentSaves.current.get(path);
         if (saved && now - saved < 1500) continue;
         const file = findFile(path);
@@ -6116,12 +6498,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // re-read it every time something touches it on disk.
         if (file.blocked) continue;
         try {
-          const bytes = await ipc.fsReadFile(path);
+          const bytes = await ipc.fsReadFile(path, sizeLimitFor(file.kind));
           if (file.kind === "code") {
             const newText = decoder.decode(bytes);
             const model = monaco.editor.getModel(monaco.Uri.file(path));
-            if (!model || model.getValue() === newText) {
-              baselines.current.set(path, newText);
+            const currentText =
+              model?.getValue() ??
+              retainedEditorModelText(monaco.Uri.file(path).toString());
+            if (currentText == null || currentText === newText) {
               continue;
             }
             patchFile(path, { external: newText });
@@ -6380,8 +6764,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // throw the work away rather than put it away.
       const ok = writeHibernation(project.id, snap);
       // Put the workspace down properly rather than letting the unmount do it.
-      // Unmounting kills the PTYs but nothing else: the editor models, the
-      // diff baselines and any live share would all be left holding memory,
+      // Unmounting kills the PTYs but nothing else: the editor models and any
+      // live share would all be left holding memory,
       // which for a feature whose whole point is reclaiming it would be a
       // strange thing to skip. closeTab already knows how to end each kind.
       if (ok) for (const t of [...tabsRef.current]) closeTabRef.current(t.id);
@@ -6929,6 +7313,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  worth more to the terminal it would otherwise be taken from. */
   const escapeSidePanel = useCallback(() => dismissPeekRef.current(), []);
   useEscapeBackstop(escapeSidePanel, sidePrefs.overlay && sideOpen);
+  const closeBuildSettings = useCallback(() => setBuildSettingsOpen(false), []);
+  useEscapeBackstop(closeBuildSettings, vibe && buildSettingsOpen);
   useEffect(
     () => () => {
       if (openTimer.current !== null) window.clearTimeout(openTimer.current);
@@ -8622,6 +9008,77 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [serverComponents, runTabs, projectStats],
   );
 
+  const integrationState = useMemo(
+    () => normalizeProjectIntegrations(project.integrations),
+    [project.integrations],
+  );
+  const localIntegrationServices = useMemo<LocalIntegrationService[]>(() => {
+    const rows: LocalIntegrationService[] = [];
+    const add = (path: string, component: string, entry: ServerEntry) => {
+      const command = entry.componentId && entry.runCommandId
+        ? project.components
+            .find((candidate) => candidate.id === entry.componentId)
+            ?.commands?.find((candidate) => candidate.id === entry.runCommandId)
+        : undefined;
+      if (command?.purpose === "check" || command?.purpose === "setup") return;
+      rows.push({
+        id: `${path}\0${entry.key}`,
+        component,
+        name: entry.name,
+        state: entry.state,
+        ports: entry.ports,
+        canStart: !entry.adhoc && entry.state !== "running",
+        canStop: entry.state === "running" && entry.ptyId != null,
+      });
+    };
+    for (const group of serverGroups) {
+      for (const entry of group.entries) add(group.path, group.label, entry);
+      for (const workspace of group.workspaces) {
+        for (const entry of workspace.entries) {
+          add(workspace.path, `${group.label} · ${workspace.label}`, entry);
+        }
+      }
+    }
+    return rows;
+  }, [serverGroups, project.components]);
+
+  const localIntegrationEntry = useCallback(
+    (id: string) => {
+      for (const group of serverGroups) {
+        const main = group.entries.find((entry) => `${group.path}\0${entry.key}` === id);
+        if (main) return { path: group.path, entry: main };
+        for (const workspace of group.workspaces) {
+          const entry = workspace.entries.find(
+            (candidate) => `${workspace.path}\0${candidate.key}` === id,
+          );
+          if (entry) return { path: workspace.path, entry };
+        }
+      }
+      return null;
+    },
+    [serverGroups],
+  );
+
+  const automateIntegration = useCallback(
+    (providerId: IntegrationProviderId) => {
+      const provider = integrationProviderById(providerId);
+      const dir = project.components[0]?.path;
+      if (!provider || !dir) return;
+      const topology = project.components
+        .map((component) => `${component.label}${component.role ? ` (${component.role})` : ""}: ${component.path}`)
+        .join("\n");
+      const seed = [
+        `Connect and configure ${provider.label} for the project “${project.name}”.`,
+        `Use an already-enabled ${provider.label} API or MCP integration first. If the account must be linked, ask the user to complete the provider's OAuth/account-link step. Use ${provider.cliBin ? `the ${provider.cliBin} CLI` : "the provider API"} only as a fallback.`,
+        "Inspect every component and their data flow before deciding what must be provisioned or deployed:",
+        topology,
+        "Keep local services usable while remote setup is pending. Never print or persist credentials. Do not apply a managed database migration or production deployment without the user's explicit confirmation. Report the safe provider resource IDs, environments, public endpoints, migration snapshot, and deployment ID/time when finished.",
+      ].join("\n\n");
+      void startAgentInDir(dir, undefined, seed, `${provider.label} setup`);
+    },
+    [project.components, project.name, startAgentInDir],
+  );
+
   // ⌘K's context, memoised. A fresh object literal here re-ran every instant
   // palette source — tabs, clipboard, sessions, notes, research, PRs, servers,
   // task history — plus their fuzzy ranking, on every ProjectView render, i.e.
@@ -8682,6 +9139,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
           (command) => command.id === vibeTarget.runCommand.id,
         ) ?? null
       : null;
+  const vibeRequiredRuns = useMemo(() => {
+    const configured = project.vibe?.requiredProcesses?.length
+      ? project.vibe.requiredProcesses
+      : vibeComponent && vibeRun
+        ? [{ componentId: vibeComponent.id, runCommandId: vibeRun.id }]
+        : [];
+    return configured.flatMap((identity) => {
+      const component = project.components.find((candidate) => candidate.id === identity.componentId);
+      const command = component?.commands?.find((candidate) => candidate.id === identity.runCommandId);
+      return component && command ? [{ component, command, identity }] : [];
+    });
+  }, [project.vibe, project.components, vibeComponent, vibeRun]);
   // What proves a Build turn is sound. Name-matching the component's
   // *configured* commands — which is all this used to do — finds nothing in a
   // project Canopy set up from nothing, so `check` was `unknown` on every turn,
@@ -8746,13 +9215,58 @@ const ProjectViewBody = memo(function ProjectViewBody({
       (tab): tab is PreviewSubTab =>
         tab.type === "preview" && tab.id === vibeOwnedPreviewId.current,
     ) ?? null;
+  // Build and Engineer share one mounted runtime but not the presented tab.
+  // This exact id also drives doc-host display and every heavyweight child's
+  // ownership; using activeTabId here would retain the hidden Engineer pane.
+  const surfaceTabId = vibe ? vibePreview?.id ?? null : activeTabId;
   if (vibeOwnedPreviewId.current && !vibePreview) vibeOwnedPreviewId.current = null;
   const vibePreviewIdRef = useRef<string | null>(null);
   vibePreviewIdRef.current = vibePreview?.id ?? null;
-  const claudeBin = AGENT_CLIS.find((cli) => cli.id === "claude")?.bin ?? "claude";
+  const vibePrimaryCli = pickLaunchCli(
+    undefined,
+    (bin) => Boolean(installed[bin]),
+  );
   const vibeComponentId = vibeComponent?.id ?? null;
   const vibeComponentLabel = vibeComponent?.label ?? null;
   const vibeComponentPath = vibeComponent?.path ?? null;
+  const recoverVibeRoute = useCallback(
+    async (action: VibeRouteRecoveryAction) => {
+      if (!vibeComponentPath) {
+        return {
+          ok: false,
+          prompt: "I couldn't open agent setup for this component.",
+          detail: "The component path is not available yet.",
+        };
+      }
+      return executeVibeRouteRecovery(action, {
+        clis: AGENT_CLIS,
+        profiles: profilesRef.current,
+        activeProfileId: activeProfile(),
+        runTerminal: ({ command, title, icon, run, env, profile }) =>
+          addTerminal(
+            vibeComponentPath,
+            command,
+            title,
+            icon,
+            run,
+            env,
+            profile,
+          ),
+        profileAccounts: ipc.profileAccounts,
+        profileEnv: ipc.profileEnv,
+        setActiveProfile,
+        primeLaunchEnv,
+        setupAgentHooks: ipc.setupAgentHooks,
+        openAgentSettings: () =>
+          window.dispatchEvent(
+            new CustomEvent("canopy:open-settings", {
+              detail: { tab: "agents" },
+            }),
+          ),
+      });
+    },
+    [addTerminal, vibeComponentPath],
+  );
   const vibeSession = useMemo(
     () =>
       vibeComponentId && vibeComponentLabel && vibeComponentPath
@@ -8761,11 +9275,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
             projectName: project.name,
             componentId: vibeComponentId,
             componentPath: vibeComponentPath,
-            cliId: "claude",
-            cliBin: claudeBin,
+            cliId: vibePrimaryCli?.id ?? getSettings().defaultAgent,
+            cliBin: vibePrimaryCli?.bin ?? getSettings().defaultAgent,
             checkCommand: vibeCheckCommand,
             checkCaveat: vibeCheckCaveat,
+            siblingPaths: components
+              .filter((component) => component.id !== vibeComponentId)
+              .map((component) => component.path),
+            componentCommands: vibeComponent?.commands ?? [],
+            projectComponents: components,
+            requiredProcesses: project.vibe?.requiredProcesses ?? [],
+            componentLinks: project.vibe?.componentLinks ?? [],
+            dataStores: project.vibe?.dataStores ?? [],
+            externalServices: project.vibe?.externalServices ?? [],
             previewTabId: () => vibePreviewIdRef.current,
+            recoverRoute: recoverVibeRoute,
           })
         : null,
     [
@@ -8776,59 +9300,59 @@ const ProjectViewBody = memo(function ProjectViewBody({
       vibeComponentPath,
       vibeCheckCommand,
       vibeCheckCaveat,
-      claudeBin,
+      components,
+      project.vibe?.requiredProcesses,
+      project.vibe?.componentLinks,
+      project.vibe?.dataStores,
+      project.vibe?.externalServices,
+      vibePrimaryCli?.id,
+      vibePrimaryCli?.bin,
+      recoverVibeRoute,
     ],
   );
   useEffect(() => () => void vibeSession?.stop(), [vibeSession]);
-  const vibeServerTargetKey =
-    vibeComponent && vibeRun
-      ? `${vibeComponent.path}:${vibeComponent.id}:${vibeRun.id}:${vibeRun.command}`
-      : null;
   vibeServerWatch.current =
-    vibe && vibeSession && vibeComponent && vibeRun && vibeServerTargetKey
-      ? {
-          targetKey: vibeServerTargetKey,
-          componentId: vibeComponent.id,
-          runCommandId: vibeRun.id,
-          path: vibeComponent.path,
-          command: vibeRun.command,
-          session: vibeSession,
-        }
-      : null;
+    vibe && vibeSession
+      ? vibeRequiredRuns
+          .filter(({ command }) => command.purpose !== "setup" && command.purpose !== "check")
+          .map(({ component, command }) => ({
+            targetKey: `${component.path}:${component.id}:${command.id}:${command.command}`,
+            componentId: component.id,
+            runCommandId: command.id,
+            path: command.cwd ?? component.path,
+            command: command.command,
+            kind: command.purpose === "worker" ? "worker" : "serve",
+            session: vibeSession,
+          }))
+      : [];
   useEffect(() => {
-    if (
-      vibeSession &&
-      vibeComponent &&
-      vibeRun &&
-      vibeServerTargetKey &&
-      openVibeServerIncident.current === vibeServerTargetKey
-    ) {
+    if (!vibeSession) return;
+    for (const watched of vibeServerWatch.current) {
+      if (!openVibeServerIncident.current.has(watched.targetKey)) continue;
       vibeSession.restoreServerIncident(
-        vibeServerTargetKey,
-        vibeComponent.id,
-        vibeRun.id,
+        watched.targetKey,
+        watched.componentId,
+        watched.runCommandId,
       );
     }
-  }, [vibeSession, vibeComponent, vibeRun, vibeServerTargetKey]);
+  }, [vibeSession, vibeRequiredRuns]);
   vibeServerExit.current = (tabId, event) => {
-    const watched = vibeServerWatch.current;
     const tab = tabsRef.current.find(
       (candidate): candidate is TermSubTab =>
         candidate.type === "terminal" && candidate.id === tabId,
     );
-    if (
-      !watched ||
-      !tab ||
-      tab.cwd !== watched.path ||
-      (tab.runCommandId
-        ? tab.componentId !== watched.componentId ||
-          tab.runCommandId !== watched.runCommandId
-        : tab.command !== watched.command)
-    ) {
-      return;
-    }
+    if (!tab) return;
+    const watched = vibeServerWatch.current.find(
+      (candidate) =>
+        tab.cwd === candidate.path &&
+        (tab.runCommandId
+          ? tab.componentId === candidate.componentId &&
+            tab.runCommandId === candidate.runCommandId
+          : tab.command === candidate.command),
+    );
+    if (!watched) return;
     const decision = judgeVibeServerExit(
-      vibeServerHealth.current,
+      vibeServerHealth.current.get(watched.targetKey) ?? INITIAL_VIBE_SERVER_HEALTH,
       watched.targetKey,
       {
         at: Date.now(),
@@ -8836,33 +9360,92 @@ const ProjectViewBody = memo(function ProjectViewBody({
         requested: event.requested,
       },
     );
-    vibeServerHealth.current = decision.state;
-    if (decision.action === "restart") {
-      restartRun(tabId, undefined, "watchdog");
-      return;
-    }
-    if (decision.action !== "crash-loop") return;
-    openVibeServerIncident.current = watched.targetKey;
-
+    vibeServerHealth.current.set(watched.targetKey, decision.state);
     const stats =
       tab.ptyId == null
         ? undefined
         : statsRef.current.find((sample) => sample.id === tab.ptyId);
+    const classification = classifyManagedProcess({
+      kind: watched.kind,
+      now: Date.now(),
+      spawnedAt: Date.now(),
+      outputBytes: stats?.output_bytes ?? 0,
+      quietMs: stats?.quiet_ms ?? 0,
+      ports: stats?.ports ?? [],
+      rawOutput: "",
+      exited: true,
+      exitCode: event.exit_code,
+    });
+    // Stopping it yourself ends the crash-loop story. The incident only ever
+    // cleared when the server came back on a port — so a person who stopped
+    // it deliberately was left staring at "The app server keeps stopping",
+    // with Canopy insisting on a fault they had just chosen. A deliberate
+    // stop is an answer, not a symptom.
+    if (
+      event.requested &&
+      openVibeServerIncident.current.has(watched.targetKey)
+    ) {
+      watched.session.resolveServerIncident(watched.targetKey);
+      openVibeServerIncident.current.delete(watched.targetKey);
+      resolveAttentionByKey(
+        `vibe-server:${project.id}:${watched.componentId}:${watched.runCommandId}`,
+        "withdrawn",
+      );
+    }
+    if (classification.exit !== "repair" || decision.action === "ignore") return;
+    openVibeServerIncident.current.add(watched.targetKey);
+
     const log =
       termHandles.current.get(tabId)?.captureTextSettled() ??
       Promise.resolve("");
-    const incident: VibeServerIncidentInput = {
+    // What the survey already knows about the crashing component, handed
+    // along so the repair agent starts from the project's own commands —
+    // "run the setup command that was never run" is the most common fix,
+    // and it is only reachable if the command travels with the incident.
+    const crashedComponent = project.components.find(
+      (candidate) => candidate.id === watched.componentId,
+    );
+    const crashedCommand = crashedComponent?.commands?.find(
+      (candidate) => candidate.id === watched.runCommandId,
+    );
+    const failure = {
       key: watched.targetKey,
       componentId: watched.componentId,
       runCommandId: watched.runCommandId,
       exitCode: event.exit_code,
-      crashTimes: decision.state.failures,
-      automaticRestarts: decision.state.failures.length - 1,
       ports: stats?.ports ?? [],
       outputBytes: stats?.output_bytes ?? null,
       totalCpu: stats?.total_cpu ?? null,
       totalMemBytes: stats?.total_mem_bytes ?? null,
       logTail: log.then((text) => vibeServerLogTail(text)),
+      ...(crashedComponent
+        ? {
+            component: {
+              label: crashedComponent.label,
+              path: crashedComponent.path,
+              ...(crashedComponent.role ? { role: crashedComponent.role } : {}),
+            },
+            commands: crashedComponent.commands ?? [],
+          }
+        : {}),
+      ...(crashedCommand
+        ? { command: { name: crashedCommand.name, command: crashedCommand.command } }
+        : {}),
+    };
+    if (decision.action === "repair") {
+      const input: VibeManagedProcessFailureInput = {
+        ...failure,
+        key: `${watched.targetKey}:runtime:${decision.state.failures.at(-1)}`,
+        kind: "runtime",
+      };
+      void watched.session.reportManagedProcessFailure(input);
+      return;
+    }
+    if (decision.action !== "crash-loop") return;
+    const incident: VibeServerIncidentInput = {
+      ...failure,
+      crashTimes: decision.state.failures,
+      automaticRestarts: decision.state.failures.length - 1,
     };
     const repairSettlements = (
       session: ReturnType<typeof createVibeBuilderSession>,
@@ -8882,7 +9465,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     };
     const record = (attempt: number) => {
       incident.present =
-        openVibeServerIncident.current === watched.targetKey;
+        openVibeServerIncident.current.has(watched.targetKey);
       void watched.session
         .reportServerIncident(incident)
         .then((result) => {
@@ -8902,8 +9485,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     postAttention({
       kind: "question",
       tone: "error",
-      title: "The Build server keeps stopping",
-      body: "I stopped restarting it. Open the failed run to inspect its output.",
+      title: `${crashedComponent?.label ?? "A project process"} couldn't stay open`,
+      body: "I stopped retrying so your computer stays responsive. I'll trace the failure through the connected project in Build.",
       source: "project",
       projectId: project.id,
       projectName: project.name,
@@ -8912,76 +9495,386 @@ const ProjectViewBody = memo(function ProjectViewBody({
     });
   };
 
-  const vibeRequiredRuns = useMemo(() => {
-    const configured = project.vibe?.requiredProcesses?.length
-      ? project.vibe.requiredProcesses
-      : vibeComponent && vibeRun
-        ? [{ componentId: vibeComponent.id, runCommandId: vibeRun.id }]
-        : [];
-    return configured.flatMap((identity) => {
-      const component = project.components.find((candidate) => candidate.id === identity.componentId);
-      const command = component?.commands?.find((candidate) => candidate.id === identity.runCommandId);
-      return component && command ? [{ component, command }] : [];
-    });
-  }, [project.vibe, project.components, vibeComponent, vibeRun]);
   const autoStartedVibeRuns = useRef(new Set<string>());
+  const reportedVibeSetupFailures = useRef(new Set<string>());
   useEffect(() => {
-    if (!visible || !vibe) return;
-    for (const { component, command } of vibeRequiredRuns) {
+    if (!visible || !vibe || !vibeSession) return;
+    for (const { component, command, identity } of vibeRequiredRuns) {
       const key = `${component.path}:${component.id}:${command.id}`;
       const running = runTabs.some((tab) => matchesVibeRun(tab, component, command));
       if (running || autoStartedVibeRuns.current.has(key)) continue;
+      const dependenciesReady = (identity.dependsOn ?? []).every((dependency) => {
+        const dependencyComponent = project.components.find(
+          (candidate) => candidate.id === dependency.componentId,
+        );
+        const dependencyCommand = dependencyComponent?.commands?.find(
+          (candidate) => candidate.id === dependency.runCommandId,
+        );
+        if (!dependencyComponent || !dependencyCommand) return false;
+        const dependencyTab = runTabs.find((tab) =>
+          matchesVibeRun(tab, dependencyComponent, dependencyCommand),
+        );
+        return vibeRunReady(
+          dependencyTab,
+          dependencyCommand,
+          projectStats,
+          vibeVerifiedReadinessPtys,
+        );
+      });
+      if (!dependenciesReady) continue;
+      // Setup commands the survey found (`purpose: "setup"`) run to completion
+      // before the server does — see vibeSetupGate for the rules.
+      const gate = vibeSetupGate(command, component, runTabs, (setupId) =>
+        autoStartedVibeRuns.current.has(`${component.path}:${component.id}:${setupId}`),
+      );
+      for (const setup of gate.start) {
+        autoStartedVibeRuns.current.add(`${component.path}:${component.id}:${setup.id}`);
+        addTerminal(
+          setup.cwd ?? component.path,
+          unattendedManagedRunCommand(setup),
+          setup.name,
+          "▶",
+          "chore",
+          undefined,
+          undefined,
+          // Build owns a preview surface, not a process-output surface. Keep
+          // the run mounted for Engineer and for diagnostics without
+          // selecting it.
+          false,
+          undefined,
+          { componentId: component.id, runCommandId: setup.id },
+        );
+      }
+      for (const setup of gate.failed) {
+        const setupKey = `${component.path}:${component.id}:${setup.id}`;
+        if (reportedVibeSetupFailures.current.has(setupKey)) continue;
+        const failedTab = runTabs.find(
+          (tab) =>
+            tab.componentId === component.id &&
+            tab.runCommandId === setup.id &&
+            tab.exited,
+        );
+        if (!failedTab) continue;
+        const classification = classifyManagedProcess({
+          kind: "setup",
+          now: Date.now(),
+          spawnedAt: Date.now(),
+          outputBytes: 0,
+          quietMs: 0,
+          ports: [],
+          readinessKind: "one-shot",
+          rawOutput: "",
+          exited: true,
+          exitCode: failedTab.exitCode,
+        });
+        if (classification.exit !== "repair") continue;
+        reportedVibeSetupFailures.current.add(setupKey);
+        const log =
+          termHandles.current.get(failedTab.id)?.captureTextSettled() ??
+          Promise.resolve("");
+        void vibeSession.reportManagedProcessFailure({
+          key: setupKey,
+          kind: "setup",
+          componentId: component.id,
+          runCommandId: setup.id,
+          exitCode: failedTab.exitCode ?? null,
+          ports: [],
+          outputBytes: null,
+          totalCpu: null,
+          totalMemBytes: null,
+          logTail: log.then((text) => vibeServerLogTail(text)),
+          component: {
+            label: component.label,
+            path: component.path,
+            ...(component.role ? { role: component.role } : {}),
+          },
+          commands: component.commands ?? [],
+          command: { name: setup.name, command: setup.command },
+        });
+      }
+      if (!gate.ready) continue;
       autoStartedVibeRuns.current.add(key);
       addTerminal(
         command.cwd ?? component.path,
-        command.command,
+        unattendedManagedRunCommand(command),
         command.name,
         "▶",
-        true,
+        command.purpose === "setup" ? "chore" : true,
         undefined,
         undefined,
-        true,
+        // Build owns a preview surface, not a process-output surface. Keep the
+        // run mounted for Engineer and for diagnostics without selecting it.
+        false,
         undefined,
         { componentId: component.id, runCommandId: command.id },
       );
     }
-  }, [visible, vibe, vibeRequiredRuns, runTabs, addTerminal]);
+  }, [visible, vibe, vibeSession, vibeRequiredRuns, runTabs, projectStats, addTerminal, project.id, project.name, project.components, vibeVerifiedReadinessPtys]);
 
+  // A live PTY is not proof that its command started. Package runners,
+  // authentication flows, and project pickers can all wait forever while the
+  // process itself looks healthy. Inspect every Build-owned run until it emits
+  // its declared readiness signal. Only two dependency confirmations whose
+  // exact command Build already authorized are answered automatically; every
+  // other prompt goes to the repair agent with the terminal tail.
   useEffect(() => {
-    if (
-      !vibe ||
-      !vibeComponent ||
-      !vibeRun ||
-      !vibeSession ||
-      !vibeServerTargetKey ||
-      openVibeServerIncident.current !== vibeServerTargetKey
-    ) {
+    if (!visible || !vibe || !vibeSession) {
+      vibeRunSupervision.current.clear();
+      setVibeVerifiedReadinessPtys((current) =>
+        current.size === 0 ? current : new Set(),
+      );
       return;
     }
-    const running = runTabs.find((tab) =>
-      matchesVibeRun(tab, vibeComponent, vibeRun),
-    );
-    const port =
-      running?.ptyId == null
-        ? null
-        : projectStats.find((sample) => sample.id === running.ptyId)?.ports[0];
-    if (!port) return;
-    vibeSession.resolveServerIncident(vibeServerTargetKey);
-    openVibeServerIncident.current = null;
-    vibeServerHealth.current = resetVibeServerHealth(vibeServerTargetKey);
-    resolveAttentionByKey(
-      `vibe-server:${project.id}:${vibeComponent.id}:${vibeRun.id}`,
-      "withdrawn",
-    );
+    let disposed = false;
+    let inspecting = false;
+    const verify = (ptyId: number) =>
+      setVibeVerifiedReadinessPtys((current) => {
+        if (current.has(ptyId)) return current;
+        const next = new Set(current);
+        next.add(ptyId);
+        return next;
+      });
+    const unverify = (ptyId: number) =>
+      setVibeVerifiedReadinessPtys((current) => {
+        if (!current.has(ptyId)) return current;
+        const next = new Set(current);
+        next.delete(ptyId);
+        return next;
+      });
+    const inspect = async () => {
+      if (disposed || inspecting) return;
+      inspecting = true;
+      try {
+        const now = Date.now();
+        const active = tabsRef.current.flatMap((tab) => {
+          if (
+            tab.type !== "terminal" ||
+            !tab.run ||
+            tab.exited ||
+            tab.ptyId == null ||
+            !tab.componentId ||
+            !tab.runCommandId
+          ) return [];
+          const component = componentsRef.current.find(
+            (candidate) => candidate.id === tab.componentId,
+          );
+          const command = component?.commands?.find(
+            (candidate) => candidate.id === tab.runCommandId,
+          );
+          return component && command ? [{ tab, component, command }] : [];
+        });
+        const live = new Set(active.map(({ tab }) => tab.ptyId as number));
+        for (const ptyId of [...vibeRunSupervision.current.keys()]) {
+          if (!live.has(ptyId)) vibeRunSupervision.current.delete(ptyId);
+        }
+        await Promise.all(active.map(async ({ tab, component, command }) => {
+          const ptyId = tab.ptyId as number;
+          const stat = statsRef.current.find((sample) => sample.id === ptyId);
+          let observed = vibeRunSupervision.current.get(ptyId);
+          if (!observed) {
+            observed = {
+              startedAt: now,
+              lastChangedAt: now,
+              outputBytes: stat?.output_bytes ?? 0,
+              handledPrompt: null,
+              handledPromptAt: null,
+              readinessVerified: false,
+              reported: false,
+            };
+            vibeRunSupervision.current.set(ptyId, observed);
+          }
+          const outputBytes = stat?.output_bytes ?? observed.outputBytes;
+          if (outputBytes !== observed.outputBytes) {
+            observed.outputBytes = outputBytes;
+            observed.lastChangedAt = now;
+          }
+          const raw = (await ipc.ptyOutput(ptyId, 16 * 1024).catch(() => null)) ?? "";
+          if (disposed) return;
+          const output = plainManagedOutput(raw);
+          const readiness = command.readiness?.kind ?? "process-alive";
+          // Readiness releases dependency startup once. Runtime regressions
+          // belong to browser/server health evidence, not a second startup
+          // incident wearing the wrong label.
+          if (observed.readinessVerified) {
+            verify(ptyId);
+            return;
+          }
+          const ports = stat?.ports ?? [];
+          const httpPath =
+            command.readiness?.kind === "http" ? command.readiness.path : null;
+          const httpReady =
+            httpPath != null && ports.length > 0
+              ? (await Promise.all(
+                  ports.map((port) =>
+                    ipc.probeHttpReadiness(port, httpPath).catch(() => false),
+                  ),
+                )).some(Boolean)
+              : false;
+          if (disposed) return;
+          const classification = classifyManagedProcess({
+            kind: command.purpose ?? "serve",
+            now,
+            spawnedAt: observed.startedAt,
+            outputBytes,
+            quietMs: stat?.quiet_ms ?? now - observed.lastChangedAt,
+            ports,
+            readinessKind: readiness,
+            httpReady,
+            readinessTimeoutMs:
+              command.readiness?.kind === "one-shot"
+                ? command.readiness.timeoutMs
+                : undefined,
+            rawOutput: raw,
+            safePromptHandledAt: observed.handledPromptAt,
+          });
+          const prompt = classification.prompt;
+          if (classification.state === "waiting-on-input" && prompt) {
+            unverify(ptyId);
+            const promptKey = `${prompt.code}:${prompt.excerpt}`;
+            if (classification.exit === "auto-answer" && prompt.kind === "safe-confirmation") {
+              if (observed.handledPrompt !== promptKey) {
+                observed.handledPrompt = promptKey;
+                observed.handledPromptAt = now;
+                observed.lastChangedAt = now;
+                await ipc.ptyWrite(ptyId, prompt.response).catch(() => {});
+              }
+              return;
+            }
+            if (!observed.reported) {
+              observed.reported = true;
+              const key = `${component.path}:${component.id}:${command.id}:${command.command}`;
+              openVibeServerIncident.current.add(key);
+              void vibeSession.reportServerStartupStall({
+                key,
+                componentId: component.id,
+                runCommandId: command.id,
+                reason: "interactive-prompt",
+                promptCode: prompt.code,
+                ports: stat?.ports ?? [],
+                outputBytes: stat?.output_bytes ?? null,
+                totalCpu: stat?.total_cpu ?? null,
+                totalMemBytes: stat?.total_mem_bytes ?? null,
+                logTail: output,
+                component: {
+                  label: component.label,
+                  path: component.path,
+                  ...(component.role ? { role: component.role } : {}),
+                },
+                commands: component.commands ?? [],
+                command: { name: command.name, command: command.command },
+              });
+            }
+            return;
+          }
+          if (classification.state === "ready") {
+            if (readiness === "process-alive" || readiness === "http") {
+              observed.readinessVerified = true;
+              verify(ptyId);
+            }
+            // A process-alive worker is allowed to become quiet after its
+            // prompt-free settling window. Only a later exit invalidates it.
+            return;
+          }
+          if (
+            !observed.reported &&
+            classification.state === "hung" &&
+            classification.exit === "repair"
+          ) {
+            observed.reported = true;
+            unverify(ptyId);
+            const key = `${component.path}:${component.id}:${command.id}:${command.command}`;
+            openVibeServerIncident.current.add(key);
+            void vibeSession.reportServerStartupStall({
+              key,
+              componentId: component.id,
+              runCommandId: command.id,
+              reason: "readiness-timeout",
+              ports: stat?.ports ?? [],
+              outputBytes: stat?.output_bytes ?? null,
+              totalCpu: stat?.total_cpu ?? null,
+              totalMemBytes: stat?.total_mem_bytes ?? null,
+              logTail: output,
+              component: {
+                label: component.label,
+                path: component.path,
+                ...(component.role ? { role: component.role } : {}),
+              },
+              commands: component.commands ?? [],
+              command: { name: command.name, command: command.command },
+            });
+          }
+        }));
+      } finally {
+        inspecting = false;
+      }
+    };
+    void inspect();
+    const timer = window.setInterval(() => void inspect(), 1_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [visible, vibe, vibeSession, project.vibe?.setupRevision]);
+
+  // The first composer is an invitation, so do not issue it until every
+  // required process has reached its declared readiness. Once unlocked it
+  // stays available through later restarts/incidents; only the initial
+  // bootstrapping state withholds input.
+  const vibeRuntimeReady =
+    vibeRequiredRuns.length > 0 &&
+    vibeRequiredRuns.every(({ component, command }) => {
+      const tab = runTabs.find((candidate) =>
+        matchesVibeRun(candidate, component, command),
+      );
+      return vibeRunReady(tab, command, projectStats, vibeVerifiedReadinessPtys);
+    });
+  const vibeInputUnlock = useRef<{ key: string | null; unlocked: boolean }>({
+    key: null,
+    unlocked: false,
+  });
+  const vibeRuntimeKey = `${project.id}:${project.vibe?.setupRevision ?? "unconfigured"}`;
+  if (vibeInputUnlock.current.key !== vibeRuntimeKey) {
+    vibeInputUnlock.current = { key: vibeRuntimeKey, unlocked: false };
+  }
+  if (vibeRuntimeReady) vibeInputUnlock.current.unlocked = true;
+
+  useEffect(() => {
+    if (!vibe || !vibeSession) return;
+    for (const watched of vibeServerWatch.current) {
+      if (!openVibeServerIncident.current.has(watched.targetKey)) continue;
+      const resolved = vibeRequiredRuns.find(
+        ({ component, command }) =>
+          component.id === watched.componentId && command.id === watched.runCommandId,
+      );
+      if (!resolved) continue;
+      const running = runTabs.find((tab) =>
+        matchesVibeRun(tab, resolved.component, resolved.command),
+      );
+      if (!vibeRunReady(
+        running,
+        resolved.command,
+        projectStats,
+        vibeVerifiedReadinessPtys,
+      )) continue;
+      vibeSession.resolveServerIncident(watched.targetKey);
+      openVibeServerIncident.current.delete(watched.targetKey);
+      vibeServerHealth.current.set(
+        watched.targetKey,
+        resetVibeServerHealth(watched.targetKey),
+      );
+      resolveAttentionByKey(
+        `vibe-server:${project.id}:${watched.componentId}:${watched.runCommandId}`,
+        "withdrawn",
+      );
+    }
   }, [
     vibe,
-    vibeComponent,
-    vibeRun,
     vibeSession,
-    vibeServerTargetKey,
+    vibeRequiredRuns,
     runTabs,
     projectStats,
     project.id,
+    vibeVerifiedReadinessPtys,
   ]);
 
   const engineerTabBeforeVibe = useRef<string | null>(null);
@@ -9488,7 +10381,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (activeTermTab) termHandles.current.get(activeTermTab.id)?.hardReset();
   }, [activeTermTab]);
   const onToggleView = useCallback(() => {
-    if (activeFileTab) toggleView(activeFileTab.file.path);
+    if (activeFileTab) void toggleView(activeFileTab.file.path);
   }, [activeFileTab, toggleView]);
   const onShareFile = useCallback(
     (memberId: string, memberName: string) => {
@@ -9736,22 +10629,30 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // rebuilt when it's in front (so it always sees current props) or when its
   // tab changed underneath it.
   const docTabs = tabs.filter((t): t is DocSubTab => t.type !== "terminal");
-  const panes = useRef(new Map<string, { tab: DocSubTab; el: ReactNode }>());
+  const panes = useRef(
+    new Map<string, { tab: DocSubTab; active: boolean; el: ReactNode }>(),
+  );
   useEffect(() => {
     const live = new Set(tabs.map((t) => t.id));
     for (const id of [...panes.current.keys()])
       if (!live.has(id)) panes.current.delete(id);
   }, [tabs]);
   const paneFor = (tab: DocSubTab): ReactNode => {
+    const active = documentResourceActive(tab.id, surfaceTabId, visible);
     const cached = panes.current.get(tab.id);
-    if (cached && cached.tab === tab && tab.id !== activeTabId)
+    // An inactive pane may keep the same element between unrelated ProjectView
+    // ticks, but the active transition itself must always reach the child. The
+    // previous cache returned the element created while active after its host
+    // became display:none, leaving native previews wanted and heavyweight
+    // editor/viewer resources alive indefinitely.
+    if (cached && shouldReuseInactiveDocumentPane(cached, tab, active))
       return cached.el;
-    const el = docTabView(tab);
-    panes.current.set(tab.id, { tab, el });
+    const el = docTabView(tab, active);
+    panes.current.set(tab.id, { tab, active, el });
     return el;
   };
 
-  function docTabView(tab: DocSubTab): ReactNode {
+  function docTabView(tab: DocSubTab, active: boolean): ReactNode {
     switch (tab.type) {
       case "branch":
         return (
@@ -9965,12 +10866,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return (
           <PreviewView
             tabId={tab.id}
+            projectId={project.id}
+            buildMode={vibe}
             url={tab.url}
             annotations={tab.annotations}
             shots={tab.shots ?? []}
             feedbackPanelHidden={tab.feedbackPanelHidden}
             dir={componentsRef.current[0]?.path ?? firstRoot}
-            visible={tab.id === activeTabId && visible}
+            visible={active}
             streaming={shownBrowserPips.some((p) => p.tabId === tab.id)}
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             servers={previewServers}
@@ -10007,7 +10910,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             serial={tab.serial}
             projectDir={tab.projectDir}
             annotations={tab.annotations}
-            visible={tab.id === activeTabId && visible}
+            visible={active}
             onPatch={(patch) => patchTabRaw(tab.id, patch as Partial<SubTab>)}
             agentTargets={agentTargets}
             installed={installed}
@@ -10026,7 +10929,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       case "agents":
         return (
           <AgentsView
-            active={tab.id === activeTabId && visible}
+            active={active}
             projectName={project.name}
             roots={roots}
             allProjects={allProjects}
@@ -10098,7 +11001,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <ClaimView
             claimId={tab.claimId}
             fallback={tab.claim}
-            active={tab.id === activeTabId && visible}
+            active={active}
             // The claim's own pty when it names one (exact, and it survives
             // an agent that cd'd into a subdirectory); the cwd parse only for
             // claims recorded before the field existed. Either way the page
@@ -10116,7 +11019,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             roots={roots}
             installed={installed}
             focus={tab.focus}
-            active={tab.id === activeTabId && visible}
+            active={active}
             onNotice={onNotice}
           />
         );
@@ -10135,6 +11038,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <CollabView
             session={session}
             ownerName={tab.ownerName}
+            active={active}
             onNotice={onNotice}
           />
         ) : (
@@ -10175,8 +11079,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <div className="file-tab-wrap">
             {!inToolbar && cta}
             <FileView
+            active={active}
+            modelOwnerId={`${project.id}:${tab.id}`}
             toolbarExtra={inToolbar ? cta : undefined}
             file={tab.file}
+            onReleaseBytes={() => patchFile(tab.file.path, { bytes: null })}
+            onNeedBytes={async () =>
+              Boolean(await reloadViewerBytes(tab.file.path))
+            }
             onCursor={
               // Only a shared file broadcasts a caret; every other tab passes
               // undefined and the subscription in MonacoEditor short-circuits.
@@ -10418,6 +11328,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 ? identifyAgent(statsByPty.get(tab.ptyId)?.agent_hint)
                 : null;
             const shown =
+              !vibe &&
               !softClosed &&
               visible &&
               (pane != null || (!grouped && tab.id === activeTabId));
@@ -10535,7 +11446,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   termHandles.current.set(tab.id, h);
                 }}
                 cwd={tab.cwd}
-                active={!softClosed && tab.id === activeTabId && visible}
+                active={
+                  !vibe && !softClosed && tab.id === activeTabId && visible
+                }
+                streaming={shown}
                 attachId={tab.attachId}
                 killAttachedOnClose={tab.killAttachedOnClose}
                 // A run tab hands its command to the shell to run-and-exit
@@ -10551,6 +11465,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 // loses its Enter to zsh's line editor — the task sat unrun at
                 // a prompt. As an argv it never touches the tty.
                 initialCommand={tab.run || tab.micro ? undefined : tab.command}
+                beforeInitialCommand={
+                  tab.spawnedTask
+                    ? (ptyId) => {
+                        const spawn = pendingAgentSpawnOps.current.get(tab.id);
+                        if (!spawn)
+                          return Promise.reject(
+                            new Error("agent spawn handshake is missing"),
+                          );
+                        spawn.ready ??= ipc.agentSpawnReady(spawn.opId, ptyId);
+                        return spawn.ready;
+                      }
+                    : undefined
+                }
                 runCommand={
                   (tab.run || tab.micro) && tab.command
                     ? tab.command
@@ -10565,8 +11492,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     : undefined
                 }
                 env={tab.env}
-                runId={tab.micro?.runId}
-                attemptId={tab.micro?.attemptId}
+                runId={tab.micro?.runId ?? tab.spawnedTask?.runId}
+                attemptId={tab.micro?.attemptId ?? tab.spawnedTask?.attemptId}
                 onSpawned={(ptyId) => {
                   livePtyByTab.current.set(tab.id, ptyId);
                   // A freshly spawned pty is alive by definition, so clear any
@@ -10581,20 +11508,57 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   });
                   if (tab.micro?.runId) updateTaskRun(tab.micro.runId, { ptyId });
                   const prompt = pendingTerminalPrompts.current.get(tab.id);
-                  if (prompt == null) return;
-                  pendingTerminalPrompts.current.delete(tab.id);
+                  const spawn = pendingAgentSpawnOps.current.get(tab.id);
+                  if (prompt == null && !spawn) return;
+                  if (spawn)
+                    spawn.ready ??= ipc.agentSpawnReady(spawn.opId, ptyId);
+                  const lineageReady = spawn?.ready;
+                  if (prompt != null) pendingTerminalPrompts.current.delete(tab.id);
                   // The shell has only just started the CLI. Give its TUI time
                   // to enter raw mode, then type and submit as separate writes
                   // so autocomplete cannot swallow the Enter.
-                  setTimeout(() => {
-                    void ipc.ptyWrite(ptyId, prompt);
-                    setTimeout(() => void ipc.ptyWrite(ptyId, "\r"), 250);
+                  setTimeout(async () => {
+                    try {
+                      await lineageReady;
+                      if (prompt != null) await ipc.ptyWrite(ptyId, prompt);
+                      if (prompt != null) {
+                        await new Promise((resolve) => setTimeout(resolve, 250));
+                        await ipc.ptyWrite(ptyId, "\r");
+                      }
+                      if (spawn)
+                        await ipc.browserResult(spawn.opId, true, {
+                          ptyId,
+                          cwd: spawn.cwd,
+                          runId: spawn.runId,
+                          attemptId: spawn.attemptId,
+                        });
+                      if (spawn) pendingAgentSpawnOps.current.delete(tab.id);
+                    } catch (error) {
+                      if (spawn) {
+                        pendingAgentSpawnOps.current.delete(tab.id);
+                        await settleAttempt({
+                          attemptId: spawn.attemptId,
+                          state: "failed",
+                          failureClass: "route",
+                          failureCode: "opening-brief",
+                        }).catch(() => {});
+                        await ipc.browserResult(spawn.opId, false, String(error));
+                      }
+                    }
                   }, 2500);
                 }}
                 onExited={(event) => {
                   if (livePtyByTab.current.get(tab.id) !== event.id) return;
                   livePtyByTab.current.delete(tab.id);
                   const code = event.exit_code;
+                  if (tab.spawnedTask) {
+                    void settleAttempt({
+                      attemptId: tab.spawnedTask.attemptId,
+                      state: code === 0 ? "completed" : "failed",
+                      failureClass: code === 0 ? null : "runtime",
+                      failureCode: code === 0 ? null : "process-exit",
+                    }).catch(() => {});
+                  }
                   // Shell tabs close on exit; run tabs stay so the output and
                   // exit status remain readable.
                   if (tab.run) {
@@ -10655,7 +11619,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   patchTab(tab.id, { notice });
                   if (
                     tab.ptyId != null &&
-                    !(tab.id === activeTabId && visible)
+                    !(tab.id === activeTabId && visible && !vibe)
                   ) {
                     pushAttention(
                       tab.ptyId,
@@ -10699,7 +11663,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             </div>
             );
           })}
-        {activeTerminalGroup &&
+        {!vibe && activeTerminalGroup &&
           activeTerminalLayout?.dividers.map((divider) => (
             <div
               key={divider.nodeId}
@@ -10719,7 +11683,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               title="Drag to resize · double-click to equalize"
             />
           ))}
-        {paneDrop && (
+        {!vibe && paneDrop && (
           <div
             className="pane-drop-preview"
             style={{
@@ -10743,7 +11707,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             data-tab-id={tab.id}
             className="fill doc-host"
             style={hostStyle(
-              tab.id === activeTabId && visible,
+              tab.id === surfaceTabId && visible,
               tab.type === "preview" && browserEngine === "proxy",
             )}
           >
@@ -10950,7 +11914,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             underneath stays mounted (unmounting a Term kills its PTY) and shows
             faintly through the frosted glass. The layer stays in the DOM so it
             can fade; the heavy AgentWorkspaceView only mounts while open. */}
-        {agentTermWs && (
+        {!vibe && agentTermWs && (
           <>
             {!wsDrawerOpen && (
               <button
@@ -11398,6 +12362,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onEdit={onEdit}
         />
       ))}
+      {sidePane("integrations", () => (
+        <IntegrationsPanel
+          project={project}
+          state={integrationState}
+          localServices={localIntegrationServices}
+          onChange={onSaveIntegrations}
+          onAutomate={automateIntegration}
+          onStartLocal={(id) => {
+            const resolved = localIntegrationEntry(id);
+            if (resolved) startServer(resolved.path, resolved.entry);
+          }}
+          onStopLocal={(id) => {
+            const ptyId = localIntegrationEntry(id)?.entry.ptyId;
+            if (ptyId != null) void ipc.ptyKill(ptyId);
+          }}
+          onOpenLocal={(port) => openPreview(`http://localhost:${port}`)}
+          onOpenRemote={openPreview}
+        />
+      ))}
       {sidePane("git", () => (
         <GitPanel
           visible={sideTab === "git" && visible && sideOpen}
@@ -11676,6 +12659,86 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onToggleSidebar={toggleSidebar}
           />
         )}
+        {!zen && vibe && (
+          <div className={`vibe-settings-peek ${buildSettingsOpen ? "open" : ""}`}>
+            {buildSettingsOpen && (
+              <button
+                className="vibe-settings-backdrop"
+                aria-label="Close Build settings"
+                onClick={() => setBuildSettingsOpen(false)}
+              />
+            )}
+            <button
+              className="vibe-settings-tab"
+              type="button"
+              aria-label={buildSettingsOpen ? "Close Build settings" : "Open Build settings"}
+              aria-expanded={buildSettingsOpen}
+              onClick={() => setBuildSettingsOpen((open) => !open)}
+            >
+              <SettingsIcon size={17} />
+            </button>
+            {buildSettingsOpen && (
+              <aside className="vibe-settings-panel" aria-label="Build settings">
+                <div className="vibe-settings-panel-head">
+                  <span>
+                    <strong>Build settings</strong>
+                    <small>Project setup, services, and deployment</small>
+                  </span>
+                  <button type="button" onClick={() => setBuildSettingsOpen(false)}>Close</button>
+                </div>
+                <section className="vibe-settings-discovery">
+                  <span>
+                    <strong>Project discovery</strong>
+                    <small>
+                      {vibeTarget.kind === "ready"
+                        ? "Components and runtime relationships are configured."
+                        : "Build is mapping components, commands, data, and dependencies."}
+                    </small>
+                  </span>
+                  {vibeTarget.kind !== "ready" && (
+                    <div>
+                      <Button
+                        size="sm"
+                        variant="accent"
+                        onClick={() => {
+                          if (retryVibeProjectSetup(project.id)) {
+                            setVibeSetupAttempt((attempt) => attempt + 1);
+                          }
+                        }}
+                      >
+                        Retry discovery
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "agents" } }))}
+                      >
+                        Agent access
+                      </Button>
+                    </div>
+                  )}
+                </section>
+                <IntegrationsPanel
+                  title="Services & deployment"
+                  project={project}
+                  state={integrationState}
+                  localServices={localIntegrationServices}
+                  onChange={onSaveIntegrations}
+                  onAutomate={automateIntegration}
+                  onStartLocal={(id) => {
+                    const resolved = localIntegrationEntry(id);
+                    if (resolved) startServer(resolved.path, resolved.entry);
+                  }}
+                  onStopLocal={(id) => {
+                    const ptyId = localIntegrationEntry(id)?.entry.ptyId;
+                    if (ptyId != null) void ipc.ptyKill(ptyId);
+                  }}
+                  onOpenLocal={(port) => openPreview(`http://localhost:${port}`)}
+                  onOpenRemote={openPreview}
+                />
+              </aside>
+            )}
+          </div>
+        )}
         {/* Docked (Appearance → "Sidebar as overlay", off): the panel takes a
             column of its own and the main area moves over for it, instead of
             floating above it. It costs a reflow of the main area every time it
@@ -11725,6 +12788,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
         )}
         <aside className="vibe-chat-placeholder" aria-label="Build chat">
           <VibeBuilderPane
+            project={project}
+            phase={
+              vibeSession
+                ? vibeInputUnlock.current.unlocked
+                  ? "build"
+                  : "waiting"
+                : vibeProjectSetupSession
+                  ? "discovering"
+                  : "waiting"
+            }
             session={
               vibeSession ??
               vibeProjectSetupSession ??
