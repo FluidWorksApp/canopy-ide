@@ -19317,35 +19317,133 @@ a.btn-sm {
   box-shadow: 0 0 0 1px var(--accent);
 }
 
-.fleet-readout {
+.fleet-disclosure {
   position: relative;
-  overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
+  width: min(620px, 100%);
 }
 
-.fleet-readout table {
+.fleet-disclosure-trigger {
+  display: flex;
   width: 100%;
-  border-collapse: collapse;
-  font-size: var(--fs-xs);
+  min-height: 54px;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 10px 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  corner-shape: squircle;
+  background: var(--bg-raised);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    background var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
 }
 
-.fleet-readout th,
-.fleet-readout td {
-  padding: 7px 9px;
-  text-align: left;
-  vertical-align: middle;
+.fleet-disclosure-trigger:hover,
+.fleet-disclosure-trigger.open {
+  border-color: var(--border-strong);
+}
+
+.fleet-disclosure-trigger:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.fleet-disclosure-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fleet-disclosure-copy strong {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-disclosure-copy > span {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-disclosure-status {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.fleet-disclosure-chevron {
+  color: var(--text-dim);
+  transform: rotate(90deg);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.fleet-disclosure-trigger.open .fleet-disclosure-chevron {
+  transform: rotate(-90deg);
+}
+
+/* Like the Skin picker, fleet evidence opens over the page rather than making
+   every setting below it travel. This is a read-only operational ledger, so
+   its rows preserve route → state → reason instead of pretending to be menu
+   options. */
+.fleet-disclosure-panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 100%;
+  max-height: min(390px, calc(100vh - 250px));
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  corner-shape: squircle;
+  background: var(--bg-overlay);
+  backdrop-filter: blur(18px) saturate(1.15);
+  box-shadow: var(--shadow-lg);
+}
+
+.fleet-route-list {
+  display: flex;
+  flex-direction: column;
+  padding: 7px;
+}
+
+.fleet-route-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 3px 12px;
+  min-width: 0;
+  padding: 8px 9px;
   border-bottom: 1px solid var(--border);
 }
 
-.fleet-readout tbody tr:last-child td {
+.fleet-route-row:last-child {
   border-bottom: 0;
 }
 
-.fleet-readout th {
-  color: var(--text-dim);
-  background: var(--bg-alt);
-  font-weight: 600;
+.fleet-route-row:hover {
+  border-radius: var(--r-sm);
+  corner-shape: squircle;
+  background: var(--bg-hover);
+}
+
+.fleet-route-identity {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
 }
 
 .fleet-route-name {
@@ -19357,17 +19455,23 @@ a.btn-sm {
 }
 
 .fleet-route-profile {
-  display: block;
-  margin-top: 2px;
+  overflow: hidden;
   color: var(--text-faint);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .fleet-state {
   display: inline-block;
+  min-width: 64px;
   padding: 2px 6px;
   border-radius: 999px;
   color: var(--text-dim);
   background: var(--bg-raised);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: center;
 }
 
 .fleet-state-ready {
@@ -19383,10 +19487,19 @@ a.btn-sm {
 }
 
 .fleet-reasons {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  padding-left: 20px;
   color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.fleet-readout-loading {
+.fleet-readout-loading,
+.fleet-readout-error,
+.fleet-readout-empty {
   padding: 8px 9px;
   color: var(--text-faint);
   border-top: 1px solid var(--border);
@@ -19394,10 +19507,23 @@ a.btn-sm {
 }
 
 .fleet-readout-error {
-  padding: 8px 9px;
   color: var(--danger);
-  border-top: 1px solid var(--border);
-  font-size: var(--fs-xs);
+}
+
+.fleet-disclosure-panel > .fleet-readout-error:first-child,
+.fleet-disclosure-panel > .fleet-readout-empty:first-child {
+  border-top: 0;
+}
+
+@media (max-width: 760px) {
+  .fleet-disclosure-panel {
+    width: 100%;
+  }
+
+  .fleet-reasons {
+    padding-left: 0;
+    white-space: normal;
+  }
 }
 
 .cli-bins {
