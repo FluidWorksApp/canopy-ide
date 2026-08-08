@@ -601,8 +601,60 @@ describe("VibeBuilderSession", () => {
         kind: "question",
         prompt: "I need a coding agent before I can make this change.",
         detail: "claude: signed out",
+        actions: expect.arrayContaining([
+          expect.objectContaining({ label: "Sign in to Claude Code" }),
+          expect.objectContaining({ label: "Use another Claude Code account" }),
+          expect.objectContaining({ label: "Agent settings & binary path" }),
+        ]),
       }),
     );
+  });
+
+  it("executes a zero-route card response through the ProjectView recovery boundary", async () => {
+    const recoverRoute = vi.fn(async () => ({
+      ok: true,
+      prompt: "Claude Code sign-in is open.",
+      detail: "Finish signing in, then retry your change.",
+    }));
+    const h = harness(
+      {
+        listRoutes: vi.fn(async () => [
+          {
+            cli: "claude",
+            profileId: "default",
+            family: "anthropic" as const,
+            state: {
+              agent: "claude",
+              profile: "default",
+              kind: "unusable" as const,
+              reasons: ["signed-out" as const],
+            },
+            choices: [{ id: "claude-fable-5", label: "Fable 5", hint: "" }],
+          },
+        ]),
+      },
+      { recoverRoute },
+    );
+    await expect(h.session.send("Make the button blue")).rejects.toThrow();
+    const response = h.session.state.question?.actions?.find(
+      (action) => action.label === "Sign in to Claude Code",
+    )?.response;
+    expect(response).toBeTruthy();
+
+    await h.session.send(response!);
+
+    expect(recoverRoute).toHaveBeenCalledWith({
+      kind: "sign-in",
+      cli: "claude",
+    });
+    expect(h.session.state).toEqual({
+      persona: { kind: "idle" },
+      question: expect.objectContaining({
+        kind: "notice",
+        prompt: "Claude Code sign-in is open.",
+      }),
+    });
+    expect(h.deps.reserve).not.toHaveBeenCalled();
   });
 
   it("launches on the model the route asked for", async () => {

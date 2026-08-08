@@ -435,14 +435,20 @@ export function VibeBuilderPane({
     }));
   };
 
-  const send = (text: string) => {
+  const send = (
+    text: string,
+    displayText = text,
+    cardAction = false,
+  ) => {
     const message = text.trim();
+    const displayed = displayText.trim();
     if (!message) return;
     // Managed install/deploy/link requests have their own confirmation path.
     // For an ordinary Build turn, the island's retained visual items are the
     // task's structured context even though the transcript keeps showing only
     // the person's words.
-    const visualBrief = parseVibeIntent(message) ? "" : vibePreviewBrief(previewContext);
+    const visualBrief =
+      cardAction || parseVibeIntent(message) ? "" : vibePreviewBrief(previewContext);
     const sentAnnotations = visualBrief
       ? previewContext?.annotations.filter((item) => !item.sent) ?? []
       : [];
@@ -450,7 +456,7 @@ export function VibeBuilderPane({
       ? previewContext?.shots.filter((item) => !item.sent) ?? []
       : [];
     const itemId = nextId();
-    const requestMode = vibeRequestMode(message);
+    const requestMode = vibeRequestMode(displayed);
     setHasSpoken(true);
     if (projectId) {
       const held = projectConversations.get(projectId);
@@ -472,7 +478,7 @@ export function VibeBuilderPane({
               ? { ...item, delivery: "done" as const }
               : item,
           ),
-          { id: itemId, kind: "you", text: message, delivery, requestMode },
+          { id: itemId, kind: "you", text: displayed, delivery, requestMode },
         ],
         persona: reducePersona(current.persona, { kind: "turn-started" }),
         openReplyId: null,
@@ -797,7 +803,10 @@ export function VibeBuilderPane({
                         disabled={answeringQuestion === question.id}
                         onClick={() => {
                           setAnsweringQuestion(question.id);
-                          send(action.response);
+                          // Keep the opaque response at the session boundary;
+                          // the conversation should show what the person
+                          // clicked, not an internal routing token.
+                          send(action.response, action.label, true);
                         }}
                       >
                         {action.label}

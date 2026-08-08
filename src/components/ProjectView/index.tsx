@@ -131,6 +131,7 @@ import {
   launchEnvSync,
   launchProfile,
   primeLaunchEnv,
+  setActiveProfile,
   supportsProfiles,
   PROFILE_CHANGE_EVENT,
 } from "../../profiles";
@@ -442,6 +443,10 @@ import {
   type VibeManagedProcessFailureInput,
   type VibeServerIncidentInput,
 } from "../../vibeBuilderSession";
+import {
+  executeVibeRouteRecovery,
+  type VibeRouteRecoveryAction,
+} from "../../vibeRouteRecovery";
 import type { VibePackageFacts } from "../../vibeTargetInference";
 import { createVibeTargetStatusSession } from "../../vibeTargetInference";
 import {
@@ -9222,6 +9227,44 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const vibeComponentId = vibeComponent?.id ?? null;
   const vibeComponentLabel = vibeComponent?.label ?? null;
   const vibeComponentPath = vibeComponent?.path ?? null;
+  const recoverVibeRoute = useCallback(
+    async (action: VibeRouteRecoveryAction) => {
+      if (!vibeComponentPath) {
+        return {
+          ok: false,
+          prompt: "I couldn't open agent setup for this component.",
+          detail: "The component path is not available yet.",
+        };
+      }
+      return executeVibeRouteRecovery(action, {
+        clis: AGENT_CLIS,
+        profiles: profilesRef.current,
+        activeProfileId: activeProfile(),
+        runTerminal: ({ command, title, icon, run, env, profile }) =>
+          addTerminal(
+            vibeComponentPath,
+            command,
+            title,
+            icon,
+            run,
+            env,
+            profile,
+          ),
+        profileAccounts: ipc.profileAccounts,
+        profileEnv: ipc.profileEnv,
+        setActiveProfile,
+        primeLaunchEnv,
+        setupAgentHooks: ipc.setupAgentHooks,
+        openAgentSettings: () =>
+          window.dispatchEvent(
+            new CustomEvent("canopy:open-settings", {
+              detail: { tab: "agents" },
+            }),
+          ),
+      });
+    },
+    [addTerminal, vibeComponentPath],
+  );
   const vibeSession = useMemo(
     () =>
       vibeComponentId && vibeComponentLabel && vibeComponentPath
@@ -9244,6 +9287,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             dataStores: project.vibe?.dataStores ?? [],
             externalServices: project.vibe?.externalServices ?? [],
             previewTabId: () => vibePreviewIdRef.current,
+            recoverRoute: recoverVibeRoute,
           })
         : null,
     [
@@ -9261,6 +9305,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       project.vibe?.externalServices,
       vibePrimaryCli?.id,
       vibePrimaryCli?.bin,
+      recoverVibeRoute,
     ],
   );
   useEffect(() => () => void vibeSession?.stop(), [vibeSession]);
