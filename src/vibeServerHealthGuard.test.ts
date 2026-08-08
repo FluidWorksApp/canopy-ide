@@ -15,7 +15,9 @@ describe("vibe server health wiring", () => {
     // Commands come from the validated setup graph, not from anything the user
     // typed. Every run carries stable ids and an argv-native command may use a
     // component-owned cwd without changing its identity.
-    expect(autoStart).toContain("for (const { component, command } of vibeRequiredRuns)");
+    expect(autoStart).toContain("for (const { component, command, identity } of vibeRequiredRuns)");
+    expect(autoStart).toContain("identity.dependsOn");
+    expect(autoStart).toContain("vibeRunReady(dependencyTab, dependencyCommand, projectStats)");
     expect(autoStart).toContain("command.cwd ?? component.path");
     expect(autoStart).toContain(
       "{ componentId: component.id, runCommandId: command.id }",
@@ -29,6 +31,15 @@ describe("vibe server health wiring", () => {
     expect(rust).toContain("requested: session.shutdown.load(Ordering::SeqCst)");
     const term = read("src/components/Term.tsx");
     expect(term).toContain("onExitedRef.current(event)");
+  });
+
+  it("watches every required long-lived process, not only the preview", () => {
+    const view = read("src/components/ProjectView/index.tsx");
+    const start = view.indexOf("vibeServerWatch.current =");
+    const watcherSetup = view.slice(start, view.indexOf("vibeServerExit.current =", start));
+    expect(watcherSetup).toContain("vibeRequiredRuns");
+    expect(watcherSetup).toContain(".map(({ component, command })");
+    expect(watcherSetup).not.toContain("vibeServerTargetKey");
   });
 
   it("drops the incident when the person stops the server themselves", () => {

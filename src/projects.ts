@@ -7,6 +7,10 @@ import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
 import { currentPlatform, type Platform } from "./shortcuts";
 import { SESSION_ID_TOKEN, type RemoteCli } from "../shared/model";
+import {
+  normalizeProjectIntegrationState,
+  type ProjectIntegrationState,
+} from "./projectIntegrations";
 
 export interface RunCommand {
   id: string;
@@ -17,6 +21,16 @@ export interface RunCommand {
   argv?: string[];
   cwd?: string;
   purpose?: "serve" | "check" | "worker" | "setup";
+  /** Setup discovered by Build is automatic only when it is local and
+   * reversible (installing declared dependencies, applying a local migration).
+   * A managed database migration is deliberately recorded but never run just
+   * because the project was opened. */
+  automatic?: boolean;
+  readiness?:
+    | { kind: "http"; path: string }
+    | { kind: "port" }
+    | { kind: "process-alive" }
+    | { kind: "one-shot"; timeoutMs: number };
 }
 
 /** What a component is, as established by project setup rather than guessed
@@ -42,7 +56,35 @@ export interface VibeConfig {
   componentId?: string;
   runCommandId?: string;
   setupRevision?: string;
-  requiredProcesses?: Array<{ componentId: string; runCommandId: string }>;
+  requiredProcesses?: Array<{
+    componentId: string;
+    runCommandId: string;
+    /** Other long-lived runs that must be ready before this one starts. */
+    dependsOn?: Array<{ componentId: string; runCommandId: string }>;
+    reason?: string;
+    requiredFor?: "preview" | "project";
+  }>;
+  /** Observed runtime/data flow. This is evidence for Build and repair, not a
+   * permission to edit the other component. */
+  componentLinks?: Array<{
+    fromComponentId: string;
+    toComponentId: string;
+    kind: "http" | "queue" | "database" | "library" | "other";
+    description: string;
+  }>;
+  dataStores?: Array<{
+    id: string;
+    label: string;
+    engine: "postgresql" | "mysql" | "sqlite" | "other";
+    mode: "local" | "managed";
+    providerId: string | null;
+    componentIds: string[];
+    schemaPaths: string[];
+    migrationPaths: string[];
+    latestMigration: string | null;
+    migrate?: { componentId: string; runCommandId: string };
+    status?: { componentId: string; runCommandId: string };
+  }>;
   externalServices?: Array<{
     id: string;
     providerId: string | null;
@@ -70,6 +112,10 @@ export interface Project {
   customTasks?: CustomMicroTask[];
   /** Portable, non-secret configuration for the project's Build lens. */
   vibe?: VibeConfig;
+  /** Durable operational facts for linked providers and environments. Secrets
+   * stay in the provider/credential store; only safe identifiers, endpoints,
+   * observations and deployment history travel with the project. */
+  integrations?: ProjectIntegrationState;
 }
 
 export interface WorkspaceState {
@@ -141,6 +187,14 @@ export function normalizeProjectStructure(project: Project): Project {
   const reservedComponentIds = new Set(componentCounts.keys());
   const reservedCommandIds = new Set(commandCounts.keys());
   let changed = false;
+
+  const integrations = project.integrations == null
+    ? undefined
+    : normalizeProjectIntegrationState(project.integrations);
+  if (
+    project.integrations != null &&
+    JSON.stringify(integrations) !== JSON.stringify(project.integrations)
+  ) changed = true;
 
   const components = rawComponents.map((component, componentIndex) => {
     const existingComponentId = nonBlankId(component.id);
@@ -247,6 +301,31 @@ export function normalizeProjectStructure(project: Project): Project {
   // and every project/component/run command intact. App persists this
   // normalization before rendering the workspace.
   if (vibe) {
+    const required = Array.isArray(vibe.requiredProcesses)
+      ? vibe.requiredProcesses
+      : [];
+    const runnableComponents = components.filter((component) =>
+      component.commands?.some(
+        (command) => command.purpose === "serve" || command.purpose === "worker",
+      ),
+    );
+    const completeRuntime = runnableComponents.every((component) =>
+      required.some((process) => process.componentId === component.id),
+    ) && required.every((process) => {
+      const component = components.find((candidate) => candidate.id === process.componentId);
+      const command = component?.commands?.find(
+        (candidate) => candidate.id === process.runCommandId,
+      );
+      if (!component || !command) return false;
+      return (process.dependsOn ?? []).every((dependency) => {
+        const dependencyComponent = components.find(
+          (candidate) => candidate.id === dependency.componentId,
+        );
+        return dependencyComponent?.commands?.some(
+          (candidate) => candidate.id === dependency.runCommandId,
+        ) === true;
+      });
+    });
     const complete =
       vibe.version === 1 &&
       Boolean(nonBlankId(vibe.setupRevision)) &&
@@ -254,6 +333,9 @@ export function normalizeProjectStructure(project: Project): Project {
       Boolean(nonBlankId(vibe.runCommandId)) &&
       Array.isArray(vibe.requiredProcesses) &&
       vibe.requiredProcesses.length > 0 &&
+      completeRuntime &&
+      Array.isArray(vibe.componentLinks) &&
+      Array.isArray(vibe.dataStores) &&
       Array.isArray(vibe.externalServices);
     if (!complete) {
       const reset: VibeConfig = { version: 1, enabled: vibe.enabled === true };
@@ -268,7 +350,7 @@ export function normalizeProjectStructure(project: Project): Project {
     }
   }
 
-  return changed ? { ...project, components, vibe } : project;
+  return changed ? { ...project, components, vibe, integrations } : project;
 }
 
 /** State-level migration seam, mirroring adoptLegacyCustomTasks: unchanged

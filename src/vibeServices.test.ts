@@ -4,6 +4,7 @@ import {
   clientVarName,
   planLink,
   providerById,
+  providerMcpToolAllowances,
   type LinkContext,
 } from "./vibeServices";
 
@@ -33,6 +34,33 @@ describe("the provider registry", () => {
 });
 
 describe("link planning", () => {
+  it("prefers a linked account API route over CLI authentication", () => {
+    const plan = planLink("supabase", ctx({
+      cliInstalled: false,
+      authenticated: false,
+      linkedReaches: ["mcp"],
+      toolAllowances: ["mcp__supabase"],
+      accountLinkAvailable: true,
+    }));
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.steps[0]).toMatchObject({ kind: "use-linked-account", reach: "mcp" });
+    expect(plan.steps.some((step) => step.kind === "install-cli")).toBe(false);
+    expect(plan.steps.some((step) => step.kind === "authenticate")).toBe(false);
+  });
+
+  it("asks for an account link before falling back to the CLI", () => {
+    const plan = planLink("firebase", ctx({
+      cliInstalled: false,
+      authenticated: false,
+      accountLinkAvailable: true,
+    }));
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.steps[0]).toMatchObject({ kind: "link-account", accountLabel: "Google" });
+    expect(plan.steps[0].why).toMatch(/firebase.*fallback/i);
+  });
+
   it("refuses a provider with no verified headless path", () => {
     const plan = planLink("some-saas", ctx());
     expect(plan.ok).toBe(false);
@@ -81,6 +109,30 @@ describe("link planning", () => {
     const serialized = JSON.stringify(plan);
     expect(serialized).toContain("STRIPE_SECRET_KEY");
     expect(serialized).not.toMatch(/sk_(live|test)_/);
+  });
+});
+
+describe("provider MCP access", () => {
+  it("admits only enabled provider-owned account tools", () => {
+    const servers = [
+      {
+        name: "Supabase",
+        url: "https://mcp.supabase.com/mcp",
+        enabled: true,
+        sources: [
+          { name: "supabase", status: "enabled" as const },
+          { name: "supabase-old", status: "disabled" as const },
+        ],
+      },
+      {
+        name: "Google Drive",
+        url: "https://google.example/mcp",
+        enabled: true,
+        sources: [{ name: "google-drive", status: "enabled" as const }],
+      },
+    ];
+    expect(providerMcpToolAllowances("supabase", servers)).toEqual(["mcp__supabase"]);
+    expect(providerMcpToolAllowances("firebase", servers)).toEqual([]);
   });
 });
 

@@ -27,6 +27,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
+use std::process::{Command, ExitStatus, Stdio};
 
 // The lifecycle ladder, shared with the app crate. Compiled in rather than
 // imported because this binary is standalone by design — but it must decide
@@ -78,6 +79,32 @@ fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
 }
 
+const SMALL_PROCESS_OUTPUT_MAX: u64 = 1024 * 1024;
+
+/// The hook only shells out for tiny git/ps answers. Drain stdout before wait,
+/// cap it at 1 MiB, and discard stderr so a corrupted process table or wrapper
+/// cannot make this short-lived sidecar allocate without bound.
+fn small_process_output(command: &mut Command) -> Option<(ExitStatus, Vec<u8>)> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let mut bytes = Vec::new();
+    stdout
+        .by_ref()
+        .take(SMALL_PROCESS_OUTPUT_MAX + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > SMALL_PROCESS_OUTPUT_MAX {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    Some((child.wait().ok()?, bytes))
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -91,7 +118,7 @@ fn main() {
     // the parent through a private gate, waits for release, and only then execs
     // the user's actual argv. The original program therefore cannot win a fork
     // race against cgroup membership.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--containment-launch")) {
         containment_launcher_main();
     }
@@ -127,10 +154,14 @@ fn main() {
     }
 }
 
-#[cfg(any(target_os = "linux", all(test, unix)))]
-#[cfg_attr(all(test, not(target_os = "linux")), allow(dead_code))]
+#[cfg(any(target_os = "linux", target_os = "windows", all(test, unix)))]
+#[cfg_attr(
+    all(test, not(any(target_os = "linux", target_os = "windows"))),
+    allow(dead_code)
+)]
 fn containment_launcher_main() -> ! {
     use std::fs::OpenOptions;
+    #[cfg(unix)]
     use std::os::unix::process::CommandExt;
 
     let mut args = std::env::args_os().skip(2);
@@ -156,11 +187,16 @@ fn containment_launcher_main() -> ! {
     };
     let program_args: Vec<_> = args.collect();
 
-    let joined = std::fs::write(&cgroup_procs, std::process::id().to_string());
-    if let Err(error) = joined {
-        eprintln!("canopy containment: could not join cgroup: {error}");
-        std::process::exit(125);
+    #[cfg(target_os = "linux")]
+    {
+        let joined = std::fs::write(&cgroup_procs, std::process::id().to_string());
+        if let Err(error) = joined {
+            eprintln!("canopy containment: could not join cgroup: {error}");
+            std::process::exit(125);
+        }
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = cgroup_procs;
     if let Err(error) = OpenOptions::new().write(true).create_new(true).open(&ready) {
         eprintln!("canopy containment: could not signal readiness: {error}");
         std::process::exit(125);
@@ -175,11 +211,30 @@ fn containment_launcher_main() -> ! {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
 
-    let error = std::process::Command::new(program)
-        .args(program_args)
-        .exec();
-    eprintln!("canopy containment: exec failed: {error}");
-    std::process::exit(126);
+    #[cfg(unix)]
+    {
+        let error = std::process::Command::new(program)
+            .args(program_args)
+            .exec();
+        eprintln!("canopy containment: exec failed: {error}");
+        std::process::exit(126);
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no exec(2). The launcher deliberately remains the job's
+        // root and waits: descendants inherit its verified Job Object before
+        // any user code can start, and the PTY observes the actual exit code.
+        match std::process::Command::new(program)
+            .args(program_args)
+            .status()
+        {
+            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            Err(error) => {
+                eprintln!("canopy containment: launch failed: {error}");
+                std::process::exit(126);
+            }
+        }
+    }
 }
 
 // ---------- reminders: the alarm that outlives the app ----------
@@ -1341,11 +1396,11 @@ fn git_branch(cwd: &str) -> Option<String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    let out = cmd.output().ok()?;
-    if !out.status.success() {
+    let (status, stdout) = small_process_output(&mut cmd)?;
+    if !status.success() {
         return None;
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let s = String::from_utf8_lossy(&stdout).trim().to_string();
     if s.is_empty() {
         None
     } else {
@@ -2149,11 +2204,10 @@ fn parent_of(pid: u32) -> Option<u32> {
     {
         // Absolute: this runs in a sidecar started by a GUI-launched app, where
         // PATH may not contain /bin at all (see spawnPathGuard).
-        let out = std::process::Command::new("/bin/ps")
-            .args(["-o", "ppid=", "-p", &pid.to_string()])
-            .output()
-            .ok()?;
-        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+        let mut command = std::process::Command::new("/bin/ps");
+        command.args(["-o", "ppid=", "-p", &pid.to_string()]);
+        let (_, stdout) = small_process_output(&mut command)?;
+        String::from_utf8_lossy(&stdout).trim().parse().ok()
     }
 }
 
@@ -2187,12 +2241,11 @@ fn read_environ(pid: u32) -> Option<Vec<String>> {
         // `ps eww` prints the environment after the command, space separated.
         // Only our own processes are readable, which is the whole population we
         // care about — and the reason this needs no privileges.
-        let out = std::process::Command::new("/bin/ps")
-            .args(["eww", "-o", "command=", "-p", &pid.to_string()])
-            .output()
-            .ok()?;
+        let mut command = std::process::Command::new("/bin/ps");
+        command.args(["eww", "-o", "command=", "-p", &pid.to_string()]);
+        let (_, stdout) = small_process_output(&mut command)?;
         Some(
-            String::from_utf8_lossy(&out.stdout)
+            String::from_utf8_lossy(&stdout)
                 .split_whitespace()
                 .map(str::to_string)
                 .collect(),

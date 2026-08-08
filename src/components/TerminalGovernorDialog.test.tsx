@@ -9,6 +9,7 @@ const status = {
   state: "awaiting_grant" as const,
   base_allowance_bytes: 1024,
   granted_bytes: 0,
+  remembered_default_bytes: 0,
   allowance_bytes: 1024,
   current_bytes: 950,
   peak_bytes: 990,
@@ -20,6 +21,8 @@ const status = {
     budget_generation: 3,
     increments: [512 * 1024 * 1024, 1024 * 1024 * 1024],
   },
+  stop_request_id: "pty-7-stop-3",
+  cli_key: "pkg:npm:@example/agent",
 };
 
 const capability = {
@@ -48,7 +51,27 @@ describe("TerminalGovernorDialog", () => {
     );
     expect(screen.getByText(/currently monitor-only/i)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Allow \+512/ }));
-    expect(onGrant).toHaveBeenCalledWith(512 * 1024 * 1024);
+    expect(onGrant).toHaveBeenCalledWith(512 * 1024 * 1024, false);
+  });
+
+  it("requires a separate checkbox confirmation before remembering a CLI default", () => {
+    const onGrant = vi.fn();
+    render(
+      <TerminalGovernorDialog
+        status={status}
+        capability={capability}
+        onGrant={onGrant}
+        onStop={() => {}}
+        onDismiss={() => {}}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: /remember this increment for this CLI/i,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Allow \+512/ }));
+    expect(onGrant).toHaveBeenCalledWith(512 * 1024 * 1024, true);
   });
 
   it("offers an explicit terminal stop without calling it a throttle", () => {

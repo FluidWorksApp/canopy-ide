@@ -1087,7 +1087,7 @@ pub fn notes_attach_file(
     // The source is arbitrary user-supplied text, so it is held to the same
     // scope rule every other read in the app is: inside a registered workspace
     // root, or refused.
-    crate::fsx::check_scope(&ws, &src)?;
+    let src = crate::fsx::check_scope(&ws, &src)?;
 
     let dir = note_dir(&project_id, &id)?;
     let mut meta = read_meta(&dir)?;
@@ -1116,13 +1116,8 @@ pub fn notes_attach_file(
     });
     let is_image = kind == "image";
     let limit = if is_image { IMAGE_MAX } else { ARTIFACT_MAX };
-    let bytes = std::fs::read(&src).map_err(|e| format!("could not read {path}: {e}"))?;
-    if bytes.len() > limit {
-        return Err(format!(
-            "{path} is {} bytes; the limit is {limit}",
-            bytes.len()
-        ));
-    }
+    let bytes = crate::bounded_file::read(&src, limit)
+        .map_err(|error| format!("could not read {path}: {error}"))?;
 
     let title = title
         .map(|t| t.trim().to_string())
@@ -1515,11 +1510,7 @@ fn link_impl(
 #[tauri::command]
 pub fn notes_read_file(project_id: String, id: String, path: String) -> Result<String, String> {
     let file = note_file(&project_id, &id, &path)?;
-    let bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
-    if bytes as usize > ARTIFACT_MAX {
-        return Err(format!("{path} is {bytes} bytes — too large to open here"));
-    }
-    std::fs::read_to_string(&file).map_err(|e| e.to_string())
+    crate::bounded_file::read_string(&file, ARTIFACT_MAX)
 }
 
 /// Read an image attachment, base64, for an `<img src="data:…">` in the detail
@@ -1529,13 +1520,7 @@ pub fn notes_read_file(project_id: String, id: String, path: String) -> Result<S
 pub fn notes_read_image(project_id: String, id: String, path: String) -> Result<String, String> {
     use base64::Engine;
     let file = note_file(&project_id, &id, &path)?;
-    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
-    if bytes.len() > IMAGE_MAX {
-        return Err(format!(
-            "{path} is {} bytes — too large to open here",
-            bytes.len()
-        ));
-    }
+    let bytes = crate::bounded_file::read(&file, IMAGE_MAX)?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 

@@ -4,6 +4,10 @@ import {
   utf8BytesThroughLimit,
   type TerminalCompactionSurface,
 } from "./terminalCompaction";
+import {
+  TerminalRetentionRegistry,
+  type TerminalRetentionTracker,
+} from "./terminalRetention";
 import { TerminalStreamLedger } from "./terminalStreamLedger";
 
 class FakeSurface implements TerminalCompactionSurface {
@@ -90,6 +94,143 @@ const harness = (surface = new FakeSurface(), maxSerializedBytes = 1_024) => {
 };
 
 describe("hidden terminal compaction", () => {
+  it("bounds 32 hidden terminals globally while a visible and rogue producer keep exact output", async () => {
+    const payloadBytes = 16;
+    const registry = new TerminalRetentionRegistry(payloadBytes * 4);
+    const sample = (visible: boolean) => ({
+      visible,
+      normalRows: 5_024,
+      alternateRows: 0,
+      cols: 80,
+      viewportRows: 24,
+      configuredScrollbackRows: 5_000,
+    });
+    const visibleTracker = registry.track(sample(true));
+    const visibleSurface = new FakeSurface();
+    const visibleController = new TerminalCompactionController(visibleSurface, {
+      metrics: trackerMetrics(visibleTracker),
+    });
+    const hidden = Array.from({ length: 32 }, (_, index) => {
+      const surface = new FakeSurface();
+      surface.state = `term-${index.toString().padStart(2, "0")}-history!`;
+      expect(surface.state.length).toBe(payloadBytes);
+      const tracker = registry.track(sample(false));
+      let timer: (() => void) | null = null;
+      const controller = new TerminalCompactionController(surface, {
+        maxSerializedBytes: payloadBytes,
+        metrics: trackerMetrics(tracker),
+        setTimer: (callback) => {
+          timer = callback;
+          return 1;
+        },
+        clearTimer: () => {
+          timer = null;
+        },
+      });
+      return { controller, surface, tracker, fire: () => timer?.() };
+    });
+
+    for (const terminal of hidden) {
+      terminal.controller.hide();
+      terminal.fire();
+      terminal.surface.pendingDrain?.();
+    }
+
+    expect(visibleController.compactNow()).toBe(false);
+    expect(visibleSurface.state).toBe("history\u001b[?2004h");
+    expect(registry.snapshot()).toMatchObject({
+      instances: 33,
+      visibleInstances: 1,
+      hiddenInstances: 32,
+      compactionAttempts: 32,
+      compactionSuccesses: 4,
+      compactionRejectedGlobalBudget: 28,
+      compactedPayloadBytes: payloadBytes * 4,
+      compactedPayloadBytesHighWater: payloadBytes * 4,
+    });
+
+    // Hidden PTY output does not parse into the compacted xterm. Model a rogue
+    // producer filling native replay while the renderer retains only its VT
+    // snapshot, then require exact one-time replay after restoration.
+    const rogue = hidden[0];
+    const ledger = new TerminalStreamLedger();
+    let native = `term-00-history!`;
+    expect(ledger.accept(1, 1, native.length)).toBe(true);
+    for (let chunk = 0; chunk < 2_000; chunk += 1) {
+      native += `\r\nrogue-${chunk.toString().padStart(4, "0")}`;
+    }
+    const showing = rogue.controller.show();
+    rogue.surface.pendingRestore?.();
+    await showing;
+    const unseen = native.slice(ledger.replayAfter() ?? 0);
+    expect(ledger.accept(2, 2, native.length)).toBe(true);
+    rogue.surface.state += unseen;
+    expect(rogue.surface.state).toBe(native);
+    expect(registry.snapshot().compactedPayloadBytes).toBe(payloadBytes * 3);
+
+    // Releasing one restored reservation admits one previously rejected
+    // terminal, keeping the aggregate at—not above—the process-wide ceiling.
+    const retry = hidden[4];
+    expect(retry.controller.compactNow()).toBe(true);
+    retry.fire();
+    retry.surface.pendingDrain?.();
+    expect(registry.snapshot()).toMatchObject({
+      compactionSuccesses: 5,
+      compactedPayloadBytes: payloadBytes * 4,
+      compactedPayloadBytesHighWater: payloadBytes * 4,
+    });
+
+    visibleController.dispose();
+    visibleTracker.dispose();
+    for (const terminal of hidden) {
+      terminal.controller.dispose();
+      terminal.tracker.dispose();
+    }
+    expect(registry.snapshot()).toMatchObject({
+      instances: 0,
+      compactedPayloadBytes: 0,
+    });
+  });
+
+  it("preserves exact output through repeated hidden compaction and reattach cycles", async () => {
+    const h = harness(new FakeSurface(), 256 * 1024);
+    const ledger = new TerminalStreamLedger();
+    let native = h.surface.state;
+    let epoch = 1;
+
+    for (let cycle = 0; cycle < 1_000; cycle += 1) {
+      const visible = `\r\nvisible-${cycle.toString().padStart(4, "0")}`;
+      const visibleEnd = native.length + visible.length;
+      expect(ledger.accept(epoch, epoch, visibleEnd)).toBe(true);
+      native += visible;
+      h.surface.state += visible;
+
+      h.controller.hide();
+      h.fireTimer();
+      h.surface.pendingDrain?.();
+
+      // The child remains live while its renderer viewer is detached. These
+      // bytes exist only in the bounded native replay ring until show settles.
+      const hidden = `\r\nhidden-${cycle.toString().padStart(4, "0")}`;
+      native += hidden;
+      epoch += 1;
+      const showing = h.controller.show();
+      h.surface.pendingRestore?.();
+      await showing;
+
+      const replayAfter = ledger.replayAfter() ?? 0;
+      const suffix = native.slice(replayAfter);
+      expect(ledger.accept(epoch, epoch, native.length)).toBe(true);
+      h.surface.state += suffix;
+      expect(h.surface.state).toBe(native);
+      expect(h.reserved()).toBe(0);
+    }
+
+    expect(h.compacted).toHaveBeenCalledTimes(1_000);
+    expect(h.restored).toHaveBeenCalledTimes(1_000);
+    expect(ledger.replayAfter()).toBe(native.length);
+  });
+
   it("advances hidden idle compaction under pressure but never compacts visible state", async () => {
     const h = harness();
     expect(h.controller.compactNow()).toBe(false);
@@ -279,6 +420,19 @@ describe("hidden terminal compaction", () => {
     );
   });
 });
+
+function trackerMetrics(tracker: TerminalRetentionTracker) {
+  return {
+    attempted: tracker.compactionAttempted,
+    reserve: tracker.reserveCompaction,
+    release: tracker.releaseCompaction,
+    compacted: tracker.compacted,
+    rejectedTooLarge: tracker.compactionRejected,
+    rejectedGlobalBudget: tracker.compactionBudgetRejected,
+    failed: tracker.compactionFailed,
+    restored: tracker.restored,
+  };
+}
 
 describe("UTF-8 compaction bound", () => {
   it("counts ASCII, BMP and surrogate-pair content without allocating bytes", () => {

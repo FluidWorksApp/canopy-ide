@@ -1,4 +1,4 @@
-import type { ComponentRole, RunCommand } from "./projects";
+import type { ComponentRole, RunCommand, VibeConfig } from "./projects";
 
 export type RepairProblemCode =
   | "server-crash-loop"
@@ -17,6 +17,19 @@ export interface RepairProblem {
   /** Everything the survey knows this component can run. The agent must
    *  prefer these over inventing commands. */
   commands: RunCommand[];
+  topology?: {
+    components: Array<{
+      id: string;
+      label: string;
+      path: string;
+      role?: ComponentRole;
+      commands: RunCommand[];
+    }>;
+    requiredProcesses: NonNullable<VibeConfig["requiredProcesses"]>;
+    componentLinks: NonNullable<VibeConfig["componentLinks"]>;
+    dataStores: NonNullable<VibeConfig["dataStores"]>;
+    externalServices: NonNullable<VibeConfig["externalServices"]>;
+  };
   evidence: {
     logTail?: string;
     exitCode?: number | null;
@@ -82,8 +95,13 @@ const commandSection = (problem: RepairProblem): string => {
   }).join("\n");
 };
 
+const topologySection = (problem: RepairProblem): string => {
+  if (!problem.topology) return "No cross-component topology was captured.";
+  return JSON.stringify(problem.topology, null, 2);
+};
+
 export function repairPrompt(problem: RepairProblem): { system: string; user: string } {
-  const system = `You are Canopy's repair agent for ${problem.projectName}. A non-technical person is relying on you to understand the failure, execute a safe fix, and verify it. Work only inside ${problem.component.path}.
+  const system = `You are Canopy's repair agent for ${problem.projectName}. A non-technical person is relying on you to understand the failure, execute a safe fix, and verify it. The failure surfaced in ${problem.component.path}. Read the complete project topology below and trace the failure across component, process, API, queue, and database boundaries before deciding where the fault lives. You may read every listed component. Edits remain limited to ${problem.component.path} unless the person explicitly approves changing another component.
 
 You may do these reversible actions autonomously:
 ${bullets(REPAIR_AUTONOMOUS)}
@@ -119,7 +137,10 @@ ${evidenceSection(problem)}
 The component's configured commands are:
 ${commandSection(problem)}
 
-Diagnose first from the evidence given. Prefer the configured commands over inventing commands. Verify that the fix actually works before claiming it is fixed: the server must be up, or the relevant command must exit cleanly.`;
+The complete observed project topology is:
+${topologySection(problem)}
+
+Diagnose first from the evidence given. Prefer the configured commands over inventing commands. For database failures, inspect the recorded schema and migration paths, compare the latest recorded migration with the configured status command, and test locally when possible. For a managed provider, prefer a linked account API/MCP route; ask the person to link the provider account when it is missing, and use its authenticated CLI only as the fallback. Never ask for a long-lived token in chat. Never apply a managed migration without explicit confirmation, regardless of whether it uses an API, MCP tool, or CLI. Verify that the fix actually works before claiming it is fixed: every affected required process must be ready, or the relevant command must exit cleanly.`;
 
   return { system, user };
 }

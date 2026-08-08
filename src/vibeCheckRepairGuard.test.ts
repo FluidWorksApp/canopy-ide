@@ -98,7 +98,8 @@ describe("the Build executor can make its change actually run", () => {
     );
     expect(spec).toContain("network: grant.network");
     expect(spec).toContain("writableRoots: grant.writableRoots");
-    expect(spec).toContain("allowedTools: grant.allowedTools");
+    expect(spec).toContain("...grant.allowedTools");
+    expect(spec).toContain("...this.linkedServiceToolAllowances");
     expect(spec).toContain("authority: grant.authority");
   });
 });

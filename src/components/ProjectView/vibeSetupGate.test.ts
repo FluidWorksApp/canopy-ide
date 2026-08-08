@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Component, RunCommand } from "../../projects";
-import { vibeSetupGate } from "./helpers";
+import { vibeRunReady, vibeSetupGate } from "./helpers";
 
 const serve: RunCommand = {
   id: "run-serve",
@@ -75,5 +75,57 @@ describe("vibeSetupGate", () => {
     const gate = vibeSetupGate(install, component, [], notStarted);
     expect(gate.ready).toBe(true);
     expect(gate.start).toEqual([]);
+  });
+
+  it("does not automatically apply a managed migration", () => {
+    const managedMigration: RunCommand = {
+      ...install,
+      id: "run-managed-migration",
+      name: "Push schema",
+      automatic: false,
+    };
+    const gate = vibeSetupGate(
+      serve,
+      { ...component, commands: [serve, managedMigration] },
+      [],
+      notStarted,
+    );
+    expect(gate.ready).toBe(true);
+    expect(gate.start).toEqual([]);
+  });
+
+  it("runs setup in declaration order instead of racing install and migration", () => {
+    const migrate: RunCommand = {
+      id: "run-migrate",
+      name: "Apply local schema",
+      command: "npm run db:migrate",
+      purpose: "setup",
+      automatic: true,
+    };
+    const withMigration = { ...component, commands: [serve, install, migrate] };
+    expect(vibeSetupGate(serve, withMigration, [], notStarted).start).toEqual([install]);
+    expect(vibeSetupGate(
+      serve,
+      withMigration,
+      [{ componentId: "cmp-api", runCommandId: "run-install", exited: true, exitCode: 0 }],
+      (id) => id === "run-install",
+    ).start).toEqual([migrate]);
+  });
+});
+
+describe("vibeRunReady", () => {
+  it("waits for a declared port before releasing dependent processes", () => {
+    const tab = { ptyId: 7, exited: false };
+    const command = { readiness: { kind: "port" as const } };
+    expect(vibeRunReady(tab, command, [{ id: 7, ports: [] }])).toBe(false);
+    expect(vibeRunReady(tab, command, [{ id: 7, ports: [5432] }])).toBe(true);
+  });
+
+  it("accepts a live worker with process-alive readiness", () => {
+    expect(vibeRunReady(
+      { ptyId: 9, exited: false },
+      { readiness: { kind: "process-alive" } },
+      [],
+    )).toBe(true);
   });
 });

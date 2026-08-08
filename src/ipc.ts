@@ -16,12 +16,46 @@ import type {
   TaskReserveInput,
 } from "./taskEnvelope";
 import type { TaskTranscriptEntry, TaskTranscriptKind } from "./taskTranscript";
+import { rendererIoBudget } from "./ioBudget";
 
 // ---------- App shell ----------
 
 /** Rebuild the native menu so its accelerators match the live webview profile. */
 export const setShortcutProfile = (profile: ShortcutProfile) =>
   invoke<void>("set_shortcut_profile", { profile });
+
+export interface ProcessCaptureMetrics {
+  active_children: number;
+  active_pipes: number;
+  active_captures: number;
+  queued_captures: number;
+  active_capture_bytes: number;
+  capture_bytes_high_water: number;
+  capture_high_water: number;
+  queue_high_water: number;
+  rejected_captures: number;
+  queue_wait_ms_total: number;
+  child_high_water: number;
+  pipe_high_water: number;
+  completed_children: number;
+  retained_bytes_current: number;
+  retained_bytes_high_water: number;
+  retained_bytes_total: number;
+  truncated_streams: number;
+}
+
+export const processCaptureMetrics = () =>
+  invoke<ProcessCaptureMetrics>("process_capture_metrics");
+
+export interface RemoteSocketMetrics {
+  active: number;
+  high_water: number;
+  accepted_total: number;
+  rejected_total: number;
+}
+
+export const remoteSocketMetrics = () =>
+  invoke<RemoteSocketMetrics>("remote_socket_metrics");
 
 // ---------- PTY ----------
 
@@ -842,20 +876,91 @@ export interface DirEntry {
   is_dir: boolean;
 }
 
+const statFlights = new Map<
+  string,
+  Promise<{ is_dir: boolean; size: number; modified_ms: number | null }>
+>();
+const dirFlights = new Map<string, Promise<DirEntry[]>>();
+const statBatchFlights = new Map<string, Promise<FsStatEntry[]>>();
+let statFlightHighWater = 0;
+let dirFlightHighWater = 0;
+
+function sharedIpc<T>(
+  flights: Map<string, Promise<T>>,
+  key: string,
+  load: () => Promise<T>,
+): Promise<T> {
+  const active = flights.get(key);
+  if (active) return active;
+  const next = load().finally(() => {
+    if (flights.get(key) === next) flights.delete(key);
+  });
+  flights.set(key, next);
+  statFlightHighWater = Math.max(
+    statFlightHighWater,
+    statFlights.size + statBatchFlights.size,
+  );
+  dirFlightHighWater = Math.max(dirFlightHighWater, dirFlights.size);
+  return next;
+}
+
+/** Scalar-only diagnostics: counts and high-water marks, never paths. */
+export const fsMetadataIoSnapshot = () => ({
+  statFlights: statFlights.size + statBatchFlights.size,
+  dirFlights: dirFlights.size,
+  statFlightHighWater,
+  dirFlightHighWater,
+});
+
 export const workspaceAdd = (path: string) =>
   invoke<string>("workspace_add", { path });
 export const workspaceRemove = (path: string) =>
   invoke<void>("workspace_remove", { path });
 export const workspaceList = () => invoke<string[]>("workspace_list");
 export const fsReadDir = (path: string) =>
-  invoke<DirEntry[]>("fs_read_dir", { path });
+  sharedIpc(dirFlights, path, () =>
+    rendererIoBudget.run(
+      { scope: "fs-metadata", bytes: 2 * 1024 * 1024 },
+      () => invoke<DirEntry[]>("fs_read_dir", { path }),
+    ),
+  );
 export const fsWriteFile = (path: string, content: string) =>
   invoke<void>("fs_write_file", { path, content });
 export const fsStat = (path: string) =>
-  invoke<{ is_dir: boolean; size: number; modified_ms: number | null }>(
-    "fs_stat",
-    { path },
+  sharedIpc(statFlights, path, () =>
+    rendererIoBudget.run(
+      { scope: "fs-metadata", bytes: 4 * 1024 },
+      () =>
+        invoke<{ is_dir: boolean; size: number; modified_ms: number | null }>(
+          "fs_stat",
+          { path },
+        ),
+    ),
   );
+
+export interface FsStatEntry {
+  path: string;
+  is_dir: boolean;
+  size: number;
+  modified_ms: number | null;
+}
+
+export const fsStatMany = (paths: string[]): Promise<FsStatEntry[]> => {
+  const unique = [...new Set(paths)];
+  if (unique.length === 0) return Promise.resolve([]);
+  // Sorting only defines the single-flight identity; native results retain the
+  // submitted order and callers address them by path.
+  const key = JSON.stringify([...unique].sort());
+  return sharedIpc(statBatchFlights, key, () =>
+    rendererIoBudget.run(
+      {
+        scope: "fs-metadata",
+        bytes: Math.min(2 * 1024 * 1024, unique.length * 4096),
+      },
+      () => invoke<FsStatEntry[]>("fs_stat_many", { paths: unique }),
+    ),
+  );
+};
 
 export async function fsReadFile(
   path: string,
@@ -2099,13 +2204,16 @@ export const onPtyStats = (
 export type TerminalBudgetState =
   | "normal"
   | "warned"
+  | "relief"
   | "awaiting_grant"
-  | "over_allowance";
+  | "over_allowance"
+  | "stopping"
+  | "exited";
 
 export interface TerminalGovernorCapability {
   platform: string;
   /** `soft_limit` is currently possible only for a verified Linux memory.high backend. */
-  enforcement: "monitor_only" | "soft_limit";
+  enforcement: "monitor_only" | "soft_limit" | "notification_limit";
   measurement: string;
   hard_limit: boolean;
   pause: boolean;
@@ -2127,6 +2235,7 @@ export interface TerminalBudgetStatus {
   state: TerminalBudgetState;
   base_allowance_bytes: number;
   granted_bytes: number;
+  remembered_default_bytes: number;
   allowance_bytes: number;
   current_bytes: number;
   peak_bytes: number;
@@ -2134,6 +2243,9 @@ export interface TerminalBudgetStatus {
   growth_bytes_per_second: number;
   samples: number;
   grant_request: TerminalGrantRequest | null;
+  stop_request_id: string;
+  /** Content-free package/bin identity; never an executable path. */
+  cli_key: string | null;
 }
 
 export interface TerminalGovernorSnapshot {
@@ -2143,6 +2255,7 @@ export interface TerminalGovernorSnapshot {
   protected_reserve_bytes: number;
   aggregate_terminal_bytes: number;
   grantable_headroom_bytes: number;
+  fallback_policy: "notify_natively_and_refuse_automatic_grant_pause_or_stop";
   sessions: TerminalBudgetStatus[];
 }
 
@@ -2158,7 +2271,11 @@ export interface TerminalGovernorIncident {
 }
 
 export interface TerminalGovernorEvent {
-  kind: "state_changed" | "grant_applied";
+  kind:
+    | "state_changed"
+    | "grant_applied"
+    | "stop_requested"
+    | "remembered_default_applied";
   status: TerminalBudgetStatus;
 }
 
@@ -2166,6 +2283,19 @@ export interface TerminalGrantOutcome {
   applied: boolean;
   idempotent: boolean;
   status: TerminalBudgetStatus;
+}
+
+export interface TerminalStopOutcome {
+  requested: boolean;
+  idempotent: boolean;
+  status: TerminalBudgetStatus;
+}
+
+export interface TerminalRememberDefaultOutcome {
+  persisted: boolean;
+  idempotent: boolean;
+  cli_key: string;
+  increment_bytes: number;
 }
 
 export const terminalGovernorStatus = (): Promise<TerminalGovernorSnapshot> =>
@@ -2185,6 +2315,34 @@ export const terminalGovernorGrant = (
     budgetGeneration,
     requestId,
     incrementBytes,
+  });
+
+export const terminalGovernorStop = (
+  id: number,
+  budgetGeneration: number,
+  requestId: string,
+): Promise<TerminalStopOutcome> =>
+  invoke<TerminalStopOutcome>("terminal_governor_stop", {
+    id,
+    budgetGeneration,
+    requestId,
+  });
+
+/** Persist only after a separate confirmation UI. Native code verifies this
+ * exact increment was already granted to the currently identified CLI. */
+export const terminalGovernorRememberDefault = (
+  id: number,
+  grantRequestId: string,
+  grantBudgetGeneration: number,
+  incrementBytes: number,
+  confirmed: boolean,
+): Promise<TerminalRememberDefaultOutcome> =>
+  invoke<TerminalRememberDefaultOutcome>("terminal_governor_remember_default", {
+    id,
+    grantRequestId,
+    grantBudgetGeneration,
+    incrementBytes,
+    confirmed,
   });
 
 export const onTerminalGovernor = (

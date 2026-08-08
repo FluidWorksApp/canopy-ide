@@ -2826,6 +2826,297 @@ body.resizing-side * {
   container: servers / inline-size;
 }
 
+/* ---------- project integrations ---------- */
+
+.integrations-panel {
+  --integration-pad: 10px;
+  container: integrations / inline-size;
+  padding-bottom: 20px;
+}
+
+.integrations-head > span:last-child {
+  color: var(--text-faint);
+  font-size: 9.5px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* One compact control-plane signature: local runtime becomes an account,
+   resource and deployment. It is a state diagram, not decorative progress —
+   later nodes may be live while an earlier one is being rechecked. */
+.integration-spine {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 11px var(--integration-pad) 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.integration-spine-node {
+  position: relative;
+  display: grid;
+  grid-template-rows: 9px auto auto;
+  justify-items: center;
+  min-width: 0;
+  color: var(--text-faint);
+}
+
+.integration-spine-line {
+  position: absolute;
+  z-index: 0;
+  top: 4px;
+  right: 50%;
+  width: 100%;
+  height: 1px;
+  background: var(--border);
+}
+
+.integration-spine-dot {
+  z-index: 1;
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--bg-raised);
+}
+
+.integration-spine-live .integration-spine-dot {
+  border-color: var(--ok);
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 13%, transparent);
+}
+
+.integration-spine-label {
+  overflow: hidden;
+  max-width: 100%;
+  margin-top: 5px;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.integration-spine-value {
+  margin-top: 1px;
+  color: var(--text-dim);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.integration-section {
+  border-bottom: 1px solid var(--border);
+  padding: 10px var(--integration-pad);
+}
+
+.integration-section-title {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  color: var(--text-dim);
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: 0.45px;
+  text-transform: uppercase;
+}
+
+.integration-section-title > span:last-child:not(:first-child) {
+  color: var(--text-faint);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.integration-local-row,
+.integration-account,
+.integration-resource,
+.integration-deployment,
+.integration-provider-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 4px 0;
+}
+
+.integration-local-row + .integration-local-row,
+.integration-account + .integration-account,
+.integration-resource + .integration-resource,
+.integration-deployment + .integration-deployment,
+.integration-provider-row + .integration-provider-row {
+  border-top: 1px solid color-mix(in srgb, var(--border) 64%, transparent);
+}
+
+.integration-status {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.integration-status-running,
+.integration-status-connected { background: var(--ok); }
+.integration-status-failed,
+.integration-status-needs-attention { background: var(--danger); }
+.integration-status-done { background: var(--text-dim); }
+.integration-status-discovered {
+  border: 1px solid var(--accent);
+  background: transparent;
+}
+
+.integration-row-main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.integration-row-name,
+.integration-row-meta,
+.integration-row-message,
+.integration-migration {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.integration-row-name {
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.integration-row-meta,
+.integration-row-message,
+.integration-migration,
+.integration-reach {
+  color: var(--text-faint);
+  font-size: 9.5px;
+  line-height: 1.35;
+}
+
+.integration-row-message { color: var(--warn); }
+.integration-migration { color: var(--text-dim); }
+.integration-reach {
+  margin-top: 2px;
+  color: color-mix(in srgb, var(--accent) 72%, var(--text-dim));
+  letter-spacing: 0.35px;
+}
+
+.integration-endpoint,
+.integration-text-action {
+  border: 0;
+  background: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 9.5px;
+  padding: 3px;
+}
+
+.integration-endpoint:hover,
+.integration-text-action:hover { text-decoration: underline; }
+
+.integration-provider-mark {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-xs);
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.integration-provider-connected {
+  border-color: color-mix(in srgb, var(--ok) 55%, var(--border));
+  color: var(--ok);
+}
+
+.integration-provider-needs-attention {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  color: var(--danger);
+}
+
+.integration-resource-discovered { opacity: 0.88; }
+.integration-deployment-latest {
+  margin: 2px -4px;
+  padding-right: 4px;
+  padding-left: 4px;
+  border-radius: var(--r-xs);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.integration-latest,
+.integration-needed {
+  margin-left: 5px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 8px;
+  font-weight: 650;
+  padding: 0 4px;
+  text-transform: uppercase;
+}
+
+.integration-empty,
+.integration-note,
+.integration-security-note {
+  margin: 4px 0;
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.integration-note { margin: 7px 0 0 14px; }
+.integration-security-note { padding: 2px var(--integration-pad) 0; }
+.integration-deploy-empty > div {
+  display: flex;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.integration-catalog { padding: 0; }
+.integration-catalog-toggle {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 14px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10.5px;
+  padding: 10px var(--integration-pad);
+  text-align: left;
+}
+
+.integration-catalog-toggle > span:last-child {
+  color: var(--text-faint);
+  font-size: 9.5px;
+}
+
+.integration-provider-group { padding: 4px var(--integration-pad) 8px; }
+.integration-provider-group-title {
+  margin-bottom: 2px;
+  color: var(--text-faint);
+  font-size: 8.5px;
+  letter-spacing: 0.45px;
+  text-transform: uppercase;
+}
+
+@container integrations (max-width: 230px) {
+  .integration-spine-label { font-size: 8px; }
+  .integration-provider-row .integration-row-meta { display: none; }
+  .integration-account .integration-text-action { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .integration-spine-live .integration-spine-dot { box-shadow: none; }
+}
+
 /* Dragged narrow, a row sheds chips before it sheds the run's name: at 200px
    three port chips left nothing but "L…", which is the answer to no question.
    Everything dropped here is still in the row's tooltip. */

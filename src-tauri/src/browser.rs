@@ -28,10 +28,10 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 use tauri::{Emitter, Manager};
 
 /// Everything a native browser view needs from the app that owns it.
-#[derive(Default)]
 pub struct BrowserManager {
     views: Mutex<HashMap<String, ViewState>>,
     /// Creation is synchronous inside an async command. A tab can close while
@@ -52,6 +52,39 @@ pub struct BrowserManager {
     close_retry_attempts: AtomicU64,
     close_retry_successes: AtomicU64,
     close_retry_failures: AtomicU64,
+    pressure_reload_enabled: bool,
+    pressure_reload_metrics: Mutex<PressureReloadMetricState>,
+}
+
+const DISABLE_PRESSURE_RELOAD_ENV: &str = "CANOPY_DISABLE_PREVIEW_PRESSURE_RELOAD";
+
+fn env_switch_disabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|raw| {
+        matches!(
+            raw.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+impl Default for BrowserManager {
+    fn default() -> Self {
+        Self {
+            views: Mutex::new(HashMap::new()),
+            opening: Mutex::new(HashMap::new()),
+            next_open: AtomicU64::new(0),
+            renderer_generation: AtomicU64::new(0),
+            orphans: Mutex::new(HashMap::new()),
+            close_retry_running: AtomicBool::new(false),
+            close_retry_attempts: AtomicU64::new(0),
+            close_retry_successes: AtomicU64::new(0),
+            close_retry_failures: AtomicU64::new(0),
+            pressure_reload_enabled: !env_switch_disabled(
+                std::env::var_os(DISABLE_PRESSURE_RELOAD_ENV).as_deref(),
+            ),
+            pressure_reload_metrics: Mutex::new(PressureReloadMetricState::default()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
@@ -62,6 +95,43 @@ pub struct BrowserCloseMetrics {
     attempts: u64,
     successes: u64,
     failures: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserPressureReloadMetrics {
+    enabled: bool,
+    decisions: u64,
+    targets: u64,
+    attempts: u64,
+    successes: u64,
+    failures: u64,
+    missing_views: u64,
+    suppressed_targets: u64,
+    dispatch_latency_ms_total: u64,
+    dispatch_latency_ms_last: u64,
+    dispatch_latency_ms_max: u64,
+}
+
+#[derive(Default)]
+struct PressureReloadMetricState {
+    decisions: u64,
+    targets: u64,
+    attempts: u64,
+    successes: u64,
+    failures: u64,
+    missing_views: u64,
+    suppressed_targets: u64,
+    dispatch_latency_ms_total: u64,
+    dispatch_latency_ms_last: u64,
+    dispatch_latency_ms_max: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PressureReloadOutcome {
+    Reloaded,
+    Failed,
+    Missing,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -398,6 +468,68 @@ impl BrowserManager {
             .collect()
     }
 
+    fn pressure_reload_metrics(&self) -> BrowserPressureReloadMetrics {
+        let metrics = self.pressure_reload_metrics.lock().unwrap();
+        BrowserPressureReloadMetrics {
+            enabled: self.pressure_reload_enabled,
+            decisions: metrics.decisions,
+            targets: metrics.targets,
+            attempts: metrics.attempts,
+            successes: metrics.successes,
+            failures: metrics.failures,
+            missing_views: metrics.missing_views,
+            suppressed_targets: metrics.suppressed_targets,
+            dispatch_latency_ms_total: metrics.dispatch_latency_ms_total,
+            dispatch_latency_ms_last: metrics.dispatch_latency_ms_last,
+            dispatch_latency_ms_max: metrics.dispatch_latency_ms_max,
+        }
+    }
+
+    fn reload_pressure_with<F>(&self, include_visible: bool, mut reload: F) -> Vec<String>
+    where
+        F: FnMut(&str, &str) -> PressureReloadOutcome,
+    {
+        let targets = self.memory_pressure_targets(include_visible);
+        {
+            let mut metrics = self.pressure_reload_metrics.lock().unwrap();
+            metrics.decisions = metrics.decisions.saturating_add(1);
+            metrics.targets = metrics.targets.saturating_add(targets.len() as u64);
+            if !self.pressure_reload_enabled {
+                metrics.suppressed_targets = metrics
+                    .suppressed_targets
+                    .saturating_add(targets.len() as u64);
+                return Vec::new();
+            }
+        }
+
+        let mut reloaded = Vec::new();
+        for (tab_id, label) in targets {
+            let started = Instant::now();
+            let outcome = reload(&tab_id, &label);
+            let elapsed = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            let mut metrics = self.pressure_reload_metrics.lock().unwrap();
+            metrics.dispatch_latency_ms_last = elapsed;
+            metrics.dispatch_latency_ms_max = metrics.dispatch_latency_ms_max.max(elapsed);
+            metrics.dispatch_latency_ms_total =
+                metrics.dispatch_latency_ms_total.saturating_add(elapsed);
+            match outcome {
+                PressureReloadOutcome::Reloaded => {
+                    metrics.attempts = metrics.attempts.saturating_add(1);
+                    metrics.successes = metrics.successes.saturating_add(1);
+                    reloaded.push(tab_id);
+                }
+                PressureReloadOutcome::Failed => {
+                    metrics.attempts = metrics.attempts.saturating_add(1);
+                    metrics.failures = metrics.failures.saturating_add(1);
+                }
+                PressureReloadOutcome::Missing => {
+                    metrics.missing_views = metrics.missing_views.saturating_add(1);
+                }
+            }
+        }
+        reloaded
+    }
+
     /// Tear down the JavaScript heaps in preview renderers while the machine
     /// is running out of memory. At warning pressure only hidden previews are
     /// touched; at critical pressure the visible preview is refreshed too.
@@ -413,20 +545,20 @@ impl BrowserManager {
         // Do not hold the state mutex while dispatching work to WebKit's main
         // thread. Besides needless contention, callbacks from a reload can
         // immediately re-enter BrowserManager through the navigation hook.
-        let targets = self.memory_pressure_targets(include_visible);
-        let mut reloaded = Vec::new();
-        for (tab_id, label) in targets {
-            let Some(view) = app.get_webview(&label) else {
-                continue;
+        self.reload_pressure_with(include_visible, |tab_id, label| {
+            let Some(view) = app.get_webview(label) else {
+                return PressureReloadOutcome::Missing;
             };
             match view.reload() {
-                Ok(()) => reloaded.push(tab_id),
-                Err(error) => log::warn!(
-                    "memory-watchdog: couldn't reload preview {tab_id} ({label}): {error}"
-                ),
+                Ok(()) => PressureReloadOutcome::Reloaded,
+                Err(error) => {
+                    log::warn!(
+                        "memory-watchdog: couldn't reload preview {tab_id} ({label}): {error}"
+                    );
+                    PressureReloadOutcome::Failed
+                }
             }
-        }
-        reloaded
+        })
     }
 }
 
@@ -1000,6 +1132,14 @@ pub fn browser_close_metrics(app: tauri::AppHandle) -> BrowserCloseMetrics {
     app.state::<BrowserManager>().close_metrics()
 }
 
+/// Constant-size pressure-reload counters and the startup kill-switch state.
+/// Together with `browser_close_metrics`, disposable-runner experiments can
+/// compare lifecycle actions without retaining tab ids, labels or URLs.
+#[tauri::command]
+pub fn browser_pressure_reload_metrics(app: tauri::AppHandle) -> BrowserPressureReloadMetrics {
+    app.state::<BrowserManager>().pressure_reload_metrics()
+}
+
 /// Run one browser op (`canopy_browser_*`) against the page. Read-only ops
 /// answer inside this call; cursor-led ones report `done: false` and their
 /// result arrives later on `browser:events`.
@@ -1378,5 +1518,89 @@ mod tests {
             .collect();
         critical.sort();
         assert_eq!(critical, ["hidden-a", "hidden-b", "visible"]);
+    }
+
+    #[test]
+    fn pressure_reload_kill_switch_values_are_explicit() {
+        for enabled in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(env_switch_disabled(Some(std::ffi::OsStr::new(enabled))));
+        }
+        for enabled in ["", "0", "false", "off", "unexpected"] {
+            assert!(!env_switch_disabled(Some(std::ffi::OsStr::new(enabled))));
+        }
+        assert!(!env_switch_disabled(None));
+    }
+
+    #[test]
+    fn pressure_reload_metrics_stay_constant_size_through_many_replacements() {
+        let manager = BrowserManager {
+            pressure_reload_enabled: true,
+            ..BrowserManager::default()
+        };
+        manager.views.lock().unwrap().insert(
+            "hidden".into(),
+            ViewState {
+                label: label_for("hidden"),
+                renderer_generation: 1,
+                visible: false,
+                bounds: Rect::default(),
+                repaint_tried: false,
+            },
+        );
+
+        for cycle in 0..10_000 {
+            let result = manager.reload_pressure_with(false, |_, _| match cycle % 3 {
+                0 => PressureReloadOutcome::Reloaded,
+                1 => PressureReloadOutcome::Failed,
+                _ => PressureReloadOutcome::Missing,
+            });
+            assert_eq!(result.len(), usize::from(cycle % 3 == 0));
+        }
+
+        let metrics = manager.pressure_reload_metrics();
+        assert_eq!(metrics.decisions, 10_000);
+        assert_eq!(metrics.targets, 10_000);
+        assert_eq!(metrics.attempts, 6_667);
+        assert_eq!(metrics.successes, 3_334);
+        assert_eq!(metrics.failures, 3_333);
+        assert_eq!(metrics.missing_views, 3_333);
+        assert_eq!(metrics.suppressed_targets, 0);
+        assert!(metrics.enabled);
+    }
+
+    #[test]
+    fn pressure_reload_kill_switch_retains_decision_measurement_without_reloading() {
+        let manager = BrowserManager {
+            pressure_reload_enabled: false,
+            ..BrowserManager::default()
+        };
+        manager.views.lock().unwrap().insert(
+            "hidden".into(),
+            ViewState {
+                label: label_for("hidden"),
+                renderer_generation: 1,
+                visible: false,
+                bounds: Rect::default(),
+                repaint_tried: false,
+            },
+        );
+        let mut called = false;
+        let reloaded = manager.reload_pressure_with(false, |_, _| {
+            called = true;
+            PressureReloadOutcome::Reloaded
+        });
+
+        assert!(!called);
+        assert!(reloaded.is_empty());
+        assert_eq!(
+            manager.pressure_reload_metrics(),
+            BrowserPressureReloadMetrics {
+                enabled: false,
+                decisions: 1,
+                targets: 1,
+                suppressed_targets: 1,
+                ..BrowserPressureReloadMetrics::default()
+            }
+        );
     }
 }

@@ -763,20 +763,21 @@ type ProjectCandidate = (String, String, Vec<String>);
 /// failed. Research calls are a handful per session, not per tool call, so the
 /// few milliseconds buy correctness cheaply.
 fn main_worktree(cwd: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args([
-            "-C",
-            cwd,
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-common-dir",
-        ])
-        .output()
-        .ok()?;
+    let mut command = std::process::Command::new("git");
+    command.args([
+        "-C",
+        cwd,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    ]);
+    let out =
+        crate::process_capture::output(&mut command, crate::process_capture::DEFAULT_STREAM_MAX)
+            .ok()?;
     if !out.status.success() {
         return None;
     }
-    let git_dir = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    let git_dir = std::str::from_utf8(&out.stdout).ok()?.trim().to_string();
     if git_dir.is_empty() {
         return None;
     }

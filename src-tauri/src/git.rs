@@ -13,6 +13,10 @@
 //!     honest outcome.
 
 use crate::blocking;
+use crate::process_capture::{
+    drain_capped, output as command_output_capped, reject_truncated as reject_truncated_output,
+    wait_with_capped_output, DEFAULT_STREAM_MAX,
+};
 use crate::winproc::NoConsoleWindow;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,6 +30,7 @@ use crate::fsx::{check_scope, WorkspaceManager};
 /// Network operations get a ceiling so a stalled remote can't wedge a worker
 /// thread for the life of the app.
 const NET_TIMEOUT_SECS: u64 = 120;
+const PROCESS_STREAM_MAX: usize = DEFAULT_STREAM_MAX;
 
 #[derive(Serialize, Clone)]
 pub struct RepoInfo {
@@ -133,7 +138,8 @@ fn run_verbose(cmd: &mut Command) -> Result<(String, String), String> {
     // The choke point for ~100 call sites, and the reason `blocking::io` exists:
     // waiting on a subprocess from an async command otherwise parks a runtime
     // worker for the whole of it. See blocking.rs.
-    let out = blocking::io(|| cmd.output()).map_err(|e| e.to_string())?;
+    let out = blocking::io(|| command_output_capped(cmd, PROCESS_STREAM_MAX))?;
+    reject_truncated_output(&out, "git")?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if out.status.success() {
@@ -173,7 +179,13 @@ pub(crate) fn repo_path(
 }
 
 fn toplevel_of(dir: &Path) -> Option<PathBuf> {
-    let out = blocking::io(|| git(dir).args(["rev-parse", "--show-toplevel"]).output()).ok()?;
+    let out = blocking::io(|| {
+        command_output_capped(
+            git(dir).args(["rev-parse", "--show-toplevel"]),
+            PROCESS_STREAM_MAX,
+        )
+    })
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -191,7 +203,13 @@ fn toplevel_of(dir: &Path) -> Option<PathBuf> {
 /// and the index of every worktree hang off it. `None` when the path isn't a
 /// repo at all.
 pub(crate) fn common_dir(dir: &Path) -> Option<PathBuf> {
-    let out = blocking::io(|| git(dir).args(["rev-parse", "--git-common-dir"]).output()).ok()?;
+    let out = blocking::io(|| {
+        command_output_capped(
+            git(dir).args(["rev-parse", "--git-common-dir"]),
+            PROCESS_STREAM_MAX,
+        )
+    })
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1429,8 +1447,9 @@ fn run_net_blocking(
     input: Option<&str>,
     preserve_failure_stdout: bool,
 ) -> Result<String, String> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::process::Stdio;
+    let _capture_permit = crate::process_capture::acquire(PROCESS_STREAM_MAX)?;
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd.stdin(if input.is_some() {
         Stdio::piped()
@@ -1456,22 +1475,10 @@ fn run_net_blocking(
     // diff is routinely 100KB+ — would fill it, block forever in write(), never
     // exit, and be reported as "timed out after 120s" while `gh` sat there with
     // more to say. The reader threads end at EOF, which is the child exiting.
-    let mut so = child.stdout.take();
-    let mut se = child.stderr.take();
-    let out_thread = std::thread::spawn(move || {
-        let mut buf = String::new();
-        if let Some(o) = so.as_mut() {
-            let _ = o.read_to_string(&mut buf);
-        }
-        buf
-    });
-    let err_thread = std::thread::spawn(move || {
-        let mut buf = String::new();
-        if let Some(e) = se.as_mut() {
-            let _ = e.read_to_string(&mut buf);
-        }
-        buf
-    });
+    let so = child.stdout.take().ok_or("network stdout was not piped")?;
+    let se = child.stderr.take().ok_or("network stderr was not piped")?;
+    let out_thread = std::thread::spawn(move || drain_capped(so, PROCESS_STREAM_MAX));
+    let err_thread = std::thread::spawn(move || drain_capped(se, PROCESS_STREAM_MAX));
 
     let start = std::time::Instant::now();
     loop {
@@ -1480,8 +1487,16 @@ fn run_net_blocking(
                 if let Some(t) = in_thread {
                     let _ = t.join();
                 }
-                let out = out_thread.join().unwrap_or_default();
-                let err = err_thread.join().unwrap_or_default();
+                let (out, out_truncated) = out_thread.join().unwrap_or_default();
+                let (err, err_truncated) = err_thread.join().unwrap_or_default();
+                if out_truncated || err_truncated {
+                    return Err(format!(
+                        "network command output exceeded the {} MiB per-stream limit",
+                        PROCESS_STREAM_MAX / 1024 / 1024
+                    ));
+                }
+                let out = String::from_utf8_lossy(&out);
+                let err = String::from_utf8_lossy(&err);
                 // git reports progress on stderr even on success, so merge.
                 return if status.success() {
                     Ok(format!("{out}{err}").trim().to_string())
@@ -1790,10 +1805,10 @@ pub(crate) fn tool_path(tool: &'static str) -> String {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     // A login shell has a whole profile to source before it answers.
     let resolved = blocking::io(|| {
-        std::process::Command::new(shell)
-            .no_console_window()
-            .args(["-lc", &format!("command -v {tool}")])
-            .output()
+        let mut cmd = std::process::Command::new(shell);
+        cmd.no_console_window()
+            .args(["-lc", &format!("command -v {tool}")]);
+        command_output_capped(&mut cmd, PROCESS_STREAM_MAX)
     })
     .ok()
     .filter(|o| o.status.success())
@@ -1868,10 +1883,9 @@ pub(crate) fn gh_anywhere() -> Command {
 #[tauri::command]
 pub async fn gh_available() -> bool {
     blocking::io(|| {
-        Command::new(gh_bin())
-            .no_console_window()
-            .arg("--version")
-            .output()
+        let mut cmd = Command::new(gh_bin());
+        cmd.no_console_window().arg("--version");
+        command_output_capped(&mut cmd, PROCESS_STREAM_MAX)
     })
     .map(|o| o.status.success())
     .unwrap_or(false)
@@ -3509,7 +3523,8 @@ fn clone_dir(src: &Path, dst: &Path) -> Result<(), String> {
     cmd.arg("--reflink=always").arg("-r");
     cmd.arg(src).arg(dst);
     cmd.no_console_window();
-    let out = cmd.output().map_err(|e| e.to_string())?;
+    let out = command_output_capped(&mut cmd, PROCESS_STREAM_MAX)?;
+    reject_truncated_output(&out, "copy-on-write clone")?;
     if out.status.success() {
         return Ok(());
     }
@@ -4069,10 +4084,9 @@ pub struct GhAuth {
 pub async fn gh_auth() -> Result<GhAuth, String> {
     let bin = gh_bin();
     let installed = blocking::io(|| {
-        Command::new(&bin)
-            .no_console_window()
-            .arg("--version")
-            .output()
+        let mut cmd = Command::new(&bin);
+        cmd.no_console_window().arg("--version");
+        command_output_capped(&mut cmd, PROCESS_STREAM_MAX)
     })
     .map(|o| o.status.success())
     .unwrap_or(false);
@@ -4093,29 +4107,29 @@ pub async fn gh_auth() -> Result<GhAuth, String> {
     cmd.no_console_window();
     cmd.args(["api", "user", "--jq", ".login"]);
     // A network round-trip to GitHub, on the runtime's worker without this.
-    let (authenticated, account, detail) = match blocking::io(|| cmd.output()) {
-        Ok(o) if o.status.success() => (
-            true,
-            String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            String::new(),
-        ),
-        Ok(o) => (
-            false,
-            String::new(),
-            String::from_utf8_lossy(&o.stderr)
-                .trim()
-                .lines()
-                .next()
-                .unwrap_or("")
-                .to_string(),
-        ),
-        Err(e) => (false, String::new(), e.to_string()),
-    };
+    let (authenticated, account, detail) =
+        match blocking::io(|| command_output_capped(&mut cmd, PROCESS_STREAM_MAX)) {
+            Ok(o) if o.status.success() => (
+                true,
+                String::from_utf8_lossy(&o.stdout).trim().to_string(),
+                String::new(),
+            ),
+            Ok(o) => (
+                false,
+                String::new(),
+                String::from_utf8_lossy(&o.stderr)
+                    .trim()
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
+            ),
+            Err(e) => (false, String::new(), e.to_string()),
+        };
     let host = blocking::io(|| {
-        Command::new(&bin)
-            .no_console_window()
-            .args(["auth", "status"])
-            .output()
+        let mut cmd = Command::new(&bin);
+        cmd.no_console_window().args(["auth", "status"]);
+        command_output_capped(&mut cmd, PROCESS_STREAM_MAX)
     })
     .ok()
     .map(|o| {
@@ -4890,9 +4904,10 @@ fn workspace_join(
                 ahead = n.next().and_then(|v| v.parse().ok()).unwrap_or(0);
             }
             merged = blocking::io(|| {
-                git(top)
-                    .args(["merge-base", "--is-ancestor", &b, &base])
-                    .output()
+                command_output_capped(
+                    git(top).args(["merge-base", "--is-ancestor", &b, &base]),
+                    PROCESS_STREAM_MAX,
+                )
             })
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -5012,9 +5027,10 @@ pub async fn git_branch_patch(
             // Plain --no-index prints "Binary files ... differ", which is the
             // useful fact — the file is there and it is new.
             if let Ok(out) = blocking::io(|| {
-                git(&dir)
-                    .args(["diff", "--no-index", "--", "/dev/null", file])
-                    .output()
+                command_output_capped(
+                    git(&dir).args(["diff", "--no-index", "--", "/dev/null", file]),
+                    PROCESS_STREAM_MAX,
+                )
             }) {
                 p.push_str(&String::from_utf8_lossy(&out.stdout));
             }
@@ -5151,6 +5167,7 @@ fn linear_graphql(
         return Err("no Linear API key".into());
     }
     let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
+    let capture_permit = crate::process_capture::acquire(PROCESS_STREAM_MAX)?;
     let mut child = std::process::Command::new(tool_path("curl"))
         .no_console_window()
         .args([
@@ -5176,7 +5193,9 @@ fn linear_graphql(
         .ok_or("curl stdin unavailable")?
         .write_all(format!("header = \"Authorization: {}\"\n", api_key.trim()).as_bytes())
         .map_err(|e| e.to_string())?;
-    let out = blocking::io(|| child.wait_with_output()).map_err(|e| e.to_string())?;
+    drop(child.stdin.take());
+    let out = blocking::io(|| wait_with_capped_output(child, PROCESS_STREAM_MAX, capture_permit))?;
+    reject_truncated_output(&out, "Linear")?;
     if !out.status.success() {
         return Err(format!(
             "Linear request failed: {}",
@@ -5832,6 +5851,21 @@ index 333..444 100644
     /// bigger than a pipe buffer used to deadlock — the child blocked in write,
     /// never exited, and the user was told "timed out after 120s" 120 seconds
     /// later. Any PR diff over ~64KB hit it.
+    #[cfg(unix)]
+    #[test]
+    fn capped_process_output_drains_beyond_the_retained_window() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args([
+            "-c",
+            "yes 0123456789abcdefghijklmnopqrstuvwxyz | head -c 200000",
+        ]);
+        let out = command_output_capped(&mut cmd, 8 * 1024).expect("command completes");
+        assert!(out.status.success());
+        assert_eq!(out.stdout.len(), 8 * 1024);
+        assert!(out.stdout_truncated);
+        assert!(!out.stderr_truncated);
+    }
+
     #[cfg(unix)]
     #[test]
     fn run_net_reads_output_larger_than_a_pipe_buffer() {

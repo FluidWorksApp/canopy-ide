@@ -3,6 +3,7 @@ mod agentid;
 mod agents;
 mod android;
 mod blocking;
+mod bounded_file;
 mod browser;
 mod change;
 mod cleanup;
@@ -33,6 +34,7 @@ mod notify;
 mod portal;
 mod preview;
 mod procenv;
+mod process_capture;
 mod profiles;
 mod provenance;
 mod prwatch;
@@ -496,11 +498,9 @@ pub fn run() {
                         .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
                         .clear_targets()
                         .target(
-                            tauri_plugin_log::Target::new(
-                                tauri_plugin_log::TargetKind::LogDir {
-                                    file_name: Some("resilience".into()),
-                                },
-                            )
+                            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                                file_name: Some("resilience".into()),
+                            })
                             .filter(|metadata| metadata.target().contains("watchdog")),
                         )
                         .build(),
@@ -683,6 +683,7 @@ pub fn run() {
             fsx::fs_read_file,
             fsx::fs_write_file,
             fsx::fs_stat,
+            fsx::fs_stat_many,
             fsx::fs_list_files,
             fsx::fs_snapshot_files,
             fsx::fs_search,
@@ -694,6 +695,7 @@ pub fn run() {
             fsx::fs_duplicate,
             fsx::workspace_export,
             fsx::workspace_import,
+            process_capture::process_capture_metrics,
             instructions::instructions_scan,
             instructions::instructions_read,
             instructions::instructions_write,
@@ -801,6 +803,8 @@ pub fn run() {
             governor::terminal_governor_status,
             governor::terminal_governor_incidents,
             governor::terminal_governor_grant,
+            governor::terminal_governor_stop,
+            governor::terminal_governor_remember_default,
             agents::session_forget,
             profiles::profiles_list,
             profiles::profile_create,
@@ -830,6 +834,7 @@ pub fn run() {
             browser::browser_set_visible,
             browser::browser_close,
             browser::browser_close_metrics,
+            browser::browser_pressure_reload_metrics,
             browser::browser_run_op,
             browser::browser_command,
             browser::browser_here,
@@ -853,6 +858,7 @@ pub fn run() {
             portal::remote_enable,
             portal::remote_disable,
             portal::remote_status,
+            portal::remote_socket_metrics,
             portal::remote_rotate_pin,
             portal::remote_set_theme,
             portal::remote_set_clis,
@@ -889,10 +895,7 @@ pub fn run() {
                 // Guarantee no child processes outlive the app.
                 let pty_cleanup = pty.kill_all();
                 app.state::<std::sync::Arc<watchdog::WatchdogState>>()
-                    .app_exit_cleanup_returned(
-                        pty_cleanup.requested,
-                        pty_cleanup.force_signals,
-                    );
+                    .app_exit_cleanup_returned(pty_cleanup.requested, pty_cleanup.force_signals);
                 app.state::<lsp::LspManager>().kill_all();
                 // ... and no relay socket either.
                 app.state::<relay::RelayManager>().shutdown();

@@ -1233,11 +1233,7 @@ fn link_impl(
 #[tauri::command]
 pub fn research_read_file(project_id: String, id: String, path: String) -> Result<String, String> {
     let file = entry_file(&project_id, &id, &path)?;
-    let bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
-    if bytes as usize > SOURCE_MAX {
-        return Err(format!("{path} is {bytes} bytes — too large to open here"));
-    }
-    std::fs::read_to_string(&file).map_err(|e| e.to_string())
+    crate::bounded_file::read_string(&file, SOURCE_MAX)
 }
 
 // ---- importing a markdown file --------------------------------------------
@@ -1414,14 +1410,8 @@ fn import_impl_inner(
         }
     }
 
-    let bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
-    if bytes as usize > SOURCE_MAX {
-        return Err(format!(
-            "{path} is {bytes} bytes — too large to import. Split it, or point a \
-             research run at it instead."
-        ));
-    }
-    let text = std::fs::read_to_string(&file).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let text = crate::bounded_file::read_string(&file, SOURCE_MAX)
+        .map_err(|error| format!("cannot read {path}: {error}"))?;
     if text.trim().is_empty() {
         return Err(format!("{path} is empty — there is nothing to import yet."));
     }

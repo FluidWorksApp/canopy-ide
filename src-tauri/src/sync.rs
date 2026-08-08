@@ -167,8 +167,8 @@ enum DryRun {
 /// Merge HEAD with `base` entirely in the object store. Nothing on disk moves:
 /// this is the whole reason the watcher can run on a timer.
 fn dry_run_merge(top: &Path, base: &str) -> DryRun {
-    let out = git(top)
-        .args([
+    let out = crate::process_capture::output(
+        git(top).args([
             "merge-tree",
             "--write-tree",
             "--name-only",
@@ -176,8 +176,9 @@ fn dry_run_merge(top: &Path, base: &str) -> DryRun {
             "-z",
             "HEAD",
             base,
-        ])
-        .output();
+        ]),
+        crate::process_capture::DEFAULT_STREAM_MAX,
+    );
     let Ok(out) = out else {
         return DryRun::Unsupported;
     };
@@ -371,10 +372,11 @@ pub(crate) fn apply(top: &Path, base: &str) -> Result<SyncOutcome, String> {
     // --no-edit: take git's own merge message rather than opening an editor
     // there is no terminal for. Fast-forward stays enabled, so a branch with
     // no commits of its own just moves up without a merge commit.
-    let out = git(top)
-        .args(["merge", "--no-edit", base])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let out = crate::process_capture::output(
+        git(top).args(["merge", "--no-edit", base]),
+        crate::process_capture::DEFAULT_STREAM_MAX,
+    )?;
+    crate::process_capture::reject_truncated(&out, "git merge")?;
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
 

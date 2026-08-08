@@ -31,12 +31,12 @@ import {
 } from "./vibeAbstractionRunner";
 import { parseVibeIntent, type VibeIntent } from "./vibeIntent";
 import { PUBLISH_CONFIRMATION, detectDeployProvider } from "./vibeDeploy";
-import { providerById } from "./vibeServices";
+import { providerById, providerMcpToolAllowances } from "./vibeServices";
 import { probeCli, type CliProbeDeps } from "./vibeCliProbe";
 import { inspectFleetRoute } from "./fleetSnapshot";
 import { choicesFor } from "./modelCatalog";
 import { AGENT_CLIS, checkCliUpdates, checkInstalledClis } from "./projects";
-import type { ComponentRole, RunCommand } from "./projects";
+import type { Component, ComponentRole, RunCommand, VibeConfig } from "./projects";
 import type { RepairProblem } from "./vibeRepair";
 import type { VibeRepairTaskInput, VibeRepairTaskResult } from "./vibeRepairSession";
 import { DEFAULT_PROFILE, launchEnvSync, launchProfile } from "./profiles";
@@ -121,6 +121,14 @@ export interface VibeBuilderSessionOptions {
   /** Everything the survey established this component can run, so a repair
    *  agent prefers the project's own commands over inventing its own. */
   componentCommands?: readonly RunCommand[];
+  /** Complete setup graph. Build and repair use it to follow work across UI,
+   * API, worker and data boundaries instead of treating the preview folder as
+   * the whole application. */
+  projectComponents?: readonly Component[];
+  requiredProcesses?: NonNullable<VibeConfig["requiredProcesses"]>;
+  componentLinks?: NonNullable<VibeConfig["componentLinks"]>;
+  dataStores?: NonNullable<VibeConfig["dataStores"]>;
+  externalServices?: NonNullable<VibeConfig["externalServices"]>;
   previewTabId(): string | null;
 }
 
@@ -705,13 +713,16 @@ async function nativeAbstractionContext(
   cwd: string,
   intent: VibeIntent,
 ): Promise<AbstractionContext> {
-  const [entries, status, worktrees, pkg] = await Promise.all([
+  const [entries, status, worktrees, pkg, mcpServers] = await Promise.all([
     ipc.fsReadDir(cwd).then((list) => list.map((e) => e.name)),
     ipc.gitStatus(cwd).catch(() => null),
     ipc.gitWorktrees(cwd).catch(() => []),
     ipc.fsReadFile(`${cwd}/package.json`)
       .then((bytes) => JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>)
       .catch(() => null),
+    intent.kind === "link"
+      ? ipc.mcpServers([cwd]).catch(() => [])
+      : Promise.resolve([]),
   ]);
 
   const record = (value: unknown): Record<string, string> =>
@@ -790,6 +801,10 @@ async function nativeAbstractionContext(
     linkBin ? probeCli(linkBin, nativeCliProbeDeps) : Promise.resolve(false),
     deployBin ? probeCli(deployBin, nativeCliProbeDeps) : Promise.resolve(false),
   ]);
+  const linkProvider = intent.kind === "link" ? providerById(intent.provider) : undefined;
+  const toolAllowances = intent.kind === "link"
+    ? providerMcpToolAllowances(intent.provider, mcpServers)
+    : [];
 
   return {
     cwd,
@@ -799,6 +814,11 @@ async function nativeAbstractionContext(
     dependencies: record(pkg?.dependencies),
     devDependencies: record(pkg?.devDependencies),
     link: {
+      linkedReaches: toolAllowances.length > 0
+        ? [linkProvider?.reach.includes("mcp") ? "mcp" : "api"]
+        : [],
+      toolAllowances,
+      accountLinkAvailable: Boolean(linkProvider?.account),
       cliInstalled: linkCliPresent,
       authenticated: false,
       presentSecrets: [],
@@ -911,6 +931,16 @@ export class VibeBuilderSession implements BuilderSession {
    *  session that is stopped mid-`vercel --prod` leaves that deploy running
    *  with no owner left to stop it. */
   private runningAbstraction: AbstractionHandle | null = null;
+  /** Provider tools are admitted only after an explicit link request and only
+   *  when an enabled MCP config names that provider. The account server keeps
+   *  the credential; Build receives a tool prefix, never a token. */
+  private linkedServiceToolAllowances = new Set<string>();
+  private activeServiceAccess: {
+    provider: string;
+    accountLabel: string;
+    linked: boolean;
+    cliFallback: string | null;
+  } | null = null;
   private snapshot: BuilderSessionState = { persona: { kind: "idle" }, question: null };
   private listeners = new Set<(event: StructuredRunnerEvent) => void>();
   private reservation: TaskReservation | null = null;
@@ -1228,7 +1258,10 @@ export class VibeBuilderSession implements BuilderSession {
    * A tracked env file remains a hard stop: the agent must not get a turn that
    * can write credentials into git. A safe project continues as an ordinary
    * Build turn instead of rendering the planner's internal checklist. */
-  private sendLinkTurn(intent: VibeIntent, message: string): Promise<void> {
+  private sendLinkTurn(
+    intent: Extract<VibeIntent, { kind: "link" }>,
+    message: string,
+  ): Promise<void> {
     let sent!: () => void;
     let failed!: (error: unknown) => void;
     const accepted = new Promise<void>((resolve, reject) => {
@@ -1242,11 +1275,22 @@ export class VibeBuilderSession implements BuilderSession {
       }
       let proposal: AbstractionProposal;
       try {
+        const context = await this.deps.abstractionContext(this.options.componentPath, intent);
         proposal = proposeAbstraction(
           intent,
-          await this.deps.abstractionContext(this.options.componentPath, intent),
+          context,
           this.lastVerification,
         );
+        for (const allowance of context.link.toolAllowances ?? []) {
+          this.linkedServiceToolAllowances.add(allowance);
+        }
+        const provider = providerById(intent.provider);
+        this.activeServiceAccess = {
+          provider: intent.provider,
+          accountLabel: provider?.account?.label ?? provider?.label ?? intent.provider,
+          linked: (context.link.linkedReaches?.length ?? 0) > 0,
+          cliFallback: provider?.cli?.bin ?? null,
+        };
       } catch {
         this.present(
           { kind: "idle" },
@@ -1478,7 +1522,7 @@ export class VibeBuilderSession implements BuilderSession {
         {
           id: `vibe-server-${input.componentId}-${input.runCommandId}`,
           kind: "notice",
-          prompt: "The app server keeps stopping.",
+          prompt: `The ${input.component?.label ?? "project"} process keeps stopping.`,
           detail: "I'm reading its output to find out why.",
         },
       );
@@ -1592,6 +1636,22 @@ export class VibeBuilderSession implements BuilderSession {
    *  second agent onto the same broken server. */
   private repairsInFlight = new Set<string>();
 
+  private repairTopology(): NonNullable<RepairProblem["topology"]> {
+    return {
+      components: (this.options.projectComponents ?? []).map((component) => ({
+        id: component.id,
+        label: component.label,
+        path: component.path,
+        ...(component.role ? { role: component.role } : {}),
+        commands: component.commands ?? [],
+      })),
+      requiredProcesses: [...(this.options.requiredProcesses ?? [])],
+      componentLinks: [...(this.options.componentLinks ?? [])],
+      dataStores: [...(this.options.dataStores ?? [])],
+      externalServices: [...(this.options.externalServices ?? [])],
+    };
+  }
+
   /** The troubleshooter. Where reportServerIncident files evidence, this
    *  spends it: a repair agent gets the log tail, the component, and every
    *  command the survey found, diagnoses, acts inside the component, and asks
@@ -1613,7 +1673,7 @@ export class VibeBuilderSession implements BuilderSession {
       };
       const problem: RepairProblem = {
         code: "server-crash-loop",
-        statement: `The app server for ${component.label} keeps stopping moments after it starts.`,
+        statement: `The ${component.label} process keeps stopping moments after it starts.`,
         projectId: this.options.projectId,
         projectName: this.options.projectName,
         component,
@@ -1621,6 +1681,7 @@ export class VibeBuilderSession implements BuilderSession {
           ? { runCommand: { id: input.runCommandId, ...input.command } }
           : {}),
         commands: input.commands ?? [],
+        topology: this.repairTopology(),
         evidence: {
           logTail,
           exitCode: input.exitCode,
@@ -2255,6 +2316,7 @@ export class VibeBuilderSession implements BuilderSession {
         path: this.options.componentPath,
       },
       commands: [...(this.options.componentCommands ?? [])],
+      topology: this.repairTopology(),
       evidence: {
         logTail: output,
         context: this.options.checkCommand
@@ -2333,9 +2395,23 @@ export class VibeBuilderSession implements BuilderSession {
       policy: {
         systemPromptAppend:
           `You are the Build-mode collaborator for ${this.options.projectName}. ` +
-          `Work inside ${this.options.componentPath}. Follow the person's intent exactly. ` +
+          `The project components and their observed runtime/data topology are ${JSON.stringify({
+            components: (this.options.projectComponents ?? []).map((component) => ({
+              id: component.id,
+              label: component.label,
+              path: component.path,
+              role: component.role,
+              commands: component.commands,
+            })),
+            requiredProcesses: this.options.requiredProcesses ?? [],
+            componentLinks: this.options.componentLinks ?? [],
+            dataStores: this.options.dataStores ?? [],
+            externalServices: this.options.externalServices ?? [],
+            activeServiceAccess: this.activeServiceAccess,
+          })}. Follow the person's intent exactly across the listed components. ` +
           "If they ask a question, investigate and answer it without changing the project. " +
-          "If they ask for a change, make it actually run: install what it needs, build it, and check your own work. " +
+          "If they ask for a change, make it actually run: create or update every affected component, preserve database schema changes as migrations, install what it needs, build it, and check your own work. " +
+          "Test database changes locally when a local workflow exists. For a managed provider, prefer an already-linked account API or provider MCP tool over a shell CLI. If no account route is linked, use canopy_ask_user to ask the person to link their provider account; if account linking is unavailable or they decline, use the provider's authenticated CLI as the fallback. Never ask them to paste a long-lived provider access token into chat. Never push a managed database migration merely because Build opened; inspect migration status and ask explicitly before changing remote schema or data, whether the operation uses an API, MCP tool, or CLI. " +
           "Explain outcomes in plain language — the person reading you does not read stack traces. " +
           "Canopy runs verification independently.",
         permissionMode: grant.permissionMode,
@@ -2343,7 +2419,10 @@ export class VibeBuilderSession implements BuilderSession {
         // sitting in this session to answer a prompt, and a Build turn reaches
         // well past starting a server — it waits on a port, restarts, opens the
         // preview and reads the console back. See agentTools.ts.
-        allowedTools: grant.allowedTools,
+        allowedTools: [...new Set([
+          ...grant.allowedTools,
+          ...this.linkedServiceToolAllowances,
+        ])],
         disallowedTools: grant.disallowedTools,
         network: grant.network,
         writableRoots: grant.writableRoots,

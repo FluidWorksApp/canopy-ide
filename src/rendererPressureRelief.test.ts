@@ -3,7 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { releaseHiddenBrowserFrames } = vi.hoisted(() => ({
   releaseHiddenBrowserFrames: vi.fn(() => ({ frames: 2, bytes: 4096 })),
 }));
+const { shedInactiveEditorModels } = vi.hoisted(() => ({
+  shedInactiveEditorModels: vi.fn(() => 3),
+}));
+const { shedInactiveViewerBytes } = vi.hoisted(() => ({
+  shedInactiveViewerBytes: vi.fn(() => ({ viewers: 2, bytes: 8192 })),
+}));
 vi.mock("./browserHost", () => ({ releaseHiddenBrowserFrames }));
+vi.mock("./editorModelRetention", () => ({ shedInactiveEditorModels }));
+vi.mock("./viewerByteRetention", () => ({ shedInactiveViewerBytes }));
 
 import {
   registerTerminalPressureShedder,
@@ -29,12 +37,16 @@ describe("renderer pressure relief", () => {
       terminalsScheduled: 1,
       browserFramesReleased: 2,
       browserFrameBytesReleased: 4096,
+      editorModelsScheduled: 3,
+      viewerBytesScheduled: 8192,
     });
     expect(rendererPressureReliefMetrics()).toEqual({
       level: 2,
       terminalsScheduled: 1,
       browserFramesReleased: 2,
       browserFrameBytesReleased: 4096,
+      editorModelsScheduled: 3,
+      viewerBytesScheduled: 8192,
     });
   });
 

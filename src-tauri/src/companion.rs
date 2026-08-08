@@ -21,7 +21,7 @@
 use std::process::Stdio;
 
 use tauri::ipc::Channel;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex;
 
@@ -33,6 +33,45 @@ use crate::winproc::NoConsoleWindow;
 /// nowhere else, and that explanation is the only thing standing between the
 /// user and a companion that silently never answers.
 const STDERR_KEEP: usize = 8 * 1024;
+const STDOUT_LINE_MAX: usize = 1024 * 1024;
+const COMPANION_INPUT_MAX: usize = 1024 * 1024;
+const COMPANION_STORE_MAX: usize = 1024 * 1024;
+
+/// Drain one complete protocol line while retaining at most `max` bytes. The
+/// unread suffix must still be consumed or a rogue child can fill its pipe and
+/// wedge both itself and the companion manager.
+async fn capped_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max: usize,
+) -> std::io::Result<Option<(Vec<u8>, bool)>> {
+    let mut out = Vec::with_capacity(max.min(8 * 1024));
+    let mut truncated = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return if out.is_empty() && !truncated {
+                Ok(None)
+            } else {
+                Ok(Some((out, truncated)))
+            };
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(available.len());
+        if !truncated {
+            let keep = take.min(max.saturating_sub(out.len()));
+            out.extend_from_slice(&available[..keep]);
+            truncated = keep < take;
+        }
+        let done = available.get(take.saturating_sub(1)) == Some(&b'\n');
+        reader.consume(take);
+        if done {
+            return Ok(Some((out, truncated)));
+        }
+    }
+}
 
 /// What the child says, as the front end sees it.
 ///
@@ -203,13 +242,28 @@ pub async fn companion_spawn(
         .ok_or("the companion CLI has no stdout")?;
     let stderr = child.stderr.take();
 
-    // stdout: one JSON object per line, forwarded as it arrives. `next_line`
-    // has no length cap, which is the whole reason this is a pipe and not a PTY.
+    // stdout: one JSON object per line, forwarded as it arrives. A line is
+    // bounded before allocation; an oversized protocol object is discarded
+    // explicitly after draining rather than parsed as partial JSON.
     {
         let sink = on_data.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(text)) = lines.next_line().await {
+            let mut reader = BufReader::new(stdout);
+            while let Ok(Some((bytes, truncated))) = capped_line(&mut reader, STDOUT_LINE_MAX).await
+            {
+                if truncated {
+                    if sink
+                        .send(CompanionOut::Stderr {
+                            text: "error: companion output line exceeded 1 MiB and was discarded"
+                                .into(),
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&bytes).trim_end().to_string();
                 if text.trim().is_empty() {
                     continue;
                 }
@@ -228,10 +282,14 @@ pub async fn companion_spawn(
     if let Some(stderr) = stderr {
         let sink = on_data.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
+            let mut reader = BufReader::new(stderr);
             let mut kept = 0usize;
-            while let Ok(Some(text)) = lines.next_line().await {
-                kept += text.len();
+            while let Ok(Some((bytes, truncated))) = capped_line(&mut reader, STDERR_KEEP).await {
+                let mut text = String::from_utf8_lossy(&bytes).trim_end().to_string();
+                if truncated {
+                    text.push_str("\n[Canopy: companion stderr line truncated]");
+                }
+                kept = kept.saturating_add(text.len());
                 if kept > STDERR_KEEP {
                     continue;
                 }
@@ -250,6 +308,33 @@ pub async fn companion_spawn(
     Ok(())
 }
 
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn capped_line_drains_an_oversized_frame_and_reads_the_next_one() {
+        let input = format!("{}\nnext\n", "x".repeat(64));
+        let mut reader = BufReader::new(input.as_bytes());
+        let (first, truncated) = capped_line(&mut reader, 8).await.unwrap().unwrap();
+        assert_eq!(first.len(), 8);
+        assert!(truncated);
+        let (next, truncated) = capped_line(&mut reader, 8).await.unwrap().unwrap();
+        assert!(!truncated);
+        assert_eq!(String::from_utf8_lossy(&next).trim(), "next");
+    }
+
+    #[tokio::test]
+    async fn capped_line_bounds_an_unterminated_eof_frame() {
+        let input = "x".repeat(64);
+        let mut reader = BufReader::new(input.as_bytes());
+        let (kept, truncated) = capped_line(&mut reader, 8).await.unwrap().unwrap();
+        assert_eq!(kept.len(), 8);
+        assert!(truncated);
+        assert!(capped_line(&mut reader, 8).await.unwrap().is_none());
+    }
+}
+
 /// Send one line to the companion. The newline is added here so no caller can
 /// forget it — an un-terminated line is a message the CLI waits on forever,
 /// which presents as the companion silently never answering.
@@ -258,6 +343,9 @@ pub async fn companion_write(
     state: tauri::State<'_, CompanionManager>,
     line: String,
 ) -> Result<(), String> {
+    if line.len() > COMPANION_INPUT_MAX {
+        return Err("companion input is limited to 1 MiB".into());
+    }
     let mut held = state.running.lock().await;
     let running = held.as_mut().ok_or("the companion is not running")?;
     let mut body = line;
@@ -381,9 +469,21 @@ pub fn companion_save_attachment(name: String, base64: String) -> Result<String,
 
 #[tauri::command]
 pub fn companion_store_read(name: String) -> Result<Option<String>, String> {
+    use std::io::Read;
     let path = companion_store_path(&name)?;
-    match std::fs::read_to_string(&path) {
-        Ok(body) => Ok(Some(body)),
+    match std::fs::File::open(&path) {
+        Ok(file) => {
+            let mut bytes = Vec::with_capacity(COMPANION_STORE_MAX.min(8 * 1024));
+            file.take(COMPANION_STORE_MAX as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| format!("{} could not be read: {e}", path.display()))?;
+            if bytes.len() > COMPANION_STORE_MAX {
+                return Err("companion store is larger than 1 MiB".into());
+            }
+            String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|_| "companion store is not UTF-8".into())
+        }
         // Nothing written yet is not a failure — it is a companion that has
         // not learned anything about you so far.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -396,6 +496,9 @@ pub fn companion_store_read(name: String) -> Result<Option<String>, String> {
 /// lose everything the companion knows rather than one fact.
 #[tauri::command]
 pub fn companion_store_write(name: String, body: String) -> Result<(), String> {
+    if body.len() > COMPANION_STORE_MAX {
+        return Err("companion store is limited to 1 MiB".into());
+    }
     let path = companion_store_path(&name)?;
     let parent = path.parent().ok_or("bad store path")?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;

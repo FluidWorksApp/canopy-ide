@@ -526,6 +526,40 @@ describe("VibeBuilderSession", () => {
     );
   });
 
+  it("briefs Build with cross-component and migration topology", async () => {
+    const h = harness({}, {
+      projectComponents: [
+        { id: "web", label: "Web", path: "/repo/web", role: "web", commands: [] },
+        { id: "api", label: "API", path: "/repo/api", role: "api", commands: [] },
+      ],
+      componentLinks: [{
+        fromComponentId: "web",
+        toComponentId: "api",
+        kind: "http",
+        description: "Web calls API",
+      }],
+      dataStores: [{
+        id: "app-db",
+        label: "App DB",
+        engine: "postgresql",
+        mode: "managed",
+        providerId: "supabase",
+        componentIds: ["api"],
+        schemaPaths: ["/repo/api/schema.sql"],
+        migrationPaths: ["/repo/api/migrations/001.sql"],
+        latestMigration: "001.sql",
+      }],
+    });
+    await h.session.send("Add login");
+
+    const launch = vi.mocked(h.deps.runner.start).mock.calls[0][2];
+    expect(launch.policy.systemPromptAppend).toContain("Web calls API");
+    expect(launch.policy.systemPromptAppend).toContain("001.sql");
+    expect(launch.policy.systemPromptAppend).toContain(
+      "Never push a managed database migration merely because Build opened",
+    );
+  });
+
   it("carries the active profile's env into the Build launch, without shadowing Canopy's own", async () => {
     // The route this attempt is recorded against names a profile; without its
     // env the process runs on the default login and the attempt record says
@@ -726,7 +760,7 @@ describe("VibeBuilderSession", () => {
       }),
     );
     expect(h.session.state.question?.prompt).toBe(
-      "The app server keeps stopping.",
+      "The project process keeps stopping.",
     );
   });
 
@@ -1319,6 +1353,36 @@ describe("managed abstractions", () => {
     expect(h.transport.send).toHaveBeenCalledWith("can we link supabase");
     expect(h.session.state.question).toBeNull();
     expect(h.replies.join(" ")).not.toMatch(/Linking Supabase|SUPABASE_SERVICE_ROLE_KEY/);
+  });
+
+  it("prefers a linked provider account tool and keeps the CLI as fallback guidance", async () => {
+    const h = harness({
+      abstractionContext: vi.fn(async (cwd: string) => ({
+        cwd,
+        entries: ["package.json", "package-lock.json"],
+        packageManagerField: null,
+        dependencies: {},
+        devDependencies: {},
+        link: {
+          linkedReaches: ["mcp" as const],
+          toolAllowances: ["mcp__supabase"],
+          accountLinkAvailable: true,
+          cliInstalled: true,
+          authenticated: false,
+          presentSecrets: [],
+          envFileTracked: false,
+        },
+        deploy: { dirty: false, cliInstalled: true },
+      })),
+    });
+
+    await h.session.send("connect supabase");
+
+    const launch = (h.deps.runner.start as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    expect(launch.policy.allowedTools).toContain("mcp__supabase");
+    expect(launch.policy.systemPromptAppend).toMatch(/prefer an already-linked account API/i);
+    expect(launch.policy.systemPromptAppend).toMatch(/authenticated CLI as the fallback/i);
+    expect(launch.policy.systemPromptAppend).toContain('"linked":true');
   });
 
   it("proposes an install instead of running it, and never sends it to the agent", async () => {

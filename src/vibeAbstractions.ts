@@ -132,6 +132,10 @@ function proposeLink(providerId: string, ctx: AbstractionContext): AbstractionPr
   // secret it has no business holding.
   const lines = plan.steps.map((step) => {
     switch (step.kind) {
+      case "use-linked-account":
+        return `Use the linked account over ${step.reach.toUpperCase()} — ${step.why}`;
+      case "link-account":
+        return `Link your ${step.accountLabel} account — ${step.why}`;
       case "install-cli":
       case "authenticate":
         return `${step.command} — ${step.why}`;

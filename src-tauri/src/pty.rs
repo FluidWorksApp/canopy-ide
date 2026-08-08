@@ -447,7 +447,8 @@ impl PtyManager {
     /// agents are attachable authoritatively — without waiting on (or trusting)
     /// the periodic `pty:stats` event.
     pub fn summaries(&self) -> Vec<PtySummary> {
-        let mut summaries = self.sessions
+        let mut summaries = self
+            .sessions
             .lock()
             .unwrap()
             .values()
@@ -477,7 +478,13 @@ impl PtyManager {
     pub fn register_renderer(&self) -> RendererRegistration {
         let _gate = self.renderer_gate.lock().unwrap();
         let generation = self.renderer_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let sessions = self.sessions.lock().unwrap().values().cloned().collect::<Vec<_>>();
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         for session in sessions {
             session.detach_desktop();
         }
@@ -506,9 +513,7 @@ impl PtyManager {
     ) -> Result<DesktopAttachResult, String> {
         let _gate = self.renderer_gate.lock().unwrap();
         self.require_renderer(renderer_generation)?;
-        let session = self
-            .get(id)
-            .ok_or_else(|| format!("no pty session {id}"))?;
+        let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
         session.attach_desktop(renderer_generation, after, channel)
     }
 
@@ -760,11 +765,7 @@ impl Session {
         }
     }
 
-    fn record_desktop_delivery(
-        &self,
-        attachment: &mut DesktopAttachment,
-        bytes: usize,
-    ) {
+    fn record_desktop_delivery(&self, attachment: &mut DesktopAttachment, bytes: usize) {
         self.desktop_delivery_chunks.fetch_add(1, Ordering::Relaxed);
         self.desktop_delivery_bytes
             .fetch_add(bytes as u64, Ordering::Relaxed);
@@ -881,18 +882,10 @@ impl Session {
             delivery_chunk_bytes_max: self
                 .desktop_delivery_chunk_bytes_max
                 .load(Ordering::Relaxed),
-            ack_latency_last_ms: self
-                .desktop_ack_latency_last_ms
-                .load(Ordering::Relaxed),
-            ack_latency_max_ms: self
-                .desktop_ack_latency_max_ms
-                .load(Ordering::Relaxed),
-            ack_latency_total_ms: self
-                .desktop_ack_latency_total_ms
-                .load(Ordering::Relaxed),
-            ack_latency_samples: self
-                .desktop_ack_latency_samples
-                .load(Ordering::Relaxed),
+            ack_latency_last_ms: self.desktop_ack_latency_last_ms.load(Ordering::Relaxed),
+            ack_latency_max_ms: self.desktop_ack_latency_max_ms.load(Ordering::Relaxed),
+            ack_latency_total_ms: self.desktop_ack_latency_total_ms.load(Ordering::Relaxed),
+            ack_latency_samples: self.desktop_ack_latency_samples.load(Ordering::Relaxed),
         }
     }
 
@@ -1586,8 +1579,8 @@ impl PtyManager {
         // Validation at the command boundary is only an early refusal; this is
         // the race-closing check after process creation and immediately before
         // the channel becomes reachable by the flusher.
-        let renderer_gate = desktop_renderer_generation
-            .map(|_| state.renderer_gate.lock().unwrap());
+        let renderer_gate =
+            desktop_renderer_generation.map(|_| state.renderer_gate.lock().unwrap());
         if let Some(renderer_generation) = desktop_renderer_generation {
             if let Err(error) = state.require_renderer(renderer_generation) {
                 drop(renderer_gate);
@@ -1822,10 +1815,7 @@ pub fn pty_detach_desktop(
 /// the predecessor's PTY streams, closes browser child views whose React owners
 /// disappeared with that page, and returns the live sessions to reconcile.
 #[tauri::command]
-pub fn pty_renderer_register(
-    app: AppHandle,
-    state: State<'_, PtyManager>,
-) -> RendererRegistration {
+pub fn pty_renderer_register(app: AppHandle, state: State<'_, PtyManager>) -> RendererRegistration {
     let registration = state.register_renderer();
     app.state::<crate::browser::BrowserManager>()
         .renderer_registered(&app, registration.generation);
@@ -2453,10 +2443,14 @@ mod tests {
         let attached = pm
             .attach_desktop(spawned.id, second.generation, None, replacement_sink)
             .expect("replacement attach");
-        assert!(String::from_utf8_lossy(&replacement_bytes.lock().unwrap())
-            .contains("AFTER_RELOAD"));
+        assert!(
+            String::from_utf8_lossy(&replacement_bytes.lock().unwrap()).contains("AFTER_RELOAD")
+        );
         let before = session.desktop_outstanding();
-        assert!(before > 0, "snapshot should await the replacement page's ack");
+        assert!(
+            before > 0,
+            "snapshot should await the replacement page's ack"
+        );
 
         session.acknowledge(first.generation, old_stream, usize::MAX);
         assert_eq!(
@@ -2477,13 +2471,79 @@ mod tests {
         );
         assert!(stale.is_err());
         assert!(pm
-            .attach_desktop(
-                spawned.id,
-                third.generation,
-                None,
-                Channel::new(|_| Ok(())),
-            )
+            .attach_desktop(spawned.id, third.generation, None, Channel::new(|_| Ok(())),)
             .is_ok());
+        let _ = pm.kill(spawned.id);
+    }
+
+    #[test]
+    fn repeated_reload_navigation_and_failed_startup_keep_one_live_pty_identity() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let first = pm.register_renderer();
+        let spawned = pm
+            .spawn(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                Some(64 * 1024),
+                None,
+                SessionKind::Desktop,
+                Some(DesktopSink {
+                    renderer_generation: first.generation,
+                    channel: Channel::new(|_| Ok(())),
+                }),
+                None,
+                None,
+            )
+            .expect("desktop spawn");
+        let original_pid = spawned.pid;
+        let original_session_generation = spawned.session_generation;
+
+        // Each registration represents a reload/navigation. Most intentionally
+        // never attach, which is the renderer-startup-failure shape. Adjacent
+        // registrations cover the double-reload race without real-time sleeps.
+        let mut latest = first;
+        for _ in 0..512 {
+            latest = pm.register_renderer();
+            let session = pm.get(spawned.id).expect("PTY survives every replacement");
+            assert_eq!(session.pid, original_pid);
+            assert_eq!(session.session_generation, original_session_generation);
+            assert!(session.desktop.lock().unwrap().is_none());
+            assert_eq!(latest.sessions.len(), 1);
+            assert_eq!(latest.sessions[0].id, spawned.id);
+            assert_eq!(
+                latest.sessions[0].session_generation,
+                original_session_generation
+            );
+        }
+
+        pm.write(spawned.id, "echo REPLACEMENT_STRESS_MARKER\r")
+            .expect("write while every renderer is detached");
+        assert!(wait_for(
+            &pm,
+            spawned.id,
+            "REPLACEMENT_STRESS_MARKER",
+            Duration::from_secs(8),
+        ));
+        let replay = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let sink = {
+            let replay = replay.clone();
+            Channel::new(move |body| {
+                if let InvokeResponseBody::Raw(chunk) = body {
+                    replay.lock().unwrap().extend(chunk);
+                }
+                Ok(())
+            })
+        };
+        pm.attach_desktop(spawned.id, latest.generation, None, sink)
+            .expect("latest renderer reattaches");
+        assert!(
+            String::from_utf8_lossy(&replay.lock().unwrap()).contains("REPLACEMENT_STRESS_MARKER")
+        );
+        assert!(pm.get(spawned.id).is_some());
         let _ = pm.kill(spawned.id);
     }
 
@@ -2566,7 +2626,10 @@ mod tests {
             .find(|summary| summary.id == id)
             .unwrap();
         assert!(summary.replay_start >= 37);
-        assert_eq!(summary.replay_end - summary.replay_start, SCROLLBACK_CAP as u64);
+        assert_eq!(
+            summary.replay_end - summary.replay_start,
+            SCROLLBACK_CAP as u64
+        );
 
         let replay = Arc::new(Mutex::new(Vec::new()));
         let sink = {

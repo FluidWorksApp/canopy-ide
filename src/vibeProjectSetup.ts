@@ -29,6 +29,7 @@ const MAX_COMPONENTS = 64;
 const MAX_COMMANDS_PER_COMPONENT = 16;
 const MAX_ARGV = 64;
 const MAX_SERVICES = 32;
+const DATA_PROVIDER_IDS = new Set(["supabase", "neon", "firebase"]);
 const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 const KEY = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
@@ -44,6 +45,9 @@ export interface VibeSetupCommandProposal {
   argv: [string, ...string[]];
   cwd: string;
   requiredEnvNames: string[];
+  /** Whether Build may run this command while bringing up the project. This
+   * must be false for operations against a managed database. */
+  automatic: boolean;
   readiness:
     | { kind: "http"; path: string }
     | { kind: "port" }
@@ -70,7 +74,29 @@ export interface VibeProjectSetupProposal {
     componentKey: string;
     commandKey: string;
     reason: string;
-    requiredFor: "preview";
+    requiredFor: "preview" | "project";
+    dependsOn: Array<{ componentKey: string; commandKey: string }>;
+  }>;
+  componentLinks: Array<{
+    fromComponentKey: string;
+    toComponentKey: string;
+    kind: "http" | "queue" | "database" | "library" | "other";
+    description: string;
+    evidence: string[];
+  }>;
+  dataStores: Array<{
+    key: string;
+    label: string;
+    engine: "postgresql" | "mysql" | "sqlite" | "other";
+    mode: "local" | "managed";
+    providerId: string | null;
+    usedByComponentKeys: string[];
+    schemaPaths: string[];
+    migrationPaths: string[];
+    latestMigration: string | null;
+    migrate: null | { componentKey: string; commandKey: string };
+    status: null | { componentKey: string; commandKey: string };
+    evidence: string[];
   }>;
   externalServices: Array<{
     key: string;
@@ -149,7 +175,7 @@ export function validateVibeSetupProposal(
   if (redactSecrets(serialized) !== serialized) {
     errors.push("setup output contains a credential value");
   }
-  exactKeys(top, ["schemaVersion", "repositoryFingerprint", "components", "preview", "requiredProcesses", "externalServices", "deployment"], "setup", errors);
+  exactKeys(top, ["schemaVersion", "repositoryFingerprint", "components", "preview", "requiredProcesses", "componentLinks", "dataStores", "externalServices", "deployment"], "setup", errors);
   if (top.schemaVersion !== VIBE_SETUP_SCHEMA_VERSION) errors.push("unsupported setup schemaVersion");
   if (top.repositoryFingerprint !== context.repositoryFingerprint) errors.push("repository changed while setup was running");
   if (!Array.isArray(top.components) || top.components.length === 0 || top.components.length > MAX_COMPONENTS) {
@@ -199,7 +225,7 @@ export function validateVibeSetupProposal(
       const cat = `${at}.commands[${commandIndex}]`;
       const command = record(rawCommand);
       if (!command) { errors.push(`${cat} is not an object`); return; }
-      exactKeys(command, ["key", "purpose", "label", "argv", "cwd", "requiredEnvNames", "readiness"], cat, errors);
+      exactKeys(command, ["key", "purpose", "label", "argv", "cwd", "requiredEnvNames", "automatic", "readiness"], cat, errors);
       if (!text(command.key) || !KEY.test(command.key) || mine.has(command.key)) errors.push(`${cat}.key is invalid or duplicated`);
       else mine.add(command.key);
       if (!["serve", "check", "worker", "setup"].includes(String(command.purpose))) errors.push(`${cat}.purpose is invalid`);
@@ -208,6 +234,7 @@ export function validateVibeSetupProposal(
       const cwd = text(command.cwd) ? resolvePath(context.projectRoot, command.cwd) : "";
       if (!cwd || !inside(componentRoot, cwd) || !context.existingPaths.has(cwd)) errors.push(`${cat}.cwd is not an observed path inside its component`);
       if (!strings(command.requiredEnvNames) || command.requiredEnvNames.some((name) => !ENV_NAME.test(name))) errors.push(`${cat}.requiredEnvNames is invalid`);
+      if (typeof command.automatic !== "boolean") errors.push(`${cat}.automatic is invalid`);
       const readiness = record(command.readiness);
       if (!readiness || !["http", "port", "process-alive", "one-shot"].includes(String(readiness.kind))) errors.push(`${cat}.readiness is invalid`);
       if (readiness?.kind === "one-shot" && (typeof readiness.timeoutMs !== "number" || readiness.timeoutMs < 1_000 || readiness.timeoutMs > 30 * 60_000)) errors.push(`${cat}.readiness timeout is out of bounds`);
@@ -228,11 +255,37 @@ export function validateVibeSetupProposal(
     else if (!commandKeys.get(ref.componentKey)?.has(ref.commandKey)) errors.push(`${at} names an unknown command`);
   };
   reference(top.preview, "preview");
+  const requiredRefs = new Set<string>();
+  const requiredDeps = new Map<string, string[]>();
   if (!Array.isArray(top.requiredProcesses) || top.requiredProcesses.length === 0) errors.push("requiredProcesses must include the preview process");
   else top.requiredProcesses.forEach((raw, index) => {
     const item = record(raw);
+    exactKeys(item ?? {}, ["componentKey", "commandKey", "reason", "requiredFor", "dependsOn"], `requiredProcesses[${index}]`, errors);
     reference(item, `requiredProcesses[${index}]`);
-    if (!item || item.requiredFor !== "preview" || !text(item.reason)) errors.push(`requiredProcesses[${index}] is incomplete`);
+    if (!item || !["preview", "project"].includes(String(item.requiredFor)) || !text(item.reason) || !Array.isArray(item.dependsOn)) {
+      errors.push(`requiredProcesses[${index}] is incomplete`);
+      return;
+    }
+    const key = `${item.componentKey}:${item.commandKey}`;
+    const selectedComponent = Array.isArray(top.components)
+      ? top.components.map(record).find((component) => component?.key === item.componentKey)
+      : null;
+    const selectedCommand = Array.isArray(selectedComponent?.commands)
+      ? selectedComponent.commands.map(record).find((command) => command?.key === item.commandKey)
+      : null;
+    if (selectedCommand?.purpose !== "serve" && selectedCommand?.purpose !== "worker") {
+      errors.push(`requiredProcesses[${index}] is not a long-lived command`);
+    }
+    if (requiredRefs.has(key)) errors.push(`requiredProcesses[${index}] is duplicated`);
+    requiredRefs.add(key);
+    const deps: string[] = [];
+    item.dependsOn.forEach((rawDependency, dependencyIndex) => {
+      const dependency = record(rawDependency);
+      reference(dependency, `requiredProcesses[${index}].dependsOn[${dependencyIndex}]`);
+      if (dependency) deps.push(`${dependency.componentKey}:${dependency.commandKey}`);
+    });
+    if (deps.includes(key)) errors.push(`requiredProcesses[${index}] depends on itself`);
+    requiredDeps.set(key, deps);
   });
   const preview = record(top.preview);
   const requiredHasPreview = Array.isArray(top.requiredProcesses) && top.requiredProcesses.some((raw) => {
@@ -240,6 +293,84 @@ export function validateVibeSetupProposal(
     return item?.componentKey === preview?.componentKey && item?.commandKey === preview?.commandKey;
   });
   if (!requiredHasPreview) errors.push("requiredProcesses omits the preview command");
+
+  // One selected long-lived command per runnable component. The former rule
+  // only required the page server, which is how a web + API + worker project
+  // opened with just one of its three processes running.
+  if (Array.isArray(top.components)) {
+    top.components.forEach((raw, index) => {
+      const component = record(raw);
+      if (!component || !Array.isArray(component.commands)) return;
+      const longLived = component.commands.some((rawCommand) => {
+        const command = record(rawCommand);
+        return command?.purpose === "serve" || command?.purpose === "worker";
+      });
+      if (longLived && ![...requiredRefs].some((key) => key.startsWith(`${component.key}:`))) {
+        errors.push(`components[${index}] has no selected required process`);
+      }
+    });
+  }
+  for (const [key, dependencies] of requiredDeps) {
+    for (const dependency of dependencies) {
+      if (!requiredRefs.has(dependency)) errors.push(`${key} depends on a process that is not required`);
+    }
+  }
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const cyclic = (key: string): boolean => {
+    if (visiting.has(key)) return true;
+    if (visited.has(key)) return false;
+    visiting.add(key);
+    const found = (requiredDeps.get(key) ?? []).some(cyclic);
+    visiting.delete(key);
+    visited.add(key);
+    return found;
+  };
+  if ([...requiredDeps.keys()].some(cyclic)) errors.push("requiredProcesses contains a dependency cycle");
+
+  if (!Array.isArray(top.componentLinks)) errors.push("componentLinks is invalid");
+  else top.componentLinks.forEach((raw, index) => {
+    const at = `componentLinks[${index}]`;
+    const link = record(raw);
+    if (!link) { errors.push(`${at} is not an object`); return; }
+    exactKeys(link, ["fromComponentKey", "toComponentKey", "kind", "description", "evidence"], at, errors);
+    if (!componentKeys.has(String(link.fromComponentKey)) || !componentKeys.has(String(link.toComponentKey))) errors.push(`${at} names an unknown component`);
+    if (!["http", "queue", "database", "library", "other"].includes(String(link.kind)) || !text(link.description)) errors.push(`${at} is incomplete`);
+    if (!strings(link.evidence) || link.evidence.length === 0 || link.evidence.some((path) => !context.existingPaths.has(resolvePath(context.projectRoot, path)))) errors.push(`${at}.evidence is invalid`);
+  });
+
+  if (!Array.isArray(top.dataStores)) errors.push("dataStores is invalid");
+  else top.dataStores.forEach((raw, index) => {
+    const at = `dataStores[${index}]`;
+    const store = record(raw);
+    if (!store) { errors.push(`${at} is not an object`); return; }
+    exactKeys(store, ["key", "label", "engine", "mode", "providerId", "usedByComponentKeys", "schemaPaths", "migrationPaths", "latestMigration", "migrate", "status", "evidence"], at, errors);
+    if (!text(store.key) || !KEY.test(store.key) || !text(store.label)) errors.push(`${at} identity is invalid`);
+    if (!["postgresql", "mysql", "sqlite", "other"].includes(String(store.engine)) || !["local", "managed"].includes(String(store.mode))) errors.push(`${at} engine or mode is invalid`);
+    if (store.providerId !== null && (!text(store.providerId) || !context.providerIds.has(store.providerId))) errors.push(`${at}.providerId is not a trusted provider`);
+    if (store.mode === "managed" && store.providerId === null) errors.push(`${at} is managed but has no trusted provider`);
+    if (store.mode === "managed" && text(store.providerId) && !DATA_PROVIDER_IDS.has(store.providerId)) errors.push(`${at}.providerId is not a database provider`);
+    if (store.engine === "postgresql" && text(store.providerId) && !["supabase", "neon"].includes(store.providerId)) errors.push(`${at}.providerId does not provide PostgreSQL`);
+    if (!strings(store.usedByComponentKeys) || store.usedByComponentKeys.length === 0 || store.usedByComponentKeys.some((key) => !componentKeys.has(key))) errors.push(`${at}.usedByComponentKeys is invalid`);
+    for (const field of ["schemaPaths", "migrationPaths", "evidence"] as const) {
+      const paths = store[field];
+      if (!strings(paths) || (field === "evidence" && paths.length === 0) || paths.some((path) => !context.existingPaths.has(resolvePath(context.projectRoot, path)))) errors.push(`${at}.${field} is invalid`);
+    }
+    if (store.latestMigration !== null && !text(store.latestMigration)) errors.push(`${at}.latestMigration is invalid`);
+    for (const field of ["migrate", "status"] as const) {
+      if (store[field] !== null) reference(store[field], `${at}.${field}`);
+    }
+    if (store.mode === "managed" && store.migrate !== null) {
+      const migration = record(store.migrate);
+      const component = Array.isArray(top.components)
+        ? top.components.map(record).find((item) => item?.key === migration?.componentKey)
+        : null;
+      const command = Array.isArray(component?.commands)
+        ? component.commands.map(record).find((item) => item?.key === migration?.commandKey)
+        : null;
+      if (command?.automatic !== false) errors.push(`${at}.migrate must not run automatically against a managed database`);
+    }
+  });
 
   if (!Array.isArray(top.externalServices) || top.externalServices.length > MAX_SERVICES) errors.push("externalServices is invalid");
   else {
@@ -339,8 +470,22 @@ export function materializeVibeSetup(project: Project, proposal: VibeProjectSetu
       // an argument, so adopting argv here is how it got dropped. Only the
       // purpose is taken, because that is what the survey actually adds.
       return same
-        ? { ...same, purpose: command.purpose }
-        : { id: commandId, name: command.label, command: displayArgv(command.argv), argv: command.argv, cwd: commandCwd, purpose: command.purpose };
+        ? {
+            ...same,
+            purpose: command.purpose,
+            automatic: command.automatic,
+            readiness: command.readiness,
+          }
+        : {
+            id: commandId,
+            name: command.label,
+            command: displayArgv(command.argv),
+            argv: command.argv,
+            cwd: commandCwd,
+            purpose: command.purpose,
+            automatic: command.automatic,
+            readiness: command.readiness,
+          };
     });
     // A configured command the proposal did not mention is still the person's
     // command. Silence about it is not a finding that it should go.
@@ -366,6 +511,45 @@ export function materializeVibeSetup(project: Project, proposal: VibeProjectSetu
         requiredProcesses: proposal.requiredProcesses.map((item) => ({
           componentId: componentIds[item.componentKey],
           runCommandId: commandIds[`${item.componentKey}:${item.commandKey}`],
+          dependsOn: item.dependsOn.map((dependency) => ({
+            componentId: componentIds[dependency.componentKey],
+            runCommandId: commandIds[`${dependency.componentKey}:${dependency.commandKey}`],
+          })),
+          reason: item.reason,
+          requiredFor: item.requiredFor,
+        })),
+        componentLinks: proposal.componentLinks.map((link) => ({
+          fromComponentId: componentIds[link.fromComponentKey],
+          toComponentId: componentIds[link.toComponentKey],
+          kind: link.kind,
+          description: link.description,
+        })),
+        dataStores: proposal.dataStores.map((store) => ({
+          id: store.key,
+          label: store.label,
+          engine: store.engine,
+          mode: store.mode,
+          providerId: store.providerId,
+          componentIds: store.usedByComponentKeys.map((key) => componentIds[key]),
+          schemaPaths: store.schemaPaths.map((path) => resolvePath(projectRoot, path)),
+          migrationPaths: store.migrationPaths.map((path) => resolvePath(projectRoot, path)),
+          latestMigration: store.latestMigration,
+          ...(store.migrate
+            ? {
+                migrate: {
+                  componentId: componentIds[store.migrate.componentKey],
+                  runCommandId: commandIds[`${store.migrate.componentKey}:${store.migrate.commandKey}`],
+                },
+              }
+            : {}),
+          ...(store.status
+            ? {
+                status: {
+                  componentId: componentIds[store.status.componentKey],
+                  runCommandId: commandIds[`${store.status.componentKey}:${store.status.commandKey}`],
+                },
+              }
+            : {}),
         })),
         externalServices: proposal.externalServices.map((item) => ({
           id: item.key,
@@ -474,7 +658,7 @@ export function vibeSetupSystemPrompt(
   // `name`/`path`/`kind` instead of `label`/`root`/`role` — and a correct
   // survey was thrown away for answering in the wrong shape. Any change to the
   // interfaces above has to be made here too, or that returns.
-  return `You are Canopy's project setup agent.${scope} Read the entire repository, including non-JavaScript components. Do not edit files. Discover every component, how each runs, the one page-serving preview target, every process required for that page to work, external services, and deployment evidence.${briefSection(brief)}
+  return `You are Canopy's project setup agent.${scope} Read the entire repository, including non-JavaScript components. Do not edit files. Discover every component, how each runs, how components call or depend on one another, the one page-serving preview target, every long-lived process needed to run the project, databases and their schema/migration workflow, external services, and deployment evidence.${briefSection(brief)}
 
 Return exactly one JSON object in this shape and no other. Field names are exact; any field not listed here is rejected, and so is any missing one:
 
@@ -493,6 +677,7 @@ Return exactly one JSON object in this shape and no other. Field names are exact
       "argv": ["pnpm", "dev"],                // argv array, never a shell string
       "cwd": "<absolute path inside this component>",
       "requiredEnvNames": ["API_URL"],        // NAMES only, never values
+      "automatic": true,                      // false for managed DB changes or other remote mutations
       "readiness": { "kind": "http", "path": "/" }
       // readiness is one of: {"kind":"http","path":"/..."} | {"kind":"port"}
       //   | {"kind":"process-alive"} | {"kind":"one-shot","timeoutMs":120000}
@@ -502,7 +687,22 @@ Return exactly one JSON object in this shape and no other. Field names are exact
   }],
   "preview": { "componentKey": "...", "commandKey": "..." },
   "requiredProcesses": [
-    { "componentKey": "...", "commandKey": "...", "reason": "<why the page needs it>", "requiredFor": "preview" }
+    { "componentKey": "...", "commandKey": "...", "reason": "<why it runs>", "requiredFor": "preview|project",
+      "dependsOn": [{ "componentKey": "...", "commandKey": "..." }] }
+  ],
+  "componentLinks": [
+    { "fromComponentKey": "...", "toComponentKey": "...", "kind": "http|queue|database|library|other",
+      "description": "<what crosses this boundary>", "evidence": ["<absolute observed path>"] }
+  ],
+  "dataStores": [
+    { "key": "app-db", "label": "Application database", "engine": "postgresql|mysql|sqlite|other",
+      "mode": "local|managed", "providerId": null,
+      "usedByComponentKeys": ["..."], "schemaPaths": ["<observed path>"],
+      "migrationPaths": ["<observed path>"], "latestMigration": "<latest migration id or filename, or null>",
+      "migrate": { "componentKey": "...", "commandKey": "..." },
+      "status": { "componentKey": "...", "commandKey": "..." },
+      "evidence": ["<absolute observed path>"] }
+    // migrate/status may each be null. A managed store requires a trusted providerId.
   ],
   "externalServices": [{
     "key": "short-id",
@@ -534,7 +734,7 @@ Android app, an iOS app, a Go service or a Rails API is not served by a
 JavaScript command, and "there is no package.json" is not a reason to call it
 non-runnable.
 
-Rules: every component directory you were given must appear. requiredProcesses must include the preview entry. Every path in root, cwd and evidence must be a real path you observed. Never include a secret value. If you cannot determine a complete setup, return no JSON object and explain the blocker plainly instead.`;
+Rules: every component directory you were given must appear. requiredProcesses must include the preview entry AND one selected serve/worker command for every runnable component; include frontend, API, worker, and a local database process rather than treating only the page server as the app. Encode startup order in dependsOn (for example web -> API -> local DB) without cycles. Put setup commands in the order they must complete (dependency install before local migration); Build runs them sequentially. A local schema/migration may be an automatic setup command; a managed Supabase/Neon migration must have automatic:false and is never applied merely by opening Build. For managed services, record the trusted providerId so Build can prefer a linked account API/MCP route, ask the person to link their Supabase, Google/Firebase, or other provider account when needed, and fall back to the authenticated provider CLI only when account access is unavailable. Preserve migration files as the source of truth and report the latest observed migration. Every path in root, cwd, schemaPaths, migrationPaths and evidence must be a real path you observed. Never include a secret value or ask for a long-lived token in chat. If you cannot determine a complete setup, return no JSON object and explain the blocker plainly instead.`;
 }
 
 /** What the setup agent is doing, in the words of the person watching.

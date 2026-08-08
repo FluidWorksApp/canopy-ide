@@ -58,6 +58,28 @@ const publicState = (term: Terminal) => {
 };
 
 describe("xterm serialization fidelity used by idle compaction", () => {
+  it("stays byte-for-byte stable through repeated hidden-idle round trips", async () => {
+    const term = new Terminal({ cols: 20, rows: 4, scrollback: 64 });
+    const serializer = new SerializeAddon();
+    term.loadAddon(serializer);
+    await write(term, "seed-界🙂\r\n\u001b[1;34mstyled\u001b[0m\u001b[?2004h");
+
+    for (let cycle = 0; cycle < 100; cycle += 1) {
+      await write(term, `\r\ncycle-${cycle.toString().padStart(3, "0")}-界🙂`);
+      const snapshot = serializer.serialize({ scrollback: 64 });
+      const before = publicState(term);
+      term.reset();
+      term.clear();
+      await write(term, snapshot);
+      expect(serializer.serialize({ scrollback: 64 })).toBe(snapshot);
+      expect(publicState(term)).toEqual(before);
+    }
+
+    expect(term.buffer.normal.length).toBe(term.rows + 64);
+    expect(term.modes.bracketedPasteMode).toBe(true);
+    term.dispose();
+  });
+
   it("round-trips the configured 5,000-row scrollback at its retention limit", async () => {
     const term = new Terminal({ cols: 24, rows: 24, scrollback: 5_000 });
     const serializer = new SerializeAddon();

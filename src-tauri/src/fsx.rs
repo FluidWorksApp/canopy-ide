@@ -29,6 +29,14 @@ pub struct DirEntry {
 }
 
 #[derive(Serialize, Clone)]
+pub struct FsStatEntry {
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified_ms: Option<u64>,
+}
+
+#[derive(Serialize, Clone)]
 pub struct FsChange {
     pub root: String,
     pub paths: Vec<String>,
@@ -373,24 +381,41 @@ pub(crate) fn roots_of(state: &State<'_, WorkspaceManager>) -> Vec<PathBuf> {
     state.roots.lock().unwrap().clone()
 }
 
+const READ_DIR_MAX_ENTRIES: usize = 4096;
+const READ_DIR_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+fn read_dir_bounded(
+    dir: &Path,
+    max_entries: usize,
+    max_bytes: usize,
+) -> Result<Vec<DirEntry>, String> {
+    let mut entries = Vec::new();
+    let mut retained = 0usize;
+    for result in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let Ok(entry) = result else { continue };
+        let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path().to_string_lossy().to_string();
+        let charge = name.len().saturating_add(path.len()).saturating_add(32);
+        if entries.len() >= max_entries || retained.saturating_add(charge) > max_bytes {
+            return Err(format!(
+                "directory listing exceeds its {max_entries}-entry/{max_bytes}-byte limit"
+            ));
+        }
+        retained += charge;
+        entries.push(DirEntry { name, path, is_dir });
+    }
+    Ok(entries)
+}
+
 #[tauri::command]
 pub async fn fs_read_dir(
     state: State<'_, WorkspaceManager>,
     path: String,
 ) -> Result<Vec<DirEntry>, String> {
     let dir = check_scope(&state, Path::new(&path))?;
-    let mut entries: Vec<DirEntry> = std::fs::read_dir(&dir)
-        .map_err(|e| e.to_string())?
-        .filter_map(|e| e.ok())
-        .map(|e| {
-            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            DirEntry {
-                name: e.file_name().to_string_lossy().to_string(),
-                path: e.path().to_string_lossy().to_string(),
-                is_dir,
-            }
-        })
-        .collect();
+    let mut entries =
+        crate::blocking::io(|| read_dir_bounded(&dir, READ_DIR_MAX_ENTRIES, READ_DIR_MAX_BYTES))?;
     entries.sort_by(|a, b| {
         (b.is_dir, a.name.to_lowercase())
             .partial_cmp(&(a.is_dir, b.name.to_lowercase()))
@@ -407,14 +432,13 @@ pub async fn fs_read_dir(
 /// provider, an agent tool — from moving a DVD image into the WebView.
 const MAX_READ_BYTES: u64 = 512 * 1024 * 1024;
 
-fn read_file_capped(
-    source: std::fs::File,
-    requested_max: Option<u64>,
-) -> Result<Vec<u8>, String> {
+fn read_file_capped(source: std::fs::File, requested_max: Option<u64>) -> Result<Vec<u8>, String> {
     let max = requested_max.unwrap_or(MAX_READ_BYTES).min(MAX_READ_BYTES);
     let initial_len = source.metadata().map_err(|e| e.to_string())?.len();
     if initial_len > max {
-        return Err(format!("file is too large to load ({initial_len} bytes; limit {max})"));
+        return Err(format!(
+            "file is too large to load ({initial_len} bytes; limit {max})"
+        ));
     }
 
     // Read through the already-open handle and stop after max+1 bytes. A path
@@ -445,10 +469,9 @@ pub async fn fs_read_file(
 ) -> Result<tauri::ipc::Response, String> {
     let file = check_scope(&state, Path::new(&path))?;
     let source = std::fs::File::open(&file).map_err(|e| e.to_string())?;
-    let opened_identity = same_file::Handle::from_file(
-        source.try_clone().map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    let opened_identity =
+        same_file::Handle::from_file(source.try_clone().map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
     // Re-authorize after open and compare the live path with the stable handle.
     // If an agent replaces a scoped path with a symlink (or swaps it back) in
     // the check-to-open window, either scope validation or identity comparison
@@ -514,22 +537,29 @@ pub async fn git_status(
     // run it on every `git:change`. `blocking::io` is what git.rs already uses
     // ~15 times for exactly this; fsx.rs had none.
     crate::blocking::io(move || {
-        let top = match git_ro(&dir).args(["rev-parse", "--show-toplevel"]).output() {
+        let top = match crate::process_capture::output(
+            git_ro(&dir).args(["rev-parse", "--show-toplevel"]),
+            crate::process_capture::DEFAULT_STREAM_MAX,
+        ) {
             Ok(out) if out.status.success() => {
                 PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
             }
             _ => return Ok(GitStatus::default()),
         };
-        let branch = git_ro(&dir)
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-        let out = git_ro(&dir)
-            .args(["status", "--porcelain", "-z", "--ignored"])
-            .output()
-            .map_err(|e| e.to_string())?;
+        let mut branch_command = git_ro(&dir);
+        branch_command.args(["rev-parse", "--abbrev-ref", "HEAD"]);
+        let branch = crate::process_capture::output(
+            &mut branch_command,
+            crate::process_capture::DEFAULT_STREAM_MAX,
+        )
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        let out = crate::process_capture::output(
+            git_ro(&dir).args(["status", "--porcelain", "-z", "--ignored"]),
+            crate::process_capture::DEFAULT_STREAM_MAX,
+        )?;
+        crate::process_capture::reject_truncated(&out, "workspace git status")?;
         let raw = String::from_utf8_lossy(&out.stdout);
         let mut entries = Vec::new();
         let mut parts = raw.split('\0').peekable();
@@ -565,10 +595,10 @@ pub async fn git_head_content(
 ) -> Result<Option<String>, String> {
     let file = check_scope(&state, Path::new(&path))?;
     let parent = file.parent().ok_or("no parent dir")?;
-    let top = match git_ro(parent)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-    {
+    let top = match crate::process_capture::output(
+        git_ro(parent).args(["rev-parse", "--show-toplevel"]),
+        crate::process_capture::DEFAULT_STREAM_MAX,
+    ) {
         Ok(out) if out.status.success() => {
             PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
         }
@@ -578,11 +608,11 @@ pub async fn git_head_content(
         Ok(r) => r.to_string_lossy().to_string(),
         Err(_) => return Ok(None),
     };
-    let out = git_ro(&top)
-        .arg("show")
-        .arg(format!("HEAD:{rel}"))
-        .output()
-        .map_err(|e| e.to_string())?;
+    let out = crate::process_capture::output(
+        git_ro(&top).arg("show").arg(format!("HEAD:{rel}")),
+        crate::process_capture::DEFAULT_STREAM_MAX,
+    )?;
+    crate::process_capture::reject_truncated(&out, "git HEAD content")?;
     if out.status.success() {
         Ok(Some(String::from_utf8_lossy(&out.stdout).to_string()))
     } else {
@@ -944,6 +974,63 @@ pub async fn fs_stat(
     }))
 }
 
+const STAT_BATCH_MAX_PATHS: usize = 256;
+const STAT_BATCH_MAX_PATH_BYTES: usize = 256 * 1024;
+
+/// Resolve and stat a set of journal/diff paths in one IPC operation. Scope is
+/// checked for every input before any metadata is returned; files that vanish
+/// between scope resolution and metadata lookup are omitted so one editor
+/// save cannot invalidate the rest of the batch.
+#[tauri::command]
+pub async fn fs_stat_many(
+    state: State<'_, WorkspaceManager>,
+    paths: Vec<String>,
+) -> Result<Vec<FsStatEntry>, String> {
+    if paths.len() > STAT_BATCH_MAX_PATHS {
+        return Err(format!(
+            "metadata batch exceeds its {STAT_BATCH_MAX_PATHS}-path limit"
+        ));
+    }
+    let path_bytes = paths
+        .iter()
+        .try_fold(0usize, |total, path| total.checked_add(path.len()))
+        .ok_or_else(|| "metadata batch path bytes overflowed".to_string())?;
+    if path_bytes > STAT_BATCH_MAX_PATH_BYTES {
+        return Err(format!(
+            "metadata batch exceeds its {STAT_BATCH_MAX_PATH_BYTES}-byte path limit"
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    let mut scoped = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let file = check_scope(&state, Path::new(&path))?;
+        scoped.push((path, file));
+    }
+
+    Ok(crate::blocking::io(move || {
+        scoped
+            .into_iter()
+            .filter_map(|(path, file)| {
+                let meta = std::fs::metadata(file).ok()?;
+                Some(FsStatEntry {
+                    path,
+                    is_dir: meta.is_dir(),
+                    size: meta.len(),
+                    modified_ms: meta
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_millis() as u64),
+                })
+            })
+            .collect()
+    }))
+}
+
 // ---------- file management (context menu) ----------
 
 /// Create an empty file. Fails if it already exists rather than truncating —
@@ -1265,6 +1352,22 @@ mod tests {
     }
 
     #[test]
+    fn directory_enumeration_refuses_to_retain_past_its_item_budget() {
+        let root = std::env::temp_dir().join(format!("canopy-capped-dir-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        for name in ["a", "b", "c"] {
+            write(&root.join(name), name);
+        }
+        let error = match read_dir_bounded(&root, 2, usize::MAX) {
+            Ok(_) => panic!("directory enumeration should have exceeded the entry limit"),
+            Err(error) => error,
+        };
+        assert!(error.contains("2-entry"));
+        assert_eq!(read_dir_bounded(&root, 3, usize::MAX).unwrap().len(), 3);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn native_file_reader_obeys_the_caller_limit_before_full_allocation() {
         let root = std::env::temp_dir().join(format!("canopy-capped-read-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
@@ -1282,10 +1385,8 @@ mod tests {
 
     #[test]
     fn open_file_identity_detects_path_replacement() {
-        let root = std::env::temp_dir().join(format!(
-            "canopy-file-identity-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("canopy-file-identity-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
         let path = root.join("payload.bin");
         let old = root.join("opened.bin");

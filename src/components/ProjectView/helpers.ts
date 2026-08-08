@@ -12,6 +12,7 @@ import { basename } from "../../paths";
 export type SideTab =
   | "files"
   | "servers"
+  | "integrations"
   | "changes"
   | "git"
   | "prs"
@@ -421,6 +422,10 @@ export interface ProjectViewProps {
   /** Persist this project's custom tasks — they live on the project record, so
    *  writing one is a workspace save. */
   onSaveCustomTasks: (tasks: import("../../microTasks").CustomMicroTask[]) => void;
+  /** Persist non-secret provider, resource and deployment observations. */
+  onSaveIntegrations: (
+    state: import("../../projectIntegrations").ProjectIntegrationState,
+  ) => void;
   /** Persist an inferred Build target without opening or closing Engineer UI. */
   onPersistVibeTarget: (
     selection: import("../../vibeTargetInference").VibeTargetSelection,
@@ -508,7 +513,10 @@ export function vibeSetupGate(
   let ready = true;
   if (command.purpose === "setup") return { ready, start, failed };
   for (const setup of (component.commands ?? []).filter(
-    (candidate) => candidate.purpose === "setup" && candidate.id !== command.id,
+    (candidate) =>
+      candidate.purpose === "setup" &&
+      candidate.id !== command.id &&
+      candidate.automatic !== false,
   )) {
     const tab = tabs.find(
       (candidate) =>
@@ -517,15 +525,35 @@ export function vibeSetupGate(
     );
     if (tab && !tab.exited) {
       ready = false;
+      break;
     } else if (tab?.exited && tab.exitCode !== 0) {
       ready = false;
       failed.push(setup);
+      break;
     } else if (!tab && !started(setup.id)) {
       ready = false;
       start.push(setup);
+      // Setup order is declaration order. Starting install and migrate in the
+      // same render races the migration against its own dependencies.
+      break;
     }
   }
   return { ready, start, failed };
+}
+
+/** A dependency is ready, not merely allocated a tab. This distinction is what
+ * makes `database -> API -> web` startup deterministic: a tab exists before
+ * its child process has bound a port. */
+export function vibeRunReady(
+  tab: Pick<TermSubTab, "ptyId" | "exited"> | undefined,
+  command: Pick<RunCommand, "readiness">,
+  stats: Pick<ipc.SessionStats, "id" | "ports">[],
+): boolean {
+  if (!tab || tab.exited || tab.ptyId == null) return false;
+  if (command.readiness?.kind === "port" || command.readiness?.kind === "http") {
+    return Boolean(stats.find((sample) => sample.id === tab.ptyId)?.ports.length);
+  }
+  return true;
 }
 
 /** One tab as canopy_editor_state describes it: enough for an agent to know

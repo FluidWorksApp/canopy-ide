@@ -28,6 +28,11 @@ native host and PTYs are still making progress; treat those as separate layers.
 - Record native browser-close counters (pending labels, retry-worker state,
   attempts, successes, and failures). An idle WebContent PID alone is not a
   leak; a pending label that survives repeated close retries is actionable.
+- Record preview pressure-reload counters (kill-switch enabled state, decisions,
+  targets, attempts, successes, failures, missing views, suppressed targets,
+  and synchronous dispatch latency). Compare them with close counters and OS
+  samples by timestamp; dispatch latency is not page-load completion time, and
+  the counters alone do not measure reclaimed WebContent memory.
 - Preserve the rotating `resilience` log from the platform app-log directory.
   It is capped at 1 MiB and filters to native watchdog/app-exit records; do not
   substitute a broad debug log that may contain paths, URLs, or user text.
@@ -78,10 +83,22 @@ platform. Warm for ten minutes before measuring slopes.
 - Browser frames: after 100 dirty/capture/replacement cycles, retained frontend
   frame count and Blob bytes must return to the number/bytes owned by live tabs;
   native active capture/payload counters must return to zero.
+- Preview relief experiment: on a disposable runner only, compare reload against
+  close and close/recreate after the frontend handle contract supports destroyed
+  views. Use identical pages/warm-up and record main/child process identity plus
+  footprint before and after each action. `CANOPY_DISABLE_PREVIEW_PRESSURE_RELOAD=1`
+  suppresses automatic preview reload while retaining decision/target telemetry.
 - Hidden terminals: one visible plus 32 hidden terminals producing bounded test
   output for 30 minutes must keep native replay per session within its ring,
   renderer compacted VT payloads within 4 MiB each and 64 MiB total, and hidden
-  terminals detached from live renderer delivery.
+  xterm cell graphs absent after the idle boundary, with hidden terminals
+  detached from live renderer delivery.
+- Editors/viewers: switch repeatedly across code, image, PDF, and spreadsheet
+  tabs. After the 60-second idle boundary, editor compact backing must remain at
+  or below 32 models/64 MiB total, inactive native-viewer source bytes must reach
+  zero, and activation must restore exact unsaved text or bounded file bytes.
+  Owner/lease saturation must report fail-closed rather than dispose a visible
+  or agent-owned model.
 - File churn: 1,000 switches among bounded fixtures must return shared active and
   queued I/O bytes to zero and editor view-state entries to at most 32.
 - Renderer replacement: from the first stale heartbeat observation, recovery

@@ -153,6 +153,24 @@ describe("poll comparisons", () => {
 });
 
 describe("journal file loading bounds", () => {
+  it("batches metadata before reading a multi-file journal", async () => {
+    const stat = vi.fn(async () => ({ is_dir: false, size: 1 }));
+    const statMany = vi.fn(async (paths: string[]) =>
+      paths.map((path) => ({ path, is_dir: false, size: 1 })),
+    );
+    const result = await loadAgentFileContents(
+      ["a", "b", "a"],
+      (path) => `/repo/${path}`,
+      { stat, statMany, readText: async (path) => path },
+      () => true,
+      { concurrency: 2, perFileBytes: 10, totalBytes: 10 },
+    );
+
+    expect(statMany).toHaveBeenCalledWith(["/repo/a", "/repo/b"]);
+    expect(stat).not.toHaveBeenCalled();
+    expect([...result.keys()]).toEqual(["a", "b"]);
+  });
+
   it("never exceeds the configured read concurrency", async () => {
     let active = 0;
     let peak = 0;

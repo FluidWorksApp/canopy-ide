@@ -118,6 +118,26 @@ retention, and persistent generation/recovery telemetry; those implementations
 still require the tests and soaks below. It does not falsify the 13:44 OOM finding
 or justify claiming a second renderer death.
 
+### Follow-up apparent restart before 17:38 +0700: in-process state reset
+
+A fourth read-only check covered the 40 minutes before 17:38 after another
+reported restart in the installed pre-fix build. Native Canopy PID `49786`
+still had its August 7 start time. Main WebContent PID `43665` still had its
+13:44:26 start time, retained page id 8 and frame id `4294967302`, and was about
+2.74 GiB RSS at the sample. The unified log contained no Canopy/WebKit crash,
+termination, exit, replacement, or new main-frame navigation record in that
+window. Four other child WebContent processes also retained their earlier
+identities; no new child launch explained the symptom.
+
+This rules out a native-app restart and an OS-level main-WebContent replacement,
+but it cannot distinguish an in-place SPA remount, feature state reset, or a
+watchdog-issued reload that WebKit did not expose as a top-level navigation in
+the available log. The installed release file log had stopped updating on
+August 7, so no contemporaneous watchdog decision survived. The new bounded
+release log records a fixed, content-free line for every recovery outcome and
+renderer generation specifically to make the next event attributable without
+capturing terminal or document content.
+
 ### Implementation update — renderer continuity (2026-08-08)
 
 The current worktree now replaces destructive renderer boot cleanup with a
@@ -159,9 +179,13 @@ Finally, the heartbeat listener is installed immediately after native renderer
 registration, before Monaco and React, and acknowledgements carry the renderer
 generation. Focused native tests cover process survival, stale acknowledgements,
 double registration, Remote/detached survival, bounded/truncated replay, and
-orphan browser teardown. The focused milestone suites pass; the full frontend
-run currently has one pre-existing `attemptIdentityGuard` source-order assertion
-failure that reproduces without this milestone. Runtime tests that kill real
+orphan browser teardown. The focused milestone suites pass. The former
+`attemptIdentityGuard` source-order failure was an obsolete textual assumption:
+containment activation must kill/reap a gated helper before reader cloning when
+membership verification fails. The guard now checks cleanup inside the actual
+reader-clone failure suffix while separately requiring the earlier containment
+cleanup boundary, and its focused suite passes. A final full frontend rerun is
+recorded with the milestone validation below. Runtime tests that kill real
 platform WebContent processes remain open below.
 
 ### Implementation update — hidden xterm compaction (2026-08-08)
@@ -794,8 +818,11 @@ kill, install a Job Object, write a cgroup, or enforce an allocation boundary,
 and therefore reported `monitor_only` on all three desktop platforms.
 
 Platform-containment milestone (2026-08-08): the backend contract now reports
-runtime capability rather than inferring it from the target OS. Windows and
-macOS remain `monitor_only`. On Linux, Canopy can opt into a race-closed
+runtime capability rather than inferring it from the target OS. macOS remains
+`monitor_only`. Windows remains monitor-only until a future PTY successfully
+passes the launcher gate, Job Object assignment, and membership verification;
+after that it reports the narrower `notification_limit` capability, never a
+hard allocation cap. On Linux, Canopy can opt into a race-closed
 `memory.high` soft boundary only when `CANOPY_CGROUP_ROOT` names an explicit
 writable cgroup-v2 delegation and Canopy itself is already inside that subtree.
 For each future PTY it creates an empty child cgroup, writes the initial
@@ -811,17 +838,42 @@ warning/grant transition before the enforced boundary. It never writes
 whereas a hard limit would give an agent allocation failures without a safe
 application-level recovery contract.
 
-This Linux path is deliberately opt-in rather than guessing a writable systemd
-scope. Automatic user-scope creation/delegation, Linux runner validation, cgroup
-event monitoring, cleanup retry for a daemonized descendant, and packaging
-instructions remain open. Windows' equivalent gate is architecturally possible:
-spawn the shipped helper waiting, open its PID, assign and verify a Job Object,
-then release it. It is not implemented yet because `portable-pty` does not
-expose its process handle, this environment cannot compile the Windows native
-dependency graph without the MSVC SDK, and `JOB_OBJECT_LIMIT_JOB_MEMORY` is a
-hard committed-memory failure boundary—not a safe analogue of `memory.high`.
-`KILL_ON_JOB_CLOSE` would also be an explicit process-tree lifetime decision,
-not something to introduce as an incidental memory-control flag.
+Linux also recognizes the current cgroup of a systemd unit carrying
+`INVOCATION_ID`, but enables containment only when that exact unit validates as
+a writable `Delegate=yes` subtree with the memory controller enabled; otherwise
+it stays monitor-only. The existing two-second sample now reads
+`memory.current` and `memory.events` together, degrades capability reporting on
+a controller read fault, and retries empty-cgroup cleanup after PTY exit.
+
+On Windows the shipped helper is now the spawn gate. It reports ready without
+starting user code, is assigned to a private Job Object, has membership checked
+with `IsProcessInJob`, and only then receives the release file. The helper keeps
+waiting for the real child because Windows has no `exec`; descendants inherit
+the verified job. The job exposes current committed memory and a live-updatable
+job-wide notification limit. It deliberately does not set
+`JOB_OBJECT_LIMIT_JOB_MEMORY`: allocation failure is not a safe analogue of
+Linux `memory.high`. `KILL_ON_JOB_CLOSE` makes the already-explicit native-host
+lifetime boundary complete, but no memory-threshold path calls
+`TerminateJobObject`. The Windows API slice compiles in an isolated MSVC-target
+probe; the full product cross-check still stops earlier in `ring` because this
+macOS environment has no Windows C SDK, so nested-job/ConPTY behavior remains a
+Windows-runner gate.
+
+Governor-lifecycle milestone (2026-08-08): sustained recovery now enters
+`RELIEF` for a ten-second cooldown before `NORMAL`; an explicit stop enters
+`STOPPING`, and disappearance from the native process scan records `EXITED`.
+Grant and stop retries are generation-scoped and audited, with completed-stop
+idempotency retained in a bounded 128-entry tombstone ring. The UI's Stop action
+uses that native lifecycle rather than bypassing it through raw `pty_kill`.
+When a CLI has a content-free package/bin identity, a separate checkbox may
+persist the exact increment that was already granted. Rust re-verifies that
+grant, stores at most 64 defaults in a 64 KiB Canopy-owned file using a
+recoverable temp/backup replacement, never persists an executable path, and
+rechecks protected host reserve plus the live platform boundary before applying
+the default to a later session. The declared no-renderer policy is refusal-only:
+native notification and accounting continue, but no automatic grant, pause, or
+stop occurs. `PAUSED` is intentionally absent because neither a safe in-flight
+turn detector nor complete macOS process-session coverage is proven.
 
 Suggested state model:
 
@@ -929,8 +981,18 @@ The bounded incident procedure and numeric release gates are in
   completion, and host reset; native metrics still stop at IPC transfer.
 - [ ] Add a long-running replacement test that proves renderer footprint reaches
   a plateau on macOS, Windows, and Linux.
+- [x] Add deterministic constant-state replacement endurance: 10,000 preview
+  reload decisions retain scalar counters only, 1,000 hidden-terminal
+  compact/restore/reattach cycles preserve exact output, and 100 real-xterm VT
+  round trips preserve public buffer/mode state. These tests prove ownership and
+  bounded bookkeeping, not an OS renderer-footprint plateau.
 - [ ] Compare reload, close, and close/recreate only after the frontend child-view
   handle contract can represent a destroyed view.
+- [x] Publish constant-size preview pressure-reload decision/target/attempt/
+  success/failure/missing/dispatch-latency counters beside the existing close
+  counters, so a disposable runner can compare lifecycle experiments without
+  retaining tab ids, labels, URLs, or history. This is a measurement hook, not
+  a result.
 
 ### B. PTY continuity and renderer reattachment — **atomic**
 
@@ -960,6 +1022,11 @@ The bounded incident procedure and numeric release gates are in
   signal count) in the bounded incident ring and the release resilience log.
 - [ ] Test reload, WebContent termination, navigation, double reload, and renderer
   startup failure against harmless marker-producing PTYs.
+- [x] Add a deterministic native PTY harness for 512 consecutive renderer
+  registrations (including adjacent/double replacement and pages that never
+  attach), preserving session generation/PID and replaying a marker emitted
+  while detached. Real WebContent termination/navigation still require a
+  disposable app runner, so the broader item remains open.
 - [x] Test headless Remote and detached micro-task PTYs in the same matrix.
 
 ### C. Hidden terminal and frontend-state pressure
@@ -998,6 +1065,16 @@ The bounded incident procedure and numeric release gates are in
   aggregates; this is not claimed as isolated xterm parser CPU time.
 - [ ] Add a bounded-output multi-terminal soak test with one visible pane and
   many hidden tabs.
+- [x] Add a deterministic controller/registry multi-terminal endurance case:
+  one visible terminal remains live, 32 hidden terminals contend for a scaled
+  global snapshot budget, a rogue hidden producer accumulates 2,000 native
+  output chunks, restore/replay is exact, rejected terminals remain live, and
+  restored/disposed reservations are recycled exactly. This validates the
+  admission and ordering state machines without allocating 64 MiB in CI; the
+  30-minute real-app footprint/traffic soak above remains open.
+- [x] Add deterministic 1,000-cycle hidden compaction/reattach exact-output and
+  100-cycle real-xterm fidelity endurance tests. They exercise parser and
+  cursor ordering but do not substitute for the multi-terminal footprint soak.
 
 ### D. General I/O and retained-data bounds
 
@@ -1007,13 +1084,31 @@ The bounded incident procedure and numeric release gates are in
   per-project active operations, 64 MiB/32 MiB active-byte ceilings, and a
   bounded 96-item/64 MiB queue. Agent Workspace and LSP-provider file reads,
   task-history/evidence artifacts, deferred project search, tracker/agent-tool
-  PR requests, and attachment decoding now share it; unwrapped metadata, Git and general
-  network call sites keep the broad
-  item above open.
-- [ ] Batch directory enumeration and metadata/stat requests; coalesce duplicate
+  PR requests, attachment decoding, and filesystem metadata now share it; native
+  Git/process work and general network call sites keep the broad item above open.
+- [x] Put all short-lived native subprocess capture behind a four-child/64 MiB
+  global admission and a 32-request bounded queue before spawn. Both stdout and stderr
+  are drained concurrently with per-stream ceilings; canceled async waiters
+  remove their queue claim, nested synchronous capture rejects instead of
+  waiting on itself, and long-lived PTY/LSP/MCP children retain their separate
+  owner-specific governors.
+- [x] Batch directory enumeration and metadata/stat requests; coalesce duplicate
   path work and cap each batch by both item count and estimated bytes.
+  Directory enumeration now refuses results beyond 4,096 entries/2 MiB and
+  identical in-flight reads share one admitted IPC request. Agent Workspace
+  journal hydration uses one deduplicated native stat batch (256 paths/256 KiB
+  of path text) instead of one invoke per file, with individual-stat fallback
+  for older cores and files that disappear during the batch.
 - [ ] Deduplicate identical in-flight network requests, cap concurrent sockets
   and response bodies per origin/project, and stream large downloads/uploads.
+- [x] Single-flight identical GitHub/Linear tracker requests and release their
+  ownership at settlement. All Git/`gh`/Linear subprocess streams are now
+  continuously drained with an 8 MiB per-stream ceiling, but a shared native
+  socket/origin scheduler and streaming upload/download API do not yet exist.
+- [x] Admit at most 16 combined Remote and Team WebSockets, reject excess before
+  upgrade, and release the reservation when the socket/relay peer ends. Native
+  CLI HTTP calls still lack one per-origin scheduler, so the broad item remains
+  open.
 - [ ] Abort superseded file reads, fetches, previews, searches, and decodes so
   their buffers cannot outlive the UI state that requested them.
 - [x] Remove aborted requests from the shared admission queue, discard late
@@ -1029,11 +1124,16 @@ The bounded incident procedure and numeric release gates are in
   a time; cap retained output to 512 Ki characters per run and 2 Mi characters
   app-wide, and single-flight lazy loads for older expanded rows.
 - [x] Put byte bounds and backpressure on both WebSocket bridge directions.
-- [ ] Bound LSP, MCP, companion, and structured-runner frames before parsing or
+- [x] Bound LSP, MCP, companion, and structured-runner frames before parsing or
   allocating the complete payload.
 - [x] Bound LSP headers/frames, MCP stdio/HTTP request and response bodies, and
-  structured-runner lines before complete-payload allocation; companion framing
-  and MCP tool-result pagination remain separate open work.
+  structured-runner lines before complete-payload allocation. Companion stdout
+  now drains and rejects JSON lines beyond 1 MiB, bounds stderr retention to
+  8 KiB, and caps input/store bodies at 1 MiB. The renderer rejects LSP frames
+  beyond four million characters before `JSON.parse`, retains at most 128
+  pre-listener messages/16 MiB estimated parsed state, clears them on failure or
+  close, and parses progress frames only once. MCP tool-result pagination is a
+  response-shaping improvement, not an unbounded framing gap, and remains open.
 - [x] Make portal queue limits byte-based as well as count-based. The portal now
   admits at most 8 MiB of queued outbound text, rejects a single message above
   4 MiB and inbound control frames above 1 MiB, and holds each byte reservation
@@ -1045,14 +1145,35 @@ The bounded incident procedure and numeric release gates are in
 - [ ] Close and instrument file descriptors/Windows handles, pipes, sockets,
   watcher registrations, timers, observers, event subscriptions, and child
   process handles at owner teardown; alert on monotonic handle-count growth.
-- [ ] Keep permission/security-scoped file handles and access grants scoped to
+- [x] Publish content-free scalar counts/high-water marks for metadata
+  single-flights, tracker fetches, LSP readers/startup-buffer bytes, root-cache
+  entries, and starting/running language servers. Each new single-flight and
+  startup buffer releases at settlement, listener attachment, close, or failure.
+  Cross-platform OS descriptor/handle counts and monotonic-growth alerts still
+  require a native sampler, so the broad handle item remains open.
+- [x] Publish owned native capture metrics for active/queued/high-water/rejected
+  captures, queue wait, live child and pipe handles, current/high-water/total
+  retained bytes, completions, and truncated streams; publish active/high-water/
+  accepted/rejected Remote/Team WebSockets. These exact ownership counters are
+  portable; a process-wide FD/HANDLE sampler remains platform-specific.
+- [x] Keep permission/security-scoped file handles and access grants scoped to
   active operations; release them on cancellation, tab/project close, and error.
-- [ ] Stream or incrementally truncate Git/process output instead of capturing
+  Static audit found no macOS `startAccessingSecurityScopedResource`, Windows
+  broker token, or equivalent grant acquisition in the current app. Workspace
+  access is a canonical-path allowlist and ordinary file handles are RAII-owned;
+  the new internal-store reads use one stable bounded handle. A future sandboxed
+  picker must add an explicit grant owner before this can remain checked.
+- [x] Stream or incrementally truncate Git/process output instead of capturing
   the full child output first.
 - [x] Stream and continuously drain commit-patch and per-file Git diff output,
   retain only the bounded display window, and compute patch statistics across
-  the full stream; branch/network/Linear helpers remain open.
-- [ ] Enforce file-size budgets before decoders/parsers that read whole files.
+  the full stream. Every remaining command in `git.rs`, including branch,
+  `gh`, network, clone, and Linear helpers, now uses the continuously drained
+  8 MiB per-stream capture. Every remaining production `Command::output` and
+  `wait_with_output` call in the app and standalone hook has been replaced by
+  bounded concurrent drain (the hook uses a 1 MiB stdout-only helper); a source
+  invariant rejects reintroduction outside test fixtures.
+- [x] Enforce file-size budgets before decoders/parsers that read whole files.
 - [x] Reject SpotSearch images and companion attachments above 12 MiB before
   FileReader/base64 work; admission charges the original plus its 4/3 encoded
   representation so the peak fits the 32 MiB per-project ceiling. Both Rust
@@ -1067,17 +1188,36 @@ The bounded incident procedure and numeric release gates are in
   concurrent-growth allocation races while retaining a 512 MiB compatibility
   backstop for legacy callers. Project open/share/watcher reads now pass their
   viewer-specific limits instead of using that compatibility ceiling.
+- [x] Pass Agent Workspace's 8 MiB per-file ceiling into the native stable-handle
+  read as well as its pre-read stat, preventing a file-growth race from escaping
+  the renderer admission estimate.
+- [x] Tighten JSON/notebook parse input to 8 MiB and SheetJS/mammoth archive
+  input to 16 MiB before IPC. Before either ZIP decoder runs, inspect the central
+  directory and reject more than 4,096 entries, any entry expanding beyond
+  16 MiB, aggregate expansion beyond 32 MiB, malformed/ZIP64/multi-disk
+  containers, and cap SheetJS hydration to 10,000 rows. Notes/research
+  artifacts and the encrypted vault now use stable-handle `max + 1` reads rather
+  than checking only after whole-file allocation.
 - [ ] Avoid retaining raw bytes, decoded text, editor models, and unchanged
   baseline strings simultaneously.
 - [x] Transfer code-file content ownership to the Monaco model after decoding;
-  clear the duplicate IPC `Uint8Array` while keeping native-viewer bytes until
-  those decoder lifecycles are independently rehydratable.
+  clear the duplicate IPC `Uint8Array`. Native-viewer bytes now have a separate
+  reconstructable ownership path rather than remaining pinned by every open tab.
+- [x] After 60 seconds inactive (or immediately on pressure), release native
+  viewer `Uint8Array` ownership and single-flight its bounded disk rehydration
+  when visible again. The read is pinned to the exact tab id and rechecked after
+  each await so close/reopen cannot resurrect an ownerless resource; a failed
+  rehydrate exposes an explicit Retry action.
 - [x] Remove the full-string baseline map where values are never read, or replace
   values with hashes/version ids where comparison is required.
 - [ ] Lazily decode media and spreadsheet sheets; release inactive decoded data
   and object URLs.
 - [x] Generate and retain spreadsheet HTML for only the active sheet rather than
   materialising every sheet table for the lifetime of the tab.
+- [x] Unmount inactive PDF/image/sheet/docx/notebook decoders, revoke their Blob
+  URLs, clear generated sheet state, and release their source bytes through the
+  bounded inactive-viewer owner above. An active source view also releases the
+  redundant non-code raw bytes after Monaco takes text ownership.
 - [ ] Dispose inactive Monaco models, workers, language-client state, WebGL/canvas
   surfaces, image decoders, and preview resources according to an explicit
   ownership contract.
@@ -1085,8 +1225,15 @@ The bounded incident procedure and numeric release gates are in
   Monaco editor instances while preserving bounded view state, and unmount
   inactive file/viewer descendants without discarding the owning tab model or
   unsaved text. Resource ownership follows the same `surfaceTabId` as the host,
-  including Build mode's preview-over-Engineer selection. Language clients,
-  media decoders, and all model ownership remain under the broader item above.
+  including Build mode's preview-over-Engineer selection.
+- [x] Compact inactive Monaco text models after 60 seconds or pressure: preserve
+  exact unsaved text in at most 32 charged JS strings/64 MiB total, dispose the
+  model and its language-service document state, and losslessly rehydrate via
+  the canonical file URI. Duplicate views, live collaboration, and agent/LSP
+  leases prevent disposal; owner/lease saturation fails closed. Closing a tab
+  forgets both live and compact backing, and agent-only models dispose at lease
+  release instead of creating ownerless retention. WebGL/canvas and native
+  WebView process ownership remain under the broader item above.
 - [ ] Bound preview request bodies, generated HTML, response copies, and decoded
   assets by bytes.
 - [x] Cap buffered preview request bodies and injectable HTML at 16 MiB before
@@ -1098,6 +1245,13 @@ The bounded incident procedure and numeric release gates are in
   proves the registry handle is retained until native close succeeds.
 - [ ] Audit every queue/ring/cache for owner, unit, limit, overflow behavior,
   expiry, and observability.
+- [x] Audit and bound the newly touched metadata single-flight maps, tracker
+  request map, LSP pre-listener queue/root-resolution cache, companion frames,
+  and Git/Linear process pipes. The broad item remains open for untouched
+  decoder, native watcher/handle, and UI feature caches.
+- [x] Add scalar-only editor/viewer retention counters and high-water marks for
+  pending owners/bytes, compact backing, rejection/fail-closed states, releases,
+  restorations, and failures; paths and content never enter diagnostics.
 
 ### E. Renderer watchdog and incident-safe recovery
 
@@ -1124,6 +1278,10 @@ The bounded incident procedure and numeric release gates are in
   watchdog/governor incident logs; both retain scalar metadata in bounded rings.
 - [ ] Test slow Monaco initialization, deliberate event-loop stalls, genuine
   WebContent termination, and simultaneous recovery triggers.
+- [x] Add deterministic watchdog endurance for two minutes of early-heartbeat
+  slow startup, 1,000 recoverable event-loop stalls, one-probe sustained-stall
+  escalation, and the existing simultaneous-trigger/double-reload suppression.
+  A genuine platform WebContent termination remains runner-only.
 
 ### F. Resource accounting and user-granted terminal budgets
 
@@ -1142,23 +1300,29 @@ The bounded incident procedure and numeric release gates are in
   reserve or headroom already promised by an earlier grant.
 - [ ] Protect a native/Rust control-plane reserve that does not depend on renderer
   responsiveness; monitor-only accounting cannot yet enforce this boundary.
-- [x] Report platform measurement and enforcement capability honestly; macOS and
-  Windows remain `monitor_only`, while Linux reports `soft_limit` only after a
-  gated cgroup-v2 launch completes membership verification.
+- [x] Report platform measurement and enforcement capability honestly; macOS
+  remains `monitor_only`, Windows reports only `notification_limit` after a
+  gated Job Object launch verifies membership, and Linux reports `soft_limit`
+  only after a gated cgroup-v2 launch verifies membership.
 - [x] Implement monitor-only NORMAL, WARNED, AWAITING_GRANT, and OVER_ALLOWANCE
   transitions with two-sample warning debounce and clear hysteresis.
 - [ ] Define NORMAL, WARNED, RELIEF, AWAITING_GRANT, PAUSED, STOPPING, and EXITED
-  transitions with hysteresis and cooldowns.
+  transitions with hysteresis and cooldowns. NORMAL/WARNED/RELIEF/
+  AWAITING_GRANT/OVER_ALLOWANCE/STOPPING/EXITED are implemented and audited;
+  PAUSED remains deliberately blocked on whole-tree and in-flight-turn safety.
 - [x] Require a generation-checked, single-use explicit API call for temporary
   512 MiB or 1 GiB allowance increments; exact retries are idempotent.
 - [x] Ask in a renderer dialog before a per-session allowance is raised; expose
   only the Rust-issued 512 MiB/1 GiB choices and an explicit Stop action, and
   state clearly when the platform remains monitor-only.
-- [ ] Add separately confirmed, native-persisted remembered defaults for a CLI;
+- [x] Add separately confirmed, native-persisted remembered defaults for a CLI;
   do not derive them from renderer `localStorage`.
 - [x] Keep grant application/refusal and state transitions in a bounded audit
   history without terminal content, prompts, commands, or paths.
 - [ ] Make grant, pause, resume, and stop operations idempotent and auditable.
+  Grant and explicit graceful stop are generation-scoped, idempotent, and
+  audited, including bounded completed-stop tombstones; pause/resume remain
+  blocked and unimplemented.
 - [ ] Detect likely in-flight API turns before pausing where possible; warn that
   pause can time out network operations.
 - [ ] Surface or lease/release file claims held by paused agents so one paused tree
@@ -1174,8 +1338,9 @@ The bounded incident procedure and numeric release gates are in
 - [x] Refuse new PTY process trees before spawn when native pressure is critical
   or host availability has reached the protected IDE reserve; never disturb an
   already-running session as an admission-control side effect.
-- [ ] Provide a non-renderer fallback decision policy when the UI cannot display
-  the grant prompt.
+- [x] Provide a non-renderer fallback decision policy when the UI cannot display
+  the grant prompt: retain native accounting, issue the content-free native
+  notification, and refuse every automatic grant, pause, or stop.
 - [x] Emit a content-free native notification, deep-linked to the terminal, when
   a session first needs a decision; automatic fallback enforcement remains open.
 
@@ -1183,10 +1348,11 @@ The bounded incident procedure and numeric release gates are in
 
 - [x] Keep one platform backend/capability contract and report `monitor_only`
   unless a runtime backend completes its own spawn-time verification.
-- [ ] Windows: create one Job Object per session and assign the PTY root before it
+- [x] Windows: create one Job Object per session and assign the PTY root before it
   can spawn descendants, using suspended spawn or a launcher gate.
-- [ ] Windows: use job-wide notification and committed-memory limits; allow live
-  limit changes and use `TerminateJobObject` for complete cleanup.
+- [ ] Windows: job-wide notification/accounting and live limit changes are
+  implemented; keep hard committed-memory enforcement and explicit
+  `TerminateJobObject` recovery open until allocation-failure UX is proven.
 - [ ] Windows: test nested jobs, conhost/pseudoconsole placement, breakaway, WMI
   escape, allocation failure, and user-grant increases.
 - [ ] Linux: create one delegated cgroup v2 subtree per session and apply
@@ -1200,8 +1366,8 @@ The bounded incident procedure and numeric release gates are in
   failed OS update does not spend the policy grant.
 - [x] Linux: omit `memory.max` until allocation-failure/OOM semantics have an
   explicit user-visible recovery contract.
-- [ ] Linux: support systemd user scopes/delegation and a clearly reported
-  monitor-only fallback when no writable controller is available.
+- [x] Linux: recognize an existing systemd `Delegate=yes` user unit and clearly
+  report monitor-only fallback when no writable controller is available.
 - [ ] Linux: test descendant inheritance, OOM behavior, live grants, cleanup, and
   distributions without delegation.
 - [ ] macOS: aggregate `ri_phys_footprint` over descendants and validate it against
@@ -1222,13 +1388,28 @@ The bounded incident procedure and numeric release gates are in
   headless, and high-output PTYs.
 - [ ] Add platform-specific containment tests in Windows, Linux, and macOS CI or
   dedicated runners.
+- [x] Add a narrow PR compile/unit matrix on `windows-2022` and `macos-14`,
+  including the platform-correct sidecar suffix and a Windows empty-Job runtime
+  check for notification-limit updates/accounting. Descendant inheritance,
+  ConPTY placement, macOS Activity Monitor comparison, and pressure behavior
+  remain dedicated-runner work, so the broader item above stays open.
 - [ ] Add multi-hour soak tests for browser snapshots, previews, terminal churn,
   file switching, and reconnect cycles.
 - [x] Define pass/fail footprint slopes and maximum recovery times, not only
   end-state assertions.
 - [ ] Roll out behind telemetry-visible feature flags with conservative defaults.
-- [ ] Provide a kill switch for governor enforcement while retaining measurement.
+- [x] Provide `CANOPY_DISABLE_TERMINAL_CONTAINMENT` as a startup kill switch for
+  cgroup/Job Object activation while retaining process-tree measurement,
+  governor transitions/incidents, and an explicit disabled capability detail.
 - [ ] Write the user-facing memory-grant, pause, recovery, and incident messages.
+- [x] Add a telemetry-visible startup kill switch for preview pressure reload
+  (`CANOPY_DISABLE_PREVIEW_PRESSURE_RELOAD`): pressure decisions and target
+  counts continue while reload actions are suppressed. Other memory features
+  still need coordinated rollout flags/kill switches.
+- [x] Replace the macOS-only pressure banner with platform-neutral copy that
+  states terminals remain native-host owned, and show one deduplicated notice
+  after a completed renderer replacement. Pause and unrecoverable-incident copy
+  stays open with the unimplemented pause/fallback policy.
 - [x] Publish an operational runbook for collecting bounded profiles without
   risking live terminal work.
 - [x] Re-run an independent adversarial review for this atomic milestone. The

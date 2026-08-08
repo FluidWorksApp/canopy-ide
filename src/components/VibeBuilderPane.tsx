@@ -632,6 +632,18 @@ export function VibeBuilderPane({
     </div>
   );
 
+  // The empty preview already explains that the project is preparing. A
+  // second floating control that says "Ready" (or looks like an input while
+  // rejecting input) is a false affordance. Keep the mounted session so an
+  // incident/question can still surface, but do not render the composer until
+  // the runtime has reached the first point at which it can accept a request.
+  if (
+    phase === "waiting" &&
+    !question
+  ) {
+    return null;
+  }
+
   return (
     <section
       className={`vibe-builder-pane ${

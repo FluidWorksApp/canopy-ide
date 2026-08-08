@@ -8,6 +8,7 @@ import {
   type ParseError,
 } from "jsonc-parser";
 import { sanitizeHtml } from "../markdown";
+import { archiveBudgetError } from "../archiveBudget";
 import { Markdown } from "./Markdown";
 import "highlight.js/styles/github-dark.css";
 
@@ -150,9 +151,14 @@ export function SheetView({ bytes }: { bytes: Uint8Array }) {
 
   useEffect(() => {
     let cancelled = false;
+    const archiveError = archiveBudgetError(bytes);
+    if (archiveError) {
+      setError(archiveError);
+      return;
+    }
     void import("xlsx")
       .then((XLSX) => {
-        const wb = XLSX.read(bytes, { type: "array" });
+        const wb = XLSX.read(bytes, { type: "array", sheetRows: 10_000 });
         if (cancelled) return;
         xlsxRef.current = XLSX;
         workbookRef.current = wb;
@@ -337,6 +343,11 @@ export function DocxView({ bytes }: { bytes: Uint8Array }) {
           .map((b) => b.toString(16).padStart(2, "0"))
           .join(" ")}.`,
       );
+      return;
+    }
+    const archiveError = archiveBudgetError(bytes);
+    if (archiveError) {
+      setError(archiveError);
       return;
     }
     void import("mammoth")

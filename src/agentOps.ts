@@ -30,6 +30,10 @@ import { TRACKERS } from "./trackers";
 import { readBoundedFile } from "./boundedFileRead";
 import { sizeLimitFor } from "./fileOpen";
 import { rendererIoBudget } from "./ioBudget";
+import {
+  leaseEditorModel,
+  retainedEditorModelText,
+} from "./editorModelRetention";
 
 /** How long a first diagnostics call waits for the server to publish. A cold
  *  tsserver is doing real work; a warm one answers in a frame. */
@@ -76,7 +80,10 @@ async function prime(path: string, roots: string[]): Promise<{ root: string; tex
   const root = rootFor(path, roots);
   if (!root) throw new Error(`${path} isn't inside any open Canopy project`);
   const existing = monaco.editor.getModel(monaco.Uri.file(path));
-  const text = existing ? existing.getValue() : await readSourceText(path, root);
+  const text =
+    existing?.getValue() ??
+    retainedEditorModelText(monaco.Uri.file(path).toString()) ??
+    (await readSourceText(path, root));
   modelFor(path, text);
   await ensureLanguageServer(path, root);
   if (!(await hasServerFor(path, root))) {
@@ -171,11 +178,12 @@ async function describeLocations(locations: LspLocation[], roots: string[]) {
     let lines = cache.get(path);
     if (!lines) {
       const model = monaco.editor.getModel(monaco.Uri.file(path));
-      const text = model
-        ? model.getValue()
-        : await readSourceText(path, rootFor(path, roots) ?? "agent-ops").catch(
-            () => "",
-          );
+      const text =
+        model?.getValue() ??
+        retainedEditorModelText(monaco.Uri.file(path).toString()) ??
+        (await readSourceText(path, rootFor(path, roots) ?? "agent-ops").catch(
+          () => "",
+        ));
       lines = text.split("\n");
       cache.set(path, lines);
     }
@@ -609,7 +617,11 @@ function needCompanion<T>(handler: T | undefined, tool: string): T {
 /** Run one UI op and produce the tool's result. Throwing is how an op reports
  *  a problem the agent should read — App turns it into the error payload. */
 export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unknown> {
-  switch (op.op) {
+  const releaseModel = op.path
+    ? leaseEditorModel(monaco.Uri.file(op.path).toString())
+    : () => {};
+  try {
+    switch (op.op) {
     case "diagnostics":
       return diagnostics(op.path, ctx.roots, op.waitMs);
     case "references":
@@ -723,5 +735,8 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
 
     default:
       throw new Error(`unknown op: ${op.op}`);
+    }
+  } finally {
+    releaseModel();
   }
 }

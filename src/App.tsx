@@ -27,8 +27,14 @@ import {
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, Notify, RelayHandle } from "./types";
 import type { CustomMicroTask } from "./microTasks";
+import type { ProjectIntegrationState } from "./projectIntegrations";
 import { shedRendererPressure } from "./rendererPressureRelief";
 import { bindMemoryPressure } from "./memoryPressureBinding";
+import {
+  memoryPressureMessage,
+  RECOVERY_NOTICE_SESSION_KEY,
+  rendererRecoveryNotice,
+} from "./memoryResilienceMessages";
 import {
   applyVibeTargetSelection,
   type VibeTargetSelection,
@@ -343,6 +349,23 @@ export default function App() {
     },
     [projectIdentity, projectNameFor],
   );
+  useEffect(() => {
+    let cancelled = false;
+    void ipc.watchdogIncidents().then((incidents) => {
+      if (cancelled) return;
+      const seen = sessionStorage.getItem(RECOVERY_NOTICE_SESSION_KEY);
+      const recovery = rendererRecoveryNotice(incidents, seen);
+      if (!recovery) return;
+      sessionStorage.setItem(RECOVERY_NOTICE_SESSION_KEY, recovery.key);
+      notify(recovery.title, "info", {
+        body: recovery.body,
+        dedupe: recovery.key,
+      });
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [notify]);
   // A micro-task in flight when Canopy last quit has no terminal to come back
   // to — its tab is ephemeral and never restored — so it can never report.
   // Settle those before anything new is recorded, or they stay "running"
@@ -2969,6 +2992,7 @@ export default function App() {
         onEdit: () => void;
         onShareContext: (on: boolean) => void;
         onSaveCustomTasks: (tasks: CustomMicroTask[]) => void;
+        onSaveIntegrations: (state: ProjectIntegrationState) => void;
         onPersistVibeTarget: (selection: VibeTargetSelection) => Promise<boolean>;
         onPersistVibeSetup: (project: Project) => Promise<boolean>;
       }
@@ -2993,6 +3017,10 @@ export default function App() {
         onSaveCustomTasks: (tasks) => {
           const p = find();
           if (p) void saveProject({ ...p, customTasks: tasks });
+        },
+        onSaveIntegrations: (integrations) => {
+          const p = find();
+          if (p) void saveProject({ ...p, integrations });
         },
         onPersistVibeTarget: async (selection) => {
           // Re-read after every awaited write. A teammate/project event may
@@ -3079,11 +3107,7 @@ export default function App() {
         <div
           className={`mem-banner ${memPressure.level === 2 ? "critical" : "warning"}`}
         >
-          <span>
-            Your Mac is low on memory — {fmtBytes(memPressure.free_bytes)} of{" "}
-            {fmtBytes(memPressure.total_bytes)} free. Close preview tabs or
-            agent terminals before the system force-quits this app.
-          </span>
+          <span>{memoryPressureMessage(memPressure, fmtBytes)}</span>
           <button onClick={() => setMemPressure(null)}>Dismiss</button>
         </div>
       )}
@@ -3093,7 +3117,7 @@ export default function App() {
           capability={terminalGovernor.capability}
           busy={governorBusy}
           error={governorError}
-          onGrant={(incrementBytes) => {
+          onGrant={(incrementBytes, rememberForCli) => {
             const request = pendingGovernor.grant_request;
             if (!request || governorBusy) return;
             setGovernorBusy(true);
@@ -3105,19 +3129,34 @@ export default function App() {
                 request.request_id,
                 incrementBytes,
               )
-              .then(() => refreshTerminalGovernor())
+              .then(async () => {
+                if (rememberForCli) {
+                  await ipc.terminalGovernorRememberDefault(
+                    pendingGovernor.id,
+                    request.request_id,
+                    request.budget_generation,
+                    incrementBytes,
+                    true,
+                  );
+                }
+                await refreshTerminalGovernor();
+              })
               .catch((error) => setGovernorError(String(error)))
               .finally(() => setGovernorBusy(false));
           }}
           onStop={() => {
-            const request = pendingGovernor.grant_request;
-            if (request) {
-              setDismissedGovernorRequests((old) =>
-                new Set(old).add(request.request_id),
-              );
-            }
-            void ipc.ptyKill(pendingGovernor.id);
-            refreshTerminalGovernor();
+            if (governorBusy) return;
+            setGovernorBusy(true);
+            setGovernorError(null);
+            void ipc
+              .terminalGovernorStop(
+                pendingGovernor.id,
+                pendingGovernor.budget_generation,
+                pendingGovernor.stop_request_id,
+              )
+              .then(() => refreshTerminalGovernor())
+              .catch((error) => setGovernorError(String(error)))
+              .finally(() => setGovernorBusy(false));
           }}
           onDismiss={() => {
             const request = pendingGovernor.grant_request;
@@ -3208,6 +3247,7 @@ export default function App() {
               onNotice={notify}
               onShareContext={handlersFor(p.id).onShareContext}
               onSaveCustomTasks={handlersFor(p.id).onSaveCustomTasks}
+              onSaveIntegrations={handlersFor(p.id).onSaveIntegrations}
               onPersistVibeTarget={handlersFor(p.id).onPersistVibeTarget}
               onPersistVibeSetup={handlersFor(p.id).onPersistVibeSetup}
             />

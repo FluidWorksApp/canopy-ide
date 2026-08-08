@@ -67,7 +67,9 @@ describe("repair prompt", () => {
     const { system } = repairPrompt(problem());
 
     expect(system).toContain("repair agent for Paper Plane");
-    expect(system).toContain("Work only inside /repo/apps/web");
+    expect(system).toContain("failure surfaced in /repo/apps/web");
+    expect(system).toContain("trace the failure across component, process, API, queue, and database boundaries");
+    expect(system).toContain("Edits remain limited to /repo/apps/web");
     expect(system).toContain('"diagnosis"');
     expect(system).toContain('"actions"');
     expect(system).toContain('"fixed"');

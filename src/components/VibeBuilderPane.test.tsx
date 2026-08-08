@@ -324,6 +324,15 @@ describe("VibeBuilderPane", () => {
     expect(h.send).not.toHaveBeenCalled();
   });
 
+  it("does not advertise a composer before the initial runtime is ready", () => {
+    const h = harness(idle());
+    render(<VibeBuilderPane session={h.session} phase="waiting" />);
+
+    expect(screen.queryByRole("region", { name: "Ash builder" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Message Ash" })).toBeNull();
+    expect(screen.queryByText("Ready")).toBeNull();
+  });
+
   it("offers editable starting ideas that match the discovered project", async () => {
     const h = harness(idle());
     const project = discoveredProject("api-starters", "api", ["serve", "check"]);

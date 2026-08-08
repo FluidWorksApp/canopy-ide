@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, EventId, Listener, Manager};
@@ -144,6 +145,78 @@ pub struct RemoteManager {
     attention: Mutex<Value>,
     /// The session scope, cached — see `open_scope`.
     roots: RootsCache,
+    sockets: Arc<SocketMetrics>,
+}
+
+#[derive(Default)]
+struct SocketMetrics {
+    active: AtomicUsize,
+    high_water: AtomicUsize,
+    accepted_total: AtomicU64,
+    rejected_total: AtomicU64,
+}
+
+#[derive(Clone, Serialize)]
+pub struct RemoteSocketMetrics {
+    pub active: usize,
+    pub high_water: usize,
+    pub accepted_total: u64,
+    pub rejected_total: u64,
+}
+
+struct SocketOwnership(Arc<SocketMetrics>);
+const REMOTE_SOCKET_MAX: usize = 16;
+
+impl SocketOwnership {
+    fn try_acquire(metrics: Arc<SocketMetrics>) -> Option<Self> {
+        let mut active = metrics.active.load(Ordering::Relaxed);
+        loop {
+            if active >= REMOTE_SOCKET_MAX {
+                metrics.rejected_total.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            match metrics.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => active = actual,
+            }
+        }
+        let active = active + 1;
+        metrics.accepted_total.fetch_add(1, Ordering::Relaxed);
+        let mut seen = metrics.high_water.load(Ordering::Relaxed);
+        while active > seen {
+            match metrics.high_water.compare_exchange_weak(
+                seen,
+                active,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => seen = actual,
+            }
+        }
+        Some(Self(metrics))
+    }
+}
+
+impl Drop for SocketOwnership {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[tauri::command]
+pub fn remote_socket_metrics(mgr: tauri::State<'_, RemoteManager>) -> RemoteSocketMetrics {
+    RemoteSocketMetrics {
+        active: mgr.sockets.active.load(Ordering::Relaxed),
+        high_water: mgr.sockets.high_water.load(Ordering::Relaxed),
+        accepted_total: mgr.sockets.accepted_total.load(Ordering::Relaxed),
+        rejected_total: mgr.sockets.rejected_total.load(Ordering::Relaxed),
+    }
 }
 
 #[derive(Clone, Default)]
@@ -207,6 +280,7 @@ struct Portal {
     /// across sockets on purpose: a phone that reconnects mid-action gets the
     /// first answer back rather than starting a second run.
     verbs: Arc<VerbRouter>,
+    sockets: Arc<SocketMetrics>,
 }
 
 /// What a PIN-minted token may do. Drive, not admin: it matches the surface
@@ -310,6 +384,7 @@ pub async fn remote_enable(
         companion: mgr.companion.clone(),
         roots: mgr.roots.clone(),
         verbs: Arc::new(VerbRouter::default()),
+        sockets: mgr.sockets.clone(),
     };
     let router = Router::new()
         .route("/remote/auth", post(auth_handler))
@@ -517,7 +592,10 @@ async fn ws_handler(
     if !valid_token(&p.tokens, &q.token) {
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
     }
-    ws.on_upgrade(move |socket| ws_conn(socket, p))
+    let Some(socket_owner) = SocketOwnership::try_acquire(p.sockets.clone()) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many remote sockets").into_response();
+    };
+    ws.on_upgrade(move |socket| ws_conn(socket, p, socket_owner))
 }
 
 /// Team relay ingress on the shared server. Unlike `/remote/*`, this carries the
@@ -529,8 +607,11 @@ async fn team_ws_handler(ws: WebSocketUpgrade, AxumState(p): AxumState<Portal>) 
     if !crate::relay::is_hosting(&p.app) {
         return (StatusCode::FORBIDDEN, "team hosting is off").into_response();
     }
+    let Some(socket_owner) = SocketOwnership::try_acquire(p.sockets.clone()) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many remote sockets").into_response();
+    };
     let app = p.app.clone();
-    ws.on_upgrade(move |socket| crate::relay::accept_ws_peer(app, socket))
+    ws.on_upgrade(move |socket| crate::relay::accept_ws_peer(app, socket, socket_owner))
 }
 
 /// Serve the SPA: any path under `/remote` maps to a baked asset, with an
@@ -607,7 +688,7 @@ fn etag_of(bytes: &[u8]) -> String {
 
 // ---- WebSocket session ----------------------------------------------------
 
-async fn ws_conn(mut socket: WebSocket, p: Portal) {
+async fn ws_conn(mut socket: WebSocket, p: Portal, _socket_owner: SocketOwnership) {
     // Single writer: every outbound message (snapshot, forwarded events, pty
     // chunks) funnels through this byte-accounted queue so we never contend on
     // the socket or retain unlimited strings behind a slow client.
@@ -1598,5 +1679,32 @@ mod tests {
         let out = trimmed["prompts"].as_array().unwrap();
         assert_eq!(out.len(), MAX_PROMPTS);
         assert_eq!(out.last().unwrap(), "p39", "the newest prompt must survive");
+    }
+
+    #[test]
+    fn socket_ownership_releases_and_preserves_only_scalar_high_water() {
+        let metrics = Arc::new(SocketMetrics::default());
+        {
+            let _first = SocketOwnership::try_acquire(metrics.clone()).unwrap();
+            let _second = SocketOwnership::try_acquire(metrics.clone()).unwrap();
+            assert_eq!(metrics.active.load(Ordering::Relaxed), 2);
+            assert_eq!(metrics.high_water.load(Ordering::Relaxed), 2);
+            assert_eq!(metrics.accepted_total.load(Ordering::Relaxed), 2);
+        }
+        assert_eq!(metrics.active.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.high_water.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn remote_socket_admission_refuses_the_seventeenth_owner() {
+        let metrics = Arc::new(SocketMetrics::default());
+        let owners: Vec<_> = (0..REMOTE_SOCKET_MAX)
+            .map(|_| SocketOwnership::try_acquire(metrics.clone()).unwrap())
+            .collect();
+        assert!(SocketOwnership::try_acquire(metrics.clone()).is_none());
+        assert_eq!(metrics.active.load(Ordering::Relaxed), REMOTE_SOCKET_MAX);
+        assert_eq!(metrics.rejected_total.load(Ordering::Relaxed), 1);
+        drop(owners);
+        assert_eq!(metrics.active.load(Ordering::Relaxed), 0);
     }
 }

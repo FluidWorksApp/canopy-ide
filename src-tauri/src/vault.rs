@@ -58,6 +58,7 @@ const AUTO_LOCK: Duration = Duration::from_secs(30 * 60);
 /// The shortest passphrase worth calling one. Argon2id is doing the work, but
 /// no KDF saves a four-character secret.
 const MIN_PASSPHRASE: usize = 8;
+const VAULT_FILE_MAX: usize = 32 * 1024 * 1024;
 
 // ---------- what is stored ----------
 
@@ -413,7 +414,7 @@ pub async fn vault_create(state: State<'_, Vault>, passphrase: String) -> Result
 #[tauri::command]
 pub async fn vault_unlock(state: State<'_, Vault>, passphrase: String) -> Result<(), String> {
     let passphrase = zeroize::Zeroizing::new(passphrase);
-    let raw = std::fs::read(vault_path()?)
+    let raw = crate::bounded_file::read(&vault_path()?, VAULT_FILE_MAX)
         .map_err(|_| "there is no vault on this machine yet".to_string())?;
     let (key, salt, data) = open(&raw, &passphrase)?;
     let mut guard = state.0.lock().unwrap();
@@ -446,7 +447,7 @@ pub async fn vault_change_passphrase(
             "a passphrase needs at least {MIN_PASSPHRASE} characters"
         ));
     }
-    let raw = std::fs::read(vault_path()?).map_err(|e| e.to_string())?;
+    let raw = crate::bounded_file::read(&vault_path()?, VAULT_FILE_MAX)?;
     let (_, _, data) = open(&raw, &old)?;
     let salt_bytes = random_bytes(SALT_LEN)?;
     let mut salt = [0u8; SALT_LEN];

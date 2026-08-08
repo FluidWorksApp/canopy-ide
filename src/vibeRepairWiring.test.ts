@@ -49,6 +49,16 @@ const options: VibeBuilderSessionOptions = {
   cliId: "claude",
   cliBin: "claude",
   checkCommand: "pnpm check",
+  projectComponents: [
+    { id: "web", label: "Website", path: "/repo/apps/web", role: "web", commands: [] },
+    { id: "api", label: "API", path: "/repo/services/api", role: "api", commands: [] },
+  ],
+  componentLinks: [{
+    fromComponentId: "web",
+    toComponentId: "api",
+    kind: "http",
+    description: "Website calls API",
+  }],
   previewTabId: () => "preview-1",
 };
 
@@ -159,6 +169,12 @@ describe("crash-loop repair wiring", () => {
           role: "web",
         },
         commands,
+        topology: expect.objectContaining({
+          components: expect.arrayContaining([
+            expect.objectContaining({ id: "api", path: "/repo/services/api" }),
+          ]),
+          componentLinks: [expect.objectContaining({ kind: "http" })],
+        }),
         evidence: {
           logTail: "sh: vite: command not found",
           exitCode: 127,

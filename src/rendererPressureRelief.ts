@@ -1,11 +1,15 @@
 import { releaseHiddenBrowserFrames } from "./browserHost";
 import { rendererIoBudget } from "./ioBudget";
+import { shedInactiveEditorModels } from "./editorModelRetention";
+import { shedInactiveViewerBytes } from "./viewerByteRetention";
 
 export interface RendererPressureReliefResult {
   level: number;
   terminalsScheduled: number;
   browserFramesReleased: number;
   browserFrameBytesReleased: number;
+  editorModelsScheduled: number;
+  viewerBytesScheduled: number;
 }
 
 const terminalShedders = new Set<() => boolean>();
@@ -14,6 +18,8 @@ let last: RendererPressureReliefResult = {
   terminalsScheduled: 0,
   browserFramesReleased: 0,
   browserFrameBytesReleased: 0,
+  editorModelsScheduled: 0,
+  viewerBytesScheduled: 0,
 };
 
 export function registerTerminalPressureShedder(
@@ -33,6 +39,8 @@ export function shedRendererPressure(level: number): RendererPressureReliefResul
       terminalsScheduled: 0,
       browserFramesReleased: 0,
       browserFrameBytesReleased: 0,
+      editorModelsScheduled: 0,
+      viewerBytesScheduled: 0,
     };
     return last;
   }
@@ -45,11 +53,15 @@ export function shedRendererPressure(level: number): RendererPressureReliefResul
     }
   }
   const frames = releaseHiddenBrowserFrames();
+  const editorModelsScheduled = shedInactiveEditorModels();
+  const viewerBytes = shedInactiveViewerBytes();
   last = {
     level,
     terminalsScheduled,
     browserFramesReleased: frames.frames,
     browserFrameBytesReleased: frames.bytes,
+    editorModelsScheduled,
+    viewerBytesScheduled: viewerBytes.bytes,
   };
   return last;
 }
@@ -66,5 +78,7 @@ export function resetRendererPressureReliefForTest(): void {
     terminalsScheduled: 0,
     browserFramesReleased: 0,
     browserFrameBytesReleased: 0,
+    editorModelsScheduled: 0,
+    viewerBytesScheduled: 0,
   };
 }

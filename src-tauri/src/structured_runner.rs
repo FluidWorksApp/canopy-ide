@@ -216,7 +216,8 @@ pub async fn structured_runner_spawn(
         let sink = on_data.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
-            while let Ok(Some((bytes, truncated))) = capped_line(&mut reader, STDOUT_LINE_MAX).await {
+            while let Ok(Some((bytes, truncated))) = capped_line(&mut reader, STDOUT_LINE_MAX).await
+            {
                 let mut text = String::from_utf8_lossy(&bytes).trim_end().to_string();
                 if truncated {
                     text.push_str("\n[Canopy: runner line truncated after 1 MiB]");

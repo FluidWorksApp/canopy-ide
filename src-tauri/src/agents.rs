@@ -261,10 +261,9 @@ fn listening_ports(pids: &[u32]) -> HashMap<u32, Vec<u16>> {
         .map(|p| p.to_string())
         .collect::<Vec<_>>()
         .join(",");
-    let Ok(res) = std::process::Command::new("lsof")
-        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &list, "-Fpn"])
-        .output()
-    else {
+    let mut command = std::process::Command::new("lsof");
+    command.args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &list, "-Fpn"]);
+    let Ok(res) = crate::process_capture::output(&mut command, 1024 * 1024) else {
         return out;
     };
     let mut pid = 0_u32;
@@ -301,23 +300,36 @@ fn listening_ports(_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
 fn update_terminal_governor(app: &AppHandle, sys: &mut System, stats: &[SessionStats]) {
     let host = crate::watchdog::memory_pressure(sys);
     let containment = app.try_state::<crate::containment::ContainmentManager>();
-    let observations: Vec<(u32, u64)> = stats
+    let observations: Vec<crate::governor::TerminalObservation> = stats
         .iter()
         .map(|session| {
-            let bytes = containment.as_ref().map_or(session.total_mem_bytes, |manager| {
-                manager.measured_bytes(session.id, session.total_mem_bytes)
-            });
-            (session.id, bytes)
+            let bytes = containment
+                .as_ref()
+                .map_or(session.total_mem_bytes, |manager| {
+                    manager.measured_bytes(session.id, session.total_mem_bytes)
+                });
+            crate::governor::TerminalObservation {
+                id: session.id,
+                bytes,
+                cli_key: crate::governor::cli_key(session.agent_hint.as_ref()),
+            }
         })
         .collect();
     let Some(governor) = app.try_state::<crate::governor::TerminalGovernor>() else {
         return;
     };
-    for event in governor.observe(
+    for event in governor.observe_detailed(
         &observations,
         host.total_bytes,
         host.available_bytes,
         crate::pty::now_ms(),
+        |id, allowance| {
+            if let Some(containment) = containment.as_ref() {
+                containment.raise_allowance(id, allowance)
+            } else {
+                Ok(())
+            }
+        },
     ) {
         if matches!(
             event.status.state,
@@ -1493,7 +1505,11 @@ fn helper_path_in(home: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(home)
         .join(".canopy")
         .join("bin")
-        .join("canopy-hook")
+        .join(if cfg!(windows) {
+            "canopy-hook.exe"
+        } else {
+            "canopy-hook"
+        })
 }
 
 /// Copy the helper next to our own binary into ~/.canopy/bin. Called at
@@ -3884,10 +3900,9 @@ fn which_installed(commands: &[String]) -> HashMap<String, bool> {
             })
             .collect::<Vec<_>>()
             .join("; ");
-        if let Ok(out) = std::process::Command::new(shell)
-            .args(["-lc", &script])
-            .output()
-        {
+        let mut command = std::process::Command::new(shell);
+        command.args(["-lc", &script]);
+        if let Ok(out) = crate::process_capture::output(&mut command, 1024 * 1024) {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 if let Some(found) = result.get_mut(line.trim()) {
                     *found = true;
@@ -3919,10 +3934,9 @@ fn which_installed(commands: &[String]) -> HashMap<String, bool> {
                         .filter(|e| !e.is_empty())
                         .any(|ext| std::path::Path::new(&format!("{target}{ext}")).is_file())
             } else {
-                std::process::Command::new("where")
-                    .no_console_window()
-                    .arg(&target)
-                    .output()
+                let mut command = std::process::Command::new("where");
+                command.no_console_window().arg(&target);
+                crate::process_capture::output(&mut command, 1024 * 1024)
                     .map(|o| o.status.success())
                     .unwrap_or(false)
             };
@@ -4005,15 +4019,16 @@ fn run_donor(target: &str, argv: &[String]) -> Option<String> {
                 .chain(a.iter().map(|s| sh_quote(s)))
                 .collect::<Vec<_>>()
                 .join(" ");
-            std::process::Command::new(shell)
-                .args(["-lc", &line])
-                .output()
+            let mut command = std::process::Command::new(shell);
+            command.args(["-lc", &line]);
+            crate::process_capture::output(&mut command, 1024 * 1024)
         };
         #[cfg(windows)]
-        let out = std::process::Command::new(&t)
-            .no_console_window()
-            .args(&a)
-            .output();
+        let out = {
+            let mut command = std::process::Command::new(&t);
+            command.no_console_window().args(&a);
+            crate::process_capture::output(&mut command, 1024 * 1024)
+        };
         let _ = tx.send(
             out.ok()
                 .filter(|o| o.status.success())
@@ -4156,15 +4171,17 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                     // One login shell (the costly part) yields both the version
                     // string and the resolved binary path, split on a sentinel —
                     // the path is how we learn who installed it.
-                    let probe = tokio::process::Command::new(&shell)
+                    let mut probe_command = tokio::process::Command::new(&shell);
+                    probe_command
                         .args([
                             "-lc",
                             &format!(
                                 "{qb} --version 2>&1; echo '@@P@@'; command -v {qb} 2>/dev/null"
                             ),
                         ])
-                        .kill_on_drop(true)
-                        .output();
+                        .kill_on_drop(true);
+                    let probe =
+                        crate::process_capture::tokio_output(&mut probe_command, 1024 * 1024);
                     if let Ok(Ok(o)) = tokio::time::timeout(Duration::from_secs(10), probe).await {
                         let out = String::from_utf8_lossy(&o.stdout);
                         let (ver, path) = out.split_once("@@P@@").unwrap_or((out.as_ref(), ""));
@@ -4184,13 +4201,17 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                             // the frontend asks — same gate as the registry path.
                             if q.latest_url.is_some() {
                                 let flag = if is_cask { "--cask " } else { "" };
-                                let info = tokio::process::Command::new(&shell)
+                                let mut info_command = tokio::process::Command::new(&shell);
+                                info_command
                                     .args([
                                         "-lc",
                                         &format!("brew info --json=v2 {flag}{pkg} 2>/dev/null"),
                                     ])
-                                    .kill_on_drop(true)
-                                    .output();
+                                    .kill_on_drop(true);
+                                let info = crate::process_capture::tokio_output(
+                                    &mut info_command,
+                                    4 * 1024 * 1024,
+                                );
                                 if let Ok(Ok(o)) =
                                     tokio::time::timeout(Duration::from_secs(10), info).await
                                 {
@@ -4223,10 +4244,14 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                 // Homebrew has its own version stream, populated above.
                 if v.managed_by.as_deref() != Some("homebrew") {
                     if let Some(url) = q.latest_url.filter(|u| u.starts_with("https://")) {
-                        let fetch = tokio::process::Command::new("curl")
+                        let mut fetch_command = tokio::process::Command::new("curl");
+                        fetch_command
                             .args(["-fsSL", "-m", "8", url.as_str()])
-                            .kill_on_drop(true)
-                            .output();
+                            .kill_on_drop(true);
+                        let fetch = crate::process_capture::tokio_output(
+                            &mut fetch_command,
+                            4 * 1024 * 1024,
+                        );
                         if let Ok(Ok(o)) =
                             tokio::time::timeout(Duration::from_secs(10), fetch).await
                         {

@@ -20,6 +20,10 @@ describe("inactive document resource lifecycle wiring", () => {
     );
     expect(source).toContain("docTabView(tab, active)");
     expect(source).toContain("<FileView\n            active={active}");
+    expect(source).toContain('modelOwnerId={`${project.id}:${tab.id}`}');
+    expect(source).toContain("closeEditorModelOwner(");
+    expect(source).toContain("for (const session of shared.current.values())");
+    expect(source).toContain("for (const tab of tabsRef.current)");
     expect(source).toContain("<CollabView");
     expect(source).toContain("active={active}");
   });
@@ -87,6 +91,8 @@ describe("inactive document resource lifecycle wiring", () => {
     );
     expect(fileView).toContain("if (!props.active)");
     expect(fileView).toContain("props.active && file.bytes");
+    expect(fileView).toContain("props.modelOwnerId ?? localOwnerId");
+    expect(fileView).toContain("closeEditorModelOwner(");
     expect(monaco).toContain("if (!active) return");
     expect(monaco).toContain("editor.dispose()");
     expect(monaco).toContain("rememberEditorViewState");

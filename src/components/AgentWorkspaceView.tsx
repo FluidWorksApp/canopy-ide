@@ -316,7 +316,10 @@ interface AgentFileReadLimits {
 
 interface AgentFileReader {
   stat: (path: string) => Promise<{ is_dir: boolean; size: number }>;
-  readText: (path: string) => Promise<string>;
+  statMany?: (
+    paths: string[],
+  ) => Promise<Array<{ path: string; is_dir: boolean; size: number }>>;
+  readText: (path: string, maxBytes?: number) => Promise<string>;
 }
 
 /** A bounded, supersedable loader split out for a real concurrency test. The
@@ -326,7 +329,11 @@ interface AgentFileReader {
 export async function loadAgentFileContents(
   paths: string[],
   absolute: (path: string) => string,
-  reader: AgentFileReader = { stat: ipc.fsStat, readText: ipc.fsReadText },
+  reader: AgentFileReader = {
+    stat: ipc.fsStat,
+    statMany: ipc.fsStatMany,
+    readText: ipc.fsReadText,
+  },
   current: () => boolean = () => true,
   limits: AgentFileReadLimits = {
     concurrency: AGENT_FILE_READ_CONCURRENCY,
@@ -336,18 +343,32 @@ export async function loadAgentFileContents(
 ): Promise<Map<string, string>> {
   const unique = [...new Set(paths)];
   const out = new Map<string, string>();
+  const resolved = new Map(unique.map((path) => [path, absolute(path)]));
+  const prefetched = new Map<string, { is_dir: boolean; size: number }>();
   let cursor = 0;
   let reservedBytes = 0;
   const alive = () => current() && !limits.signal?.aborted;
+
+  if (reader.statMany && unique.length > 1 && alive()) {
+    try {
+      for (const stat of await reader.statMany([...resolved.values()])) {
+        prefetched.set(stat.path, stat);
+      }
+    } catch {
+      // Compatibility with an older native core: individual stat calls below
+      // retain the same bounded behaviour.
+    }
+  }
 
   const worker = async () => {
     while (alive()) {
       const at = cursor++;
       const path = unique[at];
       if (path == null) return;
-      const resolved = absolute(path);
+      const absolutePath = resolved.get(path)!;
       try {
-        const stat = await reader.stat(resolved);
+        const stat =
+          prefetched.get(absolutePath) ?? (await reader.stat(absolutePath));
         if (!alive()) return;
         if (
           stat.is_dir ||
@@ -365,7 +386,7 @@ export async function loadAgentFileContents(
             bytes: stat.size,
             signal: limits.signal,
           },
-          () => reader.readText(resolved),
+          () => reader.readText(absolutePath, limits.perFileBytes),
         );
         if (!alive()) return;
         out.set(path, text);

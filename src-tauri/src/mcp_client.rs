@@ -285,7 +285,11 @@ async fn read_capped_line(
             .await
             .map_err(|e| format!("reading from the server failed: {e}"))?;
         if available.is_empty() {
-            return if out.is_empty() { Ok(None) } else { Ok(Some(out)) };
+            return if out.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(out))
+            };
         }
         let take = available
             .iter()
@@ -389,8 +393,8 @@ impl HttpTransport {
             }
             bytes.extend_from_slice(&chunk);
         }
-        let text = String::from_utf8(bytes)
-            .map_err(|_| "the MCP response was not UTF-8".to_string())?;
+        let text =
+            String::from_utf8(bytes).map_err(|_| "the MCP response was not UTF-8".to_string())?;
         if !status.is_success() {
             // The body is where a hosted server explains a 401, so it goes in
             // the message rather than just the code.

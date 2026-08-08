@@ -191,7 +191,7 @@ windows-core = "0.61"
 # snapshot.rs: CapturePreview writes its PNG into a COM memory stream; these
 # features name the stream constructor and IStream itself. Same windows 0.61
 # webview2-com-sys already resolves to, so again names, not weight.
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_JobObjects", "Win32_System_Threading"] }
 # The capture comes back as a whole-view frame; cropping the asked-for rect out
 # of it, capping the width and re-encoding all happen in Rust because neither
 # CapturePreview nor WebKitGTK's snapshot takes a rect the way WKWebView does.

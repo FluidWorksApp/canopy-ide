@@ -810,6 +810,64 @@ mod tests {
     }
 
     #[test]
+    fn long_slow_startup_with_early_heartbeat_never_arms_recovery() {
+        let mut tracker = HeartbeatTracker::default();
+        // Models two minutes of Monaco/React startup while the listener
+        // installed in main.tsx continues acknowledging from the same page.
+        // The startup duration itself must not accumulate stale misses.
+        for now in (0..=120_000).step_by(PING_EVERY.as_millis() as usize) {
+            assert_eq!(tracker.observe(now, false), HeartbeatAction::Healthy);
+            assert_eq!(tracker.misses, 0);
+            assert_eq!(tracker.probe_deadline_ms, None);
+        }
+    }
+
+    #[test]
+    fn repeated_event_loop_stalls_get_one_probe_each_and_recover_without_reload() {
+        let mut tracker = HeartbeatTracker::default();
+        let mut pressure_sheds = 0;
+        let mut reloads = 0;
+        for cycle in 0..1_000_u64 {
+            let base = cycle * 20_000;
+            for offset in [0, 3_000, 6_000] {
+                match tracker.observe(base + offset, true) {
+                    HeartbeatAction::BeginPressureShed => pressure_sheds += 1,
+                    HeartbeatAction::Reload => reloads += 1,
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                tracker.observe(base + 7_000, false),
+                HeartbeatAction::RecoveredAfterShed
+            );
+        }
+        assert_eq!(pressure_sheds, 1_000);
+        assert_eq!(reloads, 0);
+    }
+
+    #[test]
+    fn a_genuine_sustained_stall_has_a_bounded_single_escalation() {
+        let mut tracker = HeartbeatTracker::default();
+        let observations = [0, 3_000, 6_000, 8_999, 9_000].map(|now| tracker.observe(now, true));
+        assert_eq!(
+            observations,
+            [
+                HeartbeatAction::Waiting,
+                HeartbeatAction::Waiting,
+                HeartbeatAction::BeginPressureShed,
+                HeartbeatAction::Waiting,
+                HeartbeatAction::Reload,
+            ]
+        );
+        // The caller suppresses the tracker for the recovery window after the
+        // one reload decision. No second pressure probe may churn previews.
+        tracker.suppress_for(9_000, RELOAD_WINDOW);
+        for now in (12_000..60_000).step_by(PING_EVERY.as_millis() as usize) {
+            assert_eq!(tracker.observe(now, true), HeartbeatAction::Waiting);
+        }
+    }
+
+    #[test]
     fn minimized_interval_discards_an_expired_probe_deadline() {
         let mut tracker = HeartbeatTracker::default();
         tracker.observe(0, true);

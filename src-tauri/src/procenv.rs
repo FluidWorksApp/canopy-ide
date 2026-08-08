@@ -42,11 +42,11 @@ pub(crate) fn login_path() -> Option<&'static str> {
                 // `-l` so the profile that sets PATH is read. `printf` rather
                 // than `echo` because a PATH is printed verbatim by one and not
                 // reliably by the other.
-                let out = std::process::Command::new(shell)
+                let mut command = std::process::Command::new(shell);
+                command
                     .args(["-lc", "printf %s \"$PATH\""])
-                    .no_console_window()
-                    .output()
-                    .ok()?;
+                    .no_console_window();
+                let out = crate::process_capture::output(&mut command, 1024 * 1024).ok()?;
                 if !out.status.success() {
                     return None;
                 }
@@ -118,11 +118,11 @@ pub(crate) fn resolve_command(cmd: &str) -> String {
     #[cfg(unix)]
     {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        if let Ok(out) = std::process::Command::new(shell)
+        let mut command = std::process::Command::new(shell);
+        command
             .args(["-lc", &format!("command -v {cmd}")])
-            .no_console_window()
-            .output()
-        {
+            .no_console_window();
+        if let Ok(out) = crate::process_capture::output(&mut command, 64 * 1024) {
             if out.status.success() {
                 let found = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if !found.is_empty() {

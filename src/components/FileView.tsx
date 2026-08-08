@@ -1,11 +1,19 @@
 // Content of one file sub-tab: native viewer (preview), Monaco (source),
 // git diff (HEAD vs working tree), or the external-change diff.
-import { useMemo } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { OpenFile } from "../types";
 import * as ipc from "../ipc";
 import { describeBlock } from "../fileOpen";
-import { modelFor } from "../monaco-setup";
+import { modelFor, monaco } from "../monaco-setup";
+import {
+  closeEditorModelOwner,
+  updateEditorModelOwner,
+} from "../editorModelRetention";
+import {
+  cancelInactiveViewerBytes,
+  scheduleInactiveViewerBytes,
+} from "../viewerByteRetention";
 import { MonacoEditor } from "./MonacoEditor";
 import { DiffView } from "./DiffView";
 import {
@@ -27,6 +35,8 @@ interface FileViewProps {
    *  OpenFile bytes and Monaco model remain the rehydration source. */
   active: boolean;
   file: OpenFile;
+  /** Stable project/tab ownership identity for globally shared Monaco URIs. */
+  modelOwnerId?: string;
   onSave: () => void;
   onDirty: (dirty: boolean) => void;
   onAcceptExternal: () => void;
@@ -42,6 +52,10 @@ interface FileViewProps {
    *  the content. The diff views have their own toolbar in that corner, so it
    *  goes into the toolbar instead — see `hasDiffToolbar`. */
   toolbarExtra?: ReactNode;
+  /** Native viewer bytes are reconstructable from disk and can be released
+   * after inactivity. The owner performs the state update/read. */
+  onReleaseBytes?: () => void;
+  onNeedBytes?: () => Promise<boolean>;
 }
 
 /** The two views that render a `DiffView`, and so put a button row across the
@@ -58,6 +72,79 @@ export const hasDiffToolbar = (f: OpenFile) => isExternalDiff(f) || isGitDiff(f)
 
 export function FileView(props: FileViewProps) {
   const { file } = props;
+  const localOwnerId = useId();
+  const modelOwnerId = props.modelOwnerId ?? localOwnerId;
+  const modelOwned = file.kind === "code" || file.view === "source";
+  const collaborationProtected = Boolean(props.onCursor);
+  const viewerOwnerId = `${localOwnerId}:viewer`;
+  const releaseBytesRef = useRef(props.onReleaseBytes);
+  const needBytesRef = useRef(props.onNeedBytes);
+  const viewerLoadToken = useRef(0);
+  const [viewerLoadFailed, setViewerLoadFailed] = useState(false);
+  releaseBytesRef.current = props.onReleaseBytes;
+  needBytesRef.current = props.onNeedBytes;
+  const requestViewerBytes = () => {
+    const token = ++viewerLoadToken.current;
+    setViewerLoadFailed(false);
+    void Promise.resolve(needBytesRef.current?.()).then(
+      (loaded) => {
+        if (viewerLoadToken.current === token && loaded === false) {
+          setViewerLoadFailed(true);
+        }
+      },
+      () => {
+        if (viewerLoadToken.current === token) setViewerLoadFailed(true);
+      },
+    );
+  };
+  useEffect(() => {
+    if (!modelOwned) return;
+    const model = monaco.editor.getModel(monaco.Uri.file(file.path));
+    if (!model) return;
+    updateEditorModelOwner(modelOwnerId, model, {
+      active: props.active,
+      protected: collaborationProtected,
+    });
+  }, [collaborationProtected, file.path, modelOwned, modelOwnerId, props.active]);
+  useEffect(() => {
+    if (!modelOwned) return;
+    const uri = monaco.Uri.file(file.path);
+    const key = uri.toString();
+    return () => {
+      closeEditorModelOwner(
+        modelOwnerId,
+        key,
+        monaco.editor.getModel(uri) ?? undefined,
+      );
+    };
+  }, [file.path, modelOwned, modelOwnerId]);
+  useEffect(() => {
+    const bytesNeededByVisibleViewer = props.active && !modelOwned;
+    if (file.kind === "code" || bytesNeededByVisibleViewer || !file.bytes) {
+      cancelInactiveViewerBytes(viewerOwnerId);
+      return;
+    }
+    scheduleInactiveViewerBytes(
+      viewerOwnerId,
+      file.bytes.byteLength,
+      () => releaseBytesRef.current?.(),
+    );
+    return () => {
+      cancelInactiveViewerBytes(viewerOwnerId);
+    };
+  }, [file.bytes, file.kind, modelOwned, props.active, viewerOwnerId]);
+  useEffect(() => {
+    if (props.active && !modelOwned && !file.blocked && !file.bytes) {
+      requestViewerBytes();
+      return () => {
+        viewerLoadToken.current += 1;
+      };
+    }
+    viewerLoadToken.current += 1;
+    setViewerLoadFailed(false);
+    // requestViewerBytes reads callback refs and is intentionally excluded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file.blocked, file.bytes, modelOwned, props.active]);
   // Decoded once per byte array rather than per render. `modelFor` hands back
   // the existing model and discards this when one is already open, so the
   // branches below were re-decoding the whole file — potentially megabytes —
@@ -149,7 +236,25 @@ export function FileView(props: FileViewProps) {
     );
   }
 
-  if (!file.bytes) return <div className="viewer-loading">Loading…</div>;
+  if (!file.bytes) {
+    if (viewerLoadFailed) {
+      return (
+        <div className="viewer-scroll viewer-center">
+          <div className="blocked-file">
+            <div className="blocked-file-title">Couldn&apos;t reload this file</div>
+            <div className="blocked-file-path">{file.name}</div>
+            <div className="blocked-file-detail">
+              The inactive viewer released its copy, but the file could not be read again.
+            </div>
+            <div className="blocked-file-actions">
+              <Button onClick={requestViewerBytes}>Try again</Button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return <div className="viewer-loading">Loading…</div>;
+  }
   switch (file.kind) {
     case "markdown":
       return <MarkdownView bytes={file.bytes} />;

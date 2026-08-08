@@ -102,6 +102,10 @@ import { contentLeft, expandedStackScroll, GROUP_ATTR, revealScroll } from "../.
 import { clearActiveTab, setActiveTab } from "../../activeView";
 import { useFlipStrip } from "../../tabFlip";
 import { modelFor, monaco, languageForPath } from "../../monaco-setup";
+import {
+  closeEditorModelOwner,
+  retainedEditorModelText,
+} from "../../editorModelRetention";
 import { getCaret, subscribeCaret } from "../../editorState";
 import { setCompanionSpotlight } from "../../companionContext";
 import { useEscapeBackstop, useEscapeLayer } from "../../useEscape";
@@ -332,11 +336,20 @@ import { TicketsPanel, type AgentTarget } from "../TicketsPanel";
 import { PrsPanel } from "../PrsPanel";
 import { ServersPanel } from "../ServersPanel";
 import {
+  IntegrationsPanel,
+  type LocalIntegrationService,
+} from "../IntegrationsPanel";
+import {
   groupServers,
   runningCount,
   type ComponentWorkspace,
   type ServerEntry,
 } from "../../servers";
+import {
+  integrationProviderById,
+  normalizeProjectIntegrations,
+  type IntegrationProviderId,
+} from "../../projectIntegrations";
 import {
   agentsIn,
   ensureLeases,
@@ -478,6 +491,7 @@ import {
   matchesVibeRun,
   pickBrowserTab,
   resolveVibeTarget,
+  vibeRunReady,
   vibeSetupGate,
 } from "./helpers";
 import { Button } from "../ui";
@@ -651,6 +665,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   onNotice: onNoticeRaw,
   onShareContext,
   onSaveCustomTasks,
+  onSaveIntegrations,
   onPersistVibeSetup,
   relay,
   restore,
@@ -1113,20 +1128,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
   wakeWorktreeEnvRef.current = wakeWorktreeEnv;
 
   const recentSaves = useRef(new Map<string, number>());
+  const viewerByteReads = useRef(
+    new Map<string, Promise<Uint8Array | null>>(),
+  );
   const termHandles = useRef(new Map<string, TermHandle | null>());
   const livePtyByTab = useRef(new Map<string, number>());
-  const vibeServerHealth = useRef<VibeServerHealthState>(
-    INITIAL_VIBE_SERVER_HEALTH,
-  );
-  const openVibeServerIncident = useRef<string | null>(null);
-  const vibeServerWatch = useRef<{
+  const vibeServerHealth = useRef(new Map<string, VibeServerHealthState>());
+  const openVibeServerIncident = useRef(new Set<string>());
+  const vibeServerWatch = useRef<Array<{
     targetKey: string;
     componentId: string;
     runCommandId: string;
     path: string;
     command: string;
     session: ReturnType<typeof createVibeBuilderSession>;
-  } | null>(null);
+  }>>([]);
   const vibeServerExit = useRef<
     (tabId: string, event: ipc.PtyExit) => void
   >(() => {});
@@ -1766,6 +1782,34 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const collabRef = useRef(relay.collab);
   collabRef.current = relay.collab;
   const ownerCursorAt = useRef(0);
+
+  // A normal project close unmounts this view directly (hibernation closes
+  // tabs first). Release collaboration owners here as the project boundary;
+  // FileView independently releases each project:tab Monaco owner.
+  useEffect(
+    () => () => {
+      for (const session of shared.current.values()) {
+        collabRef.current.close(session.doc);
+      }
+      shared.current.clear();
+      for (const tab of tabsRef.current) {
+        if (tab.type === "collab") {
+          collabRef.current.close(tab.doc);
+          monaco.editor
+            .getModels()
+            .find(
+              (model) =>
+                model.uri.scheme === "canopy-collab" &&
+                model.uri.path.startsWith(`/${tab.doc}/`),
+            )
+            ?.dispose();
+        } else if (tab.type === "shared-project") {
+          collabRef.current.leaveProject(tab.doc);
+        }
+      }
+    },
+    [project.id],
+  );
 
   const sharedDocFor = useCallback(
     (path: string) => shared.current.get(path),
@@ -3968,17 +4012,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
   ) => {
     const tab = tabsRef.current.find((t) => t.id === id);
     if (tab?.type !== "terminal") return;
-    const watched = vibeServerWatch.current;
-    if (
-      origin === "explicit" &&
-      watched &&
-      tab.cwd === watched.path &&
-      (tab.runCommandId
-        ? tab.componentId === watched.componentId &&
-          tab.runCommandId === watched.runCommandId
-        : tab.command === watched.command)
-    ) {
-      vibeServerHealth.current = resetVibeServerHealth(watched.targetKey);
+    const watched = vibeServerWatch.current.find(
+      (candidate) =>
+        tab.cwd === candidate.path &&
+        (tab.runCommandId
+          ? tab.componentId === candidate.componentId &&
+            tab.runCommandId === candidate.runCommandId
+          : tab.command === candidate.command),
+    );
+    if (origin === "explicit" && watched) {
+      vibeServerHealth.current.set(
+        watched.targetKey,
+        resetVibeServerHealth(watched.targetKey),
+      );
     }
     const component = tab.componentId
       ? componentsRef.current.find((item) => item.id === tab.componentId)
@@ -5316,7 +5362,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
           collabRef.current.close(share.doc);
           shared.current.delete(closing.file.path);
         }
-        monaco.editor.getModel(monaco.Uri.file(closing.file.path))?.dispose();
+        const uri = monaco.Uri.file(closing.file.path);
+        closeEditorModelOwner(
+          `${project.id}:${closing.id}`,
+          uri.toString(),
+          monaco.editor.getModel(uri) ?? undefined,
+        );
       }
       if (closing?.type === "collab") {
         collabRef.current.close(closing.doc);
@@ -6007,6 +6058,55 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return tab?.file;
   };
 
+  const reloadViewerBytes = useCallback(
+    async (path: string) => {
+      const initialTab = tabsRef.current.find(
+        (item): item is FileSubTab =>
+          item.type === "file" && item.file.path === path,
+      );
+      if (!initialTab) return null;
+      const readKey = `${initialTab.id}\0${path}`;
+      const current = viewerByteReads.current.get(readKey);
+      if (current) return current;
+      const read = (async (): Promise<Uint8Array | null> => {
+        const ownerTabId = initialTab.id;
+        const ownedTab = () =>
+          ownerTabId
+            ? tabsRef.current.find(
+                (item): item is FileSubTab =>
+                  item.type === "file" && item.id === ownerTabId,
+              )
+            : undefined;
+        const file = ownedTab()?.file;
+        if (!file || file.blocked || file.kind === "code") return null;
+        if (file.bytes) return file.bytes;
+        try {
+          const stat = await ipc.fsStat(path);
+          if (!ownedTab()) return null;
+          const blocked = blockForOpen(path, file.kind, stat.size);
+          if (blocked) {
+            patchFile(path, { blocked, bytes: null });
+            return null;
+          }
+          const bytes = await ipc.fsReadFile(path, sizeLimitFor(file.kind));
+          if (!ownedTab()) return null;
+          patchFile(path, { bytes });
+          return bytes;
+        } catch (error) {
+          console.warn("viewer byte rehydrate failed", path, error);
+          return null;
+        }
+      })();
+      viewerByteReads.current.set(readKey, read);
+      try {
+        return await read;
+      } finally {
+        viewerByteReads.current.delete(readKey);
+      }
+    },
+    [patchFile],
+  );
+
   const acceptExternal = useCallback(
     (path: string) => {
       const file = findFile(path);
@@ -6027,11 +6127,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
 
   const toggleView = useCallback(
-    (path: string) => {
+    async (path: string) => {
       const file = findFile(path);
       if (!file) return;
-      if (file.view === "preview" && file.bytes) {
-        const text = decoder.decode(file.bytes);
+      if (file.view === "preview") {
+        const bytes = file.bytes ?? (await reloadViewerBytes(path));
+        if (!bytes || !findFile(path)) return;
+        const text = decoder.decode(bytes);
         modelFor(path, text);
       }
       patchFile(path, {
@@ -6039,7 +6141,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         diffOriginal: null,
       });
     },
-    [patchFile],
+    [patchFile, reloadViewerBytes],
   );
 
   // ---------- diff-first: external changes scoped to this project ----------
@@ -6158,7 +6260,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           if (file.kind === "code") {
             const newText = decoder.decode(bytes);
             const model = monaco.editor.getModel(monaco.Uri.file(path));
-            if (!model || model.getValue() === newText) {
+            const currentText =
+              model?.getValue() ??
+              retainedEditorModelText(monaco.Uri.file(path).toString());
+            if (currentText == null || currentText === newText) {
               continue;
             }
             patchFile(path, { external: newText });
@@ -8659,6 +8764,77 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [serverComponents, runTabs, projectStats],
   );
 
+  const integrationState = useMemo(
+    () => normalizeProjectIntegrations(project.integrations),
+    [project.integrations],
+  );
+  const localIntegrationServices = useMemo<LocalIntegrationService[]>(() => {
+    const rows: LocalIntegrationService[] = [];
+    const add = (path: string, component: string, entry: ServerEntry) => {
+      const command = entry.componentId && entry.runCommandId
+        ? project.components
+            .find((candidate) => candidate.id === entry.componentId)
+            ?.commands?.find((candidate) => candidate.id === entry.runCommandId)
+        : undefined;
+      if (command?.purpose === "check" || command?.purpose === "setup") return;
+      rows.push({
+        id: `${path}\0${entry.key}`,
+        component,
+        name: entry.name,
+        state: entry.state,
+        ports: entry.ports,
+        canStart: !entry.adhoc && entry.state !== "running",
+        canStop: entry.state === "running" && entry.ptyId != null,
+      });
+    };
+    for (const group of serverGroups) {
+      for (const entry of group.entries) add(group.path, group.label, entry);
+      for (const workspace of group.workspaces) {
+        for (const entry of workspace.entries) {
+          add(workspace.path, `${group.label} · ${workspace.label}`, entry);
+        }
+      }
+    }
+    return rows;
+  }, [serverGroups, project.components]);
+
+  const localIntegrationEntry = useCallback(
+    (id: string) => {
+      for (const group of serverGroups) {
+        const main = group.entries.find((entry) => `${group.path}\0${entry.key}` === id);
+        if (main) return { path: group.path, entry: main };
+        for (const workspace of group.workspaces) {
+          const entry = workspace.entries.find(
+            (candidate) => `${workspace.path}\0${candidate.key}` === id,
+          );
+          if (entry) return { path: workspace.path, entry };
+        }
+      }
+      return null;
+    },
+    [serverGroups],
+  );
+
+  const automateIntegration = useCallback(
+    (providerId: IntegrationProviderId) => {
+      const provider = integrationProviderById(providerId);
+      const dir = project.components[0]?.path;
+      if (!provider || !dir) return;
+      const topology = project.components
+        .map((component) => `${component.label}${component.role ? ` (${component.role})` : ""}: ${component.path}`)
+        .join("\n");
+      const seed = [
+        `Connect and configure ${provider.label} for the project “${project.name}”.`,
+        `Use an already-enabled ${provider.label} API or MCP integration first. If the account must be linked, ask the user to complete the provider's OAuth/account-link step. Use ${provider.cliBin ? `the ${provider.cliBin} CLI` : "the provider API"} only as a fallback.`,
+        "Inspect every component and their data flow before deciding what must be provisioned or deployed:",
+        topology,
+        "Keep local services usable while remote setup is pending. Never print or persist credentials. Do not apply a managed database migration or production deployment without the user's explicit confirmation. Report the safe provider resource IDs, environments, public endpoints, migration snapshot, and deployment ID/time when finished.",
+      ].join("\n\n");
+      void startAgentInDir(dir, undefined, seed, `${provider.label} setup`);
+    },
+    [project.components, project.name, startAgentInDir],
+  );
+
   // ⌘K's context, memoised. A fresh object literal here re-ran every instant
   // palette source — tabs, clipboard, sessions, notes, research, PRs, servers,
   // task history — plus their fuzzy ranking, on every ProjectView render, i.e.
@@ -8719,6 +8895,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
           (command) => command.id === vibeTarget.runCommand.id,
         ) ?? null
       : null;
+  const vibeRequiredRuns = useMemo(() => {
+    const configured = project.vibe?.requiredProcesses?.length
+      ? project.vibe.requiredProcesses
+      : vibeComponent && vibeRun
+        ? [{ componentId: vibeComponent.id, runCommandId: vibeRun.id }]
+        : [];
+    return configured.flatMap((identity) => {
+      const component = project.components.find((candidate) => candidate.id === identity.componentId);
+      const command = component?.commands?.find((candidate) => candidate.id === identity.runCommandId);
+      return component && command ? [{ component, command, identity }] : [];
+    });
+  }, [project.vibe, project.components, vibeComponent, vibeRun]);
   // What proves a Build turn is sound. Name-matching the component's
   // *configured* commands — which is all this used to do — finds nothing in a
   // project Canopy set up from nothing, so `check` was `unknown` on every turn,
@@ -8806,6 +8994,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
             cliBin: claudeBin,
             checkCommand: vibeCheckCommand,
             checkCaveat: vibeCheckCaveat,
+            siblingPaths: components
+              .filter((component) => component.id !== vibeComponentId)
+              .map((component) => component.path),
+            componentCommands: vibeComponent?.commands ?? [],
+            projectComponents: components,
+            requiredProcesses: project.vibe?.requiredProcesses ?? [],
+            componentLinks: project.vibe?.componentLinks ?? [],
+            dataStores: project.vibe?.dataStores ?? [],
+            externalServices: project.vibe?.externalServices ?? [],
             previewTabId: () => vibePreviewIdRef.current,
           })
         : null,
@@ -8817,59 +9014,56 @@ const ProjectViewBody = memo(function ProjectViewBody({
       vibeComponentPath,
       vibeCheckCommand,
       vibeCheckCaveat,
+      components,
+      project.vibe?.requiredProcesses,
+      project.vibe?.componentLinks,
+      project.vibe?.dataStores,
+      project.vibe?.externalServices,
       claudeBin,
     ],
   );
   useEffect(() => () => void vibeSession?.stop(), [vibeSession]);
-  const vibeServerTargetKey =
-    vibeComponent && vibeRun
-      ? `${vibeComponent.path}:${vibeComponent.id}:${vibeRun.id}:${vibeRun.command}`
-      : null;
   vibeServerWatch.current =
-    vibe && vibeSession && vibeComponent && vibeRun && vibeServerTargetKey
-      ? {
-          targetKey: vibeServerTargetKey,
-          componentId: vibeComponent.id,
-          runCommandId: vibeRun.id,
-          path: vibeComponent.path,
-          command: vibeRun.command,
-          session: vibeSession,
-        }
-      : null;
+    vibe && vibeSession
+      ? vibeRequiredRuns
+          .filter(({ command }) => command.purpose !== "setup" && command.purpose !== "check")
+          .map(({ component, command }) => ({
+            targetKey: `${component.path}:${component.id}:${command.id}:${command.command}`,
+            componentId: component.id,
+            runCommandId: command.id,
+            path: command.cwd ?? component.path,
+            command: command.command,
+            session: vibeSession,
+          }))
+      : [];
   useEffect(() => {
-    if (
-      vibeSession &&
-      vibeComponent &&
-      vibeRun &&
-      vibeServerTargetKey &&
-      openVibeServerIncident.current === vibeServerTargetKey
-    ) {
+    if (!vibeSession) return;
+    for (const watched of vibeServerWatch.current) {
+      if (!openVibeServerIncident.current.has(watched.targetKey)) continue;
       vibeSession.restoreServerIncident(
-        vibeServerTargetKey,
-        vibeComponent.id,
-        vibeRun.id,
+        watched.targetKey,
+        watched.componentId,
+        watched.runCommandId,
       );
     }
-  }, [vibeSession, vibeComponent, vibeRun, vibeServerTargetKey]);
+  }, [vibeSession, vibeRequiredRuns]);
   vibeServerExit.current = (tabId, event) => {
-    const watched = vibeServerWatch.current;
     const tab = tabsRef.current.find(
       (candidate): candidate is TermSubTab =>
         candidate.type === "terminal" && candidate.id === tabId,
     );
-    if (
-      !watched ||
-      !tab ||
-      tab.cwd !== watched.path ||
-      (tab.runCommandId
-        ? tab.componentId !== watched.componentId ||
-          tab.runCommandId !== watched.runCommandId
-        : tab.command !== watched.command)
-    ) {
-      return;
-    }
+    if (!tab) return;
+    const watched = vibeServerWatch.current.find(
+      (candidate) =>
+        tab.cwd === candidate.path &&
+        (tab.runCommandId
+          ? tab.componentId === candidate.componentId &&
+            tab.runCommandId === candidate.runCommandId
+          : tab.command === candidate.command),
+    );
+    if (!watched) return;
     const decision = judgeVibeServerExit(
-      vibeServerHealth.current,
+      vibeServerHealth.current.get(watched.targetKey) ?? INITIAL_VIBE_SERVER_HEALTH,
       watched.targetKey,
       {
         at: Date.now(),
@@ -8877,7 +9071,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         requested: event.requested,
       },
     );
-    vibeServerHealth.current = decision.state;
+    vibeServerHealth.current.set(watched.targetKey, decision.state);
     // Stopping it yourself ends the crash-loop story. The incident only ever
     // cleared when the server came back on a port — so a person who stopped
     // it deliberately was left staring at "The app server keeps stopping",
@@ -8885,10 +9079,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // stop is an answer, not a symptom.
     if (
       event.requested &&
-      openVibeServerIncident.current === watched.targetKey
+      openVibeServerIncident.current.has(watched.targetKey)
     ) {
       watched.session.resolveServerIncident(watched.targetKey);
-      openVibeServerIncident.current = null;
+      openVibeServerIncident.current.delete(watched.targetKey);
       resolveAttentionByKey(
         `vibe-server:${project.id}:${watched.componentId}:${watched.runCommandId}`,
         "withdrawn",
@@ -8899,7 +9093,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       return;
     }
     if (decision.action !== "crash-loop") return;
-    openVibeServerIncident.current = watched.targetKey;
+    openVibeServerIncident.current.add(watched.targetKey);
 
     const stats =
       tab.ptyId == null
@@ -8962,7 +9156,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     };
     const record = (attempt: number) => {
       incident.present =
-        openVibeServerIncident.current === watched.targetKey;
+        openVibeServerIncident.current.has(watched.targetKey);
       void watched.session
         .reportServerIncident(incident)
         .then((result) => {
@@ -8982,8 +9176,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     postAttention({
       kind: "question",
       tone: "error",
-      title: "The preview couldn't stay open",
-      body: "I stopped retrying so your computer stays responsive. I'll explain what needs attention in Build.",
+      title: `${crashedComponent?.label ?? "A project process"} couldn't stay open`,
+      body: "I stopped retrying so your computer stays responsive. I'll trace the failure through the connected project in Build.",
       source: "project",
       projectId: project.id,
       projectName: project.name,
@@ -8992,26 +9186,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
     });
   };
 
-  const vibeRequiredRuns = useMemo(() => {
-    const configured = project.vibe?.requiredProcesses?.length
-      ? project.vibe.requiredProcesses
-      : vibeComponent && vibeRun
-        ? [{ componentId: vibeComponent.id, runCommandId: vibeRun.id }]
-        : [];
-    return configured.flatMap((identity) => {
-      const component = project.components.find((candidate) => candidate.id === identity.componentId);
-      const command = component?.commands?.find((candidate) => candidate.id === identity.runCommandId);
-      return component && command ? [{ component, command }] : [];
-    });
-  }, [project.vibe, project.components, vibeComponent, vibeRun]);
   const autoStartedVibeRuns = useRef(new Set<string>());
   const surfacedVibeSetupFailures = useRef(new Set<string>());
   useEffect(() => {
     if (!visible || !vibe) return;
-    for (const { component, command } of vibeRequiredRuns) {
+    for (const { component, command, identity } of vibeRequiredRuns) {
       const key = `${component.path}:${component.id}:${command.id}`;
       const running = runTabs.some((tab) => matchesVibeRun(tab, component, command));
       if (running || autoStartedVibeRuns.current.has(key)) continue;
+      const dependenciesReady = (identity.dependsOn ?? []).every((dependency) => {
+        const dependencyComponent = project.components.find(
+          (candidate) => candidate.id === dependency.componentId,
+        );
+        const dependencyCommand = dependencyComponent?.commands?.find(
+          (candidate) => candidate.id === dependency.runCommandId,
+        );
+        if (!dependencyComponent || !dependencyCommand) return false;
+        const dependencyTab = runTabs.find((tab) =>
+          matchesVibeRun(tab, dependencyComponent, dependencyCommand),
+        );
+        return vibeRunReady(dependencyTab, dependencyCommand, projectStats);
+      });
+      if (!dependenciesReady) continue;
       // Setup commands the survey found (`purpose: "setup"`) run to completion
       // before the server does — see vibeSetupGate for the rules.
       const gate = vibeSetupGate(command, component, runTabs, (setupId) =>
@@ -9058,7 +9254,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         command.command,
         command.name,
         "▶",
-        true,
+        command.purpose === "setup" ? "chore" : true,
         undefined,
         undefined,
         // Build owns a preview surface, not a process-output surface. Keep the
@@ -9068,40 +9264,58 @@ const ProjectViewBody = memo(function ProjectViewBody({
         { componentId: component.id, runCommandId: command.id },
       );
     }
-  }, [visible, vibe, vibeRequiredRuns, runTabs, addTerminal, project.id, project.name]);
+  }, [visible, vibe, vibeRequiredRuns, runTabs, projectStats, addTerminal, project.id, project.name, project.components]);
+
+  // The first composer is an invitation, so do not issue it until every
+  // required process has reached its declared readiness. Once unlocked it
+  // stays available through later restarts/incidents; only the initial
+  // bootstrapping state withholds input.
+  const vibeRuntimeReady =
+    vibeRequiredRuns.length > 0 &&
+    vibeRequiredRuns.every(({ component, command }) => {
+      const tab = runTabs.find((candidate) =>
+        matchesVibeRun(candidate, component, command),
+      );
+      return vibeRunReady(tab, command, projectStats);
+    });
+  const vibeInputUnlock = useRef<{ key: string | null; unlocked: boolean }>({
+    key: null,
+    unlocked: false,
+  });
+  const vibeRuntimeKey = `${project.id}:${project.vibe?.setupRevision ?? "unconfigured"}`;
+  if (vibeInputUnlock.current.key !== vibeRuntimeKey) {
+    vibeInputUnlock.current = { key: vibeRuntimeKey, unlocked: false };
+  }
+  if (vibeRuntimeReady) vibeInputUnlock.current.unlocked = true;
 
   useEffect(() => {
-    if (
-      !vibe ||
-      !vibeComponent ||
-      !vibeRun ||
-      !vibeSession ||
-      !vibeServerTargetKey ||
-      openVibeServerIncident.current !== vibeServerTargetKey
-    ) {
-      return;
+    if (!vibe || !vibeSession) return;
+    for (const watched of vibeServerWatch.current) {
+      if (!openVibeServerIncident.current.has(watched.targetKey)) continue;
+      const resolved = vibeRequiredRuns.find(
+        ({ component, command }) =>
+          component.id === watched.componentId && command.id === watched.runCommandId,
+      );
+      if (!resolved) continue;
+      const running = runTabs.find((tab) =>
+        matchesVibeRun(tab, resolved.component, resolved.command),
+      );
+      if (!vibeRunReady(running, resolved.command, projectStats)) continue;
+      vibeSession.resolveServerIncident(watched.targetKey);
+      openVibeServerIncident.current.delete(watched.targetKey);
+      vibeServerHealth.current.set(
+        watched.targetKey,
+        resetVibeServerHealth(watched.targetKey),
+      );
+      resolveAttentionByKey(
+        `vibe-server:${project.id}:${watched.componentId}:${watched.runCommandId}`,
+        "withdrawn",
+      );
     }
-    const running = runTabs.find((tab) =>
-      matchesVibeRun(tab, vibeComponent, vibeRun),
-    );
-    const port =
-      running?.ptyId == null
-        ? null
-        : projectStats.find((sample) => sample.id === running.ptyId)?.ports[0];
-    if (!port) return;
-    vibeSession.resolveServerIncident(vibeServerTargetKey);
-    openVibeServerIncident.current = null;
-    vibeServerHealth.current = resetVibeServerHealth(vibeServerTargetKey);
-    resolveAttentionByKey(
-      `vibe-server:${project.id}:${vibeComponent.id}:${vibeRun.id}`,
-      "withdrawn",
-    );
   }, [
     vibe,
-    vibeComponent,
-    vibeRun,
     vibeSession,
-    vibeServerTargetKey,
+    vibeRequiredRuns,
     runTabs,
     projectStats,
     project.id,
@@ -9611,7 +9825,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (activeTermTab) termHandles.current.get(activeTermTab.id)?.hardReset();
   }, [activeTermTab]);
   const onToggleView = useCallback(() => {
-    if (activeFileTab) toggleView(activeFileTab.file.path);
+    if (activeFileTab) void toggleView(activeFileTab.file.path);
   }, [activeFileTab, toggleView]);
   const onShareFile = useCallback(
     (memberId: string, memberName: string) => {
@@ -10309,8 +10523,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
             {!inToolbar && cta}
             <FileView
             active={active}
+            modelOwnerId={`${project.id}:${tab.id}`}
             toolbarExtra={inToolbar ? cta : undefined}
             file={tab.file}
+            onReleaseBytes={() => patchFile(tab.file.path, { bytes: null })}
+            onNeedBytes={async () =>
+              Boolean(await reloadViewerBytes(tab.file.path))
+            }
             onCursor={
               // Only a shared file broadcasts a caret; every other tab passes
               // undefined and the subscription in MonacoEditor short-circuits.
@@ -11536,6 +11755,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onEdit={onEdit}
         />
       ))}
+      {sidePane("integrations", () => (
+        <IntegrationsPanel
+          project={project}
+          state={integrationState}
+          localServices={localIntegrationServices}
+          onChange={onSaveIntegrations}
+          onAutomate={automateIntegration}
+          onStartLocal={(id) => {
+            const resolved = localIntegrationEntry(id);
+            if (resolved) startServer(resolved.path, resolved.entry);
+          }}
+          onStopLocal={(id) => {
+            const ptyId = localIntegrationEntry(id)?.entry.ptyId;
+            if (ptyId != null) void ipc.ptyKill(ptyId);
+          }}
+          onOpenLocal={(port) => openPreview(`http://localhost:${port}`)}
+          onOpenRemote={openPreview}
+        />
+      ))}
       {sidePane("git", () => (
         <GitPanel
           visible={sideTab === "git" && visible && sideOpen}
@@ -11866,7 +12104,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
             project={project}
             phase={
               vibeSession
-                ? "build"
+                ? vibeInputUnlock.current.unlocked
+                  ? "build"
+                  : "waiting"
                 : vibeProjectSetupSession
                   ? "discovering"
                   : "waiting"

@@ -47,6 +47,7 @@ const proposal = (): VibeProjectSetupProposal => ({
         argv: ["pnpm", "dev"],
         cwd: "/repo/apps/web",
         requiredEnvNames: ["API_URL"],
+        automatic: true,
         readiness: { kind: "http", path: "/" },
       }, {
         key: "check",
@@ -55,6 +56,7 @@ const proposal = (): VibeProjectSetupProposal => ({
         argv: ["pnpm", "typecheck"],
         cwd: "/repo/apps/web",
         requiredEnvNames: [],
+        automatic: true,
         readiness: { kind: "one-shot", timeoutMs: 120_000 },
       }],
       evidence: ["/repo/apps/web/package.json"],
@@ -71,6 +73,7 @@ const proposal = (): VibeProjectSetupProposal => ({
         argv: ["go", "run", "./cmd/api"],
         cwd: "/repo/services/api",
         requiredEnvNames: ["DATABASE_URL"],
+        automatic: true,
         readiness: { kind: "http", path: "/health" },
       }],
       evidence: ["/repo/services/api/go.mod"],
@@ -78,9 +81,36 @@ const proposal = (): VibeProjectSetupProposal => ({
   ],
   preview: { componentKey: "web", commandKey: "dev" },
   requiredProcesses: [
-    { componentKey: "web", commandKey: "dev", reason: "serves the page", requiredFor: "preview" },
-    { componentKey: "api", commandKey: "serve", reason: "the page loads its data here", requiredFor: "preview" },
+    {
+      componentKey: "web", commandKey: "dev", reason: "serves the page",
+      requiredFor: "preview", dependsOn: [{ componentKey: "api", commandKey: "serve" }],
+    },
+    {
+      componentKey: "api", commandKey: "serve", reason: "the page loads its data here",
+      requiredFor: "project", dependsOn: [],
+    },
   ],
+  componentLinks: [{
+    fromComponentKey: "web",
+    toComponentKey: "api",
+    kind: "http",
+    description: "the website loads application data from the API",
+    evidence: ["/repo/apps/web/package.json"],
+  }],
+  dataStores: [{
+    key: "database",
+    label: "Database",
+    engine: "postgresql",
+    mode: "managed",
+    providerId: "neon",
+    usedByComponentKeys: ["api"],
+    schemaPaths: [],
+    migrationPaths: [],
+    latestMigration: null,
+    migrate: null,
+    status: null,
+    evidence: ["/repo/services/api/go.mod"],
+  }],
   externalServices: [{
     key: "database",
     providerId: "neon",
@@ -200,6 +230,56 @@ describe("project setup structured output", () => {
     if (!result.ok) expect(result.errors).toContain("requiredProcesses[1] names an unknown command");
   });
 
+  it("rejects a runnable worker that startup would otherwise leave behind", () => {
+    const value = proposal();
+    value.components.push({
+      key: "worker",
+      root: "/repo/services/worker",
+      label: "Worker",
+      role: "worker",
+      commands: [{
+        key: "work",
+        purpose: "worker",
+        label: "Start worker",
+        argv: ["go", "run", "./cmd/worker"],
+        cwd: "/repo/services/worker",
+        requiredEnvNames: [],
+        automatic: true,
+        readiness: { kind: "process-alive" },
+      }],
+      evidence: ["/repo/services/worker/go.mod"],
+    });
+    const validationContext = context();
+    validationContext.existingPaths = new Set([
+      ...validationContext.existingPaths,
+      "/repo/services/worker",
+      "/repo/services/worker/go.mod",
+    ]);
+    const result = validateVibeSetupProposal(value, validationContext);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toContain("components[2] has no selected required process");
+  });
+
+  it("rejects a startup dependency cycle", () => {
+    const value = proposal();
+    value.requiredProcesses[1].dependsOn = [{ componentKey: "web", commandKey: "dev" }];
+    const result = validateVibeSetupProposal(value, context());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errors).toContain("requiredProcesses contains a dependency cycle");
+  });
+
+  it("never marks a managed database migration automatic", () => {
+    const value = proposal();
+    value.dataStores[0].migrate = { componentKey: "web", commandKey: "check" };
+    const result = validateVibeSetupProposal(value, context());
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain(
+        "dataStores[0].migrate must not run automatically against a managed database",
+      );
+    }
+  });
+
   it("rejects filesystem escapes and unobserved evidence", () => {
     const value = proposal();
     value.components[0].root = "/tmp/other";
@@ -250,9 +330,22 @@ describe("setup identity materialization", () => {
       version: 1,
       componentId: "cmp-web",
       requiredProcesses: [
-        { componentId: "cmp-web", runCommandId: expect.any(String) },
-        { componentId: "cmp-api", runCommandId: expect.any(String) },
+        {
+          componentId: "cmp-web",
+          runCommandId: expect.any(String),
+          dependsOn: [{ componentId: "cmp-api", runCommandId: expect.any(String) }],
+        },
+        { componentId: "cmp-api", runCommandId: expect.any(String), dependsOn: [] },
       ],
+      componentLinks: [expect.objectContaining({
+        fromComponentId: "cmp-web",
+        toComponentId: "cmp-api",
+      })],
+      dataStores: [expect.objectContaining({
+        engine: "postgresql",
+        mode: "managed",
+        latestMigration: null,
+      })],
     });
     expect(result.project.components[0].commands?.[0].argv).toEqual(["pnpm", "dev"]);
   });
