@@ -557,20 +557,22 @@ export function vibeRunReady(
   tab: Pick<TermSubTab, "ptyId" | "exited"> | undefined,
   command: Pick<RunCommand, "readiness">,
   stats: Pick<ipc.SessionStats, "id" | "ports">[],
-  verifiedProcessPtys?: ReadonlySet<number>,
+  verifiedReadinessPtys: ReadonlySet<number>,
 ): boolean {
   if (!tab || tab.exited || tab.ptyId == null) return false;
-  if (command.readiness?.kind === "port" || command.readiness?.kind === "http") {
+  const readiness = command.readiness?.kind ?? "process-alive";
+  if (readiness === "port") {
     return Boolean(stats.find((sample) => sample.id === tab.ptyId)?.ports.length);
   }
-  // A worker can be alive while npx/pnpm/auth is waiting at a prompt. Build's
-  // output supervisor grants this only after the PTY has produced prompt-free
-  // output and stayed alive for a short settling window. The optional fallback
-  // preserves the helper's legacy callers outside Build supervision.
-  if (command.readiness?.kind === "process-alive" && verifiedProcessPtys) {
-    return verifiedProcessPtys.has(tab.ptyId);
+  // A socket is not proof of an HTTP endpoint, and a process can be alive while
+  // npx/pnpm/auth is waiting at a prompt. The one supervisor grants both kinds
+  // only after their declared evidence has been verified.
+  if (readiness === "http" || readiness === "process-alive") {
+    return verifiedReadinessPtys.has(tab.ptyId);
   }
-  return true;
+  // One-shot commands become ready by exiting successfully; they cannot
+  // release a dependent while their PTY is still running.
+  return false;
 }
 
 /** One tab as canopy_editor_state describes it: enough for an agent to know

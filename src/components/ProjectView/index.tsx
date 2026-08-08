@@ -1170,7 +1170,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const livePtyByTab = useRef(new Map<string, number>());
   const vibeServerHealth = useRef(new Map<string, VibeServerHealthState>());
   const openVibeServerIncident = useRef(new Set<string>());
-  const [vibeVerifiedProcessPtys, setVibeVerifiedProcessPtys] = useState<Set<number>>(
+  const [vibeVerifiedReadinessPtys, setVibeVerifiedReadinessPtys] = useState<Set<number>>(
     () => new Set(),
   );
   const vibeRunSupervision = useRef(new Map<number, {
@@ -1179,6 +1179,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     outputBytes: number;
     handledPrompt: string | null;
     handledPromptAt: number | null;
+    readinessVerified: boolean;
     reported: boolean;
   }>());
   const vibeServerWatch = useRef<Array<{
@@ -1187,6 +1188,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     runCommandId: string;
     path: string;
     command: string;
+    kind: "serve" | "worker";
     session: ReturnType<typeof createVibeBuilderSession>;
   }>>([]);
   const vibeServerExit = useRef<
@@ -9274,6 +9276,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             runCommandId: command.id,
             path: command.cwd ?? component.path,
             command: command.command,
+            kind: command.purpose === "worker" ? "worker" : "serve",
             session: vibeSession,
           }))
       : [];
@@ -9318,6 +9321,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ? undefined
         : statsRef.current.find((sample) => sample.id === tab.ptyId);
     const classification = classifyManagedProcess({
+      kind: watched.kind,
       now: Date.now(),
       spawnedAt: Date.now(),
       outputBytes: stats?.output_bytes ?? 0,
@@ -9469,7 +9473,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           dependencyTab,
           dependencyCommand,
           projectStats,
-          vibeVerifiedProcessPtys,
+          vibeVerifiedReadinessPtys,
         );
       });
       if (!dependenciesReady) continue;
@@ -9507,6 +9511,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
         if (!failedTab) continue;
         const classification = classifyManagedProcess({
+          kind: "setup",
           now: Date.now(),
           spawnedAt: Date.now(),
           outputBytes: 0,
@@ -9559,7 +9564,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         { componentId: component.id, runCommandId: command.id },
       );
     }
-  }, [visible, vibe, vibeSession, vibeRequiredRuns, runTabs, projectStats, addTerminal, project.id, project.name, project.components, vibeVerifiedProcessPtys]);
+  }, [visible, vibe, vibeSession, vibeRequiredRuns, runTabs, projectStats, addTerminal, project.id, project.name, project.components, vibeVerifiedReadinessPtys]);
 
   // A live PTY is not proof that its command started. Package runners,
   // authentication flows, and project pickers can all wait forever while the
@@ -9570,7 +9575,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     if (!visible || !vibe || !vibeSession) {
       vibeRunSupervision.current.clear();
-      setVibeVerifiedProcessPtys((current) =>
+      setVibeVerifiedReadinessPtys((current) =>
         current.size === 0 ? current : new Set(),
       );
       return;
@@ -9578,14 +9583,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
     let disposed = false;
     let inspecting = false;
     const verify = (ptyId: number) =>
-      setVibeVerifiedProcessPtys((current) => {
+      setVibeVerifiedReadinessPtys((current) => {
         if (current.has(ptyId)) return current;
         const next = new Set(current);
         next.add(ptyId);
         return next;
       });
     const unverify = (ptyId: number) =>
-      setVibeVerifiedProcessPtys((current) => {
+      setVibeVerifiedReadinessPtys((current) => {
         if (!current.has(ptyId)) return current;
         const next = new Set(current);
         next.delete(ptyId);
@@ -9628,6 +9633,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               outputBytes: stat?.output_bytes ?? 0,
               handledPrompt: null,
               handledPromptAt: null,
+              readinessVerified: false,
               reported: false,
             };
             vibeRunSupervision.current.set(ptyId, observed);
@@ -9640,13 +9646,39 @@ const ProjectViewBody = memo(function ProjectViewBody({
           const raw = (await ipc.ptyOutput(ptyId, 16 * 1024).catch(() => null)) ?? "";
           if (disposed) return;
           const output = plainManagedOutput(raw);
+          const readiness = command.readiness?.kind ?? "process-alive";
+          // Readiness releases dependency startup once. Runtime regressions
+          // belong to browser/server health evidence, not a second startup
+          // incident wearing the wrong label.
+          if (observed.readinessVerified) {
+            verify(ptyId);
+            return;
+          }
+          const ports = stat?.ports ?? [];
+          const httpPath =
+            command.readiness?.kind === "http" ? command.readiness.path : null;
+          const httpReady =
+            httpPath != null && ports.length > 0
+              ? (await Promise.all(
+                  ports.map((port) =>
+                    ipc.probeHttpReadiness(port, httpPath).catch(() => false),
+                  ),
+                )).some(Boolean)
+              : false;
+          if (disposed) return;
           const classification = classifyManagedProcess({
+            kind: command.purpose ?? "serve",
             now,
             spawnedAt: observed.startedAt,
             outputBytes,
             quietMs: stat?.quiet_ms ?? now - observed.lastChangedAt,
-            ports: stat?.ports ?? [],
-            readinessKind: command.readiness?.kind,
+            ports,
+            readinessKind: readiness,
+            httpReady,
+            readinessTimeoutMs:
+              command.readiness?.kind === "one-shot"
+                ? command.readiness.timeoutMs
+                : undefined,
             rawOutput: raw,
             safePromptHandledAt: observed.handledPromptAt,
           });
@@ -9690,7 +9722,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             return;
           }
           if (classification.state === "ready") {
-            if ((command.readiness?.kind ?? "process-alive") === "process-alive") {
+            if (readiness === "process-alive" || readiness === "http") {
+              observed.readinessVerified = true;
               verify(ptyId);
             }
             // A process-alive worker is allowed to become quiet after its
@@ -9748,7 +9781,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const tab = runTabs.find((candidate) =>
         matchesVibeRun(candidate, component, command),
       );
-      return vibeRunReady(tab, command, projectStats, vibeVerifiedProcessPtys);
+      return vibeRunReady(tab, command, projectStats, vibeVerifiedReadinessPtys);
     });
   const vibeInputUnlock = useRef<{ key: string | null; unlocked: boolean }>({
     key: null,
@@ -9776,7 +9809,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         running,
         resolved.command,
         projectStats,
-        vibeVerifiedProcessPtys,
+        vibeVerifiedReadinessPtys,
       )) continue;
       vibeSession.resolveServerIncident(watched.targetKey);
       openVibeServerIncident.current.delete(watched.targetKey);
@@ -9796,7 +9829,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     runTabs,
     projectStats,
     project.id,
-    vibeVerifiedProcessPtys,
+    vibeVerifiedReadinessPtys,
   ]);
 
   const engineerTabBeforeVibe = useRef<string | null>(null);

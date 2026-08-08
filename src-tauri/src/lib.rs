@@ -811,6 +811,7 @@ pub fn run() {
             agents::set_context_scopes,
             agents::session_digests,
             agents::pty_stats,
+            agents::probe_http_readiness,
             governor::terminal_governor_status,
             governor::terminal_governor_incidents,
             governor::terminal_governor_grant,
