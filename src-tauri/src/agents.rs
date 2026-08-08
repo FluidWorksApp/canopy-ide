@@ -1563,7 +1563,11 @@ pub fn install_hook_helper() -> Result<(), String> {
 /// unless a project turns it on — one session's prompts landing in another's
 /// context is a privacy decision the user makes, not a default.
 #[tauri::command]
-pub async fn set_context_scopes(scopes: serde_json::Value) -> Result<(), String> {
+pub async fn set_context_scopes(
+    app: tauri::AppHandle,
+    scopes: serde_json::Value,
+) -> Result<(), String> {
+    crate::context::ContextBridge::validate_mesh_scopes(&scopes)?;
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let dir = std::path::PathBuf::from(&home).join(".canopy");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -1571,7 +1575,12 @@ pub async fn set_context_scopes(scopes: serde_json::Value) -> Result<(), String>
         dir.join("context-scopes.json"),
         serde_json::to_string_pretty(&scopes).map_err(|e| e.to_string())?,
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    // Only publish after the hook-facing copy is durable. A failed disk write
+    // therefore leaves both readers on the previous value instead of creating
+    // a live-bridge/file split.
+    app.state::<crate::context::ContextBridge>()
+        .set_mesh_scopes(&scopes)
 }
 
 /// Delete one session's digest — the user removing a restorable session they

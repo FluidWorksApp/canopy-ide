@@ -2220,6 +2220,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
   wsDigestsRef.current = wsDigests;
   const thisInstanceRef = useRef(thisInstance);
   thisInstanceRef.current = thisInstance;
+  const routeToRaiserRef = useRef<
+    (
+      pr: string,
+      text: string,
+    ) => Promise<{ delivered: boolean; note: string; [key: string]: unknown }>
+  >(async () => ({ delivered: false, note: "PR routing is not ready." }));
   useEffect(() => {
     void ipc
       .instanceId()
@@ -4990,9 +4996,39 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // that was. Rust hands it over here because only this side holds the
       // pty→session binding and can reopen an ended conversation or open a tab
       // for a fresh one. Same route as the PR tab's "Send a change".
+      if (a.kind === "message_agent_start" && a.pr && a.text) {
+        const opId = a.opId;
+        const number = Number(parsePrUrl(a.pr)?.number ?? a.pr.replace(/^#/, ""));
+        const row = prWatchSnapshot().rows.find(
+          (r) =>
+            r.number === number &&
+            rootsRef.current.some(
+              (root) => root === r.repo || root.startsWith(`${r.repo}/`),
+            ),
+        );
+        if (!row) {
+          if (opId != null)
+            void ipc.browserResult(opId, false, `No open PR #${number} in this project.`);
+          return;
+        }
+        void startMicroTask(
+          addressPrCommentsTask,
+          { repo: row.repo, pr: toPrInfo(row) },
+          a.text,
+        ).then((started) => {
+          if (opId != null)
+            void ipc.browserResult(opId, started, {
+              started,
+              note: started
+                ? `Started a fresh agent on #${number}.`
+                : `Couldn't start an agent for #${number}.`,
+            });
+        });
+        return;
+      }
       if (a.kind === "message_agent" && a.pr && a.text) {
         const opId = a.opId;
-        void routeToRaiser(a.pr, a.text).then(
+        void routeToRaiserRef.current(a.pr, a.text).then(
           (result) => {
             if (opId != null)
               void ipc.browserResult(opId, result.delivered, result);
@@ -5097,6 +5133,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     patchTabRaw,
     showBrowserPip,
     startSpawnedAgent,
+    startMicroTask,
   ]);
 
   // The companion asking for a coding session on a brief (canopy_start_session).
@@ -7214,12 +7251,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
         live: liveSessionsRef.current,
         dirExists: (dir) => alive.has(dir),
       });
+      if (to.kind === "cold" || !to.sessionId) {
+        // The bridge must authorize the project's one mesh switch before a
+        // fresh task is created. Return resolution only; Rust sends the
+        // separate message_agent_start action after that check.
+        return {
+          delivered: true,
+          cold: true,
+          cwd: row.repo,
+          note: `No conversation left to reopen for #${number}.`,
+        };
+      }
       // Resolve/reopen only. Rust receives the pty id through browserResult
       // and performs the role check, mesh record and two-write delivery.
       return sendToRaiser(row.repo, toPrInfo(row), to, text, false);
     },
     [onNotice, sendToRaiser],
   );
+  routeToRaiserRef.current = routeToRaiser;
   const runningAgents = useMemo(
     () =>
       projectStats.flatMap((s) => {

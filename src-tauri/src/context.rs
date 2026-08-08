@@ -53,7 +53,9 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "open_file",
     "show_diff",
     "notify",
+    "spawn_agent",
     "message_agent",
+    "message_agent_start",
     "mesh_send",
 ];
 
@@ -114,6 +116,7 @@ const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_screenshot",
     "canopy_server_output",
     "canopy_show_diff",
+    "canopy_spawn_agent",
     "canopy_start_server",
     "canopy_start_session",
     "canopy_stop_server",
@@ -165,12 +168,32 @@ pub struct ContextBridge {
     /// Tools the user switched off in Settings → Agents. `None` until the
     /// frontend publishes, which is the same as "everything is on".
     disabled_tools: Mutex<Option<Vec<String>>>,
+    /// The one cross-session switch. This is the same per-project value the UI
+    /// calls "Shared context"; the mesh is that shared context substrate, so
+    /// roster, claims, history and sends all consult this one predicate.
+    mesh_scopes: Mutex<Vec<MeshScope>>,
     /// Every message one agent has sent another, durable across app runs —
     /// see mesh.rs. A message used to leave no trace anywhere: it arrived in
     /// the target's composer looking exactly like something the user had typed,
     /// so neither the user nor the receiving agent could tell that another
     /// agent had reached in.
     mesh: crate::mesh::MeshStore,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct MeshScope {
+    #[allow(dead_code)]
+    name: String,
+    roots: Vec<String>,
+    enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MeshSurface {
+    Roster,
+    Claims,
+    History,
+    Send,
 }
 
 /// Who is on the other end of a bridge request, established from the
@@ -342,6 +365,7 @@ impl Default for ContextBridge {
             next_op: AtomicU64::new(1),
             claims: crate::mesh::ClaimStore::load(),
             disabled_tools: Mutex::new(None),
+            mesh_scopes: Mutex::new(Vec::new()),
             mesh: crate::mesh::MeshStore::load(),
         }
     }
@@ -354,6 +378,26 @@ fn random_token() -> String {
 }
 
 impl ContextBridge {
+    pub fn validate_mesh_scopes(value: &serde_json::Value) -> Result<(), String> {
+        serde_json::from_value::<Vec<MeshScope>>(value.clone())
+            .map(|_| ())
+            .map_err(|e| format!("bad mesh scopes: {e}"))
+    }
+
+    pub fn set_mesh_scopes(&self, value: &serde_json::Value) -> Result<(), String> {
+        Self::validate_mesh_scopes(value)?;
+        let scopes: Vec<MeshScope> =
+            serde_json::from_value(value.clone()).expect("mesh scopes were validated");
+        *self.mesh_scopes.lock().unwrap() = scopes;
+        Ok(())
+    }
+
+    fn mesh_enabled_path(&self, path: &str) -> bool {
+        let scopes = self.mesh_scopes.lock().unwrap();
+        mesh_enabled_in(&scopes, path)
+            || main_worktree(path).is_some_and(|root| mesh_enabled_in(&scopes, &root))
+    }
+
     /// Age out stale mesh messages — the maintenance scheduler's door to a
     /// store that is otherwise private to this bridge.
     pub fn prune_mesh_messages(&self, now_ms: u64) -> usize {
@@ -547,7 +591,17 @@ pub fn context_tools(state: tauri::State<'_, ContextBridge>, disabled: Vec<Strin
 /// ended claim is history, not a holder.
 #[tauri::command]
 pub fn context_claims(state: tauri::State<'_, ContextBridge>) -> Result<Vec<Claim>, String> {
-    state.claims.held()
+    state.claims.held().map(|claims| {
+        claims
+            .into_iter()
+            .filter(|claim| {
+                claim
+                    .paths
+                    .iter()
+                    .any(|path| mesh_surface_enabled(&state, path, MeshSurface::Claims))
+            })
+            .collect()
+    })
 }
 
 /// Held and ended claims together, newest first — what a claim's detail tab
@@ -555,7 +609,17 @@ pub fn context_claims(state: tauri::State<'_, ContextBridge>) -> Result<Vec<Clai
 /// it always meant.
 #[tauri::command]
 pub fn context_claim_history(state: tauri::State<'_, ContextBridge>) -> Result<Vec<Claim>, String> {
-    state.claims.all_newest()
+    state.claims.all_newest().map(|claims| {
+        claims
+            .into_iter()
+            .filter(|claim| {
+                claim
+                    .paths
+                    .iter()
+                    .any(|path| mesh_surface_enabled(&state, path, MeshSurface::Claims))
+            })
+            .collect()
+    })
 }
 
 #[tauri::command]
@@ -563,6 +627,9 @@ pub fn context_claim_history_for_path(
     state: tauri::State<'_, ContextBridge>,
     path: String,
 ) -> Result<Vec<Claim>, String> {
+    if !mesh_surface_enabled(&state, &path, MeshSurface::Claims) {
+        return Ok(Vec::new());
+    }
     state
         .claims
         .history_for_path(&normalize_claim_path(&path, None))
@@ -582,7 +649,17 @@ pub fn context_release_claim(app: tauri::AppHandle, owner_key: String) {
 /// exist nowhere, and now outlives the app run (see mesh.rs).
 #[tauri::command]
 pub fn context_messages(state: tauri::State<'_, ContextBridge>) -> Vec<crate::mesh::MeshMessage> {
-    state.mesh.all()
+    state
+        .mesh
+        .all()
+        .into_iter()
+        .filter(|message| {
+            [&message.from_cwd, &message.to_cwd]
+                .into_iter()
+                .flatten()
+                .any(|path| mesh_surface_enabled(&state, path, MeshSurface::History))
+        })
+        .collect()
 }
 
 /// The frontend's answer to a browser-control op: `data` is a JSON document
@@ -683,9 +760,10 @@ async fn identity(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (S
 }
 
 async fn snapshot(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
-    if !authorized(&app, &headers) {
+    if caller(&app, &headers).is_none() {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     }
+    let bridge = app.state::<ContextBridge>();
     let projects: Vec<serde_json::Value> = app
         .state::<ContextBridge>()
         .snapshots
@@ -693,6 +771,24 @@ async fn snapshot(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (S
         .unwrap()
         .values()
         .cloned()
+        .map(|mut project| {
+            let mesh_enabled = project
+                .get("components")
+                .and_then(|value| value.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|component| component.get("path").and_then(|value| value.as_str()))
+                .any(|path| mesh_surface_enabled(&bridge, path, MeshSurface::Roster));
+            if !mesh_enabled {
+                if let Some(object) = project.as_object_mut() {
+                    object.insert("agents".into(), serde_json::json!([]));
+                    object.insert("meshEnabled".into(), serde_json::Value::Bool(false));
+                }
+            } else if let Some(object) = project.as_object_mut() {
+                object.insert("meshEnabled".into(), serde_json::Value::Bool(true));
+            }
+            project
+        })
         .collect();
     (
         StatusCode::OK,
@@ -889,6 +985,13 @@ fn project_for_cwd(app: &tauri::AppHandle, cwd: &str) -> Option<ProjectCandidate
         })
         .collect();
     resolve_project(&candidates, cwd, main_worktree)
+}
+
+fn same_mesh_project(app: &tauri::AppHandle, a: &str, b: &str) -> bool {
+    match (project_for_cwd(app, a), project_for_cwd(app, b)) {
+        (Some(left), Some(right)) => left.0 == right.0,
+        _ => false,
+    }
 }
 
 /// A project a directory can resolve to: its id, its display name, and the
@@ -1409,6 +1512,16 @@ async fn claims_list(
     let Some(who) = caller(&app, &headers) else {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     };
+    if !mesh_enabled_for(&app, &who, None, MeshSurface::Claims) {
+        return (
+            StatusCode::OK,
+            serde_json::json!({
+                "claims": [],
+                "note": "The mesh is disabled here because Shared context is off."
+            })
+            .to_string(),
+        );
+    }
     // Held only. An agent asks this to find out what it must not touch, and a
     // claim somebody let go of is not that.
     //
@@ -1425,7 +1538,7 @@ async fn claims_list(
         .into_iter()
         .filter(|c| c.released_at_ms.is_none())
         .filter(|c| match cwd.as_deref() {
-            Some(cwd) => claim_concerns(c, cwd),
+            Some(cwd) => claim_concerns(&app, c, cwd),
             // The companion asks on the user's behalf, not an agent's.
             None => true,
         })
@@ -1436,14 +1549,18 @@ async fn claims_list(
     )
 }
 
-/// Whether a claim is any of this caller's business: it holds files under the
-/// caller's directory, or its owner works in a directory that contains (or sits
-/// inside) the caller's. Deliberately a tree test rather than a project lookup
-/// — a claim is about files, and the question an agent is really asking is
-/// "could this collide with me".
-fn claim_concerns(claim: &Claim, cwd: &str) -> bool {
-    claim_owner_cwd(&claim.owner).is_some_and(|owner_cwd| paths_overlap(&owner_cwd, cwd))
-        || claim.paths.iter().any(|p| paths_overlap(p, cwd))
+/// Whether a claim belongs to the caller's configured project. A raw symmetric
+/// ancestor test made a terminal at `/Users/alice` concern every repo below it;
+/// project membership is the actual trust boundary and has no such wildcard.
+fn claim_concerns(app: &tauri::AppHandle, claim: &Claim, cwd: &str) -> bool {
+    claim_concerns_by(claim, cwd, |left, right| {
+        same_mesh_project(app, left, right)
+    })
+}
+
+fn claim_concerns_by(claim: &Claim, cwd: &str, same_project: impl Fn(&str, &str) -> bool) -> bool {
+    claim_owner_cwd(&claim.owner).is_some_and(|owner_cwd| same_project(&owner_cwd, cwd))
+        || claim.paths.iter().any(|path| same_project(path, cwd))
 }
 
 /// The directory out of a display owner string ("name (/path)"). Display-only
@@ -1476,6 +1593,12 @@ async fn claims_post(
     let Some(who) = caller(&app, &headers) else {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     };
+    if !mesh_enabled_for(&app, &who, None, MeshSurface::Claims) {
+        return (
+            StatusCode::FORBIDDEN,
+            "The mesh is disabled here because Shared context is off.".into(),
+        );
+    }
     let bridge = app.state::<ContextBridge>();
     let holder = ClaimIdentity::of(&who, &req.owner);
     // Relative paths are resolved against the caller's own directory, and `..`
@@ -1955,6 +2078,38 @@ fn paths_overlap(a: &str, b: &str) -> bool {
     a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
 }
 
+fn mesh_enabled_in(scopes: &[MeshScope], path: &str) -> bool {
+    scopes
+        .iter()
+        .filter(|scope| scope.enabled)
+        .flat_map(|scope| scope.roots.iter())
+        .any(|root| !root.trim_matches('/').is_empty() && path_is_within(path, root))
+}
+
+fn mesh_surface_enabled(bridge: &ContextBridge, path: &str, _surface: MeshSurface) -> bool {
+    bridge.mesh_enabled_path(path)
+}
+
+fn mesh_enabled_for(
+    app: &tauri::AppHandle,
+    who: &Caller,
+    route: Option<&str>,
+    surface: MeshSurface,
+) -> bool {
+    let path = who.cwd().or(route).unwrap_or_default();
+    !path.is_empty() && mesh_surface_enabled(&app.state::<ContextBridge>(), path, surface)
+}
+
+fn mesh_enabled_between(app: &tauri::AppHandle, who: &Caller, target: &str) -> bool {
+    let bridge = app.state::<ContextBridge>();
+    let sender_enabled = match who.cwd() {
+        Some(path) => mesh_surface_enabled(&bridge, path, MeshSurface::Send),
+        // The companion is projectless; the target is the project it chose.
+        None => true,
+    };
+    sender_enabled && mesh_surface_enabled(&bridge, target, MeshSurface::Send)
+}
+
 /// What the mesh read tool asks. One POST body rather than query params, the
 /// same shape notes and research use, so nothing here needs URL-encoding.
 #[derive(serde::Deserialize)]
@@ -1978,7 +2133,15 @@ struct MeshQuery {
 /// where the old one was — and it is the same posture claims take: a shared
 /// checkout is one trust domain. Root (the companion) asks for the user and
 /// sees everything.
-fn mesh_concerns(m: &crate::mesh::MeshMessage, who: &Caller) -> bool {
+fn mesh_concerns(app: &tauri::AppHandle, m: &crate::mesh::MeshMessage, who: &Caller) -> bool {
+    mesh_concerns_by(m, who, |left, right| same_mesh_project(app, left, right))
+}
+
+fn mesh_concerns_by(
+    m: &crate::mesh::MeshMessage,
+    who: &Caller,
+    same_project: impl Fn(&str, &str) -> bool,
+) -> bool {
     let Some(a) = who.agent() else {
         return true;
     };
@@ -1988,7 +2151,7 @@ fn mesh_concerns(m: &crate::mesh::MeshMessage, who: &Caller) -> bool {
     }
     [&m.from_cwd, &m.to_cwd]
         .iter()
-        .any(|c| c.as_deref().is_some_and(|c| paths_overlap(c, &a.cwd)))
+        .any(|c| c.as_deref().is_some_and(|c| same_project(c, &a.cwd)))
 }
 
 /// The numeric half of a mesh id, for `since` comparisons. A malformed id
@@ -2010,13 +2173,30 @@ async fn mesh_op(
     let Some(who) = caller(&app, &headers) else {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     };
+    if !mesh_enabled_for(&app, &who, None, MeshSurface::History) {
+        return match q.action.as_str() {
+            "history" => (
+                StatusCode::OK,
+                serde_json::json!({
+                    "messages": [],
+                    "total": 0,
+                    "note": "The mesh is disabled here because Shared context is off."
+                })
+                .to_string(),
+            ),
+            _ => (
+                StatusCode::NOT_FOUND,
+                "The mesh is disabled here because Shared context is off.".into(),
+            ),
+        };
+    }
     let bridge = app.state::<ContextBridge>();
     match q.action.as_str() {
         "get" => {
             let Some(id) = q.id.as_deref() else {
                 return (StatusCode::BAD_REQUEST, "get needs id, e.g. m12".into());
             };
-            match bridge.mesh.get(id).filter(|m| mesh_concerns(m, &who)) {
+            match bridge.mesh.get(id).filter(|m| mesh_concerns(&app, m, &who)) {
                 Some(m) => (
                     StatusCode::OK,
                     serde_json::json!({ "message": m }).to_string(),
@@ -2036,7 +2216,7 @@ async fn mesh_op(
                 .mesh
                 .all()
                 .into_iter()
-                .filter(|m| mesh_concerns(m, &who))
+                .filter(|m| mesh_concerns(&app, m, &who))
                 .filter(|m| since == 0 || mesh_seq(&m.id) > since)
                 .filter(|m| {
                     q.with_pty_id.is_none()
@@ -2203,6 +2383,11 @@ const MAX_MESH_ITEMS: usize = 8;
 /// How much of a mesh body the typed notice carries before pointing at the
 /// store instead.
 const MESH_NOTICE_CHARS: usize = 200;
+const MESH_INLINE_CHARS: usize = 1_200;
+
+fn agent_has_mesh_reader(agent: Option<&str>) -> bool {
+    !matches!(agent, Some("aider" | "omp"))
+}
 
 /// What the published snapshots know about the agent in a terminal: which CLI
 /// it is, and the run's title — "what it is working on" as its tab shows it.
@@ -2323,6 +2508,41 @@ fn mesh_notice(id: &str, reply_to: Option<&str>, text: &str, items: usize) -> St
         notice.push_str(&format!(" … full message via canopy_mesh get {id}"));
         if items > 0 {
             notice.push_str(&format!(" ({items} shared item(s))"));
+        }
+    }
+    notice
+}
+
+/// Aider and oh-my-pi have no MCP transport, so a pointer to canopy_mesh is a
+/// dead instruction. Give those two the body inline (bounded for terminal
+/// safety) and name shared paths directly; MCP-capable targets keep the compact
+/// id-first notice and fetch the durable record themselves.
+fn mesh_notice_for(message: &crate::mesh::MeshMessage) -> String {
+    if agent_has_mesh_reader(message.to_agent.as_deref()) {
+        return mesh_notice(
+            &message.id,
+            message.reply_to.as_deref(),
+            &message.text,
+            message.items.len(),
+        );
+    }
+    let flat = sanitize_message(&message.text);
+    let preview: String = flat.chars().take(MESH_INLINE_CHARS).collect();
+    let clipped = flat.chars().count() > MESH_INLINE_CHARS;
+    let reply = message
+        .reply_to
+        .as_deref()
+        .map(|id| format!(", replying to {id}"))
+        .unwrap_or_default();
+    let mut notice = format!("[mesh {}{}] {}", message.id, reply, preview);
+    if clipped {
+        notice.push_str(" … [truncated]");
+    }
+    if !message.items.is_empty() {
+        notice.push_str(" Shared files:");
+        for item in &message.items {
+            notice.push(' ');
+            notice.push_str(&item.path);
         }
     }
     notice
@@ -2786,6 +3006,12 @@ async fn action(
                         .into(),
                 );
             };
+            if !mesh_enabled_for(&app, &who, None, MeshSurface::Send) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "The mesh is disabled here because Shared context is off.".into(),
+                );
+            }
             let body = act
                 .text
                 .as_deref()
@@ -2958,6 +3184,12 @@ async fn action(
                         "message_agent needs text with something in it".into(),
                     );
                 }
+                if who.cwd().is_some() && !mesh_enabled_for(&app, &who, None, MeshSurface::Send) {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        "The mesh is disabled here because Shared context is off.".into(),
+                    );
+                }
                 // Waited on rather than fired off. The frontend is the only
                 // thing that knows whether this landed — it may find no open PR
                 // by that number, no project to route it to, or a conversation
@@ -2985,15 +3217,55 @@ async fn action(
                 // workspace that has to be prepared first.
                 return match tokio::time::timeout(MESSAGE_PR_TIMEOUT, rx).await {
                     Ok(Ok((true, data))) => {
-                        // Starting a fresh task is already a durable task-store
-                        // operation, not terminal delivery. Every existing or
-                        // resumed conversation comes back with a pty id and is
-                        // delivered here through the same role-checked mesh
-                        // door as the direct form.
-                        if data.get("started").and_then(|v| v.as_bool()) == Some(true)
-                            && data.get("ptyId").is_none()
-                        {
-                            return (StatusCode::OK, body_text(data));
+                        if data.get("cold").and_then(|v| v.as_bool()) == Some(true) {
+                            let route = data.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+                            if !mesh_enabled_between(&app, &who, route) {
+                                return (
+                                    StatusCode::FORBIDDEN,
+                                    "The mesh is disabled here because Shared context is off."
+                                        .into(),
+                                );
+                            }
+                            // Cold PRs become durable task-store runs, not a
+                            // PTY write. Start only after the bridge authorizes
+                            // the resolved project's mesh scope.
+                            let start_id = snaps.next_op.fetch_add(1, Ordering::Relaxed);
+                            let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+                            snaps.pending.lock().unwrap().insert(start_id, start_tx);
+                            let _ = app.emit(
+                                "agent:action",
+                                serde_json::json!({
+                                    "kind": "message_agent_start",
+                                    "route": route,
+                                    "pr": pr,
+                                    "opId": start_id,
+                                    "text": body,
+                                }),
+                            );
+                            return match tokio::time::timeout(MESSAGE_PR_TIMEOUT, start_rx).await {
+                                Ok(Ok((true, started))) => (
+                                    StatusCode::OK,
+                                    started
+                                        .get("note")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Started a fresh agent for the PR.")
+                                        .to_string(),
+                                ),
+                                Ok(Ok((false, failed))) => {
+                                    (StatusCode::BAD_REQUEST, body_text(failed))
+                                }
+                                Ok(Err(_)) => (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "Canopy dropped the approved PR start".into(),
+                                ),
+                                Err(_) => {
+                                    snaps.pending.lock().unwrap().remove(&start_id);
+                                    (
+                                        StatusCode::GATEWAY_TIMEOUT,
+                                        format!("Canopy didn't start an agent for {pr} in time"),
+                                    )
+                                }
+                            };
                         }
                         let Some(target_id) = data
                             .get("ptyId")
@@ -3012,6 +3284,12 @@ async fn action(
                                 format!("The agent for {pr} stopped before delivery"),
                             );
                         };
+                        if !mesh_enabled_between(&app, &who, &target.cwd) {
+                            return (
+                                StatusCode::FORBIDDEN,
+                                "The mesh is disabled here because Shared context is off.".into(),
+                            );
+                        }
                         if let Err(e) =
                             may_message_terminal(target_id, terminal_role(&app, target_id))
                         {
@@ -3043,15 +3321,13 @@ async fn action(
                             }),
                         ));
                         let line = format!("{} {routed}", sender_tag(&who));
-                        if let Err(e) =
-                            deliver_line(
-                                &app,
-                                target_id,
-                                target.cwd.clone(),
-                                record.id.clone(),
-                                &line,
-                            )
-                        {
+                        if let Err(e) = deliver_line(
+                            &app,
+                            target_id,
+                            target.cwd.clone(),
+                            record.id.clone(),
+                            &line,
+                        ) {
                             return (StatusCode::BAD_REQUEST, e);
                         }
                         snaps.mesh.note_delivery(&record.id, &line);
@@ -3108,6 +3384,12 @@ async fn action(
                 );
             };
             let target_cwd = target.cwd.clone();
+            if !mesh_enabled_between(&app, &who, &target_cwd) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "The mesh is disabled here because Shared context is off.".into(),
+                );
+            }
             if let Err(e) = may_message_terminal(id, terminal_role(&app, id)) {
                 return (StatusCode::FORBIDDEN, e);
             }
@@ -3185,6 +3467,12 @@ async fn action(
                 );
             };
             let target_cwd = target.cwd.clone();
+            if !mesh_enabled_between(&app, &who, &target_cwd) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "The mesh is disabled here because Shared context is off.".into(),
+                );
+            }
             // The same bar as message_agent, because the notice arrives the
             // same way: typed into the target. A shell would run it.
             if let Err(e) = may_message_terminal(id, terminal_role(&app, id)) {
@@ -3223,16 +3511,7 @@ async fn action(
             // The full body lives on the mesh; what lands in the terminal is a
             // one-line notice carrying the id, so the target knows to look —
             // and a 40-line handoff stops arriving as 40 keystroke lines.
-            let notice = format!(
-                "{} {}",
-                sender_tag(&who),
-                mesh_notice(
-                    &record.id,
-                    record.reply_to.as_deref(),
-                    text,
-                    record.items.len()
-                )
-            );
+            let notice = format!("{} {}", sender_tag(&who), mesh_notice_for(&record));
             if let Err(e) = deliver_line(&app, id, target_cwd, record.id.clone(), &notice) {
                 return (StatusCode::BAD_REQUEST, e);
             }
@@ -3240,18 +3519,26 @@ async fn action(
             // concrete notice only after that write succeeds; `submitted`
             // remains the separate truth about the delayed Return.
             snaps.mesh.note_delivery(&record.id, &notice);
-            format!(
-                "Sent mesh message {rid} to terminal {id}: a one-line notice with the id was \
-                 typed into its session, and the full message ({}between you on the mesh). It \
-                 can read it with canopy_mesh get {rid} and reply with canopy_mesh_send \
-                 replyTo \"{rid}\".",
-                if record.items.is_empty() {
-                    "kept "
-                } else {
-                    "with its shared items, kept "
-                },
-                rid = record.id,
-            )
+            if agent_has_mesh_reader(record.to_agent.as_deref()) {
+                format!(
+                    "Sent mesh message {rid} to terminal {id}: a one-line notice with the id was \
+                     typed into its session, and the full message ({}between you on the mesh). It \
+                     can read it with canopy_mesh get {rid} and reply with canopy_mesh_send \
+                     replyTo \"{rid}\".",
+                    if record.items.is_empty() {
+                        "kept "
+                    } else {
+                        "with its shared items, kept "
+                    },
+                    rid = record.id,
+                )
+            } else {
+                format!(
+                    "Sent mesh message {} to terminal {id}. That CLI has no mesh reader, so its \
+                     bounded body and shared file paths were typed inline.",
+                    record.id
+                )
+            }
         }
         other => return (StatusCode::BAD_REQUEST, format!("unknown action: {other}")),
     };
@@ -5136,6 +5423,33 @@ mod tests {
         assert!(bridge.identify(&token).is_none());
     }
 
+    #[test]
+    fn one_mesh_switch_flips_every_cross_session_surface() {
+        let bridge = ContextBridge::default();
+        let scopes = |enabled| {
+            serde_json::json!([{
+                "name": "app",
+                "roots": ["/w/app"],
+                "enabled": enabled,
+            }])
+        };
+        let surfaces = [
+            MeshSurface::Roster,
+            MeshSurface::Claims,
+            MeshSurface::History,
+            MeshSurface::Send,
+        ];
+
+        bridge.set_mesh_scopes(&scopes(false)).unwrap();
+        for surface in surfaces {
+            assert!(!mesh_surface_enabled(&bridge, "/w/app", surface));
+        }
+        bridge.set_mesh_scopes(&scopes(true)).unwrap();
+        for surface in surfaces {
+            assert!(mesh_surface_enabled(&bridge, "/w/app/src", surface));
+        }
+    }
+
     /// Claims are the caller's business only when they could collide with it.
     /// Unscoped, an agent learned every open project's claimed paths — even
     /// with shared context switched off for its own.
@@ -5163,10 +5477,19 @@ mod tests {
             owner: "other (/w/other)".into(),
             ..mine.clone()
         };
-        assert!(claim_concerns(&mine, "/w/app"));
-        assert!(!claim_concerns(&theirs, "/w/app"));
+        let project = |path: &str| {
+            ["/w/app", "/w/other"]
+                .into_iter()
+                .find(|root| path_is_within(path, root))
+        };
+        let same =
+            |left: &str, right: &str| project(left) == project(right) && project(left).is_some();
+        assert!(claim_concerns_by(&mine, "/w/app", same));
+        assert!(!claim_concerns_by(&theirs, "/w/app", same));
         // A subdirectory of the claimed tree still concerns me.
-        assert!(claim_concerns(&mine, "/w/app/src"));
+        assert!(claim_concerns_by(&mine, "/w/app/src", same));
+        // An ancestor cwd is not a wildcard for every project beneath it.
+        assert!(!claim_concerns_by(&mine, "/w", same));
     }
 
     #[test]
@@ -5321,22 +5644,55 @@ mod tests {
     #[test]
     fn mesh_history_is_scoped_like_claims() {
         let msg = mesh_msg(Some(3), "/w/app", 7, "/w/app/.claude/worktrees/x");
+        let project = |path: &str| {
+            ["/w/app", "/w/other"]
+                .into_iter()
+                .find(|root| path_is_within(path, root))
+        };
+        let same =
+            |left: &str, right: &str| project(left) == project(right) && project(left).is_some();
         // Sender and receiver both see it, by credential.
-        assert!(mesh_concerns(&msg, &agent_caller(3, "run-1", "/elsewhere")));
-        assert!(mesh_concerns(&msg, &agent_caller(7, "run-1", "/elsewhere")));
-        // A pty id from another app run names a different terminal now.
-        assert!(!mesh_concerns(
+        assert!(mesh_concerns_by(
             &msg,
-            &agent_caller(3, "run-2", "/elsewhere")
+            &agent_caller(3, "run-1", "/elsewhere"),
+            same
+        ));
+        assert!(mesh_concerns_by(
+            &msg,
+            &agent_caller(7, "run-1", "/elsewhere"),
+            same
+        ));
+        // A pty id from another app run names a different terminal now.
+        assert!(!mesh_concerns_by(
+            &msg,
+            &agent_caller(3, "run-2", "/elsewhere"),
+            same,
         ));
         // But the tree still answers: a relaunched agent working where the old
         // one was reads the old one's traffic.
-        assert!(mesh_concerns(&msg, &agent_caller(9, "run-2", "/w/app")));
-        assert!(mesh_concerns(&msg, &agent_caller(9, "run-2", "/w/app/src")));
+        assert!(mesh_concerns_by(
+            &msg,
+            &agent_caller(9, "run-2", "/w/app"),
+            same
+        ));
+        assert!(mesh_concerns_by(
+            &msg,
+            &agent_caller(9, "run-2", "/w/app/src"),
+            same
+        ));
         // A different project sees nothing.
-        assert!(!mesh_concerns(&msg, &agent_caller(9, "run-2", "/w/other")));
+        assert!(!mesh_concerns_by(
+            &msg,
+            &agent_caller(9, "run-2", "/w/other"),
+            same
+        ));
+        assert!(!mesh_concerns_by(
+            &msg,
+            &agent_caller(9, "run-2", "/w"),
+            same
+        ));
         // The companion asks for the user and sees everything.
-        assert!(mesh_concerns(&msg, &Caller::Root));
+        assert!(mesh_concerns_by(&msg, &Caller::Root, same));
     }
 
     #[test]
@@ -5359,6 +5715,23 @@ mod tests {
         // Items always earn the pointer, and are counted.
         let n = mesh_notice("m11", None, "see attached", 2);
         assert!(n.contains("(2 shared item(s))"), "got: {n}");
+    }
+
+    #[test]
+    fn mcp_less_agents_receive_the_message_not_a_dead_store_pointer() {
+        let mut message = mesh_msg(Some(3), "/w/app", 7, "/w/app");
+        message.id = "m12".into();
+        message.to_agent = Some("aider".into());
+        message.text = "first line\nsecond line".into();
+        message.items = vec![crate::mesh::MeshItem {
+            kind: "file".into(),
+            path: "/w/app/build.log".into(),
+            note: None,
+        }];
+        let notice = mesh_notice_for(&message);
+        assert!(notice.contains("first line second line"), "{notice}");
+        assert!(notice.contains("/w/app/build.log"), "{notice}");
+        assert!(!notice.contains("canopy_mesh get"), "{notice}");
     }
 
     #[test]

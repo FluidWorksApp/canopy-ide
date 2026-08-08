@@ -27,9 +27,11 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
-/// How many messages the log keeps, in memory and on disk. Old traffic ages
-/// out of the front as new traffic lands, and the file is rewritten to match.
+/// Dual cap for the rewritten JSONL log. A count cap alone allowed 500 maximum
+/// sized mesh bodies (~16 MiB) to be serialized on each delivery-state change.
+/// Keep the newest traffic while bounding the actual rewrite cost.
 const MAX_KEPT: usize = 500;
+const MAX_KEPT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CLAIM_HISTORY: usize = 200;
 
 /// How long a message stays even under the count cap. Pty ids only mean
@@ -200,10 +202,7 @@ impl MeshStore {
                 );
             }
         }
-        if messages.len() > MAX_KEPT {
-            let excess = messages.len() - MAX_KEPT;
-            messages.drain(0..excess);
-        }
+        cap_messages(&mut messages);
         // Resume past everything ever written, including messages the cap has
         // already dropped from the front — an id, once handed out, is never
         // reused for a different message.
@@ -248,10 +247,7 @@ impl MeshStore {
             submitted: false,
         };
         inner.messages.push(msg.clone());
-        if inner.messages.len() > MAX_KEPT {
-            let excess = inner.messages.len() - MAX_KEPT;
-            inner.messages.drain(0..excess);
-        }
+        cap_messages(&mut inner.messages);
         inner.persist();
         msg
     }
@@ -302,6 +298,24 @@ impl MeshStore {
             inner.persist();
         }
         dropped
+    }
+}
+
+fn message_bytes(message: &MeshMessage) -> usize {
+    serde_json::to_vec(message)
+        .map(|bytes| bytes.len() + 1)
+        .unwrap_or(0)
+}
+
+fn cap_messages(messages: &mut Vec<MeshMessage>) {
+    if messages.len() > MAX_KEPT {
+        let excess = messages.len() - MAX_KEPT;
+        messages.drain(0..excess);
+    }
+    let mut bytes: usize = messages.iter().map(message_bytes).sum();
+    while messages.len() > 1 && bytes > MAX_KEPT_BYTES {
+        bytes = bytes.saturating_sub(message_bytes(&messages[0]));
+        messages.remove(0);
     }
 }
 
@@ -830,6 +844,20 @@ mod tests {
         let next = reopened.record(new_msg("one more", 7));
         assert_eq!(next.id, format!("m{}", MAX_KEPT + 4));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_log_is_bounded_by_serialized_bytes_not_only_rows() {
+        let store = MeshStore::at(None);
+        let body = "x".repeat(16 * 1024);
+        for n in 0..200 {
+            store.record(new_msg(&format!("{n}:{body}"), 7));
+        }
+        let kept = store.all();
+        let bytes: usize = kept.iter().map(message_bytes).sum();
+        assert!(bytes <= MAX_KEPT_BYTES, "kept {bytes} bytes");
+        assert!(kept.len() < 200);
+        assert!(kept.last().unwrap().text.starts_with("199:"));
     }
 
     #[test]

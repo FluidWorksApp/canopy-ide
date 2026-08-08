@@ -66,6 +66,8 @@ IDE the user is watching, and their results stay inspectable:\n\
   or contrast)\n\
 - Working in a checkout that other agents share -> canopy_agents first, then \
   canopy_mesh history; use canopy_claim before editing shared paths\n\
+- A short one-line interrupt to another agent -> canopy_message_agent; pass a \
+  terminal id from canopy_agents, or `pr` to reach the session that raised a PR\n\
 - Handing another agent more than one line, or files, or a message it should \
   be able to find again -> canopy_mesh_send (persistent, by message id); \
   what you've sent and received, or a message id someone gave you -> \
@@ -133,6 +135,7 @@ mod tests {
         assert!(prompt.starts_with("This coding-agent session is running inside the Canopy IDE"));
         assert!(prompt.contains("At the start of a new session, call canopy_project"));
         assert!(prompt.contains("call canopy_agents and canopy_mesh history before editing"));
+        assert!(prompt.contains("canopy_message_agent"));
         assert!(prompt.contains("canopy_mesh_send"));
     }
 
