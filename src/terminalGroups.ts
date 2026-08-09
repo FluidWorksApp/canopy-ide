@@ -56,6 +56,19 @@ export function leafIds(node: TerminalSplitNode): string[] {
 export type MultiplexPaneFocusState = "normal" | "focused" | "dimmed";
 
 /**
+ * Compaction follows paint, not focus. Every visible split pane streams even
+ * when another pane owns input, while a transient mismatch must fail closed:
+ * an active terminal is protected even if a caller has not published its
+ * streaming visibility yet.
+ */
+export function terminalCompactionProtected(
+  active: boolean,
+  streaming: boolean,
+): boolean {
+  return active || streaming;
+}
+
+/**
  * Visual focus belongs to the active live tab, not merely to a persisted
  * group's remembered active leaf. During crash recovery the group can arrive
  * before its active tab does (or retain an old runtime id); that is a genuine

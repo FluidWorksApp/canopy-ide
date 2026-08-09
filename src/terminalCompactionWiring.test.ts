@@ -13,6 +13,8 @@ describe("terminal idle-compaction wiring", () => {
     expect(setup.indexOf("serialize:")).toBeLessThan(setup.indexOf("term.reset()"));
     expect(setup.indexOf("term.reset()")).toBeLessThan(setup.indexOf("term.clear()"));
     expect(setup).toContain("term.scrollToLine(");
+    expect(setup).toContain("isVisible: compactionVisible");
+    expect(setup).toContain("!compactionVisible() && compaction.compactNow()");
   });
 
   it("finishes VT restoration before attaching native replay", () => {

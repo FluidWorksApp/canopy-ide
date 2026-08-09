@@ -29,6 +29,10 @@ export interface TerminalCompactionOptions {
   idleMs?: number;
   maxSerializedBytes?: number;
   metrics?: TerminalCompactionMetricsSink;
+  /** Synchronous paint/focus authority. React props update before passive
+   *  visibility effects, so this closes the render→effect race where the
+   *  controller's last `hide()` call is already stale. */
+  isVisible?: () => boolean;
   setTimer?: (callback: () => void, delayMs: number) => unknown;
   clearTimer?: (timer: unknown) => void;
 }
@@ -80,6 +84,7 @@ export class TerminalCompactionController {
   private readonly idleMs: number;
   private readonly maxBytes: number;
   private readonly metrics: TerminalCompactionMetricsSink;
+  private readonly isVisible: () => boolean;
   private readonly setTimer: (callback: () => void, delayMs: number) => unknown;
   private readonly clearTimer: (timer: unknown) => void;
   private timer: unknown = null;
@@ -99,6 +104,7 @@ export class TerminalCompactionController {
     this.idleMs = options.idleMs ?? TERMINAL_COMPACT_IDLE_MS;
     this.maxBytes = options.maxSerializedBytes ?? TERMINAL_COMPACT_MAX_BYTES;
     this.metrics = options.metrics ?? noopMetrics;
+    this.isVisible = options.isVisible ?? (() => false);
     this.setTimer =
       options.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
     this.clearTimer =
@@ -119,6 +125,7 @@ export class TerminalCompactionController {
     if (
       this.disposed ||
       !this.hidden ||
+      this.isVisible() ||
       this.snapshot != null ||
       this.restoring != null
     ) {
@@ -190,7 +197,12 @@ export class TerminalCompactionController {
   }
 
   private currentHidden(epoch: number): boolean {
-    return !this.disposed && this.hidden && this.epoch === epoch;
+    return (
+      !this.disposed &&
+      this.hidden &&
+      !this.isVisible() &&
+      this.epoch === epoch
+    );
   }
 
   private scheduleCompaction(epoch: number, delayMs: number): void {

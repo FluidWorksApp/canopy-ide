@@ -22,6 +22,7 @@ import { matchesChord, resolve } from "../shortcuts";
 import { TerminalStreamLedger } from "../terminalStreamLedger";
 import { terminalRetentionRegistry } from "../terminalRetention";
 import { TerminalCompactionController } from "../terminalCompaction";
+import { terminalCompactionProtected } from "../terminalGroups";
 import { registerTerminalPressureShedder } from "../rendererPressureRelief";
 import { registerTerminalWindowEvents } from "../terminalWindowEvents";
 
@@ -302,6 +303,12 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       term.onResize(updateRetention),
       term.buffer.onBufferChange(updateRetention),
     ];
+    // React publishes refs during render, before the passive effect below can
+    // call show()/hide(). Pressure may arrive in that gap, so compaction asks
+    // the current paint/focus truth directly rather than trusting its last
+    // effect-delivered state.
+    const compactionVisible = () =>
+      terminalCompactionProtected(activeRef.current, streamingRef.current);
     let compactedViewportY: number | null = null;
     const compaction = new TerminalCompactionController(
       {
@@ -333,6 +340,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         },
       },
       {
+        isVisible: compactionVisible,
         metrics: {
           attempted: retention.compactionAttempted,
           reserve: retention.reserveCompaction,
@@ -346,10 +354,10 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       },
     );
     const unregisterPressureShedder = registerTerminalPressureShedder(() =>
-      compaction.compactNow(),
+      !compactionVisible() && compaction.compactNow(),
     );
     releaseMemoryRef.current = () => {
-      if (compaction.compactNow()) return "compacting";
+      if (!compactionVisible() && compaction.compactNow()) return "compacting";
       // Compaction deliberately refuses a visible terminal: serializing and
       // immediately restoring it saves nothing. Purge only scrollback there;
       // the viewport and live PTY remain intact.

@@ -35,7 +35,11 @@ class FakeSurface implements TerminalCompactionSurface {
   };
 }
 
-const harness = (surface = new FakeSurface(), maxSerializedBytes = 1_024) => {
+const harness = (
+  surface = new FakeSurface(),
+  maxSerializedBytes = 1_024,
+  isVisible: () => boolean = () => false,
+) => {
   let timer: (() => void) | null = null;
   const compacted = vi.fn();
   const attempted = vi.fn();
@@ -56,6 +60,7 @@ const harness = (surface = new FakeSurface(), maxSerializedBytes = 1_024) => {
   const controller = new TerminalCompactionController(surface, {
     idleMs: 10,
     maxSerializedBytes,
+    isVisible,
     setTimer: (callback) => {
       timer = callback;
       return 1;
@@ -244,6 +249,30 @@ describe("hidden terminal compaction", () => {
     h.surface.pendingRestore?.();
     await shown;
     expect(h.controller.compactNow()).toBe(false);
+  });
+
+  it("fails closed when render visibility outruns the passive show effect", () => {
+    let visible = false;
+    const h = harness(new FakeSurface(), 1_024, () => visible);
+    h.controller.hide();
+
+    // React has rendered the pane onscreen, but show() has not run yet. The
+    // old internal hidden bit must not let host pressure touch live cells.
+    visible = true;
+    expect(h.controller.compactNow()).toBe(false);
+    h.fireTimer();
+    expect(h.surface.events).toEqual([]);
+
+    // Visibility is rechecked after the parser barrier too: a pane revealed
+    // during drain cannot be serialized or cleared by the stale callback.
+    visible = false;
+    h.controller.hide();
+    h.fireTimer();
+    expect(h.surface.events).toEqual(["drain-queued"]);
+    visible = true;
+    h.surface.pendingDrain?.();
+    expect(h.surface.events).toEqual(["drain-queued"]);
+    expect(h.compacted).not.toHaveBeenCalled();
   });
 
   it("drains parsing, compacts, then restores before show resolves", async () => {
