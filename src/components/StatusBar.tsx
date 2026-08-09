@@ -871,12 +871,10 @@ export const StatusBar = memo(function StatusBar({
             }}
           >
             <span className={appLoad?.cpu ? "bd-hot" : undefined}>
-              {!app.includes_webviews && "≥"}
               {app.cpu.toFixed(0)}% cpu
             </span>{" "}
             ·{" "}
             <span className={appLoad?.mem ? "bd-hot" : undefined}>
-              {!app.includes_webviews && "≥"}
               {fmtMem(app.mem_bytes)}
             </span>
           </button>

@@ -25,21 +25,57 @@ export function terminalGovernorByPty(
   return new Map((snapshot?.sessions ?? []).map((status) => [status.id, status]));
 }
 
-const severity = (state: TerminalBudgetState): number => {
-  switch (state) {
-    case "over_allowance": return 3;
-    case "awaiting_grant": return 2;
-    case "warned": return 1;
-    default: return 0;
-  }
-};
+export interface TerminalMemoryQuotaGroup {
+  members: TerminalBudgetStatus[];
+  state: Extract<TerminalBudgetState, "warned" | "awaiting_grant" | "over_allowance">;
+  current_bytes: number;
+  allowance_bytes: number;
+  peak_bytes: number;
+}
 
-/** A multiplexed visual tab represents several PTYs. Show the strongest live
- * governor state among them, without inventing an aggregate byte threshold. */
-export function strongestTerminalMemoryWarning(
+/** A multiplexed tab is a view over several independently-owned allowances.
+ * Its warning compares summed usage with summed allowances; no member's quota
+ * is borrowed as a quota for the whole visual tab. Grants remain on `members`. */
+export function terminalMemoryQuotaWarning(
   statuses: Array<TerminalBudgetStatus | null | undefined>,
-): TerminalBudgetStatus | null {
-  return statuses
-    .filter(isTerminalMemoryWarning)
-    .sort((a, b) => severity(b.state) - severity(a.state))[0] ?? null;
+): TerminalMemoryQuotaGroup | null {
+  const members = statuses.filter(
+    (status): status is TerminalBudgetStatus => status != null,
+  );
+  if (members.length === 0) return null;
+  if (members.length === 1) {
+    const member = members[0];
+    if (!isTerminalMemoryWarning(member)) return null;
+    return {
+      members,
+      state: member.state as TerminalMemoryQuotaGroup["state"],
+      current_bytes: member.current_bytes,
+      allowance_bytes: member.allowance_bytes,
+      peak_bytes: member.peak_bytes,
+    };
+  }
+
+  const current_bytes = members.reduce(
+    (sum, status) => sum + status.current_bytes,
+    0,
+  );
+  const allowance_bytes = members.reduce(
+    (sum, status) => sum + status.allowance_bytes,
+    0,
+  );
+  const peak_bytes = members.reduce(
+    (sum, status) => sum + status.peak_bytes,
+    0,
+  );
+  const allowance = Math.max(1, allowance_bytes);
+  const state = current_bytes > allowance
+    ? "over_allowance"
+    : current_bytes * 100 >= allowance * 90
+      ? "awaiting_grant"
+      : current_bytes * 100 >= allowance * 75
+        ? "warned"
+        : null;
+  return state == null
+    ? null
+    : { members, state, current_bytes, allowance_bytes, peak_bytes };
 }

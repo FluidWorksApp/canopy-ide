@@ -497,7 +497,8 @@ describe("the app resource boundary", () => {
     render(<StatusBar {...base} events={[]} />);
 
     const chip = await screen.findByTitle(/canopy lower bound/);
-    expect(chip.textContent).toContain("≥44% cpu · ≥2.4 GB");
+    expect(chip.textContent).toContain("44% cpu · 2.4 GB");
+    expect(chip.textContent).not.toContain("≥");
     expect(chip.getAttribute("title")).toContain("Activity Monitor");
 
     fireEvent.click(chip);

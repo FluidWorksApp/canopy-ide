@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { TerminalBudgetStatus } from "./ipc";
 import {
   isTerminalMemoryWarning,
-  strongestTerminalMemoryWarning,
+  terminalMemoryQuotaWarning,
 } from "./terminalMemoryPressure";
 
 const status = (state: TerminalBudgetStatus["state"], id = 1): TerminalBudgetStatus => ({
@@ -19,8 +19,9 @@ const status = (state: TerminalBudgetStatus["state"], id = 1): TerminalBudgetSta
   growth_bytes_per_second: 0,
   samples: 2,
   grant_request: null,
-  stop_request_id: `stop-${id}`,
-  cli_key: null,
+    stop_request_id: `stop-${id}`,
+    cli_key: null,
+    max_allowance_bytes: null,
 });
 
 describe("terminal memory warning", () => {
@@ -36,13 +37,20 @@ describe("terminal memory warning", () => {
     expect(isTerminalMemoryWarning(status(stateName))).toBe(warned);
   });
 
-  it("uses the strongest governor state in a multiplexed tab", () => {
-    expect(
-      strongestTerminalMemoryWarning([
-        status("warned", 1),
-        status("over_allowance", 2),
-        status("awaiting_grant", 3),
-      ])?.id,
-    ).toBe(2);
+  it("compares multiplex usage with the sum of per-agent allowances", () => {
+    const first = { ...status("over_allowance", 1), current_bytes: 110 };
+    const second = { ...status("normal", 2), current_bytes: 20 };
+    expect(terminalMemoryQuotaWarning([first, second])).toBeNull();
+
+    const pressured = terminalMemoryQuotaWarning([
+      { ...first, current_bytes: 121 },
+      { ...second, current_bytes: 80 },
+    ]);
+    expect(pressured).toMatchObject({
+      state: "over_allowance",
+      current_bytes: 201,
+      allowance_bytes: 200,
+    });
+    expect(pressured?.members.map((member) => member.id)).toEqual([1, 2]);
   });
 });

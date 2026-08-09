@@ -435,6 +435,9 @@ export interface ProjectViewProps {
   /** App's one native-governor snapshot. ProjectView only joins its terminal
    * PTY ids onto it; it does not calculate a second memory policy. */
   terminalGovernor: import("../../ipc").TerminalGovernorSnapshot | null;
+  /** Publish visual multiplex membership so App's one grant dialog can compare
+   * summed usage with summed per-agent allowances. */
+  onTerminalQuotaGroupsChange?: (projectId: string, groups: number[][]) => void;
   /** Every open project (name + roots) — the resource breakdown groups the
    *  machine-wide session stats by project, which one project can't know. */
   allProjects: { name: string; roots: string[]; asleep?: boolean }[];

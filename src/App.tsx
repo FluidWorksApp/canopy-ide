@@ -125,8 +125,15 @@ import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
-import { TerminalGovernorDialog } from "./components/TerminalGovernorDialog";
+import { TerminalGovernorCard } from "./components/TerminalGovernorDialog";
+import { terminalMemoryQuotaWarning } from "./terminalMemoryPressure";
+import {
+  beginGovernorPromptCooldown as addGovernorPromptCooldown,
+  governorPromptEligible,
+  pruneGovernorPromptCooldowns,
+} from "./governorPrompt";
 import { identifyAgent } from "./agentIdentity";
+import { terminalDisplayName } from "./agentDisplayName";
 import { shouldOnboard, markOnboarded } from "./onboarding";
 import { isSelftest, setSelftestMode } from "./selftest/mode";
 import { startBrowserWatchdog } from "./browserWatchdog";
@@ -163,6 +170,8 @@ import {
 // restarts and re-associates with the same relay on reconnect. Capped, and
 // scoped by relay so joining a different team never mixes transcripts.
 const RELAY_CHAT_PREFIX = "canopy.relayChat:";
+const governorAttentionKey = (id: number) => `governor-memory:${id}`;
+const NO_DISMISSED_GOVERNOR_REQUESTS = new Set<string>();
 function loadRelayChat(label: string): ipc.RelayChatMsg[] {
   try {
     const raw = localStorage.getItem(RELAY_CHAT_PREFIX + label);
@@ -263,32 +272,152 @@ export default function App() {
   const [memPressure, setMemPressure] = useState<ipc.MemoryPressure | null>(null);
   const [terminalGovernor, setTerminalGovernor] =
     useState<ipc.TerminalGovernorSnapshot | null>(null);
+  const [terminalQuotaGroupsByProject, setTerminalQuotaGroupsByProject] =
+    useState<Record<string, number[][]>>({});
+  const onTerminalQuotaGroupsChange = useCallback(
+    (projectId: string, groups: number[][]) => {
+      setTerminalQuotaGroupsByProject((current) => {
+        if (JSON.stringify(current[projectId] ?? []) === JSON.stringify(groups)) {
+          return current;
+        }
+        return { ...current, [projectId]: groups };
+      });
+    },
+    [],
+  );
   const [governorBusy, setGovernorBusy] = useState(false);
   const [governorError, setGovernorError] = useState<string | null>(null);
-  const [dismissedGovernorRequests, setDismissedGovernorRequests] = useState<
-    Set<string>
-  >(new Set());
-  const pendingGovernor = terminalGovernor?.sessions.find((session) => {
-    const request = session.grant_request;
-    return request != null && !dismissedGovernorRequests.has(request.request_id);
-  });
-  const [pendingGovernorSession, setPendingGovernorSession] =
-    useState<ipc.SessionStats>();
+  const [activeGovernorRequestId, setActiveGovernorRequestId] =
+    useState<string | null>(null);
+  const [governorPromptCooldowns, setGovernorPromptCooldowns] = useState<
+    Record<number, number>
+  >({});
+  const beginGovernorPromptCooldown = useCallback((id: number) => {
+    setGovernorPromptCooldowns((current) =>
+      addGovernorPromptCooldown(current, id, Date.now()),
+    );
+  }, []);
   useEffect(() => {
-    if (pendingGovernor == null) {
-      setPendingGovernorSession(undefined);
+    const expiries = Object.values(governorPromptCooldowns);
+    if (expiries.length === 0) return;
+    const nextExpiry = Math.min(...expiries);
+    const timer = window.setTimeout(() => {
+      const now = Date.now();
+      setGovernorPromptCooldowns((current) =>
+        pruneGovernorPromptCooldowns(current, now),
+      );
+    }, Math.max(0, nextExpiry - Date.now()) + 20);
+    return () => window.clearTimeout(timer);
+  }, [governorPromptCooldowns]);
+  const quotaGroupByPty = useMemo(() => {
+    const groups = new Map<number, number[]>();
+    for (const projectGroups of Object.values(terminalQuotaGroupsByProject)) {
+      for (const projectGroup of projectGroups) {
+        for (const id of projectGroup) groups.set(id, projectGroup);
+      }
+    }
+    return groups;
+  }, [terminalQuotaGroupsByProject]);
+  const quotaMembersFor = useCallback(
+    (id: number) => {
+      const ids = quotaGroupByPty.get(id) ?? [id];
+      const byId = new Map(
+        (terminalGovernor?.sessions ?? []).map((status) => [status.id, status]),
+      );
+      return ids.flatMap((memberId) => {
+        const status = byId.get(memberId);
+        return status ? [status] : [];
+      });
+    },
+    [quotaGroupByPty, terminalGovernor],
+  );
+  const pendingGovernor = terminalGovernor?.sessions.find((session) => {
+    if (!governorPromptEligible(
+      session,
+      NO_DISMISSED_GOVERNOR_REQUESTS,
+      governorPromptCooldowns,
+      activeGovernorRequestId,
+      Date.now(),
+    )) return false;
+    const quota = terminalMemoryQuotaWarning(quotaMembersFor(session.id));
+    return quota != null && quota.current_bytes > quota.allowance_bytes;
+  });
+  const pendingGovernorMembers = pendingGovernor
+    ? quotaMembersFor(pendingGovernor.id)
+    : [];
+  const pendingGovernorQuota = terminalMemoryQuotaWarning(pendingGovernorMembers);
+  const pendingGovernorId = pendingGovernor?.id;
+  const pendingGovernorRequestId = pendingGovernor?.grant_request?.request_id;
+  const [pendingGovernorSessions, setPendingGovernorSessions] =
+    useState<ipc.SessionStats[]>([]);
+  const pendingGovernorTargetSession = pendingGovernorSessions.find(
+    (session) => session.id === pendingGovernorId,
+  );
+  const pendingGovernorMemberIds = pendingGovernorMembers
+    .map((member) => member.id)
+    .join(",");
+  useEffect(() => {
+    if (pendingGovernorId == null || !pendingGovernorRequestId) return;
+    const terminalName = terminalDisplayName({
+      id: pendingGovernorId,
+      name: pendingGovernorTargetSession?.name,
+      agent: identifyAgent(pendingGovernorTargetSession?.agent_hint) != null,
+    });
+    const attentionId = postAttention({
+      kind: "question",
+      tone: "warn",
+      title: `${terminalName} needs a memory decision`,
+      body: `Current use ${fmtBytes(pendingGovernorQuota?.current_bytes ?? 0)} exceeds the current ${fmtBytes(pendingGovernorQuota?.allowance_bytes ?? 0)} allowance. This platform remains monitor-only unless its capability says otherwise.`,
+      source: "app",
+      where: {
+        kind: "terminal",
+        ptyId: pendingGovernorId,
+        path: pendingGovernorTargetSession?.cwd,
+      },
+      dedupeKey: governorAttentionKey(pendingGovernorId),
+    });
+    // The actionable card below is this question's live renderer. Keep the
+    // durable item in Notifications without rendering a duplicate toast.
+    dismissToast(attentionId);
+    if (activeGovernorRequestId === pendingGovernorRequestId) return;
+    setActiveGovernorRequestId(pendingGovernorRequestId);
+    beginGovernorPromptCooldown(pendingGovernorId);
+  }, [
+    activeGovernorRequestId,
+    beginGovernorPromptCooldown,
+    pendingGovernorId,
+    pendingGovernorRequestId,
+    pendingGovernorQuota?.allowance_bytes,
+    pendingGovernorQuota?.current_bytes,
+    pendingGovernorTargetSession?.agent_hint,
+    pendingGovernorTargetSession?.cwd,
+    pendingGovernorTargetSession?.name,
+  ]);
+  useEffect(() => {
+    for (const item of attentionItems()) {
+      const rawId = item.dedupeKey?.match(/^governor-memory:(\d+)$/)?.[1];
+      if (!rawId || item.resolvedAt != null) continue;
+      const members = quotaMembersFor(Number(rawId));
+      const current = members.reduce((sum, member) => sum + member.current_bytes, 0);
+      const allowance = members.reduce(
+        (sum, member) => sum + member.allowance_bytes,
+        0,
+      );
+      if (members.length === 0 || current <= allowance) {
+        resolveAttentionByKey(item.dedupeKey!, "withdrawn");
+      }
+    }
+  }, [quotaMembersFor, terminalGovernor]);
+  useEffect(() => {
+    if (pendingGovernorId == null) {
+      setPendingGovernorSessions([]);
       return;
     }
+    const ids = new Set(
+      pendingGovernorMemberIds.split(",").filter(Boolean).map(Number),
+    );
     const select = (sessions: ipc.SessionStats[]) => {
-      const next = sessions.find((session) => session.id === pendingGovernor.id);
-      setPendingGovernorSession((current) =>
-        current?.id === next?.id &&
-        current?.name === next?.name &&
-        current?.title === next?.title &&
-        current?.agent_hint?.bin === next?.agent_hint?.bin
-          ? current
-          : next,
-      );
+      setPendingGovernorSessions(sessions.filter((session) => ids.has(session.id)));
     };
     void ipc.ptyStats().then(select).catch(() => {});
     let cancelled = false;
@@ -301,7 +430,7 @@ export default function App() {
       cancelled = true;
       un?.();
     };
-  }, [pendingGovernor?.id]);
+  }, [pendingGovernorId, pendingGovernorMemberIds]);
   // Everything that has asked for the user's attention (attention.ts). One
   // queue, one urgency model, one rule for when something leaves the app for
   // the OS — replacing a single-slot toast that the next caller overwrote, and
@@ -314,7 +443,7 @@ export default function App() {
     () => true,
   );
   const refreshTerminalGovernor = useCallback(() => {
-    void ipc
+    return ipc
       .terminalGovernorStatus()
       .then(setTerminalGovernor)
       .catch(() => {});
@@ -3187,23 +3316,57 @@ export default function App() {
           <button onClick={() => setMemPressure(null)}>Dismiss</button>
         </div>
       )}
-      {pendingGovernor && terminalGovernor && (
-        <TerminalGovernorDialog
+      {/* One non-blocking corner stack for the governor question and ordinary
+          attention cards. It never takes focus or blocks workbench interaction. */}
+      {((pendingGovernor && pendingGovernorQuota && terminalGovernor) ||
+        (deliveredToasts.length > 0 && attentionFallbackVisible)) && (
+        <div className="notice-stack">
+        {pendingGovernor && pendingGovernorQuota && terminalGovernor && (
+          <TerminalGovernorCard
           status={pendingGovernor}
-          session={
-            pendingGovernorSession
-              ? {
-                  name: pendingGovernorSession.name,
-                  agent: identifyAgent(pendingGovernorSession.agent_hint) != null,
-                }
-              : undefined
-          }
+          quota={pendingGovernorQuota}
+          members={pendingGovernorMembers.map((status) => {
+            const session = pendingGovernorSessions.find(
+              (candidate) => candidate.id === status.id,
+            );
+            return {
+              status,
+              session: session
+                ? {
+                    name: session.name,
+                    agent: identifyAgent(session.agent_hint) != null,
+                  }
+                : undefined,
+            };
+          })}
           capability={terminalGovernor.capability}
           busy={governorBusy}
           error={governorError}
+          onMaximumChange={(maxAllowanceBytes) => {
+            if (!pendingGovernor.cli_key || governorBusy) return;
+            beginGovernorPromptCooldown(pendingGovernor.id);
+            setGovernorBusy(true);
+            setGovernorError(null);
+            void ipc
+              .terminalGovernorSetMemoryMaximum(
+                pendingGovernor.cli_key,
+                maxAllowanceBytes,
+              )
+              .then(() => {
+                setActiveGovernorRequestId(null);
+                resolveAttentionByKey(
+                  governorAttentionKey(pendingGovernor.id),
+                  "answered",
+                );
+                refreshTerminalGovernor();
+              })
+              .catch((error) => setGovernorError(String(error)))
+              .finally(() => setGovernorBusy(false));
+          }}
           onGrant={(incrementBytes, rememberForCli) => {
             const request = pendingGovernor.grant_request;
             if (!request || governorBusy) return;
+            beginGovernorPromptCooldown(pendingGovernor.id);
             setGovernorBusy(true);
             setGovernorError(null);
             void ipc
@@ -3213,15 +3376,39 @@ export default function App() {
                 request.request_id,
                 incrementBytes,
               )
-              .then(async () => {
+              .then(async (outcome) => {
+                setActiveGovernorRequestId(null);
+                resolveAttentionByKey(
+                  governorAttentionKey(pendingGovernor.id),
+                  "answered",
+                );
+                setTerminalGovernor((current) =>
+                  current == null
+                    ? current
+                    : {
+                        ...current,
+                        sessions: current.sessions.map((session) =>
+                          session.id === outcome.status.id
+                            ? outcome.status
+                            : session,
+                        ),
+                      },
+                );
                 if (rememberForCli) {
-                  await ipc.terminalGovernorRememberDefault(
-                    pendingGovernor.id,
-                    request.request_id,
-                    request.budget_generation,
-                    incrementBytes,
-                    true,
-                  );
+                  try {
+                    await ipc.terminalGovernorRememberDefault(
+                      pendingGovernor.id,
+                      request.request_id,
+                      request.budget_generation,
+                      incrementBytes,
+                      true,
+                    );
+                  } catch (error) {
+                    notify(
+                      `Allowance raised, but the CLI default was not saved: ${String(error)}`,
+                      "warn",
+                    );
+                  }
                 }
                 await refreshTerminalGovernor();
               })
@@ -3230,6 +3417,7 @@ export default function App() {
           }}
           onStop={() => {
             if (governorBusy) return;
+            beginGovernorPromptCooldown(pendingGovernor.id);
             setGovernorBusy(true);
             setGovernorError(null);
             void ipc
@@ -3238,19 +3426,39 @@ export default function App() {
                 pendingGovernor.budget_generation,
                 pendingGovernor.stop_request_id,
               )
-              .then(() => refreshTerminalGovernor())
+              .then(() => {
+                setActiveGovernorRequestId(null);
+                resolveAttentionByKey(
+                  governorAttentionKey(pendingGovernor.id),
+                  "answered",
+                );
+                refreshTerminalGovernor();
+              })
               .catch((error) => setGovernorError(String(error)))
               .finally(() => setGovernorBusy(false));
           }}
           onDismiss={() => {
             const request = pendingGovernor.grant_request;
             if (!request) return;
-            setDismissedGovernorRequests((old) =>
-              new Set(old).add(request.request_id),
+            beginGovernorPromptCooldown(pendingGovernor.id);
+            setActiveGovernorRequestId(null);
+            resolveAttentionByKey(
+              governorAttentionKey(pendingGovernor.id),
+              "dismissed",
             );
             setGovernorError(null);
           }}
-        />
+          />
+        )}
+        {attentionFallbackVisible && deliveredToasts.map((t) => (
+          <NoticeToast
+            key={t.id}
+            item={t}
+            onDismiss={() => dismissToast(t.id)}
+            onFollow={() => void followAttention(t)}
+          />
+        ))}
+        </div>
       )}
       <TitleBar
         projects={ws.projects}
@@ -3325,6 +3533,7 @@ export default function App() {
               events={agentEvents}
               hookPath={hookPath}
               terminalGovernor={terminalGovernor}
+              onTerminalQuotaGroupsChange={onTerminalQuotaGroupsChange}
               relay={relay}
               dismissedPending={dismissedPending}
               onDismissPending={dismissPending}
@@ -3381,29 +3590,6 @@ export default function App() {
           onOpen={() => openReleaseNotes(releaseNotes)}
           onDismiss={dismissReleaseNotes}
         />
-      )}
-
-      {/* A stack, not a slot. Two things reporting at once used to mean the
-          first was destroyed before it could be read. Newest at the bottom,
-          nearest the corner the eye is already in.
-
-          Suppressed while the companion is up: the same items are delivered by
-          it instead, from wherever it is standing. This is a second *renderer*
-          on the one attention queue, never a second queue — urgency, fading and
-          whether something reaches the OS are still decided in attention.ts,
-          and a question is still outstanding until it is answered rather than
-          until its card is closed. */}
-      {deliveredToasts.length > 0 && attentionFallbackVisible && (
-        <div className="notice-stack">
-          {deliveredToasts.map((t) => (
-            <NoticeToast
-              key={t.id}
-              item={t}
-              onDismiss={() => dismissToast(t.id)}
-              onFollow={() => void followAttention(t)}
-            />
-          ))}
-        </div>
       )}
 
       {companionVisible && (

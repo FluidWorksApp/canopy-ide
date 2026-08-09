@@ -81,6 +81,7 @@ import {
   type FleetRouteSnapshot,
 } from "../fleetSnapshot";
 import { FleetReadinessPanel } from "./FleetReadinessPanel";
+import { AgentMemorySettings } from "./AgentMemorySettings";
 import {
   loginCommand,
   supportsProfiles,
@@ -1553,6 +1554,12 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         : "The spawn tool is hidden and existing clients are refused."
                     }
                   />
+                </Item>
+                <Item
+                  name="Memory allowance maximums"
+                  desc="Choose how far each agent's monitored allowance may be raised on this device."
+                >
+                  <AgentMemorySettings />
                 </Item>
                 <Item
                   name="Notification pop-ups"

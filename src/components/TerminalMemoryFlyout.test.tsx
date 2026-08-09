@@ -11,6 +11,7 @@ const status: TerminalBudgetStatus = {
   granted_bytes: 0,
   remembered_default_bytes: 0,
   allowance_bytes: 1024 ** 3,
+  max_allowance_bytes: null,
   current_bytes: 900 * 1024 ** 2,
   peak_bytes: 900 * 1024 ** 2,
   ema_bytes: 0,
@@ -28,8 +29,16 @@ describe("TerminalMemoryFlyout", () => {
     const onHibernate = vi.fn();
     render(
       <TerminalMemoryFlyout
-        session={{ name: "Juniper", agent: true }}
-        status={status}
+        members={[
+          { status, session: { name: "Juniper", agent: true } },
+        ]}
+        quota={{
+          members: [status],
+          state: "awaiting_grant",
+          current_bytes: status.current_bytes,
+          allowance_bytes: status.allowance_bytes,
+          peak_bytes: status.peak_bytes,
+        }}
         onPurge={onPurge}
         onRestart={onRestart}
         onHibernate={onHibernate}
@@ -37,7 +46,7 @@ describe("TerminalMemoryFlyout", () => {
       />,
     );
 
-    expect(screen.getByRole("complementary", { name: "Memory actions for Juniper" })).toHaveTextContent("1.0 GB allowance");
+    expect(screen.getByRole("complementary", { name: "Memory actions for Juniper" })).toHaveTextContent("1.0 GB combined allowance");
     fireEvent.click(screen.getByRole("button", { name: "Purge / compact" }));
     fireEvent.click(screen.getByRole("button", { name: "Restart tab" }));
     fireEvent.click(screen.getByRole("button", { name: "Hibernate" }));
