@@ -23,7 +23,7 @@ export function WorkflowRunsFold({ projectId }: { projectId: string }) {
     };
     const changed = (event: Event) => {
       const change = (event as CustomEvent<{ projectId: string }>).detail;
-      if (change?.projectId === projectId) refresh();
+      if (change?.projectId === projectId) setRuns(cachedWorkflowRuns(projectId));
     };
     refresh();
     window.addEventListener(WORKFLOW_RUNS_EVENT, changed);

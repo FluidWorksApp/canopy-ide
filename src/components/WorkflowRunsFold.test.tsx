@@ -60,6 +60,6 @@ describe("WorkflowRunsFold", () => {
         detail: { projectId: "project-1", runId: "workflow-1" },
       }),
     );
-    await waitFor(() => expect(refreshWorkflowRuns).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(refreshWorkflowRuns).toHaveBeenCalledTimes(1));
   });
 });

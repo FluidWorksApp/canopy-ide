@@ -2282,6 +2282,26 @@ mod tests {
     }
 
     #[test]
+    fn reads_an_envelope_by_its_attempt_reference() {
+        let root = root();
+        let store = TaskStore::at(root.clone());
+        let reservation = store.reserve(input()).unwrap();
+
+        let detail = store
+            .get_for_attempt(&reservation.attempt.attempt_id)
+            .unwrap()
+            .expect("reserved attempt should resolve to its envelope");
+        assert_eq!(detail.envelope.summary.run_id, reservation.envelope.run_id);
+        assert_eq!(detail.attempts.len(), 1);
+        assert_eq!(
+            detail.attempts[0].attempt_id,
+            reservation.attempt.attempt_id
+        );
+        assert!(store.get_for_attempt("attempt_missing").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn mcp_cancellation_settles_the_durable_attempt_and_is_idempotent() {
         let root = root();
         let store = TaskStore::at(root.clone());

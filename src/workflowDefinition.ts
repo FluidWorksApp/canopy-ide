@@ -215,7 +215,14 @@ function validateConstraints(
 }
 
 function expectedOutcomes(step: WorkflowStep): string[] {
-  if (step.kind === "human") return step.card.actions.map((action) => action.response);
+  if (step.kind === "human") {
+    const card = record(step.card);
+    return Array.isArray(card?.actions)
+      ? card.actions
+          .map((action) => record(action)?.response)
+          .filter((response): response is string => typeof response === "string")
+      : [];
+  }
   if (step.kind === "gate" || step.kind === "watch") return ["pass", "fail"];
   return ["success", "failure"];
 }
@@ -366,7 +373,11 @@ export function validateWorkflowDefinition(
     if (step.kind !== "gate") continue;
     const source = byId.get(step.evidence?.stepId);
     if (!source) errors.push(`gate ${step.id} names missing evidence step ${step.evidence?.stepId}`);
-    else if (step.evidence.predicate.startsWith("attempt.") && source.kind !== "agent") {
+    else if (
+      typeof step.evidence?.predicate === "string" &&
+      step.evidence.predicate.startsWith("attempt.") &&
+      source.kind !== "agent"
+    ) {
       errors.push(`gate ${step.id} requires attempt evidence from an agent step`);
     }
   }
@@ -496,7 +507,15 @@ export async function loadWorkflowDefinitions(
   io: WorkflowDefinitionIo = DEFAULT_IO,
 ): Promise<WorkflowDefinitionsLoad> {
   const dir = `${normalize(projectRoot)}/.canopy/workflows`;
-  const entries = await io.readDir(dir).catch(() => []);
+  let entries: ipc.DirEntry[];
+  try {
+    entries = await io.readDir(dir);
+  } catch (error) {
+    const message = String(error);
+    return /not found|no such file/i.test(message)
+      ? { ok: true, definitions: [] }
+      : { ok: false, errors: [`could not read ${dir}: ${message}`] };
+  }
   const files = entries
     .filter((entry) => !entry.is_dir && entry.name.endsWith(".json"))
     .sort((left, right) => left.name.localeCompare(right.name));

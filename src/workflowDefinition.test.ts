@@ -68,6 +68,34 @@ describe("validateWorkflowDefinition", () => {
     );
   });
 
+  it("reports malformed variant bodies instead of throwing", () => {
+    const definition = valid() as unknown as Record<string, unknown>;
+    definition.steps = [
+      { id: "ask", name: "Ask", kind: "human", capabilities: [] },
+      {
+        id: "gate",
+        name: "Gate",
+        kind: "gate",
+        capabilities: [],
+        evidence: { stepId: "ask" },
+      },
+    ];
+    definition.start = "ask";
+    definition.edges = [
+      { from: "ask", on: "approve", to: "gate" },
+      { from: "gate", on: "pass", to: "$completed" },
+      { from: "gate", on: "fail", to: "$failed" },
+    ];
+    expect(() => validateWorkflowDefinition(definition, context)).not.toThrow();
+    const result = validateWorkflowDefinition(definition, context);
+    expect(result.ok ? [] : result.errors).toEqual(
+      expect.arrayContaining([
+        "workflow.steps[0].card is required",
+        "workflow.steps[1].evidence.predicate is invalid",
+      ]),
+    );
+  });
+
   it("rejects missing edge targets, evidence sources, and exit cases", () => {
     expect(errorsFor((definition) => { definition.edges[0].to = "missing"; }).join(" ")).toContain(
       "does not land",
@@ -154,5 +182,18 @@ describe("workflow definition loading and triggers", () => {
         payload: { repo: "repo", body: "plain comment" },
       }),
     ).toBe(false);
+  });
+
+  it("distinguishes an absent workflow directory from a failed read", async () => {
+    const missing = await loadWorkflowDefinitions("/repo", context, {
+      readDir: async () => { throw new Error("No such file"); },
+      readText: async () => "",
+    });
+    expect(missing).toEqual({ ok: true, definitions: [] });
+    const denied = await loadWorkflowDefinitions("/repo", context, {
+      readDir: async () => { throw new Error("permission denied"); },
+      readText: async () => "",
+    });
+    expect(denied).toMatchObject({ ok: false });
   });
 });

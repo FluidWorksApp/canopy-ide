@@ -96,6 +96,7 @@ export const DEFAULT_WORKFLOW_STORE_DEPS = {
 
 export type WorkflowExecutionResult =
   | { state: "settled"; run: WorkflowRunDetail }
+  | { state: "interrupted"; run: WorkflowRunDetail }
   | { state: "waiting-human"; run: WorkflowRunDetail; card: BuilderCard }
   | { state: "waiting-event"; run: WorkflowRunDetail };
 
@@ -261,7 +262,9 @@ export async function continueWorkflow(
 ): Promise<WorkflowExecutionResult> {
   let run = await deps.getRun(runId);
   if (!run) throw new Error("workflow run not found");
-  if (run.status === "interrupted") run = await deps.resume(runId);
+  // Restart reconciliation deliberately stops here. Re-launching this step
+  // before its attempt ledger has been reconciled could duplicate side effects.
+  if (run.status === "interrupted") return { state: "interrupted", run };
 
   for (let transitions = 0; transitions < 512; transitions += 1) {
     if (["completed", "failed", "cancelled"].includes(run.status)) {

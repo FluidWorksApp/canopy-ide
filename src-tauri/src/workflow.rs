@@ -231,34 +231,49 @@ impl WorkflowStore {
         }
         let changed_id = input.run_id.clone();
         self.mutate(move |conn| {
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| error.to_string())?;
             let project_id = current_project(&tx, &input.run_id, &input.step_id)?;
             if let Some(attempt_id) = &input.attempt_id {
-                let ordinal: i64 = tx.query_row(
-                    "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM workflow_step_attempts
+                let ordinal: i64 = tx
+                    .query_row(
+                        "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM workflow_step_attempts
                      WHERE run_id = ?1 AND step_id = ?2",
-                    params![input.run_id, input.step_id],
-                    |row| row.get(0),
-                ).map_err(|error| error.to_string())?;
+                        params![input.run_id, input.step_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|error| error.to_string())?;
                 tx.execute(
-                    "INSERT OR IGNORE INTO workflow_step_attempts (run_id, step_id, ordinal, attempt_id)
+                    "INSERT INTO workflow_step_attempts (run_id, step_id, ordinal, attempt_id)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![input.run_id, input.step_id, ordinal, attempt_id],
-                ).map_err(|error| error.to_string())?;
+                )
+                .map_err(|error| error.to_string())?;
             }
             let now = now_ms();
             tx.execute(
                 "UPDATE workflow_steps SET state = ?1, updated_at = ?2
                  WHERE run_id = ?3 AND step_id = ?4",
                 params![input.state, now, input.run_id, input.step_id],
-            ).map_err(|error| error.to_string())?;
+            )
+            .map_err(|error| error.to_string())?;
             tx.execute(
                 "UPDATE workflow_runs SET status = ?1, updated_at = ?2 WHERE run_id = ?3",
-                params![if input.state == "waiting" { "waiting" } else { "running" }, now, input.run_id],
-            ).map_err(|error| error.to_string())?;
+                params![
+                    if input.state == "waiting" {
+                        "waiting"
+                    } else {
+                        "running"
+                    },
+                    now,
+                    input.run_id
+                ],
+            )
+            .map_err(|error| error.to_string())?;
             tx.commit().map_err(|error| error.to_string())?;
-            let detail = read_detail(conn, &input.run_id)?.ok_or_else(|| "workflow run disappeared".to_string())?;
+            let detail = read_detail(conn, &input.run_id)?
+                .ok_or_else(|| "workflow run disappeared".to_string())?;
             Ok((project_id, changed_id, detail))
         })
     }
@@ -847,6 +862,13 @@ mod tests {
             updated.steps[0].attempt_ids,
             vec!["attempt_one", "attempt_two"]
         );
+        let duplicate = store.record_step(WorkflowStepRecordInput {
+            run_id: updated.summary.run_id.clone(),
+            step_id: "agent".into(),
+            state: "running".into(),
+            attempt_id: Some("attempt_two".into()),
+        });
+        assert!(duplicate.is_err(), "an attempt may only be referenced once");
         let columns: Vec<String> = store
             .with_conn(|conn| {
                 let mut statement = conn

@@ -9,6 +9,7 @@ import type {
 } from "./workflowRun";
 import {
   answerWorkflowHuman,
+  continueWorkflow,
   startWorkflow,
   type WorkflowExecutorDeps,
 } from "./workflowExecutor";
@@ -180,11 +181,11 @@ function harness() {
       };
       return run;
     },
-    resume: async () => {
+    resume: vi.fn(async () => {
       if (!run) throw new Error("no run");
       run = { ...run, status: "running" };
       return run;
-    },
+    }),
     reserveTask,
     reserveAttempt: vi.fn(),
     taskGetForAttempt: async () => task,
@@ -236,5 +237,31 @@ describe("workflow linear executor", () => {
       deps,
     );
     expect(settled).toMatchObject({ state: "settled", run: { status: "completed" } });
+  });
+
+  it("surfaces a restart-interrupted run without launching a duplicate agent", async () => {
+    const { deps, current } = harness();
+    const context = { projectId: "project", componentId: "component", worktreePath: "/repo" };
+    await deps.createRun({
+      projectId: context.projectId,
+      definitionId: definition.id,
+      definitionVersion: definition.version,
+      definitionHash: "hash",
+      definition,
+      triggerKind: "manual",
+      trigger: { kind: "manual", eventId: "manual-1", occurredAt: 1, payload: {} },
+      startStepId: definition.start,
+      steps: definition.steps.map((step) => ({ id: step.id, kind: step.kind })),
+    });
+    const run = current();
+    if (!run) throw new Error("test run was not created");
+    run.status = "interrupted";
+
+    await expect(continueWorkflow(run.runId, context, deps)).resolves.toMatchObject({
+      state: "interrupted",
+      run: { status: "interrupted", currentStepId: "agent" },
+    });
+    expect(deps.launchAgent).not.toHaveBeenCalled();
+    expect(deps.resume).not.toHaveBeenCalled();
   });
 });
