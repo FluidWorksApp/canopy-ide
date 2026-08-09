@@ -103,7 +103,11 @@ fn scratch_project() -> std::io::Result<PathBuf> {
         dir.join("index.html"),
         "<!doctype html><button id=primary>Primary</button>\n",
     )?;
-    Ok(dir)
+    // macOS exposes /var as a symlink to /private/var. The native snapshot
+    // returns canonical paths, so hand the frontend that same root; otherwise
+    // the production containment gate correctly rejects `/private/var/...`
+    // evidence as outside a project registered as `/var/...`.
+    std::fs::canonicalize(dir)
 }
 
 /// Where the workspace lives during a selftest — never `~/.canopy`.

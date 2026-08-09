@@ -4,6 +4,7 @@ import { loadTaskEvidence, readEvidenceArtifact, type TaskRunEvidence } from "..
 import { createVibeBuilderSession, setVibeBuilderSelftestDeps, type VibeBuilderSessionOptions } from "../vibeBuilderSession";
 import { PUBLISH_CONFIRMATION } from "../vibeDeploy";
 import { scanDiffForSecrets } from "../vibeSecretScan";
+import { setVibeProjectSetupSelftestDeps } from "../vibeProjectSetup";
 import type { SelftestConfig } from "../ipc";
 import { evaluateVibeExit, vibeExitPassed, type VibeExitSignals } from "./vibeExitCriteria";
 import { createVibeSelftestFixture } from "./vibeSelftestFixture";
@@ -14,6 +15,7 @@ export interface VibeExitSelftestDeps {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const mark = (step: string) => ipc.jsLog("info", `vibe-exit: ${step}`);
 
 async function until<T>(label: string, read: () => T | Promise<T>, accept: (value: T) => boolean, ms = 30_000): Promise<T> {
   const started = Date.now();
@@ -55,6 +57,7 @@ async function latestEvidence(projectId: string, after = 0): Promise<TaskRunEvid
 export async function runVibeExitSelftest(cfg: SelftestConfig, deps: VibeExitSelftestDeps): Promise<void> {
   const fixture = createVibeSelftestFixture(cfg.projectDir);
   setVibeBuilderSelftestDeps(fixture.deps);
+  setVibeProjectSetupSelftestDeps(fixture.setupDeps);
   const browser: BrowserSignal[] = [];
   const unsubscribe = onBrowserSignal((signal) => browser.push(signal));
   const signals = Object.fromEntries([
@@ -82,28 +85,37 @@ export async function runVibeExitSelftest(cfg: SelftestConfig, deps: VibeExitSel
   });
 
   try {
+    await mark("opening scratch project");
     await deps.openDirAsProject(cfg.projectDir);
     const projectId = await until("scratch project id", () => deps.projectIdFor(cfg.projectDir), Boolean) as string;
+    await mark(`scratch project ready (${projectId})`);
     const modalBefore = document.querySelector(".modal-backdrop, .dlg-scrim, .confirm-backdrop");
     const toggle = await until("Build mode toggle", () => document.querySelector('[aria-label="Switch to Build mode"]'), Boolean);
     click(toggle as Element);
+    await mark("Build mode selected");
     await until("Build pane", () => document.querySelector(".vibe-builder-pane"), Boolean);
+    await mark("Build pane mounted; waiting for setup input");
 
     const navBefore = browser.filter((event) => event.t === "nav").length;
     const bindingsBefore = fixture.trace.processBindings.length;
     await send("Make the primary button blue");
+    await mark("first Build request sent");
     await until("streamed prose", () => document.querySelector(".vibe-builder-log")?.textContent ?? "", (text) => text.includes("I changed the"));
+    await mark("streamed prose observed");
     const streamText = document.querySelector(".vibe-builder-log")?.textContent ?? "";
     const toolCount = fixture.trace.events.filter((event) => event.kind === "tool").length;
     const overflow = Number((document.querySelector(".companion-trail-count")?.textContent ?? "").replace(/\D/g, ""));
     const engineer = document.querySelector('[aria-label="Switch to Engineer mode"]');
     if (!engineer) throw new Error("Engineer mode toggle is absent during a live turn");
     click(engineer);
+    await mark("Engineer selected during turn");
     const buildAgain = await until("return-to-Build toggle", () => document.querySelector('[aria-label="Switch to Build mode"]'), Boolean);
     click(buildAgain as Element);
+    await mark("returned to Build during turn");
     const navAfterLens = browser.filter((event) => event.t === "nav").length;
     await until("continued turn", () => fixture.trace.events.filter((event) => event.kind === "turnEnd").length, (count) => count > 0);
     const first = await latestEvidence(projectId);
+    await mark(`first task settled (${first.runId})`);
     const firstAttempt = first.attempts[0];
     const observations = firstAttempt?.observations ?? [];
     const kinds = new Set(observations.map((item) => item.kind));
@@ -286,12 +298,29 @@ export async function runVibeExitSelftest(cfg: SelftestConfig, deps: VibeExitSel
     });
   } catch (error) {
     collection.scenario = String(error);
+    if (fixture.trace.sends.length === 0) {
+      const stats = await ipc.ptyStats().catch(() => []);
+      const runtime = await Promise.all(stats.map(async (stat) => ({
+        id: stat.id,
+        title: stat.title,
+        cwd: stat.cwd,
+        ports: stat.ports,
+        quietMs: stat.quiet_ms,
+        outputBytes: stat.output_bytes,
+        output: await ipc.ptyOutput(stat.id, 2_000).catch(() => "<not captured>"),
+      })));
+      collection.runtime = JSON.stringify(runtime);
+      await mark(`runtime at collection stop: ${collection.runtime}`);
+    }
+    await mark(`collection stopped: ${String(error)}`);
   } finally {
     unsubscribe();
     setVibeBuilderSelftestDeps(null);
+    setVibeProjectSetupSelftestDeps(null);
   }
 
   const results = evaluateVibeExit(signals);
+  await mark("writing frozen report");
   await ipc.selftestFinish({
     ok: vibeExitPassed(results),
     scenario: cfg.scenario,
