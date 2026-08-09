@@ -108,7 +108,9 @@ describe("xterm serialization fidelity used by idle compaction", () => {
     term.loadAddon(serializer);
     await write(
       term,
-      "one\r\ntwo\r\nwrapped-界🙂-content\r\n\u001b[1;3;31mred界🙂\u001b[0m\r\nfour\u001b[?2004h\u001b[2D",
+      "one\r\ntwo\r\nwrapped-界🙂-content\r\n" +
+        "\u001b[1;3;4;38;2;12;34;56;48;2;90;80;70mcolored界🙂\u001b[0m\r\n" +
+        "four\u001b[?2004h\u001b[2D",
     );
     term.scrollToLine(1);
     const snapshot = serializer.serialize({ scrollback: 10 });
@@ -117,6 +119,18 @@ describe("xterm serialization fidelity used by idle compaction", () => {
     const rowsBefore = term.buffer.normal.length;
     expect(rowsBefore).toBeGreaterThan(term.rows);
     expect(before.normal.lines.some((line) => line.wrapped)).toBe(true);
+    const coloredCells = before.normal.lines.flatMap((line) =>
+      line.cells.filter(
+        (cell) => cell != null && cell.fgMode !== 0 && cell.bgMode !== 0,
+      ),
+    );
+    expect(coloredCells.length).toBeGreaterThan(0);
+    expect(
+      coloredCells.some(
+        (cell) =>
+          cell?.bold && cell.italic && cell.underline && cell.fg !== cell.bg,
+      ),
+    ).toBe(true);
     expect(term.modes.bracketedPasteMode).toBe(true);
 
     term.reset();
