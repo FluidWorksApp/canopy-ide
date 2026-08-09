@@ -35,6 +35,7 @@ pub enum Store {
     Provenance,
     Sessions,
     Tasks,
+    Workflows,
 }
 
 impl Store {
@@ -45,6 +46,7 @@ impl Store {
             Store::Provenance => "provenance",
             Store::Sessions => "sessions",
             Store::Tasks => "tasks",
+            Store::Workflows => "workflows",
         }
     }
 
@@ -76,6 +78,8 @@ impl Store {
             // Attempt/transcript writes arrive in short structured-event
             // bursts; one quarter-second event is enough for every open view.
             Store::Tasks => Duration::from_millis(250),
+            // A step may reserve an attempt and advance in one short burst.
+            Store::Workflows => Duration::from_millis(250),
         }
     }
 

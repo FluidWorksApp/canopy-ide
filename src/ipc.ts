@@ -16,6 +16,13 @@ import type {
   TaskReserveInput,
 } from "./taskEnvelope";
 import type { TaskTranscriptEntry, TaskTranscriptKind } from "./taskTranscript";
+import type {
+  WorkflowRunAdvanceInput,
+  WorkflowRunCreateInput,
+  WorkflowRunDetail,
+  WorkflowRunSummary,
+  WorkflowStepRecordInput,
+} from "./workflowRun";
 import { rendererIoBudget } from "./ioBudget";
 
 // ---------- App shell ----------
@@ -2026,6 +2033,9 @@ export const taskList = (projectId: string, limit = 50) =>
 export const taskGet = (runId: string) =>
   invoke<TaskEnvelopeDetail | null>("task_get", { runId });
 
+export const taskGetForAttempt = (attemptId: string) =>
+  invoke<TaskEnvelopeDetail | null>("task_get_for_attempt", { attemptId });
+
 export const taskListAll = (limit = 200) =>
   invoke<TaskEnvelopeSummary[]>("task_list_all", { limit });
 
@@ -2043,6 +2053,26 @@ export const taskDelete = (runId: string) =>
 
 export const taskClearHistory = () =>
   invoke<number>("task_clear_history");
+
+// ---------- Durable workflow runs ----------
+
+export const workflowRunCreate = (input: WorkflowRunCreateInput) =>
+  invoke<WorkflowRunDetail>("workflow_run_create", { input });
+
+export const workflowStepRecord = (input: WorkflowStepRecordInput) =>
+  invoke<WorkflowRunDetail>("workflow_step_record", { input });
+
+export const workflowRunAdvance = (input: WorkflowRunAdvanceInput) =>
+  invoke<WorkflowRunDetail>("workflow_run_advance", { input });
+
+export const workflowRunResume = (runId: string) =>
+  invoke<WorkflowRunDetail>("workflow_run_resume", { runId });
+
+export const workflowRunList = (projectId: string, limit = 50) =>
+  invoke<WorkflowRunSummary[]>("workflow_run_list", { projectId, limit });
+
+export const workflowRunGet = (runId: string) =>
+  invoke<WorkflowRunDetail | null>("workflow_run_get", { runId });
 
 export const taskTranscriptAppend = (args: {
   runId: string;

@@ -817,6 +817,24 @@ impl TaskStore {
         self.with_conn(|conn| read_detail(conn, run_id))
     }
 
+    fn get_for_attempt(&self, attempt_id: &str) -> Result<Option<TaskEnvelopeDetail>, String> {
+        validate_id(attempt_id, "attempt id")?;
+        self.with_conn(|conn| {
+            let run_id: Option<String> = conn
+                .query_row(
+                    "SELECT run_id FROM task_attempts WHERE attempt_id = ?1",
+                    [attempt_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            match run_id {
+                Some(run_id) => read_detail(conn, &run_id),
+                None => Ok(None),
+            }
+        })
+    }
+
     fn list_all(&self, limit: usize) -> Result<Vec<TaskEnvelopeSummary>, String> {
         let limit = limit.clamp(1, MAX_LIST) as i64;
         self.with_conn(|conn| {
@@ -2062,6 +2080,14 @@ pub fn task_get(
 }
 
 #[tauri::command]
+pub fn task_get_for_attempt(
+    attempt_id: String,
+    store: State<'_, TaskStore>,
+) -> Result<Option<TaskEnvelopeDetail>, String> {
+    store.get_for_attempt(&attempt_id)
+}
+
+#[tauri::command]
 pub fn task_list_all(
     limit: Option<usize>,
     store: State<'_, TaskStore>,
@@ -2252,6 +2278,26 @@ mod tests {
             detail.attempts[0].attempt_id,
             reservation.attempt.attempt_id
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reads_an_envelope_by_its_attempt_reference() {
+        let root = root();
+        let store = TaskStore::at(root.clone());
+        let reservation = store.reserve(input()).unwrap();
+
+        let detail = store
+            .get_for_attempt(&reservation.attempt.attempt_id)
+            .unwrap()
+            .expect("reserved attempt should resolve to its envelope");
+        assert_eq!(detail.envelope.summary.run_id, reservation.envelope.run_id);
+        assert_eq!(detail.attempts.len(), 1);
+        assert_eq!(
+            detail.attempts[0].attempt_id,
+            reservation.attempt.attempt_id
+        );
+        assert!(store.get_for_attempt("attempt_missing").unwrap().is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
