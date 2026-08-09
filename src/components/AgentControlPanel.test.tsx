@@ -83,6 +83,14 @@ function seed() {
       first_prompt: "build the settings page",
       prompts: ["build the settings page"],
     }),
+    digest({
+      session_id: "s-exec-2",
+      surface: "10",
+      cwd: "/w/canopy/.claude/worktrees/agent-y",
+      updated: now,
+      first_prompt: "test the settings page",
+      prompts: ["test the settings page"],
+    }),
   ];
   seams.messages = [
     {
@@ -90,8 +98,21 @@ function seed() {
       from_pty_id: 7,
       to_pty_id: 8,
       text: "brief: build the settings page",
+      delivered:
+        "[canopy: message from Coral Hawk, the agent in /w/canopy (terminal 7)] brief: build the settings page",
       instance: "inst-1",
       at_ms: 1000,
+      submitted: true,
+    },
+    {
+      id: "m4",
+      from_pty_id: 7,
+      to_pty_id: 10,
+      text: "brief: test the settings page",
+      delivered:
+        "[canopy: message from Coral Hawk, the agent in /w/canopy (terminal 7)] brief: test the settings page",
+      instance: "inst-1",
+      at_ms: 1500,
       submitted: true,
     },
     {
@@ -122,10 +143,11 @@ const allProjects = [
   { name: "other", roots: ["/w/other"] },
 ];
 
-function renderPanel(mode: "graph" | "table") {
+function renderPanel(mode: "graph" | "table", onJumpToPty?: (ptyId: number) => void) {
   seams.stats = [
     session({ id: 7, name: "Coral Hawk" }),
     session({ id: 8, cwd: "/w/canopy/.claude/worktrees/agent-x" }),
+    session({ id: 10, cwd: "/w/canopy/.claude/worktrees/agent-y" }),
     session({
       id: 9,
       cwd: "/w/other",
@@ -133,7 +155,14 @@ function renderPanel(mode: "graph" | "table") {
       agent_hint: { bin: "codex", pkg: null, path: null, interactive: true },
     }),
   ];
-  return render(<AgentControlPanel active mode={mode} allProjects={allProjects} />);
+  return render(
+    <AgentControlPanel
+      active
+      mode={mode}
+      allProjects={allProjects}
+      onJumpToPty={onJumpToPty}
+    />,
+  );
 }
 
 describe("the control panel graph", () => {
@@ -141,20 +170,31 @@ describe("the control panel graph", () => {
     seed();
     const { container } = renderPanel("graph");
     await waitFor(() => {
-      expect(container.querySelectorAll(".acp-edge")).toHaveLength(1);
+      expect(container.querySelectorAll(".acp-edge")).toHaveLength(2);
     });
-    // The one edge is 7↔8; the bystander (9) and the dead terminal (44) get
-    // nothing. Every brief came from 7, so the record shows a lead.
+    // The two recorded spawn edges are 7↔8 and 7↔10; the bystander (9) and the
+    // dead terminal (44) get nothing.
     const edge = container.querySelector(".acp-edge title");
     expect(edge?.textContent).toContain("between #7 and #8");
-    expect(edge?.textContent).toContain("briefs flow from #7");
-    // All three live agents are nodes, grouped by checkout: the executor's
-    // workspace folds into the canopy group, the bystander stands apart.
-    expect(container.querySelectorAll(".acp-node")).toHaveLength(3);
+    expect(edge?.textContent).toContain("spawn lineage from #7");
+    expect(container.querySelectorAll(".acp-edge-spawn")).toHaveLength(2);
+    // All four live agents are nodes, grouped by checkout: both executor
+    // workspaces fold into the canopy group, the bystander stands apart.
+    expect(container.querySelectorAll(".acp-node")).toHaveLength(4);
     const groups = [...container.querySelectorAll(".acp-group-name")].map(
       (g) => g.textContent,
     );
     expect(groups).toEqual(["canopy", "other"]);
+
+    // The lead owns the upper band. Siblings share the next band and consume
+    // horizontal space instead of becoming the old flat vertical chain.
+    const lead = screen.getByRole("button", { name: /Coral Hawk/ });
+    const child8 = screen.getByRole("button", { name: /claude #8/i });
+    const child10 = screen.getByRole("button", { name: /claude #10/i });
+    expect(lead.style.top).toBe("96px");
+    expect(child8.style.top).toBe(child10.style.top);
+    expect(child8.style.top).not.toBe(lead.style.top);
+    expect(child8.style.left).not.toBe(child10.style.left);
   });
 
   it("renders lifecycle states verbatim — a silent session is unknown, never idle", async () => {
@@ -163,34 +203,63 @@ describe("the control panel graph", () => {
     // The lead's fresh digest reads working; the executor went quiet an hour
     // ago (and the bystander never reported) and must say so in unknown's own
     // words.
-    await screen.findByText(LIFE_META.working.label);
+    expect((await screen.findAllByText(LIFE_META.working.label)).length).toBeGreaterThan(0);
     const unknown = await screen.findAllByText(LIFE_META.unknown.label);
     expect(unknown.length).toBeGreaterThan(0);
     expect(screen.queryByText(LIFE_META.idle.label)).toBeNull();
   });
 
-  it("severs a pair from its edge, and shows a severed pair as cut", async () => {
+  it("keeps node inspection safe and makes sever a confirmed dedicated control", async () => {
     seed();
     const user = userEvent.setup();
-    const { container } = renderPanel("graph");
+    const jump = vi.fn();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const { container } = renderPanel("graph", jump);
     await waitFor(() => {
-      expect(container.querySelectorAll(".acp-edge")).toHaveLength(1);
+      expect(container.querySelectorAll(".acp-edge")).toHaveLength(2);
     });
     expect(container.querySelector(".acp-edge-severed")).toBeNull();
-    await user.click(container.querySelector(".acp-edge")!);
+
+    // Clicking a node selects/inspects it and focuses its terminal. It never
+    // shares the destructive sever affordance.
+    const lead = screen.getByRole("button", { name: /Coral Hawk/ });
+    await user.click(lead);
+    expect(jump).toHaveBeenCalledWith(7);
+    expect(lead.getAttribute("aria-pressed")).toBe("true");
+    expect(seams.severCalls).toEqual([]);
+
+    // The wire itself is inert. The small x asks before using meshSever.
+    expect(container.querySelector<SVGGElement>(".acp-edge")!.style.pointerEvents).toBe(
+      "none",
+    );
+    expect(seams.severCalls).toEqual([]);
+    const severButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Sever connection between terminals #7 and #8"]',
+    )!;
+    await user.click(severButton);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(seams.severCalls).toEqual([]);
+    confirm.mockReturnValue(true);
+    await user.click(severButton);
     expect(seams.severCalls).toEqual([{ a: 7, b: 8, severed: true }]);
 
-    // With the pair severed, the edge renders cut and the click reconnects.
+    // Reconnect keeps the established single-door path and is non-destructive.
     seams.severed = [{ a: 7, b: 8, instance: "inst-1", at_ms: 1 }];
     const second = renderPanel("graph");
     await waitFor(() => {
       expect(second.container.querySelector(".acp-edge-severed")).not.toBeNull();
     });
-    await user.click(second.container.querySelector(".acp-edge-severed")!);
+    await user.click(
+      second.container.querySelector(
+        'button[aria-label="Reconnect connection between terminals #7 and #8"]',
+      )!,
+    );
     expect(seams.severCalls).toEqual([
       { a: 7, b: 8, severed: true },
       { a: 7, b: 8, severed: false },
     ]);
+    expect(confirm).toHaveBeenCalledTimes(2);
+    confirm.mockRestore();
   });
 });
 
