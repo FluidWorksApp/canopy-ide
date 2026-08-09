@@ -374,6 +374,10 @@ fn raise_file_descriptor_limit() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Must precede every startup writer. In particular, hook installation and
+    // integration healing write into CLI-owned config files.
+    selftest::prepare().expect("selftest home isolation failed");
+
     #[cfg(target_os = "macos")]
     raise_file_descriptor_limit();
 

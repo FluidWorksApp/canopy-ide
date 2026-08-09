@@ -779,12 +779,35 @@ pub fn setup_agent(agent: &str, home: &str) -> Result<SetupReport, String> {
     setup_agent_in(agent, home, home)
 }
 
+/// A config root may be the selected home or one account profile directly
+/// beneath it. Refuse every other pairing before an installer gets a path.
+/// This turns the two-root profile API into a containment boundary: an e2e
+/// helper home can never be paired with (and then written into) the real home.
+fn config_root_belongs_to_home(cfg: &std::path::Path, home: &std::path::Path) -> bool {
+    let cfg = cfg.canonicalize().unwrap_or_else(|_| cfg.to_path_buf());
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    if cfg == home {
+        return true;
+    }
+    let profiles = home.join(".canopy").join("profiles");
+    let Ok(relative) = cfg.strip_prefix(profiles) else {
+        return false;
+    };
+    let mut parts = relative.components();
+    matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none()
+}
+
 /// The same setup against an arbitrary config root — how a profile gets hooked.
 ///
 /// Two roots: `cfg` is the CLI's own configuration and moves with the profile;
 /// `home` never moves, because the helper binary, the event bus and the session
 /// digests all live there.
 pub fn setup_agent_in(agent: &str, cfg: &str, home: &str) -> Result<SetupReport, String> {
+    if !config_root_belongs_to_home(std::path::Path::new(cfg), std::path::Path::new(home)) {
+        return Err(format!(
+            "refusing to write agent config outside the selected home: {cfg} is not {home} or one of its profiles"
+        ));
+    }
     let bridge = format!("{home}/.canopy/agent-events.jsonl");
     // Eager, not `?`-chained: every step runs even when an earlier one failed,
     // so the report says what actually happened to each.
@@ -991,6 +1014,77 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
     }
 }
 
+/// Every Canopy-owned command in a hook config must name the helper for this
+/// home. One correct lifecycle entry is not enough: a stale status line or
+/// notify command can still fail every session that reaches it.
+fn hook_commands_point_to_home(agent: &str, cfg: &str, home: &str) -> bool {
+    let Some(config) = hooks_config_path(agent, cfg, home) else {
+        return false;
+    };
+    let Ok(raw) = std::fs::read_to_string(config) else {
+        return false;
+    };
+    let helper = helper_path_in(home);
+    if !helper.exists() {
+        return false;
+    }
+    let expected = helper.to_string_lossy().to_string();
+    fn inspect(value: &serde_json::Value, expected: &str, seen: &mut bool) -> bool {
+        match value {
+            serde_json::Value::String(s) if s.contains("canopy-hook") => {
+                *seen = true;
+                s.contains(expected)
+            }
+            serde_json::Value::Array(items) => {
+                items.iter().all(|item| inspect(item, expected, seen))
+            }
+            serde_json::Value::Object(fields) => {
+                fields.values().all(|value| inspect(value, expected, seen))
+            }
+            _ => true,
+        }
+    }
+    let config_matches = if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+        let mut seen = false;
+        inspect(&value, &expected, &mut seen) && seen
+    } else {
+        let owned: Vec<&str> = raw
+            .lines()
+            .filter(|line| line.contains("canopy-hook"))
+            .collect();
+        !owned.is_empty() && owned.iter().all(|line| line.contains(&expected))
+    };
+    if !config_matches {
+        return false;
+    }
+    // Codex's legacy notify fallback lives beside its MCP table rather than in
+    // hooks.json. It is still a hook command and must participate in the same
+    // liveness check, or a stale notify survives whenever native hooks and MCP
+    // already point at the current helper.
+    if agent == "codex" {
+        let config = std::path::PathBuf::from(cfg).join(".codex/config.toml");
+        if let Ok(toml) = std::fs::read_to_string(config) {
+            return toml.lines().all(|line| {
+                let line = line.trim_start();
+                !line.starts_with("notify")
+                    || !line.contains("canopy-hook")
+                    || line.contains(&expected)
+            });
+        }
+    }
+    true
+}
+
+fn hooks_state(agent: &str, cfg: &str, home: &str) -> &'static str {
+    if !hooks_are_ours_in(agent, cfg, home) {
+        "missing"
+    } else if hook_commands_point_to_home(agent, cfg, home) {
+        "ours"
+    } else {
+        "stale"
+    }
+}
+
 /// Aider has no hook system, but `notifications-command` runs an arbitrary
 /// command whenever it is waiting for input — after a turn AND at y/n
 /// confirms (verified in its io.py). The helper's --event mode synthesizes
@@ -1000,15 +1094,39 @@ fn setup_aider_hooks(cfg: &str, home: &str) -> Result<String, String> {
     let helper = require_helper(home, "hooks not installed")?;
     let path = std::path::PathBuf::from(cfg).join(".aider.conf.yml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing.lines().any(|line| {
+    let command = format!(
+        "{} --agent aider --signal needs-human-ambiguous",
+        sh_quote(&helper.to_string_lossy())
+    );
+    let command = serde_json::to_string(&command).map_err(|e| e.to_string())?;
+    let wanted = format!("notifications-command: {command}");
+    let owns_line = |line: &str| {
         line.trim_start().starts_with("notifications-command:") && line.contains("canopy-hook")
-    }) {
+    };
+    if existing.lines().any(|line| line.trim() == wanted) {
         return Ok("Aider notifications already set up".into());
+    }
+    if existing.lines().any(owns_line) {
+        let replaced = existing
+            .lines()
+            .map(|line| {
+                if owns_line(line) {
+                    wanted.as_str()
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let trailing = if existing.ends_with('\n') { "\n" } else { "" };
+        std::fs::write(&path, format!("{replaced}{trailing}")).map_err(|e| e.to_string())?;
+        return Ok("Aider notifications updated — restart aider sessions".into());
     }
     if existing.lines().any(|line| {
         let line = line.trim_start();
         !line.starts_with('#')
             && (line.starts_with("notifications:") || line.starts_with("notifications-command:"))
+            && !owns_line(line)
     }) {
         return Err(
             "~/.aider.conf.yml already configures notifications — point \
@@ -1026,14 +1144,8 @@ fn setup_aider_hooks(cfg: &str, home: &str) -> Result<String, String> {
     // The honest classification is that aider wants the keyboard and cannot say
     // which kind. `needs-human-ambiguous` records exactly that: waiting, at
     // `reported` confidence, never reclaimable.
-    let command = format!(
-        "{} --agent aider --signal needs-human-ambiguous",
-        sh_quote(&helper.to_string_lossy())
-    );
-    let command = serde_json::to_string(&command).map_err(|e| e.to_string())?;
-    let block = format!(
-        "\n# canopy: surface \"needs you\" in the IDE\nnotifications: true\nnotifications-command: {command}\n"
-    );
+    let block =
+        format!("\n# canopy: surface \"needs you\" in the IDE\nnotifications: true\n{wanted}\n");
     std::fs::write(&path, format!("{existing}{block}")).map_err(|e| e.to_string())?;
     Ok("Aider notifications hooked (~/.aider.conf.yml) — restart aider sessions".into())
 }
@@ -2588,6 +2700,7 @@ fn setup_amp_mcp(cfg: &str, home: &str) -> Result<String, String> {
 /// State of one half of one CLI's integration.
 /// - `ours`: present and pointing at our helper
 /// - `missing`: nothing registered
+/// - `stale`: ours, but pointing at a helper outside the selected home
 /// - `foreign`: something else claimed the name — never touched, only reported
 /// - `unreadable`: the config exists but can't be parsed
 /// - `unsupported`: this CLI has no such integration point
@@ -2620,7 +2733,7 @@ fn json_mcp_registry(
 
 /// Read the `[mcp_servers.canopy]` section out of codex's TOML without a
 /// parser, the same way `codex_toml_with_canopy` writes it.
-fn codex_mcp_state(existing: &str) -> &'static str {
+fn codex_mcp_state_for(existing: &str, expected: Option<&str>) -> &'static str {
     let mut section = "";
     let mut body = String::new();
     for line in existing.lines() {
@@ -2634,11 +2747,16 @@ fn codex_mcp_state(existing: &str) -> &'static str {
         }
         if section == "[mcp_servers.canopy]" {
             body.push_str(line);
+            body.push('\n');
         } else if section == "[mcp_servers]" {
             let key = t.split('=').next().unwrap_or("").trim().trim_matches('"');
             if key == "canopy" {
                 return if t.contains("canopy-hook") {
-                    "ours"
+                    if expected.map_or(true, |path| t.contains(path)) {
+                        "ours"
+                    } else {
+                        "stale"
+                    }
                 } else {
                     "foreign"
                 };
@@ -2649,19 +2767,44 @@ fn codex_mcp_state(existing: &str) -> &'static str {
         return "missing";
     }
     if body.contains("canopy-hook") {
-        "ours"
+        let points_to_expected = expected.map_or(true, |expected| {
+            let quoted = format!("{expected:?}");
+            body.lines().any(|line| {
+                let Some((key, value)) = line.split_once('=') else {
+                    return false;
+                };
+                key.trim() == "command" && value.trim() == quoted
+            })
+        });
+        if points_to_expected {
+            "ours"
+        } else {
+            "stale"
+        }
     } else {
         "foreign"
     }
 }
 
+#[cfg(test)]
+fn codex_mcp_state(existing: &str) -> &'static str {
+    codex_mcp_state_for(existing, None)
+}
+
 fn mcp_state(agent: &str, cfg: &str, home: &str) -> &'static str {
     if agent == "codex" {
-        return match std::fs::read_to_string(
-            std::path::PathBuf::from(cfg).join(".codex/config.toml"),
-        ) {
-            Ok(raw) => codex_mcp_state(&raw),
-            Err(_) => "missing",
+        let helper = helper_path_in(home);
+        let expected = helper.to_string_lossy().to_string();
+        let state =
+            match std::fs::read_to_string(std::path::PathBuf::from(cfg).join(".codex/config.toml"))
+            {
+                Ok(raw) => codex_mcp_state_for(&raw, Some(&expected)),
+                Err(_) => "missing",
+            };
+        return if state == "ours" && !helper.exists() {
+            "stale"
+        } else {
+            state
         };
     }
     let Some((path, key)) = json_mcp_registry(agent, cfg, home) else {
@@ -2672,7 +2815,22 @@ fn mcp_state(agent: &str, cfg: &str, home: &str) -> &'static str {
     };
     match registry.get(key).and_then(|servers| servers.get("canopy")) {
         None => "missing",
-        Some(entry) if is_canopy_mcp_entry(entry) => "ours",
+        Some(entry) if is_canopy_mcp_entry(entry) => {
+            let helper = helper_path_in(home);
+            let expected = helper.to_string_lossy();
+            let command = entry.get("command");
+            let actual = command.and_then(|value| value.as_str()).or_else(|| {
+                command
+                    .and_then(|value| value.as_array())
+                    .and_then(|args| args.first())
+                    .and_then(|value| value.as_str())
+            });
+            if actual == Some(expected.as_ref()) && helper.exists() {
+                "ours"
+            } else {
+                "stale"
+            }
+        }
         Some(_) => "foreign",
     }
 }
@@ -2690,11 +2848,7 @@ pub fn integration_health(
         .map(|(agent, bin)| IntegrationHealth {
             agent: (*agent).into(),
             cli_installed: installed.get(*bin).copied().unwrap_or(false),
-            hooks: if hooks_are_ours_in(agent, cfg, home) {
-                "ours"
-            } else {
-                "missing"
-            },
+            hooks: hooks_state(agent, cfg, home),
             mcp: mcp_state(agent, cfg, home),
         })
         .collect()
@@ -2840,7 +2994,8 @@ fn heal_root(
     failed: &mut Vec<String>,
 ) {
     for health in healths {
-        let owned = health.hooks == "ours" || health.mcp == "ours";
+        let owned =
+            matches!(health.hooks, "ours" | "stale") || matches!(health.mcp, "ours" | "stale");
         // Nothing installed and nothing of ours to maintain — writing a config
         // for a CLI this machine doesn't have is pure noise. Ownership still
         // counts on its own, because PATH detection runs a login shell that a
@@ -2856,6 +3011,8 @@ fn heal_root(
             Some("not set up yet".to_string())
         } else if upgraded {
             Some(format!("upgraded to {version}"))
+        } else if health.hooks == "stale" || health.mcp == "stale" {
+            Some("stale helper path".to_string())
         } else if health.hooks == "missing" {
             Some("hooks missing".to_string())
         } else if health.mcp == "missing" {
@@ -5158,6 +5315,56 @@ mod integration_tests {
         assert_eq!(mcp_state("amp", h, h), "foreign");
     }
 
+    /// The vibe e2e harness once paired its throwaway helper home with the
+    /// user's real config root. That stamped the temporary helper into both
+    /// Claude and Codex's real files. The two-root profile seam must reject the
+    /// pair before any per-agent writer runs, while normal setup remains fully
+    /// contained in the overridden home.
+    #[test]
+    fn an_e2e_home_cannot_write_in_the_real_config_root() {
+        let real = scratch_home("e2e-real-home");
+        let e2e = scratch_home("e2e-overridden-home");
+        let real_codex = real.join(".codex/config.toml");
+        let real_claude = real.join(".claude/settings.json");
+        let codex_before = "model = \"user-choice\"\n";
+        let claude_before = r#"{"theme":"dark"}"#;
+        write(&real_codex, codex_before);
+        write(&real_claude, claude_before);
+
+        for agent in ["codex", "claude"] {
+            let error =
+                setup_agent_in(agent, real.to_str().unwrap(), e2e.to_str().unwrap()).unwrap_err();
+            assert!(error.contains("outside the selected home"), "{error}");
+            let report = setup_agent(agent, e2e.to_str().unwrap()).unwrap();
+            assert!(report.ok, "{}", report.summary);
+        }
+
+        assert_eq!(std::fs::read_to_string(&real_codex).unwrap(), codex_before);
+        assert_eq!(
+            std::fs::read_to_string(&real_claude).unwrap(),
+            claude_before
+        );
+        let e2e_helper = helper_path_in(e2e.to_str().unwrap());
+        assert!(e2e_helper.exists(), "setup must only stamp a live helper");
+        for path in [
+            e2e.join(".codex/config.toml"),
+            e2e.join(".codex/hooks.json"),
+            e2e.join(".claude/settings.json"),
+        ] {
+            let body = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                body.contains(&e2e_helper.to_string_lossy().to_string()),
+                "{}",
+                path.display()
+            );
+            assert!(
+                !body.contains(&real.to_string_lossy().to_string()),
+                "{}",
+                path.display()
+            );
+        }
+    }
+
     /// The PATH probe, as a launch would hand it over. Only agy, so a test's
     /// result never depends on which CLIs the machine running it happens to
     /// have installed.
@@ -5243,6 +5450,120 @@ mod integration_tests {
             before,
             "an unchanged integration must not be rewritten"
         );
+    }
+
+    /// A cleaned e2e home leaves syntactically valid, Canopy-owned entries
+    /// behind. Version-only healing treated those as healthy forever. A normal
+    /// restart on the same version must repoint hooks, notify, status line and
+    /// MCP registrations to the live helper installed for this home.
+    #[test]
+    fn a_same_version_launch_repoints_stale_helper_paths() {
+        let home = scratch_home("heal-stale-helper");
+        let h = home.to_str().unwrap();
+        for agent in ["codex", "claude", "aider"] {
+            setup_agent(agent, h).unwrap();
+        }
+        heal_integrations_in(h, "1.2.3", &HashMap::new());
+
+        let old = "/tmp/canopy-vibe-e2e-home/.canopy/bin/canopy-hook";
+        let current = helper_path_in(h).to_string_lossy().to_string();
+        for path in [
+            home.join(".codex/config.toml"),
+            home.join(".codex/hooks.json"),
+            home.join(".claude/settings.json"),
+            home.join(".claude.json"),
+            home.join(".aider.conf.yml"),
+        ] {
+            let body = std::fs::read_to_string(&path).unwrap();
+            write(&path, &body.replace(&current, old));
+        }
+        assert_eq!(mcp_state("codex", h, h), "stale");
+        assert_eq!(mcp_state("claude", h, h), "stale");
+        assert_eq!(hooks_state("codex", h, h), "stale");
+        assert_eq!(hooks_state("claude", h, h), "stale");
+        assert_eq!(hooks_state("aider", h, h), "stale");
+
+        let report = heal_integrations_in(h, "1.2.3", &HashMap::new());
+        assert!(!report.upgraded);
+        for agent in ["codex", "claude", "aider"] {
+            assert!(
+                report
+                    .repaired
+                    .iter()
+                    .any(|line| line.starts_with(agent) && line.contains("stale helper path")),
+                "{agent} was not repaired: {:?}",
+                report.repaired
+            );
+            assert_eq!(hooks_state(agent, h, h), "ours");
+        }
+        assert_eq!(
+            mcp_state("codex", h, h),
+            "ours",
+            "expected {current:?} in {}",
+            std::fs::read_to_string(home.join(".codex/config.toml")).unwrap()
+        );
+        assert_eq!(mcp_state("claude", h, h), "ours");
+        assert!(helper_path_in(h).exists(), "repaired commands must resolve");
+        for path in [
+            home.join(".codex/config.toml"),
+            home.join(".codex/hooks.json"),
+            home.join(".claude/settings.json"),
+            home.join(".claude.json"),
+            home.join(".aider.conf.yml"),
+        ] {
+            let body = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                body.contains(&current),
+                "{} still lacks live helper",
+                path.display()
+            );
+            assert!(
+                !body.contains(old),
+                "{} still points at dead helper",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_stale_codex_notify_is_healed_even_when_native_hooks_and_mcp_are_current() {
+        let home = scratch_home("heal-stale-notify-only");
+        let h = home.to_str().unwrap();
+        setup_agent("codex", h).unwrap();
+        heal_integrations_in(h, "1.2.3", &HashMap::new());
+
+        let config = home.join(".codex/config.toml");
+        let current = helper_path_in(h).to_string_lossy().to_string();
+        let old = "/tmp/cleaned-e2e-home/.canopy/bin/canopy-hook";
+        let body = std::fs::read_to_string(&config).unwrap();
+        let stale = body
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with("notify") {
+                    line.replace(&current, old)
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        write(&config, &format!("{stale}\n"));
+
+        assert_eq!(mcp_state("codex", h, h), "ours");
+        assert_eq!(hooks_state("codex", h, h), "stale");
+        let report = heal_integrations_in(h, "1.2.3", &HashMap::new());
+        assert!(
+            report
+                .repaired
+                .iter()
+                .any(|line| line.starts_with("codex") && line.contains("stale helper path")),
+            "{:?}",
+            report.repaired
+        );
+        let healed = std::fs::read_to_string(config).unwrap();
+        assert!(healed.contains(&current));
+        assert!(!healed.contains(old));
+        assert_eq!(hooks_state("codex", h, h), "ours");
     }
 
     /// A version bump re-applies owned integrations, because that is when a
