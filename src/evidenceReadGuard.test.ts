@@ -220,6 +220,24 @@ const JUSTIFYING_FUNCTIONS = [
     enabled: true,
     cost: "the evidence panel is built but hangs under no row, so nothing a person can click reaches the record",
   },
+  {
+    module: "workflowRuns.ts",
+    symbol: "refreshWorkflowRuns",
+    enabled: true,
+    cost: "durable workflow runs are never listed, so the workflow store is write-only",
+  },
+  {
+    module: "workflowRuns.ts",
+    symbol: "workflowGet",
+    enabled: true,
+    cost: "workflow step states are durable but no surface can read one run",
+  },
+  {
+    module: "components/WorkflowRunsFold.tsx",
+    symbol: "WorkflowRunsFold",
+    enabled: true,
+    cost: "the workflow projection exists but is mounted by no user-facing surface",
+  },
 ] as const;
 
 describe("a module's justifying function has a caller", () => {
@@ -255,6 +273,11 @@ const READ_APIS = [
     module: "taskTranscript.ts",
     symbol: "listTranscript",
     cost: "the durable transcript is written and never read, so a turn's history dies with its session",
+  },
+  {
+    module: "taskEnvelopes.ts",
+    symbol: "taskGetForAttempt",
+    cost: "workflow gates cannot dereference their attempt evidence, so a recorded step can never make a gate pass",
   },
 ] as const;
 

@@ -43,6 +43,10 @@ export function taskStoreChanged(e: ipc.StoreChange): void {
 export const taskGet = (runId: string): Promise<TaskEnvelopeDetail | null> =>
   ipc.taskGet(runId);
 
+export const taskGetForAttempt = (
+  attemptId: string,
+): Promise<TaskEnvelopeDetail | null> => ipc.taskGetForAttempt(attemptId);
+
 export async function reserveTask(
   input: TaskReserveInput,
 ): Promise<TaskReservation> {

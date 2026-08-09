@@ -60,6 +60,7 @@ mod vault_kdbx;
 mod watchdog;
 mod webview_keys;
 mod winproc;
+mod workflow;
 mod wsbridge;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -451,6 +452,7 @@ pub fn run() {
         .manage(companion::CompanionManager::default())
         .manage(structured_runner::StructuredRunnerManager::default())
         .manage(tasks::TaskStore::default())
+        .manage(workflow::WorkflowStore::default())
         .manage(cli::pending_from_env())
         .manage(cli::pending_link_from_env())
         .setup(|app| {
@@ -581,6 +583,7 @@ pub fn run() {
             tasks::task_attempt_wait,
             tasks::task_list,
             tasks::task_get,
+            tasks::task_get_for_attempt,
             tasks::task_list_all,
             tasks::task_list_history,
             tasks::task_update_metadata,
@@ -593,6 +596,12 @@ pub fn run() {
             tasks::task_event_list,
             tasks::task_artifact_write,
             tasks::task_artifact_read,
+            workflow::workflow_run_create,
+            workflow::workflow_step_record,
+            workflow::workflow_run_advance,
+            workflow::workflow_run_resume,
+            workflow::workflow_run_list,
+            workflow::workflow_run_get,
             pty::pty_spawn,
             pty::pty_spawn_detached,
             pty::pty_spawn_argv,

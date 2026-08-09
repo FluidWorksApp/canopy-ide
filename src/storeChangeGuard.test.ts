@@ -82,6 +82,14 @@ const STORES = [
     boundary: "mutate",
     delete_boundaries: [],
   },
+  {
+    id: "workflows",
+    file: "workflow.rs",
+    variant: "Workflows",
+    module: "workflowRuns.ts",
+    boundary: "mutate",
+    delete_boundaries: [],
+  },
 ] as const;
 
 /** Rust comments are where the words "std::fs::write" appear most often in
