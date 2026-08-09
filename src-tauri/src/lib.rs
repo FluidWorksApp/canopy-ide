@@ -564,6 +564,7 @@ pub fn run() {
             notify::notify_native,
             selftest::selftest_config,
             selftest::selftest_finish,
+            selftest::selftest_store_contains,
             companion::companion_spawn,
             companion::companion_write,
             companion::companion_kill,

@@ -1495,6 +1495,19 @@ export const DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS: VibeProjectSetupSessionDep
   providerIds: new Set(["supabase", "neon", "firebase", "stripe", "vercel", "netlify", "cloudflare", "fly"]),
 };
 
+// The executable exit protocol replaces only the external setup-agent edge.
+// Repository observation, proposal validation, command verification,
+// persistence and process startup continue through their production paths.
+// An ordinary launch cannot reach this setter: its caller is dynamically
+// imported only for the short-lived `--selftest=vibe-exit` scenario.
+let selftestSessionDeps: VibeProjectSetupSessionDeps | null = null;
+
+export function setVibeProjectSetupSelftestDeps(
+  deps: VibeProjectSetupSessionDeps | null,
+): void {
+  selftestSessionDeps = deps;
+}
+
 function verificationRepairProblem(
   project: Project,
   failure: VibeSetupVerificationFailure,
@@ -1863,7 +1876,7 @@ function createVibeProjectSetupFlight(
 export function createVibeProjectSetupSession(
   project: Project,
   persist: (configured: Project) => Promise<boolean>,
-  deps: VibeProjectSetupSessionDeps = DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS,
+  deps: VibeProjectSetupSessionDeps = selftestSessionDeps ?? DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS,
 ): BuilderSession & { stop(): Promise<void> } {
   const flights = flightsFor(deps);
   let flight = flights.get(project.id);
