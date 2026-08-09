@@ -2,15 +2,16 @@
 //
 // Two views of one dataset. The graph draws each agent session as a node in
 // its checkout's group, with an edge wherever the mesh has recorded traffic
-// between two terminals — a pulse rides the edge when a message flows, and
-// clicking an edge severs (or reconnects) that pair at the mesh store's own
+// between two terminals — spawn openings establish the primary family tree,
+// ordinary traffic stays secondary, and a pulse rides the edge when a message
+// flows. Sever/reconnect has its own guarded control at the mesh store's one
 // write door. The table is the same rows flat: status, agent, the prompt that
 // started it, and what it is working on now.
 //
 // Honesty rules, inherited: statuses are shared/agentLife verbatim (`unknown`
 // is never dressed up as idle), edges exist only where messages were recorded,
-// and the lead→worker arrow renders only when every brief on the edge came
-// from one side. Data arrives by subscription — pty:stats pushes, the mesh
+// and a lead→worker arrow comes from a spawn opening first, one-sided briefing
+// inference second. Data arrives by subscription — pty:stats pushes, the mesh
 // speaks over the store-change channel — never by a polling loop here.
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
@@ -24,6 +25,7 @@ import {
   deriveEdges,
   initialPrompt,
   isSevered,
+  lineageLayers,
   nodeLabel,
   severedOnlyEdges,
   subscribeMesh,
@@ -45,10 +47,13 @@ interface Pulse {
   d: string;
 }
 
-/** Graph geometry: groups are columns, nodes stack inside their group. */
-const COL_W = 250;
-const ROW_H = 104;
-const X0 = 140;
+/** Graph geometry: checkout groups sit side by side; within one, parents own
+ *  a horizontal band above a horizontal band of their children. */
+const GROUP_GAP = 28;
+const GROUP_PAD_X = 28;
+const NODE_GAP_X = 216;
+const LAYER_GAP_Y = 116;
+const GRAPH_PAD_X = 24;
 const Y0 = 96;
 const NODE_R = 44;
 
@@ -134,8 +139,9 @@ export function AgentControlPanel({
     return observed.concat(severedOnlyEdges(severed, instance, livePtyIds, observed));
   }, [messages, instance, livePtyIds, severed]);
 
-  // Layout: one column per group, stable order (group key, then pty id) so a
-  // stats tick never shuffles the picture.
+  // Membership stays stable (group key, then pty id) so a stats tick never
+  // shuffles the picture. Geometry below then turns recorded lineage into
+  // parent/child bands rather than flattening every member into one column.
   const groups = useMemo(() => {
     const byKey = new Map<string, Node[]>();
     for (const n of nodes) {
@@ -151,18 +157,36 @@ export function AgentControlPanel({
       }));
   }, [nodes]);
 
-  const positions = useMemo(() => {
+  const layout = useMemo(() => {
     const at = new Map<number, { x: number; y: number }>();
-    groups.forEach((g, gi) => {
-      g.members.forEach((n, ni) => {
-        at.set(n.row.session.id, { x: X0 + gi * COL_W, y: Y0 + ni * ROW_H });
+    let left = GRAPH_PAD_X;
+    let deepest = 1;
+    const placedGroups = groups.map((group) => {
+      const byId = new Map(group.members.map((node) => [node.row.session.id, node]));
+      const layers = lineageLayers([...byId.keys()], edges);
+      const widest = Math.max(1, ...layers.map((layer) => layer.length));
+      const width = widest * NODE_GAP_X + GROUP_PAD_X * 2;
+      layers.forEach((layer, depth) => {
+        layer.forEach((id, index) => {
+          at.set(id, {
+            x: left + width / 2 + (index - (layer.length - 1) / 2) * NODE_GAP_X,
+            y: Y0 + depth * LAYER_GAP_Y,
+          });
+        });
       });
+      deepest = Math.max(deepest, layers.length);
+      const placed = { ...group, left, width, layers };
+      left += width + GROUP_GAP;
+      return placed;
     });
-    return at;
-  }, [groups]);
-  const width = Math.max(1, groups.length) * COL_W + 40;
-  const height =
-    Math.max(1, ...groups.map((g) => g.members.length)) * ROW_H + Y0 + 20;
+    return {
+      positions: at,
+      groups: placedGroups,
+      width: Math.max(1, left - GROUP_GAP + GRAPH_PAD_X),
+      height: Y0 + deepest * LAYER_GAP_Y,
+    };
+  }, [groups, edges]);
+  const { positions, width, height } = layout;
 
   // A transmission pulse per newly observed message, riding its edge from the
   // sender's end. Driven by the store-change refetch above, cleared by its own
@@ -200,12 +224,23 @@ export function AgentControlPanel({
     }, 1500);
   }, [edges, positions, severed, instance]);
 
-  const sever = (e: MeshEdge) => {
+  const toggleConnection = (e: MeshEdge) => {
+    const cut = isSevered(severed, instance, e.a, e.b);
+    if (
+      !cut &&
+      !window.confirm(
+        `Sever the connection between terminals #${e.a} and #${e.b}?\n\nMessages between them will be refused until you reconnect it.`,
+      )
+    ) {
+      return;
+    }
     void ipc
-      .meshSever(e.a, e.b, !isSevered(severed, instance, e.a, e.b))
+      .meshSever(e.a, e.b, !cut)
       .then(setSevered)
       .catch(() => {});
   };
+
+  const [selectedPtyId, setSelectedPtyId] = useState<number | null>(null);
 
   const groupLabel = (key: string) => {
     const project = allProjects.find((p) =>
@@ -304,23 +339,45 @@ export function AgentControlPanel({
           // worker. Undirected edges keep a-b order and no marker.
           const from = e.lead === e.b ? b : a;
           const to = e.lead === e.b ? a : b;
+          const relationship =
+            e.relation === "spawn"
+              ? `spawn lineage from #${e.lead}`
+              : e.relation === "inferred"
+                ? `lead inferred from one-sided briefs by #${e.lead}`
+                : "message traffic";
           const title = cut
-            ? `Severed — messages between #${e.a} and #${e.b} are refused. Click to reconnect.`
-            : `${e.count} message${e.count === 1 ? "" : "s"} between #${e.a} and #${e.b}` +
-              (e.lead != null ? ` — briefs flow from #${e.lead}` : "") +
-              ". Click to sever this connection.";
+            ? `Severed — messages between #${e.a} and #${e.b} are refused.`
+            : `${e.count} message${e.count === 1 ? "" : "s"} between #${e.a} and #${e.b} — ${relationship}.`;
+          const d = wireD(from, to);
           return (
             <g
               key={`${e.a}:${e.b}`}
-              className={`acp-edge ${cut ? "acp-edge-severed" : ""}`}
-              onClick={() => sever(e)}
+              className={`acp-edge acp-edge-${e.relation} ${
+                cut ? "acp-edge-severed" : ""
+              }`}
+              style={{ pointerEvents: "none" }}
             >
               <title>{title}</title>
-              <path className="acp-edge-hit" d={wireD(from, to)} />
               <path
                 className="acp-edge-wire"
-                d={wireD(from, to)}
+                d={d}
                 markerEnd={!cut && e.lead != null ? "url(#acp-lead)" : undefined}
+                strokeDasharray={!cut && e.relation === "traffic" ? "3 7" : undefined}
+                style={{
+                  opacity: cut
+                    ? 1
+                    : e.relation === "spawn"
+                      ? 1
+                      : e.relation === "inferred"
+                        ? 0.72
+                        : 0.42,
+                  strokeWidth:
+                    e.relation === "spawn"
+                      ? 2.25
+                      : e.relation === "inferred"
+                        ? 1.35
+                        : 1,
+                }}
               />
               {cut && (
                 <text
@@ -341,15 +398,15 @@ export function AgentControlPanel({
           </circle>
         ))}
       </svg>
-      {groups.map((g, gi) => (
+      {layout.groups.map((g) => (
         <div
           key={g.key}
           className="acp-group"
           style={{
-            left: X0 + gi * COL_W - COL_W / 2 + 16,
+            left: g.left,
             top: Y0 - NODE_R - 34,
-            width: COL_W - 32,
-            height: g.members.length * ROW_H + 30,
+            width: g.width,
+            height: Math.max(1, g.layers.length) * LAYER_GAP_Y + 30,
           }}
         >
           <span className="acp-group-name" title={g.key}>
@@ -357,6 +414,45 @@ export function AgentControlPanel({
           </span>
         </div>
       ))}
+      {edges.map((edge) => {
+        const a = positions.get(edge.a);
+        const b = positions.get(edge.b);
+        if (!a || !b) return null;
+        const cut = isSevered(severed, instance, edge.a, edge.b);
+        return (
+          <button
+            key={`action:${edge.a}:${edge.b}`}
+            type="button"
+            aria-label={`${cut ? "Reconnect" : "Sever"} connection between terminals #${edge.a} and #${edge.b}`}
+            title={
+              cut
+                ? `Reconnect #${edge.a} and #${edge.b}`
+                : `Sever #${edge.a} and #${edge.b}`
+            }
+            onClick={() => toggleConnection(edge)}
+            style={{
+              position: "absolute",
+              left: (a.x + b.x) / 2,
+              top: (a.y + b.y) / 2,
+              zIndex: 2,
+              transform: "translate(-50%, -50%)",
+              width: 20,
+              height: 20,
+              padding: 0,
+              border: "1px solid var(--border-strong)",
+              borderRadius: 999,
+              background: "var(--bg-raised)",
+              color: cut ? "var(--accent)" : "var(--text-dim)",
+              font: "inherit",
+              fontSize: 11,
+              lineHeight: "18px",
+              cursor: "pointer",
+            }}
+          >
+            {cut ? "↻" : "✕"}
+          </button>
+        );
+      })}
       {nodes.map(({ row, life }) => {
         const at = positions.get(row.session.id);
         if (!at) return null;
@@ -366,11 +462,23 @@ export function AgentControlPanel({
           <button
             key={row.session.id}
             className={`acp-node ${st.cls}`}
-            style={{ left: at.x, top: at.y }}
+            style={{
+              left: at.x,
+              top: at.y,
+              outline:
+                selectedPtyId === row.session.id
+                  ? "2px solid color-mix(in srgb, var(--accent) 72%, transparent)"
+                  : undefined,
+              outlineOffset: selectedPtyId === row.session.id ? 2 : undefined,
+            }}
+            aria-pressed={selectedPtyId === row.session.id}
             title={`${label.primary}${label.detail ? ` (${label.detail})` : ""} — ${
               life.note || st.label
             }\n${row.session.cwd}`}
-            onClick={() => onJumpToPty?.(row.session.id)}
+            onClick={() => {
+              setSelectedPtyId(row.session.id);
+              onJumpToPty?.(row.session.id);
+            }}
           >
             <span className="acp-node-head">
               {row.agent?.id ? (
@@ -409,8 +517,13 @@ function labelFor(row: SessionRow, tabNames?: Map<number, TabName>) {
   });
 }
 
-/** A gentle horizontal-biased curve between two node centres. */
+/** A top-down family-tree curve between two node centres. Cross-checkout
+ *  traffic can still run sideways, where the horizontal fallback is clearer. */
 function wireD(from: { x: number; y: number }, to: { x: number; y: number }) {
+  if (from.y !== to.y) {
+    const dy = (to.y - from.y) / 2;
+    return `M ${from.x} ${from.y} C ${from.x} ${from.y + dy}, ${to.x} ${to.y - dy}, ${to.x} ${to.y}`;
+  }
   const dx = (to.x - from.x) / 2;
   return `M ${from.x} ${from.y} C ${from.x + dx} ${from.y}, ${to.x - dx} ${to.y}, ${to.x} ${to.y}`;
 }

@@ -37,10 +37,13 @@ export interface MeshEdge {
   lastAtMs: number;
   /** Which end sent the newest message. */
   lastFrom: number | null;
-  /** The pty that originated every brief (non-reply message) on this edge, or
-   *  null when both ends originate — the data shows no hierarchy, so none is
-   *  rendered. */
+  /** The recorded spawn parent, else the pty that originated every brief
+   *  (non-reply message) on this edge. Null when neither signal exists. */
   lead: number | null;
+  /** Why this edge is directional. Spawn openings are the recorded lineage;
+   *  one-sided briefs are the deliberately weaker fallback; ordinary traffic
+   *  carries no hierarchy. */
+  relation: "spawn" | "inferred" | "traffic";
 }
 
 const pairKey = (a: number, b: number) => `${Math.min(a, b)}:${Math.max(a, b)}`;
@@ -55,7 +58,13 @@ export function deriveEdges(
   instance: string | null,
   livePtyIds: ReadonlySet<number>,
 ): MeshEdge[] {
-  const byPair = new Map<string, MeshEdge & { briefFrom: Set<number> }>();
+  const byPair = new Map<
+    string,
+    MeshEdge & {
+      briefFrom: Set<number>;
+      spawn: { from: number; atMs: number; id: string } | null;
+    }
+  >();
   for (const m of messages) {
     if (m.from_pty_id == null) continue;
     if (!instance || m.instance !== instance) continue;
@@ -72,7 +81,9 @@ export function deriveEdges(
         lastAtMs: 0,
         lastFrom: null,
         lead: null,
+        relation: "traffic",
         briefFrom: new Set(),
+        spawn: null,
       };
       byPair.set(key, edge);
     }
@@ -83,13 +94,102 @@ export function deriveEdges(
       edge.lastFrom = m.from_pty_id;
     }
     if (!m.reply_to) edge.briefFrom.add(m.from_pty_id);
+    if (isSpawnOpening(m)) {
+      const candidate = { from: m.from_pty_id, atMs: m.at_ms, id: m.id };
+      if (
+        !edge.spawn ||
+        candidate.atMs < edge.spawn.atMs ||
+        (candidate.atMs === edge.spawn.atMs && candidate.id.localeCompare(edge.spawn.id) < 0)
+      ) {
+        edge.spawn = candidate;
+      }
+    }
   }
-  return [...byPair.values()].map(({ briefFrom, ...edge }) => ({
-    ...edge,
-    // One side originating every brief is the only hierarchy the record can
-    // show; anything else renders undirected.
-    lead: briefFrom.size === 1 ? [...briefFrom][0] : null,
-  }));
+  return [...byPair.values()].map(({ briefFrom, spawn, ...edge }) => {
+    if (spawn) return { ...edge, lead: spawn.from, relation: "spawn" as const };
+    // One side originating every brief is the only fallback hierarchy the
+    // record can show; anything else renders as secondary, undirected traffic.
+    const lead = briefFrom.size === 1 ? [...briefFrom][0] : null;
+    return {
+      ...edge,
+      lead,
+      relation: lead == null ? ("traffic" as const) : ("inferred" as const),
+    };
+  });
+}
+
+/** A spawn opening is the one mesh write whose delivered terminal line ends
+ *  in the complete recorded body. Rich mesh sends deliver only an id notice;
+ *  direct sends keep the sanitised delivered text in `text` and no separate
+ *  `delivered` field. This distinction is made at the existing Rust write
+ *  doors, so lineage is evidence from the spawn record, not graph guesswork. */
+function isSpawnOpening(message: MeshMessage): boolean {
+  return (
+    !message.reply_to &&
+    !!message.delivered &&
+    message.delivered.endsWith(`] ${message.text}`)
+  );
+}
+
+/** Deterministic family-tree bands for one checkout. Recorded spawn lineage
+ *  wins parent selection; one-sided briefing inference is the fallback. A
+ *  malformed cycle is ignored at the edge that would close it, leaving every
+ *  node in exactly one finite layer. */
+export function lineageLayers(
+  nodeIds: readonly number[],
+  edges: readonly MeshEdge[],
+): number[][] {
+  const ids = [...new Set(nodeIds)].sort((a, b) => a - b);
+  const known = new Set(ids);
+  const candidates = edges
+    .filter(
+      (edge) =>
+        edge.lead != null &&
+        edge.relation !== "traffic" &&
+        known.has(edge.a) &&
+        known.has(edge.b),
+    )
+    .map((edge) => ({
+      parent: edge.lead!,
+      child: edge.lead === edge.a ? edge.b : edge.a,
+      relation: edge.relation,
+    }))
+    .sort(
+      (a, b) =>
+        Number(a.relation !== "spawn") - Number(b.relation !== "spawn") ||
+        a.child - b.child ||
+        a.parent - b.parent,
+    );
+
+  const parentOf = new Map<number, number>();
+  for (const candidate of candidates) {
+    if (parentOf.has(candidate.child)) continue;
+    let ancestor: number | undefined = candidate.parent;
+    let cyclic = ancestor === candidate.child;
+    while (!cyclic && ancestor != null) {
+      ancestor = parentOf.get(ancestor);
+      cyclic = ancestor === candidate.child;
+    }
+    if (!cyclic) parentOf.set(candidate.child, candidate.parent);
+  }
+
+  const depth = new Map<number, number>();
+  const depthOf = (id: number): number => {
+    const knownDepth = depth.get(id);
+    if (knownDepth != null) return knownDepth;
+    const parent = parentOf.get(id);
+    const value = parent == null ? 0 : depthOf(parent) + 1;
+    depth.set(id, value);
+    return value;
+  };
+  for (const id of ids) depthOf(id);
+
+  const layers: number[][] = [];
+  for (const id of ids) {
+    const d = depth.get(id) ?? 0;
+    (layers[d] ??= []).push(id);
+  }
+  return layers;
 }
 
 /**
@@ -121,6 +221,7 @@ export function severedOnlyEdges(
       lastAtMs: 0,
       lastFrom: null,
       lead: null,
+      relation: "traffic" as const,
     }));
 }
 

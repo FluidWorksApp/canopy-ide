@@ -5,6 +5,7 @@ import {
   deriveEdges,
   initialPrompt,
   isSevered,
+  lineageLayers,
   nodeLabel,
   severedOnlyEdges,
 } from "./meshLinks";
@@ -39,6 +40,7 @@ describe("edges derive from the recorded messages and nothing else", () => {
     expect(pair12?.count).toBe(2);
     expect(pair12?.lastId).toBe("m2");
     expect(pair12?.lastFrom).toBe(2);
+    expect(pair12?.relation).toBe("inferred");
     expect(edges.find((e) => e.a === 1 && e.b === 3)?.count).toBe(1);
   });
 
@@ -54,6 +56,7 @@ describe("edges derive from the recorded messages and nothing else", () => {
       live,
     );
     expect(led[0].lead).toBe(1);
+    expect(led[0].relation).toBe("inferred");
 
     // Both sides originate briefs: no hierarchy in the data, none rendered.
     const mutual = deriveEdges(
@@ -65,6 +68,39 @@ describe("edges derive from the recorded messages and nothing else", () => {
       live,
     );
     expect(mutual[0].lead).toBeNull();
+    expect(mutual[0].relation).toBe("traffic");
+  });
+
+  it("uses a recorded spawn opening as primary lineage, ahead of later traffic", () => {
+    const spawned = deriveEdges(
+      [
+        msg({
+          id: "spawn",
+          from_pty_id: 1,
+          to_pty_id: 2,
+          text: "build the settings page",
+          delivered: "[canopy: message from Moss, the agent in /repo (terminal 1)] build the settings page",
+        }),
+        // The child later originates a brief. That makes traffic bidirectional,
+        // but it does not rewrite the persisted parent/child fact.
+        msg({ id: "later", from_pty_id: 2, to_pty_id: 1, at_ms: 2000 }),
+      ],
+      "inst-1",
+      live,
+    );
+    expect(spawned[0]).toMatchObject({ lead: 1, relation: "spawn" });
+
+    const meshNotice = deriveEdges(
+      [
+        msg({
+          text: "a long mesh body",
+          delivered: "[canopy: message from Moss (terminal 1)] New mesh message m1 — read it with canopy_mesh get m1.",
+        }),
+      ],
+      "inst-1",
+      live,
+    );
+    expect(meshNotice[0].relation).toBe("inferred");
   });
 
   it("ignores other launches, dead terminals, and companion sends", () => {
@@ -99,6 +135,63 @@ describe("edges derive from the recorded messages and nothing else", () => {
     expect(isSevered(severed, "inst-1", 2, 1)).toBe(true);
     expect(isSevered(severed, "inst-1", 1, 3)).toBe(false);
     expect(isSevered(severed, "other", 1, 2)).toBe(false);
+  });
+});
+
+describe("lineage layout", () => {
+  it("puts a parent above horizontally-spaced children deterministically", () => {
+    const edges = deriveEdges(
+      [
+        msg({
+          id: "child-3",
+          from_pty_id: 1,
+          to_pty_id: 3,
+          text: "third",
+          delivered: "[canopy: message from Lead (terminal 1)] third",
+        }),
+        msg({
+          id: "child-2",
+          from_pty_id: 1,
+          to_pty_id: 2,
+          text: "second",
+          delivered: "[canopy: message from Lead (terminal 1)] second",
+        }),
+      ],
+      "inst-1",
+      live,
+    );
+    expect(lineageLayers([3, 1, 2], edges)).toEqual([[1], [2, 3]]);
+    expect(lineageLayers([2, 3, 1], [...edges].reverse())).toEqual([[1], [2, 3]]);
+  });
+
+  it("prefers spawn lineage over inference and leaves malformed cycles finite", () => {
+    const edge = (
+      a: number,
+      b: number,
+      lead: number,
+      relation: "spawn" | "inferred",
+    ) => ({
+      a,
+      b,
+      lead,
+      relation,
+      count: 1,
+      lastId: "m",
+      lastAtMs: 1,
+      lastFrom: lead,
+    });
+    expect(
+      lineageLayers(
+        [1, 2, 3],
+        [edge(2, 3, 2, "inferred"), edge(1, 3, 1, "spawn")],
+      ),
+    ).toEqual([[1, 2], [3]]);
+    expect(
+      lineageLayers(
+        [1, 2],
+        [edge(1, 2, 1, "spawn"), edge(1, 2, 2, "spawn")],
+      ),
+    ).toEqual([[2], [1]]);
   });
 });
 
