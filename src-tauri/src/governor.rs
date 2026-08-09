@@ -19,10 +19,13 @@ const CLEAR_NUM: u64 = 70;
 const INCIDENT_CAP: usize = 256;
 const STOP_TOMBSTONE_CAP: usize = 128;
 const RELIEF_COOLDOWN_MS: u64 = 10_000;
-const GRANT_CHOICES: [u64; 2] = [512 * MIB, GIB];
+const GRANT_STEP_BYTES: u64 = 512 * MIB;
+const GRANT_CHOICES: [u64; 2] = [GRANT_STEP_BYTES, 2 * GRANT_STEP_BYTES];
 const DEFAULTS_FILE: &str = "terminal-memory-defaults.json";
 const DEFAULTS_ENTRY_CAP: usize = 64;
 const DEFAULTS_FILE_MAX: u64 = 64 * 1024;
+const MIN_MAX_ALLOWANCE_BYTES: u64 = 512 * MIB;
+const MAX_MAX_ALLOWANCE_BYTES: u64 = 1024 * GIB;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -149,6 +152,9 @@ pub struct TerminalBudgetStatus {
     pub granted_bytes: u64,
     pub remembered_default_bytes: u64,
     pub allowance_bytes: u64,
+    /// A user-owned policy ceiling for allowance grants. This is not an OS
+    /// memory limit; capability reporting separately states what is enforced.
+    pub max_allowance_bytes: Option<u64>,
     pub current_bytes: u64,
     pub peak_bytes: u64,
     pub ema_bytes: u64,
@@ -211,6 +217,12 @@ pub struct RememberDefaultOutcome {
     pub increment_bytes: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AgentMemoryMaximum {
+    pub cli_key: String,
+    pub max_allowance_bytes: u64,
+}
+
 #[derive(Clone)]
 struct AppliedGrant {
     request_id: String,
@@ -237,6 +249,7 @@ struct SessionBudget {
     base_allowance_bytes: u64,
     granted_bytes: u64,
     remembered_default_bytes: u64,
+    max_allowance_bytes: Option<u64>,
     current_bytes: u64,
     peak_bytes: u64,
     ema_bytes: f64,
@@ -253,10 +266,28 @@ struct SessionBudget {
 }
 
 impl SessionBudget {
-    fn allowance(&self) -> u64 {
+    fn uncapped_allowance(&self) -> u64 {
         self.base_allowance_bytes
             .saturating_add(self.remembered_default_bytes)
             .saturating_add(self.granted_bytes)
+    }
+
+    fn allowance(&self) -> u64 {
+        self.max_allowance_bytes.map_or_else(
+            || self.uncapped_allowance(),
+            |maximum| self.uncapped_allowance().min(maximum),
+        )
+    }
+
+    fn grant_choices(&self) -> Vec<u64> {
+        GRANT_CHOICES
+            .into_iter()
+            .filter(|increment| {
+                self.max_allowance_bytes.is_none_or(|maximum| {
+                    self.uncapped_allowance().saturating_add(*increment) <= maximum
+                })
+            })
+            .collect()
     }
 
     fn status(&self) -> TerminalBudgetStatus {
@@ -268,6 +299,7 @@ impl SessionBudget {
             granted_bytes: self.granted_bytes,
             remembered_default_bytes: self.remembered_default_bytes,
             allowance_bytes: self.allowance(),
+            max_allowance_bytes: self.max_allowance_bytes,
             current_bytes: self.current_bytes,
             peak_bytes: self.peak_bytes,
             ema_bytes: self.ema_bytes.max(0.0).round() as u64,
@@ -310,11 +342,14 @@ impl Default for GovernorInner {
 struct RememberedDefaultsFile {
     #[serde(default)]
     defaults: BTreeMap<String, u64>,
+    #[serde(default)]
+    maxima: BTreeMap<String, u64>,
 }
 
 struct RememberedDefaults {
     path: Option<PathBuf>,
     values: HashMap<String, u64>,
+    maxima: HashMap<String, u64>,
 }
 
 pub struct TerminalGovernor {
@@ -325,13 +360,17 @@ pub struct TerminalGovernor {
 impl Default for TerminalGovernor {
     fn default() -> Self {
         let path = remembered_defaults_path();
-        let values = path
+        let (values, maxima) = path
             .as_deref()
             .and_then(|path| load_remembered_defaults(path).ok())
             .unwrap_or_default();
         Self {
             inner: Mutex::new(GovernorInner::default()),
-            defaults: Mutex::new(RememberedDefaults { path, values }),
+            defaults: Mutex::new(RememberedDefaults {
+                path,
+                values,
+                maxima,
+            }),
         }
     }
 }
@@ -364,13 +403,20 @@ fn remembered_defaults_path() -> Option<PathBuf> {
         .map(|home| home.join(".canopy").join(DEFAULTS_FILE))
 }
 
-fn load_remembered_defaults(path: &Path) -> Result<HashMap<String, u64>, String> {
+fn valid_max_allowance(value: u64) -> bool {
+    (MIN_MAX_ALLOWANCE_BYTES..=MAX_MAX_ALLOWANCE_BYTES).contains(&value)
+        && value % GRANT_STEP_BYTES == 0
+}
+
+fn load_remembered_defaults(
+    path: &Path,
+) -> Result<(HashMap<String, u64>, HashMap<String, u64>), String> {
     let backup = path.with_extension("json.bak");
     let body = match read_defaults_file(path)? {
         Some(body) => body,
         None => match read_defaults_file(&backup)? {
             Some(body) => body,
-            None => return Ok(HashMap::new()),
+            None => return Ok((HashMap::new(), HashMap::new())),
         },
     };
     let parsed: RememberedDefaultsFile =
@@ -380,12 +426,17 @@ fn load_remembered_defaults(path: &Path) -> Result<HashMap<String, u64>, String>
         .into_iter()
         .filter(|(key, value)| valid_cli_key(key) && GRANT_CHOICES.contains(value))
         .collect();
-    if values.len() > DEFAULTS_ENTRY_CAP {
+    let maxima: HashMap<_, _> = parsed
+        .maxima
+        .into_iter()
+        .filter(|(key, value)| valid_cli_key(key) && valid_max_allowance(*value))
+        .collect();
+    if values.len() > DEFAULTS_ENTRY_CAP || maxima.len() > DEFAULTS_ENTRY_CAP {
         return Err(format!(
             "remembered-default store exceeds {DEFAULTS_ENTRY_CAP} entries"
         ));
     }
-    Ok(values)
+    Ok((values, maxima))
 }
 
 fn read_defaults_file(path: &Path) -> Result<Option<String>, String> {
@@ -415,8 +466,12 @@ fn read_defaults_file(path: &Path) -> Result<Option<String>, String> {
         .map_err(|_| "remembered-default file is not UTF-8".to_string())
 }
 
-fn persist_remembered_defaults(path: &Path, values: &HashMap<String, u64>) -> Result<(), String> {
-    if values.len() > DEFAULTS_ENTRY_CAP {
+fn persist_remembered_defaults(
+    path: &Path,
+    values: &HashMap<String, u64>,
+    maxima: &HashMap<String, u64>,
+) -> Result<(), String> {
+    if values.len() > DEFAULTS_ENTRY_CAP || maxima.len() > DEFAULTS_ENTRY_CAP {
         return Err(format!(
             "remembered-default store is full ({DEFAULTS_ENTRY_CAP} entries)"
         ));
@@ -428,6 +483,10 @@ fn persist_remembered_defaults(path: &Path, values: &HashMap<String, u64>) -> Re
             .iter()
             .map(|(key, value)| (key.clone(), *value))
             .collect(),
+        maxima: maxima
+            .iter()
+            .map(|(key, value)| (key.clone(), *value))
+            .collect(),
     })
     .map_err(|error| error.to_string())?;
     if body.len() as u64 > DEFAULTS_FILE_MAX {
@@ -435,8 +494,12 @@ fn persist_remembered_defaults(path: &Path, values: &HashMap<String, u64>) -> Re
             "remembered-default encoding exceeds {DEFAULTS_FILE_MAX} bytes"
         ));
     }
+    let target_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(DEFAULTS_FILE);
     let tmp = parent.join(format!(
-        ".{DEFAULTS_FILE}.tmp-{}-{}",
+        ".{target_name}.tmp-{}-{}",
         std::process::id(),
         now_ms()
     ));
@@ -491,6 +554,11 @@ pub(crate) fn cli_key(hint: Option<&crate::agentid::AgentHint>) -> Option<String
         .map(|value| ("pkg", value))
         .unwrap_or(("bin", hint.bin.as_str()));
     let value = value.trim().to_ascii_lowercase();
+    let value = if kind == "bin" {
+        value.strip_suffix(".exe").unwrap_or(&value).to_string()
+    } else {
+        value
+    };
     let key = format!("{kind}:{value}");
     valid_cli_key(&key).then_some(key)
 }
@@ -569,7 +637,10 @@ impl TerminalGovernor {
     where
         F: FnMut(u32, u64) -> Result<(), String>,
     {
-        let remembered = self.defaults.lock().unwrap().values.clone();
+        let remembered = self.defaults.lock().unwrap();
+        let remembered_defaults = remembered.values.clone();
+        let remembered_maxima = remembered.maxima.clone();
+        drop(remembered);
         let mut inner = self.inner.lock().unwrap();
         inner.host_total_bytes = host_total_bytes;
         inner.host_available_bytes = host_available_bytes;
@@ -633,6 +704,10 @@ impl TerminalGovernor {
                 base_allowance_bytes: base,
                 granted_bytes: 0,
                 remembered_default_bytes: 0,
+                max_allowance_bytes: observation
+                    .cli_key
+                    .as_ref()
+                    .and_then(|key| remembered_maxima.get(key).copied()),
                 current_bytes: current,
                 peak_bytes: current,
                 ema_bytes: current as f64,
@@ -652,13 +727,20 @@ impl TerminalGovernor {
                 session.cli_key.clone_from(&observation.cli_key);
             }
             if let Some(key) = session.cli_key.clone() {
+                session.max_allowance_bytes = remembered_maxima.get(&key).copied();
                 if session.evaluated_default_cli.as_deref() != Some(&key) {
                     session.evaluated_default_cli = Some(key.clone());
                     if session.remembered_default_bytes == 0 && session.granted_bytes == 0 {
-                        if let Some(increment) = remembered.get(&key).copied() {
+                        if let Some(increment) = remembered_defaults.get(&key).copied() {
                             let headroom = grantable_headroom(&inner);
-                            let next_allowance = session.allowance().saturating_add(increment);
-                            let applied = if increment > headroom {
+                            let next_allowance =
+                                session.uncapped_allowance().saturating_add(increment);
+                            let applied = if session
+                                .max_allowance_bytes
+                                .is_some_and(|maximum| next_allowance > maximum)
+                            {
+                                Err("remembered default exceeds the agent allowance maximum")
+                            } else if increment > headroom {
                                 Err("remembered default would consume the protected host reserve")
                             } else {
                                 apply_boundary(id, next_allowance)
@@ -770,7 +852,7 @@ impl TerminalGovernor {
                     session.pending = Some(GrantRequest {
                         request_id: format!("pty-{id}-grant-{}", inner.next_request),
                         budget_generation: session.budget_generation,
-                        increments: GRANT_CHOICES.to_vec(),
+                        increments: session.grant_choices(),
                     });
                 }
                 let status = session.status();
@@ -873,6 +955,10 @@ impl TerminalGovernor {
 
         let refusal = if !GRANT_CHOICES.contains(&increment_bytes) {
             Some("unsupported grant increment")
+        } else if session.max_allowance_bytes.is_some_and(|maximum| {
+            session.uncapped_allowance().saturating_add(increment_bytes) > maximum
+        }) {
+            Some("grant would exceed the agent allowance maximum")
         } else if increment_bytes > reserve_headroom {
             Some("grant would consume the protected host reserve")
         } else {
@@ -900,7 +986,7 @@ impl TerminalGovernor {
             return Err(detail.to_string());
         }
 
-        let next_allowance = session.allowance().saturating_add(increment_bytes);
+        let next_allowance = session.uncapped_allowance().saturating_add(increment_bytes);
         if let Err(error) = apply_boundary(next_allowance) {
             let incident = GovernorIncident {
                 at_ms,
@@ -937,7 +1023,7 @@ impl TerminalGovernor {
             session.pending = Some(GrantRequest {
                 request_id: format!("pty-{id}-grant-{}", inner.next_request),
                 budget_generation: session.budget_generation,
-                increments: GRANT_CHOICES.to_vec(),
+                increments: session.grant_choices(),
             });
             session.relief_since_ms = None;
             BudgetState::OverAllowance
@@ -1185,7 +1271,7 @@ impl TerminalGovernor {
             ));
         }
         next.insert(cli_key.clone(), increment_bytes);
-        persist_remembered_defaults(&path, &next)?;
+        persist_remembered_defaults(&path, &next, &defaults.maxima)?;
         defaults.values = next;
         drop(defaults);
         let mut inner = self.inner.lock().unwrap();
@@ -1215,14 +1301,90 @@ impl TerminalGovernor {
         })
     }
 
+    fn memory_maxima(&self) -> Vec<AgentMemoryMaximum> {
+        let defaults = self.defaults.lock().unwrap();
+        let mut maxima: Vec<_> = defaults
+            .maxima
+            .iter()
+            .map(|(cli_key, max_allowance_bytes)| AgentMemoryMaximum {
+                cli_key: cli_key.clone(),
+                max_allowance_bytes: *max_allowance_bytes,
+            })
+            .collect();
+        maxima.sort_by(|left, right| left.cli_key.cmp(&right.cli_key));
+        maxima
+    }
+
+    fn set_memory_maximum(
+        &self,
+        cli_key: String,
+        max_allowance_bytes: Option<u64>,
+    ) -> Result<Vec<AgentMemoryMaximum>, String> {
+        if !valid_cli_key(&cli_key) {
+            return Err("invalid agent CLI identity".into());
+        }
+        if max_allowance_bytes.is_some_and(|value| !valid_max_allowance(value)) {
+            return Err(format!(
+                "agent allowance maximum must be between {MIN_MAX_ALLOWANCE_BYTES} and {MAX_MAX_ALLOWANCE_BYTES} bytes"
+            ));
+        }
+
+        let mut defaults = self.defaults.lock().unwrap();
+        let mut maxima = defaults.maxima.clone();
+        match max_allowance_bytes {
+            Some(value) => {
+                if !maxima.contains_key(&cli_key) && maxima.len() >= DEFAULTS_ENTRY_CAP {
+                    return Err(format!(
+                        "remembered-default store is full ({DEFAULTS_ENTRY_CAP} entries)"
+                    ));
+                }
+                maxima.insert(cli_key.clone(), value);
+            }
+            None => {
+                maxima.remove(&cli_key);
+            }
+        }
+        let path = defaults
+            .path
+            .clone()
+            .ok_or("native remembered-default storage is unavailable")?;
+        persist_remembered_defaults(&path, &defaults.values, &maxima)?;
+        defaults.maxima = maxima;
+        let mut listed: Vec<_> = defaults
+            .maxima
+            .iter()
+            .map(|(cli_key, max_allowance_bytes)| AgentMemoryMaximum {
+                cli_key: cli_key.clone(),
+                max_allowance_bytes: *max_allowance_bytes,
+            })
+            .collect();
+        listed.sort_by(|left, right| left.cli_key.cmp(&right.cli_key));
+        drop(defaults);
+
+        let mut inner = self.inner.lock().unwrap();
+        for session in inner
+            .sessions
+            .values_mut()
+            .filter(|session| session.cli_key.as_deref() == Some(&cli_key))
+        {
+            session.max_allowance_bytes = max_allowance_bytes;
+            let grant_choices = session.grant_choices();
+            if let Some(pending) = session.pending.as_mut() {
+                pending.increments = grant_choices;
+            }
+        }
+        Ok(listed)
+    }
+
     #[cfg(test)]
     fn with_defaults_path(path: PathBuf) -> Self {
-        let values = load_remembered_defaults(&path).unwrap_or_default();
+        let (values, maxima) = load_remembered_defaults(&path).unwrap_or_default();
         Self {
             inner: Mutex::new(GovernorInner::default()),
             defaults: Mutex::new(RememberedDefaults {
                 path: Some(path),
                 values,
+                maxima,
             }),
         }
     }
@@ -1335,6 +1497,38 @@ pub fn terminal_governor_remember_default(
     )
 }
 
+#[tauri::command]
+pub fn terminal_governor_memory_maxima(
+    state: State<'_, TerminalGovernor>,
+) -> Vec<AgentMemoryMaximum> {
+    state.memory_maxima()
+}
+
+#[tauri::command]
+pub fn terminal_governor_set_memory_maximum(
+    app: AppHandle,
+    state: State<'_, TerminalGovernor>,
+    cli_key: String,
+    max_allowance_bytes: Option<u64>,
+) -> Result<Vec<AgentMemoryMaximum>, String> {
+    let result = state.set_memory_maximum(cli_key.clone(), max_allowance_bytes)?;
+    for status in state
+        .snapshot()
+        .sessions
+        .into_iter()
+        .filter(|status| status.cli_key.as_deref() == Some(&cli_key))
+    {
+        let _ = app.emit(
+            "terminal:governor",
+            GovernorEvent {
+                kind: "maximum_changed",
+                status,
+            },
+        );
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1443,6 +1637,14 @@ mod tests {
             .unwrap();
         assert!(first.applied);
         assert_eq!(first.status.granted_bytes, 512 * MIB);
+        assert_eq!(
+            first.status.allowance_bytes,
+            base_allowance(gib(8)) + GRANT_STEP_BYTES
+        );
+        assert_eq!(first.status.state, BudgetState::Relief);
+        assert!(first.status.grant_request.is_none());
+        governor.observe(&[(3, first.status.current_bytes)], gib(8), gib(6), 4_500);
+        assert!(governor.snapshot().sessions[0].grant_request.is_none());
         let retry = governor
             .grant(
                 3,
@@ -1745,6 +1947,55 @@ mod tests {
     }
 
     #[test]
+    fn agent_maximum_is_persistent_and_bounds_allowance_grants() {
+        let path = defaults_scratch();
+        let governor = TerminalGovernor::with_defaults_path(path.clone());
+        let key = "pkg:npm:@example/agent".to_string();
+        let maximum = gib(2);
+        governor
+            .set_memory_maximum(key.clone(), Some(maximum))
+            .unwrap();
+
+        let allowance = base_allowance(gib(16));
+        observe_cli(&governor, 8, allowance * 95 / 100, 1_000, |_, _| Ok(()));
+        observe_cli(&governor, 8, allowance * 95 / 100, 3_000, |_, _| Ok(()));
+        let status = governor.snapshot().sessions[0].clone();
+        assert_eq!(status.max_allowance_bytes, Some(maximum));
+        let request = status.grant_request.unwrap();
+        assert_eq!(request.increments, vec![512 * MIB]);
+        let refused = governor
+            .grant(
+                8,
+                request.budget_generation,
+                &request.request_id,
+                GIB,
+                4_000,
+            )
+            .unwrap_err();
+        assert_eq!(refused, "grant would exceed the agent allowance maximum");
+        let granted = governor
+            .grant(
+                8,
+                request.budget_generation,
+                &request.request_id,
+                512 * MIB,
+                5_000,
+            )
+            .unwrap();
+        assert_eq!(granted.status.allowance_bytes, maximum);
+
+        let restored = TerminalGovernor::with_defaults_path(path.clone());
+        assert_eq!(
+            restored.memory_maxima(),
+            vec![AgentMemoryMaximum {
+                cli_key: key,
+                max_allowance_bytes: maximum,
+            }]
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn remembered_cli_default_requires_separate_confirmation_and_applied_grant() {
         let path = defaults_scratch();
         let governor = TerminalGovernor::with_defaults_path(path.clone());
@@ -1852,7 +2103,7 @@ mod tests {
         let values: HashMap<_, _> = (0..=DEFAULTS_ENTRY_CAP)
             .map(|index| (format!("bin:agent-{index}"), 512 * MIB))
             .collect();
-        let error = persist_remembered_defaults(&path, &values).unwrap_err();
+        let error = persist_remembered_defaults(&path, &values, &HashMap::new()).unwrap_err();
         assert!(error.contains("full"));
         assert!(!path.exists());
     }

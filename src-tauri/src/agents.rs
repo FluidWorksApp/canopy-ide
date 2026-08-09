@@ -372,16 +372,12 @@ fn update_terminal_governor(app: &AppHandle, sys: &mut System, stats: &[SessionS
             }
         },
     ) {
-        if matches!(
-            event.status.state,
-            crate::governor::BudgetState::AwaitingGrant
-                | crate::governor::BudgetState::OverAllowance
-        ) {
+        if event.status.current_bytes > event.status.allowance_bytes {
             crate::notify::notify_native(
                 app.clone(),
-                "A terminal needs a memory decision".into(),
+                "An agent needs a memory decision".into(),
                 format!(
-                    "Using {} MiB of a {} MiB one-session allowance. Open Canopy to allow more or stop it.",
+                    "Current use is {} MiB against a {} MiB allowance. Open Canopy to allow more or stop it.",
                     event.status.current_bytes / (1024 * 1024),
                     event.status.allowance_bytes / (1024 * 1024),
                 ),

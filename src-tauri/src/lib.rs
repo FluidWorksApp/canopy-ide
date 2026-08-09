@@ -835,6 +835,8 @@ pub fn run() {
             governor::terminal_governor_grant,
             governor::terminal_governor_stop,
             governor::terminal_governor_remember_default,
+            governor::terminal_governor_memory_maxima,
+            governor::terminal_governor_set_memory_maximum,
             agents::session_forget,
             profiles::profiles_list,
             profiles::profile_create,

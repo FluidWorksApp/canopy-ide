@@ -10015,6 +10015,39 @@ body.dragging-tab * {
   font-size: 12px;
 }
 
+.agent-memory-settings {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-memory-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.agent-memory-setting-row > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+
+.agent-memory-settings > .set-item-desc {
+  margin: 4px 0 0;
+}
+
+@media (max-width: 560px) {
+  .agent-memory-setting-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
 /* The warning under a switch that disarms a safety. Bordered in the danger
    colour rather than filled with it: it has to read as a standing condition
    the user agreed to, not a transient error toast. */
@@ -12197,6 +12230,137 @@ input[type="radio"]:disabled {
 }
 .dlg-actions-spacer {
   flex: 1;
+}
+
+.terminal-governor-card {
+  pointer-events: auto;
+  display: grid;
+  gap: 12px;
+  width: min(560px, calc(100vw - 32px));
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 16px;
+  color: var(--text);
+  background: var(--bg-overlay);
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-3), inset 3px 0 0 var(--danger);
+}
+
+.terminal-governor-card-head,
+.terminal-governor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.terminal-governor-card-head {
+  justify-content: space-between;
+}
+
+.terminal-governor-card-head > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.terminal-governor-card-head span {
+  color: var(--danger);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.terminal-governor-card-head strong {
+  overflow-wrap: anywhere;
+  font-size: var(--fs-lg);
+}
+
+.terminal-governor-card > p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+
+.terminal-governor-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.terminal-governor-actions > button {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.terminal-governor-controls {
+  display: grid;
+  gap: 12px;
+}
+
+.terminal-governor-members {
+  padding: 9px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
+.terminal-governor-maximum {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 12px;
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+
+.terminal-governor-maximum small {
+  grid-column: 1 / -1;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+.terminal-governor-remember {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+
+.terminal-governor-remember input {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.terminal-governor-meta {
+  padding: 8px 10px;
+  color: var(--text-faint);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.terminal-governor-meta.is-error {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
+@media (max-width: 520px) {
+  .terminal-governor-actions > button {
+    flex: 1 1 calc(50% - 4px);
+    justify-content: center;
+  }
+  .terminal-governor-maximum {
+    grid-template-columns: 1fr;
+  }
 }
 
 .dlg-btn-hint {

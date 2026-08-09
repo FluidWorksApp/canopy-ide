@@ -2336,6 +2336,8 @@ export interface TerminalBudgetStatus {
   granted_bytes: number;
   remembered_default_bytes: number;
   allowance_bytes: number;
+  /** Policy ceiling for grants to this agent; not an OS hard limit. */
+  max_allowance_bytes: number | null;
   current_bytes: number;
   peak_bytes: number;
   ema_bytes: number;
@@ -2374,6 +2376,7 @@ export interface TerminalGovernorEvent {
     | "state_changed"
     | "grant_applied"
     | "stop_requested"
+    | "maximum_changed"
     | "remembered_default_applied";
   status: TerminalBudgetStatus;
 }
@@ -2395,6 +2398,11 @@ export interface TerminalRememberDefaultOutcome {
   idempotent: boolean;
   cli_key: string;
   increment_bytes: number;
+}
+
+export interface AgentMemoryMaximum {
+  cli_key: string;
+  max_allowance_bytes: number;
 }
 
 export const terminalGovernorStatus = (): Promise<TerminalGovernorSnapshot> =>
@@ -2442,6 +2450,18 @@ export const terminalGovernorRememberDefault = (
     grantBudgetGeneration,
     incrementBytes,
     confirmed,
+  });
+
+export const terminalGovernorMemoryMaxima = (): Promise<AgentMemoryMaximum[]> =>
+  invoke<AgentMemoryMaximum[]>("terminal_governor_memory_maxima");
+
+export const terminalGovernorSetMemoryMaximum = (
+  cliKey: string,
+  maxAllowanceBytes: number | null,
+): Promise<AgentMemoryMaximum[]> =>
+  invoke<AgentMemoryMaximum[]>("terminal_governor_set_memory_maximum", {
+    cliKey,
+    maxAllowanceBytes,
   });
 
 export const onTerminalGovernor = (

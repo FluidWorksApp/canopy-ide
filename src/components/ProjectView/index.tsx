@@ -460,7 +460,7 @@ import { inferVibeCheck } from "../../vibeCheckInference";
 import { TabSwitcher } from "../TabSwitcher";
 import { switchRowKey, tabKind } from "../../tabKind";
 import {
-  strongestTerminalMemoryWarning,
+  terminalMemoryQuotaWarning,
   terminalGovernorByPty,
 } from "../../terminalMemoryPressure";
 import { TerminalMemoryFlyout } from "../TerminalMemoryFlyout";
@@ -690,6 +690,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   events,
   hookPath,
   terminalGovernor,
+  onTerminalQuotaGroupsChange,
   allProjects,
   dismissedPending,
   onDismissPending,
@@ -1240,9 +1241,26 @@ const ProjectViewBody = memo(function ProjectViewBody({
         : [tab],
     [tabs],
   );
+  const terminalQuotaGroups = useMemo(() => {
+    const groups = new Map<string, number[]>();
+    for (const tab of tabs) {
+      if (tab.type !== "terminal" || tab.ptyId == null) continue;
+      const key = tab.paneGroup ? `group:${tab.paneGroup}` : `tab:${tab.id}`;
+      const members = groups.get(key) ?? [];
+      members.push(tab.ptyId);
+      groups.set(key, members);
+    }
+    return [...groups.values()].map((members) => members.sort((a, b) => a - b));
+  }, [tabs]);
+  useEffect(() => {
+    onTerminalQuotaGroupsChange?.(project.id, terminalQuotaGroups);
+  }, [onTerminalQuotaGroupsChange, project.id, terminalQuotaGroups]);
+  useEffect(() => {
+    return () => onTerminalQuotaGroupsChange?.(project.id, []);
+  }, [onTerminalQuotaGroupsChange, project.id]);
   const terminalMemoryWarning = useCallback(
     (tab: TermSubTab) =>
-      strongestTerminalMemoryWarning(
+      terminalMemoryQuotaWarning(
         terminalMemoryMembers(tab).map((member) =>
           member.ptyId == null ? null : governorByPty.get(member.ptyId),
         ),
@@ -11937,16 +11955,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
         )}
         {!vibe && memoryFlyoutTab && memoryFlyoutStatus && (
           <TerminalMemoryFlyout
-            session={(() => {
-              const session = statsByPty.get(memoryFlyoutStatus.id);
+            quota={memoryFlyoutStatus}
+            members={memoryFlyoutStatus.members.map((status) => {
+              const session = statsByPty.get(status.id);
+              const tab = terminalMemoryMembers(memoryFlyoutTab).find(
+                (member) => member.ptyId === status.id,
+              );
               return {
-                name: session?.name ?? memoryFlyoutTab.name,
-                agent:
-                  identifyAgent(session?.agent_hint) != null ||
-                  isAgentTab(memoryFlyoutTab),
+                status,
+                session: {
+                  name: session?.name ?? tab?.name,
+                  agent:
+                    identifyAgent(session?.agent_hint) != null ||
+                    (tab ? isAgentTab(tab) : false),
+                },
               };
-            })()}
-            status={memoryFlyoutStatus}
+            })}
             onClose={() => setMemoryFlyoutTabId(null)}
             onPurge={() => {
               const outcomes = terminalMemoryMembers(memoryFlyoutTab).map(
