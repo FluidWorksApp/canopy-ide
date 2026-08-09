@@ -263,12 +263,37 @@ export default function App() {
   const [memPressure, setMemPressure] = useState<ipc.MemoryPressure | null>(null);
   const [terminalGovernor, setTerminalGovernor] =
     useState<ipc.TerminalGovernorSnapshot | null>(null);
-  const [terminalStats, setTerminalStats] = useState<ipc.SessionStats[]>([]);
+  const [governorBusy, setGovernorBusy] = useState(false);
+  const [governorError, setGovernorError] = useState<string | null>(null);
+  const [dismissedGovernorRequests, setDismissedGovernorRequests] = useState<
+    Set<string>
+  >(new Set());
+  const pendingGovernor = terminalGovernor?.sessions.find((session) => {
+    const request = session.grant_request;
+    return request != null && !dismissedGovernorRequests.has(request.request_id);
+  });
+  const [pendingGovernorSession, setPendingGovernorSession] =
+    useState<ipc.SessionStats>();
   useEffect(() => {
-    void ipc.ptyStats().then(setTerminalStats).catch(() => {});
+    if (pendingGovernor == null) {
+      setPendingGovernorSession(undefined);
+      return;
+    }
+    const select = (sessions: ipc.SessionStats[]) => {
+      const next = sessions.find((session) => session.id === pendingGovernor.id);
+      setPendingGovernorSession((current) =>
+        current?.id === next?.id &&
+        current?.name === next?.name &&
+        current?.title === next?.title &&
+        current?.agent_hint?.bin === next?.agent_hint?.bin
+          ? current
+          : next,
+      );
+    };
+    void ipc.ptyStats().then(select).catch(() => {});
     let cancelled = false;
     let un: (() => void) | undefined;
-    void ipc.onPtyStats(setTerminalStats).then((stop) => {
+    void ipc.onPtyStats(select).then((stop) => {
       if (cancelled) stop();
       else un = stop;
     });
@@ -276,12 +301,7 @@ export default function App() {
       cancelled = true;
       un?.();
     };
-  }, []);
-  const [governorBusy, setGovernorBusy] = useState(false);
-  const [governorError, setGovernorError] = useState<string | null>(null);
-  const [dismissedGovernorRequests, setDismissedGovernorRequests] = useState<
-    Set<string>
-  >(new Set());
+  }, [pendingGovernor?.id]);
   // Everything that has asked for the user's attention (attention.ts). One
   // queue, one urgency model, one rule for when something leaves the app for
   // the OS — replacing a single-slot toast that the next caller overwrote, and
@@ -3144,14 +3164,6 @@ export default function App() {
 
   if (!loaded) return null;
 
-  const pendingGovernor = terminalGovernor?.sessions.find((session) => {
-    const request = session.grant_request;
-    return request != null && !dismissedGovernorRequests.has(request.request_id);
-  });
-  const pendingGovernorSession = pendingGovernor
-    ? terminalStats.find((session) => session.id === pendingGovernor.id)
-    : undefined;
-
   return (
     <div className={`app ${zen ? "zen" : ""}`}>
       {/* Focus mode: chrome slides away but stays reachable — hovering the top
@@ -3174,7 +3186,6 @@ export default function App() {
             pendingGovernorSession
               ? {
                   name: pendingGovernorSession.name,
-                  title: pendingGovernorSession.title,
                   agent: identifyAgent(pendingGovernorSession.agent_hint) != null,
                 }
               : undefined

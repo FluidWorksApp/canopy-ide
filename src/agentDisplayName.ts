@@ -104,7 +104,6 @@ export interface TerminalNameSource {
   id: number;
   name?: string;
   agent: boolean;
-  title?: string;
 }
 
 /** One terminal label for system-owned surfaces. Agent sessions use the live
@@ -114,10 +113,9 @@ export function terminalDisplayName({
   id,
   name,
   agent,
-  title,
 }: TerminalNameSource): string {
   if (!agent) return `Terminal ${id}`;
-  return clean(name) || clean(title) || `Terminal ${id}`;
+  return clean(name) || `Terminal ${id}`;
 }
 
 /** ptyId -> the tab showing it, for every terminal tab that has spawned. The

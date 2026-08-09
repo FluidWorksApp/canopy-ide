@@ -6700,9 +6700,9 @@ mod tests {
     #[test]
     fn a_task_can_name_itself_and_the_naming_survives_the_disable_list() {
         // The tool has to be published (a def nobody lists is invisible), and
-        // it has to be one of the two a micro-task session keeps whatever the
-        // user switched off — the protocol in microTasks.ts instructs every run
-        // to call it, so a session without it is one whose brief is wrong.
+        // every MCP-capable agent keeps it whatever the user switched off: live
+        // status is part of the mesh contract. Micro-tasks separately retain
+        // their completion tool so the ephemeral tab cannot be stranded.
         let published = tools_list();
         let tools = published["tools"].as_array().unwrap().clone();
         let tool = tools

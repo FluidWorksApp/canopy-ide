@@ -86,6 +86,7 @@ describe("agentDisplayName", () => {
 describe("terminalDisplayName", () => {
   it("uses assigned names for agents and numbered labels for shells", () => {
     expect(terminalDisplayName({ id: 7, name: "Piper", agent: true })).toBe("Piper");
+    expect(terminalDisplayName({ id: 7, agent: true })).toBe("Terminal 7");
     expect(terminalDisplayName({ id: 7, name: "Piper", agent: false })).toBe(
       "Terminal 7",
     );

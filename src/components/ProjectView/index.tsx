@@ -11921,7 +11921,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
               const session = statsByPty.get(memoryFlyoutStatus.id);
               return {
                 name: session?.name ?? memoryFlyoutTab.name,
-                title: memoryFlyoutTab.customTitle ?? memoryFlyoutTab.title,
                 agent:
                   identifyAgent(session?.agent_hint) != null ||
                   isAgentTab(memoryFlyoutTab),
