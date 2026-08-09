@@ -206,7 +206,9 @@ function validateConstraints(
         pattern.length > 128 ||
         pattern.startsWith("/") ||
         pattern.includes("..") ||
-        /[\0\r\n]/.test(pattern)
+        pattern.includes("\u0000") ||
+        pattern.includes("\r") ||
+        pattern.includes("\n")
       ) {
         errors.push(`${at}.branchPatterns contains an unsafe pattern`);
       }
