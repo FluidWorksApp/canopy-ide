@@ -27596,3 +27596,29 @@ a.btn-sm {
 .acp-prompt em {
   color: var(--text-faint);
 }
+.agent-name-editor {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-weight: inherit;
+  text-align: left;
+  cursor: text;
+}
+
+.agent-name-editor:hover {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.agent-name-editing input {
+  width: min(12rem, 100%);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  padding: 2px 5px;
+  color: var(--text);
+  background: var(--bg-deep);
+  font: inherit;
+}

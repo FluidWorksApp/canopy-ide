@@ -25,7 +25,10 @@ changes intact because other sessions may share this checkout.\n\
 \n\
 Canopy integrations are available only when they appear in your actual tool \
 inventory. Never invent a Canopy tool or imitate one through an unrelated \
-shell command.";
+shell command. A hooks-only client whose inventory has no Canopy integration \
+cannot publish live status, inspect the roster, or answer another agent through \
+the mesh; keep working in its own terminal and never claim those actions \
+happened.";
 
 /// Tool-routing instructions for clients that initialized Canopy's MCP server.
 const TOOL_ROUTING: &str = "\
@@ -66,13 +69,17 @@ IDE the user is watching, and their results stay inspectable:\n\
   or contrast)\n\
 - Working in a checkout that other agents share -> canopy_agents first, then \
   canopy_mesh history; use canopy_claim before editing shared paths\n\
+- Mesh duty -> call canopy_name_task with a short `description` when you start \
+  work and whenever your focus materially changes; answer lead pings promptly, \
+  and send agent-to-agent coordination through canopy_message_agent or \
+  canopy_mesh_send rather than leaving it only in terminal prose\n\
 - A short one-line interrupt to another agent -> canopy_message_agent; pass a \
   terminal id from canopy_agents, or `pr` to reach the session that raised a PR\n\
 - Handing another agent more than one line, or files, or a message it should \
   be able to find again -> canopy_mesh_send (persistent, by message id); \
   what you've sent and received, or a message id someone gave you -> \
   canopy_mesh\n\
-- Delegating a bounded, independent slice -> canopy_spawn_agent with a complete \
+- If available, delegating a bounded, independent slice -> canopy_spawn_agent with a complete \
   brief. The child has no memory of this conversation; use canopy_agents first \
   and prefer messaging an existing owner when the work is already in flight.\n\
 \n\
@@ -137,6 +144,8 @@ mod tests {
         assert!(prompt.contains("call canopy_agents and canopy_mesh history before editing"));
         assert!(prompt.contains("canopy_message_agent"));
         assert!(prompt.contains("canopy_mesh_send"));
+        assert!(prompt.contains("call canopy_name_task"));
+        assert!(prompt.contains("answer lead pings promptly"));
     }
 
     #[test]
@@ -144,6 +153,7 @@ mod tests {
         assert!(!SESSION_CONTEXT.contains("canopy_project"));
         assert!(!SESSION_CONTEXT.contains("canopy_mesh"));
         assert!(SESSION_CONTEXT.contains("only when they appear in your actual tool inventory"));
+        assert!(SESSION_CONTEXT.contains("cannot publish live status"));
     }
 
     #[test]

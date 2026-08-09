@@ -17,6 +17,12 @@ export interface SpawnPlacementTab {
   paneGroup?: string;
 }
 
+/** The existing attention preference is the single focus authority for agent
+ *  delegation. Off means create the tab and leave the user's current project,
+ *  tab, and active split pane untouched. */
+export const spawnedAgentTakesFocus = (agentAskForAttention: boolean) =>
+  agentAskForAttention;
+
 /** Add a new terminal to the existing mux tree without inventing a second
  * geometry model. A missing/stale target is an honest placement failure: the
  * caller can retry as a plain tab instead of silently landing elsewhere. */
@@ -25,6 +31,7 @@ export function placeSpawnedTab(
   tabs: readonly SpawnPlacementTab[],
   nextTabId: string,
   placement: AgentSpawnPlacement,
+  activate = true,
 ): { groups: Record<string, TerminalGroup>; groupId?: string } {
   if (placement.mode === "tab") return { groups };
   const target = tabs.find((tab) => tab.ptyId === placement.relativeToPtyId);
@@ -41,7 +48,7 @@ export function placeSpawnedTab(
   const next: TerminalGroup = {
     id: groupId,
     root: splitLeaf(root, target.id, nextTabId, horizontal ? "horizontal" : "vertical", before),
-    activeTabId: nextTabId,
+    activeTabId: activate ? nextTabId : (current?.activeTabId ?? target.id),
   };
   return { groups: { ...groups, [groupId]: next }, groupId };
 }

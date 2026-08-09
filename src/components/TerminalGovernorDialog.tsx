@@ -5,9 +5,14 @@ import type {
   TerminalGovernorCapability,
 } from "../ipc";
 import { Dialog, type DialogAction } from "./Dialog";
+import {
+  terminalDisplayName,
+  type TerminalNameSource,
+} from "../agentDisplayName";
 
 interface Props {
   status: TerminalBudgetStatus;
+  session?: Omit<TerminalNameSource, "id">;
   capability: TerminalGovernorCapability;
   busy?: boolean;
   error?: string | null;
@@ -18,6 +23,7 @@ interface Props {
 
 export function TerminalGovernorDialog({
   status,
+  session,
   capability,
   busy = false,
   error,
@@ -25,6 +31,7 @@ export function TerminalGovernorDialog({
   onStop,
   onDismiss,
 }: Props) {
+  const terminalName = terminalDisplayName({ id: status.id, agent: false, ...session });
   const [rememberForCli, setRememberForCli] = useState(false);
   const request = status.grant_request;
   const actions: DialogAction[] = [
@@ -49,7 +56,7 @@ export function TerminalGovernorDialog({
   return (
     <Dialog
       variant={status.state === "over_allowance" ? "danger" : "accent"}
-      title={`Terminal ${status.id} is using ${fmtBytes(status.current_bytes)}`}
+      title={`${terminalName} is using ${fmtBytes(status.current_bytes)}`}
       body={`Its one-session allowance is ${fmtBytes(status.allowance_bytes)}. ${enforcement}`}
       meta={
         error || (

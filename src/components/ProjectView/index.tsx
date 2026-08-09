@@ -144,6 +144,7 @@ import {
 import { pickLaunchCli, startCommandParked } from "../../agentSeed";
 import {
   placeSpawnedTab,
+  spawnedAgentTakesFocus,
   type AgentSpawnPlacement,
 } from "../../agentSpawn";
 import {
@@ -1371,6 +1372,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
           .filter((id): id is number => id != null),
       );
       const mine = all.filter((s) => ids.has(s.id));
+      // Native session names are the naming substrate. A rename made from the
+      // Agents page targets an already-running PTY, so mirror the next stats
+      // push into its existing tab instead of leaving the strip on the old
+      // launch-time label.
+      const names = new Map(mine.map((session) => [session.id, session.name]));
+      setTabs((current) => {
+        let changed = false;
+        const next = current.map((tab) => {
+          if (tab.type !== "terminal" || tab.ptyId == null) return tab;
+          const name = names.get(tab.ptyId);
+          if (!name || name === tab.name) return tab;
+          changed = true;
+          return { ...tab, name };
+        });
+        return changed ? next : current;
+      });
       for (const s of mine) {
         const hasAgent = !!identifyAgent(s.agent_hint);
         if (hasAgent) {
@@ -3227,12 +3244,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
         parentPtyId: a.parentPtyId,
         depth: a.spawnDepth,
       };
+      const activate = spawnedAgentTakesFocus(
+        getSettings().agentAskForAttention,
+      );
       const id = addTerminal(
         a.route,
         start.command,
         `${title} · ${cli.name}`,
         cli.icon,
-        false,
+        activate,
         fleet.env,
         fleet.route.profile === DEFAULT_PROFILE ? undefined : fleet.route.profile,
         true,
@@ -3248,6 +3268,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ),
           id,
           placement,
+          activate,
         );
         if (placed.groupId) {
           const relativeToPtyId =
@@ -9008,6 +9029,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           projectStats.find((session) => session.id === t.ptyId)?.name ??
           t.customTitle,
         title: t.title,
+        description: t.description,
         ptyId: t.ptyId as number,
         agentId: (byProc ?? byCommand)?.id ?? "agent",
         dir: basename(t.cwd) ?? "",
@@ -10144,6 +10166,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           name: a.name,
           agent: a.agentId,
           title: a.title,
+          description: a.description,
           dir: a.dir,
         })),
         // Preview and device annotations, so canopy_annotations serves every
@@ -11903,7 +11926,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
         )}
         {!vibe && memoryFlyoutTab && memoryFlyoutStatus && (
           <TerminalMemoryFlyout
-            title={memoryFlyoutTab.name ?? memoryFlyoutTab.customTitle ?? memoryFlyoutTab.title}
+            session={(() => {
+              const session = statsByPty.get(memoryFlyoutStatus.id);
+              return {
+                name: session?.name ?? memoryFlyoutTab.name,
+                agent:
+                  identifyAgent(session?.agent_hint) != null ||
+                  isAgentTab(memoryFlyoutTab),
+              };
+            })()}
             status={memoryFlyoutStatus}
             onClose={() => setMemoryFlyoutTabId(null)}
             onPurge={() => {

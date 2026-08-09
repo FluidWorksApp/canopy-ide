@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { leafIds } from "./terminalGroups";
-import { placeSpawnedTab } from "./agentSpawn";
+import { placeSpawnedTab, spawnedAgentTakesFocus } from "./agentSpawn";
+
+describe("spawn focus", () => {
+  it("honours the existing attention preference both ways", () => {
+    expect(spawnedAgentTakesFocus(false)).toBe(false);
+    expect(spawnedAgentTakesFocus(true)).toBe(true);
+  });
+});
 
 describe("placeSpawnedTab", () => {
   it("leaves a plain spawned tab outside the mux model", () => {
@@ -46,6 +53,17 @@ describe("placeSpawnedTab", () => {
     );
     expect(placed.groupId).toBe("mux");
     expect(leafIds(placed.groups.mux.root)).toEqual(["target", "child", "other"]);
+  });
+
+  it("adds a background split without changing the active pane", () => {
+    const placed = placeSpawnedTab(
+      {},
+      [{ id: "parent", ptyId: 7 }],
+      "child",
+      { mode: "split", relativeToPtyId: 7, direction: "right" },
+      false,
+    );
+    expect(placed.groups[placed.groupId!].activeTabId).toBe("parent");
   });
 
   it("refuses a stale relative terminal", () => {

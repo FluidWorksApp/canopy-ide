@@ -43,6 +43,7 @@ describe("TerminalGovernorDialog", () => {
     render(
       <TerminalGovernorDialog
         status={status}
+        session={{ name: "Piper", agent: true }}
         capability={capability}
         onGrant={onGrant}
         onStop={() => {}}
@@ -50,6 +51,7 @@ describe("TerminalGovernorDialog", () => {
       />,
     );
     expect(screen.getByText(/currently monitor-only/i)).toBeTruthy();
+    expect(screen.getByText(/Piper is using/i)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Allow \+512/ }));
     expect(onGrant).toHaveBeenCalledWith(512 * 1024 * 1024, false);
   });
@@ -72,6 +74,21 @@ describe("TerminalGovernorDialog", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /Allow \+512/ }));
     expect(onGrant).toHaveBeenCalledWith(512 * 1024 * 1024, true);
+  });
+
+  it("keeps the numbered fallback for a plain shell", () => {
+    render(
+      <TerminalGovernorDialog
+        status={status}
+        session={{ name: "Moss", agent: false }}
+        capability={capability}
+        onGrant={() => {}}
+        onStop={() => {}}
+        onDismiss={() => {}}
+      />,
+    );
+    expect(screen.getByText(/Terminal 7 is using/i)).toBeTruthy();
+    expect(screen.queryByText(/Moss is using/i)).toBeNull();
   });
 
   it("offers an explicit terminal stop without calling it a throttle", () => {

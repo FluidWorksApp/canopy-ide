@@ -78,6 +78,7 @@ import { companionName, summonCompanion } from "./companion";
 import type { CompanionProposal } from "./companionSession";
 import { personaBinding } from "./personaBinding";
 import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
+import { spawnedAgentTakesFocus } from "./agentSpawn";
 import { readRemoteThemeTokens } from "./remoteTheme";
 import { useTabDrag } from "./tabDrag";
 import * as prWatch from "./prWatchStore";
@@ -125,6 +126,7 @@ import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
 import { TerminalGovernorDialog } from "./components/TerminalGovernorDialog";
+import { identifyAgent } from "./agentIdentity";
 import { shouldOnboard, markOnboarded } from "./onboarding";
 import { isSelftest, setSelftestMode } from "./selftest/mode";
 import { startBrowserWatchdog } from "./browserWatchdog";
@@ -266,6 +268,40 @@ export default function App() {
   const [dismissedGovernorRequests, setDismissedGovernorRequests] = useState<
     Set<string>
   >(new Set());
+  const pendingGovernor = terminalGovernor?.sessions.find((session) => {
+    const request = session.grant_request;
+    return request != null && !dismissedGovernorRequests.has(request.request_id);
+  });
+  const [pendingGovernorSession, setPendingGovernorSession] =
+    useState<ipc.SessionStats>();
+  useEffect(() => {
+    if (pendingGovernor == null) {
+      setPendingGovernorSession(undefined);
+      return;
+    }
+    const select = (sessions: ipc.SessionStats[]) => {
+      const next = sessions.find((session) => session.id === pendingGovernor.id);
+      setPendingGovernorSession((current) =>
+        current?.id === next?.id &&
+        current?.name === next?.name &&
+        current?.title === next?.title &&
+        current?.agent_hint?.bin === next?.agent_hint?.bin
+          ? current
+          : next,
+      );
+    };
+    void ipc.ptyStats().then(select).catch(() => {});
+    let cancelled = false;
+    let un: (() => void) | undefined;
+    void ipc.onPtyStats(select).then((stop) => {
+      if (cancelled) stop();
+      else un = stop;
+    });
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, [pendingGovernor?.id]);
   // Everything that has asked for the user's attention (attention.ts). One
   // queue, one urgency model, one rule for when something leaves the app for
   // the OS — replacing a single-slot toast that the next caller overwrote, and
@@ -1162,7 +1198,10 @@ export default function App() {
   // Republished on every settings write, because the sidecar reads it when an
   // agent asks for its tool list — which can be at any moment.
   useEffect(() => {
-    const publish = () => void ipc.contextTools(getSettings().disabledTools);
+    const publish = () => {
+      const settings = getSettings();
+      void ipc.contextTools(settings.disabledTools, settings.agentsMaySpawn);
+    };
     publish();
     window.addEventListener(THEME_CHANGE_EVENT, publish);
     return () => window.removeEventListener(THEME_CHANGE_EVENT, publish);
@@ -2123,9 +2162,12 @@ export default function App() {
           );
           return;
         }
+        const askForAttention = getSettings().agentAskForAttention;
         await prepareProjectForAgentAction(
           projectId,
-          getSettings().agentAskForAttention,
+          a.kind === "spawn_agent"
+            ? spawnedAgentTakesFocus(askForAttention)
+            : askForAttention,
         );
         // Timer, not rAF — see the attach-terminal dispatch above.
         window.setTimeout(
@@ -3130,11 +3172,6 @@ export default function App() {
 
   if (!loaded) return null;
 
-  const pendingGovernor = terminalGovernor?.sessions.find((session) => {
-    const request = session.grant_request;
-    return request != null && !dismissedGovernorRequests.has(request.request_id);
-  });
-
   return (
     <div className={`app ${zen ? "zen" : ""}`}>
       {/* Focus mode: chrome slides away but stays reachable — hovering the top
@@ -3153,6 +3190,14 @@ export default function App() {
       {pendingGovernor && terminalGovernor && (
         <TerminalGovernorDialog
           status={pendingGovernor}
+          session={
+            pendingGovernorSession
+              ? {
+                  name: pendingGovernorSession.name,
+                  agent: identifyAgent(pendingGovernorSession.agent_hint) != null,
+                }
+              : undefined
+          }
           capability={terminalGovernor.capability}
           busy={governorBusy}
           error={governorError}

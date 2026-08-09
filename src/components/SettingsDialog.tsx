@@ -1540,6 +1540,21 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item
+                  name="Agent delegation"
+                  desc="Control whether coding agents can create additional agent tabs."
+                >
+                  <Checkbox
+                    checked={s.agentsMaySpawn}
+                    onChange={(v) => patch({ agentsMaySpawn: v })}
+                    label="Agents may spawn new agent tabs"
+                    hint={
+                      s.agentsMaySpawn
+                        ? "Agents can delegate bounded work to a new tab."
+                        : "The spawn tool is hidden and existing clients are refused."
+                    }
+                  />
+                </Item>
+                <Item
                   name="Notification pop-ups"
                   desc="Choose whether agent and project notices interrupt your work or wait in the bell."
                 >

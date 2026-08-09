@@ -24,6 +24,7 @@ describe("getSettings / updateSettings", () => {
     expect(s.tabSwitchMode).toBe("recent");
     expect(s.restoreUserClosedSessions).toBe(false);
     expect(s.agentAskForAttention).toBe(false);
+    expect(s.agentsMaySpawn).toBe(true);
     expect(s.notificationPopupsEnabled).toBe(true);
     expect(s.dictationTriggerMode).toBe("hold");
     expect(s.dictationModKey).toBe("ShiftLeft");
@@ -49,6 +50,7 @@ describe("getSettings / updateSettings", () => {
       tabSwitchMode: "order",
       restoreUserClosedSessions: true,
       agentAskForAttention: false,
+      agentsMaySpawn: false,
       notificationPopupsEnabled: false,
     });
     const s = getSettings();
@@ -57,6 +59,7 @@ describe("getSettings / updateSettings", () => {
     expect(s.tabSwitchMode).toBe("order");
     expect(s.restoreUserClosedSessions).toBe(true);
     expect(s.agentAskForAttention).toBe(false);
+    expect(s.agentsMaySpawn).toBe(false);
     expect(s.notificationPopupsEnabled).toBe(false);
   });
 

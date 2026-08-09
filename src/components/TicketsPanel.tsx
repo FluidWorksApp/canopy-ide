@@ -28,6 +28,8 @@ export interface AgentTarget {
   /** Stable Canopy-assigned session name. */
   name?: string;
   title: string;
+  /** Agent-published current focus. */
+  description?: string;
   ptyId: number;
   /** Registry id of the CLI running in it, for its brand mark. */
   agentId: string;

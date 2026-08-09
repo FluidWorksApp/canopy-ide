@@ -89,6 +89,15 @@ describe("the agents page", () => {
     expect(screen.getByText("Juniper")).toBeTruthy();
   });
 
+  it("shows an agent-published live status instead of treating the initial prompt as current", () => {
+    page({
+      tabNames: new Map([
+        [7, { name: "Ember", description: "Reviewing the bridge capability gate" }],
+      ]),
+    });
+    expect(screen.getByText("Reviewing the bridge capability gate")).toBeTruthy();
+  });
+
   it("counts what is running", () => {
     const { container } = page({ stats: [session({ id: 7 }), session({ id: 8 })] });
     const running = container.querySelector(".agv-stat");

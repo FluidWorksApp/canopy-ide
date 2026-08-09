@@ -1,5 +1,9 @@
 import type { TerminalBudgetStatus } from "../ipc";
 import { Button } from "./ui";
+import {
+  terminalDisplayName,
+  type TerminalNameSource,
+} from "../agentDisplayName";
 
 const formatBytes = (bytes: number) => {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
@@ -14,20 +18,21 @@ const stateCopy = (status: TerminalBudgetStatus) => {
 };
 
 export function TerminalMemoryFlyout({
-  title,
+  session,
   status,
   onPurge,
   onRestart,
   onHibernate,
   onClose,
 }: {
-  title: string;
+  session?: Omit<TerminalNameSource, "id">;
   status: TerminalBudgetStatus;
   onPurge: () => void;
   onRestart: () => void;
   onHibernate: () => void;
   onClose: () => void;
 }) {
+  const title = terminalDisplayName({ id: status.id, agent: false, ...session });
   return (
     <aside className="terminal-memory-flyout" aria-label={`Memory actions for ${title}`}>
       <div className="terminal-memory-flyout-head">

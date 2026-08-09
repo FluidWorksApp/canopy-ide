@@ -73,6 +73,7 @@ function seed() {
       updated: now,
       first_prompt: "coordinate the panel build",
       prompts: ["coordinate the panel build", "check on the executor"],
+      working_on: "stitching live status into the table",
     }),
     digest({
       session_id: "s-exec",
@@ -201,9 +202,10 @@ describe("the control panel table", () => {
     expect(lead).toBeTruthy();
     // Identity detail: branch riding next to the name.
     expect(screen.getByText(/⎇ feat\/panel/)).toBeTruthy();
-    // The initial prompt is the retained one, the "now" column the latest.
+    // The initial prompt stays retained while the explicit status owns "now".
     expect(screen.getByText("coordinate the panel build")).toBeTruthy();
-    expect(screen.getByText("check on the executor")).toBeTruthy();
+    expect(screen.getByText("stitching live status into the table")).toBeTruthy();
+    expect(screen.queryByText("check on the executor")).toBeNull();
     // And the status column stays honest here too.
     expect(screen.getAllByText(LIFE_META.unknown.label).length).toBeGreaterThan(0);
     expect(screen.queryByText(LIFE_META.idle.label)).toBeNull();
