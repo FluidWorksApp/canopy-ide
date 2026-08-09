@@ -22,6 +22,7 @@ import {
   layoutSplit,
   leafIds,
   mapSplitTabIds,
+  multiplexPaneFocusState,
   paneDropZone,
   remapTerminalGroups,
   neighborPane,
@@ -11511,6 +11512,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
               ? activePaneRects.get(tab.id)
               : undefined;
             const grouped = Boolean(group && leafIds(group.root).length > 1);
+            const paneFocus = group
+              ? multiplexPaneFocusState(group, activeTabId, tab.id)
+              : "normal";
             const paneAgent =
               tab.ptyId != null
                 ? identifyAgent(statsByPty.get(tab.ptyId)?.agent_hint)
@@ -11537,16 +11541,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
               // are clones of the live host, and a hidden host has to be
               // findable without the pane knowing anything about them.
               data-tab-id={tab.id}
-              className={`fill term-host ${grouped ? "term-host-multiplexed" : ""} ${tab.id === activeTabId ? "term-host-focused" : ""}`}
+              className={`fill term-host ${grouped ? "term-host-multiplexed" : ""} ${paneFocus === "normal" ? "" : `term-host-${paneFocus}`}`}
               style={paneStyle}
               onPointerDown={() => {
-                if (!group || group.activeTabId === tab.id) return;
-                const next = { ...group, activeTabId: tab.id };
-                terminalGroupsRef.current = {
-                  ...terminalGroupsRef.current,
-                  [group.id]: next,
-                };
-                setTerminalGroups(terminalGroupsRef.current);
+                if (!group) return;
+                if (group.activeTabId !== tab.id) {
+                  const next = { ...group, activeTabId: tab.id };
+                  terminalGroupsRef.current = {
+                    ...terminalGroupsRef.current,
+                    [group.id]: next,
+                  };
+                  setTerminalGroups(terminalGroupsRef.current);
+                }
+                // A recovered group can remember this pane as active while no
+                // live tab owns focus yet. Clicking it must still establish
+                // the live focus id and re-enable terminal input.
                 setActiveTabId(tab.id);
               }}
               // Selected text is a task waiting to be written down — an error,
