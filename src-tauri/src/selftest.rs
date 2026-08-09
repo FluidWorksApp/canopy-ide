@@ -77,6 +77,30 @@ fn scratch_root() -> PathBuf {
     std::env::temp_dir().join(format!("canopy-selftest-{}", std::process::id()))
 }
 
+/// Put the entire process behind a disposable home before startup writers run.
+///
+/// Selftests used to isolate only Canopy's workspace store, and did so late in
+/// `setup()`. Integration bootstrap had already installed the helper and healed
+/// CLI configs by then. A harness that supplied a throwaway helper home could
+/// consequently leave that throwaway path in the user's real Claude/Codex
+/// config. HOME is process-wide, so set it once, before Tauri starts threads or
+/// any subsystem has a chance to cache it.
+pub fn prepare() -> Result<(), String> {
+    if requested(std::env::args(), std::env::var("CANOPY_SELFTEST").ok()).is_none() {
+        return Ok(());
+    }
+    let home = scratch_root().join("home");
+    std::fs::create_dir_all(&home).map_err(|e| {
+        format!(
+            "selftest: cannot create isolated home {}: {e}",
+            home.display()
+        )
+    })?;
+    std::env::set_var("HOME", &home);
+    std::env::set_var("USERPROFILE", &home);
+    Ok(())
+}
+
 /// A throwaway directory to open as a project. It is deliberately a tiny real
 /// npm app: the vibe-exit scenario must exercise zero-setup target inference,
 /// a check command and an automatically started server without the network.
@@ -347,5 +371,12 @@ mod tests {
         assert!(store_contains(&root, b"[REDACTED:aws-access-key]").unwrap());
         assert!(!store_contains(&root, b"raw-secret-value").unwrap());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn selftest_home_is_a_child_of_its_scratch_root() {
+        let home = scratch_root().join("home");
+        assert!(home.starts_with(scratch_root()));
+        assert_ne!(home, scratch_root());
     }
 }
