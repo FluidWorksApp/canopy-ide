@@ -4,7 +4,12 @@ import { describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { PaneBar } from "./PaneBar";
 import { ANCHOR_ATTR } from "../tabSticky";
-import type { StripGroup, SubTab, TermSubTab } from "./ProjectView/helpers";
+import type {
+  RailChip,
+  StripGroup,
+  SubTab,
+  TermSubTab,
+} from "./ProjectView/helpers";
 
 // The bar's own module graph, not ProjectView's: PaneBar only needs two label
 // helpers from there, and importing the real index would drag the whole view
@@ -69,6 +74,7 @@ function paneBar(over: Partial<React.ComponentProps<typeof PaneBar>> = {}) {
       shellChips={[]}
       runChips={[]}
       runSummary={null}
+      showRunRail={true}
       shellMenuOpen={false}
       setShellMenuOpen={noop}
       runMenuOpen={false}
@@ -112,6 +118,38 @@ function paneBar(over: Partial<React.ComponentProps<typeof PaneBar>> = {}) {
 }
 
 const renameInput = () => document.querySelector<HTMLInputElement>(".tab-rename-input")!;
+
+const railChip = (id: string, active = false): RailChip => ({
+  id,
+  active,
+  dot: null,
+  title: id,
+  tooltip: id,
+  onSelect: noop,
+  onClose: noop,
+});
+
+describe("PaneBar run-terminal visibility", () => {
+  it("hides the run rail in Build without dimming the remaining tab surface", () => {
+    const runChips = [railChip("dev server", true)];
+    const { rerender } = render(
+      paneBar({ runChips, activeSection: "runs", showRunRail: false }),
+    );
+
+    expect(document.querySelector('[data-rail="RUNS"]')).toBeNull();
+    expect(document.querySelector(".pane-bar")).toHaveClass(
+      "pane-bar-focus-tabs",
+    );
+    expect(document.querySelector(".tabs")).not.toHaveClass("pane-section-dim");
+
+    rerender(paneBar({ runChips, activeSection: "runs", showRunRail: true }));
+
+    expect(document.querySelector('[data-rail="RUNS"]')).not.toBeNull();
+    expect(document.querySelector(".pane-bar")).toHaveClass(
+      "pane-bar-focus-runs",
+    );
+  });
+});
 
 describe("PaneBar tab rename", () => {
   it("focuses the input and selects the whole name when a rename starts", () => {

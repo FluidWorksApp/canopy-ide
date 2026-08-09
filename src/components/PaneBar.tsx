@@ -276,6 +276,8 @@ export interface PaneBarProps {
   shellChips: RailChip[];
   runChips: RailChip[];
   runSummary: React.ReactNode;
+  /** Build mode supervises runs without exposing their terminal surfaces. */
+  showRunRail: boolean;
   shellMenuOpen: boolean;
   setShellMenuOpen: (v: boolean) => void;
   runMenuOpen: boolean;
@@ -333,7 +335,7 @@ function PaneBarImpl({
   tabGroups, stripDrag, stripRef, paneRef, termText, openStacks, onToggleStack,
   stripTabs, activeTabId, flashTabId, renamingTabId, renameDraft,
   collabPaths, isAgentTab, tabState, tabRing, tabMemoryWarning, showHints,
-  shellChips, runChips, runSummary, shellMenuOpen, setShellMenuOpen,
+  shellChips, runChips, runSummary, showRunRail, shellMenuOpen, setShellMenuOpen,
   runMenuOpen, setRunMenuOpen, activeSection,
   activeFileKind, activeFileView,
   isSharedFile, isRelayConnectedWithPeers, isTerminalTab,
@@ -473,6 +475,8 @@ function PaneBarImpl({
   // directly.
   useStickyLayout(stripRef);
   const drawn = tabGroups.filter((g) => g.tabs.length > 0);
+  const visibleActiveSection =
+    !showRunRail && activeSection === "runs" ? "tabs" : activeSection;
   const hoverTab = hoverPreview
     ? stripTabs.find((tab) => tab.id === hoverPreview.tabId)
     : undefined;
@@ -480,13 +484,13 @@ function PaneBarImpl({
   for (const g of drawn) if (g.label) pinIndex.set(g.key, pinIndex.size);
 
   return (
-    <div className={`pane-bar pane-bar-focus-${activeSection}`}>
+    <div className={`pane-bar pane-bar-focus-${visibleActiveSection}`}>
       <div
         ref={(el) => {
           tabsRowRef.current = el;
           stripRef.current = el;
         }}
-        className={`tabs tabs-harbor ${activeSection !== "tabs" ? "pane-section-dim" : ""}`}
+        className={`tabs tabs-harbor ${visibleActiveSection !== "tabs" ? "pane-section-dim" : ""}`}
       >
         {blob && (
           <span
@@ -698,16 +702,18 @@ function PaneBarImpl({
         summary={<TerminalIcon size={11} className="run-chip-shell-dot" />}
         open={shellMenuOpen}
         setOpen={setShellMenuOpen}
-        dim={activeSection !== "shells"}
+        dim={visibleActiveSection !== "shells"}
       />
-      <Rail
-        label="RUNS"
-        chips={runChips}
-        summary={runSummary}
-        open={runMenuOpen}
-        setOpen={setRunMenuOpen}
-        dim={activeSection !== "runs"}
-      />
+      {showRunRail && (
+        <Rail
+          label="RUNS"
+          chips={runChips}
+          summary={runSummary}
+          open={runMenuOpen}
+          setOpen={setRunMenuOpen}
+          dim={visibleActiveSection !== "runs"}
+        />
+      )}
 
       <div className="pane-actions">
         {stripTabs.length > 4 && (

@@ -360,6 +360,17 @@ export type SubTab =
  *  below the terminals and display-toggled the same way. */
 export type DocSubTab = Exclude<SubTab, TermSubTab>;
 
+/** Tabs a person may navigate to in the current workspace mode. Build keeps
+ * run terminals alive for supervision, but they are an implementation detail
+ * there; Engineer continues to expose every tab. */
+export function tabsPresentedByMode(
+  tabs: SubTab[],
+  buildMode: boolean,
+): SubTab[] {
+  if (!buildMode) return tabs;
+  return tabs.filter((tab) => tab.type !== "terminal" || !tab.run);
+}
+
 /** One entry in a right-hand rail (a shell or a running command). */
 export interface RailChip {
   id: string;

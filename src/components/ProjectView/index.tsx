@@ -520,6 +520,7 @@ import {
   resolveVibeTarget,
   vibeRunReady,
   vibeSetupGate,
+  tabsPresentedByMode,
 } from "./helpers";
 import { Button } from "../ui";
 import {
@@ -4721,15 +4722,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, [visible, project.components, addTerminal, refreshInstalled, refreshUpdates]);
 
   const switcherOpen = switcher !== null;
+  const navigableTabs = useMemo(
+    () => tabsPresentedByMode(visibleTabs, vibe),
+    [visibleTabs, vibe],
+  );
   const visualOpenTabs = useMemo(() => {
     const groups = new Set<string>();
-    return visibleTabs.filter((tab) => {
+    return navigableTabs.filter((tab) => {
       if (tab.type !== "terminal" || !tab.paneGroup) return true;
       if (groups.has(tab.paneGroup)) return false;
       groups.add(tab.paneGroup);
       return true;
     });
-  }, [visibleTabs]);
+  }, [navigableTabs]);
   const switcherTabs = useMemo(
     () =>
       switcher?.ids
@@ -9243,7 +9248,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const spotCtx = useMemo(
     () => ({
       components: components.map((c) => ({ label: c.label, path: c.path })),
-      tabs,
+      tabs: tabsPresentedByMode(tabs, vibe),
       serverGroups,
       digests: wsDigests,
       projectId: project.id,
@@ -9253,7 +9258,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       })),
       installed,
     }),
-    [components, tabs, serverGroups, wsDigests, project.id, installed],
+    [components, tabs, vibe, serverGroups, wsDigests, project.id, installed],
   );
 
   const serversRunning = runningCount(serverGroups);
@@ -10731,7 +10736,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           openPr(action.repo, action.pr);
           return;
         case "open-server":
-          if (action.tabId) setActiveTabId(action.tabId);
+          if (vibe) {
+            if (vibePreview) setActiveTabId(vibePreview.id);
+            else openPreview();
+          } else if (action.tabId) setActiveTabId(action.tabId);
           else selectSideTab("servers");
           return;
         case "open-task-run":
@@ -10798,6 +10806,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       saveNote,
       openNote,
       project.id,
+      vibe,
+      vibePreview?.id,
     ],
   );
 
@@ -11443,6 +11453,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         shellChips={shellChips}
         runChips={runChips}
         runSummary={runSummary}
+        showRunRail={!vibe}
         shellMenuOpen={shellMenuOpen}
         setShellMenuOpen={setShellMenuOpen}
         runMenuOpen={runMenuOpen}
