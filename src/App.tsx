@@ -3524,7 +3524,7 @@ export default function App() {
           }}
         />
       )}
-      <Dictation />
+      <Dictation notify={notify} />
       {/* Last, and once: every `title` in the app is drawn by this one bubble
           instead of the webview's native grey box. */}
       <TooltipLayer />
