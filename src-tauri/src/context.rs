@@ -6329,19 +6329,26 @@ mod tests {
 
     #[test]
     fn mcp_less_agents_receive_the_message_not_a_dead_store_pointer() {
-        let mut message = mesh_msg(Some(3), "/w/app", 7, "/w/app");
-        message.id = "m12".into();
-        message.to_agent = Some("aider".into());
-        message.text = "first line\nsecond line".into();
-        message.items = vec![crate::mesh::MeshItem {
-            kind: "file".into(),
-            path: "/w/app/build.log".into(),
-            note: None,
-        }];
-        let notice = mesh_notice_for(&message);
-        assert!(notice.contains("first line second line"), "{notice}");
-        assert!(notice.contains("/w/app/build.log"), "{notice}");
-        assert!(!notice.contains("canopy_mesh get"), "{notice}");
+        for agent in ["aider", "omp"] {
+            let mut message = mesh_msg(Some(3), "/w/app", 7, "/w/app");
+            message.id = "m12".into();
+            message.to_agent = Some(agent.into());
+            message.text = "first line\nsecond line".into();
+            message.items = vec![crate::mesh::MeshItem {
+                kind: "file".into(),
+                path: "/w/app/build.log".into(),
+                note: None,
+            }];
+            let notice = mesh_notice_for(&message);
+            assert!(notice.contains("first line second line"), "{notice}");
+            assert!(notice.contains("/w/app/build.log"), "{notice}");
+            assert!(!notice.contains("canopy_mesh get"), "{notice}");
+
+            message.text = "x".repeat(MESH_INLINE_CHARS + 20);
+            let notice = mesh_notice_for(&message);
+            assert!(notice.contains("[truncated]"), "{notice}");
+            assert!(!notice.contains("canopy_mesh get"), "{notice}");
+        }
     }
 
     #[test]

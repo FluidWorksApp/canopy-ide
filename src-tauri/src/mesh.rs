@@ -32,6 +32,10 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 /// Keep the newest traffic while bounding the actual rewrite cost.
 const MAX_KEPT: usize = 500;
 const MAX_KEPT_BYTES: usize = 2 * 1024 * 1024;
+/// The append log may briefly retain superseded delivery events and messages
+/// that the in-memory cap has dropped. Compact before that history can cost
+/// more than twice the authoritative message window.
+const MAX_LOG_BYTES: u64 = (MAX_KEPT_BYTES * 2) as u64;
 const MAX_CLAIM_HISTORY: usize = 200;
 
 /// How long a message stays even under the count cap. Pty ids only mean
@@ -143,6 +147,17 @@ pub struct NewMessage {
     pub at_ms: u64,
 }
 
+/// Append-only mutations for the durable JSONL. Existing installations contain
+/// bare `MeshMessage` lines; the loader accepts both and compaction writes the
+/// old canonical form, so this changes write amplification without a migration.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "mesh_event", rename_all = "snake_case")]
+enum MeshLogEntry {
+    Message { message: MeshMessage },
+    Delivery { id: String, line: String },
+    Submitted { id: String },
+}
+
 /// One severed agent pair: the user cut the edge between two terminals in the
 /// control panel, and delivery between them — either direction — is refused at
 /// `record` until they reconnect it. Keyed the way claims key identity
@@ -178,6 +193,7 @@ struct Inner {
     /// None means "nowhere to persist" (no home directory): the mesh still
     /// works for this run, it just starts empty next time.
     path: Option<PathBuf>,
+    persisted_bytes: u64,
 }
 
 pub struct MeshStore {
@@ -228,14 +244,22 @@ impl MeshStore {
     pub fn at(path: Option<PathBuf>) -> Self {
         let mut messages: Vec<MeshMessage> = Vec::new();
         let mut severed: Vec<SeveredPair> = Vec::new();
+        let persisted_bytes = path
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         if let Some(p) = &path {
             if let Ok(raw) = std::fs::read_to_string(p) {
                 // A line that doesn't parse is skipped, not fatal: one
                 // corrupted write must not take the whole history with it.
-                messages.extend(
-                    raw.lines()
-                        .filter_map(|l| serde_json::from_str::<MeshMessage>(l).ok()),
-                );
+                for line in raw.lines() {
+                    if let Ok(entry) = serde_json::from_str::<MeshLogEntry>(line) {
+                        apply_log_entry(&mut messages, entry);
+                    } else if let Ok(message) = serde_json::from_str::<MeshMessage>(line) {
+                        messages.push(message);
+                    }
+                }
             }
             if let Ok(raw) = std::fs::read_to_string(severed_sibling(p)) {
                 severed.extend(
@@ -260,6 +284,7 @@ impl MeshStore {
                 severed,
                 next_id,
                 path,
+                persisted_bytes,
             }),
         }
     }
@@ -307,7 +332,9 @@ impl MeshStore {
         };
         inner.messages.push(msg.clone());
         cap_messages(&mut inner.messages);
-        inner.persist();
+        inner.append(MeshLogEntry::Message {
+            message: msg.clone(),
+        });
         crate::change::pulse(crate::change::Store::Mesh, "", &msg.id);
         Ok(msg)
     }
@@ -316,18 +343,21 @@ impl MeshStore {
     /// the body (a mesh send's notice line).
     pub fn note_delivery(&self, id: &str, line: &str) {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(m) = inner.messages.iter_mut().find(|m| m.id == id) {
-            m.delivered = Some(line.to_string());
-            inner.persist();
+        if let Some(index) = inner.messages.iter().position(|m| m.id == id) {
+            inner.messages[index].delivered = Some(line.to_string());
+            inner.append(MeshLogEntry::Delivery {
+                id: id.to_string(),
+                line: line.to_string(),
+            });
         }
     }
 
     /// The return that submits the typed line landed.
     pub fn mark_submitted(&self, id: &str) {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(m) = inner.messages.iter_mut().find(|m| m.id == id) {
-            m.submitted = true;
-            inner.persist();
+        if let Some(index) = inner.messages.iter().position(|m| m.id == id) {
+            inner.messages[index].submitted = true;
+            inner.append(MeshLogEntry::Submitted { id: id.to_string() });
             crate::change::pulse(crate::change::Store::Mesh, "", id);
         }
     }
@@ -425,12 +455,64 @@ fn cap_messages(messages: &mut Vec<MeshMessage>) {
     }
 }
 
+fn apply_log_entry(messages: &mut Vec<MeshMessage>, entry: MeshLogEntry) {
+    match entry {
+        MeshLogEntry::Message { message } => messages.push(message),
+        MeshLogEntry::Delivery { id, line } => {
+            if let Some(message) = messages.iter_mut().rev().find(|message| message.id == id) {
+                message.delivered = Some(line);
+            }
+        }
+        MeshLogEntry::Submitted { id } => {
+            if let Some(message) = messages.iter_mut().rev().find(|message| message.id == id) {
+                message.submitted = true;
+            }
+        }
+    }
+}
+
 impl Inner {
-    /// Rewrite the whole file, via a sibling and a rename so a crash
-    /// mid-write leaves the old log rather than half of a new one. The log is
-    /// small by construction (MAX_KEPT), so rewriting beats an append format
-    /// that could never amend `submitted` in place.
-    fn persist(&self) {
+    /// Append one mutation. A send records its body once, then delivery and
+    /// submission each add one small event rather than serializing the full
+    /// message window three times while holding the store mutex.
+    fn append(&mut self, entry: MeshLogEntry) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            if std::fs::create_dir_all(dir).is_err() {
+                return;
+            }
+        }
+        let Ok(encoded) = serde_json::to_vec(&entry) else {
+            return;
+        };
+        // Start as well as end with a newline. If a crash left the previous
+        // append truncated before its terminator, the next valid event still
+        // begins on its own line rather than being fused to the corrupt tail.
+        let mut line = Vec::with_capacity(encoded.len() + 2);
+        line.push(b'\n');
+        line.extend_from_slice(&encoded);
+        line.push(b'\n');
+        use std::io::Write;
+        let wrote = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(&line))
+            .is_ok();
+        if !wrote {
+            return;
+        }
+        self.persisted_bytes = self.persisted_bytes.saturating_add(line.len() as u64);
+        if self.persisted_bytes > MAX_LOG_BYTES {
+            self.persist();
+        }
+    }
+
+    /// Compact the append log to the authoritative in-memory message window,
+    /// via a sibling and rename so a crash keeps the old complete log.
+    fn persist(&mut self) {
         let Some(path) = &self.path else {
             return;
         };
@@ -448,7 +530,11 @@ impl Inner {
         }
         let tmp = path.with_extension("jsonl.tmp");
         if std::fs::write(&tmp, out).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
+            if std::fs::rename(&tmp, path).is_ok() {
+                self.persisted_bytes = std::fs::metadata(path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+            }
         }
     }
 
@@ -970,6 +1056,30 @@ mod tests {
     }
 
     #[test]
+    fn delivery_state_appends_without_rewriting_the_message_window() {
+        let path = tmp_store("append-updates");
+        let store = MeshStore::at(Some(path.clone()));
+        let message = store.record(new_msg("handoff body", 7)).unwrap();
+        let recorded = std::fs::read(&path).unwrap();
+
+        store.note_delivery(&message.id, "typed notice");
+        let delivered = std::fs::read(&path).unwrap();
+        assert!(delivered.starts_with(&recorded));
+        assert!(delivered.len() > recorded.len());
+
+        store.mark_submitted(&message.id);
+        let submitted = std::fs::read(&path).unwrap();
+        assert!(submitted.starts_with(&delivered));
+        assert!(submitted.len() > delivered.len());
+
+        let reopened = MeshStore::at(Some(path.clone()));
+        let restored = reopened.get(&message.id).unwrap();
+        assert_eq!(restored.delivered.as_deref(), Some("typed notice"));
+        assert!(restored.submitted);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn the_cap_drops_the_oldest_and_only_the_oldest() {
         let path = tmp_store("cap");
         let store = MeshStore::at(Some(path.clone()));
@@ -991,16 +1101,22 @@ mod tests {
 
     #[test]
     fn the_log_is_bounded_by_serialized_bytes_not_only_rows() {
-        let store = MeshStore::at(None);
-        let body = "x".repeat(16 * 1024);
-        for n in 0..200 {
-            store.record(new_msg(&format!("{n}:{body}"), 7));
+        let path = tmp_store("byte-cap");
+        let store = MeshStore::at(Some(path.clone()));
+        let body = "x".repeat(32 * 1024);
+        for n in 0..140 {
+            store.record(new_msg(&format!("{n}:{body}"), 7)).unwrap();
         }
         let kept = store.all();
         let bytes: usize = kept.iter().map(message_bytes).sum();
         assert!(bytes <= MAX_KEPT_BYTES, "kept {bytes} bytes");
-        assert!(kept.len() < 200);
-        assert!(kept.last().unwrap().text.starts_with("199:"));
+        assert!(kept.len() < 140);
+        assert!(kept.last().unwrap().text.starts_with("139:"));
+        let disk_bytes = std::fs::metadata(&path).unwrap().len();
+        assert!(disk_bytes <= MAX_LOG_BYTES, "stored {disk_bytes} bytes");
+        let reopened = MeshStore::at(Some(path.clone()));
+        assert!(reopened.all().last().unwrap().text.starts_with("139:"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
@@ -1015,6 +1131,32 @@ mod tests {
         let reopened = MeshStore::at(Some(path.clone()));
         assert_eq!(reopened.all().len(), 1);
         assert_eq!(reopened.all()[0].text, "good");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_truncated_append_does_not_consume_the_next_valid_event() {
+        let path = tmp_store("truncated-append");
+        let store = MeshStore::at(Some(path.clone()));
+        store.record(new_msg("before", 7)).unwrap();
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(br#"{"mesh_event":"delivery""#)
+            .unwrap();
+        store.record(new_msg("after", 7)).unwrap();
+
+        let reopened = MeshStore::at(Some(path.clone()));
+        assert_eq!(
+            reopened
+                .all()
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["before", "after"]
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
