@@ -186,6 +186,16 @@ export function vibeStarterIdeas(project: VibeBuilderProject | undefined): strin
   return ideas.slice(0, 3);
 }
 
+/** Only an explicit request to refresh repository understanding belongs to
+ * project discovery. Ordinary uses of "explore" (an idea, UI, or feature)
+ * remain Build turns. */
+export function requestsProjectDiscovery(text: string): boolean {
+  const message = text.trim().toLowerCase();
+  const action = /\b(?:re-?explore|rediscover|re-?scan|rerun|refresh)\b/;
+  const target = /\b(?:project|repo|repository|setup|discovery)\b/;
+  return action.test(message) && target.test(message);
+}
+
 function initialView(state: BuilderSessionState): BuilderView {
   const synced = applySessionState(
     {
@@ -246,6 +256,7 @@ export function VibeBuilderPane({
   phase = "build",
   attention = [],
   onOpenAttention,
+  onRequestDiscovery,
 }: {
   session: BuilderSession;
   project?: VibeBuilderProject;
@@ -253,6 +264,8 @@ export function VibeBuilderPane({
   /** Project-scoped items from the shared attention channel. */
   attention?: readonly AttentionItem[];
   onOpenAttention?: (item: AttentionItem) => void;
+  /** Explicit chat request to replace the saved project survey. */
+  onRequestDiscovery?: () => void | Promise<void>;
 }) {
   const nextId = () => `builder-${++builderItemSequence}`;
   const [view, setView] = useState(() => {
@@ -460,6 +473,7 @@ export function VibeBuilderPane({
     const message = text.trim();
     const displayed = displayText.trim();
     if (!message) return;
+    const discoveryRequest = onRequestDiscovery && requestsProjectDiscovery(message);
     // Managed install/deploy/link requests have their own confirmation path.
     // For an ordinary Build turn, the island's retained visual items are the
     // task's structured context even though the transcript keeps showing only
@@ -524,7 +538,9 @@ export function VibeBuilderPane({
     };
     try {
       void Promise.resolve(
-        visualBrief
+        discoveryRequest
+          ? onRequestDiscovery()
+          : visualBrief
           ? session.send(message, { context: visualBrief })
           : session.send(message),
       )

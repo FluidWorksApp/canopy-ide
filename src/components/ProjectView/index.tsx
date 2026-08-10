@@ -124,7 +124,7 @@ import {
 import { GuestSession, OwnerSession } from "../../collab";
 import { CollabView } from "../CollabView";
 import { SharedProjectView } from "../SharedProjectView";
-import type { AgentCli } from "../../projects";
+import type { AgentCli, Project } from "../../projects";
 import {
   envReachesProfile,
   reloadPlan,
@@ -859,6 +859,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
       void session.stop();
     };
   }, [vibe, vibeTarget.kind, project, onPersistVibeSetup, vibeSetupAttempt]);
+  const requestVibeProjectDiscovery = useCallback(async () => {
+    // Clear the saved target only after the workspace write succeeds. The
+    // explicit retry token is consumed by the setup session created from the
+    // resulting needs-setup render; startup itself never sets that token.
+    const requested: Project = {
+      ...project,
+      vibe: { version: 1, enabled: true },
+    };
+    if (!(await onPersistVibeSetup(requested))) {
+      throw new Error("Could not save the project discovery request");
+    }
+    retryVibeProjectSetup(project.id);
+    setVibeSetupAttempt((attempt) => attempt + 1);
+  }, [onPersistVibeSetup, project]);
   const vibeWaitingSession = useMemo(
     () => createVibeTargetStatusSession("I'm getting your project ready."),
     [],
@@ -13550,7 +13564,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         ? "Components and runtime relationships are configured."
                         : project.vibe?.discovery
                           ? project.vibe.discovery.message
-                        : "Build is mapping components, commands, data, and dependencies."}
+                          : "Build is mapping components, commands, data, and dependencies."}
                     </small>
                   </span>
                   {vibeTarget.kind !== "ready" && (
@@ -13558,11 +13572,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                       <Button
                         size="sm"
                         variant="accent"
-                        onClick={() => {
-                          if (retryVibeProjectSetup(project.id)) {
-                            setVibeSetupAttempt((attempt) => attempt + 1);
-                          }
-                        }}
+                        onClick={() => void requestVibeProjectDiscovery()}
                       >
                         Retry discovery
                       </Button>
@@ -13661,6 +13671,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               vibeProjectSetupSession ??
               vibeWaitingSession
             }
+            onRequestDiscovery={requestVibeProjectDiscovery}
           />
         </aside>
         {/* The PanelGroup renders in every mode on purpose. Swapping mainArea

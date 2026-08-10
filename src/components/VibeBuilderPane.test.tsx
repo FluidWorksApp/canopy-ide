@@ -14,6 +14,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StructuredRunnerEvent } from "../structuredEvents";
 import {
+  requestsProjectDiscovery,
   VibeBuilderPane,
   vibeStarterIdeas,
 } from "./VibeBuilderPane";
@@ -123,6 +124,27 @@ const discoveredProject = (
 });
 
 describe("VibeBuilderPane", () => {
+  it("routes only explicit repository rediscovery requests away from Build", async () => {
+    expect(requestsProjectDiscovery("Please explore a new dashboard idea")).toBe(false);
+    expect(requestsProjectDiscovery("Re-explore this project again")).toBe(true);
+    expect(requestsProjectDiscovery("Refresh repository discovery")).toBe(true);
+
+    const h = harness(idle());
+    const onRequestDiscovery = vi.fn(async () => {});
+    render(
+      <VibeBuilderPane
+        session={h.session}
+        onRequestDiscovery={onRequestDiscovery}
+      />,
+    );
+    const input = screen.getByRole("textbox", { name: "Message Ash" });
+    fireEvent.change(input, { target: { value: "Please rediscover this project" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(onRequestDiscovery).toHaveBeenCalledTimes(1));
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
   it("describes a question as investigation rather than a change", () => {
     const h = harness(idle());
     h.send.mockImplementation(() => new Promise<void>(() => {}));
