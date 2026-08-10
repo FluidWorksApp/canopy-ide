@@ -10,7 +10,7 @@ import {
 const status = (requestId: string, id = 7): TerminalBudgetStatus => ({
   id,
   budget_generation: 1,
-  state: "awaiting_grant",
+  state: "over_allowance",
   base_allowance_bytes: 100,
   granted_bytes: 0,
   remembered_default_bytes: 0,
@@ -54,15 +54,26 @@ describe("governor prompt cooldown", () => {
     ).toBe(true);
   });
 
-  it("never prompts from peak usage or a stale breach state", () => {
-    const stale = {
+  it("waits for the native sustained breach and survives a brief raw dip", () => {
+    const notYetSustained = {
       ...status("stale"),
-      state: "over_allowance" as const,
+      state: "awaiting_grant" as const,
       current_bytes: 1.5 * 1024 ** 3,
       allowance_bytes: 2 * 1024 ** 3,
       peak_bytes: 4.6 * 1024 ** 3,
     };
-    expect(governorPromptEligible(stale, new Set(), {}, null, 10_000)).toBe(false);
+    expect(
+      governorPromptEligible(notYetSustained, new Set(), {}, null, 10_000),
+    ).toBe(false);
+    expect(
+      governorPromptEligible(
+        { ...status("held"), current_bytes: 90 },
+        new Set(),
+        {},
+        null,
+        10_000,
+      ),
+    ).toBe(true);
   });
 
   it("paces a continuing breach unless current usage is actively growing", () => {

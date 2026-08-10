@@ -35,7 +35,12 @@ import { STRUCTURED_RUNNERS } from "./structuredRunners";
 
 export { StructuredTransport };
 
-export interface CompanionTransport extends ProjectRunnerTransport {}
+export interface CompanionTransport extends ProjectRunnerTransport {
+  /** Stop only the turn in flight while leaving a reusable transport. */
+  cancelTurn?: () => Promise<void>;
+  /** Re-run the last one-shot turn after a visible failure. */
+  retryTurn?: () => Promise<void>;
+}
 
 export interface TransportHost extends StructuredRunnerHost {}
 
@@ -84,6 +89,25 @@ export async function startStructured(
  *  a code because the code (-32600) is JSON-RPC's "invalid request", which is
  *  not specific to this at all. */
 const CONVERSATION_GONE = /no rollout found|no conversation found|thread .{0,40}not found|session .{0,40}not found/i;
+export const ONESHOT_TURN_CEILING_MS = 5 * 60 * 1000;
+const WAITING_FOR_STDIN = /reading additional input from stdin/i;
+const MCP_AUTH_REQUIRED =
+  /AuthRequired|www_authenticate_header|oauth-protected-resource/i;
+
+/** Codex prints MCP startup failures as Rust transport diagnostics. They belong
+ * in a log, not in a chat card; translate the recoverable authentication case
+ * into the action the person can actually take. */
+export function companionMcpAuthError(text: string): string | null {
+  if (!MCP_AUTH_REQUIRED.test(text)) return null;
+  const id =
+    /https?:\/\/(?:mcp\.)?([a-z0-9-]+)\./i.exec(text)?.[1]?.toLowerCase() ??
+    /\b([a-z0-9-]+) MCP\b/i.exec(text)?.[1]?.toLowerCase();
+  if (!id) {
+    return "An MCP server needs authentication. Sign in to it from Codex, then Retry, or disable that MCP server in Codex.";
+  }
+  const label = `${id[0].toUpperCase()}${id.slice(1)}`;
+  return `${label} MCP needs authentication. Run \`codex mcp login ${id}\` in a terminal, then Retry. To use Jarvis without it, disable that MCP server in Codex.`;
+}
 
 export class OneshotTransport implements CompanionTransport {
   private host: TransportHost;
@@ -97,6 +121,10 @@ export class OneshotTransport implements CompanionTransport {
   /** A heal is in flight: the process that is about to exit belongs to the
    *  attempt we just abandoned, so its exit ends nothing. */
   private replaying = false;
+  private active = false;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private timeoutMs: number;
+  private abort: () => Promise<void>;
 
   constructor(opts: {
     host: TransportHost;
@@ -104,12 +132,64 @@ export class OneshotTransport implements CompanionTransport {
     onSession: (id: string) => void;
     onForget?: () => void;
     launch: (message: string, sessionId: string | null) => Promise<void>;
+    abort?: () => Promise<void>;
+    timeoutMs?: number;
   }) {
     this.host = opts.host;
     this.sessionId = opts.sessionId;
     this.onSession = opts.onSession;
     this.onForget = opts.onForget ?? (() => {});
     this.launch = opts.launch;
+    this.abort = opts.abort ?? (() => ipc.companionKill());
+    this.timeoutMs = opts.timeoutMs ?? ONESHOT_TURN_CEILING_MS;
+  }
+
+  private clearTimer(): void {
+    if (this.timer != null) clearTimeout(this.timer);
+    this.timer = null;
+  }
+
+  private endTurn(): boolean {
+    if (!this.active) return false;
+    this.active = false;
+    this.clearTimer();
+    this.host.emit({ kind: "turnEnd" });
+    return true;
+  }
+
+  private failTurn(message: string): boolean {
+    if (!this.active) return false;
+    this.host.emit({ kind: "error", message });
+    return this.endTurn();
+  }
+
+  /** Process exit is the normal one-shot turn boundary. Kept here so a
+   *  timeout/cancel that already ended the turn cannot end it twice. */
+  handleExit(): void {
+    if (this.consumeReplay()) return;
+    this.endTurn();
+  }
+
+  /** Stderr is normally diagnostic only. This particular Codex banner means
+   *  the process is blocked on the exact stdin contract this transport must
+   *  never violate, so fail immediately instead of waiting for the ceiling. */
+  handleStderr(text: string): void {
+    if (WAITING_FOR_STDIN.test(text)) {
+      if (this.failTurn("Codex waited for stdin instead of starting the turn. Retry after updating Canopy.")) {
+        void this.abort();
+      }
+      return;
+    }
+    const authError = companionMcpAuthError(text);
+    if (authError) {
+      if (this.failTurn(authError)) void this.abort();
+      return;
+    }
+    if (/error|fatal|not found|denied|invalid/i.test(text)) {
+      if (!this.healIfConversationGone(text)) {
+        this.host.emit({ kind: "error", message: text });
+      }
+    }
   }
 
   /** Whether the exit now arriving belongs to an abandoned attempt. Consumed,
@@ -205,12 +285,11 @@ export class OneshotTransport implements CompanionTransport {
         // Silent on purpose when it heals: the user asked a question, and a
         // dead thread id is Canopy's problem to fix, not a failure to report.
         if (this.healIfConversationGone(message)) return;
-        this.host.emit({ kind: "error", message });
-        this.host.emit({ kind: "turnEnd" });
+        this.failTurn(message);
         return;
       }
       case "turn.completed":
-        this.host.emit({ kind: "turnEnd" });
+        this.endTurn();
         return;
       default:
         return;
@@ -218,12 +297,39 @@ export class OneshotTransport implements CompanionTransport {
   }
 
   async send(text: string): Promise<void> {
+    if (this.active) return;
     this.pending = text;
-    await this.launch(text, this.sessionId);
+    this.active = true;
+    this.clearTimer();
+    this.timer = setTimeout(() => {
+      if (this.failTurn("The companion did not finish within 5 minutes. The turn was stopped; you can retry.")) {
+        void this.abort();
+      }
+    }, this.timeoutMs);
+    try {
+      await this.launch(text, this.sessionId);
+    } catch (err) {
+      this.active = false;
+      this.clearTimer();
+      throw err;
+    }
+  }
+
+  async cancelTurn(): Promise<void> {
+    if (!this.failTurn("Turn cancelled.")) return;
+    await this.abort();
+  }
+
+  async retryTurn(): Promise<void> {
+    const text = this.pending;
+    if (!text) throw new Error("There is no companion turn to retry.");
+    await this.send(text);
   }
 
   async stop(): Promise<void> {
-    await ipc.companionKill();
+    this.active = false;
+    this.clearTimer();
+    await this.abort();
   }
 }
 
@@ -262,26 +368,20 @@ export function startOneshot(
         args: [...args, `${launch.systemPrompt}\n\n---\n\n${message}`],
         cwd: opts.cwd,
         env: opts.env,
+        // Codex treats a piped stdin as additional prompt text and reads it to
+        // EOF. The complete prompt is already the final argv value.
+        keepStdin: false,
       },
       (out) => {
         if (out.kind === "line") transport.handleLine(out.text);
-        else if (out.kind === "stderr") {
-          if (/error|fatal|not found|denied|invalid/i.test(out.text)) {
-            // Same recovery as a `turn.failed` naming a missing conversation:
-            // which of the two a CLI uses to report it is an implementation
-            // detail of that CLI, and codex has used both. Heal first, and only
-            // show the line if it was something else.
-            if (!transport.healIfConversationGone(out.text)) {
-              host.emit({ kind: "error", message: out.text });
-            }
-          }
-        } else if (out.kind === "exit") {
+        else if (out.kind === "stderr") transport.handleStderr(out.text);
+        else if (out.kind === "exit") {
           // A turn ending is the process ending, so this is normal — never the
           // "the agent stopped" that a streaming tier's exit means. Except when
           // the transport has already abandoned this attempt and started the
           // turn again on a fresh thread: ending the turn here would close the
           // reply the replacement is about to write into.
-          if (!transport.consumeReplay()) host.emit({ kind: "turnEnd" });
+          transport.handleExit();
         }
       },
     );

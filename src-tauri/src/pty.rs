@@ -1411,6 +1411,14 @@ impl PtyManager {
         // The caller's own variables go on first, so Canopy's identity vars below
         // always win however a caller spells them.
         let extra_env = extra_env.unwrap_or_default();
+        // Canopy is frequently launched from an agent/tool process whose own
+        // output is deliberately machine-friendly. `NO_COLOR` belongs to that
+        // host process; blindly inheriting it turns every interactive CLI in a
+        // fresh Canopy terminal monochrome even though the PTY below explicitly
+        // advertises 256-colour/true-colour support. Drop only the inherited
+        // value. A run that deliberately supplies `NO_COLOR` in `extra_env`
+        // still gets exactly what it requested when the loop below reapplies it.
+        clear_inherited_no_color(&mut cmd, &extra_env);
         let caller_set_aider_read = extra_env.iter().any(|(k, _)| k == "AIDER_READ");
         for (k, v) in extra_env {
             if matches!(k.as_str(), "CANOPY_RUN_ID" | "CANOPY_ATTEMPT_ID") {
@@ -2023,6 +2031,17 @@ fn dirs_home() -> Option<String> {
         .ok()
 }
 
+/// A GUI terminal is an interactive boundary, not a continuation of the
+/// launcher process's output policy. Agent runners commonly set `NO_COLOR` so
+/// captured tool logs stay plain; carrying that into the PTY silently disables
+/// colour in every child CLI. Keep an explicit per-run override, though: callers
+/// that put `NO_COLOR` in `extra_env` are asking for monochrome on purpose.
+fn clear_inherited_no_color(cmd: &mut CommandBuilder, extra_env: &[(String, String)]) {
+    if !extra_env.iter().any(|(key, _)| key == "NO_COLOR") {
+        cmd.env_remove("NO_COLOR");
+    }
+}
+
 /// The read-only bootstrap Aider should inherit in a Canopy PTY. Explicit user
 /// configuration always wins; a missing generated file means startup has not
 /// installed it yet, so launching bare is safer than naming a nonexistent file.
@@ -2079,6 +2098,26 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(home.join(".canopy")).unwrap();
         std::fs::remove_dir(home).unwrap();
+    }
+
+    #[test]
+    fn interactive_pty_drops_only_inherited_no_color() {
+        let mut inherited = CommandBuilder::new("ignored");
+        inherited.env("NO_COLOR", "1");
+        clear_inherited_no_color(&mut inherited, &[]);
+        assert_eq!(inherited.get_env("NO_COLOR"), None);
+
+        let mut explicit = CommandBuilder::new("ignored");
+        explicit.env("NO_COLOR", "inherited");
+        let extra = vec![("NO_COLOR".into(), "requested".into())];
+        clear_inherited_no_color(&mut explicit, &extra);
+        for (key, value) in extra {
+            explicit.env(key, value);
+        }
+        assert_eq!(
+            explicit.get_env("NO_COLOR"),
+            Some(std::ffi::OsStr::new("requested"))
+        );
     }
 
     #[test]

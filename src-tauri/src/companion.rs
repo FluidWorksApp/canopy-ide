@@ -1,4 +1,4 @@
-//! The companion's process: one long-lived agent CLI, spoken to in JSON lines.
+//! The companion's process: an agent CLI spoken to in JSON lines.
 //!
 //! Why this exists rather than reusing `pty.rs`, which already spawns agents:
 //! a PTY is a terminal, and a terminal is the wrong pipe for this protocol.
@@ -9,8 +9,12 @@
 //! comfortably. The result would be a truncated line and a session that dies on
 //! the first long question.
 //!
-//! So the structured tier gets plain pipes: stdin in, stdout out, one JSON
-//! object per line, exactly as the CLI documents. Every *other* CLI still runs
+//! So the streaming structured tier gets plain pipes: stdin in, stdout out,
+//! one JSON object per line, exactly as the CLI documents. A one-shot runner
+//! gets closed stdin instead: its complete prompt is already an argv value,
+//! and Codex appends piped stdin to that prompt by reading it to EOF. Leaving
+//! an unused pipe open therefore deadlocks the turn before it can begin.
+//! Every *other* CLI still runs
 //! through `pty.rs` — those are TUIs and genuinely need a terminal — which is
 //! the split `CompanionTier` describes on the TypeScript side.
 //!
@@ -92,7 +96,9 @@ pub enum CompanionOut {
 }
 
 struct Running {
-    stdin: ChildStdin,
+    /// Present only for a streaming protocol. One-shot runners receive closed
+    /// stdin so a CLI that consumes piped input can observe EOF immediately.
+    stdin: Option<ChildStdin>,
     child: Child,
     /// Bumped on every spawn, so a restart is distinguishable from a reconnect
     /// — switching CLI mid-conversation must not splice one agent's answer
@@ -120,6 +126,7 @@ pub async fn companion_spawn(
     args: Vec<String>,
     cwd: Option<String>,
     env: Option<Vec<(String, String)>>,
+    keep_stdin: Option<bool>,
     on_data: Channel<CompanionOut>,
 ) -> Result<(), String> {
     // Take the lock for the whole swap: two spawns racing would leave one child
@@ -141,9 +148,14 @@ pub async fn companion_spawn(
     // spawns through a login shell; this execs the binary directly, so it has
     // to resolve the name the way a login shell would.
     let resolved = crate::procenv::resolve_command(&command);
+    let keep_stdin = keep_stdin.unwrap_or(true);
     let mut cmd = tokio::process::Command::new(&resolved);
     cmd.args(&args)
-        .stdin(Stdio::piped())
+        .stdin(if keep_stdin {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // Quitting Canopy must not leave an agent running and billing.
@@ -235,7 +247,11 @@ pub async fn companion_spawn(
             }
         )
     })?;
-    let stdin = child.stdin.take().ok_or("the companion CLI has no stdin")?;
+    let stdin = if keep_stdin {
+        Some(child.stdin.take().ok_or("the companion CLI has no stdin")?)
+    } else {
+        None
+    };
     let stdout = child
         .stdout
         .take()
@@ -333,6 +349,33 @@ mod framing_tests {
         assert!(truncated);
         assert!(capped_line(&mut reader, 8).await.unwrap().is_none());
     }
+
+    #[tokio::test]
+    async fn a_oneshot_child_observes_stdin_eof_instead_of_waiting_forever() {
+        // This is a process-level regression test for the exact Codex hang:
+        // the prompt is already in argv, while the CLI reads any piped stdin
+        // to EOF. Stdio::null is an already-closed input stream; a retained
+        // Stdio::piped handle would make this child wait just as Codex did.
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "read -r ignored || printf stdin-closed"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn stdin fixture");
+        let stdout = child.stdout.take().expect("fixture stdout");
+        let output = tokio::time::timeout(std::time::Duration::from_secs(2), async move {
+            let mut reader = BufReader::new(stdout);
+            let mut text = String::new();
+            tokio::io::AsyncReadExt::read_to_string(&mut reader, &mut text)
+                .await
+                .expect("read fixture output");
+            child.wait().await.expect("wait for fixture");
+            text
+        })
+        .await
+        .expect("closed stdin must not block");
+        assert_eq!(output, "stdin-closed");
+    }
 }
 
 /// Send one line to the companion. The newline is added here so no caller can
@@ -350,13 +393,15 @@ pub async fn companion_write(
     let running = held.as_mut().ok_or("the companion is not running")?;
     let mut body = line;
     body.push('\n');
-    running
+    let stdin = running
         .stdin
+        .as_mut()
+        .ok_or("this companion runner does not accept stdin")?;
+    stdin
         .write_all(body.as_bytes())
         .await
         .map_err(|e| format!("could not reach the companion: {e}"))?;
-    running
-        .stdin
+    stdin
         .flush()
         .await
         .map_err(|e| format!("could not reach the companion: {e}"))

@@ -4250,6 +4250,9 @@ export async function companionSpawn(
     args: string[];
     cwd?: string;
     env?: [string, string][];
+    /** Keep a writable stdin pipe for a streaming protocol. One-shot runners
+     *  must set this false so CLIs that append piped input can observe EOF. */
+    keepStdin?: boolean;
   },
   onData: (out: CompanionOut) => void,
 ): Promise<void> {

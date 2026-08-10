@@ -423,6 +423,11 @@ export interface Settings {
    * is a presentation preference only — every item stays in the shared queue
    * and remains available from the top-right bell. */
   notificationPopupsEnabled: boolean;
+  /** Show the terminal memory warning flyout and governor decision card. The
+   *  governor continues measuring in the background when this is off; only its
+   *  user-facing prompts and attention items are suppressed. On by default so
+   *  the existing safety feature remains available after an upgrade. */
+  terminalMemoryPromptsEnabled: boolean;
   /** canopy_* MCP tools the user switched off (Settings → Agents). Stored as
    *  the exceptions, not the whole set, so a tool added in a later version is
    *  on by default rather than invisible to everyone who ever opened this
@@ -605,6 +610,7 @@ export const DEFAULTS: Settings = {
   agentAskForAttention: false,
   agentsMaySpawn: true,
   notificationPopupsEnabled: true,
+  terminalMemoryPromptsEnabled: true,
   disabledTools: [],
   autoImportMarkdownResearch: true,
   trackerKeys: {},

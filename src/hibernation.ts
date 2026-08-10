@@ -35,6 +35,9 @@ export interface TerminalSnapshot {
   cwd: string;
   command?: string;
   title: string;
+  /** `title` is a name the user chose, so waking re-asserts it on the new
+   *  session rather than accepting the generated one. */
+  renamed?: boolean;
   icon?: string;
   run?: boolean;
   componentId?: string;
@@ -141,7 +144,11 @@ export function snapshotTabs(
           kind: "terminal",
           cwd: t.cwd,
           command,
-          title: t.customTitle ?? t.title,
+          // A rename lands in native `name`, which dies with the pty. Reading
+          // only `customTitle` here put the generated name into the snapshot,
+          // so every wake undid the rename.
+          title: (t.renamed ? t.name : undefined) ?? t.customTitle ?? t.title,
+          renamed: t.renamed || undefined,
           icon: t.icon,
           run: t.run,
           ...(t.componentId && t.runCommandId

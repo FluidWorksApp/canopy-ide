@@ -13,8 +13,9 @@ export function governorPromptEligible(
 ): boolean {
   const request = status.grant_request;
   if (request == null || dismissed.has(request.request_id)) return false;
-  // State and peak are historical. Only a live breach may ask a question.
-  if (status.current_bytes <= status.allowance_bytes) return false;
+  // The native governor debounces both sides of the boundary. Trust that
+  // stabilized state instead of reopening/closing the card on each raw sample.
+  if (status.state !== "over_allowance") return false;
   if (activeRequestId === request.request_id) return true;
   const cooldownUntil = cooldowns[status.id] ?? 0;
   if (cooldownUntil <= now) return true;

@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  companionMcpAuthError,
   OneshotTransport,
   newText,
 } from "./companionTransport";
@@ -257,19 +258,22 @@ describe("recovering a reply from a redrawing terminal", () => {
 });
 
 describe("the oneshot protocol (codex)", () => {
-  function oneshot(sessionId: string | null = null) {
+  function oneshot(sessionId: string | null = null, timeoutMs = 60_000) {
     const host = collector();
     const sent: { message: string; sessionId: string | null }[] = [];
     let learned: string | null = null;
     let forgotten = 0;
+    const abort = vi.fn(async () => {});
     const t = new OneshotTransport({
       host,
       sessionId,
       onSession: (id) => void (learned = id),
       onForget: () => void (forgotten += 1),
       launch: async (message, sessionId) => void sent.push({ message, sessionId }),
+      abort,
+      timeoutMs,
     });
-    return { t, host, sent, learned: () => learned, forgotten: () => forgotten };
+    return { t, host, sent, abort, learned: () => learned, forgotten: () => forgotten };
   }
 
   it("learns the thread id from the first turn", () => {
@@ -435,12 +439,14 @@ describe("the oneshot protocol (codex)", () => {
     });
   });
 
-  it("ends the turn on turn.completed, and reports one that failed", () => {
+  it("ends the turn on turn.completed, and reports one that failed", async () => {
     const o = oneshot();
+    await o.t.send("hello");
     o.t.handleLine(line({ type: "turn.completed" }));
     expect(o.host.events).toEqual([{ kind: "turnEnd" }]);
 
     const b = oneshot();
+    await b.t.send("hello");
     b.t.handleLine(line({ type: "turn.failed", error: { message: "rate limited" } }));
     expect(b.host.events).toEqual([
       { kind: "error", message: "rate limited" },
@@ -454,5 +460,68 @@ describe("the oneshot protocol (codex)", () => {
     o.t.handleLine(line({ type: "turn.started" }));
     o.t.handleLine(line({ type: "item.started", item: { type: "reasoning" } }));
     expect(o.host.events).toEqual([]);
+  });
+
+  it("fails immediately if Codex says it is waiting for additional stdin", async () => {
+    const o = oneshot();
+    await o.t.send("hello");
+    o.t.handleStderr("Reading additional input from stdin...");
+    expect(o.host.events).toEqual([
+      { kind: "error", message: expect.stringContaining("waited for stdin") },
+      { kind: "turnEnd" },
+    ]);
+    expect(o.abort).toHaveBeenCalledOnce();
+  });
+
+  it("turns an MCP authentication crash into an actionable error", async () => {
+    const o = oneshot();
+    await o.t.send("hello");
+    const raw =
+      'rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer resource_metadata=https://mcp.stripe.com/.well-known/oauth-protected-resource" })';
+    o.t.handleStderr(raw);
+
+    expect(o.host.events).toEqual([
+      {
+        kind: "error",
+        message:
+          "Stripe MCP needs authentication. Run `codex mcp login stripe` in a terminal, then Retry. To use Jarvis without it, disable that MCP server in Codex.",
+      },
+      { kind: "turnEnd" },
+    ]);
+    expect(o.abort).toHaveBeenCalledOnce();
+    expect(companionMcpAuthError("ordinary warning")).toBeNull();
+  });
+
+  it("bounds a wedged turn and kills its child", async () => {
+    vi.useFakeTimers();
+    try {
+      const o = oneshot(null, 25);
+      await o.t.send("hello");
+      await vi.advanceTimersByTimeAsync(25);
+      expect(o.host.events).toEqual([
+        { kind: "error", message: expect.stringContaining("did not finish within 5 minutes") },
+        { kind: "turnEnd" },
+      ]);
+      expect(o.abort).toHaveBeenCalledOnce();
+      // The process exit caused by the kill must not close the turn twice.
+      o.t.handleExit();
+      expect(o.host.events.filter((e) => e.kind === "turnEnd")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a turn visibly and remains reusable", async () => {
+    const o = oneshot();
+    await o.t.send("first");
+    await o.t.cancelTurn();
+    expect(o.host.events).toEqual([
+      { kind: "error", message: "Turn cancelled." },
+      { kind: "turnEnd" },
+    ]);
+    expect(o.abort).toHaveBeenCalledOnce();
+    await o.t.send("second");
+    expect(o.sent.at(-1)).toEqual({ message: "second", sessionId: null });
+    await o.t.stop();
   });
 });

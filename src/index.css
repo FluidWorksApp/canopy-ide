@@ -24522,6 +24522,12 @@ a.btn-sm {
   cursor: default;
 }
 
+.companion-send-cancel {
+  background: transparent;
+  border-color: var(--warning, #d99a2b);
+  color: var(--warning, #d99a2b);
+}
+
 /* Motion is decoration here; the position and the face carry the meaning. */
 @media (prefers-reduced-motion: reduce) {
   .companion,

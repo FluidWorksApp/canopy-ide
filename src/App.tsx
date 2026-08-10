@@ -78,6 +78,11 @@ import { companionName, summonCompanion } from "./companion";
 import type { CompanionProposal } from "./companionSession";
 import { personaBinding } from "./personaBinding";
 import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
+import {
+  dismissTerminalMemoryPromptsForWindow,
+  subscribeTerminalMemoryPromptVisibility,
+  terminalMemoryPromptsVisible,
+} from "./terminalMemoryPromptVisibility";
 import { spawnedAgentTakesFocus } from "./agentSpawn";
 import { readRemoteThemeTokens } from "./remoteTheme";
 import { useTabDrag } from "./tabDrag";
@@ -126,7 +131,9 @@ import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
 import { TerminalGovernorCard } from "./components/TerminalGovernorDialog";
-import { terminalMemoryQuotaWarning } from "./terminalMemoryPressure";
+import {
+  terminalMemoryQuotaSummary,
+} from "./terminalMemoryPressure";
 import {
   beginGovernorPromptCooldown as addGovernorPromptCooldown,
   governorPromptEligible,
@@ -331,21 +338,29 @@ export default function App() {
     },
     [quotaGroupByPty, terminalGovernor],
   );
-  const pendingGovernor = terminalGovernor?.sessions.find((session) => {
-    if (!governorPromptEligible(
-      session,
-      NO_DISMISSED_GOVERNOR_REQUESTS,
-      governorPromptCooldowns,
-      activeGovernorRequestId,
-      Date.now(),
-    )) return false;
-    const quota = terminalMemoryQuotaWarning(quotaMembersFor(session.id));
-    return quota != null && quota.current_bytes > quota.allowance_bytes;
-  });
+  const showTerminalMemoryPrompts = useSyncExternalStore(
+    subscribeTerminalMemoryPromptVisibility,
+    terminalMemoryPromptsVisible,
+    () => true,
+  );
+  const pendingGovernor = showTerminalMemoryPrompts
+    ? terminalGovernor?.sessions.find((session) => {
+        if (!governorPromptEligible(
+          session,
+          NO_DISMISSED_GOVERNOR_REQUESTS,
+          governorPromptCooldowns,
+          activeGovernorRequestId,
+          Date.now(),
+        )) return false;
+        return quotaMembersFor(session.id).length > 0;
+      })
+    : undefined;
   const pendingGovernorMembers = pendingGovernor
     ? quotaMembersFor(pendingGovernor.id)
     : [];
-  const pendingGovernorQuota = terminalMemoryQuotaWarning(pendingGovernorMembers);
+  const pendingGovernorQuota = pendingGovernor
+    ? terminalMemoryQuotaSummary(pendingGovernorMembers, "over_allowance")
+    : null;
   const pendingGovernorId = pendingGovernor?.id;
   const pendingGovernorRequestId = pendingGovernor?.grant_request?.request_id;
   const [pendingGovernorSessions, setPendingGovernorSessions] =
@@ -367,7 +382,7 @@ export default function App() {
       kind: "question",
       tone: "warn",
       title: `${terminalName} needs a memory decision`,
-      body: `Current use ${fmtBytes(pendingGovernorQuota?.current_bytes ?? 0)} exceeds the current ${fmtBytes(pendingGovernorQuota?.allowance_bytes ?? 0)} allowance. This platform remains monitor-only unless its capability says otherwise.`,
+      body: `Current use is ${fmtBytes(pendingGovernorQuota?.current_bytes ?? 0)} against the current ${fmtBytes(pendingGovernorQuota?.allowance_bytes ?? 0)} allowance. This platform remains monitor-only unless its capability says otherwise.`,
       source: "app",
       where: {
         kind: "terminal",
@@ -394,16 +409,28 @@ export default function App() {
     pendingGovernorTargetSession?.name,
   ]);
   useEffect(() => {
+    if (showTerminalMemoryPrompts) return;
+    setActiveGovernorRequestId(null);
+    for (const item of attentionItems()) {
+      if (
+        item.resolvedAt == null &&
+        item.dedupeKey?.startsWith("governor-memory:")
+      ) {
+        resolveAttentionByKey(item.dedupeKey, "withdrawn");
+      }
+    }
+  }, [showTerminalMemoryPrompts]);
+  useEffect(() => {
     for (const item of attentionItems()) {
       const rawId = item.dedupeKey?.match(/^governor-memory:(\d+)$/)?.[1];
       if (!rawId || item.resolvedAt != null) continue;
       const members = quotaMembersFor(Number(rawId));
-      const current = members.reduce((sum, member) => sum + member.current_bytes, 0);
-      const allowance = members.reduce(
-        (sum, member) => sum + member.allowance_bytes,
-        0,
-      );
-      if (members.length === 0 || current <= allowance) {
+      const owner = members.find((member) => member.id === Number(rawId));
+      if (
+        owner == null ||
+        owner.state !== "over_allowance" ||
+        owner.grant_request == null
+      ) {
         resolveAttentionByKey(item.dedupeKey!, "withdrawn");
       }
     }
@@ -3340,6 +3367,7 @@ export default function App() {
             };
           })}
           capability={terminalGovernor.capability}
+          headroomBytes={terminalGovernor.grantable_headroom_bytes}
           busy={governorBusy}
           error={governorError}
           onMaximumChange={(maxAllowanceBytes) => {
@@ -3440,6 +3468,7 @@ export default function App() {
           onDismiss={() => {
             const request = pendingGovernor.grant_request;
             if (!request) return;
+            dismissTerminalMemoryPromptsForWindow();
             beginGovernorPromptCooldown(pendingGovernor.id);
             setActiveGovernorRequestId(null);
             resolveAttentionByKey(

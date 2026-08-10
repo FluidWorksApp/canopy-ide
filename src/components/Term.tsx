@@ -70,6 +70,10 @@ export interface TermHandle {
 
 interface TermProps {
   cwd?: string;
+  /** Per-cell foreground/background correction performed by xterm. Leave at 1
+   *  for ordinary shells and CLIs so their authored colours remain untouched;
+   *  Codex uses 4.5 to repair its mixed light/dark TUI surfaces. */
+  minimumContrastRatio?: number;
   /** Owns keyboard/focus and window-global input events. */
   active: boolean;
   /** The pane is actually onscreen and should consume native output. All panes
@@ -107,7 +111,25 @@ interface TermProps {
 }
 
 export const Term = forwardRef<TermHandle, TermProps>(function Term(
-  { cwd, active, streaming, initialCommand, beforeInitialCommand, runCommand, runArgv, env, runId, attemptId, attachId, killAttachedOnClose, onSpawned, onExited, onTitle, onNotify },
+  {
+    cwd,
+    minimumContrastRatio = 1,
+    active,
+    streaming,
+    initialCommand,
+    beforeInitialCommand,
+    runCommand,
+    runArgv,
+    env,
+    runId,
+    attemptId,
+    attachId,
+    killAttachedOnClose,
+    onSpawned,
+    onExited,
+    onTitle,
+    onNotify,
+  },
   ref,
 ) {
   // Frozen once: a Term never switches between spawn and attach mid-life, and
@@ -205,6 +227,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       cursorStyle: settings.terminalCursorStyle,
       cursorBlink: settings.terminalCursorBlink,
       macOptionIsMeta: true,
+      minimumContrastRatio,
       theme: themeFor(settings),
     });
     termRef.current = term;

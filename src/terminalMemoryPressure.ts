@@ -33,6 +33,29 @@ export interface TerminalMemoryQuotaGroup {
   peak_bytes: number;
 }
 
+/** Aggregate the current view without independently reclassifying it. Prompt
+ * callers use the native governor's debounced state so one raw dip cannot
+ * withdraw a decision that took a sustained breach to open. */
+export function terminalMemoryQuotaSummary(
+  statuses: Array<TerminalBudgetStatus | null | undefined>,
+  state: TerminalMemoryQuotaGroup["state"],
+): TerminalMemoryQuotaGroup | null {
+  const members = statuses.filter(
+    (status): status is TerminalBudgetStatus => status != null,
+  );
+  if (members.length === 0) return null;
+  return {
+    members,
+    state,
+    current_bytes: members.reduce((sum, status) => sum + status.current_bytes, 0),
+    allowance_bytes: members.reduce(
+      (sum, status) => sum + status.allowance_bytes,
+      0,
+    ),
+    peak_bytes: members.reduce((sum, status) => sum + status.peak_bytes, 0),
+  };
+}
+
 /** A multiplexed tab is a view over several independently-owned allowances.
  * Its warning compares summed usage with summed allowances; no member's quota
  * is borrowed as a quota for the whole visual tab. Grants remain on `members`. */
@@ -46,13 +69,10 @@ export function terminalMemoryQuotaWarning(
   if (members.length === 1) {
     const member = members[0];
     if (!isTerminalMemoryWarning(member)) return null;
-    return {
+    return terminalMemoryQuotaSummary(
       members,
-      state: member.state as TerminalMemoryQuotaGroup["state"],
-      current_bytes: member.current_bytes,
-      allowance_bytes: member.allowance_bytes,
-      peak_bytes: member.peak_bytes,
-    };
+      member.state as TerminalMemoryQuotaGroup["state"],
+    );
   }
 
   const current_bytes = members.reduce(
@@ -63,10 +83,6 @@ export function terminalMemoryQuotaWarning(
     (sum, status) => sum + status.allowance_bytes,
     0,
   );
-  const peak_bytes = members.reduce(
-    (sum, status) => sum + status.peak_bytes,
-    0,
-  );
   const allowance = Math.max(1, allowance_bytes);
   const state = current_bytes > allowance
     ? "over_allowance"
@@ -75,7 +91,5 @@ export function terminalMemoryQuotaWarning(
       : current_bytes * 100 >= allowance * 75
         ? "warned"
         : null;
-  return state == null
-    ? null
-    : { members, state, current_bytes, allowance_bytes, peak_bytes };
+  return state == null ? null : terminalMemoryQuotaSummary(members, state);
 }

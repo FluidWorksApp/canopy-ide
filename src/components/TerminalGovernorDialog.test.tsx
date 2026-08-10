@@ -59,6 +59,7 @@ describe("TerminalGovernorCard", () => {
         quota={quota}
         members={member({ name: "Piper", agent: true })}
         capability={capability}
+        headroomBytes={8 * 1024 * 1024 * 1024}
         onGrant={onGrant}
         onMaximumChange={() => {}}
         onStop={() => {}}
@@ -73,6 +74,56 @@ describe("TerminalGovernorCard", () => {
     expect(onGrant).toHaveBeenCalledWith(512 * 1024 * 1024, false);
   });
 
+  it("never offers an Allow the host has no reserve for", () => {
+    // The governor refuses an increment above the grantable headroom. Offering
+    // it anyway left the card with three buttons, none of which could grant,
+    // and a red notice that read like a bug rather than a decision.
+    const onGrant = vi.fn();
+    render(
+      <TerminalGovernorCard
+        status={status}
+        quota={quota}
+        members={member()}
+        capability={capability}
+        headroomBytes={128 * 1024 * 1024}
+        onGrant={onGrant}
+        onMaximumChange={() => {}}
+        onStop={() => {}}
+        onDismiss={() => {}}
+      />,
+    );
+    const allow = screen.getByRole("button", { name: /Allow \+512/ });
+    expect(allow.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(allow);
+    expect(onGrant).not.toHaveBeenCalled();
+    expect(screen.getByText(/protected reserve leaves no room/i)).toBeTruthy();
+    // The ways out stay live.
+    expect(
+      screen.getByRole("button", { name: /Stop terminal/i }).hasAttribute("disabled"),
+    ).toBe(false);
+  });
+
+  it("never offers an Allow that would breach the agent's own maximum", () => {
+    const onGrant = vi.fn();
+    render(
+      <TerminalGovernorCard
+        status={{ ...status, max_allowance_bytes: 1024 + 256 * 1024 * 1024 }}
+        quota={quota}
+        members={member()}
+        capability={capability}
+        headroomBytes={8 * 1024 * 1024 * 1024}
+        onGrant={onGrant}
+        onMaximumChange={() => {}}
+        onStop={() => {}}
+        onDismiss={() => {}}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Allow \+512/ }).hasAttribute("disabled"),
+    ).toBe(true);
+    expect(screen.getByText(/raise it first/i)).toBeTruthy();
+  });
+
   it("requires a separate checkbox confirmation before remembering a CLI default", () => {
     const onGrant = vi.fn();
     render(
@@ -81,6 +132,7 @@ describe("TerminalGovernorCard", () => {
         quota={quota}
         members={member()}
         capability={capability}
+        headroomBytes={8 * 1024 * 1024 * 1024}
         onGrant={onGrant}
         onMaximumChange={() => {}}
         onStop={() => {}}
@@ -103,6 +155,7 @@ describe("TerminalGovernorCard", () => {
         quota={quota}
         members={member({ name: "Moss", agent: false })}
         capability={capability}
+        headroomBytes={8 * 1024 * 1024 * 1024}
         onGrant={() => {}}
         onMaximumChange={() => {}}
         onStop={() => {}}
@@ -121,6 +174,7 @@ describe("TerminalGovernorCard", () => {
         quota={{ ...quota, state: "over_allowance" }}
         members={member()}
         capability={capability}
+        headroomBytes={8 * 1024 * 1024 * 1024}
         onGrant={() => {}}
         onMaximumChange={() => {}}
         onStop={onStop}
@@ -144,6 +198,7 @@ describe("TerminalGovernorCard", () => {
           dynamic_raise: true,
           mechanism: "cgroup_v2_memory_high",
         }}
+        headroomBytes={8 * 1024 * 1024 * 1024}
         onGrant={() => {}}
         onMaximumChange={() => {}}
         onStop={() => {}}
@@ -162,6 +217,7 @@ describe("TerminalGovernorCard", () => {
         quota={quota}
         members={member({ name: "Piper", agent: true })}
         capability={capability}
+        headroomBytes={8 * 1024 * 1024 * 1024}
         onGrant={() => {}}
         onMaximumChange={onMaximumChange}
         onStop={() => {}}
@@ -210,6 +266,7 @@ describe("TerminalGovernorCard", () => {
           { status: second, session: { name: "Quill", agent: true } },
         ]}
         capability={capability}
+        headroomBytes={8 * 1024 * 1024 * 1024}
         onGrant={onGrant}
         onMaximumChange={() => {}}
         onStop={() => {}}

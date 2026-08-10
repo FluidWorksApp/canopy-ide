@@ -304,9 +304,9 @@ export function ServersPanel({
                   />
                 ))}
 
-                {/* The same component on other branches. One line each until
-                    you open it, so four workspaces cost four rows rather than
-                    four headings and twelve commands. */}
+                {/* Actual run instances on other branches. Dormant worktrees
+                    are deliberately absent: the configured command above is
+                    one capability, not one server per branch. */}
                 {g.workspaces.map((w) => {
                   // Open by default when something is happening in there —
                   // a live server or an agent — and closed otherwise. An

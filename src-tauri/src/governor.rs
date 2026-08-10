@@ -16,6 +16,12 @@ const MIB: u64 = 1024 * 1024;
 const WARN_NUM: u64 = 75;
 const REQUEST_NUM: u64 = 90;
 const CLEAR_NUM: u64 = 70;
+// Process trees can briefly cross an allowance while a compiler or agent
+// forks, and can briefly dip while that child hands work to another process.
+// User-facing grant decisions must describe a condition, not a sample: both
+// entering and leaving a breach therefore require the same observed dwell.
+const BREACH_DWELL_MS: u64 = 10_000;
+const CLEAR_DWELL_MS: u64 = 10_000;
 const INCIDENT_CAP: usize = 256;
 const STOP_TOMBSTONE_CAP: usize = 128;
 const RELIEF_COOLDOWN_MS: u64 = 10_000;
@@ -256,6 +262,8 @@ struct SessionBudget {
     growth_bytes_per_second: f64,
     samples: u64,
     warn_streak: u8,
+    breach_since_ms: Option<u64>,
+    clear_since_ms: Option<u64>,
     last_sample_ms: u64,
     pending: Option<GrantRequest>,
     last_grant: Option<AppliedGrant>,
@@ -381,7 +389,7 @@ pub(crate) fn base_allowance(total_bytes: u64) -> u64 {
     } else if total_bytes < 24 * GIB {
         GIB + 512 * MIB
     } else {
-        2 * GIB
+        4 * GIB
     }
 }
 
@@ -714,6 +722,8 @@ impl TerminalGovernor {
                 growth_bytes_per_second: 0.0,
                 samples: 0,
                 warn_streak: 0,
+                breach_since_ms: None,
+                clear_since_ms: None,
                 last_sample_ms: at_ms,
                 pending: None,
                 last_grant: None,
@@ -801,6 +811,22 @@ impl TerminalGovernor {
             session.last_sample_ms = at_ms;
 
             let allowance = session.allowance().max(1);
+            if current >= allowance {
+                session.breach_since_ms.get_or_insert(at_ms);
+            } else {
+                session.breach_since_ms = None;
+            }
+            if current.saturating_mul(100) < allowance.saturating_mul(CLEAR_NUM) {
+                session.clear_since_ms.get_or_insert(at_ms);
+            } else {
+                session.clear_since_ms = None;
+            }
+            let breach_is_sustained = session
+                .breach_since_ms
+                .is_some_and(|since| at_ms.saturating_sub(since) >= BREACH_DWELL_MS);
+            let clear_is_sustained = session
+                .clear_since_ms
+                .is_some_and(|since| at_ms.saturating_sub(since) >= CLEAR_DWELL_MS);
             if current.saturating_mul(100) >= allowance.saturating_mul(WARN_NUM) {
                 session.warn_streak = session.warn_streak.saturating_add(1);
             } else if current.saturating_mul(100) < allowance.saturating_mul(CLEAR_NUM) {
@@ -809,7 +835,11 @@ impl TerminalGovernor {
 
             let target = if session.state == BudgetState::Stopping {
                 BudgetState::Stopping
-            } else if current >= allowance {
+            } else if breach_is_sustained {
+                BudgetState::OverAllowance
+            } else if session.state == BudgetState::OverAllowance && !clear_is_sustained {
+                // Keep the decision stable through short-lived dips. It leaves
+                // this state only after the clear watermark itself has held.
                 BudgetState::OverAllowance
             } else if session.warn_streak >= 2
                 && current.saturating_mul(100) >= allowance.saturating_mul(REQUEST_NUM)
@@ -819,7 +849,7 @@ impl TerminalGovernor {
                 && current.saturating_mul(100) >= allowance.saturating_mul(WARN_NUM)
             {
                 BudgetState::Warned
-            } else if current.saturating_mul(100) < allowance.saturating_mul(CLEAR_NUM) {
+            } else if clear_is_sustained {
                 if matches!(
                     session.state,
                     BudgetState::Warned | BudgetState::AwaitingGrant | BudgetState::OverAllowance
@@ -1541,7 +1571,7 @@ mod tests {
     fn dynamic_defaults_and_reserve_are_bounded() {
         assert_eq!(base_allowance(gib(8)), gib(1));
         assert_eq!(base_allowance(gib(16)), gib(1) + 512 * MIB);
-        assert_eq!(base_allowance(gib(32)), gib(2));
+        assert_eq!(base_allowance(gib(32)), gib(4));
         assert_eq!(protected_reserve(gib(8)), gib(3));
         assert_eq!(protected_reserve(gib(32)), gib(8));
         assert_eq!(protected_reserve(gib(2)), gib(2));
@@ -1574,13 +1604,61 @@ mod tests {
         assert!(governor
             .observe(&[(1, allowance * 72 / 100)], gib(8), gib(6), 5_000)
             .is_empty());
-        let events = governor.observe(&[(1, allowance / 2)], gib(8), gib(6), 7_000);
-        assert_eq!(events[0].status.state, BudgetState::Relief);
+        assert!(governor
+            .observe(&[(1, allowance / 2)], gib(8), gib(6), 7_000)
+            .is_empty());
         assert!(governor
             .observe(&[(1, allowance / 2)], gib(8), gib(6), 15_000)
             .is_empty());
         let events = governor.observe(&[(1, allowance / 2)], gib(8), gib(6), 17_000);
+        assert_eq!(events[0].status.state, BudgetState::Relief);
+        assert!(governor
+            .observe(&[(1, allowance / 2)], gib(8), gib(6), 25_000)
+            .is_empty());
+        let events = governor.observe(&[(1, allowance / 2)], gib(8), gib(6), 27_000);
         assert_eq!(events[0].status.state, BudgetState::Normal);
+    }
+
+    #[test]
+    fn allowance_notification_ignores_spikes_and_requires_a_sustained_clear() {
+        let governor = TerminalGovernor::default();
+        let allowance = base_allowance(gib(8));
+        let over = allowance + MIB;
+        let clear = allowance / 2;
+
+        assert!(governor
+            .observe(&[(4, over)], gib(8), gib(6), 1_000)
+            .is_empty());
+        assert!(governor
+            .observe(&[(4, clear)], gib(8), gib(6), 3_000)
+            .is_empty());
+        let after_spike = &governor.snapshot().sessions[0];
+        assert_ne!(after_spike.state, BudgetState::OverAllowance);
+        assert!(after_spike.grant_request.is_none());
+
+        governor.observe(&[(4, over)], gib(8), gib(6), 5_000);
+        governor.observe(&[(4, over)], gib(8), gib(6), 13_000);
+        assert_ne!(
+            governor.snapshot().sessions[0].state,
+            BudgetState::OverAllowance
+        );
+        let opened = governor.observe(&[(4, over)], gib(8), gib(6), 15_000);
+        assert_eq!(opened[0].status.state, BudgetState::OverAllowance);
+        assert!(opened[0].status.grant_request.is_some());
+
+        assert!(governor
+            .observe(&[(4, clear)], gib(8), gib(6), 17_000)
+            .is_empty());
+        assert!(governor
+            .observe(&[(4, clear)], gib(8), gib(6), 25_000)
+            .is_empty());
+        let held = &governor.snapshot().sessions[0];
+        assert_eq!(held.state, BudgetState::OverAllowance);
+        assert!(held.grant_request.is_some());
+
+        let cleared = governor.observe(&[(4, clear)], gib(8), gib(6), 27_000);
+        assert_eq!(cleared[0].status.state, BudgetState::Relief);
+        assert!(cleared[0].status.grant_request.is_none());
     }
 
     #[test]
@@ -1717,6 +1795,7 @@ mod tests {
         let governor = TerminalGovernor::default();
         let current = base_allowance(gib(8)) + gib(2);
         governor.observe(&[(3, current)], gib(8), gib(7), 1_000);
+        governor.observe(&[(3, current)], gib(8), gib(7), 11_000);
         let request = governor.snapshot().sessions[0]
             .grant_request
             .clone()

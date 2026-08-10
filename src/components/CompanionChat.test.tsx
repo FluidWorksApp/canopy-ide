@@ -52,6 +52,7 @@ function mount(s: CompanionState, over: Partial<Parameters<typeof CompanionChat>
       onAnswer={noop}
       onInstall={noop}
       onRetry={noop}
+      onCancel={noop}
       onSend={noop}
       onClose={noop}
       {...over}
@@ -178,6 +179,16 @@ describe("the composer", () => {
     expect(input.rows).toBe(2);
     fireEvent.keyDown(input, { key: "Enter" });
     expect(onSend).toHaveBeenCalledWith("one\ntwo", []);
+  });
+
+  it("offers a working Cancel control while a turn is running", () => {
+    const onCancel = vi.fn();
+    mount(state([], "working"), { onCancel });
+    const button = document.querySelector(".companion-send") as HTMLButtonElement;
+    expect(button.textContent).toBe("Cancel");
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
+    expect(onCancel).toHaveBeenCalledOnce();
   });
 });
 

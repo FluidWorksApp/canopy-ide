@@ -40,10 +40,9 @@ export interface ServerGroup {
   path: string;
   entries: ServerEntry[];
   /** The same component, checked out in a workspace of its own. Nested rather
-   *  than listed alongside: a component and a component-on-a-branch are one
-   *  thing seen twice, and giving each its own top-level group turned four
-   *  components with four workspaces into sixteen headings you had to read
-   *  past to find the one server that was actually up. */
+   *  than listed alongside. Dormant copies are omitted entirely: one configured
+   *  command is one row, regardless of how many branches happen to exist. A
+   *  workspace appears only after it has an actual run to inspect or manage. */
   workspaces: WorkspaceRuns[];
   /** Entries in the `running` state, here and in every workspace below — the
    *  group header's live count. */
@@ -233,6 +232,14 @@ export function groupServers(
 
   const out = [...groups.values()];
   for (const g of out) {
+    // A configured command is a project capability, not one capability per git
+    // worktree. Keep only branch instances that have actually been run; the
+    // main component row remains the single place to start the command. This
+    // turns ten dormant branches back into one server row without hiding two
+    // live copies that genuinely are running side by side.
+    g.workspaces = g.workspaces.filter((w) =>
+      w.entries.some((entry) => entry.tabId != null),
+    );
     for (const w of g.workspaces)
       w.running = w.entries.filter((e) => e.state === "running").length;
     // Workspaces somebody is actually working in come first. Twenty branches

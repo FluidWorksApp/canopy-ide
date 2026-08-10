@@ -211,11 +211,6 @@ export function restorableFrom(
         return false;
       }
 
-      // Clicking a tab's close control or invoking Close Tab means "I'm done
-      // looking at this", not "recover this after a crash". Keep the transcript
-      // intact so the opt-in setting can still offer it.
-      if (!restoreUserClosedSessions && userClosed.has(id)) return false;
-
       // Just restored and the process hasn't shown up yet.
       const clicked = restoredAt.get(id);
       if (clicked != null) {
@@ -249,7 +244,16 @@ export function restorableFrom(
     // transcript written under a directory we can reach, a CLI that learns to
     // reopen by id).
     .filter((r): r is Omit<Restorable, "superseded"> => r.command !== null);
-  return newestPerDirectory(rows);
+  const groups = newestPerDirectory(rows);
+  if (restoreUserClosedSessions) return groups;
+  // Clicking a tab's close control or invoking Close Tab means "I'm done
+  // looking at this", not "recover this after a crash". Applied to the whole
+  // directory group rather than to the one session, for the same reason forget
+  // tombstones `superseded`: dropping only the closed session promotes the next
+  // one behind it, so closing the conversation you were actually in surfaces a
+  // stale one you abandoned days ago. The transcripts stay on disk, and new
+  // work in that directory leads the group again and brings it back.
+  return groups.filter((g) => !userClosed.has(g.digest.session_id));
 }
 
 /**

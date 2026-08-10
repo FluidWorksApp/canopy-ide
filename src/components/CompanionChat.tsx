@@ -43,6 +43,8 @@ interface Props {
   onInstall: () => void;
   /** Start the session again after it died. */
   onRetry: () => void;
+  /** Stop the turn currently in flight. */
+  onCancel: () => void;
   name: string;
   at: { left: number; top: number; side: "left" | "right" };
   width: number;
@@ -65,6 +67,7 @@ export function CompanionChat({
   onAnswer,
   onInstall,
   onRetry,
+  onCancel,
   expanded,
   onToggleExpand,
   onSend,
@@ -398,12 +401,12 @@ export function CompanionChat({
         />
         </div>
         <button
-          className="companion-send"
-          onClick={submit}
-          disabled={!canSend}
+          className={`companion-send${busy ? " companion-send-cancel" : ""}`}
+          onClick={busy ? onCancel : submit}
+          disabled={busy ? false : !canSend}
           type="button"
         >
-          {busy ? "…" : "Send"}
+          {busy ? "Cancel" : "Send"}
         </button>
       </div>
     </div>

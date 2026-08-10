@@ -1556,6 +1556,21 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item
+                  name="Memory monitoring prompts"
+                  desc="Choose whether terminal memory warnings and allowance decisions appear while you work."
+                >
+                  <Checkbox
+                    checked={s.terminalMemoryPromptsEnabled}
+                    onChange={(v) => patch({ terminalMemoryPromptsEnabled: v })}
+                    label="Show terminal memory prompts"
+                    hint={
+                      s.terminalMemoryPromptsEnabled
+                        ? "Warnings and memory decisions appear when an agent exceeds its allowance."
+                        : "Monitoring continues silently; no memory warning cards or notifications appear."
+                    }
+                  />
+                </Item>
+                <Item
                   name="Memory allowance maximums"
                   desc="Choose how far each agent's monitored allowance may be raised on this device."
                 >

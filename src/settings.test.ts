@@ -26,6 +26,7 @@ describe("getSettings / updateSettings", () => {
     expect(s.agentAskForAttention).toBe(false);
     expect(s.agentsMaySpawn).toBe(true);
     expect(s.notificationPopupsEnabled).toBe(true);
+    expect(s.terminalMemoryPromptsEnabled).toBe(true);
     expect(s.dictationTriggerMode).toBe("hold");
     expect(s.dictationModKey).toBe("ShiftLeft");
   });
@@ -52,6 +53,7 @@ describe("getSettings / updateSettings", () => {
       agentAskForAttention: false,
       agentsMaySpawn: false,
       notificationPopupsEnabled: false,
+      terminalMemoryPromptsEnabled: false,
     });
     const s = getSettings();
     expect(s.theme).toBe("gotham");
@@ -61,6 +63,7 @@ describe("getSettings / updateSettings", () => {
     expect(s.agentAskForAttention).toBe(false);
     expect(s.agentsMaySpawn).toBe(false);
     expect(s.notificationPopupsEnabled).toBe(false);
+    expect(s.terminalMemoryPromptsEnabled).toBe(false);
   });
 
   it("merges successive patches rather than replacing the whole object", () => {

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SpotSearch } from "./SpotSearch";
 import { mockCommands } from "../test/setup";
@@ -66,6 +66,51 @@ describe("SpotSearch", () => {
       type: "run-task",
       brief: "fix the flaky pty test",
     });
+  });
+
+  it("routes the production Cognito wording to Research on Enter", async () => {
+    const { onAction } = open();
+    await userEvent.keyboard(
+      "Can you research and find out what it would take for us to migrate out of Cognito authentication?",
+    );
+    await userEvent.keyboard("{Enter}");
+    expect(onAction).toHaveBeenCalledWith({
+      type: "start-research",
+      question: expect.stringContaining("migrate out of Cognito authentication"),
+    });
+  });
+
+  it("keeps a research prompt until ProjectView acknowledges a durable receipt", async () => {
+    let acknowledge!: (accepted: boolean) => void;
+    const onAction = vi.fn(
+      () => new Promise<boolean>((resolve) => void (acknowledge = resolve)),
+    );
+    const { onClose } = open({ onAction });
+    await userEvent.keyboard(
+      "research what it takes to migrate our Cognito authentication and preserve existing users",
+    );
+    await userEvent.keyboard("{Enter}");
+    expect(onAction).toHaveBeenCalledWith({
+      type: "start-research",
+      question: expect.stringContaining("migrate our Cognito authentication"),
+    });
+    expect(onClose).not.toHaveBeenCalled();
+    acknowledge(true);
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+  });
+
+  it("does not discard a research prompt when no receipt could be created", async () => {
+    const onAction = vi.fn(async () => false);
+    const { onClose } = open({ onAction });
+    await userEvent.keyboard(
+      "research what it takes to migrate our Cognito authentication and preserve existing users",
+    );
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(onAction).toHaveBeenCalled());
+    expect(onClose).not.toHaveBeenCalled();
+    expect((screen.getByRole("combobox") as HTMLTextAreaElement).value).toContain(
+      "migrate our Cognito authentication",
+    );
   });
 
   it("stops searching once the text is a prompt rather than a query", async () => {

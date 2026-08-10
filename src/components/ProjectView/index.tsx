@@ -11,6 +11,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type CSSProperties,
   type ReactNode,
 } from "react";
@@ -38,7 +39,13 @@ import {
   type TerminalGroup,
   type TerminalSplitNode,
 } from "../../terminalGroups";
+import { terminalMinimumContrast } from "../../terminalContrast";
 import { getSettings, SETTINGS_CHANGE_EVENT } from "../../settings";
+import {
+  dismissTerminalMemoryPromptsForWindow,
+  subscribeTerminalMemoryPromptVisibility,
+  terminalMemoryPromptsVisible,
+} from "../../terminalMemoryPromptVisibility";
 import {
   TAB_USE_DWELL_MS,
   groupTabSwitch,
@@ -257,6 +264,7 @@ import {
   settleIfRunning as researchSettleIfRunning,
   start as researchStart,
 } from "../../research";
+import { dispatchResearch } from "../../researchDispatch";
 import { resolveWikilink } from "../../wikilinks";
 import {
   NEXT_STATUSES as NEXT_NOTE_STATUSES,
@@ -1258,14 +1266,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     return () => onTerminalQuotaGroupsChange?.(project.id, []);
   }, [onTerminalQuotaGroupsChange, project.id]);
+  const showTerminalMemoryPrompts = useSyncExternalStore(
+    subscribeTerminalMemoryPromptVisibility,
+    terminalMemoryPromptsVisible,
+    () => true,
+  );
   const terminalMemoryWarning = useCallback(
     (tab: TermSubTab) =>
-      terminalMemoryQuotaWarning(
-        terminalMemoryMembers(tab).map((member) =>
-          member.ptyId == null ? null : governorByPty.get(member.ptyId),
-        ),
-      ),
-    [governorByPty, terminalMemoryMembers],
+      showTerminalMemoryPrompts
+        ? terminalMemoryQuotaWarning(
+            terminalMemoryMembers(tab).map((member) =>
+              member.ptyId == null ? null : governorByPty.get(member.ptyId),
+            ),
+          )
+        : null,
+    [governorByPty, showTerminalMemoryPrompts, terminalMemoryMembers],
   );
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
@@ -2410,7 +2425,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
       .map((t) => ({
         cwd: t.cwd,
         command: t.command,
-        title: t.customTitle ?? t.title,
+        // Same reason as the hibernation snapshot: a rename is stored in native
+        // `name` and dies with the pty, so leaving it out is what made a
+        // reopened terminal come back under its generated name.
+        title: (t.renamed ? t.name : undefined) ?? t.customTitle ?? t.title,
+        renamed: t.renamed || undefined,
         icon: t.icon,
         run: t.run,
         componentId: t.componentId,
@@ -2464,9 +2483,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ? { componentId: t.componentId, runCommandId: t.runCommandId }
           : undefined,
       );
+      // A name the user chose outlives the pty that held it. Handing it back as
+      // a pending rename is what makes the spawn callback re-assert it, instead
+      // of the reopened terminal settling under a freshly generated name.
+      if (t.renamed && t.title) patchTabRaw(id, { customTitle: t.title });
       return id;
     },
-    [addTerminal],
+    [addTerminal, patchTabRaw],
   );
 
   const resumeSession = useCallback(
@@ -3738,28 +3761,30 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const startResearch = useCallback(
     async (question: string, userQuery = "", ticket?: ipc.ResearchTicketLink) => {
       const q = question.trim();
-      if (!q) return;
+      if (!q) return false;
       // The title is the question, shortened — an entry is cited by number
       // anyway, and asking the user to name it before it exists is a form to
       // fill in before any work has happened.
       const title = q.length > 80 ? `${q.slice(0, 77).trimEnd()}…` : q;
       try {
-        const entry = await researchStart({
-          projectId: project.id,
-          projectName: project.name,
-          roots,
-          title,
-          question: q,
-          cwd: roots[0],
-        });
-        // Link before opening the tab, so the entry carries the ticket it
-        // came from the first time anyone looks at it.
-        if (ticket)
-          await researchLinkEntry({ projectId: project.id, id: entry.id, ticket });
-        const entryDir = await ipc.researchDir(project.id, entry.id);
-        const ok = await startMicroTask(
-          researchTask,
-          {
+        const result = await dispatchResearch({
+          create: () => researchStart({
+            projectId: project.id,
+            projectName: project.name,
+            roots,
+            title,
+            question: q,
+            cwd: roots[0],
+          }),
+          // Link before opening the tab, so the entry carries the ticket it
+          // came from the first time anyone looks at it.
+          link: ticket
+            ? async (entry) => {
+                await researchLinkEntry({ projectId: project.id, id: entry.id, ticket });
+              }
+            : undefined,
+          directory: (entry) => ipc.researchDir(project.id, entry.id),
+          launch: (entry, entryDir) => startMicroTask(researchTask, {
             dir: roots[0] ?? "",
             entryId: entry.id,
             entryDir,
@@ -3773,19 +3798,23 @@ const ProjectViewBody = memo(function ProjectViewBody({
               label: c.label,
               path: c.path,
             })),
-          },
-          userQuery,
-        );
-        // The agent never started, so nothing will ever move this entry off
-        // "researching". Say so on the entry rather than leaving a row that
-        // looks live forever.
-        if (!ok) {
-          await researchSetStatus(project.id, entry.id, "blocked", "Canopy",
-            "the agent never started");
+          }, userQuery),
+          block: (entry, error) => researchSetStatus(
+            project.id,
+            entry.id,
+            "blocked",
+            "Canopy",
+            error ? `research setup failed — ${String(error)}` : "the agent never started",
+          ),
+          open: (entry) => openResearch(entry.id, entry.title),
+        });
+        if (result.error) {
+          onNotice(`Research was saved, but couldn't start: ${String(result.error)}`, "error");
         }
-        openResearch(entry.id, entry.title);
+        return true;
       } catch (err) {
         onNotice(`Couldn't start research: ${String(err)}`, "error");
+        return false;
       }
     },
     [project.id, project.name, roots, startMicroTask, openResearch, onNotice],
@@ -6986,7 +7015,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             t.agentId && t.profile && t.profile !== "default"
               ? await ipc.profileEnv(t.agentId, t.profile).catch(() => [])
               : [];
-          return addTerminal(
+          const id = addTerminal(
             t.cwd,
             command,
             t.title,
@@ -7000,6 +7029,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
               ? { componentId: t.componentId, runCommandId: t.runCommandId }
               : undefined,
           );
+          // Waking spawns a new pty, which names itself. A name the user chose
+          // has to be re-asserted onto it or the wake silently renames the tab.
+          if (t.renamed && t.title) patchTabRaw(id, { customTitle: t.title });
+          return id;
         }
         case "file": {
           await openFileRef.current(t.path, { diff: t.view === "diff" });
@@ -7086,7 +7119,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           });
       }
     },
-    [addTerminal, patchFile, ticketRepo],
+    [addTerminal, patchFile, patchTabRaw, ticketRepo],
   );
 
   // Wake: rebuild the workspace step by step while the frost (rendered by App,
@@ -8170,11 +8203,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (tab?.ptyId != null) {
         void ipc
           .ptySetName(tab.ptyId, renameDraft)
-          .then((name) => patchTab(tab.id, { name, customTitle: undefined }))
+          .then((name) =>
+            patchTab(tab.id, {
+              name,
+              customTitle: undefined,
+              // Clearing the draft leaves nothing saying this name was chosen
+              // rather than generated, and the snapshots need that to know
+              // which names to carry back.
+              renamed: renameDraft.trim().length > 0,
+            }),
+          )
           .catch((error) => onNotice(String(error), "error"));
       } else if (tab) {
         // The spawn callback promotes this pending value into native state.
-        patchTab(tab.id, { customTitle: renameDraft.trim() || undefined });
+        const chosen = renameDraft.trim() || undefined;
+        patchTab(tab.id, { customTitle: chosen, renamed: chosen != null });
       }
     }
     setRenamingTabId(null);
@@ -9133,10 +9176,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [tabs],
   );
 
-  // Each component's copy in each workspace, hung under that component rather
-  // than beside it. Listing them as top-level components instead turned four
-  // components with four workspaces into sixteen headings — the panel became a
-  // wall you read past to find the one server that was actually up.
+  // Each component's workspace locations are supplied to the join so it can
+  // recognize real runs there. `groupServers` omits dormant copies: branches
+  // are locations, not ten declarations of the same configured command.
   //
   // Still not gated on which workspace is "active": you cannot test two
   // branches side by side if starting the second one's server means first
@@ -10673,11 +10715,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  panels and menus already use — the palette names the action, this owns
    *  the doing. */
   const onSpotAction = useCallback(
-    (action: SpotAction) => {
+    async (action: SpotAction) => {
       switch (action.type) {
         case "run-task": {
           const dir = componentsRef.current[0]?.path;
-          if (!dir) return;
+          if (!dir) return false;
           const active = tabsRef.current.find(
             (t) => t.id === activeTabIdRef.current,
           );
@@ -10709,8 +10751,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // captured — a research question is about the codebase, not about
         // whatever happens to be on screen.
         case "start-research":
-          void startResearch(action.question);
-          return;
+          return startResearch(action.question);
         case "save-note":
           void saveNote(action.text, action.attachments);
           return;
@@ -11202,7 +11243,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       case "research-list":
         return (
-          <ResearchPanel page projectId={project.id} onOpen={(e) => openResearch(e.id, e.title)} onStart={(q) => void startResearch(q)} canStart={AGENT_CLIS.some((c) => getInstalled()[c.bin])} />
+          <ResearchPanel page projectId={project.id} onOpen={(e) => openResearch(e.id, e.title)} onStart={startResearch} canStart={AGENT_CLIS.some((c) => getInstalled()[c.bin])} />
         );
       case "notes-list":
         return (
@@ -11695,6 +11736,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   termHandles.current.set(tab.id, h);
                 }}
                 cwd={tab.cwd}
+                minimumContrastRatio={terminalMinimumContrast(
+                  agentIdForCommand(tab.command),
+                )}
                 active={
                   !vibe && !softClosed && tab.id === activeTabId && visible
                 }
@@ -11760,7 +11804,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     void ipc
                       .ptySetName(ptyId, tab.customTitle)
                       .then((name) =>
-                        patchTab(tab.id, { name, customTitle: undefined }),
+                        patchTab(tab.id, {
+                          name,
+                          customTitle: undefined,
+                          renamed: true,
+                        }),
                       )
                       .catch((error) => onNotice(String(error), "error"));
                   }
@@ -11971,7 +12019,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 },
               };
             })}
-            onClose={() => setMemoryFlyoutTabId(null)}
+            onClose={() => {
+              dismissTerminalMemoryPromptsForWindow();
+              setMemoryFlyoutTabId(null);
+            }}
             onPurge={() => {
               const outcomes = terminalMemoryMembers(memoryFlyoutTab).map(
                 (member) => termHandles.current.get(member.id)?.releaseMemory(),
@@ -12890,7 +12941,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         <ResearchPanel
           projectId={project.id}
           onOpen={(e) => openResearch(e.id, e.title)}
-          onStart={(q) => void startResearch(q)}
+          onStart={startResearch}
           canStart={AGENT_CLIS.some((c) => getInstalled()[c.bin])}
           onOpenAll={() => openCollectionPage("research-list")}
         />

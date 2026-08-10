@@ -339,6 +339,39 @@ describe("ResearchPanel", () => {
     expect(onStart).toHaveBeenCalledWith("why is startup slow");
   });
 
+  it("waits for a durable receipt before clearing an Enter submission", async () => {
+    mockCommands({ research_list: () => [] });
+    let acknowledge!: (accepted: boolean) => void;
+    const onStart = vi.fn(
+      () => new Promise<boolean>((resolve) => void (acknowledge = resolve)),
+    );
+    render(
+      <ResearchPanel projectId="p1" onOpen={vi.fn()} onStart={onStart} canStart />,
+    );
+    const field = screen.getByPlaceholderText("Research a question…");
+    await userEvent.type(field, "why is startup slow{Enter}");
+
+    expect(onStart).toHaveBeenCalledWith("why is startup slow");
+    expect(field).toHaveValue("why is startup slow");
+    expect(screen.getByRole("button", { name: "Starting…" })).toBeDisabled();
+
+    acknowledge(true);
+    await waitFor(() => expect(field).toHaveValue(""));
+  });
+
+  it("keeps the question when receipt creation is refused", async () => {
+    mockCommands({ research_list: () => [] });
+    const onStart = vi.fn(async () => false);
+    render(
+      <ResearchPanel projectId="p1" onOpen={vi.fn()} onStart={onStart} canStart />,
+    );
+    const field = screen.getByPlaceholderText("Research a question…");
+    await userEvent.type(field, "why is startup slow{Enter}");
+
+    await waitFor(() => expect(onStart).toHaveBeenCalled());
+    expect(field).toHaveValue("why is startup slow");
+  });
+
   it("explains itself when there is nothing yet", async () => {
     mockCommands({ research_list: () => [] });
     render(

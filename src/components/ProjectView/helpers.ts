@@ -38,6 +38,11 @@ export interface TermSubTab {
   description?: string;
   /** Legacy/prespawn rename. Live sessions move this into native `name`. */
   customTitle?: string;
+  /** The name on this tab was chosen by the user, not generated. Native owns
+   *  the name but forgets it with the pty, and an auto title is not
+   *  distinguishable from a rename once both live in `name` — so restore needs
+   *  which names are worth re-asserting on the new session. */
+  renamed?: boolean;
   ptyId: number | null;
   /** When set, this tab attaches to an already-running headless PTY (spawned
    *  from the remote portal) instead of spawning its own. Closing it detaches;

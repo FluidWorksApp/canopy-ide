@@ -101,6 +101,22 @@ describe("snapshotTabs", () => {
     expect(t).toMatchObject({ title: "api server" });
   });
 
+  it("carries a rename that native holds, and marks it as the user's", () => {
+    // A rename is moved into native `name`, which dies with the pty. Reading
+    // only `customTitle` snapshotted the generated name, so waking renamed the
+    // tab back to "Lumen" every time.
+    const [renamed] = snapshotTabs([
+      term({ title: "zsh", name: "billing api", renamed: true }),
+    ]);
+    expect(renamed).toMatchObject({ title: "billing api", renamed: true });
+
+    // A generated name is not a rename: re-asserting it on the new session
+    // would fight whatever that session names itself.
+    const [generated] = snapshotTabs([term({ title: "zsh", name: "Lumen" })]);
+    expect(generated).toMatchObject({ title: "zsh" });
+    expect(generated).not.toHaveProperty("renamed", true);
+  });
+
   it("drops the tabs that must not come back", () => {
     const kept = snapshotTabs([
       // One-shot: waking it would re-run a task that already finished.
