@@ -662,7 +662,46 @@ export interface AgentCli {
    * own --help goes in here.
    */
   unattended?: string;
+
+  /**
+   * Workflow-facing capabilities for this agent type. The canvas, schema
+   * validator and launcher all read this same descriptor, so supporting a new
+   * configurable CLI is one registry change rather than a switch in every
+   * consumer. An absent descriptor still permits the CLI as a reusable agent,
+   * but exposes no launch-time configuration Canopy cannot verify.
+   */
+  execution?: AgentExecutionSpec;
 }
+
+export interface AgentConfigChoice {
+  value: string;
+  label: string;
+  hint?: string;
+}
+
+export interface AgentConfigField {
+  key: string;
+  label: string;
+  control: "text" | "select" | "model" | "profile";
+  placeholder?: string;
+  choices?: readonly AgentConfigChoice[];
+  /** Model families are resolved through the live/seed catalogue by the UI. */
+  modelFamilies?: readonly ("anthropic" | "openai" | "google")[];
+}
+
+export interface AgentLaunchArgument {
+  flag: string;
+  value: string;
+}
+
+export interface AgentExecutionSpec {
+  fields: readonly AgentConfigField[];
+  /** Convert declarative agent configuration into verified CLI arguments. */
+  launchArgs: (config: AgentLaunchOptions) => readonly AgentLaunchArgument[];
+}
+
+/** Arbitrary manifest-declared configuration, persisted on a reusable agent. */
+export type AgentLaunchOptions = Readonly<Record<string, string | undefined>>;
 
 /**
  * A registry entry as authored, before the user's binary override is applied.
@@ -694,6 +733,30 @@ export function shellBin(bin: string): string {
   if (!/\s/.test(bin)) return bin;
   return currentPlatform() === "windows" ? `"${bin}"` : shellQuote(bin);
 }
+
+const modelField = (
+  modelFamilies: AgentConfigField["modelFamilies"],
+  placeholder?: string,
+): AgentConfigField => ({ key: "model", label: "Model", control: "model", modelFamilies, placeholder });
+const providerField = (placeholder = "anthropic, openai…"): AgentConfigField => ({
+  key: "provider", label: "Provider", control: "text", placeholder,
+});
+const effortField = (values: readonly string[]): AgentConfigField => ({
+  key: "effort",
+  label: "Effort",
+  control: "select",
+  choices: values.map((value) => ({ value, label: value })),
+});
+const profileField: AgentConfigField = {
+  key: "profileId", label: "Account", control: "profile",
+};
+const option = (flag: string, value?: string): AgentLaunchArgument[] =>
+  value?.trim() ? [{ flag, value: value.trim() }] : [];
+const qualifiedModel = (config: AgentLaunchOptions) => {
+  const model = config.model?.trim();
+  const provider = config.provider?.trim();
+  return model && provider && !model.includes("/") ? `${provider}/${model}` : model;
+};
 
 /** The CLIs Canopy ships knowledge of, under the names their vendors use.
  *  Never read this directly to launch or probe anything — read AGENT_CLIS,
@@ -739,6 +802,17 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // against an unsupported model, the session starts and falls back to the
     // configured mode.
     unattended: "--permission-mode auto",
+    execution: {
+      fields: [
+        modelField(["anthropic"]),
+        effortField(["low", "medium", "high", "xhigh", "max"]),
+        profileField,
+      ],
+      launchArgs: (config) => [
+        ...option("--model", config.model),
+        ...option("--effort", config.effort),
+      ],
+    },
   },
   {
     id: "codex",
@@ -770,6 +844,22 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // NOT `--full-auto`, which every guide still names: it is gone from codex
     // 0.147.0's --help, and a flag clap doesn't know refuses to launch at all.
     unattended: "--ask-for-approval never --sandbox workspace-write",
+    execution: {
+      fields: [
+        modelField(["openai"]),
+        effortField(["low", "medium", "high", "xhigh", "max", "ultra"]),
+        profileField,
+      ],
+      launchArgs: (config) => [
+        ...option("-m", config.model),
+        ...option(
+          "-c",
+          config.effort
+            ? `model_reasoning_effort=${JSON.stringify(config.effort)}`
+            : undefined,
+        ),
+      ],
+    },
   },
   {
     id: "amp",
@@ -790,6 +880,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // and a removed flag would refuse to launch. No `unattended` either, for
     // the same reason and with the happier consequence: a CLI that does not
     // stop to ask is already in the mode a task needs.
+    execution: { fields: [profileField], launchArgs: () => [] },
   },
   {
     id: "aider",
@@ -813,6 +904,17 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // nothing between "confirm everything" and `--yes-always`. There is no mode
     // to pin, so a task launches it exactly as a person would and it asks —
     // rather than being handed the skip-permissions rung it was never granted.
+    execution: {
+      fields: [
+        providerField(),
+        modelField(["anthropic", "openai", "google"], "provider/model"),
+        effortField(["low", "medium", "high"]),
+      ],
+      launchArgs: (config) => [
+        ...option("--model", qualifiedModel(config)),
+        ...option("--reasoning-effort", config.effort),
+      ],
+    },
   },
   // Gemini CLI is gone from this list on purpose: Google killed its "Login
   // with Google" path for individuals (2026-06-18, "migrate to the Antigravity
@@ -844,6 +946,16 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // exists for. Antigravity keeps asking about commands either way; that is
     // its safety net and this leaves it alone.
     unattended: "--mode accept-edits",
+    execution: {
+      fields: [
+        modelField(["google"]),
+        effortField(["low", "medium", "high"]),
+      ],
+      launchArgs: (config) => [
+        ...option("--model", config.model),
+        ...option("--effort", config.effort),
+      ],
+    },
   },
   {
     id: "opencode",
@@ -869,6 +981,14 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // is all opencode allows short of `--auto`: its only other control is that
     // per-tool permission table, and `--auto` is the skip-permissions rung.
     unattended: "--agent build",
+    execution: {
+      fields: [
+        providerField(),
+        modelField(undefined, "provider/model"),
+        profileField,
+      ],
+      launchArgs: (config) => option("--model", qualifiedModel(config)),
+    },
   },
   // oh-my-pi. NB: the bare `omp` npm package is an unrelated squat — the
   // official installer is the omp.sh script.
@@ -893,6 +1013,18 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // `always-ask` is a configurable default, and a task that inherits it stops
     // on its first edit.
     unattended: "--approval-mode=write",
+    execution: {
+      fields: [
+        providerField(),
+        modelField(["anthropic", "openai", "google"]),
+        effortField(["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"]),
+      ],
+      launchArgs: (config) => [
+        ...option("--model", config.model),
+        ...option("--provider", config.provider),
+        ...option("--thinking", config.effort),
+      ],
+    },
   },
 ];
 
@@ -1432,18 +1564,41 @@ function withUnattendedMode(command: string, cli: AgentCli): string {
   return cli.unattended ? `${command} ${cli.unattended}` : command;
 }
 
+/** Apply only arguments declared by the selected agent type's manifest.
+ * Values are shell-quoted independently, so committed agent configuration
+ * cannot become another shell command. Unknown fields never reach argv: the
+ * adapter returns the complete argument list it understands. */
+function withAgentLaunchOptions(
+  command: string,
+  cli: AgentCli,
+  options?: AgentLaunchOptions,
+): string {
+  if (!options || !cli.execution) return command;
+  const args = cli.execution.launchArgs(options).flatMap(({ flag, value }) =>
+    flag.trim() && value.trim() ? [flag.trim(), shellQuote(value.trim())] : []);
+  return args.length > 0 ? `${command} ${args.join(" ")}` : command;
+}
+
 export function startCommand(
   agentId: string,
   text: string,
+  options?: AgentLaunchOptions,
 ): { command: string; typePrompt: boolean } | null {
   const cli = AGENT_CLIS.find((c) => c.id === agentId);
   if (!cli) return null;
   return cli.prompt
     ? {
-        command: withUnattendedMode(withSkipPermissions(cli.prompt(text), cli), cli),
+        command: withAgentLaunchOptions(
+          withUnattendedMode(withSkipPermissions(cli.prompt(text), cli), cli),
+          cli,
+          options,
+        ),
         typePrompt: false,
       }
-    : { command: withUnattendedMode(launchCommand(cli), cli), typePrompt: true };
+    : {
+        command: withAgentLaunchOptions(withUnattendedMode(launchCommand(cli), cli), cli, options),
+        typePrompt: true,
+      };
 }
 
 export function restoreCommand(agentId: string, sessionId: string): string | null {

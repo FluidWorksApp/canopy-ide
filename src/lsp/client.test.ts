@@ -93,15 +93,72 @@ describe("language server startup", () => {
   });
 
   it("retries a transient initialization failure before answering", async () => {
+    vi.useFakeTimers();
     mocks.lspStart.mockResolvedValueOnce(7).mockResolvedValueOnce(8);
     mocks.start.mockRejectedValueOnce(new Error("transport closed")).mockResolvedValueOnce(undefined);
     const client = await loadClient();
 
-    await client.ensureLanguageServer(file, root);
+    const ready = client.ensureLanguageServer(file, root);
+    await vi.advanceTimersByTimeAsync(500);
+    await ready;
 
     expect(mocks.start).toHaveBeenCalledTimes(2);
     expect(mocks.lspStop).toHaveBeenCalledWith(7);
     expect(await client.hasServerFor(file, root)).toBe(true);
+  });
+
+  it("waits through the bounded restart plan instead of returning a retry notice", async () => {
+    vi.useFakeTimers();
+    mocks.lspStart
+      .mockResolvedValueOnce(7)
+      .mockResolvedValueOnce(8)
+      .mockResolvedValueOnce(9);
+    mocks.start
+      .mockRejectedValueOnce(new Error("transport closed"))
+      .mockRejectedValueOnce(new Error("transport closed again"))
+      .mockResolvedValueOnce(undefined);
+    const client = await loadClient();
+
+    let answered = false;
+    const ready = client.ensureLanguageServer(file, root).then(() => {
+      answered = true;
+    });
+    await vi.advanceTimersByTimeAsync(499);
+    expect(answered).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_501);
+    await ready;
+
+    expect(mocks.start).toHaveBeenCalledTimes(3);
+    expect(await client.hasServerFor(file, root)).toBe(true);
+  });
+
+  it("preserves a precise initialize error when the client reports Unknown reason", async () => {
+    mocks.lspStart.mockImplementationOnce(async (
+      _command: string,
+      _args: string[],
+      _root: string,
+      onMessage: (message: string) => void,
+    ) => {
+      onMessage(JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        error: {
+          code: -32603,
+          message: "Could not find a valid TypeScript installation in this workspace",
+        },
+      }));
+      return 7;
+    });
+    mocks.start.mockRejectedValueOnce(new Error("Unknown reason"));
+    const client = await loadClient();
+
+    await client.ensureLanguageServer(file, root);
+
+    expect(await client.describeMissingServer(file, root)).toContain(
+      "Could not find a valid TypeScript installation in this workspace",
+    );
+    expect(await client.describeMissingServer(file, root)).not.toContain("Unknown reason");
+    expect(mocks.start).toHaveBeenCalledOnce();
   });
 
   it("automatically restarts a desired server when its subprocess exits", async () => {

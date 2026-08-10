@@ -165,8 +165,14 @@ import {
   resumeSessionId,
   launchCommand,
   shellBin,
+  type AgentLaunchOptions,
   updateCommand,
 } from "../../projects";
+import {
+  workflowAgentForStep,
+  workflowAgentPrompt,
+  workflowAgentSelection,
+} from "../../workflowAgents";
 import {
   AgentIcon,
   AgentsIcon,
@@ -3168,14 +3174,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
     async (
       cli: AgentCli,
       installed: Record<string, boolean>,
+      requestedProfile?: string,
     ): Promise<{
       allowed: boolean;
       route: FleetRouteSnapshot;
       env: [string, string][];
     }> => {
       await primeLaunchEnv();
-      const env = launchEnvSync(cli.id);
-      const profile = launchProfile(cli.id) ?? DEFAULT_PROFILE;
+      const profile = requestedProfile || launchProfile(cli.id) || DEFAULT_PROFILE;
+      const env = requestedProfile
+        ? requestedProfile === DEFAULT_PROFILE
+          ? []
+          : await ipc.profileEnv(cli.id, requestedProfile).catch(() => [] as [string, string][])
+        : launchEnvSync(cli.id);
       const route = await inspectFleetRoute(cli, profile, installed);
       const gate = fleetGate(route.state);
       const profileName =
@@ -3464,6 +3475,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // that reservation so the workflow edge, task evidence and PTY all name
       // the same attempt instead of creating a shadow micro-task.
       existingReservation?: TaskReservation,
+      launchOptions?: AgentLaunchOptions,
     ): Promise<boolean> => {
       await hydrateTaskHistory();
       const installed = await getInstalledForLaunch();
@@ -3473,7 +3485,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return false;
       }
-      const fleet = await gateManagedLaunch(cli, installed);
+      const fleet = await gateManagedLaunch(cli, installed, launchOptions?.profileId);
       if (!fleet.allowed) return false;
       // A task that edits files gets the PR's branch in a worktree of its own,
       // same deal as startPrAgent: reuse the worktree already holding it, else
@@ -3517,7 +3529,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const seed = oneLine(
         `${brief} ${progressBrief(def, payload)} ${microTaskProtocol()}`,
       );
-      const start = await startCommandParked(agent, seed, dir);
+      const start = await startCommandParked(agent, seed, dir, launchOptions);
       if (!start) {
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return false;
@@ -3569,7 +3581,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             metadata: { ...durableHistory, history: true },
             route: {
               cli: cli.id,
-              profileId: launchProfile(agent) ?? "default",
+              profileId: fleet.route.profile,
+              requestedModel: launchOptions?.model ?? null,
               harnessVersion: "micro-task-v1",
               promptVersion: "micro-task-v1",
               toolPolicyVersion: "micro-task-v1",
@@ -4005,10 +4018,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       deps: WorkflowExecutorDeps;
     }> => {
       const installed = await getInstalledForLaunch();
-      const cli = pickLaunchCli(undefined, (bin) => Boolean(installed[bin]));
-      if (!cli) throw new Error("No agent CLI is installed for workflow steps");
-      const fleet = await gateManagedLaunch(cli, installed);
-      if (!fleet.allowed) throw new Error("Canopy's fleet gate refused this workflow launch");
+      const inheritedCli = pickLaunchCli(undefined, (bin) => Boolean(installed[bin]));
+      if (!inheritedCli) throw new Error("No agent CLI is installed for workflow steps");
 
       const projectRoot = roots[0] ?? project.components[0]?.path;
       if (!projectRoot) throw new Error("This project has no component root");
@@ -4034,14 +4045,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
         executionMode: "pty",
         selection: { policy: "workflow-default-agent", eligible: [`${agent}:${profileId}`] },
       });
-      const initialRoute = snapshotFor(cli.id, fleet.route.profile);
-
       const deps: WorkflowExecutorDeps = {
         ...DEFAULT_WORKFLOW_STORE_DEPS,
-        routeFor: (_step, selected) => {
+        routeFor: (step, selected) => {
+          const block = workflowAgentForStep(definition, step);
+          const config = workflowAgentSelection(block);
+          const requestedCli = block?.type && block.type !== "inherit" ? block.type : inheritedCli.id;
+          const requestedProfile = config.profileId ?? launchProfile(requestedCli) ?? DEFAULT_PROFILE;
           const route = selected
-            ? snapshotFor(selected.cli, selected.profileId)
-            : initialRoute;
+            ? { ...snapshotFor(selected.cli, selected.profileId), requestedModel: selected.requestedModel }
+              : {
+                ...snapshotFor(requestedCli, requestedProfile),
+                requestedProvider: config.provider ?? null,
+                requestedModel: config.model ?? null,
+                requestedEffort: config.effort ?? null,
+                selection: {
+                  policy: block ? "workflow-agent-block" : "workflow-inherit",
+                  eligible: [`${requestedCli}:${requestedProfile}`],
+                  agentBlockId: block?.id ?? null,
+                  agentType: block?.type ?? "inherit",
+                  agentConfig: config,
+                },
+              };
           return {
             route,
             candidates: [],
@@ -4050,13 +4075,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
           };
         },
         launchAgent: async ({ step, reservation }) => {
+          const block = workflowAgentForStep(definition, step);
+          const selection = workflowAgentSelection(block);
+          const requestedCli = block?.type && block.type !== "inherit" ? block.type : inheritedCli.id;
           const task: MicroTaskDef<{ dir: string }> = {
             id: `workflow-${definition.id}-${step.id}`,
             label: step.name,
             icon: "◇",
             placeholder: "",
             cwd: (payload) => payload.dir,
-            buildContext: () => step.prompt,
+            buildContext: () => workflowAgentPrompt(block, step),
             runLabel: () => `${definition.name} · ${step.name}`,
             effect: step.capabilities.includes("workspace-write") ? "pushes" : "reads",
           };
@@ -4064,9 +4092,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
             task,
             { dir: worktreePath },
             "",
-            reservation.attempt.route.cli,
+            requestedCli,
             undefined,
             reservation,
+            selection,
           );
           if (!started) {
             await settleAttempt({ attemptId: reservation.attempt.attemptId, state: "failed" })
@@ -4207,6 +4236,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const path = `${projectRoot.replace(/[\\/]+$/, "")}/.canopy/workflows/review-change.json`;
     await ipc.fsCreateFile(path);
     await ipc.fsWriteFile(path, `${JSON.stringify(STARTER_WORKFLOW_DEFINITION, null, 2)}\n`);
+  }, [project.components, roots]);
+
+  const saveWorkflowDefinition = useCallback(async (definition: WorkflowDefinition) => {
+    const projectRoot = roots[0] ?? project.components[0]?.path;
+    if (!projectRoot) throw new Error("This project has no component root");
+    const path = `${projectRoot.replace(/[\\/]+$/, "")}/.canopy/workflows/${definition.id}.json`;
+    await Promise.all((definition.agents ?? []).map(async (agent) => {
+      const agentPath = `${projectRoot.replace(/[\\/]+$/, "")}/.canopy/agents/${agent.id}.json`;
+      await ipc.fsCreateFile(agentPath).catch(() => {});
+      await ipc.fsWriteFile(agentPath, `${JSON.stringify(agent, null, 2)}\n`);
+    }));
+    await ipc.fsWriteFile(path, `${JSON.stringify(definition, null, 2)}\n`);
   }, [project.components, roots]);
 
   /** Ticket work is a Task by default: prepare the same durable worktree a
@@ -11569,6 +11610,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onAnswer={answerWorkflowDecision}
             onResume={resumeWorkflow}
             onCreateStarter={createStarterWorkflow}
+            onSave={saveWorkflowDefinition}
           />
         );
       case "mcp":

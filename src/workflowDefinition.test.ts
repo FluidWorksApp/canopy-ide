@@ -6,6 +6,7 @@ import {
   workflowAcceptsTrigger,
   type WorkflowDefinition,
 } from "./workflowDefinition";
+import { AGENT_CLIS } from "./projects";
 
 const context = {
   projectRoot: "/repo",
@@ -68,6 +69,61 @@ describe("validateWorkflowDefinition", () => {
 
   it("ships a safe starter definition that passes the same validator", () => {
     expect(validateWorkflowDefinition(STARTER_WORKFLOW_DEFINITION, context).ok).toBe(true);
+  });
+
+  it("validates reusable agent blocks and step references", () => {
+    const definition = valid();
+    definition.agents = [{
+      id: "reviewer",
+      name: "Opus reviewer",
+      type: "claude",
+      config: { model: "opus", effort: "high" },
+      prompt: "Review evidence precisely.",
+    }];
+    const step = definition.steps[0];
+    if (step.kind === "agent") step.agent = "reviewer";
+    expect(validateWorkflowDefinition(definition, context).ok).toBe(true);
+
+    expect(errorsFor((candidate) => {
+      const agentStep = candidate.steps[0];
+      if (agentStep.kind === "agent") agentStep.agent = "missing";
+    })).toContain("workflow.steps[0].agent does not name a reusable agent block");
+    expect(errorsFor((candidate) => {
+      candidate.agents = [{ id: "wrong", name: "Wrong", type: "agy", config: { effort: "ultra" } }];
+    })).toContain("workflow.agents[0].config.effort is not a supported value");
+    expect(errorsFor((candidate) => {
+      candidate.agents = [{ id: "wrong", name: "Wrong", type: "claude", config: { region: "us" } }];
+    })).toContain("workflow.agents[0].config.region is not declared by claude");
+  });
+
+  it("validates new configuration fields from an agent-type manifest", () => {
+    AGENT_CLIS.push({
+      id: "future-agent",
+      name: "Future Agent",
+      bin: "future-agent",
+      icon: "F",
+      execution: {
+        fields: [{
+          key: "region",
+          label: "Region",
+          control: "select",
+          choices: [{ value: "apac", label: "Asia Pacific" }],
+        }],
+        launchArgs: () => [],
+      },
+    });
+    try {
+      const definition = valid();
+      definition.agents = [{
+        id: "regional",
+        name: "Regional agent",
+        type: "future-agent",
+        config: { region: "apac" },
+      }];
+      expect(validateWorkflowDefinition(definition, context).ok).toBe(true);
+    } finally {
+      AGENT_CLIS.splice(AGENT_CLIS.findIndex((agent) => agent.id === "future-agent"), 1);
+    }
   });
 
   it("rejects schema and capability violations", () => {

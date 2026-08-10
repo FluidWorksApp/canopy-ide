@@ -1,4 +1,5 @@
 import * as ipc from "./ipc";
+import { AGENT_CLIS } from "./projects";
 import { redactSecrets } from "./vibeSecretScan";
 
 export const WORKFLOW_SCHEMA_VERSION = 1 as const;
@@ -47,6 +48,24 @@ export interface WorkflowTriggerDeclaration {
   mentions?: string[];
 }
 
+/** A reusable execution identity. Steps refer to this by id and add their own
+ * task prompt; the block's prompt is stable role/context shared by every use. */
+export interface WorkflowAgentBlock {
+  id: string;
+  name: string;
+  /** Stable agent-type registry id, or `inherit` for the project default. */
+  type: string;
+  /** Values interpreted exclusively by the selected agent type's manifest. */
+  config?: Record<string, string>;
+  prompt?: string;
+}
+
+export interface WorkflowCanvasPoint { x: number; y: number }
+export interface WorkflowCanvasLayout {
+  nodes: Record<string, WorkflowCanvasPoint>;
+  viewport?: WorkflowCanvasPoint & { zoom: number };
+}
+
 interface WorkflowStepBase {
   id: string;
   name: string;
@@ -57,6 +76,8 @@ interface WorkflowStepBase {
 
 export interface WorkflowAgentStep extends WorkflowStepBase {
   kind: "agent";
+  /** Reusable agent block. Omitted by pre-canvas definitions, which inherit. */
+  agent?: string;
   prompt: string;
   acceptance?: string[];
   attemptCap?: number;
@@ -124,11 +145,13 @@ export interface WorkflowDefinition {
   id: string;
   version: string;
   name: string;
+  agents?: WorkflowAgentBlock[];
   triggers: WorkflowTriggerDeclaration[];
   constraints: WorkflowConstraints;
   start: string;
   steps: WorkflowStep[];
   edges: WorkflowEdge[];
+  canvas?: WorkflowCanvasLayout;
 }
 
 /** A safe first file for the empty-state action. It only reads the workspace,
@@ -139,6 +162,12 @@ export const STARTER_WORKFLOW_DEFINITION: WorkflowDefinition = {
   id: "review-change",
   version: "1",
   name: "Review the current change",
+  agents: [{
+    id: "reviewer",
+    name: "Reviewer",
+    type: "inherit",
+    prompt: "Act as a precise code reviewer. Prioritize evidence over style preferences.",
+  }],
   triggers: [{ kind: "manual" }],
   constraints: { componentRoots: ["."], branchPatterns: ["*"] },
   start: "review",
@@ -147,6 +176,7 @@ export const STARTER_WORKFLOW_DEFINITION: WorkflowDefinition = {
       id: "review",
       name: "Review the patch",
       kind: "agent",
+      agent: "reviewer",
       capabilities: ["workspace-read"],
       prompt: "Review the current branch changes. Identify concrete correctness, security, performance, and test-coverage risks. Do not edit files. Report evidence with file paths and line numbers.",
       acceptance: [
@@ -177,6 +207,14 @@ export const STARTER_WORKFLOW_DEFINITION: WorkflowDefinition = {
     { from: "accept", on: "accept", to: "$completed" },
     { from: "accept", on: "incomplete", to: "$failed" },
   ],
+  canvas: {
+    nodes: {
+      "trigger:0": { x: 80, y: 160 },
+      review: { x: 360, y: 120 },
+      accept: { x: 660, y: 120 },
+    },
+    viewport: { x: 0, y: 0, zoom: 1 },
+  },
 };
 
 export interface WorkflowValidationContext {
@@ -205,7 +243,7 @@ const TERMINALS = new Set<WorkflowTerminal>(["$completed", "$failed", "$cancelle
 const MAX_STEPS = 128;
 const MAX_EDGES = 512;
 const MAX_ROUNDS = 16;
-
+const MAX_AGENTS = 64;
 const record = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -317,7 +355,7 @@ export function validateWorkflowDefinition(
   if (!top) return { ok: false, errors: ["workflow definition is not an object"] };
   exactKeys(
     top,
-    ["schemaVersion", "id", "version", "name", "triggers", "constraints", "start", "steps", "edges"],
+    ["schemaVersion", "id", "version", "name", "agents", "triggers", "constraints", "start", "steps", "edges", "canvas"],
     "workflow",
     errors,
   );
@@ -327,6 +365,45 @@ export function validateWorkflowDefinition(
   if (!text(top.name) || top.name.length > 256) errors.push("workflow.name is invalid");
   if (!text(top.start) || !ID.test(top.start)) errors.push("workflow.start is invalid");
   validateConstraints(top.constraints, "workflow.constraints", context, errors);
+
+  const rawAgents = top.agents === undefined ? [] : Array.isArray(top.agents) ? top.agents : [];
+  if (top.agents !== undefined && !Array.isArray(top.agents)) {
+    errors.push("workflow.agents must be an array");
+  }
+  if (rawAgents.length > MAX_AGENTS) errors.push(`workflow.agents must contain at most ${MAX_AGENTS} blocks`);
+  const agentIds = new Set<string>();
+  rawAgents.forEach((raw, index) => {
+    const at = `workflow.agents[${index}]`;
+    const agent = record(raw);
+    if (!agent) { errors.push(`${at} is not an object`); return; }
+    exactKeys(agent, ["id", "name", "type", "config", "prompt"], at, errors);
+    if (!text(agent.id) || !ID.test(agent.id)) errors.push(`${at}.id is invalid`);
+    else if (agentIds.has(agent.id)) errors.push(`${at}.id is duplicated`);
+    else agentIds.add(agent.id);
+    if (!text(agent.name) || agent.name.length > 128) errors.push(`${at}.name is invalid`);
+    if (!text(agent.type) || agent.type.length > 128) errors.push(`${at}.type is invalid`);
+    if (agent.prompt !== undefined && (typeof agent.prompt !== "string" || agent.prompt.length > 32_000)) {
+      errors.push(`${at}.prompt is invalid`);
+    }
+    const typeId = typeof agent.type === "string" ? agent.type : "";
+    const agentType = AGENT_CLIS.find((candidate) => candidate.id === typeId);
+    if (typeId !== "inherit" && !agentType) errors.push(`${at}.type is not registered`);
+    const config = agent.config === undefined ? {} : record(agent.config);
+    if (!config) {
+      errors.push(`${at}.config must be an object`);
+    } else {
+      const fields = new Map(agentType?.execution?.fields.map((field) => [field.key, field]) ?? []);
+      if (Object.keys(config).length > 32) errors.push(`${at}.config has too many fields`);
+      for (const [key, value] of Object.entries(config)) {
+        const field = fields.get(key);
+        if (!field) errors.push(`${at}.config.${key} is not declared by ${typeId || "this agent type"}`);
+        if (!text(value) || value.length > 512) errors.push(`${at}.config.${key} is invalid`);
+        if (field?.choices && !field.choices.some((choice) => choice.value === value)) {
+          errors.push(`${at}.config.${key} is not a supported value`);
+        }
+      }
+    }
+  });
 
   const triggers = Array.isArray(top.triggers) ? top.triggers : [];
   if (triggers.length === 0) errors.push("workflow.triggers must contain at least one declaration");
@@ -371,7 +448,7 @@ export function validateWorkflowDefinition(
     const kind = step.kind;
     const specific =
       kind === "agent"
-        ? ["prompt", "acceptance", "attemptCap"]
+        ? ["agent", "prompt", "acceptance", "attemptCap"]
         : kind === "gate"
           ? ["evidence"]
           : kind === "watch"
@@ -402,6 +479,9 @@ export function validateWorkflowDefinition(
     if (step.constraints !== undefined) validateConstraints(step.constraints, `${at}.constraints`, context, errors);
 
     if (kind === "agent") {
+      if (step.agent !== undefined && (!text(step.agent) || !agentIds.has(step.agent))) {
+        errors.push(`${at}.agent does not name a reusable agent block`);
+      }
       if (!text(step.prompt)) errors.push(`${at}.prompt is required`);
       if (!Array.isArray(step.capabilities) || !step.capabilities.includes("workspace-read")) {
         errors.push(`${at} must declare workspace-read`);
@@ -567,6 +647,37 @@ export function validateWorkflowDefinition(
     return result;
   };
   for (const step of steps) if (!reachesTerminal(step.id)) errors.push(`step ${step.id} has no path to a terminal state`);
+
+  if (top.canvas !== undefined) {
+    const canvas = record(top.canvas);
+    if (!canvas) errors.push("workflow.canvas must be an object");
+    else {
+      exactKeys(canvas, ["nodes", "viewport"], "workflow.canvas", errors);
+      const nodes = record(canvas.nodes);
+      if (!nodes) errors.push("workflow.canvas.nodes must be an object");
+      else for (const [id, rawPoint] of Object.entries(nodes)) {
+        const point = record(rawPoint);
+        if (!point) { errors.push(`workflow.canvas.nodes.${id} is invalid`); continue; }
+        exactKeys(point, ["x", "y"], `workflow.canvas.nodes.${id}`, errors);
+        if (![point.x, point.y].every((value) => typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= 1_000_000)) {
+          errors.push(`workflow.canvas.nodes.${id} is invalid`);
+        }
+      }
+      if (canvas.viewport !== undefined) {
+        const viewport = record(canvas.viewport);
+        if (!viewport) errors.push("workflow.canvas.viewport is invalid");
+        else {
+          exactKeys(viewport, ["x", "y", "zoom"], "workflow.canvas.viewport", errors);
+          if (
+            typeof viewport.x !== "number" || !Number.isFinite(viewport.x) ||
+            typeof viewport.y !== "number" || !Number.isFinite(viewport.y) ||
+            typeof viewport.zoom !== "number" || !Number.isFinite(viewport.zoom) ||
+            viewport.zoom < 0.2 || viewport.zoom > 3
+          ) errors.push("workflow.canvas.viewport is invalid");
+        }
+      }
+    }
+  }
 
   return errors.length > 0
     ? { ok: false, errors }

@@ -37,6 +37,7 @@ import type {
   WorkflowRunDetail,
   WorkflowStepRecordInput,
 } from "./workflowRun";
+import { workflowAgentForStep, workflowAgentPrompt } from "./workflowAgents";
 
 export interface WorkflowExecutionContext {
   projectId: string;
@@ -168,6 +169,8 @@ async function executeAgent(
   context: WorkflowExecutionContext,
   deps: WorkflowExecutorDeps,
 ): Promise<WorkflowRunDetail> {
+  const agentBlock = workflowAgentForStep(initialRun.definition, step);
+  const prompt = workflowAgentPrompt(agentBlock, step);
   const firstPlan = deps.routeFor(step);
   const attemptCap = step.attemptCap ?? 3;
   const metadata = {
@@ -178,6 +181,9 @@ async function executeAgent(
       stepId: step.id,
       capabilities: [...step.capabilities],
       constraints: step.constraints ?? initialRun.definition.constraints,
+      agentBlockId: agentBlock?.id ?? null,
+      agentType: agentBlock?.type ?? "inherit",
+      agentConfig: { ...(agentBlock?.config ?? {}) },
     },
   };
   let reservation = await deps.reserveTask({
@@ -185,10 +191,10 @@ async function executeAgent(
     projectId: context.projectId,
     componentId: context.componentId,
     worktreePath: context.worktreePath,
-    goal: step.prompt,
+    goal: prompt,
     acceptance: step.acceptance ?? [],
     taskClasses: { workflow: step.id },
-    contextSummary: `Workflow ${initialRun.definitionId}@${initialRun.definitionVersion}`,
+    contextSummary: `Workflow ${initialRun.definitionId}@${initialRun.definitionVersion}${agentBlock ? ` using ${agentBlock.name}` : ""}`,
     riskClass: step.capabilities.includes("workspace-write") ? "reversible" : "read-only",
     authorityPolicy: {
       source: "workflow",

@@ -24,17 +24,17 @@ function bodyBetween(start: string, end: string): string {
 describe("managed launch fleet gates", () => {
   it("gates a fresh agent before creating its command or terminal", () => {
     const body = bodyBetween("const startAgentInDir", "const [microRuns");
-    expect(body.indexOf("gateManagedLaunch(cli, installed)")).toBeLessThan(
+    expect(body.indexOf("gateManagedLaunch(cli, installed")).toBeLessThan(
       body.indexOf("startCommandParked(agent"),
     );
-    expect(body.indexOf("gateManagedLaunch(cli, installed)")).toBeLessThan(
+    expect(body.indexOf("gateManagedLaunch(cli, installed")).toBeLessThan(
       body.indexOf("addTerminal("),
     );
   });
 
   it("gates a micro-task before isolation, command creation, or spawning", () => {
     const body = bodyBetween("const startMicroTask", "const startPrQuickTask");
-    const gate = body.indexOf("gateManagedLaunch(cli, installed)");
+    const gate = body.indexOf("gateManagedLaunch(cli, installed");
     expect(gate).toBeGreaterThanOrEqual(0);
     expect(gate).toBeLessThan(body.indexOf("switchTo(repo"));
     expect(gate).toBeLessThan(body.indexOf("startCommandParked(agent"));

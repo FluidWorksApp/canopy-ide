@@ -229,10 +229,44 @@ describe("dangerouslySkipPermissions", () => {
     expect(restoreCommand("amp", "T-9")).toBe("amp threads continue T-9");
   });
 
+  it("pins workflow model, provider, and effort with each CLI's verified flags", () => {
+    expect(startCommand("claude", "review", { model: "opus", effort: "high" })?.command)
+      .toBe("claude 'review' --permission-mode auto --model 'opus' --effort 'high'");
+    expect(startCommand("codex", "build", { model: "gpt-5.6-sol", effort: "xhigh" })?.command)
+      .toBe("codex 'build' --ask-for-approval never --sandbox workspace-write -m 'gpt-5.6-sol' -c 'model_reasoning_effort=\"xhigh\"'");
+    expect(startCommand("opencode", "build", { provider: "anthropic", model: "claude-opus-5" }))
+      .toEqual({ command: "opencode --agent build --model 'anthropic/claude-opus-5'", typePrompt: true });
+    expect(startCommand("agy", "build", { model: "gemini-3.1-pro-preview", effort: "high" })?.command)
+      .toBe("agy --mode accept-edits --model 'gemini-3.1-pro-preview' --effort 'high'");
+    expect(startCommand("aider", "build", { model: "opus", effort: "medium" })?.command)
+      .toBe("aider --model 'opus' --reasoning-effort 'medium'");
+    expect(startCommand("omp", "build", { provider: "anthropic", model: "opus", effort: "max" })?.command)
+      .toBe("omp --approval-mode=write --model 'opus' --provider 'anthropic' --thinking 'max'");
+  });
+
   it("leaves custom CLIs alone — we know nothing about their flags", () => {
     skipping(true);
     addClis([{ id: "acme", name: "Acme", bin: "acme", promptArgs: "go {prompt}" }]);
     expect(startCommand("acme", "hi")?.command).toBe("acme go 'hi'");
+  });
+
+  it("launches a future agent type entirely from its registry manifest", () => {
+    AGENT_CLIS.push({
+      id: "future-agent",
+      name: "Future Agent",
+      bin: "future-agent",
+      icon: "F",
+      execution: {
+        fields: [{ key: "region", label: "Region", control: "text" }],
+        launchArgs: (config) => config.region
+          ? [{ flag: "--region", value: config.region }]
+          : [],
+      },
+    });
+    expect(startCommand("future-agent", "build", { region: "asia southeast" })).toEqual({
+      command: "future-agent --region 'asia southeast'",
+      typePrompt: true,
+    });
   });
 
   it("reaches agents started from the remote portal", () => {

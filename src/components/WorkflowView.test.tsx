@@ -103,6 +103,7 @@ describe("WorkflowView", () => {
         onAnswer={onAnswer}
         onResume={vi.fn()}
         onCreateStarter={vi.fn()}
+        onSave={vi.fn()}
       />,
     );
 
@@ -133,10 +134,11 @@ describe("WorkflowView", () => {
         onAnswer={vi.fn()}
         onResume={vi.fn()}
         onCreateStarter={onCreateStarter}
+        onSave={vi.fn()}
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Create a starter workflow" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Create workflow canvas" }));
     expect(onCreateStarter).toHaveBeenCalledOnce();
     expect(await screen.findByRole("button", { name: "Run" })).toBeInTheDocument();
   });

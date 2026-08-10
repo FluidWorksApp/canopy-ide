@@ -69,7 +69,11 @@ pub struct TaskRouteSnapshot {
     pub executable_fingerprint: Option<String>,
     pub profile_id: String,
     #[serde(default)]
+    pub requested_provider: Option<String>,
+    #[serde(default)]
     pub requested_model: Option<String>,
+    #[serde(default)]
+    pub requested_effort: Option<String>,
     #[serde(default)]
     pub observed_model: Option<String>,
     pub harness_version: String,
@@ -1870,7 +1874,9 @@ fn validate_route(route: &TaskRouteSnapshot) -> Result<(), String> {
     for (value, label) in [
         (&route.cli_version, "cli version"),
         (&route.executable_fingerprint, "executable fingerprint"),
+        (&route.requested_provider, "requested provider"),
         (&route.requested_model, "requested model"),
+        (&route.requested_effort, "requested effort"),
         (&route.observed_model, "observed model"),
     ] {
         bounded_opt(value, 512, label)?;
@@ -2197,7 +2203,9 @@ mod tests {
             cli_version: Some("1.0".into()),
             executable_fingerprint: Some("bin-1".into()),
             profile_id: "default".into(),
+            requested_provider: None,
             requested_model: Some("frontier".into()),
+            requested_effort: Some("high".into()),
             observed_model: None,
             harness_version: "1".into(),
             prompt_version: "1".into(),

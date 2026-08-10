@@ -4272,11 +4272,15 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 text(ctx_post(request))
             }
         }
-        "canopy_diagnostics" => text(ui_op("diagnostics", args, 25)),
-        "canopy_references" => text(ui_op("references", args, 25)),
-        "canopy_definition" => text(ui_op("definition", args, 25)),
-        "canopy_hover" => text(ui_op("hover", args, 25)),
-        "canopy_symbols" => text(ui_op("symbols", args, 25)),
+        // A cold language server can consume its 15s initialization ceiling,
+        // then recover through three supervised restarts. Keep the bridge open
+        // for that bounded cycle so agents receive the answer or final cause,
+        // never the internal "restarting" state halfway through.
+        "canopy_diagnostics" => text(ui_op("diagnostics", args, 90)),
+        "canopy_references" => text(ui_op("references", args, 90)),
+        "canopy_definition" => text(ui_op("definition", args, 90)),
+        "canopy_hover" => text(ui_op("hover", args, 90)),
+        "canopy_symbols" => text(ui_op("symbols", args, 90)),
         "canopy_tickets" => text(ui_op("tickets", args, 25)),
         // Held open like the other GitHub-delegating tools: one `gh` call per
         // repo, and for the companion that is every repo the user has.

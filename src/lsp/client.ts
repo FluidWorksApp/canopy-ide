@@ -61,6 +61,9 @@ interface RunningServer {
 interface DesiredServer {
   spec: ServerSpec;
   serverRoot: string;
+  /** The component root Canopy owns. Package-local servers run deeper, but may
+   *  resolve a hoisted executable/toolchain from here. */
+  projectRoot: string;
 }
 
 type StartResult = "ready" | "transient-failure" | "permanent-failure" | "timeout";
@@ -86,8 +89,8 @@ const exitedBeforeRegistration = new Set<number>();
 const stopping = new Set<number>();
 
 const STARTUP_TIMEOUT_MS = 15_000;
-const INLINE_RETRY_DELAY_MS = 250;
 const RESTART_DELAYS_MS = [500, 1_500, 5_000] as const;
+const RECOVERY_POLL_MS = 50;
 
 const keyFor = (specId: string, serverRoot: string) => `${specId}\0${serverRoot}`;
 
@@ -119,26 +122,37 @@ function serverRootFor(spec: ServerSpec, path: string, root: string): Promise<st
   return hit;
 }
 
-async function serverCommand(spec: ServerSpec, root: string): Promise<string> {
+async function serverCommand(
+  spec: ServerSpec,
+  root: string,
+  projectRoot: string,
+): Promise<string> {
   // Prefer a workspace-local install so projects pin their own server version.
-  const local = `${root}/node_modules/.bin/${spec.command}`;
-  try {
-    await ipc.fsStat(local);
-    return local;
-  } catch {
-    return spec.command; // Rust resolves via login-shell PATH
+  for (const candidateRoot of root === projectRoot ? [root] : [root, projectRoot]) {
+    const local = `${candidateRoot}/node_modules/.bin/${spec.command}`;
+    try {
+      await ipc.fsStat(local);
+      return local;
+    } catch {
+      // Try the component root before falling back to the login-shell PATH.
+    }
   }
+  return spec.command; // Rust resolves via login-shell PATH
 }
 
 /** What to spawn for this project. TypeScript is the one server whose answer
  *  depends on what the project has installed (see resolveTypescriptLaunch);
  *  everything else runs the spec as written. */
-async function launchFor(spec: ServerSpec, root: string): Promise<ServerLaunch> {
-  const command = await serverCommand(spec, root);
+async function launchFor(
+  spec: ServerSpec,
+  root: string,
+  projectRoot: string,
+): Promise<ServerLaunch> {
+  const command = await serverCommand(spec, root, projectRoot);
   if (spec.id !== "typescript") {
     return { command, args: spec.args, initializationOptions: spec.initializationOptions };
   }
-  return resolveTypescriptLaunch(spec, root, command, exists);
+  return resolveTypescriptLaunch(spec, root, command, exists, projectRoot);
 }
 
 /** Fold a raw `$/progress` frame into the server's busy state. Cheap enough to
@@ -265,17 +279,29 @@ async function ensureExitListener(): Promise<void> {
 async function startLanguageServer(
   spec: ServerSpec,
   serverRoot: string,
+  projectRoot: string,
   key: string,
 ): Promise<StartResult> {
   const progress: ProgressState = { active: new Set(), lastEnd: 0 };
   const reader = new IpcMessageReader();
   let serverId: number | null = null;
+  // vscode-languageclient sometimes rejects initialize with only "Unknown
+  // reason" even though the server sent a precise JSON-RPC error first. Keep
+  // the protocol error so the recovery classifier and the agent see the real
+  // cause (for example, a missing workspace TypeScript installation).
+  let protocolFailure: string | null = null;
 
   try {
     await ensureExitListener();
-    const launch = await launchFor(spec, serverRoot);
+    const launch = await launchFor(spec, serverRoot, projectRoot);
     serverId = await ipc.lspStart(launch.command, launch.args, serverRoot, (msg) => {
-      reader.push(msg, (message) => observeProgress(progress, message));
+      reader.push(msg, (message) => {
+        observeProgress(progress, message);
+        const error = (message as Message & { error?: { message?: unknown } }).error;
+        if (typeof error?.message === "string" && error.message.trim()) {
+          protocolFailure = error.message.trim();
+        }
+      });
     });
     readers.set(serverId, reader);
     if (exitedBeforeRegistration.delete(serverId)) {
@@ -333,7 +359,8 @@ async function startLanguageServer(
       stopping.add(serverId);
       await ipc.lspStop(serverId).catch(() => {});
     }
-    const reason = serverUnavailableMessage(spec, err);
+    const failure = protocolFailure ?? err;
+    const reason = serverUnavailableMessage(spec, failure);
     failures.set(key, reason);
     console.warn(`LSP unavailable for ${spec.id} (${serverRoot}):`, err);
     const { invoke } = await import("@tauri-apps/api/core");
@@ -341,16 +368,17 @@ async function startLanguageServer(
       level: "warn",
       message: `LSP unavailable for ${spec.id} (${serverRoot}): ${reason}`,
     }).catch(() => {});
-    return failureKind(err);
+    return failureKind(failure);
   }
 }
 
 async function runManagedStartup(key: string, target: DesiredServer): Promise<void> {
-  let result = await startLanguageServer(target.spec, target.serverRoot, key);
-  if (result === "transient-failure" && desired.has(key)) {
-    await sleep(INLINE_RETRY_DELAY_MS);
-    if (desired.has(key)) result = await startLanguageServer(target.spec, target.serverRoot, key);
-  }
+  const result = await startLanguageServer(
+    target.spec,
+    target.serverRoot,
+    target.projectRoot,
+    key,
+  );
 
   // The workspace may have closed while initialization was in flight. Never
   // resurrect a server after its owner stopped asking Canopy to keep it ready.
@@ -362,6 +390,23 @@ async function runManagedStartup(key: string, target: DesiredServer): Promise<vo
   }
   if (result !== "ready" && result !== "permanent-failure" && desired.has(key)) {
     scheduleRestart(key);
+  }
+}
+
+/** A tool call is a demand for an answer, not a request to begin recovery in
+ *  the background. Stay with the bounded supervisor until it either produces
+ *  a live server or exhausts its restart plan. All file-based LSP tools prime
+ *  through this function, so references/definition/hover get the same contract
+ *  as diagnostics. */
+async function waitForManagedRecovery(key: string): Promise<void> {
+  while (!running.has(key)) {
+    const inFlight = starting.get(key);
+    if (inFlight) {
+      await inFlight;
+      continue;
+    }
+    if (!restartTimers.has(key)) return;
+    await sleep(RECOVERY_POLL_MS);
   }
 }
 
@@ -384,12 +429,13 @@ export async function ensureLanguageServer(path: string, root: string): Promise<
   const serverRoot = await serverRootFor(spec, path, root);
   const key = keyFor(spec.id, serverRoot);
   if (running.has(key)) return;
-  const target = { spec, serverRoot };
+  const target = { spec, serverRoot, projectRoot: root };
   desired.set(key, target);
   // A direct demand after the bounded supervisor gave up starts a fresh
   // recovery window; ordinary calls during recovery share its in-flight work.
   if (!starting.has(key) && !restartTimers.has(key)) restartAttempts.delete(key);
   await ensureManagedServer(key, target);
+  await waitForManagedRecovery(key);
 }
 
 async function serverFor(path: string, root: string): Promise<RunningServer | null> {

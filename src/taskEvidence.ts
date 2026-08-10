@@ -73,7 +73,9 @@ export function routeFacts(route: TaskRouteSnapshot): RouteFact[] {
     fact("Agent", route.cli, NOT_RECORDED),
     fact("Version", route.cliVersion, NOT_RECORDED),
     fact("Profile", route.profileId, NOT_RECORDED),
+    fact("Provider", route.requestedProvider, NONE_REQUESTED),
     fact("Requested model", route.requestedModel, NONE_REQUESTED),
+    fact("Effort", route.requestedEffort, NONE_REQUESTED),
     // Deliberately not `route.observedModel ?? route.requestedModel`. See the
     // module header: that substitution is the whole failure this reads against.
     fact("Observed model", route.observedModel, NOT_OBSERVED),

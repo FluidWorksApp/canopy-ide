@@ -24,7 +24,12 @@
 // file, which is what the screenshots themselves already do.
 
 import * as ipc from "./ipc";
-import { AGENT_CLIS, startCommand, type AgentCli } from "./projects";
+import {
+  AGENT_CLIS,
+  startCommand,
+  type AgentCli,
+  type AgentLaunchOptions,
+} from "./projects";
 import { getSettings } from "./settings";
 
 /**
@@ -119,15 +124,16 @@ export async function startCommandParked(
   agentId: string,
   seed: string,
   dir: string,
+  options?: AgentLaunchOptions,
 ): Promise<{ command: string; typePrompt: boolean } | null> {
-  const start = startCommand(agentId, seed);
+  const start = startCommand(agentId, seed, options);
   // typePrompt means the CLI takes no prompt argument: it launches bare and the
   // text is typed into its TUI once it is up, which is raw mode and has no such
   // limit. Only a prompt that has to survive the SHELL is at risk here.
   if (!start || start.typePrompt || fitsOnOneLine(start.command)) return start;
   try {
     const path = await ipc.spotSaveContextText(dir, seed);
-    return startCommand(agentId, briefPointer(path)) ?? start;
+    return startCommand(agentId, briefPointer(path), options) ?? start;
   } catch (err) {
     void ipc.jsLog("warn", `agent: could not park a ${byteLength(seed)}-byte brief: ${String(err)}`);
     return start;
