@@ -4118,7 +4118,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
       };
     },
     [
-      gateManagedLaunch,
       getInstalledForLaunch,
       onNotice,
       project.components,
