@@ -43,6 +43,7 @@ import { BroomIcon, HeartIcon, StatsIcon } from "./icons";
 import { ClipboardHistory } from "./ClipboardHistory";
 import type { AgentEventEntry } from "../types";
 import { modelCommandLine, type ModelSwitch } from "../agentModels";
+import { agentCliFor } from "../projects";
 import { useBranchSwitch } from "../useBranchSwitch";
 
 /** How many branches the tray's menu shows before you type. It is a shortcut to
@@ -372,7 +373,11 @@ export const StatusBar = memo(function StatusBar({
     if (activePtyId == null) return null;
     for (let i = events.length - 1; i >= 0; i--) {
       const d = events[i].data;
-      if (d?.pty === activePtyId && d.agent === "opencode" && d.sessionId) {
+      if (
+        d?.pty === activePtyId &&
+        agentCliFor(d.agent)?.capabilities?.eventSessionLookup &&
+        d.sessionId
+      ) {
         return d.sessionId;
       }
     }

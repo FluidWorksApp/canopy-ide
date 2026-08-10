@@ -1,10 +1,10 @@
 import type { AccountStatus, AgentProfile, SetupReport } from "./ipc";
 import { loginCommand } from "./profiles";
-import type { AgentCli } from "./projects";
+import { streamsStructured, type AgentCli } from "./projects";
 import type { BuilderQuestionAction } from "./vibeBuilderSessionTypes";
 import type { RouteCandidate } from "./vibeFailover";
 
-export type VibeBuildCli = "claude" | "codex";
+export type VibeBuildCli = string;
 
 export type VibeRouteRecoveryAction =
   | { kind: "install"; cli: VibeBuildCli }
@@ -42,10 +42,8 @@ export interface VibeRouteRecoveryDeps {
 }
 
 const RESPONSE_PREFIX = "vibe:route-recovery:";
-const BUILD_CLIS = new Set<VibeBuildCli>(["claude", "codex"]);
-
 const isBuildCli = (cli: string): cli is VibeBuildCli =>
-  BUILD_CLIS.has(cli as VibeBuildCli);
+  streamsStructured(cli);
 
 export function routeRecoveryResponse(action: VibeRouteRecoveryAction): string {
   return action.kind === "agent-settings"

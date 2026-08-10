@@ -187,7 +187,7 @@ export function codexResumeSandbox(
  *  attempted, but they do not confine Edit/Write paths. The existing Bash
  *  destructive-command hook is a separate safety gate, not filesystem
  *  containment. */
-const CLAUDE_RUNNER: StructuredRunner = {
+export const CLAUDE_RUNNER: StructuredRunner = {
   tier: "structured",
   dialect: "claude",
   verification: {
@@ -255,7 +255,7 @@ const CLAUDE_RUNNER: StructuredRunner = {
  *  The prompt is NOT here: it is a positional argument appended per turn by the
  *  transport, because on this CLI the prompt is part of launching rather than
  *  something written to a running process. */
-const CODEX_RUNNER: StructuredRunner = {
+export const CODEX_RUNNER: StructuredRunner = {
   tier: "oneshot",
   dialect: "codex",
   verification: {

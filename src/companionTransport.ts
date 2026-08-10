@@ -31,7 +31,7 @@ import {
   startStructured as startProjectStructured,
   type ProjectRunnerTransport,
 } from "./projectRunner";
-import { STRUCTURED_RUNNERS } from "./structuredRunners";
+import { structuredRunnerFor } from "./projects";
 
 export { StructuredTransport };
 
@@ -365,7 +365,7 @@ export function startOneshot(
     env?: [string, string][];
   },
 ): CompanionTransport {
-  const runner = STRUCTURED_RUNNERS[cliId];
+  const runner = structuredRunnerFor(cliId);
   if (!runner) throw new Error(`${cliId} has no verified runner`);
   let transport: OneshotTransport;
   const spawn = async (message: string, sessionId: string | null) => {

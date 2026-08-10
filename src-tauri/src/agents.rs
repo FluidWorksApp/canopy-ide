@@ -725,19 +725,6 @@ pub async fn hook_bridge_path() -> Option<String> {
     )
 }
 
-/// Every CLI Canopy knows how to wire up, with the binary that proves it is
-/// installed. One list, so the panel, the health check and the startup repair
-/// can't drift apart about who is supported.
-pub const SUPPORTED_AGENTS: &[(&str, &str)] = &[
-    ("claude", "claude"),
-    ("codex", "codex"),
-    ("agy", "agy"),
-    ("aider", "aider"),
-    ("opencode", "opencode"),
-    ("omp", "omp"),
-    ("amp", "amp"),
-];
-
 /// What one step of an agent's setup did. Steps are reported individually
 /// because they fail independently: an MCP registry that can't be parsed says
 /// nothing about whether the hooks landed, and collapsing the two into a single
@@ -805,32 +792,40 @@ pub fn setup_agent_in(agent: &str, cfg: &str, home: &str) -> Result<SetupReport,
         ));
     }
     let bridge = format!("{home}/.canopy/agent-events.jsonl");
+    let Some(cli) = crate::agent_cli::resolve(agent) else {
+        return Err(format!("auto-setup not supported for {agent} yet"));
+    };
+    let Some(adapter) = cli.integration else {
+        return Err(format!("auto-setup not supported for {agent} yet"));
+    };
+    let agent = cli.id;
     // Eager, not `?`-chained: every step runs even when an earlier one failed,
     // so the report says what actually happened to each.
-    let steps: Vec<(&str, Result<String, String>)> = match agent {
-        "claude" => vec![
+    let steps: Vec<(&str, Result<String, String>)> = match adapter {
+        crate::agent_cli::IntegrationAdapter::Claude => vec![
             ("hooks", setup_claude_hooks(cfg, home, &bridge)),
             ("mcp", setup_claude_mcp(cfg, home)),
         ],
-        "codex" => vec![
+        crate::agent_cli::IntegrationAdapter::Codex => vec![
             ("hooks", setup_codex_hooks(cfg, home, &bridge)),
             ("mcp", setup_codex_mcp(cfg, home)),
         ],
-        "agy" => vec![
+        crate::agent_cli::IntegrationAdapter::Antigravity => vec![
             ("hooks", setup_agy_hooks(cfg, home)),
             ("mcp", setup_agy_mcp(cfg, home)),
         ],
-        "aider" => vec![("hooks", setup_aider_hooks(cfg, home))],
-        "opencode" => vec![
+        crate::agent_cli::IntegrationAdapter::Aider => {
+            vec![("hooks", setup_aider_hooks(cfg, home))]
+        }
+        crate::agent_cli::IntegrationAdapter::OpenCode => vec![
             ("hooks", setup_opencode_plugin(cfg, home)),
             ("mcp", setup_opencode_mcp(cfg, home)),
         ],
-        "omp" => vec![("hooks", setup_omp_hook(cfg, home))],
-        "amp" => vec![
+        crate::agent_cli::IntegrationAdapter::Omp => vec![("hooks", setup_omp_hook(cfg, home))],
+        crate::agent_cli::IntegrationAdapter::Amp => vec![
             ("hooks", setup_amp_plugin(cfg, home)),
             ("mcp", setup_amp_mcp(cfg, home)),
         ],
-        _ => return Err(format!("auto-setup not supported for {agent} yet")),
     };
     let steps: Vec<SetupStep> = steps
         .into_iter()
@@ -2839,13 +2834,12 @@ pub fn integration_health(
     home: &str,
     installed: &HashMap<String, bool>,
 ) -> Vec<IntegrationHealth> {
-    SUPPORTED_AGENTS
-        .iter()
-        .map(|(agent, bin)| IntegrationHealth {
-            agent: (*agent).into(),
-            cli_installed: installed.get(*bin).copied().unwrap_or(false),
-            hooks: hooks_state(agent, cfg, home),
-            mcp: mcp_state(agent, cfg, home),
+    crate::agent_cli::integrated_clis()
+        .map(|cli| IntegrationHealth {
+            agent: cli.id.into(),
+            cli_installed: installed.get(cli.bin).copied().unwrap_or(false),
+            hooks: hooks_state(cli.id, cfg, home),
+            mcp: mcp_state(cli.id, cfg, home),
         })
         .collect()
 }
@@ -2853,7 +2847,9 @@ pub fn integration_health(
 #[tauri::command]
 pub async fn agent_integration_health() -> Result<Vec<IntegrationHealth>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
-    let bins: Vec<String> = SUPPORTED_AGENTS.iter().map(|(_, b)| (*b).into()).collect();
+    let bins: Vec<String> = crate::agent_cli::integrated_clis()
+        .map(|cli| cli.bin.into())
+        .collect();
     Ok(integration_health(&home, &home, &which_installed(&bins)))
 }
 
@@ -2892,7 +2888,9 @@ pub fn heal_integrations(app: AppHandle) {
             let Ok(home) = std::env::var("HOME") else {
                 return;
             };
-            let bins: Vec<String> = SUPPORTED_AGENTS.iter().map(|(_, b)| (*b).into()).collect();
+            let bins: Vec<String> = crate::agent_cli::integrated_clis()
+                .map(|cli| cli.bin.into())
+                .collect();
             let installed = which_installed(&bins);
             let report = heal_integrations_in(&home, env!("CARGO_PKG_VERSION"), &installed);
             for line in &report.repaired {
@@ -5365,9 +5363,8 @@ mod integration_tests {
     /// result never depends on which CLIs the machine running it happens to
     /// have installed.
     fn only_agy_installed() -> HashMap<String, bool> {
-        SUPPORTED_AGENTS
-            .iter()
-            .map(|(_, bin)| ((*bin).to_string(), *bin == "agy"))
+        crate::agent_cli::integrated_clis()
+            .map(|cli| (cli.bin.to_string(), cli.id == "agy"))
             .collect()
     }
 
@@ -5935,10 +5932,11 @@ mod tests {
     #[test]
     fn the_fidelity_manifest_covers_every_supported_agent() {
         let declared = crate::agent_life::all_fidelity();
-        for (id, _) in crate::agents::SUPPORTED_AGENTS {
+        for cli in crate::agent_cli::integrated_clis() {
             assert!(
-                declared.iter().any(|c| c.id == *id),
-                "{id} is in SUPPORTED_AGENTS but absent from shared/agentLife/fidelity.json"
+                declared.iter().any(|c| c.id == cli.id),
+                "{} has an integration adapter but is absent from shared/agentLife/fidelity.json",
+                cli.id,
             );
         }
     }

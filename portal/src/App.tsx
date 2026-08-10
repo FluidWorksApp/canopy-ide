@@ -255,11 +255,11 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     for (const item of pending) {
       if (notified.current.has(item.key)) continue
       notified.current.add(item.key)
-      void showAlert(alertFor(item))
+      void showAlert(alertFor(item, clis))
     }
     // Keys are per-session-per-event, so the set would grow all day otherwise.
     if (notified.current.size > 500) notified.current = new Set(pending.map((p) => p.key))
-  }, [pending])
+  }, [pending, clis])
 
   // The same buzz for attention-channel questions — the ones that never touch
   // the hook stream (canopy_ask_user, a dialog raised in a background project).

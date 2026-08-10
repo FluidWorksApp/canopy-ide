@@ -22,6 +22,7 @@ import { getSettings } from "./settings";
 import { heldBadge, heldBranches } from "./branchSwitch";
 import { getSnapshot as clipboardSnapshot } from "./clipboardStore";
 import { rendererIoBudget } from "./ioBudget";
+import { agentCliFor } from "./projects";
 
 /** What Enter does on a row — ProjectView owns the dispatch, this names it. */
 export type SpotAction =
@@ -542,15 +543,15 @@ export async function indexRows(query: string, ctx: SpotContext, roots: string[]
       });
       continue;
     }
-    // Aider keeps its history as a file in the repo and has no session to
-    // reopen — so the row opens the history itself. Every other agent's
-    // conversation opens as a session.
-    if (h.agent === "aider") {
+    // A file-backed store has no session to reopen, so its manifest sends the
+    // row to the history itself. Every session-backed agent opens a session.
+    const agentType = agentCliFor(h.agent);
+    if (agentType?.capabilities?.conversationStore?.open === "file") {
       out.push({
         id: `spot:${h.kind}:${h.key}`,
         group: "Agent Sessions",
-        kind: "agent:aider",
-        title: `aider · ${dir(h.cwd)}`,
+        kind: `agent:${agentType.id}`,
+        title: `${agentType.name} · ${dir(h.cwd)}`,
         detail: h.snippet,
         score: 0,
         action: { type: "open-file", path: h.meta },

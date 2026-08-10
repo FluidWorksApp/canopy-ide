@@ -1,5 +1,5 @@
 import type { Project, Component, ComponentRole, RunCommand } from "./projects";
-import { AGENT_CLIS } from "./projects";
+import { agentCliFor, streamsStructured } from "./projects";
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 import { launchEnvSync } from "./profiles";
 import { getSettings } from "./settings";
@@ -8,7 +8,7 @@ import { DEFAULT_VIBE_BUILDER_DEPS } from "./vibeBuilderSession";
 import type { BuilderSession } from "./vibeBuilderSessionTypes";
 import { redactSecrets } from "./vibeSecretScan";
 import type { ProjectRunnerController, ProjectRunnerTransport } from "./projectRunner";
-import { streamsStructured, type StructuredRunnerLaunch } from "./structuredRunners";
+import type { StructuredRunnerLaunch } from "./structuredRunners";
 import type {
   TaskAttemptReserveInput,
   TaskAttemptSettlement,
@@ -1385,7 +1385,7 @@ export const DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS: VibeProjectSetupTaskDeps = {
   runner: DEFAULT_VIBE_BUILDER_DEPS.runner,
   listRoutes: DEFAULT_VIBE_BUILDER_DEPS.listRoutes,
   cliVersion: DEFAULT_VIBE_BUILDER_DEPS.cliVersion,
-  binFor: (cli) => AGENT_CLIS.find((candidate) => candidate.id === cli)?.bin ?? null,
+  binFor: (cli) => agentCliFor(cli)?.bin ?? null,
   sessionId: DEFAULT_VIBE_BUILDER_DEPS.sessionId,
   reserve: DEFAULT_VIBE_BUILDER_DEPS.reserve,
   startAttempt: DEFAULT_VIBE_BUILDER_DEPS.startAttempt,

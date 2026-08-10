@@ -22,7 +22,7 @@
 import type { SubTab, SideTab } from "./components/ProjectView/helpers";
 import type * as ipc from "./ipc";
 import type { ReviewPayload } from "./components/ReviewView";
-import { AGENT_CLIS, restoreCommand, resumeSessionId } from "./projects";
+import { agentCliFor, restoreCommand, resumeSessionId } from "./projects";
 import { agentIdForCommand } from "./agentIdentity";
 import { claimLabel } from "./claims";
 import type { TerminalGroup } from "./terminalGroups";
@@ -312,7 +312,7 @@ export function stepLabel(t: SnapshotTab): string {
     case "terminal": {
       const where = baseName(t.cwd);
       if (t.agentId) {
-        const name = AGENT_CLIS.find((c) => c.id === t.agentId)?.name ?? t.agentId;
+        const name = agentCliFor(t.agentId)?.name ?? t.agentId;
         return t.sessionId
           ? `Resuming ${name} in ${where}`
           : `Starting ${name} in ${where}`;

@@ -9,6 +9,7 @@ import type { ReactNode } from 'react'
 import {
   type AgentRow,
   type Project,
+  type RemoteCli,
   STATE_LABEL,
   agentMeta,
   basename,
@@ -46,8 +47,16 @@ export function Metric({ n, label, tone }: { n: number; label: string; tone?: st
  *  tinted with the agent's brand hue and stamped with its glyph. This is the
  *  single loudest bit of colour in the list — what turns a wall of rows into a
  *  scannable panel. `sz` lets a project card show a denser cluster of them. */
-export function AgentBadge({ agent, sz = 34 }: { agent: string; sz?: number }) {
-  const m = agentMeta(agent)
+export function AgentBadge({
+  agent,
+  sz = 34,
+  clis = [],
+}: {
+  agent: string
+  sz?: number
+  clis?: readonly RemoteCli[]
+}) {
+  const m = agentMeta(agent, clis)
   return (
     <span className="abadge" style={{ width: sz, height: sz }} title={m.label}>
       <AgentGlyph agent={agent} s={Math.round(sz * 0.62)} />
@@ -82,14 +91,16 @@ export function AgentCard({
   index = 0,
   onOpen,
   trailing,
+  clis = [],
 }: {
   row: AgentRow
   index?: number
   onOpen?: () => void
   trailing?: ReactNode
+  clis?: readonly RemoteCli[]
 }) {
   const clickable = !!onOpen
-  const m = agentMeta(row.agent)
+  const m = agentMeta(row.agent, clis)
   // A terminal has no hook behind it, so "idle"/"working" would be a guess.
   // Say what it is instead, and show its title where a prompt would go.
   const stateLabel = row.terminal
@@ -115,7 +126,7 @@ export function AgentCard({
       disabled={!clickable}
     >
       <span className={`agent-card-rail ${row.live ? row.state : 'ended'}`} />
-      <AgentBadge agent={row.agent} />
+      <AgentBadge agent={row.agent} clis={clis} />
       <div className="agent-main">
         <div className="agent-top">
           <span className="agent-name">{m.label}</span>

@@ -6,11 +6,10 @@ import {
   type StructuredRunnerHost,
 } from "./structuredEvents";
 import {
-  STRUCTURED_RUNNERS,
-  streamsStructured,
   type StructuredRunner,
   type StructuredRunnerLaunch,
 } from "./structuredRunners";
+import { streamsStructured, structuredRunnerFor } from "./projects";
 
 export interface ProjectRunnerTransport {
   send(text: string): Promise<void>;
@@ -254,7 +253,7 @@ export async function startStructured(
   opts: { resume: boolean; process: ProjectRunnerProcess },
 ): Promise<ProjectRunnerTransport> {
   if (!attemptId) throw new Error("A structured runner requires an attempt id");
-  const runner = STRUCTURED_RUNNERS[cliId];
+  const runner = structuredRunnerFor(cliId);
   // One rule, asked in one place. `streamsStructured` is the same predicate the
   // route eligibility filter uses (vibeProjectSetup, vibeBuilderSession), and it
   // is called here rather than re-stated: this launcher used to carry its own

@@ -1,7 +1,7 @@
 import type { ModelChoice } from "./agentModels";
 import { SEEDS } from "./modelCatalog";
 import {
-  AGENT_CLIS,
+  agentCliFor,
   type AgentCli,
   type AgentConfigField,
   type AgentLaunchOptions,
@@ -11,7 +11,7 @@ import type { WorkflowAgentBlock, WorkflowAgentStep } from "./workflowDefinition
 export type AgentLaunchSelection = AgentLaunchOptions;
 
 export const workflowAgentType = (typeId: string): AgentCli | undefined =>
-  AGENT_CLIS.find((candidate) => candidate.id === typeId);
+  agentCliFor(typeId);
 
 /** Resolve a manifest's catalogue declaration without knowing the agent id. */
 export const modelChoicesFor = (field?: AgentConfigField): ModelChoice[] => {

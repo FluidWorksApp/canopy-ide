@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   failoverDecision,
-  FAMILY_FOR_CLI,
   rankRoutes,
   type RouteCandidate,
 } from "./vibeFailover";
 import type { FleetState } from "./fleetState";
 import type { AttemptOutcome } from "./failureClassifier";
-import { streamsStructured } from "./structuredRunners";
+import { routingAgentClis, streamsStructured } from "./projects";
 
 const state = (
   agent: string,
@@ -95,9 +94,9 @@ describe("route selection", () => {
       choices: [{ id: "gemini-3.1-pro-preview", label: "Gemini", hint: "" }],
     };
     expect(rankRoutes([phantom], "build")).toEqual([]);
-    expect(FAMILY_FOR_CLI).not.toHaveProperty("gemini");
-    for (const cli of Object.keys(FAMILY_FOR_CLI)) {
-      expect(streamsStructured(cli), cli).toBe(true);
+    expect(routingAgentClis().some((cli) => cli.id === "gemini")).toBe(false);
+    for (const cli of routingAgentClis()) {
+      expect(streamsStructured(cli.id), cli.id).toBe(true);
     }
   });
 });

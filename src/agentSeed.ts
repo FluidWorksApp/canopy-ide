@@ -26,6 +26,7 @@
 import * as ipc from "./ipc";
 import {
   AGENT_CLIS,
+  agentCliFor,
   startCommand,
   type AgentCli,
   type AgentLaunchOptions,
@@ -61,13 +62,14 @@ export function pickLaunchCli(
   requested: string | undefined,
   installed: (bin: string) => boolean,
 ): AgentCli | undefined {
-  if (requested) return AGENT_CLIS.find((c) => c.id === requested);
+  if (requested) return agentCliFor(requested);
   const here = AGENT_CLIS.filter((c) => installed(c.bin));
   const preferred = getSettings().defaultAgent;
+  const preferredCli = agentCliFor(preferred);
   return (
-    here.find((c) => c.id === preferred) ??
+    here.find((c) => c === preferredCli) ??
     here[0] ??
-    AGENT_CLIS.find((c) => c.id === preferred) ??
+    preferredCli ??
     AGENT_CLIS[0]
   );
 }

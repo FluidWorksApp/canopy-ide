@@ -506,7 +506,7 @@ mod tests {
         }
     }
 
-    // The manifest-covers-SUPPORTED_AGENTS assertion lives in `agents.rs`,
+    // The manifest-covers-native-integration assertion lives in `agents.rs`,
     // beside the list it checks — this module is also compiled into the hook
     // binary, which has no `agents` module.
     #[test]

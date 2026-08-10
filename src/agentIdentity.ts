@@ -19,7 +19,7 @@
 
 import { POLICY, agentLife } from "../shared/agentLife";
 import type { AgentHint, SessionDigest } from "./ipc";
-import { AGENT_CLIS, agentForBin, agentForPkg, binName } from "./projects";
+import { agentCliFor, agentForBin, agentForPkg, binName } from "./projects";
 
 export interface AgentIdentity {
   /** Registry id, or null when the terminal is running something we can see
@@ -44,7 +44,7 @@ const KNOWN_TUIS = new Set([
 
 /** Looked up per call rather than cached in a Map built at module load: the
  *  registry is re-resolved whenever a binary override is edited. */
-const cliById = (id: string) => AGENT_CLIS.find((c) => c.id === id);
+const cliById = (id: string) => agentCliFor(id);
 
 /** Learned binary -> agent id, keyed by canonical executable path.
  *

@@ -32,7 +32,7 @@ use crate::agents::{read_json_config, write_config_atomic};
 /// row — this is what tells you *whose* it is.
 #[derive(serde::Serialize, Clone, Debug, PartialEq)]
 pub struct McpSource {
-    /// Agent id, matching SUPPORTED_AGENTS where there is one.
+    /// Stable agent CLI id, matching the native CLI manifest where there is one.
     pub agent: String,
     /// What the UI calls this CLI, plus the scope: "Claude Code (project)".
     pub label: String,

@@ -20,7 +20,7 @@ import {
 import { fleetGate, rankFleet, type FleetState } from "./fleetState";
 import type { ModelChoice } from "./agentModels";
 import type { ModelFamily } from "./modelCatalog";
-import { streamsStructured } from "./structuredRunners";
+import { streamsStructured } from "./projects";
 import {
   modelForClass,
   TIER_FOR_CLASS,
@@ -99,14 +99,6 @@ export function rankRoutes(
     ];
   });
 }
-
-/** Which model family a coding CLI speaks. Only the two that route today —
- *  an agent absent here has no family we can name, and naming one anyway is
- *  how a route tuple starts lying. */
-export const FAMILY_FOR_CLI: Readonly<Record<string, ModelFamily>> = {
-  claude: "anthropic",
-  codex: "openai",
-};
 
 /** The route record the task store keeps. Deliberately mirrors
  *  TaskRouteSnapshot rather than importing it: this module decides routes and

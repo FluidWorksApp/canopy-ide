@@ -1,5 +1,5 @@
 import * as ipc from "./ipc";
-import { AGENT_CLIS } from "./projects";
+import { agentCliFor } from "./projects";
 import { redactSecrets } from "./vibeSecretScan";
 
 export const WORKFLOW_SCHEMA_VERSION = 1 as const;
@@ -386,7 +386,7 @@ export function validateWorkflowDefinition(
       errors.push(`${at}.prompt is invalid`);
     }
     const typeId = typeof agent.type === "string" ? agent.type : "";
-    const agentType = AGENT_CLIS.find((candidate) => candidate.id === typeId);
+    const agentType = agentCliFor(typeId);
     if (typeId !== "inherit" && !agentType) errors.push(`${at}.type is not registered`);
     const config = agent.config === undefined ? {} : record(agent.config);
     if (!config) {

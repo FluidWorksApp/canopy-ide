@@ -329,7 +329,7 @@ export function WorkflowCanvas({ definition, run, projectRoot, onChange }: Workf
               onDragStart={(event) => event.dataTransfer.setData("application/x-canopy-agent", agent.id)}
               onClick={() => setSelected(`agentlib:${agent.id}`)}
             >
-              <AgentIcon id={agent.type === "inherit" ? "claude" : agent.type} size={16} />
+              <AgentIcon id={agent.type} size={16} />
               <span><b>{agent.name}</b><small>{agent.type}{agent.config?.model ? ` · ${agent.config.model}` : ""}</small></span>
               <i>⋮⋮</i>
             </button>

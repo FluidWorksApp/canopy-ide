@@ -94,13 +94,13 @@ function NotifyControl() {
 }
 
 function alertRow(ctx: PanelCtx, item: PendingItem) {
-  const m = agentMeta(item.agent)
+  const m = agentMeta(item.agent, ctx.clis)
   const live = item.pty != null && ctx.rows.some((r) => r.ptyId === item.pty)
   return (
     <Row
       key={item.key}
       on={ctx.openKey === `terminal:${item.pty}`}
-      icon={<AgentBadge agent={item.agent} sz={26} />}
+      icon={<AgentBadge agent={item.agent} sz={26} clis={ctx.clis} />}
       title={
         <>
           {m.label}
@@ -220,8 +220,8 @@ export const usagePanel: PanelDef = {
               {plans.map((p) => (
                 <div className="usage-card" key={p.agent}>
                   <div className="usage-head">
-                    <AgentBadge agent={p.agent} sz={24} />
-                    <span className="usage-name">{agentMeta(p.agent).label}</span>
+                    <AgentBadge agent={p.agent} sz={24} clis={ctx.clis} />
+                    <span className="usage-name">{agentMeta(p.agent, ctx.clis).label}</span>
                     {p.plan && <Pill>{p.plan}</Pill>}
                   </div>
                   {p.windows.map((w) => (

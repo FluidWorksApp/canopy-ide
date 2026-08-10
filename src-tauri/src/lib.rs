@@ -1,3 +1,4 @@
+mod agent_cli;
 mod agent_instructions;
 mod agent_life;
 mod agentid;

@@ -156,6 +156,8 @@ import {
 } from "../../agentSpawn";
 import {
   AGENT_CLIS,
+  agentCliFor,
+  agentModelSwitchFor,
   announceCliInstallsChanged,
   binName,
   SHELL_PATTERN,
@@ -363,7 +365,6 @@ import {
 } from "../../agentDisplayName";
 import {
   modelCommandLine,
-  modelSwitchFor,
   type ModelChoice,
 } from "../../agentModels";
 import { refreshChoices } from "../../modelCatalog";
@@ -2557,7 +2558,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         r.cwd,
         r.command,
         r.digest.agent ?? "agent",
-        AGENT_CLIS.find((c) => c.id === r.agentId)?.icon,
+        agentCliFor(r.agentId)?.icon,
         false,
         env,
         env.length ? r.profile : undefined,
@@ -2626,7 +2627,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     setReloadAsk(null);
     await primeLaunchEnv();
     for (const item of reloading(ask.plan)) {
-      const cli = AGENT_CLIS.find((c) => c.id === item.agent.agentId);
+      const cli = agentCliFor(item.agent.agentId);
       if (!cli || !item.action) continue;
       const env = launchEnvSync(cli.id);
       // No env means the account could not be resolved after all; leaving the
@@ -4350,7 +4351,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         run.cwd,
         cmd,
         runTitle(run),
-        AGENT_CLIS.find((c) => c.id === run.agent)?.icon,
+        agentCliFor(run.agent)?.icon,
       );
       if (id) onNotice(`Picked “${runTitle(run)}” back up where it left off.`);
     },
@@ -7603,7 +7604,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         runIn,
         cmd,
         agentId,
-        AGENT_CLIS.find((c) => c.id === agentId)?.icon,
+        agentCliFor(agentId)?.icon,
       );
       for (let i = 0; i < 40; i++) {
         await new Promise((r) => setTimeout(r, 400));
@@ -8041,7 +8042,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           const running = statsRef.current.find((stat) => stat.id === ptyId);
           if (running) {
             const agent = identifyAgent(running.agent_hint);
-            const icon = AGENT_CLIS.find((cli) => cli.id === agent?.id)?.icon;
+            const icon = agentCliFor(agent?.id)?.icon;
             const id = attachTerminal(
               ptyId,
               running.cwd,
@@ -8235,23 +8236,26 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // what happened while the two were worked out separately, and every `/model`
   // landed in the leftmost Claude tab.
   //
-  // Claude ships no way to list its own models, so its menu starts as the
-  // checked-in seed and is refined once per session from a donor CLI's
-  // catalogue if the user has one (see modelCatalog.ts). Probed lazily — the
-  // first time a Claude session is actually in front — so a project with no
-  // Claude tab never shells out at all, and never more than once either way.
-  const [claudeModels, setClaudeModels] = useState<ModelChoice[] | null>(null);
-  const claudeProbed = useRef(false);
+  // A CLI may declare that its launch-time menu can be refined from a donor
+  // catalogue. Probe lazily only after that type is actually present.
+  const [refinedModels, setRefinedModels] = useState<Record<string, ModelChoice[]>>({});
+  const modelCatalogProbed = useRef(new Set<string>());
   useEffect(() => {
-    if (claudeProbed.current) return;
-    const hasClaude = tabs.some((t) => {
-      if (t.type !== "terminal" || t.ptyId == null) return false;
+    const present = new Map<string, NonNullable<AgentCli["capabilities"]>["refreshModelCatalog"]>();
+    for (const t of tabs) {
+      if (t.type !== "terminal" || t.ptyId == null) continue;
       const s = projectStats.find((x) => x.id === t.ptyId);
-      return (s ? identifyAgent(s.agent_hint)?.id : null) === "claude";
-    });
-    if (!hasClaude) return;
-    claudeProbed.current = true;
-    void refreshChoices("anthropic", ipc.modelCatalog).then(setClaudeModels);
+      const id = s ? identifyAgent(s.agent_hint)?.id : null;
+      const family = agentCliFor(id)?.capabilities?.refreshModelCatalog;
+      if (id && family) present.set(id, family);
+    }
+    for (const [id, family] of present) {
+      if (modelCatalogProbed.current.has(id) || !family) continue;
+      modelCatalogProbed.current.add(id);
+      void refreshChoices(family, ipc.modelCatalog).then((choices) => {
+        setRefinedModels((current) => ({ ...current, [id]: choices }));
+      });
+    }
   }, [tabs, projectStats]);
 
   const modelTarget = useMemo(() => {
@@ -8259,16 +8263,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (t.ptyId == null) return null;
       const s = projectStats.find((x) => x.id === t.ptyId);
       const agent = s ? (identifyAgent(s.agent_hint)?.id ?? null) : null;
-      let sw = modelSwitchFor(agent);
+      let sw = agentModelSwitchFor(agent);
       // The donor's answer replaces the seed only when one arrived; a failed
       // probe leaves the menu exactly as it was rather than emptying it.
-      if (agent === "claude" && claudeModels && sw?.kind === "inline") {
-        sw = { ...sw, choices: claudeModels };
+      if (agent && refinedModels[agent] && sw?.kind === "inline") {
+        sw = { ...sw, choices: refinedModels[agent] };
       }
       if (!agent || !sw) return null;
       // A bare binary Canopy ships no entry for (gemini) has no registry name
       // to borrow, so it is named by the id — which is its command anyway.
-      const label = AGENT_CLIS.find((c) => c.id === agent)?.name ?? agent;
+      const label = agentCliFor(agent)?.name ?? agent;
       return { tabId: t.id, ptyId: t.ptyId, agent, label, sw };
     };
     const termTabs = tabs.filter((t): t is TermSubTab => t.type === "terminal");
@@ -8279,7 +8283,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (hit) return hit;
     }
     return null;
-  }, [tabs, activeTabId, projectStats, claudeModels]);
+  }, [tabs, activeTabId, projectStats, refinedModels]);
   const modelTargetRef = useRef(modelTarget);
   modelTargetRef.current = modelTarget;
 
@@ -11100,7 +11104,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           openDevice();
           return;
         case "launch-cli": {
-          const cli = AGENT_CLIS.find((c) => c.id === action.cliId);
+          const cli = agentCliFor(action.cliId);
           if (cli) launchCli(cli);
           return;
         }
@@ -11556,7 +11560,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 cwd,
                 cmd,
                 title,
-                AGENT_CLIS.find((c) => c.id === agentId)?.icon,
+                agentCliFor(agentId)?.icon,
               )
             }
             onOpenInstructions={openInstructions}
@@ -13432,7 +13436,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               cwd,
               cmd,
               title,
-              AGENT_CLIS.find((c) => c.id === agentId)?.icon,
+              agentCliFor(agentId)?.icon,
             )
           }
           onNotice={onNotice}

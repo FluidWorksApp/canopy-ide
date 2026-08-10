@@ -44,7 +44,6 @@ import {
 } from "../companion";
 import { clearCompanionView, clearRun } from "../companionSession";
 import { forgetAllMemories } from "../companionMemory";
-import { MODEL_SWITCH } from "../agentModels";
 import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Radio, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
 import { drawWave } from "../waveStyles";
@@ -64,6 +63,8 @@ import {
 import {
   AGENT_CLIS,
   AGENT_CLIS_CHANGED_EVENT,
+  agentCliFor,
+  agentModelSwitchFor,
   binName,
   BUILTIN_AGENT_CLIS,
   checkInstalledClis,
@@ -337,7 +338,7 @@ function CompanionSettings({
   // The same resolver the session uses, so this row can never show one CLI
   // while the companion runs on another.
   const chosen = companionCli((bin) => Boolean(installed[bin]));
-  const models = chosen ? MODEL_SWITCH[chosen.id] : undefined;
+  const models = chosen ? agentModelSwitchFor(chosen.id) : undefined;
   const name = s.companionName.trim() || mascotDef(s.mascot).label;
   const authority = COMPANION_AUTHORITIES.find((a) => a.id === s.companionAuthority);
 
@@ -665,7 +666,7 @@ function AgentBinaries({
   return (
     <div className="cli-bins">
       {BUILTIN_AGENT_CLIS.map((def) => {
-        const resolved = AGENT_CLIS.find((c) => c.id === def.id);
+        const resolved = agentCliFor(def.id);
         const bin = resolved?.bin ?? def.bin;
         const state = found[bin];
         return (

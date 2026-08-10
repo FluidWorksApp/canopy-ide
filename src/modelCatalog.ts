@@ -120,6 +120,8 @@ export interface Donor {
   agent: string;
   /** Families this donor can answer for at all. */
   families: readonly ModelFamily[];
+  /** Index into the native allowlisted argv table for this family. */
+  query: (family: ModelFamily) => number;
   /** Turns the donor's stdout into bare model ids. */
   parse: (stdout: string, family: ModelFamily) => string[];
 }
@@ -164,10 +166,16 @@ export const parseAider = (stdout: string): string[] => {
 };
 
 export const DONORS: readonly Donor[] = [
-  { agent: "omp", families: ["anthropic", "openai", "google"], parse: parseOmp },
+  {
+    agent: "omp",
+    families: ["anthropic", "openai", "google"],
+    query: () => 0,
+    parse: parseOmp,
+  },
   {
     agent: "aider",
     families: ["anthropic", "openai", "google"],
+    query: (family) => ({ anthropic: 0, openai: 1, google: 2 })[family],
     parse: (stdout) => parseAider(stdout),
   },
 ];
@@ -182,13 +190,8 @@ export const DONORS: readonly Donor[] = [
  * and family pair has a query" test is for.
  */
 export const donorQuery = (agent: string, family: ModelFamily): number | null => {
-  // omp filters by provider inside one JSON dump, so a single command serves
-  // every family.
-  if (agent === "omp") return 0;
-  // aider's registry is hundreds of rows, so each family gets its own filtered
-  // query. Order matches the argv table in agents.rs.
-  if (agent === "aider") return { anthropic: 0, openai: 1, google: 2 }[family];
-  return null;
+  const donor = DONORS.find((candidate) => candidate.agent === agent);
+  return donor?.families.includes(family) ? donor.query(family) : null;
 };
 
 /**

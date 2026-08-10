@@ -2748,7 +2748,9 @@ const MESH_NOTICE_CHARS: usize = 200;
 const MESH_INLINE_CHARS: usize = 1_200;
 
 fn agent_has_mesh_reader(agent: Option<&str>) -> bool {
-    !matches!(agent, Some("aider" | "omp"))
+    agent
+        .and_then(crate::agent_cli::resolve)
+        .map_or(true, |cli| cli.mesh_reader)
 }
 
 /// What the published snapshots know about the agent in a terminal: which CLI

@@ -35,7 +35,13 @@ import { providerById, providerMcpToolAllowances } from "./vibeServices";
 import { probeCli, type CliProbeDeps } from "./vibeCliProbe";
 import { inspectFleetRoute } from "./fleetSnapshot";
 import { choicesFor } from "./modelCatalog";
-import { AGENT_CLIS, checkCliUpdates, checkInstalledClis } from "./projects";
+import {
+  AGENT_CLIS,
+  agentCliFor,
+  checkCliUpdates,
+  checkInstalledClis,
+  routingAgentClis,
+} from "./projects";
 import type { Component, ComponentRole, RunCommand, VibeConfig } from "./projects";
 import type { RepairProblem } from "./vibeRepair";
 import type { VibeRepairTaskInput, VibeRepairTaskResult } from "./vibeRepairSession";
@@ -43,7 +49,6 @@ import { DEFAULT_PROFILE, launchEnvSync, launchProfile } from "./profiles";
 import { getSettings } from "./settings";
 import { grantFor } from "./workspaceAuthority";
 import {
-  FAMILY_FOR_CLI,
   failoverDecision,
   rankRoutes,
   resolveRoute,
@@ -745,13 +750,13 @@ async function listNativeRoutes(): Promise<RouteCandidate[]> {
   // turns, project discovery, and repair all share the same primary route.
   // Fleet health can still demote an exhausted/unhealthy preference, and
   // evidence-classified route failure can still fail over afterwards.
-  const families = Object.entries(FAMILY_FOR_CLI).sort(
-    ([left], [right]) => Number(right === preferred) - Number(left === preferred),
+  const routes = routingAgentClis().sort(
+    (left, right) => Number(right.id === preferred) - Number(left.id === preferred),
   );
   const candidates = await Promise.all(
-    families.map(async ([cli, family]) => {
-      const def = AGENT_CLIS.find((c) => c.id === cli);
-      if (!def) return null;
+    routes.map(async (def) => {
+      const cli = def.id;
+      const family = def.capabilities.routingModelFamily;
       const profileId = launchProfile(cli) ?? DEFAULT_PROFILE;
       // A missing binary's verdict is complete from the install probe alone.
       // Do not add account, plan and hook IPC to the path whose whole job is
@@ -772,7 +777,7 @@ async function listNativeRoutes(): Promise<RouteCandidate[]> {
 }
 
 async function nativeCliVersion(cli: string): Promise<string | null> {
-  const bin = AGENT_CLIS.find((c) => c.id === cli)?.bin;
+  const bin = agentCliFor(cli)?.bin;
   if (!bin) return null;
   const versions = await checkCliUpdates();
   return versions[bin]?.installed ?? null;
@@ -2917,7 +2922,7 @@ export class VibeBuilderSession implements BuilderSession {
         ? grantFor("survey", workspace)
         : grantFor("build", workspace);
     return {
-      bin: AGENT_CLIS.find((c) => c.id === cli)?.bin ?? this.options.cliBin,
+      bin: agentCliFor(cli)?.bin ?? this.options.cliBin,
       policy: {
         systemPromptAppend:
           `You are the Build-mode collaborator for ${this.options.projectName}. ` +

@@ -8,5 +8,6 @@
  * the palette or any other CLI. A ratio of 4.5 is the WCAG AA text floor.
  */
 export function terminalMinimumContrast(agentId: string | null): number {
-  return agentId === "codex" ? 4.5 : 1;
+  return agentCliFor(agentId)?.capabilities?.terminalMinimumContrast ?? 1;
 }
+import { agentCliFor } from "./projects";

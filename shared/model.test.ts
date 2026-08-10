@@ -1,8 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { agentFromTitle, buildRows, commandToResume, SESSION_ID_TOKEN, type Digest, type Pty, type Stat } from './model'
+import { agentFromTitle, buildRows, commandToResume, SESSION_ID_TOKEN, type Digest, type Pty, type RemoteCli, type Stat } from './model'
 
 const ROOT = '/home/dev/canopy'
 const noStats = new Map<number, Stat>()
+const clis: RemoteCli[] = [
+  { id: 'claude', name: 'Claude Code', command: 'claude', available: true },
+  { id: 'codex', name: 'Codex CLI', command: 'codex', available: true },
+]
 
 const digest = (over: Partial<Digest> = {}): Digest => ({
   session_id: 's1',
@@ -71,7 +75,7 @@ describe('buildRows — terminals', () => {
   })
 
   it('names a terminal after the agent CLI it is running', () => {
-    const rows = buildRows([], [], noStats, 'inst', [pty(7, ROOT, 'codex — canopy')])
+    const rows = buildRows([], [], noStats, 'inst', [pty(7, ROOT, 'codex — canopy')], clis)
     expect(rows[0]).toMatchObject({ agent: 'codex', terminal: true })
   })
 
@@ -94,7 +98,7 @@ describe('buildRows — terminals', () => {
         },
       ],
     ])
-    const [row] = buildRows([], [], stats, 'inst', [pty(7, ROOT, '✳ Fix the tests')])
+    const [row] = buildRows([], [], stats, 'inst', [pty(7, ROOT, '✳ Fix the tests')], clis)
     expect(row).toMatchObject({ agent: 'claude', terminal: true, title: '✳ Fix the tests' })
   })
 
@@ -125,7 +129,7 @@ describe('agentFromTitle', () => {
     [undefined, undefined],
     ['', undefined],
   ])('%s -> %s', (title, expected) => {
-    expect(agentFromTitle(title)).toBe(expected)
+    expect(agentFromTitle(title, clis)).toBe(expected)
   })
 
   it('maps an overridden executable back to its registry id', () => {

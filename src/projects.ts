@@ -7,10 +7,21 @@ import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
 import { currentPlatform, type Platform } from "./shortcuts";
 import { SESSION_ID_TOKEN, type RemoteCli } from "../shared/model";
+import { DEFAULT_AGENT_CLI_ID } from "../shared/agentCliIdentity";
 import {
   normalizeProjectIntegrationState,
   type ProjectIntegrationState,
 } from "./projectIntegrations";
+import {
+  CLAUDE_RUNNER,
+  CODEX_RUNNER,
+  type StructuredRunner,
+} from "./structuredRunners";
+import {
+  MODEL_SWITCH,
+  modelSwitchFor as legacyModelSwitchFor,
+  type ModelSwitch,
+} from "./agentModels";
 
 export interface RunCommand {
   id: string;
@@ -532,6 +543,9 @@ export const newRunCommandId = () =>
 
 export interface AgentCli {
   id: string;
+  /** Historical registry ids accepted when reading durable state. Display-name
+   * changes never belong here; `name` can change without a migration. */
+  aliases?: readonly string[];
   name: string;
   /**
    * The executable to run. This is the *resolved* binary: an entry the user has
@@ -544,6 +558,8 @@ export interface AgentCli {
   /** Fallback glyph for the terminal tab strip; the menu uses the brand SVG
    *  registered under the same `id` in components/icons.tsx. */
   icon: string;
+  /** Optional brand accent projected to remote surfaces. */
+  brandColor?: string;
   /**
    * One-click install command, when there is a package Canopy knows how to
    * fetch. Absent for an entry the user added themselves: nothing here knows
@@ -671,6 +687,41 @@ export interface AgentCli {
    * but exposes no launch-time configuration Canopy cannot verify.
    */
   execution?: AgentExecutionSpec;
+
+  /** Product behavior declared by the CLI adapter. Consumers ask for a
+   * capability and never infer it from the vendor id. */
+  capabilities?: AgentCliCapabilities;
+
+  /** Verified non-interactive transport, owned by this CLI's adapter. */
+  structuredRunner?: StructuredRunner;
+
+  /** Verified interactive model control, when this CLI exposes one. */
+  modelSwitch?: ModelSwitch;
+}
+
+export interface AgentCliCapabilities {
+  profiles?: true;
+  managedIntegration?: true;
+  approvalInput?: "keystroke";
+  terminalMinimumContrast?: number;
+  eventSessionLookup?: true;
+  /** Conversation history is not safely restorable without a human prompt. */
+  restoreRequiresHumanPrompt?: true;
+  /** A locally unobservable subscription limit worth disclosing beside usage. */
+  usageLimitNote?: {
+    text: string;
+    command?: string;
+  };
+  routingModelFamily?: "anthropic" | "openai" | "google";
+  /** Family whose launch-time menu may be refined from a donor catalogue. */
+  refreshModelCatalog?: "anthropic" | "openai" | "google";
+  /** Other instruction namespaces implied when this CLI is installed. */
+  instructionCompanions?: readonly string[];
+  conversationStore?: {
+    path: string;
+    note?: string;
+    open: "session" | "file";
+  };
 }
 
 export interface AgentConfigChoice {
@@ -763,10 +814,26 @@ const qualifiedModel = (config: AgentLaunchOptions) => {
  *  which is this list with the user's overrides applied. */
 export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
   {
-    id: "claude",
+    id: DEFAULT_AGENT_CLI_ID,
     name: "Claude Code",
     bin: "claude",
     icon: "✳",
+    brandColor: "#d97757",
+    capabilities: {
+      profiles: true,
+      managedIntegration: true,
+      approvalInput: "keystroke",
+      routingModelFamily: "anthropic",
+      refreshModelCatalog: "anthropic",
+      restoreRequiresHumanPrompt: true,
+      usageLimitNote: {
+        text: "Claude also caps some models individually each week; that limit isn't exposed locally",
+        command: "/usage",
+      },
+      conversationStore: { path: "~/.claude/projects/**/*.jsonl", open: "session" },
+    },
+    structuredRunner: CLAUDE_RUNNER,
+    modelSwitch: MODEL_SWITCH.claude,
     install: "npm install -g @anthropic-ai/claude-code",
     pkgs: ["npm:@anthropic-ai/claude-code"],
     latestUrl: "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
@@ -819,6 +886,17 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     name: "Codex CLI",
     bin: "codex",
     icon: "⌬",
+    brandColor: "#7a9dff",
+    capabilities: {
+      profiles: true,
+      managedIntegration: true,
+      approvalInput: "keystroke",
+      terminalMinimumContrast: 4.5,
+      routingModelFamily: "openai",
+      conversationStore: { path: "~/.codex/sessions/**/rollout-*.jsonl", open: "session" },
+    },
+    structuredRunner: CODEX_RUNNER,
+    modelSwitch: MODEL_SWITCH.codex,
     install: "npm install -g @openai/codex",
     pkgs: ["npm:@openai/codex"],
     latestUrl: "https://registry.npmjs.org/@openai/codex/latest",
@@ -866,6 +944,8 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     name: "Amp",
     bin: "amp",
     icon: "⚡",
+    brandColor: "#f34e3f",
+    capabilities: { profiles: true, managedIntegration: true },
     install: "npm install -g @ampcode/cli",
     // @sourcegraph/amp remains as the compatibility-package identity.
     pkgs: ["npm:@ampcode/cli", "npm:@sourcegraph/amp"],
@@ -887,6 +967,16 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     name: "Aider",
     bin: "aider",
     icon: "a",
+    brandColor: "#14b014",
+    capabilities: {
+      managedIntegration: true,
+      conversationStore: {
+        path: "<project>/.aider.chat.history.md",
+        note: "No session ids: a hit opens the history file itself.",
+        open: "file",
+      },
+    },
+    modelSwitch: MODEL_SWITCH.aider,
     // `-U` makes this the update command too; only-if-needed keeps a global
     // env's shared deps unbumped (the form aider's own docs use, 2026-08-06).
     install: "python3 -m pip install -U --upgrade-strategy only-if-needed aider-chat",
@@ -930,6 +1020,16 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     name: "Antigravity",
     bin: "agy",
     icon: "◇",
+    capabilities: {
+      managedIntegration: true,
+      instructionCompanions: ["gemini"],
+      conversationStore: {
+        path: "~/.gemini/antigravity-cli/conversations/*.db",
+        note: "Stored as protobuf; snippets may read roughly.",
+        open: "session",
+      },
+    },
+    modelSwitch: MODEL_SWITCH.agy,
     install: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
     // Registry flags re-verified against Antigravity 1.1.11 local --help on
     // 2026-08-09 (`--conversation`, permission bypass, mode, model, add-dir,
@@ -962,6 +1062,13 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     name: "OpenCode",
     bin: "opencode",
     icon: "▣",
+    capabilities: {
+      profiles: true,
+      managedIntegration: true,
+      eventSessionLookup: true,
+      conversationStore: { path: "~/.local/share/opencode/opencode.db", open: "session" },
+    },
+    modelSwitch: MODEL_SWITCH.opencode,
     install: "npm install -g opencode-ai",
     pkgs: ["npm:opencode-ai"],
     latestUrl: "https://registry.npmjs.org/opencode-ai/latest",
@@ -997,6 +1104,15 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     name: "oh-my-pi",
     bin: "omp",
     icon: "π",
+    capabilities: {
+      managedIntegration: true,
+      conversationStore: {
+        path: "~/.omp/agent/sessions/**/*.jsonl",
+        note: "Sub-agent transcripts are indexed under their parent conversation.",
+        open: "session",
+      },
+    },
+    modelSwitch: MODEL_SWITCH.omp,
     install: "curl -fsSL https://omp.sh/install | sh",
     // Also published as a Homebrew formula (can1357/tap) and scoped npm CLI.
     pkgs: ["brew:omp", "npm:@oh-my-pi/pi-coding-agent"],
@@ -1226,6 +1342,45 @@ function bindCli(def: AgentCliDef, bin: string): AgentCli {
  */
 export const AGENT_CLIS: AgentCli[] = [];
 
+/** Resolve durable identity through the registry. `name` is deliberately not
+ * consulted: vendors may rename products without changing saved workflows,
+ * tasks, profiles, or hooks. Historical ids are explicit aliases. */
+export function agentCliFor(id?: string | null): AgentCli | undefined {
+  if (!id) return undefined;
+  return AGENT_CLIS.find((cli) => cli.id === id || cli.aliases?.includes(id));
+}
+
+export function canonicalAgentCliId(id?: string | null): string | null {
+  return agentCliFor(id)?.id ?? null;
+}
+
+export function agentClisWith(
+  capability: keyof AgentCliCapabilities,
+): AgentCli[] {
+  return AGENT_CLIS.filter((cli) => cli.capabilities?.[capability] !== undefined);
+}
+
+export function structuredRunnerFor(id?: string | null): StructuredRunner | undefined {
+  return agentCliFor(id)?.structuredRunner;
+}
+
+export function agentModelSwitchFor(id?: string | null): ModelSwitch | null {
+  return agentCliFor(id)?.modelSwitch ?? legacyModelSwitchFor(id);
+}
+
+export function streamsStructured(id?: string | null): boolean {
+  const runner = structuredRunnerFor(id);
+  return Boolean(runner?.verification.cliVersion && runner.verification.checkedOn);
+}
+
+export function routingAgentClis(): Array<AgentCli & {
+  capabilities: AgentCliCapabilities & { routingModelFamily: "anthropic" | "openai" | "google" };
+}> {
+  return AGENT_CLIS.filter((cli) => cli.capabilities?.routingModelFamily) as Array<AgentCli & {
+    capabilities: AgentCliCapabilities & { routingModelFamily: "anthropic" | "openai" | "google" };
+  }>;
+}
+
 /** Browser-safe projection of the resolved launcher registry. Remote receives
  * commands, availability and verified resume syntax, never installers. */
 export function remoteCliMetadata(installed: Record<string, boolean>): RemoteCli[] {
@@ -1236,9 +1391,12 @@ export function remoteCliMetadata(installed: Record<string, boolean>): RemoteCli
     // remote portal honours the skip-permissions setting like a local one —
     // re-sent on each metadata push, which is when the setting is re-read.
     command: launchCommand(cli),
+    icon: cli.icon,
+    brandColor: cli.brandColor,
     resumeTemplate: cli.resume && withSkipPermissions(cli.resume(SESSION_ID_TOKEN), cli),
     available: !!installed[cli.bin],
     custom: cli.custom,
+    restoreRequiresHumanPrompt: cli.capabilities?.restoreRequiresHumanPrompt,
   }));
 }
 
@@ -1584,7 +1742,7 @@ export function startCommand(
   text: string,
   options?: AgentLaunchOptions,
 ): { command: string; typePrompt: boolean } | null {
-  const cli = AGENT_CLIS.find((c) => c.id === agentId);
+  const cli = agentCliFor(agentId);
   if (!cli) return null;
   return cli.prompt
     ? {
@@ -1604,7 +1762,7 @@ export function startCommand(
 export function restoreCommand(agentId: string, sessionId: string): string | null {
   const id = sessionId.trim();
   if (!id) return null;
-  const cli = AGENT_CLIS.find((c) => c.id === agentId);
+  const cli = agentCliFor(agentId);
   const cmd = cli?.resume?.(id);
   return cmd ? withSkipPermissions(cmd, cli) : null;
 }
@@ -1624,7 +1782,7 @@ export function resumeSessionId(command: string | null | undefined): string | nu
   if (!cmd) return null;
   const SENTINEL = "__CANOPY_SID__";
   const templates = agentCliDefs().flatMap((d) => {
-    const bins = new Set([AGENT_CLIS.find((c) => c.id === d.id)?.bin ?? d.bin, d.bin]);
+    const bins = new Set([agentCliFor(d.id)?.bin ?? d.bin, d.bin]);
     // Each spelling as written *and* as quoted: a path with a space in it goes
     // to the shell quoted, so that is the form a remembered resume command
     // carries — while an id from before the override is still bare.

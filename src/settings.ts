@@ -12,6 +12,7 @@ import type { BrowserEngine } from "./browserBounds";
 import type { MascotId } from "./mascots";
 import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
+import { DEFAULT_AGENT_CLI_ID } from "../shared/agentCliIdentity";
 import { SKINS, type SkinId } from "./skins/registry";
 import {
   isSessionNameTheme,
@@ -602,7 +603,7 @@ export const DEFAULTS: Settings = {
   runawayCpuPercent: 300,
   runawayMemBytes: 4 * 1024 * 1024 * 1024,
   ptyHighWater: 2 * 1024 * 1024,
-  defaultAgent: "claude",
+  defaultAgent: DEFAULT_AGENT_CLI_ID,
   dangerouslySkipPermissions: false,
   cliBins: {},
   activeProfile: "default",

@@ -14,7 +14,8 @@ import { launchEnvSync } from "./profiles";
 import { getSettings } from "./settings";
 import * as ipc from "./ipc";
 import type { ProjectRunnerTransport } from "./projectRunner";
-import { streamsStructured, type StructuredRunnerLaunch } from "./structuredRunners";
+import { streamsStructured } from "./projects";
+import type { StructuredRunnerLaunch } from "./structuredRunners";
 import { rankRoutes, resolveRoute, type RouteVersions } from "./vibeFailover";
 import {
   parseRepairVerdict,

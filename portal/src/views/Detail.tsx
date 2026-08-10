@@ -476,7 +476,7 @@ function TerminalDetail({
 }) {
   const [text, setText] = useState('')
   const row = ctx.rows.find((r) => r.ptyId === pty)
-  const m = agentMeta(row?.agent ?? 'shell')
+  const m = agentMeta(row?.agent ?? 'shell', ctx.clis)
   // With a real keyboard the terminal itself is the input: xterm forwards every
   // keystroke to the PTY already, so the composer and the control-key row are
   // chrome between the user and the shell. They are also the *only* way to type
@@ -510,7 +510,7 @@ function TerminalDetail({
           <span className="mono">{basename(row?.cwd)}</span>
         )
       }
-      badge={<AgentBadge agent={row?.agent ?? 'shell'} sz={28} />}
+      badge={<AgentBadge agent={row?.agent ?? 'shell'} sz={28} clis={ctx.clis} />}
       actions={
         <button
           className="danger sm"
@@ -597,7 +597,7 @@ function HistoryDetail({
       </Frame>
     )
   }
-  const m = agentMeta(row.agent)
+  const m = agentMeta(row.agent, ctx.clis)
   const prompts = (row.prompts ?? []).filter((p) => p.trim() && !p.trim().startsWith('<'))
   return (
     <Frame
@@ -611,7 +611,7 @@ function HistoryDetail({
           <span className="mono">{basename(row.cwd)}</span>
         )
       }
-      badge={<AgentBadge agent={row.agent} sz={28} />}
+      badge={<AgentBadge agent={row.agent} sz={28} clis={ctx.clis} />}
       actions={<ResumeButton ctx={ctx} row={row} />}
       onBack={onBack}
       showBack={showBack}

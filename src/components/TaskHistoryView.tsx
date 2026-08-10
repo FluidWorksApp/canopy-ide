@@ -25,7 +25,7 @@ import {
   type TaskRun,
   type TaskRunStatus,
 } from "../taskHistory";
-import { AGENT_CLIS } from "../projects";
+import { agentCliFor } from "../projects";
 import {
   AgentIcon,
   AgentsIcon,
@@ -250,7 +250,7 @@ export function TaskHistoryView({
     else days.push({ day, runs: [run] });
   }
 
-  const agentName = (id: string) => AGENT_CLIS.find((c) => c.id === id)?.name ?? id;
+  const agentName = (id: string) => agentCliFor(id)?.name ?? id;
   const narrowed = query.trim() !== "" || filter !== "all";
 
   return (
