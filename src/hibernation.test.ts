@@ -59,6 +59,31 @@ describe("snapshotTabs", () => {
     ]);
   });
 
+  it("captures a CLI typed into an ordinary shell from its live process", () => {
+    const snap = snapshotTabs(
+      [term({ command: undefined, ptyId: 7 })],
+      (pty) => (pty === 7 ? "sess-42" : undefined),
+      (pty) => (pty === 7 ? "codex" : undefined),
+    );
+    expect(snap).toMatchObject([
+      {
+        kind: "terminal",
+        command: undefined,
+        agentId: "codex",
+        sessionId: "sess-42",
+      },
+    ]);
+  });
+
+  it("prefers the live CLI over a stale launch command", () => {
+    const [snap] = snapshotTabs(
+      [term({ command: "claude", ptyId: 7 })],
+      () => "sess-42",
+      () => "codex",
+    );
+    expect(snap).toMatchObject({ agentId: "codex", sessionId: "sess-42" });
+  });
+
   /** The resume command's session id only exists in one account's store. */
   it("remembers which account the session was running under", () => {
     const [t] = snapshotTabs(
@@ -229,6 +254,13 @@ describe("terminalLaunch", () => {
     // aider has no verified resume-by-id syntax, so the registry offers none.
     expect(terminalLaunch(t({ agentId: "aider", sessionId: "s1", command: "aider" }))).toEqual({
       command: "aider",
+      resumed: false,
+    });
+  });
+
+  it("starts a live-identified CLI whose shell had no launch command", () => {
+    expect(terminalLaunch(t({ agentId: "codex", command: undefined }))).toEqual({
+      command: "codex",
       resumed: false,
     });
   });

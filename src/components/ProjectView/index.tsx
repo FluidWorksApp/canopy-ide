@@ -357,7 +357,11 @@ import { Dialog } from "../Dialog";
 import { BranchSwitchProvider, useBranchSwitch } from "../../useBranchSwitch";
 import { askDialog } from "../../branchSwitch";
 import { useTabDragGroups, applyOrder } from "../../tabDrag";
-import { agentIdForCommand, identifyAgent } from "../../agentIdentity";
+import {
+  agentIdForCommand,
+  identifyAgent,
+  rememberAgentPtys,
+} from "../../agentIdentity";
 import {
   agentDisplayName,
   tabNamesByPty,
@@ -1383,6 +1387,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [stats, setStats] = useState<ipc.SessionStats[]>([]);
   const statsRef = useRef(stats);
   statsRef.current = stats;
+  /** Last positive runtime CLI identity for each still-live terminal. Process
+   * samples can momentarily show the shell while the CLI remains the owner. */
+  const rememberedAgentPtys = useRef(new Map<number, string>());
   // What the human has not dealt with, per terminal — the other axis. Held here
   // rather than on the tab because it must survive a tab re-render and must
   // NOT survive the terminal: `forget` runs when a pty goes.
@@ -7243,6 +7250,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
         sidePinned: sideOut,
         worktree: wt,
         sessionFor: (pty) => liveSessionByPtyRef.current.get(pty),
+        agentFor: (pty) => {
+          const stat = statsRef.current.find((sample) => sample.id === pty);
+          return (
+            identifyAgent(stat?.agent_hint)?.id ??
+            rememberedAgentPtys.current.get(pty)
+          );
+        },
         terminalGroups: terminalGroupsRef.current,
       });
       // App waits for this before closing the project: a snapshot that could
@@ -8561,9 +8575,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // set only earns a new identity when the set of agent-bearing ptys actually
   // changes — so the memoized PaneBar isn't repainted by a sample that changed
   // nothing.
-  const agentPtyList = projectStats
-    .filter((s) => identifyAgent(s.agent_hint))
-    .map((s) => s.id);
+  // Process ownership can be absent for one sample while the CLI hands the tty
+  // to its shell or a child. Remember positive identity until the terminal is
+  // actually closed; otherwise the Workspace overlay is conditionally
+  // unmounted on that sample and every click/draft inside it disappears.
+  const liveTerminalPtys = tabs
+    .filter((tab): tab is TermSubTab => tab.type === "terminal" && tab.ptyId != null)
+    .map((tab) => tab.ptyId as number);
+  rememberAgentPtys(rememberedAgentPtys.current, liveTerminalPtys, projectStats);
+  const agentPtyList = [
+    ...new Set([
+      ...projectStats.filter((s) => identifyAgent(s.agent_hint)).map((s) => s.id),
+      ...rememberedAgentPtys.current.keys(),
+    ]),
+  ];
   const agentPtyKey = agentPtyList
     .slice()
     .sort((a, b) => a - b)
@@ -10669,18 +10694,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
     activeTab.ptyId != null
       ? (() => {
           const stat = projectStats.find((s) => s.id === activeTab.ptyId);
-          const procs = stat?.procs ?? [];
-          const byProc = AGENT_CLIS.find((c) =>
-            procs.some(
-              (p) =>
-                binName(p.name) === binName(c.bin) ||
-                binName(p.cmd.split(" ")[0] ?? "") === binName(c.bin),
-            ),
-          );
           const byCommand = AGENT_CLIS.find(
             (c) => c.id === agentIdForCommand(activeTab.command),
           );
-          const agent = (byProc ?? byCommand)?.id ?? "agent";
+          const agent =
+            identifyAgent(stat?.agent_hint)?.id ??
+            rememberedAgentPtys.current.get(activeTab.ptyId as number) ??
+            byCommand?.id ??
+            "agent";
           // The live session cwd — the same source the Agents panel keys off,
           // so the overlay and a panel-opened tab resolve the same workspace.
           const cwd = stat?.cwd || activeTab.cwd || "";

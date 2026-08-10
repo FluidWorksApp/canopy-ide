@@ -6,6 +6,7 @@ import {
   learnBin,
   learnedBins,
   observeForLearning,
+  rememberAgentPtys,
   resetLearned,
 } from "./agentIdentity";
 
@@ -113,6 +114,27 @@ describe("identifyAgent", () => {
   it("does not promote a non-interactive command", () => {
     const build = hint({ bin: "make", path: "/usr/bin/make", interactive: false });
     expect(identifyAgent(build)).toBeNull();
+  });
+});
+
+describe("rememberAgentPtys", () => {
+  it("holds identity through empty samples, updates it, and forgets on close", () => {
+    const memory = new Map<number, string>();
+    rememberAgentPtys(memory, [7], [{ id: 7, agent_hint: hint() }]);
+    expect(memory.get(7)).toBe("claude");
+
+    // The shell briefly owns the foreground pgrp between CLI samples. This is
+    // not evidence that the terminal stopped being an agent workspace.
+    rememberAgentPtys(memory, [7], [{ id: 7, agent_hint: null }]);
+    expect(memory.get(7)).toBe("claude");
+
+    rememberAgentPtys(memory, [7], [
+      { id: 7, agent_hint: hint({ bin: "codex", path: "/opt/homebrew/bin/codex" }) },
+    ]);
+    expect(memory.get(7)).toBe("codex");
+
+    rememberAgentPtys(memory, [], []);
+    expect(memory.has(7)).toBe(false);
   });
 });
 

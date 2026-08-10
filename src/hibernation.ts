@@ -22,7 +22,12 @@
 import type { SubTab, SideTab } from "./components/ProjectView/helpers";
 import type * as ipc from "./ipc";
 import type { ReviewPayload } from "./components/ReviewView";
-import { agentCliFor, restoreCommand, resumeSessionId } from "./projects";
+import {
+  agentCliFor,
+  launchCommand,
+  restoreCommand,
+  resumeSessionId,
+} from "./projects";
 import { agentIdForCommand } from "./agentIdentity";
 import { claimLabel } from "./claims";
 import type { TerminalGroup } from "./terminalGroups";
@@ -125,6 +130,7 @@ const VERSION = 1;
 export function snapshotTabs(
   tabs: SubTab[],
   sessionFor: (ptyId: number) => string | undefined = () => undefined,
+  agentFor: (ptyId: number) => string | undefined = () => undefined,
 ): SnapshotTab[] {
   const out: SnapshotTab[] = [];
   for (const t of tabs) {
@@ -133,7 +139,16 @@ export function snapshotTabs(
         if (t.micro) break;
         if (t.run && t.exited) break;
         const command = t.command;
-        const agentId = agentIdForCommand(command) ?? undefined;
+        // The process in the PTY is the strongest answer. A CLI may have been
+        // typed into an ordinary shell, in which case the tab has no launch
+        // command at all; treating that as a shell discarded both the CLI and
+        // its otherwise-known conversation on hibernate. The command remains
+        // the restart-proof fallback for a just-spawned terminal that has not
+        // appeared in process stats yet.
+        const agentId =
+          (t.ptyId != null ? agentFor(t.ptyId) : undefined) ??
+          agentIdForCommand(command) ??
+          undefined;
         // The live conversation if the hook reported one, else the id the
         // command itself names (a terminal started as a resume knows its own
         // session even before the agent has said anything).
@@ -257,15 +272,18 @@ export function buildSnapshot(opts: {
   sidePinned: boolean;
   worktree: { repo: string; path: string; branch: string } | null;
   sessionFor?: (ptyId: number) => string | undefined;
+  agentFor?: (ptyId: number) => string | undefined;
   now?: number;
   terminalGroups?: Record<string, TerminalGroup>;
 }): ProjectSnapshot {
-  const kept = opts.tabs.filter((t) => snapshotTabs([t], opts.sessionFor).length > 0);
+  const kept = opts.tabs.filter(
+    (t) => snapshotTabs([t], opts.sessionFor, opts.agentFor).length > 0,
+  );
   const activeIndex = kept.findIndex((t) => t.id === opts.activeTabId);
   return {
     version: VERSION,
     at: opts.now ?? Date.now(),
-    tabs: snapshotTabs(kept, opts.sessionFor),
+    tabs: snapshotTabs(kept, opts.sessionFor, opts.agentFor),
     activeIndex: activeIndex < 0 ? null : activeIndex,
     sideTab: opts.sideTab,
     sidePinned: opts.sidePinned,
@@ -375,7 +393,8 @@ export function wakeSteps(snap: ProjectSnapshot | null): WakeStep[] {
 
 /** The command a hibernated terminal comes back with: the agent's own resume
  *  line when there is a conversation to reopen, else whatever it was launched
- *  with. Returns `resumed` so the caller can say which of the two happened. */
+ *  with (or a bare CLI launch when it was started by hand in a shell). Returns
+ *  `resumed` so the caller can say which of the two happened. */
 export function terminalLaunch(t: TerminalSnapshot): {
   command: string | undefined;
   resumed: boolean;
@@ -383,6 +402,13 @@ export function terminalLaunch(t: TerminalSnapshot): {
   if (t.agentId && t.sessionId) {
     const resume = restoreCommand(t.agentId, t.sessionId);
     if (resume) return { command: resume, resumed: true };
+  }
+  // A CLI started by hand in an ordinary shell has no recorded command. Its
+  // live identity is still enough to bring the CLI itself back, even when it
+  // exposed no session id (or no verified resume syntax).
+  if (!t.command && t.agentId) {
+    const cli = agentCliFor(t.agentId);
+    if (cli) return { command: launchCommand(cli), resumed: false };
   }
   return { command: t.command, resumed: false };
 }
