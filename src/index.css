@@ -8291,9 +8291,9 @@ body.dragging-tab * {
 .workflow-inline-error {
   margin-bottom: 10px;
   padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--red) 35%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
   border-radius: var(--r-md);
-  background: color-mix(in srgb, var(--red) 5%, transparent);
+  background: color-mix(in srgb, var(--danger) 5%, transparent);
   color: var(--text-dim);
   font-size: var(--fs-xs);
 }
@@ -8302,8 +8302,8 @@ body.dragging-tab * {
 .workflow-empty code { color: var(--text); font-family: var(--font-mono); }
 .workflow-catalog-error {
   border-style: solid;
-  border-color: color-mix(in srgb, var(--red) 35%, var(--border));
-  background: color-mix(in srgb, var(--red) 5%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+  background: color-mix(in srgb, var(--danger) 5%, transparent);
 }
 .workflow-empty-runs { min-height: 180px; justify-content: center; align-items: center; text-align: center; }
 .workflow-run-grid {
@@ -8338,7 +8338,7 @@ body.dragging-tab * {
 }
 .workflow-run-row:hover { background: var(--bg-raised); }
 .workflow-run-row:focus-visible { outline: none; box-shadow: var(--ring); }
-.workflow-run-row.is-selected { background: var(--bg-selected); }
+.workflow-run-row.is-selected { background: color-mix(in srgb, var(--accent) 11%, var(--bg-raised)); }
 .workflow-run-row > span { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .workflow-run-row strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .workflow-run-row small,
@@ -8351,9 +8351,9 @@ body.dragging-tab * {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-faint) 10%, transparent);
 }
 .workflow-run-row.st-running .workflow-run-pulse,
-.workflow-run-row.st-waiting .workflow-run-pulse { background: var(--yellow); }
-.workflow-run-row.st-completed .workflow-run-pulse { background: var(--green); }
-.workflow-run-row.st-failed .workflow-run-pulse { background: var(--red); }
+.workflow-run-row.st-waiting .workflow-run-pulse { background: var(--warn); }
+.workflow-run-row.st-completed .workflow-run-pulse { background: var(--ok); }
+.workflow-run-row.st-failed .workflow-run-pulse { background: var(--danger); }
 .workflow-run-detail { min-width: 0; padding: 20px 22px; }
 .workflow-run-title {
   display: flex;
@@ -8371,9 +8371,9 @@ body.dragging-tab * {
   text-transform: uppercase;
 }
 .workflow-status.st-running,
-.workflow-status.st-waiting { color: var(--yellow); }
-.workflow-status.st-completed { color: var(--green); }
-.workflow-status.st-failed { color: var(--red); }
+.workflow-status.st-waiting { color: var(--warn); }
+.workflow-status.st-completed { color: var(--ok); }
+.workflow-status.st-failed { color: var(--danger); }
 .workflow-spine { position: relative; }
 .workflow-spine::before {
   position: absolute;
@@ -8401,11 +8401,11 @@ body.dragging-tab * {
   border-radius: 50%;
   background: var(--text-faint);
 }
-.workflow-step.st-completed .workflow-step-node { background: var(--green); }
-.workflow-step.st-failed .workflow-step-node { background: var(--red); }
+.workflow-step.st-completed .workflow-step-node { background: var(--ok); }
+.workflow-step.st-failed .workflow-step-node { background: var(--danger); }
 .workflow-step.is-current .workflow-step-node {
-  background: var(--yellow);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--yellow) 12%, transparent);
+  background: var(--warn);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 12%, transparent);
 }
 .workflow-step > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .workflow-step span,
@@ -8415,8 +8415,8 @@ body.dragging-tab * {
 .workflow-decision {
   margin: 8px 0 0 24px;
   padding: 14px;
-  border-left: 2px solid var(--yellow);
-  background: color-mix(in srgb, var(--yellow) 5%, transparent);
+  border-left: 2px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 5%, transparent);
 }
 .workflow-decision p { margin: 5px 0 12px; color: var(--text-dim); font-size: var(--fs-xs); }
 .workflow-decision > div { display: flex; flex-wrap: wrap; gap: 7px; }

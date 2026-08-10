@@ -115,4 +115,29 @@ describe("WorkflowView", () => {
     expect(onAnswer).toHaveBeenCalledWith("workflow-1", "approve");
     expect(screen.queryByText("Completed tasks")).toBeNull();
   });
+
+  it("turns the empty catalog into a starter workflow without leaving the page", async () => {
+    mocks.loadWorkflowDefinitions
+      .mockReset()
+      .mockResolvedValueOnce({ ok: true, definitions: [] })
+      .mockResolvedValue({ ok: true, definitions: [definition] });
+    mocks.refreshWorkflowRuns.mockResolvedValue([]);
+    const onCreateStarter = vi.fn().mockResolvedValue(undefined);
+    render(
+      <WorkflowView
+        projectId="project-1"
+        projectName="Canopy"
+        projectRoot="/repo"
+        componentRoots={["/repo"]}
+        onRun={vi.fn()}
+        onAnswer={vi.fn()}
+        onResume={vi.fn()}
+        onCreateStarter={onCreateStarter}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Create a starter workflow" }));
+    expect(onCreateStarter).toHaveBeenCalledOnce();
+    expect(await screen.findByRole("button", { name: "Run" })).toBeInTheDocument();
+  });
 });
