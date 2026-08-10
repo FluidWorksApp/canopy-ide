@@ -330,6 +330,7 @@ import {
   hasIdentity,
   identityPatch,
   promptTaskIdentity,
+  shouldSeedPromptIdentity,
   taskDescription,
   taskIdentity,
 } from "../../taskIdentity";
@@ -7147,15 +7148,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
       if (tab && d.event === "UserPromptSubmit" && d.prompt) {
         const baseline = promptTaskIdentity(d.prompt);
-        if (baseline.title || baseline.description)
+        // The first substantive prompt is a useful temporary label while the
+        // model starts. Follow-ups are conversation, not identity: once this
+        // baseline or canopy_name_task has named the work, raw user messages
+        // must not overwrite the model's title/current-focus summary.
+        if (
+          (baseline.title || baseline.description) &&
+          shouldSeedPromptIdentity(tab)
+        )
           patchTabRaw(tab.id, {
             ...(baseline.description ? { description: baseline.description } : {}),
             // Managed micro-tasks already have a durable launch label. For an
             // ordinary conversation, the human's request is a better identity
             // than the generated fallback until the agent refines it.
-            ...(baseline.title && !tab.micro && !tab.renamed
-              ? { customTitle: baseline.title }
-              : {}),
+            ...(baseline.title ? { customTitle: baseline.title } : {}),
           });
       }
       if (tab && tab.id === activeTabIdRef.current && visibleRef.current)

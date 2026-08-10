@@ -141,6 +141,18 @@ export function promptTaskIdentity(raw: unknown): {
   };
 }
 
+/** A human prompt is only the session's temporary identity before anything has
+ * named the work. Once a baseline or canopy_name_task title exists, later
+ * follow-up messages are conversation — never a reason to rename the tab or
+ * replace the model's current-focus summary. */
+export function shouldSeedPromptIdentity(tab: {
+  customTitle?: string;
+  renamed?: boolean;
+  micro?: unknown;
+}): boolean {
+  return !tab.micro && !tab.renamed && !tab.customTitle?.trim();
+}
+
 /** Everything an agent may say about its own run, cleaned. */
 export function taskIdentity(raw: {
   title?: unknown;

@@ -5,6 +5,7 @@ import {
   identityPatch,
   MAX_TAGS,
   promptTaskIdentity,
+  shouldSeedPromptIdentity,
   taskGlyph,
   taskDescription,
   taskIdentity,
@@ -27,6 +28,13 @@ describe("promptTaskIdentity", () => {
     expect(promptTaskIdentity("continue")).toEqual({ description: "continue" });
     expect(promptTaskIdentity("<task-notification>internal</task-notification>"))
       .toEqual({});
+  });
+
+  it("only seeds an unnamed ordinary session", () => {
+    expect(shouldSeedPromptIdentity({})).toBe(true);
+    expect(shouldSeedPromptIdentity({ customTitle: "Review agent restore" })).toBe(false);
+    expect(shouldSeedPromptIdentity({ renamed: true })).toBe(false);
+    expect(shouldSeedPromptIdentity({ micro: { taskId: "review" } })).toBe(false);
   });
 });
 
