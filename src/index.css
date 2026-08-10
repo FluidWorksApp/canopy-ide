@@ -3562,9 +3562,60 @@ body.resizing-side * {
 
 .mcp-source {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
   line-height: 18px;
+}
+
+/* A compact patch-bay port: the checked square means this server is physically
+   present in that client's registry. The amber outline marks a staged wiring
+   change before Apply touches any config file. */
+.mcp-source-switch {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.mcp-source-switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mcp-source-switch span {
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background: var(--bg-deep);
+  box-shadow: inset 0 0 0 2px var(--bg);
+}
+
+.mcp-source-switch input:checked + span {
+  border-color: var(--ok);
+  background: var(--ok);
+}
+
+.mcp-source-switch-changed span {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.mcp-source-switch input:focus-visible + span {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mcp-source-switch input:disabled + span {
+  opacity: 0.35;
+  cursor: not-allowed;
 }
 
 .mcp-source-label {
@@ -3599,6 +3650,25 @@ body.resizing-side * {
   color: var(--text-dim);
   font-size: 10.5px;
   line-height: 1.45;
+}
+
+.mcp-client-apply {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-alt) 94%, transparent);
+  box-shadow: 0 -6px 16px color-mix(in srgb, var(--bg-deep) 55%, transparent);
+  backdrop-filter: blur(8px);
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
+.mcp-client-apply > span:first-child {
+  margin-right: auto;
 }
 
 /* ── One server, opened as a tab ──────────────────────────────────────────────

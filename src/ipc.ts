@@ -2595,6 +2595,8 @@ export interface McpSource {
   scope: "global" | "project";
   /** "pending" is a `.mcp.json` server nobody has approved or rejected yet. */
   status: "enabled" | "disabled" | "pending";
+  /** Present when the source lives inside a CLI's per-project state map. */
+  project_dir?: string;
 }
 /** One MCP server, folded across every CLI that configures it. Credentials are
  *  stripped in Rust: `args` is redacted and `env_keys` holds names only, so
@@ -2616,6 +2618,22 @@ export interface McpServer {
  *  per-project registries; pass none for the user-scope answer alone. */
 export const mcpServers = (projectDirs: string[] = []) =>
   invoke<McpServer[]>("mcp_servers", { projectDirs });
+
+export interface McpSourceChange {
+  agent: string;
+  name: string;
+  configPath: string;
+  scope: "global" | "project";
+  projectDir?: string;
+  enabled: boolean;
+}
+
+/** Apply a staged set of per-client MCP registrations. Native code rediscovers
+ *  every source before editing, then atomically updates only known registries. */
+export const mcpUpdateSources = (
+  projectDirs: string[],
+  changes: McpSourceChange[],
+) => invoke<McpServer[]>("mcp_update_sources", { projectDirs, changes });
 
 /** One tool a server exposes. `input_schema` is the server's own JSON Schema,
  *  passed through untouched — the argument form is generated from it. */

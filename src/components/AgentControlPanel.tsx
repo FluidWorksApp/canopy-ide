@@ -1,7 +1,7 @@
 // The agent control panel: every agent working in Canopy, as one live picture.
 //
 // Two views of one dataset. The graph draws each agent session as a node in
-// its checkout's group, with an edge wherever the mesh has recorded traffic
+// its project's group, with an edge wherever the mesh has recorded traffic
 // between two terminals — spawn openings establish the primary family tree,
 // ordinary traffic stays secondary, and a pulse rides the edge when a message
 // flows. Sever/reconnect has its own guarded control at the mesh store's one
@@ -40,6 +40,8 @@ interface Node {
   row: SessionRow;
   life: Life;
   group: string;
+  groupLabel: string;
+  groupTitle: string;
 }
 
 interface Pulse {
@@ -47,7 +49,7 @@ interface Pulse {
   d: string;
 }
 
-/** Graph geometry: checkout groups sit side by side; within one, parents own
+/** Graph geometry: project groups sit side by side; within one, parents own
  *  a horizontal band above a horizontal band of their children. */
 const GROUP_GAP = 28;
 const GROUP_PAD_X = 28;
@@ -56,6 +58,45 @@ const LAYER_GAP_Y = 116;
 const GRAPH_PAD_X = 24;
 const Y0 = 96;
 const NODE_R = 44;
+
+/** Resolve a terminal to the Canopy project that owns its component root.
+ *  A project may contain several independent repositories; grouping by each
+ *  checkout and then labelling every box with the project name produced the
+ *  repeated CORAA frames this surface used to show. The project index is the
+ *  identity (names need not be unique), while the longest matching root wins
+ *  when projects are nested. Unowned terminals retain checkout grouping. */
+function graphGroup(
+  cwd: string,
+  projects: { name: string; roots: string[] }[],
+): { key: string; label: string; title: string } {
+  const cleanCwd = cwd.replace(/\/+$/, "") || "/";
+  let match: { projectIndex: number; root: string } | undefined;
+  projects.forEach((project, projectIndex) => {
+    for (const rawRoot of project.roots) {
+      const root = rawRoot.replace(/\/+$/, "") || "/";
+      if (
+        (cleanCwd === root || cleanCwd.startsWith(`${root}/`)) &&
+        (!match || root.length > match.root.length)
+      ) {
+        match = { projectIndex, root };
+      }
+    }
+  });
+  if (match) {
+    const project = projects[match.projectIndex];
+    return {
+      key: `project:${match.projectIndex}`,
+      label: project.name,
+      title: project.roots.join("\n"),
+    };
+  }
+  const checkout = checkoutKey(cleanCwd);
+  return {
+    key: `checkout:${checkout}`,
+    label: basename(checkout) || checkout,
+    title: checkout,
+  };
+}
 
 export interface AgentControlPanelProps {
   /** This surface is in front; everything that subscribes is gated on it. */
@@ -122,12 +163,17 @@ export function AgentControlPanel({
 
   const nodes: Node[] = useMemo(
     () =>
-      agentSessions.map((row) => ({
-        row,
-        life: lifeOf(row),
-        group: checkoutKey(row.session.cwd),
-      })),
-    [agentSessions, lifeOf],
+      agentSessions.map((row) => {
+        const group = graphGroup(row.session.cwd, allProjects);
+        return {
+          row,
+          life: lifeOf(row),
+          group: group.key,
+          groupLabel: group.label,
+          groupTitle: group.title,
+        };
+      }),
+    [agentSessions, lifeOf, allProjects],
   );
 
   const livePtyIds = useMemo(
@@ -153,6 +199,8 @@ export function AgentControlPanel({
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([key, members]) => ({
         key,
+        label: members[0].groupLabel,
+        title: members[0].groupTitle,
         members: members.sort((a, b) => a.row.session.id - b.row.session.id),
       }));
   }, [nodes]);
@@ -241,13 +289,6 @@ export function AgentControlPanel({
   };
 
   const [selectedPtyId, setSelectedPtyId] = useState<number | null>(null);
-
-  const groupLabel = (key: string) => {
-    const project = allProjects.find((p) =>
-      p.roots.some((r) => key === r || key.startsWith(r + "/")),
-    );
-    return project?.name ?? basename(key) ?? key;
-  };
 
   if (nodes.length === 0) {
     return (
@@ -409,8 +450,8 @@ export function AgentControlPanel({
             height: Math.max(1, g.layers.length) * LAYER_GAP_Y + 30,
           }}
         >
-          <span className="acp-group-name" title={g.key}>
-            {groupLabel(g.key)}
+          <span className="acp-group-name" title={g.title}>
+            {g.label}
           </span>
         </div>
       ))}

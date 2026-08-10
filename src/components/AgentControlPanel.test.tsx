@@ -166,6 +166,33 @@ function renderPanel(mode: "graph" | "table", onJumpToPty?: (ptyId: number) => v
 }
 
 describe("the control panel graph", () => {
+  it("draws one project frame around agents from all of its component roots", async () => {
+    seams.messages = [];
+    seams.severed = [];
+    seams.digests = [
+      digest({ session_id: "website", surface: "21", cwd: "/w/coraa/website" }),
+      digest({ session_id: "agent", surface: "22", cwd: "/w/coraa/coraa-agent" }),
+    ];
+    seams.stats = [
+      session({ id: 21, cwd: "/w/coraa/website" }),
+      session({ id: 22, cwd: "/w/coraa/coraa-agent" }),
+    ];
+    const { container } = render(
+      <AgentControlPanel
+        active
+        mode="graph"
+        allProjects={[{
+          name: "CORAA",
+          roots: ["/w/coraa/website", "/w/coraa/coraa-agent"],
+        }]}
+      />,
+    );
+
+    await waitFor(() => expect(container.querySelectorAll(".acp-node")).toHaveLength(2));
+    expect(container.querySelectorAll(".acp-group")).toHaveLength(1);
+    expect(container.querySelector(".acp-group-name")?.textContent).toBe("CORAA");
+  });
+
   it("draws edges only where messages were recorded, oriented by who briefs", async () => {
     seed();
     const { container } = renderPanel("graph");

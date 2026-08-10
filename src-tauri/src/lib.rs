@@ -815,6 +815,7 @@ pub fn run() {
             agents::agent_integration_health,
             agents::agent_health_report,
             mcp::mcp_servers,
+            mcp::mcp_update_sources,
             mcp_client::mcp_connect,
             mcp_client::mcp_call_tool,
             mcp_client::mcp_task_get,

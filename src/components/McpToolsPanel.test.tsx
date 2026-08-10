@@ -8,8 +8,11 @@ import type { McpServer } from "../ipc";
 // row that knows about all four. These cover that claim, and the one thing that
 // must never happen: a credential from a config reaching the DOM.
 
-const mcpServers = vi.hoisted(() => vi.fn());
-vi.mock("../ipc", () => ({ mcpServers }));
+const { mcpServers, mcpUpdateSources } = vi.hoisted(() => ({
+  mcpServers: vi.fn(),
+  mcpUpdateSources: vi.fn(),
+}));
+vi.mock("../ipc", () => ({ mcpServers, mcpUpdateSources }));
 
 const server = (over: Partial<McpServer> = {}): McpServer => ({
   key: "cmd:npx @playwright/mcp",
@@ -37,6 +40,8 @@ const onOpen = vi.fn();
 
 const panel = (servers: McpServer[]) => {
   mcpServers.mockReset();
+  mcpUpdateSources.mockReset();
+  mcpUpdateSources.mockResolvedValue(servers);
   onOpen.mockReset();
   mcpServers.mockResolvedValue(servers);
   render(<McpToolsPanel rootsKey={"/repo"} visible onOpen={onOpen} />);
@@ -184,6 +189,73 @@ it("does not open the server when the configs are unfolded", async () => {
   expand();
   expect(onOpen).not.toHaveBeenCalled();
   expect(screen.getByText("A_KEY")).toBeTruthy();
+});
+
+it("stages a client removal and applies it as one guarded config change", async () => {
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  mcpUpdateSources.mockResolvedValue([]);
+  panel([server()]);
+  await screen.findByText("playwright");
+  expand();
+
+  fireEvent.click(screen.getByLabelText("Remove playwright Claude Code (global)"));
+  expect(screen.getByText("will remove")).toBeTruthy();
+  expect(screen.getByText("1 client change")).toBeTruthy();
+  fireEvent.click(screen.getByText("Apply"));
+
+  await waitFor(() => expect(mcpUpdateSources).toHaveBeenCalledWith(
+    ["/repo"],
+    [{
+      agent: "claude",
+      name: "playwright",
+      configPath: "/home/u/.claude.json",
+      scope: "global",
+      projectDir: undefined,
+      enabled: false,
+    }],
+  ));
+  expect(confirm).toHaveBeenCalledOnce();
+  confirm.mockRestore();
+});
+
+it("lets the user revert staged client selections without touching a config", async () => {
+  panel([server()]);
+  await screen.findByText("playwright");
+  expand();
+  fireEvent.click(screen.getByLabelText("Remove playwright Claude Code (global)"));
+  fireEvent.click(screen.getByText("Revert"));
+  expect(screen.queryByText("will remove")).toBeNull();
+  expect(mcpUpdateSources).not.toHaveBeenCalled();
+});
+
+it("keeps pending Claude project trust decisions read-only", async () => {
+  panel([server({
+    enabled: false,
+    sources: [{
+      agent: "claude",
+      label: "Claude Code (project)",
+      name: "playwright",
+      config_path: "/repo/.mcp.json",
+      scope: "project",
+      status: "pending",
+      project_dir: "/repo",
+    }],
+  })]);
+  await screen.findByText("playwright");
+  expand();
+  expect(screen.getByLabelText("Enable playwright Claude Code (project)")).toBeDisabled();
+});
+
+it("keeps Canopy's automatically managed context bridge read-only", async () => {
+  panel([server({
+    command: "/home/u/.canopy/bin/canopy-hook",
+    args: ["--mcp"],
+  })]);
+  await screen.findByText("playwright");
+  expand();
+  const control = screen.getByLabelText("Remove playwright Claude Code (global)");
+  expect(control).toBeDisabled();
+  expect(control.closest("label")?.title).toContain("Settings → Agents");
 });
 
 describe("a remote server", () => {

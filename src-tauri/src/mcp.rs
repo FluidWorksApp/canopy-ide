@@ -25,7 +25,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::agents::read_json_config;
+use crate::agents::{read_json_config, write_config_atomic};
 
 /// One config file's claim on a server: which CLI, under what name, from where.
 /// A server configured in four CLIs has four of these, and the row is the same
@@ -45,6 +45,21 @@ pub struct McpSource {
     /// "enabled", "disabled" (switched off in this config), or "pending" (a
     /// `.mcp.json` server the user has neither approved nor rejected).
     pub status: String,
+    /// The project whose nested CLI state owns this entry. Only needed for
+    /// registries such as Claude's per-project map inside ~/.claude.json.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_dir: Option<String>,
+}
+
+#[derive(serde::Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSourceChange {
+    pub agent: String,
+    pub name: String,
+    pub config_path: String,
+    pub scope: String,
+    pub project_dir: Option<String>,
+    pub enabled: bool,
 }
 
 /// One server, however many configs point at it.
@@ -756,6 +771,7 @@ fn read_registry_labelled(
                 config_path: path.display().to_string(),
                 scope: scope.into(),
                 status: status.into(),
+                project_dir: (scope == "project").then(|| cwd.display().to_string()),
             },
             Some(cwd.to_path_buf()),
         );
@@ -835,6 +851,7 @@ pub fn discover(
                         config_path: codex_path.display().to_string(),
                         scope: "global".into(),
                         status: status.into(),
+                        project_dir: None,
                     },
                     Some(root.clone()),
                 );
@@ -892,6 +909,7 @@ fn read_project(
                     config_path: claude_path.display().to_string(),
                     scope: "project".into(),
                     status: status.into(),
+                    project_dir: Some(project.display().to_string()),
                 },
                 Some(project.to_path_buf()),
             );
@@ -946,6 +964,175 @@ fn remember_specs(found: BTreeMap<String, LaunchSpec>) {
     }
 }
 
+fn source_is_nested_claude_state(source: &McpSource) -> bool {
+    source.agent == "claude"
+        && source.scope == "project"
+        && Path::new(&source.config_path)
+            .file_name()
+            .is_some_and(|name| name == ".claude.json")
+}
+
+fn source_registry_key(source: &McpSource) -> &'static str {
+    match source.agent.as_str() {
+        "opencode" => "mcp",
+        "amp" => "amp.mcpServers",
+        "vscode" => "servers",
+        _ => "mcpServers",
+    }
+}
+
+/// Enable an entry that is still present, or remove its whole registry section.
+/// The latter is the only disable mechanism every JSON client actually obeys;
+/// inventing an `enabled` field for Claude/Cursor would leave the server live
+/// while Canopy claimed it was off.
+fn set_json_source_enabled(source: &McpSource, enabled: bool) -> Result<bool, String> {
+    let path = Path::new(&source.config_path);
+    let mut cfg = read_json_config(path)?;
+    let entries = if source_is_nested_claude_state(source) {
+        let project = source
+            .project_dir
+            .as_deref()
+            .ok_or("Claude's project MCP entry has no project directory")?;
+        cfg.get_mut("projects")
+            .and_then(|v| v.get_mut(project))
+            .and_then(|v| v.get_mut("mcpServers"))
+            .and_then(|v| v.as_object_mut())
+            .ok_or_else(|| {
+                format!(
+                    "{} no longer contains Claude's MCP registry for {project}",
+                    path.display()
+                )
+            })?
+    } else {
+        let key = source_registry_key(source);
+        cfg.get_mut(key)
+            .and_then(|v| v.as_object_mut())
+            .ok_or_else(|| format!("{key} in {} is not an object", path.display()))?
+    };
+
+    let Some(existing) = entries.get(&source.name).cloned() else {
+        return Err(format!(
+            "{} no longer contains an MCP server named '{}'",
+            path.display(),
+            source.name
+        ));
+    };
+    if enabled {
+        let mut restored = existing;
+        let object = restored.as_object_mut().ok_or_else(|| {
+            format!(
+                "MCP server '{}' in {} is not an object",
+                source.name,
+                path.display()
+            )
+        })?;
+        // Every JSON dialect we discover defaults an omitted flag to enabled.
+        // Removing a stale false preserves the client's native representation.
+        let removed_enabled = object.remove("enabled").is_some();
+        let removed_disabled = object.remove("disabled").is_some();
+        if !removed_enabled && !removed_disabled {
+            return Ok(false);
+        }
+        entries.insert(source.name.clone(), restored);
+    } else {
+        entries.remove(&source.name);
+    }
+
+    let body = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
+    write_config_atomic(path, &body)?;
+    Ok(true)
+}
+
+fn codex_section_is(path: &[String], name: &str) -> bool {
+    path.len() >= 2 && path[0] == "mcp_servers" && path[1] == name
+}
+
+/// Codex's TOML is edited as text to retain comments and formatting, matching
+/// the installer in agents.rs. Disabling removes the server table and all of
+/// its child tables; enabling drops a retained `enabled = false` line.
+fn codex_toml_with_source(
+    existing: &str,
+    name: &str,
+    enabled: bool,
+) -> Result<Option<String>, String> {
+    let mut in_server = false;
+    let mut saw_server = false;
+    let mut changed = false;
+    let mut out = Vec::new();
+
+    for line in existing.lines() {
+        if let Some(path) = toml_table_path(line) {
+            in_server = codex_section_is(&path, name);
+            saw_server |= in_server;
+            if in_server && !enabled {
+                changed = true;
+                continue;
+            }
+            out.push(line.to_string());
+            continue;
+        }
+        if in_server {
+            if !enabled {
+                changed = true;
+                continue;
+            }
+            let key = line
+                .split_once('=')
+                .map(|(key, _)| key.trim().trim_matches(['"', '\'']))
+                .unwrap_or("");
+            if key == "enabled" {
+                changed = true;
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+
+    if !saw_server {
+        return Err(format!(
+            "Codex config no longer contains an MCP server named '{name}'"
+        ));
+    }
+    if !changed {
+        return Ok(None);
+    }
+    while out.last().is_some_and(|line| line.is_empty()) {
+        out.pop();
+    }
+    let mut body = out.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    Ok(Some(body))
+}
+
+fn set_codex_source_enabled(source: &McpSource, enabled: bool) -> Result<bool, String> {
+    let path = Path::new(&source.config_path);
+    let existing = std::fs::read_to_string(path)
+        .map_err(|e| format!("{} could not be read: {e}", path.display()))?;
+    let Some(body) = codex_toml_with_source(&existing, &source.name, enabled)? else {
+        return Ok(false);
+    };
+    write_config_atomic(path, &body)?;
+    Ok(true)
+}
+
+fn source_matches_change(source: &McpSource, change: &McpSourceChange) -> bool {
+    source.agent == change.agent
+        && source.name == change.name
+        && source.config_path == change.config_path
+        && source.scope == change.scope
+        && source.project_dir == change.project_dir
+}
+
+fn is_managed_canopy_bridge(server: &McpServer) -> bool {
+    server
+        .command
+        .as_deref()
+        .is_some_and(|command| basename(command) == "canopy-hook")
+        && server.args.iter().any(|arg| arg == "--mcp")
+}
+
 #[tauri::command]
 pub async fn mcp_servers(project_dirs: Option<Vec<String>>) -> Result<Vec<McpServer>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
@@ -954,6 +1141,66 @@ pub async fn mcp_servers(project_dirs: Option<Vec<String>>) -> Result<Vec<McpSer
         .into_iter()
         .map(PathBuf::from)
         .collect();
+    let (servers, found) = discover(Path::new(&home), &projects);
+    remember_specs(found);
+    Ok(servers)
+}
+
+/// Apply the MCP panel's staged per-client selections. Every target is first
+/// rediscovered from Canopy's allowlisted registries; the renderer cannot turn
+/// this command into an arbitrary JSON/TOML deletion by inventing a path.
+#[tauri::command]
+pub async fn mcp_update_sources(
+    project_dirs: Option<Vec<String>>,
+    changes: Vec<McpSourceChange>,
+) -> Result<Vec<McpServer>, String> {
+    let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
+    let projects: Vec<PathBuf> = project_dirs
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let (before, _) = discover(Path::new(&home), &projects);
+    let mut validated = Vec::new();
+
+    for change in changes {
+        let (server, source) = before
+            .iter()
+            .find_map(|server| {
+                server
+                    .sources
+                    .iter()
+                    .find(|source| source_matches_change(source, &change))
+                    .map(|source| (server, source.clone()))
+            })
+            .ok_or_else(|| {
+                format!(
+                    "{} no longer configures an MCP server named '{}' at {} — re-read the configs",
+                    change.agent, change.name, change.config_path
+                )
+            })?;
+        if is_managed_canopy_bridge(server) {
+            return Err("Canopy's context bridge is managed from Settings → Agents".to_string());
+        }
+        if source.status == "pending" {
+            return Err(format!(
+                "{} is waiting for approval in {} — approve or reject it from Claude Code",
+                source.name, source.label
+            ));
+        }
+        if (source.status == "enabled") != change.enabled {
+            validated.push((source, change.enabled));
+        }
+    }
+
+    for (source, enabled) in validated {
+        if source.agent == "codex" {
+            set_codex_source_enabled(&source, enabled)?;
+        } else {
+            set_json_source_enabled(&source, enabled)?;
+        }
+    }
+
     let (servers, found) = discover(Path::new(&home), &projects);
     remember_specs(found);
     Ok(servers)
@@ -1063,6 +1310,7 @@ mod tests {
                 config_path: "/tmp/x".into(),
                 scope: "global".into(),
                 status: "enabled".into(),
+                project_dir: None,
             },
             None,
         );
@@ -1167,6 +1415,7 @@ CANOPY_CTX_PORT = "1234"
             config_path: "/tmp/x".into(),
             scope: "global".into(),
             status: status.into(),
+            project_dir: None,
         };
         collector.add(
             "browserbase",
@@ -1209,6 +1458,7 @@ CANOPY_CTX_PORT = "1234"
             config_path: "/tmp/x".into(),
             scope: "global".into(),
             status: "enabled".into(),
+            project_dir: None,
         };
         collector.add("srv", with_env(&["A_KEY"]), source.clone(), None);
         collector.add("srv", with_env(&["B_KEY", "A_KEY"]), source, None);
@@ -1219,6 +1469,99 @@ CANOPY_CTX_PORT = "1234"
         let spec = specs.values().next().unwrap();
         assert_eq!(spec.env.keys().collect::<Vec<_>>(), ["A_KEY", "B_KEY"]);
         assert_eq!(spec.env["A_KEY"], "value-of-A_KEY");
+    }
+
+    #[test]
+    fn removing_a_json_source_keeps_the_other_servers_and_settings() {
+        let dir = std::env::temp_dir().join(format!(
+            "canopy-mcp-edit-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let path = dir.join("mcp.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"linear":{"url":"https://linear.test/mcp"},"docs":{"command":"docs"}},"theme":"dark"}"#,
+        )
+        .unwrap();
+        let source = McpSource {
+            agent: "cursor".into(),
+            label: "Cursor (global)".into(),
+            name: "linear".into(),
+            config_path: path.display().to_string(),
+            scope: "global".into(),
+            status: "enabled".into(),
+            project_dir: None,
+        };
+
+        assert!(set_json_source_enabled(&source, false).unwrap());
+        let config = read_json_config(&path).unwrap();
+        assert!(config["mcpServers"].get("linear").is_none());
+        assert_eq!(config["mcpServers"]["docs"]["command"], "docs");
+        assert_eq!(config["theme"], "dark");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn enabling_a_retained_json_source_removes_disable_flags() {
+        let dir = std::env::temp_dir().join(format!(
+            "canopy-mcp-enable-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let path = dir.join("opencode.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"mcp":{"docs":{"type":"local","command":["docs"],"enabled":false}}}"#,
+        )
+        .unwrap();
+        let source = McpSource {
+            agent: "opencode".into(),
+            label: "OpenCode (global)".into(),
+            name: "docs".into(),
+            config_path: path.display().to_string(),
+            scope: "global".into(),
+            status: "disabled".into(),
+            project_dir: None,
+        };
+
+        assert!(set_json_source_enabled(&source, true).unwrap());
+        let config = read_json_config(&path).unwrap();
+        assert!(config["mcp"]["docs"].get("enabled").is_none());
+        assert_eq!(config["mcp"]["docs"]["command"][0], "docs");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn codex_removal_drops_one_server_and_its_children_only() {
+        let raw = r#"model = "gpt-5"
+
+[mcp_servers.linear]
+url = "https://linear.test/mcp"
+enabled = false
+
+[mcp_servers.linear.env]
+LINEAR_KEY = "secret"
+
+[mcp_servers.docs]
+command = "docs"
+"#;
+        let removed = codex_toml_with_source(raw, "linear", false)
+            .unwrap()
+            .unwrap();
+        assert!(!removed.contains("linear"));
+        assert!(!removed.contains("secret"));
+        assert!(removed.contains("[mcp_servers.docs]"));
+        assert!(removed.contains("model = \"gpt-5\""));
+
+        let enabled = codex_toml_with_source(raw, "linear", true)
+            .unwrap()
+            .unwrap();
+        assert!(enabled.contains("[mcp_servers.linear]"));
+        assert!(!enabled.contains("enabled = false"));
+        assert!(enabled.contains("LINEAR_KEY = \"secret\""));
     }
 
     #[test]

@@ -2419,7 +2419,7 @@ pub(crate) fn read_json_config(path: &std::path::Path) -> Result<serde_json::Val
 /// setup step. The temp file is created in the destination directory to keep
 /// the rename within one filesystem, and inherits the original's permissions
 /// so a 0600 config doesn't come back world-readable.
-fn write_config_atomic(path: &std::path::Path, body: &str) -> Result<(), String> {
+pub(crate) fn write_config_atomic(path: &std::path::Path, body: &str) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
