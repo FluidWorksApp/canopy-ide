@@ -1266,6 +1266,12 @@ fn update_digest(
         if let Some(p) = event["prompt"].as_str() {
             let p = p.trim();
             if !p.is_empty() {
+                // A prompt is the universal baseline status. Agents may later
+                // refine it through canopy_name_task, but the UI must not
+                // depend on a voluntary tool call to say what a turn is about.
+                let working_on = p.split_whitespace().collect::<Vec<_>>().join(" ");
+                digest["working_on"] = serde_json::json!(truncate(&working_on, 160));
+                digest["working_on_updated"] = serde_json::json!(now);
                 // The prompt that started the session, kept apart from the
                 // rotating window above: `prompts` drops its oldest entries,
                 // so on a long session the reason it exists at all was the
@@ -5905,6 +5911,10 @@ mod tests {
         assert_eq!(prompts.first().copied(), Some("p3"));
         assert_eq!(
             prompts.last().copied(),
+            Some(format!("p{}", MAX_PROMPTS + 2).as_str())
+        );
+        assert_eq!(
+            digest["working_on"].as_str(),
             Some(format!("p{}", MAX_PROMPTS + 2).as_str())
         );
         let _ = std::fs::remove_file(&path);

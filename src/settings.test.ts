@@ -19,6 +19,7 @@ describe("getSettings / updateSettings", () => {
   it("returns defaults when nothing is stored", () => {
     const s = getSettings();
     expect(s.scrollback).toBe(5_000);
+    expect(s.sessionNameTheme).toBe("canopy");
     expect(s.theme).toBe("gotham");
     expect(s.trackerKeys).toEqual({});
     expect(s.tabSwitchMode).toBe("recent");
@@ -46,6 +47,7 @@ describe("getSettings / updateSettings", () => {
 
   it("round-trips a patch through localStorage", () => {
     updateSettings({
+      sessionNameTheme: "retro",
       theme: "gotham",
       customAccent: "#ff0000",
       tabSwitchMode: "order",
@@ -57,6 +59,7 @@ describe("getSettings / updateSettings", () => {
     });
     const s = getSettings();
     expect(s.theme).toBe("gotham");
+    expect(s.sessionNameTheme).toBe("retro");
     expect(s.customAccent).toBe("#ff0000");
     expect(s.tabSwitchMode).toBe("order");
     expect(s.restoreUserClosedSessions).toBe(true);
@@ -77,6 +80,14 @@ describe("getSettings / updateSettings", () => {
   it("falls back to defaults on corrupt stored JSON", () => {
     localStorage.setItem("canopy.settings", "{not json");
     expect(getSettings().scrollback).toBe(5_000);
+  });
+
+  it("rejects a hand-edited unknown session-name theme", () => {
+    localStorage.setItem(
+      "canopy.settings",
+      JSON.stringify({ sessionNameTheme: "definitely-not-a-theme" }),
+    );
+    expect(getSettings().sessionNameTheme).toBe("canopy");
   });
 
   it("migrates the former default combo and reserved Command trigger", () => {

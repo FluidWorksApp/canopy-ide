@@ -99,6 +99,12 @@ export function TerminalGovernorCard({
           ? `Its combined allowance is ${fmtBytes(quota.allowance_bytes)} across ${members.length} agents. Grants remain per agent; this decision applies to ${terminalName}. ${enforcement}`
           : `Its one-agent allowance is ${fmtBytes(status.allowance_bytes)}. ${enforcement}`}
       </p>
+      {!multiplexed && status.max_allowance_bytes != null && (
+        <p className="terminal-governor-allowance-summary">
+          Current allowance: <strong>{fmtBytes(status.allowance_bytes)}</strong>
+          {" · "}Grant ceiling: <strong>{fmtBytes(status.max_allowance_bytes)}</strong>
+        </p>
+      )}
       <div className="terminal-governor-controls">
         {multiplexed && (
           <div className="terminal-governor-members" aria-label="Per-agent memory allowances">
@@ -117,9 +123,9 @@ export function TerminalGovernorCard({
         )}
         {status.cli_key && (
           <label className="terminal-governor-maximum">
-            <span>Maximum allowance for {terminalName}</span>
+            <span>Grant ceiling for {terminalName}</span>
             <Select
-              aria-label={`Maximum allowance for ${terminalName}`}
+              aria-label={`Grant ceiling for ${terminalName}`}
               width="sm"
               size="sm"
               value={status.max_allowance_bytes ?? 0}
@@ -140,7 +146,10 @@ export function TerminalGovernorCard({
                 <option key={bytes} value={bytes}>{fmtBytes(bytes)}</option>
               ))}
             </Select>
-            <small>Caps future allowance grants; it does not create a hard OS limit.</small>
+            <small>
+              This is not the current allowance. It only caps future grants;
+              use an Allow button below to raise the active allowance.
+            </small>
           </label>
         )}
         {status.cli_key && (

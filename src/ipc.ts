@@ -219,6 +219,8 @@ export const ptySetTitle = (id: number, title: string) =>
   gone(invoke<void>("pty_set_title", { id, title }));
 export const ptySetName = (id: number, name: string) =>
   invoke<string>("pty_set_name", { id, name });
+export const ptySetNameTheme = (theme: string) =>
+  invoke<void>("pty_set_name_theme", { theme });
 
 /** Spawn a detached PTY from an argv array, with no shell anywhere in the path.
  *  `argv[0]` is the program; every later element stays exactly one argument,

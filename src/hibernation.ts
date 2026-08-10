@@ -80,6 +80,7 @@ export type SnapshotTab =
   | { kind: "prs-list" }
   | { kind: "issues-list" }
   | { kind: "task-history" }
+  | { kind: "workflows" }
   | { kind: "instructions"; focus?: string }
   | { kind: "mcp"; server: ipc.McpServer }
   | { kind: "claim"; claim: ipc.AgentClaim }
@@ -217,6 +218,9 @@ export function snapshotTabs(
       case "task-history":
         out.push({ kind: "task-history" });
         break;
+      case "workflows":
+        out.push({ kind: "workflows" });
+        break;
       case "instructions":
         out.push({ kind: "instructions", focus: t.focus });
         break;
@@ -344,6 +348,8 @@ export function stepLabel(t: SnapshotTab): string {
       return "Reopening issues";
     case "task-history":
       return "Reopening completed tasks";
+    case "workflows":
+      return "Reopening workflows";
     case "instructions":
       return "Reopening agent instructions";
     case "mcp":

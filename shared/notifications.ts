@@ -43,6 +43,10 @@ export interface AgentEventData {
   tool: string;
   /** Empty when the hook carried no agent stamp (a bare claude). */
   agent: string;
+  /** Human text that began this turn. Kept only on UserPromptSubmit so the
+   * owning tab can publish a baseline title/status without waiting for the
+   * model to voluntarily call a naming tool. */
+  prompt?: string;
   message?: string;
   notificationType?: string;
   /** What the installer classified this moment as, when it could — the same
@@ -111,6 +115,8 @@ export function parseAgentEvent(raw: string): AgentEventData | null {
     agent: typeof parsed.agent === "string" ? parsed.agent : "",
   };
   if (parsed.message != null) data.message = String(parsed.message);
+  if (event === "UserPromptSubmit" && typeof parsed.prompt === "string")
+    data.prompt = parsed.prompt;
   if (typeof parsed.notification_type === "string")
     data.notificationType = parsed.notification_type;
   if (typeof parsed.canopy_signal === "string")

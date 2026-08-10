@@ -14,6 +14,10 @@ import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
 import { SKINS, type SkinId } from "./skins/registry";
 import {
+  isSessionNameTheme,
+  type SessionNameTheme,
+} from "./sessionNameThemes";
+import {
   formatChord,
   isShortcutProfile,
   keyLabel as chordKeyLabel,
@@ -227,6 +231,10 @@ export const EDITOR_FONT_DEFAULT =
 
 export interface Settings {
   scrollback: number;
+  /** Vocabulary used for Canopy's generated terminal/session callsigns. The
+   * native PTY manager owns generation so detached and Remote launches follow
+   * it too; the frontend publishes this preference on launch and on change. */
+  sessionNameTheme: SessionNameTheme;
   /** Workbench shortcut preset. Imported editor-specific customizations can be
    * layered above this later without changing the semantic command catalog. */
   keymapProfile: ShortcutProfile;
@@ -587,6 +595,7 @@ export interface Settings {
 // which is exactly why `webgl` is gone rather than defaulted to false.
 export const DEFAULTS: Settings = {
   scrollback: 5_000,
+  sessionNameTheme: "canopy",
   keymapProfile: "canopy",
   defaultProjectLens: "engineer",
   fontSize: 13,
@@ -706,6 +715,8 @@ export function getSettings(): Settings {
     const stored = JSON.parse(raw ?? "{}") as Partial<Settings>;
     value = { ...DEFAULTS, ...stored };
     value.scrollback = boundedScrollback(stored.scrollback);
+    if (!isSessionNameTheme(value.sessionNameTheme))
+      value.sessionNameTheme = DEFAULTS.sessionNameTheme;
     if (stored.dictationTriggerRevision !== DICTATION_TRIGGER_REVISION) {
       // Full settings snapshots made the old combo look user-selected on every
       // existing install. Move only its unchanged default to the new gesture;

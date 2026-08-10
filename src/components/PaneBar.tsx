@@ -135,6 +135,7 @@ function tabTitle(tab: SubTab): string {
     case "prs-list": return "Every open pull request in this project";
     case "issues-list": return "Every issue from this project's connected trackers";
     case "task-history": return "Every one-shot task that has finished, and what it reported";
+    case "workflows": return "Repository workflows, live steps, decisions, and durable run history";
     case "instructions": return "CLAUDE.md, AGENTS.md, skills and subagents — what every agent reads first";
     case "mcp": return `${tab.server.name} — the tools this MCP server exposes, and who can reach it`;
     case "claim": return `${claimOwnerName(tab.claim.owner)} claimed ${tab.claim.paths.join(", ")}${tab.claim.note ? `\n${tab.claim.note}` : ""}`;
@@ -168,6 +169,7 @@ function tabText(tab: SubTab, showAssignedName = false): string {
     case "prs-list": return "Pull requests";
     case "issues-list": return "Issues";
     case "task-history": return "Completed tasks";
+    case "workflows": return "Workflows";
     case "instructions": return "Agent instructions";
     case "mcp": return tab.server.name;
     case "claim": return tabDisplayLabel(tab);

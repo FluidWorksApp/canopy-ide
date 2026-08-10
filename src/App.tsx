@@ -1337,13 +1337,17 @@ export default function App() {
     if (loaded && shouldOnboard()) setOnboarding(true);
   }, [loaded]);
 
-  // The webview resolves shortcuts from settings on every keydown. Native menu
-  // accelerators need the same profile pushed across the Tauri boundary, both
-  // on launch and whenever onboarding or Settings changes it.
+  // The webview resolves shortcuts and terminal names from settings. Their
+  // native owners need the same choices pushed across the Tauri boundary, both
+  // on launch and whenever onboarding or Settings changes them.
   useEffect(() => {
     const sync = () => {
-      void ipc.setShortcutProfile(getSettings().keymapProfile).catch((err) =>
+      const settings = getSettings();
+      void ipc.setShortcutProfile(settings.keymapProfile).catch((err) =>
         console.warn("failed to apply native shortcut profile", err),
+      );
+      void ipc.ptySetNameTheme(settings.sessionNameTheme).catch((err) =>
+        console.warn("failed to apply session name theme", err),
       );
     };
     sync();
@@ -3381,11 +3385,9 @@ export default function App() {
                 maxAllowanceBytes,
               )
               .then(() => {
-                setActiveGovernorRequestId(null);
-                resolveAttentionByKey(
-                  governorAttentionKey(pendingGovernor.id),
-                  "answered",
-                );
+                // A ceiling change is policy, not the requested grant. Keep
+                // this same decision open instead of closing it and then
+                // reopening an identical popup against the unchanged allowance.
                 refreshTerminalGovernor();
               })
               .catch((error) => setGovernorError(String(error)))

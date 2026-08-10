@@ -234,6 +234,12 @@ export interface TaskHistorySubTab {
   focus?: { runId: string; nonce: number };
 }
 
+/** Repository-defined automations and their durable execution history. */
+export interface WorkflowsSubTab {
+  id: string;
+  type: "workflows";
+}
+
 /** The instruction files every agent reads before it sees any code — the
  *  project's, the user's own, and the skill and subagent packs. One per
  *  project; `focus` is the file a panel row asked it to open on. */
@@ -356,6 +362,7 @@ export type SubTab =
   | PrsListSubTab
   | IssuesListSubTab
   | TaskHistorySubTab
+  | WorkflowsSubTab
   | InstructionsSubTab
   | McpSubTab
   | ClaimSubTab
@@ -645,6 +652,8 @@ export function describeTab(tab: SubTab | undefined) {
       return { kind: "issues-list", label: "Issues" };
     case "task-history":
       return { kind: "task-history", label: "Completed tasks" };
+    case "workflows":
+      return { kind: "workflows", label: "Workflows" };
     case "instructions":
       return { kind: "instructions", label: "Agent instructions" };
     case "mcp":
@@ -719,6 +728,8 @@ export function tabDisplayLabel(t: SubTab): string {
       return "Issues";
     case "task-history":
       return "Completed tasks";
+    case "workflows":
+      return "Workflows";
     case "instructions":
       return "Agent instructions";
     case "mcp":

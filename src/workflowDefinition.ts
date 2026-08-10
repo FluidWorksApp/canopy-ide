@@ -118,6 +118,54 @@ export interface WorkflowDefinition {
   edges: WorkflowEdge[];
 }
 
+/** A safe first file for the empty-state action. It only reads the workspace,
+ * then asks the person whether the evidence is complete; creating the file
+ * never starts it. */
+export const STARTER_WORKFLOW_DEFINITION: WorkflowDefinition = {
+  schemaVersion: WORKFLOW_SCHEMA_VERSION,
+  id: "review-change",
+  version: "1",
+  name: "Review the current change",
+  triggers: [{ kind: "manual" }],
+  constraints: { componentRoots: ["."], branchPatterns: ["*"] },
+  start: "review",
+  steps: [
+    {
+      id: "review",
+      name: "Review the patch",
+      kind: "agent",
+      capabilities: ["workspace-read"],
+      prompt: "Review the current branch changes. Identify concrete correctness, security, performance, and test-coverage risks. Do not edit files. Report evidence with file paths and line numbers.",
+      acceptance: [
+        "Every finding names a concrete file and line.",
+        "The report distinguishes blocking problems from optional improvements.",
+      ],
+      attemptCap: 2,
+    },
+    {
+      id: "accept",
+      name: "Accept the review",
+      kind: "human",
+      capabilities: [],
+      card: {
+        reason: "choice",
+        title: "Is this review complete?",
+        detail: "Accept the evidence to finish this run, or mark it incomplete.",
+        actions: [
+          { label: "Accept review", response: "accept", tone: "primary" },
+          { label: "Mark incomplete", response: "incomplete", tone: "danger" },
+        ],
+      },
+    },
+  ],
+  edges: [
+    { from: "review", on: "success", to: "accept" },
+    { from: "review", on: "failure", to: "$failed" },
+    { from: "accept", on: "accept", to: "$completed" },
+    { from: "accept", on: "incomplete", to: "$failed" },
+  ],
+};
+
 export interface WorkflowValidationContext {
   projectRoot: string;
   componentRoots: ReadonlySet<string>;
@@ -153,7 +201,25 @@ const text = (value: unknown): value is string =>
   typeof value === "string" && value.trim().length > 0;
 const strings = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every((item) => typeof item === "string");
-const normalize = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "");
+/** Lexically normalize a definition path without touching the filesystem.
+ * Repository definitions need `.` to mean the checked-out component on every
+ * machine; retaining that segment made the portable spelling fail the exact
+ * component-root comparison and effectively required an absolute path. */
+const normalize = (path: string) => {
+  const source = path.replace(/\\/g, "/");
+  const drive = source.match(/^[A-Za-z]:/)?.[0] ?? "";
+  const rooted = source.startsWith("/");
+  const body = drive ? source.slice(drive.length).replace(/^\/+/, "") : rooted ? source.slice(1) : source;
+  const parts: string[] = [];
+  for (const part of body.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  if (drive) return `${drive}/${parts.join("/")}`.replace(/\/$/, "");
+  if (rooted) return `/${parts.join("/")}`;
+  return parts.join("/");
+};
 const absolute = (path: string) => /^(?:[A-Za-z]:\/|\/)/.test(normalize(path));
 const resolvePath = (root: string, path: string) =>
   normalize(absolute(path) ? path : `${normalize(root)}/${path.replace(/^\.\//, "")}`);

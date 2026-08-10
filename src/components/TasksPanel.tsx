@@ -67,6 +67,8 @@ interface TasksPanelProps {
   /** Open the full history. Given a run id, expand that run when it opens —
    *  a row you clicked should not make you find it again in the list. */
   onOpenHistory: (focus?: string) => void;
+  /** Open the project's workflow catalog and durable run timeline. */
+  onOpenWorkflows: () => void;
   /** The tasks this project keeps. Owned by the project, so editing one is a
    *  workspace save, not a settings write — and a task written here doesn't
    *  turn up in a project it makes no sense in. */
@@ -107,6 +109,7 @@ export function TasksPanel({
   onRunCustom,
   onRunOneOff,
   onOpenHistory,
+  onOpenWorkflows,
   custom,
   onSaveCustom,
   projectId,
@@ -279,6 +282,9 @@ export function TasksPanel({
       <div className="side-panel-head">
         <span>Tasks</span>
         <span className="status-spacer" />
+        <Button size="sm" variant="ghost" onClick={onOpenWorkflows}>
+          Workflows
+        </Button>
         <Button size="sm" variant="ghost" onClick={() => onOpenHistory()}>
           View all
         </Button>

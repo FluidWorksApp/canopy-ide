@@ -74,6 +74,34 @@ describe("TabSwitcher", () => {
     expect(shot.textContent).toBe("building…\n$ npm test");
   });
 
+  it("uses a terminal glyph instead of a blank card before output arrives", () => {
+    render(
+      <TabSwitcher
+        tabs={[term("quiet")]}
+        selectedId="quiet"
+        paneRef={paneWith([], "")}
+        termText={() => ""}
+        onPick={() => {}}
+      />,
+    );
+    expect(document.querySelector(".tsw-terminal-blank svg")).not.toBeNull();
+  });
+
+  it("uses a cheap multiplex tile instead of pretending one pane is the group", () => {
+    render(
+      <TabSwitcher
+        tabs={[{ ...term("mux"), multiplexCount: 4 }]}
+        selectedId="mux"
+        paneRef={paneWith([], "")}
+        termText={() => "this representative should not be captured"}
+        onPick={() => {}}
+      />,
+    );
+    expect(screen.getByText("4 panes")).toBeTruthy();
+    expect(document.querySelector(".tsw-multiplex")).not.toBeNull();
+    expect(document.querySelector(".tsw-term")).toBeNull();
+  });
+
   it("clones a doc pane rather than naming it", () => {
     render(
       <TabSwitcher

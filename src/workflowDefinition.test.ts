@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   loadWorkflowDefinitions,
+  STARTER_WORKFLOW_DEFINITION,
   validateWorkflowDefinition,
   workflowAcceptsTrigger,
   type WorkflowDefinition,
@@ -57,6 +58,16 @@ describe("validateWorkflowDefinition", () => {
       ok: true,
       definition: valid(),
     });
+  });
+
+  it("accepts portable component-root paths in committed definitions", () => {
+    const definition = valid();
+    definition.constraints.componentRoots = ["."];
+    expect(validateWorkflowDefinition(definition, context).ok).toBe(true);
+  });
+
+  it("ships a safe starter definition that passes the same validator", () => {
+    expect(validateWorkflowDefinition(STARTER_WORKFLOW_DEFINITION, context).ok).toBe(true);
   });
 
   it("rejects schema and capability violations", () => {

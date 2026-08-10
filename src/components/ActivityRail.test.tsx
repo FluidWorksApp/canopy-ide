@@ -38,8 +38,7 @@ describe("ActivityRail", () => {
       "Project — Components & files",
       "Project — Servers — every component you can run, start and manage",
       "Project — Integrations — local services, linked accounts and deployments",
-      "Source control & Review — Session changes",
-      "Source control & Review — Git — branches, commits, worktrees, PRs",
+      "Source control & Review — Source control — session changes, branches, commits and worktrees",
       "Source control & Review — Pull requests — every open project, one list",
       "Source control & Review — Issues — GitHub, Linear, …",
       "Agents — Agents",
@@ -99,7 +98,7 @@ describe("ActivityRail", () => {
     it("draws the 8x8 twins for every icon in the rail", () => {
       document.documentElement.dataset.theme = "pixel";
       const { container } = render(<ActivityRail {...props} />);
-      expect(boxes(container)).toEqual(Array(15).fill("0 0 8 8"));
+      expect(boxes(container)).toEqual(Array(14).fill("0 0 8 8"));
     });
 
     it("swaps back and forth when the skin changes under it", () => {

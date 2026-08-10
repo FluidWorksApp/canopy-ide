@@ -1,7 +1,6 @@
 import { memo } from "react";
 import {
   AgentsIcon,
-  DiffIcon,
   FilesIcon,
   GitBranchIcon,
   GlobeIcon,
@@ -18,7 +17,6 @@ import {
 } from "./icons";
 import {
   PixelAgentsIcon,
-  PixelChangesIcon,
   PixelFilesIcon,
   PixelGitIcon,
   PixelIntegrationsIcon,
@@ -92,16 +90,10 @@ const RAIL_GROUPS: { id: string; name: string; tabs: RailTab[] }[] = [
     name: "Source control & Review",
     tabs: [
       {
-        key: "changes",
-        Icon: DiffIcon,
-        Pixel: PixelChangesIcon,
-        title: "Session changes",
-      },
-      {
         key: "git",
         Icon: GitBranchIcon,
         Pixel: PixelGitIcon,
-        title: "Git — branches, commits, worktrees, PRs",
+        title: "Source control — session changes, branches, commits and worktrees",
       },
       {
         key: "prs",
@@ -258,7 +250,7 @@ function ActivityRailImpl({
       onBlur={onHoverCancel}
     >
       {pixel ? <t.Pixel size={22} /> : <t.Icon size={22} />}
-      {t.key === "changes" && changeBadge > 0 && (
+      {t.key === "git" && changeBadge > 0 && (
         <span className="rail-badge">{Math.min(changeBadge, 99)}</span>
       )}
       {t.key === "servers" && serversBadge > 0 && (

@@ -1,5 +1,5 @@
-// One open project: icon rail + collapsible side panel (components / changes /
-// agents) + the main area where the AGENT is the hero. Agents and reference
+// One open project: icon rail + collapsible side panel (components / source
+// control / agents) + the main area where the AGENT is the hero. Agents and reference
 // docs are sub-tabs; plain shells and long-running commands sit in compact
 // right-hand rails (single chip, or a dropdown once there's more than one).
 // Terminals stay mounted so TUIs keep running. Bottom status tray shows git
@@ -277,6 +277,7 @@ import {
   setStatus as setNoteStatus,
 } from "../../notes";
 import { TaskHistoryView } from "../TaskHistoryView";
+import { WorkflowView } from "../WorkflowView";
 import { InstructionsView } from "../InstructionsView";
 import {
   adoptTaskReservation,
@@ -294,6 +295,21 @@ import {
   taskGet,
   TASK_ENVELOPES_EVENT,
 } from "../../taskEnvelopes";
+import type { TaskReservation, TaskRouteSnapshot } from "../../taskEnvelope";
+import {
+  answerWorkflowHuman,
+  continueWorkflow,
+  DEFAULT_WORKFLOW_STORE_DEPS,
+  startWorkflow,
+  type WorkflowExecutionContext,
+  type WorkflowExecutorDeps,
+} from "../../workflowExecutor";
+import {
+  STARTER_WORKFLOW_DEFINITION,
+  type WorkflowDefinition,
+} from "../../workflowDefinition";
+import { workflowGet } from "../../workflowRuns";
+import { waitForWorkflowAttempt } from "../../workflowAttempt";
 import { record as recordProvenance } from "../../provenance";
 import { resolveAgentForPr, type PrAgent } from "../../agentForPr";
 import { cached as provenanceCached, parsePrUrl } from "../../provenance";
@@ -302,6 +318,7 @@ import {
   askedLine,
   hasIdentity,
   identityPatch,
+  promptTaskIdentity,
   taskDescription,
   taskIdentity,
 } from "../../taskIdentity";
@@ -515,6 +532,7 @@ import {
   type ReviewSubTab,
   type AgentSubTab,
   type TaskHistorySubTab,
+  type WorkflowsSubTab,
   type InstructionsSubTab,
   type McpSubTab,
   type ClaimSubTab,
@@ -552,6 +570,7 @@ export type {
   ReviewSubTab,
   AgentSubTab,
   TaskHistorySubTab,
+  WorkflowsSubTab,
   InstructionsSubTab,
   McpSubTab,
   ClaimSubTab,
@@ -2952,6 +2971,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [patchTabRaw],
   );
 
+  /** One workflow control room per project. Definitions, live runs and human
+   * decisions share the page because they are three views of the same route. */
+  const openWorkflows = useCallback(() => {
+    const existing = tabsRef.current.find((tab) => tab.type === "workflows");
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    const id = tabId();
+    setTabs((previous) => [...previous, { id, type: "workflows" }]);
+    setActiveTabId(id);
+  }, []);
+
   /** Open the agent-instructions tab, focused on one file when a panel row
    *  asked for it. One per project, like the history tab. */
   const openInstructions = useCallback(
@@ -3425,6 +3457,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // one the user chose from its menu.
       preferAgent?: string,
       onReserved?: (ids: { runId: string; attemptId: string }) => void,
+      // Workflow steps reserve their durable attempt before launching. Reuse
+      // that reservation so the workflow edge, task evidence and PTY all name
+      // the same attempt instead of creating a shadow micro-task.
+      existingReservation?: TaskReservation,
     ): Promise<boolean> => {
       await hydrateTaskHistory();
       const installed = await getInstalledForLaunch();
@@ -3508,35 +3544,35 @@ const ProjectViewBody = memo(function ProjectViewBody({
         // delete. The launcher's metadata is the only durable place that knows.
         ephemeralCwd: Boolean(env?.cleanup),
       };
-      let reservation;
+      let reservation: TaskReservation;
       let durableHistory;
       try {
         const appInstance = await ipc.instanceId();
         durableHistory = { ...history, appInstance };
-        reservation = await reserveTask({
-          kind: def.id,
-          projectId: project.id,
-          componentId: component?.id ?? project.id,
-          worktreePath: dir,
-          goal: brief,
-          acceptance: def.steps?.map((step) => step.done) ?? [],
-          taskClasses: { micro_task: 1 },
-          contextSummary: `One-shot ${def.effect ?? "reads"} task launched from ${runName}.`,
-          riskClass: def.effect ?? "reads",
-          authorityPolicy: { effect: def.effect ?? "reads" },
-          failoverPolicy: { automatic: false },
-          attemptCap: 1,
-          title: runName,
-          metadata: { ...durableHistory, history: true },
-          route: {
-            cli: cli.id,
-            profileId: launchProfile(agent) ?? "default",
-            harnessVersion: "micro-task-v1",
-            promptVersion: "micro-task-v1",
-            toolPolicyVersion: "micro-task-v1",
-            executionMode: "pty",
-          },
-        });
+        reservation = existingReservation ?? await reserveTask({
+            kind: def.id,
+            projectId: project.id,
+            componentId: component?.id ?? project.id,
+            worktreePath: dir,
+            goal: brief,
+            acceptance: def.steps?.map((step) => step.done) ?? [],
+            taskClasses: { micro_task: 1 },
+            contextSummary: `One-shot ${def.effect ?? "reads"} task launched from ${runName}.`,
+            riskClass: def.effect ?? "reads",
+            authorityPolicy: { effect: def.effect ?? "reads" },
+            failoverPolicy: { automatic: false },
+            attemptCap: 1,
+            title: runName,
+            metadata: { ...durableHistory, history: true },
+            route: {
+              cli: cli.id,
+              profileId: launchProfile(agent) ?? "default",
+              harnessVersion: "micro-task-v1",
+              promptVersion: "micro-task-v1",
+              toolPolicyVersion: "micro-task-v1",
+              executionMode: "pty",
+            },
+          });
       } catch (err) {
         onNotice(`Couldn't reserve "${def.label}": ${String(err)}`, "error");
         return false;
@@ -3959,6 +3995,156 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [startMicroTask],
   );
+
+  const workflowRuntime = useCallback(
+    async (definition: WorkflowDefinition): Promise<{
+      context: WorkflowExecutionContext;
+      deps: WorkflowExecutorDeps;
+    }> => {
+      const installed = await getInstalledForLaunch();
+      const cli = pickLaunchCli(undefined, (bin) => Boolean(installed[bin]));
+      if (!cli) throw new Error("No agent CLI is installed for workflow steps");
+      const fleet = await gateManagedLaunch(cli, installed);
+      if (!fleet.allowed) throw new Error("Canopy's fleet gate refused this workflow launch");
+
+      const projectRoot = roots[0] ?? project.components[0]?.path;
+      if (!projectRoot) throw new Error("This project has no component root");
+      const declaredRoot = definition.constraints.componentRoots[0] ?? projectRoot;
+      const worktreePath = /^(?:[A-Za-z]:[\\/]|\/)/.test(declaredRoot)
+        ? declaredRoot
+        : `${projectRoot.replace(/[\\/]+$/, "")}/${declaredRoot.replace(/^\.?[\\/]/, "")}`;
+      const component = [...project.components]
+        .filter((candidate) =>
+          worktreePath === candidate.path || worktreePath.startsWith(`${candidate.path}/`),
+        )
+        .sort((left, right) => right.path.length - left.path.length)[0] ?? project.components[0];
+      if (!component) throw new Error("This workflow does not target a project component");
+
+      const snapshotFor = (agent: string, profileId: string): TaskRouteSnapshot => ({
+        cli: agent,
+        profileId,
+        requestedModel: null,
+        observedModel: null,
+        harnessVersion: "workflow-p1",
+        promptVersion: "workflow-p1",
+        toolPolicyVersion: "workflow-p1",
+        executionMode: "pty",
+        selection: { policy: "workflow-default-agent", eligible: [`${agent}:${profileId}`] },
+      });
+      const initialRoute = snapshotFor(cli.id, fleet.route.profile);
+
+      const deps: WorkflowExecutorDeps = {
+        ...DEFAULT_WORKFLOW_STORE_DEPS,
+        routeFor: (_step, selected) => {
+          const route = selected
+            ? snapshotFor(selected.cli, selected.profileId)
+            : initialRoute;
+          return {
+            route,
+            candidates: [],
+            taskClass: "build",
+            snapshotFor: (next) => snapshotFor(next.cli, next.profileId),
+          };
+        },
+        launchAgent: async ({ step, reservation }) => {
+          const task: MicroTaskDef<{ dir: string }> = {
+            id: `workflow-${definition.id}-${step.id}`,
+            label: step.name,
+            icon: "◇",
+            placeholder: "",
+            cwd: (payload) => payload.dir,
+            buildContext: () => step.prompt,
+            runLabel: () => `${definition.name} · ${step.name}`,
+            effect: step.capabilities.includes("workspace-write") ? "pushes" : "reads",
+          };
+          const started = await startMicroTask(
+            task,
+            { dir: worktreePath },
+            "",
+            reservation.attempt.route.cli,
+            undefined,
+            reservation,
+          );
+          if (!started) {
+            await settleAttempt({ attemptId: reservation.attempt.attemptId, state: "failed" })
+              .catch(() => {});
+            return { ok: false, failureText: "workflow agent did not start" };
+          }
+          return waitForWorkflowAttempt(reservation.attempt.attemptId);
+        },
+        // Native open-PR/update-branch execution needs structured parameters
+        // that schema v1 does not carry. Fail closed instead of guessing a
+        // repository, branch or pull request from ambient UI state.
+        runGitOp: async (step) => {
+          onNotice(`Workflow step “${step.name}” needs git-operation parameters before it can run.`, "error");
+          return { ok: false };
+        },
+      };
+      return {
+        context: { projectId: project.id, componentId: component.id, worktreePath },
+        deps,
+      };
+    },
+    [
+      gateManagedLaunch,
+      getInstalledForLaunch,
+      onNotice,
+      project.components,
+      project.id,
+      roots,
+      startMicroTask,
+    ],
+  );
+
+  const runWorkflowDefinition = useCallback(
+    async (definition: WorkflowDefinition) => {
+      const runtime = await workflowRuntime(definition);
+      const run = startWorkflow(
+        definition,
+        {
+          kind: "manual",
+          eventId: crypto.randomUUID(),
+          occurredAt: Date.now(),
+          payload: { source: "workflow-view" },
+        },
+        runtime.context,
+        runtime.deps,
+      );
+      void run.catch((error) => onNotice(`Workflow stopped: ${String(error)}`, "error"));
+    },
+    [onNotice, workflowRuntime],
+  );
+
+  const answerWorkflowDecision = useCallback(
+    async (runId: string, response: string) => {
+      const run = await workflowGet(runId);
+      if (!run) throw new Error("Workflow run not found");
+      const runtime = await workflowRuntime(run.definition);
+      void answerWorkflowHuman(runId, response, runtime.context, runtime.deps)
+        .catch((error) => onNotice(`Workflow stopped: ${String(error)}`, "error"));
+    },
+    [onNotice, workflowRuntime],
+  );
+
+  const resumeWorkflow = useCallback(
+    async (runId: string) => {
+      const run = await workflowGet(runId);
+      if (!run) throw new Error("Workflow run not found");
+      const runtime = await workflowRuntime(run.definition);
+      await runtime.deps.resume(runId);
+      void continueWorkflow(runId, runtime.context, runtime.deps)
+        .catch((error) => onNotice(`Workflow stopped: ${String(error)}`, "error"));
+    },
+    [onNotice, workflowRuntime],
+  );
+
+  const createStarterWorkflow = useCallback(async () => {
+    const projectRoot = roots[0] ?? project.components[0]?.path;
+    if (!projectRoot) throw new Error("This project has no component root");
+    const path = `${projectRoot.replace(/[\\/]+$/, "")}/.canopy/workflows/review-change.json`;
+    await ipc.fsCreateFile(path);
+    await ipc.fsWriteFile(path, `${JSON.stringify(STARTER_WORKFLOW_DEFINITION, null, 2)}\n`);
+  }, [project.components, roots]);
 
   /** Ticket work is a Task by default: prepare the same durable worktree a
    *  normal agent would receive, then let the one-shot lifecycle run there.
@@ -6848,6 +7034,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const tab = tabsRef.current.find(
         (t): t is TermSubTab => t.type === "terminal" && t.ptyId === d.pty,
       );
+      if (tab && d.event === "UserPromptSubmit" && d.prompt) {
+        const baseline = promptTaskIdentity(d.prompt);
+        if (baseline.title || baseline.description)
+          patchTabRaw(tab.id, {
+            ...(baseline.description ? { description: baseline.description } : {}),
+            // Managed micro-tasks already have a durable launch label. For an
+            // ordinary conversation, the human's request is a better identity
+            // than the generated fallback until the agent refines it.
+            ...(baseline.title && !tab.micro && !tab.renamed
+              ? { customTitle: baseline.title }
+              : {}),
+          });
+      }
       if (tab && tab.id === activeTabIdRef.current && visibleRef.current)
         attentionRef.current(d.pty, { t: "focus", at: e.ts, visible: true }, cli);
     }
@@ -7119,6 +7318,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           return push({ id: tabId(), type: "issues-list" });
         case "task-history":
           return push({ id: tabId(), type: "task-history" });
+        case "workflows":
+          return push({ id: tabId(), type: "workflows" });
         case "instructions":
           return push({ id: tabId(), type: "instructions", focus: t.focus });
         case "mcp":
@@ -7159,7 +7360,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // sleeps, and restoring one that is gone points the whole file surface at
       // a path that no longer resolves.
       if (restore.worktree) void wakeWorktreeEnvRef.current(restore.worktree);
-      setSideTab(restore.sideTab);
+      // Session changes moved into Source control. Keep the legacy value in
+      // SideTab long enough to read older hibernation snapshots, then land it
+      // on the combined panel instead of restoring a rail item that no longer
+      // exists.
+      setSideTab(restore.sideTab === "changes" ? "git" : restore.sideTab);
       setPinned(restore.sidePinned);
       const ids: (string | null)[] = [];
       const restoredTerminalIds = new Map<string, string>();
@@ -11289,6 +11494,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
             focus={tab.focus}
           />
         );
+      case "workflows":
+        return (
+          <WorkflowView
+            projectId={project.id}
+            projectName={project.name}
+            projectRoot={roots[0] ?? project.components[0]?.path ?? ""}
+            componentRoots={roots}
+            onRun={runWorkflowDefinition}
+            onAnswer={answerWorkflowDecision}
+            onResume={resumeWorkflow}
+            onCreateStarter={createStarterWorkflow}
+          />
+        );
       case "mcp":
         return <McpView server={tab.server} onNotice={onNotice} />;
       case "claim":
@@ -11439,6 +11657,86 @@ const ProjectViewBody = memo(function ProjectViewBody({
     : null;
   const activePaneRects = new Map(
     activeTerminalLayout?.panes.map((pane) => [pane.tabId, pane]) ?? [],
+  );
+  const [paneReposition, setPaneReposition] = useState<{
+    sourceTabId: string;
+    targetTabId: string;
+  } | null>(null);
+
+  /** Drag a pane header's grip onto another pane to exchange their positions.
+   * Swapping leaves preserves the exact split tree and ratios, so moving a
+   * session never rebuilds its terminal or disturbs the rest of the layout. */
+  const startPaneReposition = useCallback(
+    (sourceTabId: string, event: React.PointerEvent<HTMLButtonElement>) => {
+      if (!activeTerminalGroup || !activeTerminalLayout || !contentRef.current)
+        return;
+      event.preventDefault();
+      event.stopPropagation();
+      const grip = event.currentTarget;
+      const pointerId = event.pointerId;
+      const origin = { x: event.clientX, y: event.clientY };
+      const groupId = activeTerminalGroup.id;
+      const content = contentRef.current.getBoundingClientRect();
+      let dragging = false;
+      let targetTabId = sourceTabId;
+      grip.setPointerCapture?.(pointerId);
+
+      const targetAt = (x: number, y: number) => {
+        const px = (x - content.left) / content.width;
+        const py = (y - content.top) / content.height;
+        return activeTerminalLayout.panes.find(
+          (pane) =>
+            px >= pane.left &&
+            px <= pane.left + pane.width &&
+            py >= pane.top &&
+            py <= pane.top + pane.height,
+        )?.tabId;
+      };
+      const move = (e: PointerEvent) => {
+        if (
+          !dragging &&
+          Math.hypot(e.clientX - origin.x, e.clientY - origin.y) < 5
+        )
+          return;
+        dragging = true;
+        targetTabId = targetAt(e.clientX, e.clientY) ?? sourceTabId;
+        setPaneReposition((current) =>
+          current?.sourceTabId === sourceTabId &&
+          current.targetTabId === targetTabId
+            ? current
+            : { sourceTabId, targetTabId },
+        );
+      };
+      const up = () => {
+        if (grip.hasPointerCapture?.(pointerId))
+          grip.releasePointerCapture(pointerId);
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", up);
+        setPaneReposition(null);
+        if (!dragging || targetTabId === sourceTabId) return;
+        setTerminalGroups((prev) => {
+          const group = prev[groupId];
+          if (!group) return prev;
+          const leaves = leafIds(group.root);
+          if (!leaves.includes(sourceTabId) || !leaves.includes(targetTabId))
+            return prev;
+          const next = {
+            ...prev,
+            [groupId]: {
+              ...group,
+              root: swapLeaves(group.root, sourceTabId, targetTabId),
+            },
+          };
+          terminalGroupsRef.current = next;
+          return next;
+        });
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
+    },
+    [activeTerminalGroup, activeTerminalLayout],
   );
 
   const startPaneResize = useCallback(
@@ -11649,7 +11947,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               // are clones of the live host, and a hidden host has to be
               // findable without the pane knowing anything about them.
               data-tab-id={tab.id}
-              className={`fill term-host ${grouped ? "term-host-multiplexed" : ""} ${paneFocus === "normal" ? "" : `term-host-${paneFocus}`}`}
+              className={`fill term-host ${grouped ? "term-host-multiplexed" : ""} ${paneFocus === "normal" ? "" : `term-host-${paneFocus}`} ${paneReposition?.sourceTabId === tab.id ? "term-host-pane-moving" : ""} ${paneReposition?.targetTabId === tab.id && paneReposition.sourceTabId !== tab.id ? "term-host-pane-target" : ""}`}
               style={paneStyle}
               onPointerDown={() => {
                 if (!group) return;
@@ -11681,6 +11979,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
             >
               {grouped && (
                 <div className="multiplex-pane-head">
+                  <button
+                    type="button"
+                    className="multiplex-pane-drag"
+                    aria-label={`Reposition ${tab.name ?? tab.customTitle ?? tab.title}`}
+                    title="Drag onto another pane to swap positions"
+                    onPointerDown={(event) =>
+                      startPaneReposition(tab.id, event)
+                    }
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    ⠿
+                  </button>
                   {paneAgent?.id ? (
                     <AgentIcon id={paneAgent.id} size={12} />
                   ) : (
@@ -11695,9 +12005,38 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     }`}
                     aria-hidden
                   />
-                  <span className="multiplex-pane-title">
-                    {tab.name ?? tab.customTitle ?? tab.title}
-                  </span>
+                  {renamingTabId === tab.id ? (
+                    <input
+                      className="multiplex-pane-rename"
+                      autoFocus
+                      value={renameDraft}
+                      aria-label="Agent name"
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => event.stopPropagation()}
+                      onChange={(event) => setRenameDraft(event.target.value)}
+                      onBlur={commitRename}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          commitRename();
+                        } else if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelRename();
+                        }
+                      }}
+                    />
+                  ) : (
+                    <span
+                      className="multiplex-pane-title"
+                      title="Double-click to rename"
+                      onDoubleClick={(event) => {
+                        event.stopPropagation();
+                        startRename(tab);
+                      }}
+                    >
+                      {tab.name ?? tab.customTitle ?? tab.title}
+                    </span>
+                  )}
                   <span className="multiplex-pane-path" title={tab.cwd}>
                     {basename(tab.cwd)}
                   </span>
@@ -12438,6 +12777,81 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return <div style={{ display: active ? "contents" : "none" }}>{el}</div>;
   };
 
+  const sessionChangesPanel = (
+    <ChangesPanel
+      embedded
+      groups={changeGroups}
+      loading={changesLoading}
+      onOpen={(p) => void openFile(p, { diff: true })}
+      onRefresh={() => void refreshChanges()}
+      collab={collabChanges}
+      onOpenCollab={(p) => void openFile(p, { diff: true })}
+      onStage={(repo, paths) =>
+        void ipc
+          .gitStage(repo, paths)
+          .then(() => refreshChanges())
+          .catch((err) => onNotice(String(err), "error"))
+      }
+      onUnstage={(repo, paths) =>
+        void ipc
+          .gitUnstage(repo, paths)
+          .then(() => refreshChanges())
+          .catch((err) => onNotice(String(err), "error"))
+      }
+      onDiscard={(repo, file) =>
+        void ipc
+          .gitDiscard(
+            repo,
+            file.untracked ? [] : [file.path],
+            file.untracked ? [file.path] : [],
+          )
+          .then(() => refreshChanges())
+          .catch((err) => onNotice(String(err), "error"))
+      }
+      onCommit={(repo, message) =>
+        ipc
+          .gitCommit(repo, message, false)
+          .then((msg) => {
+            onNotice(msg, "success");
+            void refreshChanges();
+          })
+          .catch((err) => {
+            onNotice(String(err), "error");
+            throw err;
+          })
+      }
+      onSaveCollab={(p) =>
+        void saveFile(p).then(() => {
+          relay.collab.markOwnerSaved(p);
+          void refreshChanges();
+        })
+      }
+      agentBar={
+        <AgentQueryBar
+          placeholder="Ask an agent about these changes…"
+          onRunTask={(query) => {
+            const dir = changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
+            if (!dir) return onNotice("No git repository in this project.");
+            runAdhocTask(
+              sessionChangesContext(changeContextGroups(), query),
+              dir,
+              "Changes",
+            );
+          }}
+          tasks={
+            hasTasksToList({ saved: project.customTasks })
+              ? () =>
+                  taskRows(
+                    "About the current changes: ",
+                    changeGroups[0]?.repo ?? componentsRef.current[0]?.path ?? "",
+                  )
+              : undefined
+          }
+        />
+      }
+    />
+  );
+
   const sidePanel = (
     <div className="sidebar">
       {compMenu.menu && (
@@ -12762,6 +13176,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       {sidePane("git", () => (
         <GitPanel
           visible={sideTab === "git" && visible && sideOpen}
+          changes={sessionChangesPanel}
+          changeCount={changeCount + collabEditedCount}
           components={project.components.map((c) => ({
             label: c.label,
             path: c.path,
@@ -12795,82 +13211,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     },
                   ],
             )
-          }
-        />
-      ))}
-      {sidePane("changes", () => (
-        <ChangesPanel
-          groups={changeGroups}
-          loading={changesLoading}
-          onOpen={(p) => void openFile(p, { diff: true })}
-          onRefresh={() => void refreshChanges()}
-          collab={collabChanges}
-          onOpenCollab={(p) => void openFile(p, { diff: true })}
-          onStage={(repo, paths) =>
-            void ipc
-              .gitStage(repo, paths)
-              .then(() => refreshChanges())
-              .catch((err) => onNotice(String(err), "error"))
-          }
-          onUnstage={(repo, paths) =>
-            void ipc
-              .gitUnstage(repo, paths)
-              .then(() => refreshChanges())
-              .catch((err) => onNotice(String(err), "error"))
-          }
-          onDiscard={(repo, file) =>
-            void ipc
-              .gitDiscard(
-                repo,
-                file.untracked ? [] : [file.path],
-                file.untracked ? [file.path] : [],
-              )
-              .then(() => refreshChanges())
-              .catch((err) => onNotice(String(err), "error"))
-          }
-          onCommit={(repo, message) =>
-            ipc
-              .gitCommit(repo, message, false)
-              .then((msg) => {
-                onNotice(msg, "success");
-                void refreshChanges();
-              })
-              .catch((err) => {
-                onNotice(String(err), "error");
-                throw err;
-              })
-          }
-          onSaveCollab={(p) =>
-            void saveFile(p).then(() => {
-              relay.collab.markOwnerSaved(p);
-              void refreshChanges();
-            })
-          }
-          agentBar={
-            <AgentQueryBar
-              placeholder="Ask an agent about these changes…"
-              onRunTask={(query) => {
-                const dir =
-                  changeGroups[0]?.repo ?? componentsRef.current[0]?.path;
-                if (!dir) return onNotice("No git repository in this project.");
-                runAdhocTask(
-                  sessionChangesContext(changeContextGroups(), query),
-                  dir,
-                  "Changes",
-                );
-              }}
-              tasks={
-                hasTasksToList({ saved: project.customTasks })
-                  ? () =>
-                      taskRows(
-                        "About the current changes: ",
-                        changeGroups[0]?.repo ??
-                          componentsRef.current[0]?.path ??
-                          "",
-                      )
-                  : undefined
-              }
-            />
           }
         />
       ))}
@@ -12938,6 +13278,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
           onRunOneOff={(brief: string, dir: string) => runAdhocTask(brief, dir)}
           onOpenHistory={openTaskHistory}
+          onOpenWorkflows={openWorkflows}
           custom={project.customTasks ?? []}
           onSaveCustom={onSaveCustomTasks}
           projectId={project.id}

@@ -10,6 +10,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type RefObject,
 } from "react";
 import {
@@ -107,6 +108,11 @@ import {
   SHORTCUT_PROFILES,
   type ShortcutProfile,
 } from "../shortcuts";
+import {
+  SESSION_NAME_THEMES,
+  sessionNameThemeDef,
+  type SessionNameTheme,
+} from "../sessionNameThemes";
 
 export type SettingsTab =
   | "appearance"
@@ -1899,6 +1905,47 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
 
             {tab === "terminal" && (
               <>
+                <Item
+                  name="Automatic session names"
+                  tag="New terminals only"
+                  desc="Choose the callsign vocabulary Canopy uses before an agent publishes what it is working on."
+                >
+                  <div className="session-name-theme">
+                    <Select
+                      width="lg"
+                      aria-label="Automatic session names"
+                      value={s.sessionNameTheme}
+                      onChange={(e) =>
+                        patch({
+                          sessionNameTheme: e.target.value as SessionNameTheme,
+                        })
+                      }
+                    >
+                      {SESSION_NAME_THEMES.map((theme) => (
+                        <option key={theme.id} value={theme.id}>
+                          {theme.label} — {theme.note}
+                        </option>
+                      ))}
+                    </Select>
+                    <div className="session-name-preview" aria-live="polite">
+                      {sessionNameThemeDef(s.sessionNameTheme).preview.map(
+                        (name, index) => (
+                          <span
+                            className="session-name-chip"
+                            style={
+                              {
+                                "--name-opacity": String(1 - index * 0.14),
+                              } as CSSProperties
+                            }
+                            key={name}
+                          >
+                            {name}
+                          </span>
+                        ),
+                      )}
+                    </div>
+                  </div>
+                </Item>
                 <Item
                   name="Font and cursor"
                   tag="New terminals only"

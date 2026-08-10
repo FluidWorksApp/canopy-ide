@@ -39,7 +39,6 @@ import {
 import { Button, Segmented, TextInput } from "./ui";
 import { TaskEvidenceFold } from "./TaskEvidence";
 import { basename } from "../paths";
-import { WorkflowRunsFold } from "./WorkflowRunsFold";
 
 const PER_PAGE = 25;
 
@@ -323,10 +322,6 @@ export function TaskHistoryView({
             )}
           </div>
         </div>
-      </div>
-
-      <div className="task-history-col">
-        <WorkflowRunsFold projectId={projectId} />
       </div>
 
       <div className="task-history-filters">

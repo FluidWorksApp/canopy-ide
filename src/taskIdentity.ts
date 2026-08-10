@@ -119,6 +119,28 @@ export function taskDescription(raw: unknown): string | undefined {
   return clamp(flatten(raw), 160) || undefined;
 }
 
+/** Baseline identity available before the model has done any work: the human
+ * prompt that began the turn. Explicit canopy_name_task output can refine it
+ * later. Attachment markers are transport metadata, and terse acknowledgments
+ * must not replace a useful existing title with "Continue" or "OK". */
+export function promptTaskIdentity(raw: unknown): {
+  title?: string;
+  description?: string;
+} {
+  if (typeof raw !== "string") return {};
+  const prompt = flatten(raw)
+    .replace(/^(?:\[Image #\d+\]\s*)+/i, "")
+    .trim();
+  if (!prompt || prompt.startsWith("<")) return {};
+  const description = taskDescription(prompt);
+  const acknowledgement = /^(?:ok(?:ay)?|yes|no|continue|go ahead|do it|proceed|thanks?)[.!]?$/i
+    .test(prompt);
+  return {
+    ...(!acknowledgement ? { title: taskTitle(prompt) } : {}),
+    ...(description ? { description } : {}),
+  };
+}
+
 /** Everything an agent may say about its own run, cleaned. */
 export function taskIdentity(raw: {
   title?: unknown;

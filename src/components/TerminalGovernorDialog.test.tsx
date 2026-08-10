@@ -213,7 +213,11 @@ describe("TerminalGovernorCard", () => {
     const onMaximumChange = vi.fn();
     render(
       <TerminalGovernorCard
-        status={status}
+        status={{
+          ...status,
+          allowance_bytes: 2 * 1024 ** 3,
+          max_allowance_bytes: 4 * 1024 ** 3,
+        }}
         quota={quota}
         members={member({ name: "Piper", agent: true })}
         capability={capability}
@@ -229,8 +233,11 @@ describe("TerminalGovernorCard", () => {
     });
     expect(checkbox.closest(".terminal-governor-remember")).toBeTruthy();
     expect(checkbox.closest(".terminal-governor-meta")).toBeNull();
+    expect(screen.getByText(/current allowance:/i)).toHaveTextContent("2.0 GB");
+    expect(screen.getByText(/grant ceiling:/i)).toHaveTextContent("4.0 GB");
+    expect(screen.getByText(/this is not the current allowance/i)).toBeTruthy();
     fireEvent.change(
-      screen.getByRole("combobox", { name: /maximum allowance for piper/i }),
+      screen.getByRole("combobox", { name: /grant ceiling for piper/i }),
       { target: { value: 2 * 1024 ** 3 } },
     );
     expect(onMaximumChange).toHaveBeenCalledWith(2 * 1024 ** 3);

@@ -241,7 +241,12 @@ export function followLink(
 ): DeepLinkAction {
   switch (link.kind) {
     case "panel":
-      return { do: "panel", panel: link.panel };
+      // Changes is now the first subview of Source control. Keep accepting old
+      // notification URLs, but never route them to the retired rail entry.
+      return {
+        do: "panel",
+        panel: link.panel === "changes" ? "git" : link.panel,
+      };
     case "terminal": {
       const tab = ctx.terminals.find(
         (t) => t.ptyId === link.ptyId || t.attachId === link.ptyId,

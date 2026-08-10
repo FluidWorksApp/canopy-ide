@@ -20,7 +20,7 @@ use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -1560,6 +1560,7 @@ impl PtyManager {
         };
 
         let default_name = default_session_name(id);
+        let result_name = default_name.clone();
         let session = Arc::new(Session {
             id,
             session_generation,
@@ -1795,7 +1796,7 @@ impl PtyManager {
             id,
             session_generation,
             pid,
-            name: default_session_name(id),
+            name: result_name,
             cols,
             rows,
             generation,
@@ -1964,21 +1965,226 @@ pub fn pty_set_name(state: State<'_, PtyManager>, id: u32, name: String) -> Resu
     Ok(next)
 }
 
-const SESSION_NAMES: &[&str] = &[
+const CANOPY_SESSION_NAMES: &[&str] = &[
     "Ember", "Juniper", "Lumen", "Moss", "Nova", "Orbit", "Piper", "Quill", "Rook", "Sage",
     "Tango", "Umber", "Vega", "Willow", "Xeno", "Yarrow", "Zephyr", "Aster", "Birch", "Cinder",
     "Drift", "Echo", "Flint", "Grove",
 ];
 
-fn default_session_name(id: u32) -> String {
+const GALAXY_SESSION_NAMES: &[&str] = &[
+    "Astro", "Bespin", "Comet", "Droid", "Endor", "Falcon", "Hoth", "Ion", "Jawa", "Kessel",
+    "Laser", "Meteor", "Naboo", "Photon", "Rebel", "Saber", "Tatooine", "Vector", "Wookiee",
+    "Xwing", "Yavin", "Zenith", "Pulsar", "Quasar",
+];
+
+const WIZARDRY_SESSION_NAMES: &[&str] = &[
+    "Auror",
+    "Basilisk",
+    "Charm",
+    "Fawkes",
+    "Galleon",
+    "Hex",
+    "Incant",
+    "Jinx",
+    "Knightbus",
+    "Lumos",
+    "Mandrake",
+    "Niffler",
+    "Owlery",
+    "Patronus",
+    "Quaffle",
+    "Reparo",
+    "Spellbook",
+    "Thestral",
+    "Unicorn",
+    "Wand",
+    "Alohomora",
+    "Broomstick",
+    "Cauldron",
+    "Divination",
+];
+
+const ANDROID_SESSION_NAMES: &[&str] = &[
+    "Cupcake",
+    "Donut",
+    "Eclair",
+    "Froyo",
+    "Gingerbread",
+    "Honeycomb",
+    "Icecream",
+    "Jellybean",
+    "Kitkat",
+    "Lollipop",
+    "Marshmallow",
+    "Nougat",
+    "Oreo",
+    "Pie",
+    "Quincetart",
+    "Redvelvet",
+    "Snowcone",
+    "Tiramisu",
+    "Upsidedown",
+    "Vanilla",
+    "Wafer",
+    "Baklava",
+    "Cannoli",
+    "Gelato",
+];
+
+const APPLE_SESSION_NAMES: &[&str] = &[
+    "Cheetah",
+    "Puma",
+    "Jaguar",
+    "Panther",
+    "Tiger",
+    "Leopard",
+    "Snowlion",
+    "Lion",
+    "Mountainlion",
+    "Mavericks",
+    "Yosemite",
+    "Elcapitan",
+    "Sierra",
+    "Highsierra",
+    "Mojave",
+    "Catalina",
+    "Bigsur",
+    "Monterey",
+    "Ventura",
+    "Sonoma",
+    "Sequoia",
+    "Tahoe",
+    "Redwood",
+    "Mariposa",
+];
+
+const RETRO_SESSION_NAMES: &[&str] = &[
+    "Ada",
+    "Altair",
+    "Amiga",
+    "Atari",
+    "Basic",
+    "Byte",
+    "Cobol",
+    "Commodore",
+    "Dos",
+    "Eniac",
+    "Fortran",
+    "Lisp",
+    "Pascal",
+    "Pixel",
+    "Turing",
+    "Unix",
+    "Xerox",
+    "Zork",
+    "Acorn",
+    "Beos",
+    "Kaypro",
+    "Osborne",
+    "Sinclair",
+    "Trs80",
+];
+
+const TABLETOP_SESSION_NAMES: &[&str] = &[
+    "Bard",
+    "Cleric",
+    "Druid",
+    "Mage",
+    "Paladin",
+    "Ranger",
+    "Rogue",
+    "Rune",
+    "Quest",
+    "Dice",
+    "Goblin",
+    "Kobold",
+    "Tavern",
+    "Dragon",
+    "Dungeon",
+    "Griffin",
+    "Mimic",
+    "Necromancer",
+    "Oracle",
+    "Sorcerer",
+    "Warlock",
+    "Barbarian",
+    "Alchemist",
+    "Artificer",
+];
+
+const CYBER_SESSION_NAMES: &[&str] = &[
+    "Arcade",
+    "Chrome",
+    "Cipher",
+    "Glitch",
+    "Hacker",
+    "Kernel",
+    "Matrix",
+    "Neon",
+    "Proxy",
+    "Synth",
+    "Circuit",
+    "Deck",
+    "Flux",
+    "Grid",
+    "Node",
+    "Pulse",
+    "Relay",
+    "Shard",
+    "Voxel",
+    "Wireframe",
+    "Zero",
+    "Bitstream",
+    "Datastream",
+    "Mainframe",
+];
+
+fn session_names(theme: &str) -> Option<&'static [&'static str]> {
+    match theme {
+        "canopy" => Some(CANOPY_SESSION_NAMES),
+        "galaxy" => Some(GALAXY_SESSION_NAMES),
+        "wizardry" => Some(WIZARDRY_SESSION_NAMES),
+        "android" => Some(ANDROID_SESSION_NAMES),
+        "apple" => Some(APPLE_SESSION_NAMES),
+        "retro" => Some(RETRO_SESSION_NAMES),
+        "tabletop" => Some(TABLETOP_SESSION_NAMES),
+        "cyber" => Some(CYBER_SESSION_NAMES),
+        _ => None,
+    }
+}
+
+fn current_session_name_theme() -> &'static RwLock<String> {
+    static THEME: OnceLock<RwLock<String>> = OnceLock::new();
+    THEME.get_or_init(|| RwLock::new("canopy".to_string()))
+}
+
+/// Publish the renderer's persisted callsign preference to the native session
+/// owner. The PTY manager generates names because not every launch has a
+/// frontend caller (Remote and detached jobs do not).
+#[tauri::command]
+pub fn pty_set_name_theme(theme: String) -> Result<(), String> {
+    if session_names(&theme).is_none() {
+        return Err(format!("unknown session name theme: {theme}"));
+    }
+    *current_session_name_theme().write().unwrap() = theme;
+    Ok(())
+}
+
+fn default_session_name_for_theme(id: u32, theme: &str) -> String {
+    let names = session_names(theme).unwrap_or(CANOPY_SESSION_NAMES);
     let index = id.saturating_sub(1) as usize;
-    let base = SESSION_NAMES[index % SESSION_NAMES.len()];
-    let round = index / SESSION_NAMES.len();
+    let base = names[index % names.len()];
+    let round = index / names.len();
     if round == 0 {
         base.to_string()
     } else {
         format!("{base} {}", round + 1)
     }
+}
+
+fn default_session_name(id: u32) -> String {
+    let theme = current_session_name_theme().read().unwrap();
+    default_session_name_for_theme(id, &theme)
 }
 
 fn get_session(state: &State<'_, PtyManager>, id: u32) -> Result<Arc<Session>, String> {
@@ -2063,11 +2269,32 @@ mod tests {
 
     #[test]
     fn generated_session_names_are_human_readable_and_unique() {
-        let names = (1..=72).map(default_session_name).collect::<Vec<_>>();
+        let names = (1..=72)
+            .map(|id| default_session_name_for_theme(id, "canopy"))
+            .collect::<Vec<_>>();
         assert_eq!(names[0], "Ember");
         assert_eq!(names[24], "Ember 2");
         let unique = names.iter().collect::<std::collections::HashSet<_>>();
         assert_eq!(unique.len(), names.len());
+    }
+
+    #[test]
+    fn every_session_name_theme_is_complete_and_globally_distinct() {
+        let themes = [
+            "canopy", "galaxy", "wizardry", "android", "apple", "retro", "tabletop", "cyber",
+        ];
+        let mut all = std::collections::HashSet::new();
+        for theme in themes {
+            let names = session_names(theme).unwrap();
+            assert_eq!(names.len(), 24, "{theme}");
+            for name in names {
+                assert!(
+                    all.insert(name.to_ascii_lowercase()),
+                    "duplicate name: {name}"
+                );
+            }
+        }
+        assert!(session_names("unknown").is_none());
     }
     use std::time::Instant;
 

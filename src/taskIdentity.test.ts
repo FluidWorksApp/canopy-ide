@@ -4,12 +4,31 @@ import {
   hasIdentity,
   identityPatch,
   MAX_TAGS,
+  promptTaskIdentity,
   taskGlyph,
   taskDescription,
   taskIdentity,
   taskTags,
   taskTitle,
 } from "./taskIdentity";
+
+describe("promptTaskIdentity", () => {
+  it("turns the human prompt into a baseline title and description", () => {
+    const identity = promptTaskIdentity(
+      "[Image #1] Fix working status publishing for every agent",
+    );
+    expect(identity.title).toBe("Fix working status publishing for every agent");
+    expect(identity.description).toBe(
+      "Fix working status publishing for every agent",
+    );
+  });
+
+  it("does not replace a useful title with a terse follow-up", () => {
+    expect(promptTaskIdentity("continue")).toEqual({ description: "continue" });
+    expect(promptTaskIdentity("<task-notification>internal</task-notification>"))
+      .toEqual({});
+  });
+});
 
 describe("taskDescription", () => {
   it("keeps a model update to one bounded line", () => {

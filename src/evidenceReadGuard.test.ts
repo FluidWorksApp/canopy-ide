@@ -233,10 +233,10 @@ const JUSTIFYING_FUNCTIONS = [
     cost: "workflow step states are durable but no surface can read one run",
   },
   {
-    module: "components/WorkflowRunsFold.tsx",
-    symbol: "WorkflowRunsFold",
+    module: "components/WorkflowView.tsx",
+    symbol: "WorkflowView",
     enabled: true,
-    cost: "the workflow projection exists but is mounted by no user-facing surface",
+    cost: "the workflow catalog and run projection exist but are mounted by no user-facing surface",
   },
 ] as const;
 
