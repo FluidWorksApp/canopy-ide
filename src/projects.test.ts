@@ -16,6 +16,7 @@ import {
   normalizeProjectStructure,
   newCustomCliId,
   refreshAgentClis,
+  recordVibeDiscoveryFailure,
   remoteCliMetadata,
   restoreCommand,
   resumeSessionId,
@@ -761,6 +762,79 @@ describe("project vibe serialization", () => {
     expect(normalizeProjectStructure(normalized)).toBe(normalized);
   });
 
+  it("preserves a failed discovery marker without preserving partial setup", () => {
+    const failed: Project = {
+      id: "failed-discovery",
+      name: "Failed discovery",
+      components: [{
+        id: "cmp-web",
+        label: "web",
+        path: "/repo/web",
+        commands: [{ id: "run-dev", name: "dev", command: "npm run dev" }],
+      }],
+      vibe: {
+        version: 1,
+        enabled: true,
+        componentId: "stale-component",
+        discovery: {
+          status: "failed",
+          attemptedAt: 1234,
+          message: "I couldn't determine a safe complete setup for this project.",
+        },
+      },
+    };
+
+    expect(normalizeProjectStructure(failed).vibe).toEqual({
+      version: 1,
+      enabled: true,
+      discovery: failed.vibe?.discovery,
+    });
+  });
+
+  it("records discovery failure on the latest project without carrying stale setup", () => {
+    const current: Project = {
+      id: "current",
+      name: "Current",
+      components: [{
+        id: "cmp-web",
+        label: "Web",
+        path: "/repo/web",
+        commands: [{ id: "run-dev", name: "Dev", command: "pnpm dev" }],
+      }],
+      vibe: {
+        version: 1,
+        enabled: true,
+        componentId: "stale-component",
+      },
+    };
+    const next = recordVibeDiscoveryFailure(
+      {
+        ...current,
+        name: "Renamed while discovery ran",
+        components: [...current.components, {
+          id: "cmp-new",
+          label: "New component",
+          path: "/repo/new",
+          commands: [],
+        }],
+      },
+      "Discovery was rejected.",
+      1234,
+    );
+
+    expect(next.name).toBe("Renamed while discovery ran");
+    expect(next.components.at(-1)?.id).toBe("cmp-new");
+    expect(next.vibe).toEqual({
+      version: 1,
+      enabled: current.vibe?.enabled === true,
+      discovery: {
+        status: "failed",
+        attemptedAt: 1234,
+        message: "Discovery was rejected.",
+      },
+    });
+  });
+
   it("preserves a complete agent-owned v1 setup", () => {
     const complete: Project = {
       id: "complete",
@@ -787,7 +861,48 @@ describe("project vibe serialization", () => {
     expect(normalizeProjectStructure(complete)).toBe(complete);
   });
 
-  it("resurveys an old setup that omitted a runnable component", () => {
+  it("drops an obsolete failure marker from a complete setup", () => {
+    const complete: Project = {
+      id: "recovered",
+      name: "Recovered",
+      components: [{
+        id: "cmp-web",
+        label: "web",
+        path: "/repo/web",
+        commands: [{ id: "run-dev", name: "dev", command: "npm run dev" }],
+      }],
+      vibe: {
+        version: 1,
+        enabled: true,
+        setupRevision: "repo-fingerprint",
+        componentId: "cmp-web",
+        runCommandId: "run-dev",
+        requiredProcesses: [{ componentId: "cmp-web", runCommandId: "run-dev" }],
+        componentLinks: [],
+        dataStores: [],
+        externalServices: [],
+        discovery: {
+          status: "failed",
+          attemptedAt: 1234,
+          message: "old failure",
+        },
+      },
+    };
+
+    expect(normalizeProjectStructure(complete).vibe).toEqual({
+      version: 1,
+      enabled: true,
+      setupRevision: "repo-fingerprint",
+      componentId: "cmp-web",
+      runCommandId: "run-dev",
+      requiredProcesses: [{ componentId: "cmp-web", runCommandId: "run-dev" }],
+      componentLinks: [],
+      dataStores: [],
+      externalServices: [],
+    });
+  });
+
+  it("requires an explicit refresh when an old setup omitted a runnable component", () => {
     const incomplete: Project = {
       id: "missing-worker",
       name: "Missing worker",
@@ -821,6 +936,11 @@ describe("project vibe serialization", () => {
     expect(normalizeProjectStructure(incomplete).vibe).toEqual({
       version: 1,
       enabled: true,
+      discovery: {
+        status: "stale",
+        attemptedAt: 1,
+        message: "The saved project setup needs a refresh. Retry discovery when you want Canopy to inspect it again.",
+      },
     });
   });
 

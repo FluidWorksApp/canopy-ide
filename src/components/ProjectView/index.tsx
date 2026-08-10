@@ -13548,6 +13548,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     <small>
                       {vibeTarget.kind === "ready"
                         ? "Components and runtime relationships are configured."
+                        : project.vibe?.discovery
+                          ? project.vibe.discovery.message
                         : "Build is mapping components, commands, data, and dependencies."}
                     </small>
                   </span>

@@ -1,5 +1,9 @@
 import type { Project, Component, ComponentRole, RunCommand } from "./projects";
-import { agentCliFor, streamsStructured } from "./projects";
+import {
+  agentCliFor,
+  recordVibeDiscoveryFailure,
+  streamsStructured,
+} from "./projects";
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 import { launchEnvSync } from "./profiles";
 import { getSettings } from "./settings";
@@ -684,6 +688,23 @@ Narrow this attempt to the unresolved component directories${unresolved.length ?
 Emit a fresh checkpoint when each unresolved component is complete, then return the complete final project object, including retained and newly completed components.`;
 }
 
+/** A schema correction is not another repository survey. Hand the next
+ *  bounded attempt the object it must repair and the validator's exact
+ *  complaints, so it can fix its answer without rereading six repositories
+ *  and making the same structural mistake again. */
+function vibeSetupCorrectionUserMessage(
+  previous: unknown,
+  errors: readonly string[],
+): string {
+  return `Canopy finished validating your previous project setup object. Do not inspect or explore the repositories again. Correct only the rejected structure below, preserve all supported findings, and return ${VIBE_SETUP_FINAL_MARKER} followed by one complete corrected JSON object.
+
+Validation errors:
+${errors.map((error) => `- ${error}`).join("\n")}
+
+Previous object:
+${redactSecrets(JSON.stringify(previous))}`;
+}
+
 /** What Canopy can state about the project instead of making the agent infer
  *  it. The person configured these components and named them; a survey that
  *  begins by guessing at that is redoing settled work, and guessing differently
@@ -963,7 +984,12 @@ export interface VibeProjectSetupTaskInput {
   timeoutMs?: number;
   /** Schema/repository validation owned by Canopy. A JSON object is not a
    * successful attempt merely because it parses. */
-  validateOutput?: (output: unknown) => boolean | Promise<boolean>;
+  validateOutput?: (
+    output: unknown,
+  ) =>
+    | boolean
+    | SetupValidation
+    | Promise<boolean | SetupValidation>;
   /** What the agent is doing right now, for the pane. Setup can run for
    *  minutes; without this it prints one line and then looks hung, which is
    *  indistinguishable from being hung. */
@@ -1117,6 +1143,7 @@ export async function runVibeProjectSetupTask(
   let attempt = reservation.attempt;
   const history: AttemptOutcomeRecord[] = [];
   const retainedEvidence = new Map<string, VibeSetupComponentEvidence>();
+  let correction: { previous: unknown; errors: string[] } | null = null;
   const retain = (text: string) => {
     for (const item of extractVibeSetupComponentEvidence(
       text,
@@ -1145,11 +1172,13 @@ export async function runVibeProjectSetupTask(
         ? { name: input.projectName, components: input.components }
         : undefined,
     );
-    const userMessage = vibeSetupRetryUserMessage(
-      input.componentRoots ?? [],
-      input.inventory ?? [],
-      partialEvidence(),
-    );
+    const userMessage = correction
+      ? vibeSetupCorrectionUserMessage(correction.previous, correction.errors)
+      : vibeSetupRetryUserMessage(
+          input.componentRoots ?? [],
+          input.inventory ?? [],
+          partialEvidence(),
+        );
     const completedRoots = new Set(partialEvidence().map((item) => item.root));
     const unresolvedRoots = (input.componentRoots ?? [])
       .map(normalized)
@@ -1185,9 +1214,11 @@ export async function runVibeProjectSetupTask(
       // cwd is only the components' common ancestor; these are the directories
       // the project actually is, granted explicitly so reading one never
       // depends on where the launch happened to land.
-      additionalDirectories: retainedEvidence.size > 0
-        ? unresolvedRoots
-        : input.componentRoots ?? [],
+      additionalDirectories: correction
+        ? []
+        : retainedEvidence.size > 0
+          ? unresolvedRoots
+          : input.componentRoots ?? [],
       env: [...launchEnvSync(chosen.cli), ["CANOPY_VIBE_SETUP", "1"], ["CANOPY_RUN_ID", runId], ["CANOPY_ATTEMPT_ID", attempt.attemptId]],
     };
     // What was actually spawned. A turn that ends having said nothing is the
@@ -1301,9 +1332,19 @@ export async function runVibeProjectSetupTask(
           ...(retainedEvidence.size ? { partialEvidence: partialEvidence() } : {}),
         };
       }
-      if (input.validateOutput && !(await input.validateOutput(parsed))) {
+      const rawValidation = input.validateOutput
+        ? await input.validateOutput(parsed)
+        : true;
+      const validation = typeof rawValidation === "boolean"
+        ? {
+            ok: rawValidation,
+            errors: rawValidation ? [] : ["the setup object did not satisfy the required schema"],
+          }
+        : rawValidation;
+      if (!validation.ok) {
         await deps.settleAttempt({ attemptId: attempt.attemptId, state: "blocked", failureClass: "task", failureCode: "invalid-setup-schema" });
-        if (retainedEvidence.size > 0 && attemptsUsed < attemptCap) {
+        if (attemptsUsed < attemptCap) {
+          correction = { previous: parsed, errors: validation.errors };
           attempt = await deps.reserveAttempt({
             runId,
             route: await routeFor(chosen),
@@ -1470,7 +1511,7 @@ export const DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS: VibeProjectSetupSessionDep
       if (!result.ok) {
         void ipc.jsLog("error", `vibe-setup: proposal failed validation: ${result.errors.join("; ")}`);
       }
-      return result.ok;
+      return result;
     },
   }, DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS),
   verify: (project, existingPaths, proposedArgv, signal) =>
@@ -1578,24 +1619,12 @@ interface VibeProjectSetupFlight {
   state: BuilderSession["state"];
   status: SetupFlightStatus;
   fingerprint: string | null;
-  /** When this flight failed, so a remount does not immediately buy another
-   *  attempt. See SETUP_RETRY_COOLDOWN_MS. */
+  /** When this flight failed. Mirrored into the project record so a new app
+   *  process also knows not to retry without an explicit request. */
   failedAt: number | null;
   abort: AbortController;
   start(): void;
 }
-
-/** How long a failed setup stays failed before a remount may try again.
- *
- *  A failure used to drop the flight outright, so the next mount started a
- *  fresh run — and ProjectView mounts on every render pass, every HMR update
- *  and every switch back to the project. Against a project whose setup keeps
- *  failing that is an unbounded loop of model calls, each one able to run the
- *  full timeout before it fails again; roughly sixty launches in twenty
- *  minutes were observed here, most of them 300-second turns, all of them
- *  billed. Retrying is right. Retrying on every render is not, and the person
- *  paying for it has no way to see it happening. */
-const SETUP_RETRY_COOLDOWN_MS = 300_000;
 
 /** A setup task belongs to the project and dependency lifetime, not to one
  * React render. ProjectView is intentionally mounted and cleaned up more than
@@ -1607,20 +1636,21 @@ const setupFlights = new WeakMap<
   Map<string, VibeProjectSetupFlight>
 >();
 
-/** Failure cooldowns, surviving hot module replacement.
+/** Failed outcomes and explicit retries, surviving hot module replacement.
  *
- *  The flight map above does not: editing any source file while the dev
- *  instance is open replaces this module, and with it every held failed
- *  flight — so each save re-armed setup for a project whose last attempt just
- *  failed, and a session of active development relaunched a billed survey
- *  every few seconds (observed: reject at 03:42:50, fresh launch at
- *  03:42:51). Only the timestamps live here, keyed by project id, so all
- *  code stays fresh after a reload and only the memory of recent failure
- *  persists. Consulted solely for the default production deps: injected test
- *  deps keep their isolated WeakMap world and never see cross-test state. */
+ *  The durable source is `project.vibe.discovery`; this map closes the short
+ *  window before that async workspace write reaches React. There is no time
+ *  expiry: elapsed time is not user intent. Only Retry discovery consumes an
+ *  explicit-retry token and permits another survey. */
 const FAILED_SETUPS = Symbol.for("canopy.vibeSetupFailedAt");
 const failedSetups = ((globalThis as Record<symbol, unknown>)[FAILED_SETUPS] ??=
-  new Map<string, number>()) as Map<string, number>;
+  new Map<string, { status: "failed"; attemptedAt: number; message: string }>()) as Map<
+    string,
+    { status: "failed"; attemptedAt: number; message: string } | number
+  >;
+const SETUP_RETRIES = Symbol.for("canopy.vibeSetupExplicitRetries");
+const setupRetries = ((globalThis as Record<symbol, unknown>)[SETUP_RETRIES] ??=
+  new Set<string>()) as Set<string>;
 
 function flightsFor(deps: VibeProjectSetupSessionDeps): Map<string, VibeProjectSetupFlight> {
   let flights = setupFlights.get(deps);
@@ -1631,17 +1661,15 @@ function flightsFor(deps: VibeProjectSetupSessionDeps): Map<string, VibeProjectS
   return flights;
 }
 
-/** Explicit retry from Build settings. Automatic remounts still respect the
- * cooldown; a person who just enabled an agent route need not wait for it. A
- * running survey is cancelled before replacement, so retry never creates two
- * setup terminals. Completed surveys remain authoritative. */
+/** Explicit retry from Build settings. A running survey is cancelled before
+ * replacement, so retry never creates two setup terminals. */
 export function retryVibeProjectSetup(projectId: string): boolean {
   const flights = flightsFor(DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS);
   const flight = flights.get(projectId);
-  if (flight?.status === "succeeded") return false;
   if (flight?.status === "running") flight.abort.abort();
   flights.delete(projectId);
   failedSetups.delete(projectId);
+  setupRetries.add(projectId);
   return true;
 }
 
@@ -1689,14 +1717,28 @@ function createVibeProjectSetupFlight(
       question: null,
     };
     if (deps === DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS) {
-      failedSetups.set(flight.project.id, flight.failedAt);
+      failedSetups.set(flight.project.id, {
+        status: "failed",
+        attemptedAt: flight.failedAt,
+        message,
+      });
     }
+    const failedProject = recordVibeDiscoveryFailure(
+      flight.project,
+      message,
+      flight.failedAt,
+    );
+    flight.project = failedProject;
+    void flight.persist(failedProject).then((saved) => {
+      if (!saved) {
+        void ipc.jsLog("error", `vibe-setup: could not persist failed discovery for ${flight.project.id}`);
+      }
+    }).catch((error) => {
+      void ipc.jsLog("error", `vibe-setup: could not persist failed discovery for ${flight.project.id}: ${String(error)}`);
+    });
     publish({ kind: "reply", text: message });
-    // The failed flight is KEPT. Dropping it here made the failure retryable
-    // on the next mount, which sounds like resilience and is actually an
-    // unbounded loop: ProjectView remounts constantly, so each remount bought
-    // another model call. It is released after SETUP_RETRY_COOLDOWN_MS, so a
-    // retry still happens — just not sixty times in twenty minutes.
+    // The failed flight is KEPT. Dropping it here made the next mount launch a
+    // new model call. The project marker makes the same rule survive restart.
   };
   const execute = async () => {
     publish({ kind: "reply", text: "I'm understanding how this project fits together and starting everything it needs." });
@@ -1879,6 +1921,8 @@ export function createVibeProjectSetupSession(
   deps: VibeProjectSetupSessionDeps = selftestSessionDeps ?? DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS,
 ): BuilderSession & { stop(): Promise<void> } {
   const flights = flightsFor(deps);
+  const explicitRetry = deps === DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS &&
+    setupRetries.delete(project.id);
   let flight = flights.get(project.id);
   // A known different persisted revision is a different repository setup. An
   // absent revision is commonly the stale ProjectView value from just before
@@ -1892,41 +1936,57 @@ export function createVibeProjectSetupSession(
     flights.delete(project.id);
     flight = undefined;
   }
-  // A failed flight is held until the cooldown expires, then released so the
-  // next mount may try again. Held, it is reused as-is: start() only runs a
-  // flight that is idle, so the person keeps seeing the incident instead of
-  // watching a new model call begin every time the view remounts.
-  if (
-    flight?.status === "failed" &&
-    flight.failedAt !== null &&
-    Date.now() - flight.failedAt >= SETUP_RETRY_COOLDOWN_MS
-  ) {
-    flights.delete(project.id);
-    flight = undefined;
-  }
-  // No flight in this module's map does not mean no recent failure: HMR
-  // replaces the module and its maps, and the cooldown must not be lost with
-  // them — see failedSetups. Rebuild the held failed flight instead of
-  // starting a fresh billed run.
-  if (!flight && deps === DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS) {
-    const failedAt = failedSetups.get(project.id);
-    if (failedAt !== undefined && Date.now() - failedAt < SETUP_RETRY_COOLDOWN_MS) {
+  // No flight in this module's map does not mean discovery was never tried.
+  // Rebuild the incident from durable project state (or the short async-save
+  // bridge) and stay stopped until the person explicitly retries.
+  if (!flight && !explicitRetry) {
+    const persistedFailure = project.vibe?.discovery;
+    const remembered = deps === DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS
+      ? failedSetups.get(project.id)
+      : undefined;
+    // Development HMR may retain the pre-durable map whose values were bare
+    // timestamps. Interpret that one old shape instead of launching again.
+    const rememberedFailure = typeof remembered === "number"
+      ? {
+          status: "failed" as const,
+          attemptedAt: remembered,
+          message: "I couldn't determine a safe complete setup for this project.",
+        }
+      : remembered;
+    const failure = persistedFailure ?? rememberedFailure;
+    if (failure) {
       flight = createVibeProjectSetupFlight(project, persist, deps);
       flight.status = "failed";
-      flight.failedAt = failedAt;
+      flight.failedAt = failure.attemptedAt;
+      if (!persistedFailure && rememberedFailure) {
+        const migrated = recordVibeDiscoveryFailure(
+          project,
+          rememberedFailure.message,
+          rememberedFailure.attemptedAt,
+        );
+        flight.project = migrated;
+        void persist(migrated).then((saved) => {
+          if (!saved) {
+            void ipc.jsLog("error", `vibe-setup: could not migrate failed discovery for ${project.id}`);
+          }
+        }).catch((error) => {
+          void ipc.jsLog("error", `vibe-setup: could not migrate failed discovery for ${project.id}: ${String(error)}`);
+        });
+      }
       flight.state = {
         persona: { kind: "incident" },
         card: {
           id: `vibe-setup-${project.id}`,
           kind: "outcome",
           tone: "warning",
-          title: "I couldn’t finish setting up the project",
+          title: failure.status === "stale"
+            ? "Project setup needs a refresh"
+            : "I couldn’t finish setting up the project",
+          detail: failure.message,
         },
         question: null,
       };
       flights.set(project.id, flight);
-    } else if (failedAt !== undefined) {
-      failedSetups.delete(project.id);
     }
   }
   if (!flight) {

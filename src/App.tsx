@@ -20,6 +20,7 @@ import {
   loadWorkspace,
   newComponentId,
   newProjectId,
+  recordVibeDiscoveryFailure,
   saveWorkspace,
   saveWorkspaceStrict,
   type Project,
@@ -3301,13 +3302,24 @@ export default function App() {
             const state = wsRef.current;
             const current = state.projects.find((candidate) => candidate.id === id);
             if (!current || configured.id !== id) return false;
+            const failedDiscovery = configured.vibe?.discovery;
             // A setup proposal was validated against the component identities
             // it observed. If they changed while persistence waited, discard it
             // rather than overwrite newer project structure.
             const observed = current.components.map((component) => `${component.id}:${component.path}`).join("|");
             const proposedFrom = configured.components.map((component) => `${component.id}:${component.path}`).join("|");
-            if (observed !== proposedFrom && current.vibe?.setupRevision) return false;
-            const projects = state.projects.map((candidate) => candidate.id === id ? configured : candidate);
+            if (!failedDiscovery && observed !== proposedFrom && current.vibe?.setupRevision) return false;
+            // Failure is a marker, not a project snapshot. Merge it onto the
+            // latest value so a long survey cannot undo edits made while it
+            // was running.
+            const next = failedDiscovery?.status === "failed"
+              ? recordVibeDiscoveryFailure(
+                  current,
+                  failedDiscovery.message,
+                  failedDiscovery.attemptedAt,
+                )
+              : configured;
+            const projects = state.projects.map((candidate) => candidate.id === id ? next : candidate);
             const candidate = { ...state, projects };
             try { await saveWorkspaceStrict(candidate); } catch { return false; }
             if (wsRef.current !== state) continue;

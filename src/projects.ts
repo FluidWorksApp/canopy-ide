@@ -64,6 +64,14 @@ export interface Component {
 export interface VibeConfig {
   version: 1;
   enabled: boolean;
+  /** A discovery that finished without a persistable setup. This is durable
+   *  because failure is still an outcome: reopening the app must not launch
+   *  another billed repository survey unless the person explicitly retries. */
+  discovery?: {
+    status: "failed" | "stale";
+    attemptedAt: number;
+    message: string;
+  };
   componentId?: string;
   runCommandId?: string;
   setupRevision?: string;
@@ -127,6 +135,24 @@ export interface Project {
    * stay in the provider/credential store; only safe identifiers, endpoints,
    * observations and deployment history travel with the project. */
   integrations?: ProjectIntegrationState;
+}
+
+/** Record only the discovery outcome on the freshest project value. Survey
+ * failures can arrive many minutes after they started; replacing the whole
+ * captured project here would erase components or settings edited meanwhile. */
+export function recordVibeDiscoveryFailure(
+  project: Project,
+  message: string,
+  attemptedAt: number = Date.now(),
+): Project {
+  return {
+    ...project,
+    vibe: {
+      version: 1,
+      enabled: project.vibe?.enabled === true,
+      discovery: { status: "failed", attemptedAt, message },
+    },
+  };
 }
 
 export interface WorkspaceState {
@@ -349,15 +375,39 @@ export function normalizeProjectStructure(project: Project): Project {
       Array.isArray(vibe.dataStores) &&
       Array.isArray(vibe.externalServices);
     if (!complete) {
-      const reset: VibeConfig = { version: 1, enabled: vibe.enabled === true };
+      const discovery = vibe.discovery;
+      const recordedDiscovery =
+        (discovery?.status === "failed" || discovery?.status === "stale") &&
+        Number.isFinite(discovery.attemptedAt) &&
+        discovery.attemptedAt > 0 &&
+        typeof discovery.message === "string" &&
+        discovery.message.trim()
+          ? discovery
+          : nonBlankId(vibe.setupRevision)
+            ? {
+                status: "stale" as const,
+                attemptedAt: 1,
+                message: "The saved project setup needs a refresh. Retry discovery when you want Canopy to inspect it again.",
+              }
+            : undefined;
+      const reset: VibeConfig = {
+        version: 1,
+        enabled: vibe.enabled === true,
+        ...(recordedDiscovery ? { discovery: recordedDiscovery } : {}),
+      };
       if (
-        vibe.version !== reset.version ||
-        vibe.enabled !== reset.enabled ||
-        Object.keys(vibe).length !== 2
+        JSON.stringify(vibe) !== JSON.stringify(reset)
       ) {
         vibe = reset;
         changed = true;
       }
+    } else if (vibe.discovery) {
+      // A complete setup supersedes the last failed attempt. Keeping both
+      // makes a successful project look failed to any surface that reads the
+      // durable outcome directly.
+      const { discovery: _discovery, ...ready } = vibe;
+      vibe = ready;
+      changed = true;
     }
   }
 

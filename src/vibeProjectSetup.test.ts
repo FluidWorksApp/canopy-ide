@@ -605,12 +605,28 @@ describe("bounded setup agent task", () => {
     expect(deps.settlements).toContainEqual(expect.objectContaining({ state: "blocked", failureCode: "invalid-structured-output" }));
   });
 
-  it("settles parseable but invalid schema as blocked rather than completed", async () => {
-    const deps = taskDeps([[{ kind: "delta", text: JSON.stringify({ schemaVersion: 1 }) }, { kind: "turnEnd" }]]);
-    const result = await runVibeProjectSetupTask({ ...taskInput, validateOutput: () => false }, deps);
-    expect(result).toMatchObject({ ok: false, reason: "invalid-output", attempts: 1 });
+  it("corrects parseable schema errors without exploring the project again", async () => {
+    const invalid = { schemaVersion: 1, components: [] };
+    const valid = proposal();
+    const deps = taskDeps([
+      [{ kind: "delta", text: JSON.stringify(invalid) }, { kind: "turnEnd" }],
+      [{ kind: "delta", text: JSON.stringify(valid) }, { kind: "turnEnd" }],
+    ]);
+    const validateOutput = vi.fn()
+      .mockReturnValueOnce({ ok: false, errors: ["components must contain between 1 and 64 entries"] })
+      .mockReturnValueOnce({ ok: true, proposal: valid });
+    const result = await runVibeProjectSetupTask({
+      ...taskInput,
+      componentRoots: ["/repo/apps/web", "/repo/services/api"],
+      validateOutput,
+    }, deps);
+    expect(result).toMatchObject({ ok: true, attempts: 2 });
     expect(deps.settlements).toContainEqual(expect.objectContaining({ state: "blocked", failureCode: "invalid-setup-schema" }));
-    expect(deps.settlements).not.toContainEqual(expect.objectContaining({ state: "completed" }));
+    expect(deps.settlements).toContainEqual(expect.objectContaining({ state: "completed" }));
+    expect(deps.messages[1]).toContain("Do not inspect or explore the repositories again");
+    expect(deps.messages[1]).toContain("components must contain between 1 and 64 entries");
+    expect(deps.messages[1]).toContain(JSON.stringify(invalid));
+    expect(deps.launches[1].launch.additionalDirectories).toEqual([]);
   });
 
   it("never fails over to a CLI it cannot launch", async () => {
@@ -893,8 +909,8 @@ describe("non-technical setup surface", () => {
     );
   });
 
-  it("does not persist when a repair verdict is not followed by a successful proof", async () => {
-    const persist = vi.fn(async () => true);
+  it("does not persist an unverified setup and records the failed discovery", async () => {
+    const persist = vi.fn(async (_next: Project) => true);
     const verify = vi.fn(async (configured: Project) => {
       const component = configured.components[0];
       return {
@@ -932,7 +948,16 @@ describe("non-technical setup surface", () => {
 
     await failed;
     expect(verify).toHaveBeenCalledTimes(2);
-    expect(persist).not.toHaveBeenCalled();
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(persist.mock.calls[0][0]).toMatchObject({
+      vibe: {
+        version: 1,
+        discovery: {
+          status: "failed",
+          message: "I couldn't finish preparing this project yet.",
+        },
+      },
+    });
   });
 
   it("keeps a correct survey when an unrelated file was saved while it ran", async () => {
@@ -1013,6 +1038,70 @@ describe("non-technical setup surface", () => {
       await again.stop();
     }
     expect(deps.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not rerun a failed discovery after the durable project is reopened", async () => {
+    const firstDeps: VibeProjectSetupSessionDeps = {
+      observe: vi.fn(async () => ({
+        projectRoot: root,
+        componentRoots: ["/repo/apps/web", "/repo/services/api"],
+        fingerprint: "tree-1",
+        paths: context().existingPaths,
+      })),
+      run: vi.fn(async () => ({
+        ok: false as const,
+        reason: "invalid-output" as const,
+        message: "I couldn't determine a safe complete setup for this project.",
+        runId: "setup-run",
+        attempts: 1,
+      })),
+      ...verifiedSessionDeps,
+      providerIds: context().providerIds,
+    };
+    let persisted: Project | null = null;
+    const first = createVibeProjectSetupSession(
+      project(),
+      async (next) => { persisted = next; return true; },
+      firstDeps,
+    );
+    first.events$.subscribe(() => {});
+    await vi.waitFor(() => expect(persisted).not.toBeNull());
+
+    // A fresh dependency object has a fresh flight map, like a fresh app
+    // process. The project record alone must keep discovery stopped.
+    const reopenedDeps: VibeProjectSetupSessionDeps = {
+      observe: vi.fn(async () => ({
+        projectRoot: root,
+        componentRoots: ["/repo/apps/web", "/repo/services/api"],
+        fingerprint: "tree-1",
+        paths: context().existingPaths,
+      })),
+      run: vi.fn(async () => ({
+        ok: false as const,
+        reason: "invalid-output" as const,
+        message: "unexpected rerun",
+        runId: "unexpected-run",
+        attempts: 1,
+      })),
+      ...verifiedSessionDeps,
+      providerIds: context().providerIds,
+    };
+    const reopened = createVibeProjectSetupSession(
+      persisted!,
+      async () => true,
+      reopenedDeps,
+    );
+    reopened.events$.subscribe(() => {});
+    await Promise.resolve();
+
+    expect(reopenedDeps.observe).not.toHaveBeenCalled();
+    expect(reopenedDeps.run).not.toHaveBeenCalled();
+    expect(reopened.state.card).toMatchObject({
+      kind: "outcome",
+      tone: "warning",
+      title: "I couldn’t finish setting up the project",
+      detail: "I couldn't determine a safe complete setup for this project.",
+    });
   });
 
   it("keeps one project-owned setup flight across view switches and an unchanged completed revision", async () => {
