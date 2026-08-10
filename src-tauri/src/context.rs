@@ -1520,6 +1520,7 @@ async fn research_op(
             Some(req.cwd.clone()),
             req.pty_id,
             req.tags.clone(),
+            req.text.clone(),
             req.instance.clone(),
         )
         .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),

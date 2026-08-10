@@ -259,6 +259,7 @@ import {
   implementContext,
   link as researchLinkEntry,
   reconcileMerged,
+  researchRequestDraft,
   refresh as researchRefresh,
   setStatus as researchSetStatus,
   settleIfRunning as researchSettleIfRunning,
@@ -3760,7 +3761,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const startResearch = useCallback(
     async (question: string, userQuery = "", ticket?: ipc.ResearchTicketLink) => {
-      const q = question.trim();
+      const draft = researchRequestDraft(question);
+      const q = draft.question;
       if (!q) return false;
       // The title is the question, shortened — an entry is cited by number
       // anyway, and asking the user to name it before it exists is a form to
@@ -3774,6 +3776,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             roots,
             title,
             question: q,
+            body: draft.body,
             cwd: roots[0],
           }),
           // Link before opening the tab, so the entry carries the ticket it
@@ -3809,11 +3812,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
           open: (entry) => openResearch(entry.id, entry.title),
         });
         if (result.error) {
-          onNotice(`Research was saved, but couldn't start: ${String(result.error)}`, "error");
+          onNotice(`Research was saved, but couldn't start: ${String(result.error)}`, "error", {
+            dedupe: `research-start:${project.id}`,
+          });
         }
         return true;
       } catch (err) {
-        onNotice(`Couldn't start research: ${String(err)}`, "error");
+        onNotice(`Couldn't start research: ${String(err)}`, "error", {
+          dedupe: `research-start:${project.id}`,
+        });
         return false;
       }
     },
@@ -4954,10 +4961,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
         const detached = findRun(microRunsRef.current, a.ptyId);
         const ptyId = tab?.ptyId ?? detached?.ptyId;
         if (ptyId == null) return;
-        if (tab && description) patchTabRaw(tab.id, { description });
+        if (tab)
+          patchTabRaw(tab.id, {
+            ...(description ? { description } : {}),
+            // The generated session name (Moss, Juniper, …) is a fallback,
+            // not the work's identity. Preserve an explicit user rename.
+            ...(named.title && !tab.renamed
+              ? { customTitle: named.title }
+              : {}),
+          });
 
-        // Ordinary agent sessions publish only the hover line. Task identity
-        // belongs to micro-task history and must not rename a normal terminal.
+        // Ordinary sessions have no task-history row to update, but their tab
+        // title and hover status above still follow canopy_name_task.
         if (!tab?.micro && !detached) return;
         if (!hasIdentity(named)) return;
         const runId = tab?.micro?.runId ?? detached?.runId;
@@ -9094,7 +9109,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           t.name ??
           projectStats.find((session) => session.id === t.ptyId)?.name ??
           t.customTitle,
-        title: t.title,
+        title: t.customTitle ?? t.title,
         description: t.description,
         ptyId: t.ptyId as number,
         agentId: (byProc ?? byCommand)?.id ?? "agent",

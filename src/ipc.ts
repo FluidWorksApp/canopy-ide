@@ -1487,6 +1487,8 @@ export interface ResearchStartArgs {
   roots?: string[];
   title: string;
   question?: string;
+  /** Context too long or detailed for the concise question field. */
+  body?: string;
   agent?: string;
   cwd?: string;
   ptyId?: number;

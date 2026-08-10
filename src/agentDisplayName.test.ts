@@ -17,6 +17,14 @@ describe("agentDisplayName", () => {
     ).toBe("Juniper");
   });
 
+  it("uses the published task title ahead of a generated session name", () => {
+    expect(
+      agentDisplayName({
+        tab: { name: "Moss", customTitle: "Fix Codex task status", title: "codex" },
+      }),
+    ).toBe("Fix Codex task status");
+  });
+
   it("uses the native session name when there is no mounted tab", () => {
     expect(
       agentDisplayName({

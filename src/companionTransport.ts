@@ -187,7 +187,7 @@ export class OneshotTransport implements CompanionTransport {
     }
     if (/error|fatal|not found|denied|invalid/i.test(text)) {
       if (!this.healIfConversationGone(text)) {
-        this.host.emit({ kind: "error", message: text });
+        this.host.emit({ kind: "error", message: companionCliError(text) });
       }
     }
   }
@@ -331,6 +331,22 @@ export class OneshotTransport implements CompanionTransport {
     this.clearTimer();
     await this.abort();
   }
+}
+
+/** CLI error streams sometimes wrap the only useful sentence in a protocol
+ * envelope. Keep the diagnostic human-readable without hiding unknown text. */
+export function companionCliError(text: string): string {
+  try {
+    const parsed = JSON.parse(text) as {
+      message?: unknown;
+      error?: { message?: unknown };
+    };
+    const message = parsed.error?.message ?? parsed.message;
+    if (typeof message === "string" && message.trim()) return message.trim();
+  } catch {
+    // Plain stderr is already the best diagnostic available.
+  }
+  return text;
 }
 
 /** Start a oneshot-tier CLI. Nothing is spawned until the first message: the

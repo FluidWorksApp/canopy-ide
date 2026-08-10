@@ -206,6 +206,17 @@ describe("PaneBar tab rename", () => {
     expect(screen.queryByText("canopy")).toBeNull();
   });
 
+  it("shows an agent-published task title ahead of its generated name", () => {
+    const tab = {
+      ...term("t1", "codex"),
+      name: "Moss",
+      customTitle: "Fix Codex task status",
+    };
+    render(paneBar({ tabGroups: [run("all", [tab])] }));
+    expect(screen.getByText("Fix Codex task status")).toHaveClass("tab-title");
+    expect(screen.queryByText("Moss")).toBeNull();
+  });
+
   it("keeps a non-agent run's command title", () => {
     const tab = { ...term("t1", "npm run dev"), name: "Juniper" };
     render(

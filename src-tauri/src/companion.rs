@@ -261,7 +261,7 @@ pub async fn companion_spawn(
     // stdout: one JSON object per line, forwarded as it arrives. A line is
     // bounded before allocation; an oversized protocol object is discarded
     // explicitly after draining rather than parsed as partial JSON.
-    {
+    let stdout_task = {
         let sink = on_data.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
@@ -288,16 +288,15 @@ pub async fn companion_spawn(
                     return;
                 }
             }
-            let _ = sink.send(CompanionOut::Exit { code: None });
-        });
-    }
+        })
+    };
 
     // stderr must be drained whether or not anyone reads it: an unread pipe
     // buffer fills and deadlocks a chatty CLI mid-answer. Bounded so a CLI that
     // logs a warning per token cannot grow without limit.
-    if let Some(stderr) = stderr {
+    let stderr_task = if let Some(stderr) = stderr {
         let sink = on_data.clone();
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
             let mut kept = 0usize;
             while let Ok(Some((bytes, truncated))) = capped_line(&mut reader, STDERR_KEEP).await {
@@ -313,8 +312,23 @@ pub async fn companion_spawn(
                     return;
                 }
             }
-        });
-    }
+        }))
+    } else {
+        None
+    };
+
+    // Exit is the turn boundary. Do not publish it from the stdout reader:
+    // stderr is a separate pipe and may still contain the concrete failure,
+    // which otherwise arrives after the UI has already committed its generic
+    // "no reply" fallback.
+    let exit_sink = on_data.clone();
+    tokio::spawn(async move {
+        let _ = stdout_task.await;
+        if let Some(task) = stderr_task {
+            let _ = task.await;
+        }
+        let _ = exit_sink.send(CompanionOut::Exit { code: None });
+    });
 
     *held = Some(Running {
         stdin,

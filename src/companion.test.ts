@@ -5,6 +5,7 @@ import {
   clampSpot,
   companionCli,
   companionName,
+  companionModelForCli,
   companionRunnerLaunch,
   companionSessionId,
   companionSlug,
@@ -95,6 +96,12 @@ describe("name", () => {
 });
 
 describe("tiers", () => {
+  it("does not pass a stale model override to picker-based Codex", () => {
+    expect(companionModelForCli("codex", "default")).toBe("");
+    expect(companionModelForCli("claude", "default")).toBe("default");
+    expect(companionModelForCli("claude", "not-a-claude-model")).toBe("");
+  });
+
   it("puts every unlisted CLI in the terminal tier rather than refusing it", () => {
     // The point of the fallback: an agent Canopy ships no runner for still
     // works as a companion on the day the user installs it.

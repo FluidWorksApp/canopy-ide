@@ -149,8 +149,8 @@ function tabText(tab: SubTab, showAssignedName = false): string {
   switch (tab.type) {
     case "terminal":
       return tab.multiplexTitle ??
-        (showAssignedName ? tab.name : undefined) ??
         tab.customTitle ??
+        (showAssignedName ? tab.name : undefined) ??
         tab.title;
     case "pr": return `#${tab.pr.number} ${tab.pr.title}`;
     case "ticket": return `${tab.ticket.id} ${tab.ticket.title}`;

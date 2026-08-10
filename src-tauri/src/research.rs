@@ -762,6 +762,7 @@ pub fn research_start(
     cwd: Option<String>,
     pty_id: Option<u64>,
     tags: Option<Vec<String>>,
+    body: Option<String>,
     instance: Option<String>,
 ) -> Result<Summary, String> {
     let _guard = store.0.lock().unwrap();
@@ -779,6 +780,7 @@ pub fn research_start(
             cwd,
             pty_id,
             tags,
+            body,
             instance,
         ),
     )
@@ -795,6 +797,7 @@ fn start_impl(
     cwd: Option<String>,
     pty_id: Option<u64>,
     tags: Option<Vec<String>>,
+    body: Option<String>,
     instance: Option<String>,
 ) -> Result<Summary, String> {
     let title = title.trim().to_string();
@@ -813,6 +816,18 @@ fn start_impl(
         &question,
         QUESTION_MAX,
         "State what is being investigated; the material goes in the body.",
+    )?;
+    let initial_body = body.unwrap_or_default();
+    let document = if initial_body.trim().is_empty() {
+        format!("# {title}\n\n")
+    } else {
+        format!("# {title}\n\n{}\n", initial_body.trim())
+    };
+    cap(
+        "body",
+        &document,
+        BODY_MAX,
+        "Move long raw material into a source.",
     )?;
 
     let pdir = project_dir(&project_id)?;
@@ -877,7 +892,7 @@ fn start_impl(
         }],
     };
     write_meta(&dir, &meta)?;
-    write_atomic(&body_path(&dir), &format!("# {}\n\n", meta.title))?;
+    write_atomic(&body_path(&dir), &document)?;
     // From here on this terminal is doing research, whoever launched it. A run
     // Canopy started already had the env; this is what brings the harness to
     // one that opened an entry on its own initiative.
@@ -1425,6 +1440,7 @@ fn import_impl_inner(
         Some(clip(&format!("Imported from {path}"), QUESTION_MAX)),
         None,
         file.parent().map(|p| p.to_string_lossy().to_string()),
+        None,
         None,
         None,
         instance,
@@ -2096,6 +2112,7 @@ mod tests {
             Some("/repo".into()),
             Some(12),
             None,
+            None,
             Some("inst1".into()),
         )
         .unwrap()
@@ -2193,6 +2210,28 @@ mod tests {
         // Every move is on the record, including the one that started it.
         let detail = research_get("p1".into(), s.id.clone()).unwrap();
         assert_eq!(detail.history.len(), 4);
+    }
+
+    #[test]
+    fn start_keeps_initial_context_in_the_body() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _home = TempHome::new("initial-body");
+        let summary = start_impl(
+            "p1".into(),
+            Some("Canopy".into()),
+            Some(vec!["/repo".into()]),
+            "Cache policy".into(),
+            Some("Should the cache policy change?".into()),
+            None,
+            Some("/repo".into()),
+            None,
+            None,
+            Some("## Original request\n\nTicket details".into()),
+            None,
+        )
+        .unwrap();
+        let detail = research_get("p1".into(), summary.id).unwrap();
+        assert!(detail.body.contains("Ticket details"));
     }
 
     #[test]

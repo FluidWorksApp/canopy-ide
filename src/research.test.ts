@@ -13,12 +13,30 @@ import {
   reconcileMerged,
   refresh,
   researchContext,
+  researchRequestDraft,
   resetStoreWatchForTest,
   watchStore,
 } from "./research";
 import { __reset as resetPrLinkState } from "./prLinkState";
 
 const STATUSES = STATUS_ORDER;
+
+describe("research request tiers", () => {
+  it("keeps a concise request in the question field", () => {
+    expect(researchRequestDraft("Why is startup slow?")).toEqual({
+      question: "Why is startup slow?",
+    });
+  });
+
+  it("moves long request material into the body", () => {
+    const raw = `Should we change the cache?\n\n${"context ".repeat(180)}`;
+    const draft = researchRequestDraft(raw);
+    expect(Array.from(draft.question)).toHaveLength(27);
+    expect(draft.question).toBe("Should we change the cache?");
+    expect(draft.body).toContain(raw.trim());
+    expect(Array.from(draft.question).length).toBeLessThanOrEqual(600);
+  });
+});
 
 describe("the status model", () => {
   it("names and explains every status it can render", () => {

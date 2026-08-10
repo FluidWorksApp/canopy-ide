@@ -20,6 +20,7 @@
 // components/Companion.tsx.
 
 import { AGENT_CLIS, type AgentCli } from "./projects";
+import { MODEL_SWITCH } from "./agentModels";
 import { mascotDef } from "./mascots";
 import { getSettings, updateSettings } from "./settings";
 import {
@@ -162,6 +163,17 @@ export function tierNote(cliId: string): string {
     default:
       return "Replies arrive whole, not streamed.";
   }
+}
+
+/** A stored companion model is valid only for CLIs whose verified launch
+ * contract accepts one of Canopy's inline choices. Picker-based CLIs such as
+ * Codex own their account-specific catalogue, so passing a stale value like
+ * Claude's `default` would override the CLI with a model that does not exist. */
+export function companionModelForCli(cliId: string, stored: string): string {
+  const model = stored.trim();
+  const sw = MODEL_SWITCH[cliId];
+  if (!model || sw?.kind !== "inline") return "";
+  return sw.choices.some((choice) => choice.id === model) ? model : "";
 }
 
 /** Which CLI the companion runs on. The only answer to that question — the

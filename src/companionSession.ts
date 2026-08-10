@@ -15,6 +15,7 @@ import * as ipc from "./ipc";
 import {
   actionPolicy,
   companionCli,
+  companionModelForCli,
   companionSessionId,
   forgetCompanionSession,
   tierFor,
@@ -365,7 +366,7 @@ export async function startCompanion(
       sessionId,
       systemPrompt,
       roots,
-      model: s.companionModel,
+      model: companionModelForCli(cli.id, s.companionModel),
       authority,
     };
 

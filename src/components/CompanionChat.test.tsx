@@ -192,6 +192,21 @@ describe("the composer", () => {
   });
 });
 
+describe("failed replies", () => {
+  it("renders the error once", () => {
+    const failed = state([], "ready");
+    failed.messages[1] = {
+      id: "a1",
+      who: "ash",
+      text: "Unsupported model.",
+      failed: true,
+    };
+    mount(failed);
+    expect(document.body.textContent?.match(/Unsupported model\./g)).toHaveLength(1);
+    expect(document.querySelectorAll(".companion-failed")).toHaveLength(1);
+  });
+});
+
 describe("attachments", () => {
   it("stages a selected file and sends its path with the message", async () => {
     const onSend = vi.fn();

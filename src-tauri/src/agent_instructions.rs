@@ -69,9 +69,11 @@ IDE the user is watching, and their results stay inspectable:\n\
   or contrast)\n\
 - Working in a checkout that other agents share -> canopy_agents first, then \
   canopy_mesh history; use canopy_claim before editing shared paths\n\
-- Mesh duty -> call canopy_name_task with a short `description` when you start \
-  work and whenever your focus materially changes; answer lead pings promptly, \
-  and send agent-to-agent coordination through canopy_message_agent or \
+- Starting any task -> call canopy_name_task before substantive work with a \
+  short `title` and one-line `description`; call it again whenever your focus \
+  materially changes so the tab and live status say what you are doing\n\
+- Mesh duty -> answer lead pings promptly, and send agent-to-agent coordination \
+  through canopy_message_agent or \
   canopy_mesh_send rather than leaving it only in terminal prose\n\
 - A short one-line interrupt to another agent -> canopy_message_agent; pass a \
   terminal id from canopy_agents, or `pr` to reach the session that raised a PR\n\
@@ -145,6 +147,7 @@ mod tests {
         assert!(prompt.contains("canopy_message_agent"));
         assert!(prompt.contains("canopy_mesh_send"));
         assert!(prompt.contains("call canopy_name_task"));
+        assert!(prompt.contains("short `title` and one-line `description`"));
         assert!(prompt.contains("answer lead pings promptly"));
     }
 

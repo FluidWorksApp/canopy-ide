@@ -240,7 +240,9 @@ export function CompanionChat({
                 />
               )}
               {m.who === "ash" ? (
-                m.text ? (
+                m.failed ? (
+                  <span className="companion-failed">{m.text}</span>
+                ) : m.text ? (
                   // The same renderer every other markdown surface uses — a
                   // second one would drift, and answers here are full of code
                   // spans and paths. `external` on purpose: this is an agent's
@@ -262,7 +264,6 @@ export function CompanionChat({
                   )}
                 </>
               )}
-              {m.failed && <span className="companion-failed">{m.text}</span>}
             </div>
           </div>
         ))}

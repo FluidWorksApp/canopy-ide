@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   companionMcpAuthError,
+  companionCliError,
   OneshotTransport,
   newText,
 } from "./companionTransport";
@@ -490,6 +491,19 @@ describe("the oneshot protocol (codex)", () => {
     ]);
     expect(o.abort).toHaveBeenCalledOnce();
     expect(companionMcpAuthError("ordinary warning")).toBeNull();
+  });
+
+  it("unwraps a Codex JSON error instead of exposing the protocol envelope", async () => {
+    const o = oneshot();
+    await o.t.send("hello");
+    const raw = JSON.stringify({
+      type: "error",
+      status: 400,
+      error: { type: "invalid_request_error", message: "Unsupported model." },
+    });
+    o.t.handleStderr(raw);
+    expect(companionCliError(raw)).toBe("Unsupported model.");
+    expect(o.host.events).toEqual([{ kind: "error", message: "Unsupported model." }]);
   });
 
   it("bounds a wedged turn and kills its child", async () => {

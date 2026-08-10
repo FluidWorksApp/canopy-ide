@@ -3306,7 +3306,7 @@ fn research_tool_defs() -> Vec<serde_json::Value> {
                 "id": { "type": "string", "description": "Entry id — required by everything except start" },
                 "title": { "type": "string", "description": "start: the question in a few words. source: what this capture is." },
                 "question": { "type": "string", "description": "start: what is being investigated and why" },
-                "text": { "type": "string", "description": "append: markdown to add to the body. source: the raw material." },
+                "text": { "type": "string", "description": "start: initial context that is too detailed for the question. append: markdown to add to the body. source: the raw material." },
                 "origin": { "type": "string", "description": "source: where it came from — a file path, URL or command" },
                 "digest": { "type": "string", "description": "One paragraph: the finding itself. This is what other agents read." },
                 "recommendation": { "type": "string", "description": "What to do about it, in a sentence or two" },

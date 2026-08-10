@@ -74,9 +74,9 @@ const uninformative = (title: string, agentLabel?: string) =>
   (!!agentLabel && title.toLowerCase() === agentLabel.toLowerCase());
 
 /**
- * Precedence is deliberate: assigned name, then the CLI's useful title, then
- * cwd basename. `agentLabel` exists only for compatibility with an older
- * native core that supplies none of those.
+ * Precedence is deliberate: task/user title, assigned fallback name, then the
+ * CLI's useful title and cwd basename. `agentLabel` exists only for
+ * compatibility with an older native core that supplies none of those.
  */
 export function agentDisplayName({
   tab,
@@ -92,7 +92,7 @@ export function agentDisplayName({
   /** Retained only as the last compatibility fallback for old native cores. */
   agentLabel?: string;
 }): string {
-  const assigned = clean(tab?.name) || clean(sessionName) || clean(tab?.customTitle);
+  const assigned = clean(tab?.customTitle) || clean(tab?.name) || clean(sessionName);
   if (assigned) return assigned;
   const auto = clean(tab?.title) || clean(sessionTitle);
   if (auto && !uninformative(auto, agentLabel)) return auto;
