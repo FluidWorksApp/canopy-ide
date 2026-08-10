@@ -305,8 +305,11 @@ import {
   type WorkflowExecutorDeps,
 } from "../../workflowExecutor";
 import {
+  loadWorkflowDefinitions,
   STARTER_WORKFLOW_DEFINITION,
+  workflowAcceptsTrigger,
   type WorkflowDefinition,
+  type WorkflowTriggerProvenance,
 } from "../../workflowDefinition";
 import { workflowGet } from "../../workflowRuns";
 import { waitForWorkflowAttempt } from "../../workflowAttempt";
@@ -4113,6 +4116,66 @@ const ProjectViewBody = memo(function ProjectViewBody({
       void run.catch((error) => onNotice(`Workflow stopped: ${String(error)}`, "error"));
     },
     [onNotice, workflowRuntime],
+  );
+
+  const dispatchedWorkflowEvents = useRef(new Set<string>());
+  const lastIssueWorkflowEvent = useRef(new Map<string, { kind: string; body: string; at: number }>());
+  const dispatchWorkflowEvent = useCallback(
+    async (event: WorkflowTriggerProvenance) => {
+      if (dispatchedWorkflowEvents.current.has(event.eventId)) return;
+      if (event.kind.startsWith("issue.")) {
+        const identity = [
+          event.payload.source,
+          event.payload.repo,
+          event.payload.issueId,
+        ].map(String).join("\0");
+        const body = typeof event.payload.body === "string" ? event.payload.body : "";
+        const previous = lastIssueWorkflowEvent.current.get(identity);
+        // A mutation is emitted immediately by TicketView, then observed once
+        // more by the provider refresh. Keep the immediate launch and discard
+        // only that echo. A different lifecycle kind or comment body remains
+        // a distinct event, including close → reopen → close.
+        if (
+          previous &&
+          previous.kind === event.kind &&
+          previous.body === body &&
+          event.occurredAt - previous.at < 60_000
+        ) return;
+        lastIssueWorkflowEvent.current.set(identity, {
+          kind: event.kind,
+          body,
+          at: event.occurredAt,
+        });
+      }
+      dispatchedWorkflowEvents.current.add(event.eventId);
+      if (dispatchedWorkflowEvents.current.size > 1_000) {
+        const oldest = dispatchedWorkflowEvents.current.values().next().value;
+        if (oldest) dispatchedWorkflowEvents.current.delete(oldest);
+      }
+      const projectRoot = roots[0] ?? project.components[0]?.path;
+      if (!projectRoot) return;
+      const catalog = await loadWorkflowDefinitions(projectRoot, {
+        projectRoot,
+        componentRoots: new Set(roots),
+      });
+      if (!catalog.ok) {
+        onNotice(`Workflow event ignored: ${catalog.errors[0] ?? "the workflow catalog is invalid"}`, "error");
+        return;
+      }
+      const matching = catalog.definitions.filter((definition) =>
+        workflowAcceptsTrigger(definition, event),
+      );
+      await Promise.all(matching.map(async (definition) => {
+        try {
+          const runtime = await workflowRuntime(definition);
+          void startWorkflow(definition, event, runtime.context, runtime.deps)
+            .catch((error) => onNotice(`Workflow stopped: ${String(error)}`, "error"));
+        } catch (error) {
+          onNotice(`Couldn't start workflow “${definition.name}”: ${String(error)}`, "error");
+        }
+      }));
+    },
+    [onNotice, project.components, roots, workflowRuntime],
   );
 
   const answerWorkflowDecision = useCallback(
@@ -11258,6 +11321,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             onSendToAgent={(target) =>
               sendTicketToAgent(target, ticketContext(tab.ticket))
             }
+            onWorkflowEvent={dispatchWorkflowEvent}
           />
         );
       case "research":
@@ -11475,7 +11539,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       case "issues-list":
         return (
-          <TicketsPanel page components={project.components.map((c) => ({ label: c.label, path: c.path }))} agentTargets={agentTargets} installed={installed} onStartWork={startTicketWork} onSendToAgent={sendTicketToAgent} onResearch={(t) => void researchTicket(t)} onOpenTicket={openTicket} onOpenIntegrations={() => window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "integrations" } }))} />
+          <TicketsPanel page components={project.components.map((c) => ({ label: c.label, path: c.path }))} agentTargets={agentTargets} installed={installed} onStartWork={startTicketWork} onSendToAgent={sendTicketToAgent} onResearch={(t) => void researchTicket(t)} onOpenTicket={openTicket} onOpenIntegrations={() => window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "integrations" } }))} onWorkflowEvent={dispatchWorkflowEvent} />
         );
       case "task-history":
         return (
@@ -13240,6 +13304,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           onSendToAgent={sendTicketToAgent}
           onResearch={(t) => void researchTicket(t)}
           onOpenTicket={openTicket}
+          onWorkflowEvent={dispatchWorkflowEvent}
           onOpenIntegrations={() => {
             window.dispatchEvent(
               new CustomEvent("canopy:open-settings", {

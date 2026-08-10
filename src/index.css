@@ -8275,6 +8275,11 @@ body.dragging-tab * {
 }
 .workflow-definition-route span { display: inline-flex; align-items: center; gap: 5px; }
 .workflow-definition-route i { color: var(--text-faint); font-style: normal; }
+.workflow-definition-triggers {
+  margin-top: 7px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
 .workflow-empty,
 .workflow-catalog-error {
   display: flex;

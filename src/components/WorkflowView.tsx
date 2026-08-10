@@ -41,6 +41,10 @@ const stepKind = (kind: string) => ({
   "git-op": "Git",
 })[kind] ?? kind;
 
+const triggerLabel = (kind: string) => kind === "manual"
+  ? "Manual"
+  : kind.split(".").map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`).join(" ");
+
 export function WorkflowView({
   projectId,
   projectName,
@@ -210,6 +214,9 @@ export function WorkflowView({
                     </span>
                   ))}
                 </div>
+                <div className="workflow-definition-triggers">
+                  Runs on {definition.triggers.map((trigger) => triggerLabel(trigger.kind)).join(" · ")}
+                </div>
               </article>
             );
           })}
@@ -221,7 +228,7 @@ export function WorkflowView({
           {runs.length === 0 ? (
             <div className="workflow-empty workflow-empty-runs">
               <strong>No runs yet.</strong>
-              <span>Run a manual workflow and its steps will appear here as they happen.</span>
+              <span>Manual and event-triggered runs appear here as they happen.</span>
             </div>
           ) : (
             <div className="workflow-run-grid">
@@ -254,6 +261,7 @@ export function WorkflowView({
                       <div>
                         <span className={`workflow-status st-${selectedRun.status}`}>{selectedRun.status}</span>
                         <h3>{selectedRun.definition.name}</h3>
+                        <small>Triggered by {triggerLabel(selectedRun.trigger.kind)}</small>
                       </div>
                       {selectedRun.status === "interrupted" && (
                         <Button size="sm" variant="accent" onClick={() => void act(() => onResume(selectedRun.runId))}>

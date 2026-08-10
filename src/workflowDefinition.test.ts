@@ -77,6 +77,9 @@ describe("validateWorkflowDefinition", () => {
     expect(errorsFor((definition) => { definition.steps[0].capabilities = []; })).toContain(
       "workflow.steps[0] must declare workspace-read",
     );
+    expect(errorsFor((definition) => {
+      definition.triggers.push({ kind: "issue.opened", mentions: ["@canopy"] });
+    })).toContain("workflow.triggers[2].mentions is only valid for comment events");
   });
 
   it("reports malformed variant bodies instead of throwing", () => {
@@ -193,6 +196,55 @@ describe("workflow definition loading and triggers", () => {
         payload: { repo: "repo", body: "plain comment" },
       }),
     ).toBe(false);
+  });
+
+  it("matches issue lifecycle and filtered issue-comment provenance", () => {
+    const definition = valid();
+    definition.triggers.push(
+      { kind: "issue.opened", repo: "/repo" },
+      { kind: "issue.comment", repo: "/repo", mentions: ["@canopy"] },
+    );
+    expect(workflowAcceptsTrigger(definition, {
+      kind: "issue.opened",
+      eventId: "issue-opened-1",
+      occurredAt: 4,
+      payload: { repo: "/repo", issueId: "#42" },
+    })).toBe(true);
+    expect(workflowAcceptsTrigger(definition, {
+      kind: "issue.opened",
+      eventId: "issue-opened-2",
+      occurredAt: 5,
+      payload: { repo: "/other", issueId: "#42" },
+    })).toBe(false);
+    expect(workflowAcceptsTrigger(definition, {
+      kind: "issue.comment",
+      eventId: "issue-comment-1",
+      occurredAt: 6,
+      payload: { repo: "/repo", issueId: "#42", body: "please @canopy investigate" },
+    })).toBe(true);
+    expect(workflowAcceptsTrigger(definition, {
+      kind: "issue.comment",
+      eventId: "issue-comment-2",
+      occurredAt: 7,
+      payload: { repo: "/repo", issueId: "#42", body: "plain comment" },
+    })).toBe(false);
+  });
+
+  it("accepts issue events in watch steps", () => {
+    const definition = valid();
+    definition.steps = [{
+      id: "wait",
+      name: "Wait for an issue comment",
+      kind: "watch",
+      event: "issue.comment",
+      capabilities: [],
+    }];
+    definition.start = "wait";
+    definition.edges = [
+      { from: "wait", on: "pass", to: "$completed" },
+      { from: "wait", on: "fail", to: "$failed" },
+    ];
+    expect(validateWorkflowDefinition(definition, context).ok).toBe(true);
   });
 
   it("distinguishes an absent workflow directory from a failed read", async () => {

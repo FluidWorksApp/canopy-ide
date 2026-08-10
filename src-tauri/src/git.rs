@@ -5104,6 +5104,9 @@ pub struct TicketInfo {
     pub body: String,
     /// Human priority label when the tracker has one ("High"); empty otherwise.
     pub priority: String,
+    /// Provider cursor for deterministic change detection in the workflow
+    /// adapter. This is provenance, not presentation state.
+    pub updated_at: String,
 }
 
 #[derive(Serialize)]
@@ -5422,6 +5425,7 @@ pub async fn gh_issue_list(
                                 })
                             })
                             .unwrap_or_default(),
+                        updated_at: i["updatedAt"].as_str().unwrap_or("").to_string(),
                     }
                 })
                 .collect()
@@ -5432,7 +5436,7 @@ pub async fn gh_issue_list(
 #[tauri::command]
 pub async fn linear_issues(api_key: String) -> Result<Vec<TicketInfo>, String> {
     // Active work only — completed/canceled would bury the list.
-    let query = r#"{ viewer { id } issues(first: 100, orderBy: updatedAt, filter: { state: { type: { in: ["triage", "backlog", "unstarted", "started"] } } }) { nodes { identifier title url branchName description priorityLabel state { name type } assignee { id displayName } } } }"#;
+    let query = r#"{ viewer { id } issues(first: 100, orderBy: updatedAt, filter: { state: { type: { in: ["triage", "backlog", "unstarted", "started"] } } }) { nodes { identifier title url branchName description priorityLabel updatedAt state { name type } assignee { id displayName } } } }"#;
     let v = linear_graphql(&api_key, query, serde_json::json!({}))?;
     let viewer = v["data"]["viewer"]["id"].as_str().unwrap_or("").to_string();
     Ok(v["data"]["issues"]["nodes"]
@@ -5457,6 +5461,7 @@ pub async fn linear_issues(api_key: String) -> Result<Vec<TicketInfo>, String> {
                             "No priority" => String::new(),
                             other => other.to_string(),
                         },
+                        updated_at: i["updatedAt"].as_str().unwrap_or("").to_string(),
                     }
                 })
                 .collect()

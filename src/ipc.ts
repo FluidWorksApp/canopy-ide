@@ -3854,6 +3854,9 @@ export interface TicketInfo {
   branch: string | null;
   body: string;
   priority: string;
+  /** Provider update cursor used to turn tracker refreshes into workflow
+   * events. Optional for older native builds and synthetic test rows. */
+  updated_at?: string;
 }
 
 export interface GhAuth {

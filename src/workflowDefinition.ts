@@ -5,6 +5,11 @@ export const WORKFLOW_SCHEMA_VERSION = 1 as const;
 export const WORKFLOW_TRIGGER_CATALOG = [
   "manual",
   "pr.comment",
+  "issue.opened",
+  "issue.updated",
+  "issue.closed",
+  "issue.reopened",
+  "issue.comment",
   "research.created",
   "research.status-changed",
   "task.created",
@@ -67,7 +72,15 @@ export interface WorkflowGateStep extends WorkflowStepBase {
 
 export interface WorkflowWatchStep extends WorkflowStepBase {
   kind: "watch";
-  event: Extract<WorkflowTriggerKind, "pr.comment">;
+  event: Extract<
+    WorkflowTriggerKind,
+    | "pr.comment"
+    | "issue.opened"
+    | "issue.updated"
+    | "issue.closed"
+    | "issue.reopened"
+    | "issue.comment"
+  >;
 }
 
 export interface WorkflowHumanStep extends WorkflowStepBase {
@@ -329,7 +342,16 @@ export function validateWorkflowDefinition(
       errors.push(`${at}.kind is not in the event catalog`);
     }
     if (trigger.repo !== undefined && !text(trigger.repo)) errors.push(`${at}.repo is invalid`);
-    if (trigger.mentions !== undefined && !strings(trigger.mentions)) errors.push(`${at}.mentions is invalid`);
+    if (trigger.mentions !== undefined && !strings(trigger.mentions)) {
+      errors.push(`${at}.mentions is invalid`);
+    } else if (
+      Array.isArray(trigger.mentions) &&
+      trigger.mentions.length > 0 &&
+      trigger.kind !== "pr.comment" &&
+      trigger.kind !== "issue.comment"
+    ) {
+      errors.push(`${at}.mentions is only valid for comment events`);
+    }
   });
 
   const rawSteps = Array.isArray(top.steps) ? top.steps : [];
@@ -399,7 +421,14 @@ export function validateWorkflowDefinition(
         }
       }
     } else if (kind === "watch") {
-      if (step.event !== "pr.comment") errors.push(`${at}.event is not wired in P1`);
+      if (![
+        "pr.comment",
+        "issue.opened",
+        "issue.updated",
+        "issue.closed",
+        "issue.reopened",
+        "issue.comment",
+      ].includes(String(step.event))) errors.push(`${at}.event is not wired`);
     } else if (kind === "human") {
       const card = record(step.card);
       if (!card) errors.push(`${at}.card is required`);
@@ -620,25 +649,36 @@ export async function loadWorkflowDefinitions(
 }
 
 export interface WorkflowTriggerProvenance {
-  kind: "manual" | "pr.comment";
+  kind: Extract<
+    WorkflowTriggerKind,
+    | "manual"
+    | "pr.comment"
+    | "issue.opened"
+    | "issue.updated"
+    | "issue.closed"
+    | "issue.reopened"
+    | "issue.comment"
+  >;
   eventId: string;
   occurredAt: number;
   payload: Record<string, unknown>;
 }
 
-/** P1 dispatches only manual and PR-comment events; the definition catalog is
- * wider so adding the remaining event adapters does not require a schema
- * migration. */
+/** Match the trigger declaration against its immutable source event. Repository
+ * filters apply to both PRs and issues; mention filters apply only to events
+ * that carry comment text. */
 export function workflowAcceptsTrigger(
   definition: WorkflowDefinition,
   event: WorkflowTriggerProvenance,
 ): boolean {
   return definition.triggers.some((trigger) => {
     if (trigger.kind !== event.kind) return false;
-    if (event.kind !== "pr.comment") return true;
     const repo = typeof event.payload.repo === "string" ? event.payload.repo : "";
-    const body = typeof event.payload.body === "string" ? event.payload.body : "";
     if (trigger.repo && trigger.repo !== repo) return false;
+    if (event.kind !== "pr.comment" && event.kind !== "issue.comment") {
+      return (trigger.mentions ?? []).length === 0;
+    }
+    const body = typeof event.payload.body === "string" ? event.payload.body : "";
     return (trigger.mentions ?? []).every((mention) => body.includes(mention));
   });
 }
