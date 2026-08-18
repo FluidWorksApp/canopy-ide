@@ -836,25 +836,29 @@ pub fn discover(
             );
         }
 
-        // Codex is TOML, so it gets read directly rather than through `Registry`.
-        let codex_path = root.join(".codex/config.toml");
-        if let Ok(raw) = std::fs::read_to_string(&codex_path) {
-            for (name, endpoint) in parse_codex_toml(&raw) {
-                let status = plain_status(&name, endpoint.enabled);
-                collector.add(
-                    &name,
-                    endpoint,
-                    McpSource {
-                        agent: "codex".into(),
-                        label: format!("Codex (global){suffix}"),
-                        name: name.clone(),
-                        config_path: codex_path.display().to_string(),
-                        scope: "global".into(),
-                        status: status.into(),
-                        project_dir: None,
-                    },
-                    Some(root.clone()),
-                );
+        for (agent, label, rel) in [
+            ("codex", "Codex", ".codex/config.toml"),
+            ("grok", "Grok", ".grok/config.toml"),
+        ] {
+            let path = root.join(rel);
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                for (name, endpoint) in parse_codex_toml(&raw) {
+                    let status = plain_status(&name, endpoint.enabled);
+                    collector.add(
+                        &name,
+                        endpoint,
+                        McpSource {
+                            agent: agent.into(),
+                            label: format!("{label} (global){suffix}"),
+                            name: name.clone(),
+                            config_path: path.display().to_string(),
+                            scope: "global".into(),
+                            status: status.into(),
+                            project_dir: None,
+                        },
+                        Some(root.clone()),
+                    );
+                }
             }
         }
     }
@@ -1194,7 +1198,7 @@ pub async fn mcp_update_sources(
     }
 
     for (source, enabled) in validated {
-        if source.agent == "codex" {
+        if matches!(source.agent.as_str(), "codex" | "grok") {
             set_codex_source_enabled(&source, enabled)?;
         } else {
             set_json_source_enabled(&source, enabled)?;

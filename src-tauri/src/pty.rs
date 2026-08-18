@@ -48,11 +48,8 @@ const DEFAULT_HIGH_WATER: usize = 2 * 1024 * 1024;
 const INPUT_HIGH_WATER: usize = 1024 * 1024;
 /// How often the writer thread re-checks for teardown while its queue is empty.
 const WRITER_POLL: Duration = Duration::from_millis(250);
-/// Per-session output retained for a remote (Canopy Remote) attach: a
-/// late-joining browser gets this many recent bytes as a catch-up snapshot
-/// before the live tail. The local WebView is unaffected and keeps its own
-/// xterm scrollback — this ring exists only to seed remote viewers.
-const SCROLLBACK_CAP: usize = 256 * 1024;
+/// Replay retained while no desktop or remote viewer is attached.
+const SCROLLBACK_CAP: usize = 4 * 1024 * 1024;
 /// Bounded fan-out queue to remote subscribers. Lossy on lag by design: a slow
 /// phone is dropped to a resync, never allowed to stall the agent.
 const BROADCAST_CAP: usize = 512;
@@ -118,6 +115,7 @@ pub struct Session {
     pub session_generation: u64,
     pub pid: Option<u32>,
     pub kind: SessionKind,
+    pub execution_context: Option<crate::execution::ExecutionContext>,
     /// Canopy's stable, human-facing name for this terminal. This is display
     /// metadata only: bridge credentials and every privileged operation remain
     /// keyed by the PTY id + private token.
@@ -376,6 +374,8 @@ pub struct PtySpawned {
     pub title: String,
     pub cols: u16,
     pub rows: u16,
+    pub project_id: Option<String>,
+    pub execution_context: Option<crate::execution::ExecutionContext>,
 }
 
 /// A live PTY session, minimally: enough for a remote client to know which
@@ -391,6 +391,8 @@ pub struct PtySummary {
     pub cols: u16,
     pub rows: u16,
     pub kind: SessionKind,
+    pub project_id: Option<String>,
+    pub execution_context: Option<crate::execution::ExecutionContext>,
     pub replay_start: u64,
     pub replay_end: u64,
 }
@@ -463,6 +465,7 @@ impl PtyManager {
             .values()
             .map(|s| {
                 let (cols, rows) = *s.size.lock().unwrap();
+                let execution_context = s.execution_context.clone();
                 PtySummary {
                     id: s.id,
                     session_generation: s.session_generation,
@@ -473,6 +476,10 @@ impl PtyManager {
                     cols,
                     rows,
                     kind: s.kind,
+                    project_id: execution_context
+                        .as_ref()
+                        .map(|context| context.project_id.clone()),
+                    execution_context,
                     replay_start: s.dropped_output_bytes.load(Ordering::Relaxed),
                     replay_end: s.output_bytes.load(Ordering::Relaxed),
                 }
@@ -1035,6 +1042,7 @@ pub fn pty_spawn(
     app: AppHandle,
     state: State<'_, PtyManager>,
     tasks: State<'_, crate::tasks::TaskStore>,
+    execution: State<'_, crate::execution::ExecutionRegistry>,
     cols: u16,
     rows: u16,
     cwd: Option<String>,
@@ -1047,12 +1055,21 @@ pub fn pty_spawn(
     env: Option<Vec<(String, String)>>,
     run_id: Option<String>,
     attempt_id: Option<String>,
+    project_id: Option<String>,
+    component_id: Option<String>,
+    workspace_path: Option<String>,
     renderer_generation: u64,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<SpawnResult, String> {
     state.require_renderer(renderer_generation)?;
     let binding = tasks.spawn_binding(run_id.as_deref(), attempt_id.as_deref())?;
-    let result = state.spawn(
+    let context = execution.bind(
+        project_id.as_deref(),
+        component_id.as_deref(),
+        workspace_path.as_deref().or(cwd.as_deref()),
+        binding.as_ref(),
+    )?;
+    let result = state.spawn_bound(
         app,
         cols,
         rows,
@@ -1067,6 +1084,7 @@ pub fn pty_spawn(
         }),
         env,
         binding.clone(),
+        context,
     );
     finish_task_spawn(&state, &tasks, binding.as_ref(), result)
 }
@@ -1086,14 +1104,24 @@ pub fn pty_spawn_detached(
     app: AppHandle,
     state: State<'_, PtyManager>,
     tasks: State<'_, crate::tasks::TaskStore>,
+    execution: State<'_, crate::execution::ExecutionRegistry>,
     cwd: Option<String>,
     command: String,
     env: Option<Vec<(String, String)>>,
     run_id: Option<String>,
     attempt_id: Option<String>,
+    project_id: Option<String>,
+    component_id: Option<String>,
+    workspace_path: Option<String>,
 ) -> Result<SpawnResult, String> {
     let binding = tasks.spawn_binding(run_id.as_deref(), attempt_id.as_deref())?;
-    let result = state.spawn(
+    let context = execution.bind(
+        project_id.as_deref(),
+        component_id.as_deref(),
+        workspace_path.as_deref().or(cwd.as_deref()),
+        binding.as_ref(),
+    )?;
+    let result = state.spawn_bound(
         app,
         120,
         40,
@@ -1105,6 +1133,7 @@ pub fn pty_spawn_detached(
         None,
         env,
         binding.clone(),
+        context,
     );
     finish_task_spawn(&state, &tasks, binding.as_ref(), result)
 }
@@ -1128,11 +1157,15 @@ pub fn pty_spawn_argv(
     app: AppHandle,
     state: State<'_, PtyManager>,
     tasks: State<'_, crate::tasks::TaskStore>,
+    execution: State<'_, crate::execution::ExecutionRegistry>,
     cwd: Option<String>,
     argv: Vec<String>,
     env: Option<Vec<(String, String)>>,
     run_id: Option<String>,
     attempt_id: Option<String>,
+    project_id: Option<String>,
+    component_id: Option<String>,
+    workspace_path: Option<String>,
 ) -> Result<SpawnResult, String> {
     // An empty first element is as unusable as no first element, and it would
     // otherwise reach CommandBuilder as a program named "" and surface as an
@@ -1141,7 +1174,13 @@ pub fn pty_spawn_argv(
         return Err("argv must name a program".into());
     }
     let binding = tasks.spawn_binding(run_id.as_deref(), attempt_id.as_deref())?;
-    let result = state.spawn(
+    let context = execution.bind(
+        project_id.as_deref(),
+        component_id.as_deref(),
+        workspace_path.as_deref().or(cwd.as_deref()),
+        binding.as_ref(),
+    )?;
+    let result = state.spawn_bound(
         app,
         120,
         40,
@@ -1153,6 +1192,7 @@ pub fn pty_spawn_argv(
         None,
         env,
         binding.clone(),
+        context,
     );
     finish_task_spawn(&state, &tasks, binding.as_ref(), result)
 }
@@ -1165,6 +1205,7 @@ pub fn pty_spawn_attached_argv(
     app: AppHandle,
     state: State<'_, PtyManager>,
     tasks: State<'_, crate::tasks::TaskStore>,
+    execution: State<'_, crate::execution::ExecutionRegistry>,
     cols: u16,
     rows: u16,
     cwd: Option<String>,
@@ -1173,6 +1214,9 @@ pub fn pty_spawn_attached_argv(
     env: Option<Vec<(String, String)>>,
     run_id: Option<String>,
     attempt_id: Option<String>,
+    project_id: Option<String>,
+    component_id: Option<String>,
+    workspace_path: Option<String>,
     renderer_generation: u64,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<SpawnResult, String> {
@@ -1181,7 +1225,13 @@ pub fn pty_spawn_attached_argv(
     }
     state.require_renderer(renderer_generation)?;
     let binding = tasks.spawn_binding(run_id.as_deref(), attempt_id.as_deref())?;
-    let result = state.spawn(
+    let context = execution.bind(
+        project_id.as_deref(),
+        component_id.as_deref(),
+        workspace_path.as_deref().or(cwd.as_deref()),
+        binding.as_ref(),
+    )?;
+    let result = state.spawn_bound(
         app,
         cols,
         rows,
@@ -1196,6 +1246,7 @@ pub fn pty_spawn_attached_argv(
         }),
         env,
         binding.clone(),
+        context,
     );
     finish_task_spawn(&state, &tasks, binding.as_ref(), result)
 }
@@ -1258,15 +1309,28 @@ pub enum RunSpec {
 }
 
 impl PtyManager {
-    /// Spawn a headless PTY (no WebView channel) that a remote client can attach
-    /// to — used by Canopy Remote to open a new terminal / agent from a phone.
-    /// Runs `command` (an agent CLI) in `cwd` if given. Returns the new PTY id.
     pub fn spawn_headless<R: tauri::Runtime>(
         &self,
         app: AppHandle<R>,
         cwd: Option<String>,
         command: Option<String>,
         account_override: Option<Vec<(String, String)>>,
+    ) -> Result<u32, String> {
+        self.spawn_headless_bound(app, cwd, command, account_override, None, None, None)
+    }
+
+    /// Spawn a headless PTY (no WebView channel) that a remote client can attach
+    /// to — used by Canopy Remote to open a new terminal / agent from a phone.
+    /// Runs `command` (an agent CLI) in `cwd` if given. Returns the new PTY id.
+    pub fn spawn_headless_bound<R: tauri::Runtime>(
+        &self,
+        app: AppHandle<R>,
+        cwd: Option<String>,
+        command: Option<String>,
+        account_override: Option<Vec<(String, String)>>,
+        project_id: Option<String>,
+        component_id: Option<String>,
+        workspace_path: Option<String>,
     ) -> Result<u32, String> {
         // A remote launch uses the same account as a desktop one; this path
         // has no webview to ask, so it reads profiles::active.
@@ -1277,7 +1341,16 @@ impl PtyManager {
                 .map(|(home, cmd)| crate::profiles::env_for_command(&home, cmd))
                 .filter(|e| !e.is_empty())
         });
-        let res = self.spawn(
+        let context = match app.try_state::<crate::execution::ExecutionRegistry>() {
+            Some(execution) => execution.bind(
+                project_id.as_deref(),
+                component_id.as_deref(),
+                workspace_path.as_deref().or(cwd.as_deref()),
+                None,
+            )?,
+            None => None,
+        };
+        let res = self.spawn_bound(
             app.clone(),
             120,
             32,
@@ -1289,6 +1362,7 @@ impl PtyManager {
             None,
             account,
             None,
+            context.clone(),
         )?;
         if let Some(cmd) = command {
             let cmd = cmd.trim();
@@ -1312,6 +1386,10 @@ impl PtyManager {
                     title: s.title.lock().unwrap().clone(),
                     cols: res.cols,
                     rows: res.rows,
+                    project_id: context
+                        .as_ref()
+                        .map(|context| context.project_id.clone()),
+                    execution_context: context,
                 },
             );
         }
@@ -1336,6 +1414,38 @@ impl PtyManager {
         desktop: Option<DesktopSink>,
         extra_env: Option<Vec<(String, String)>>,
         task_identity: Option<crate::tasks::AttemptBinding>,
+    ) -> Result<SpawnResult, String> {
+        self.spawn_bound(
+            app,
+            cols,
+            rows,
+            cwd,
+            shell,
+            high_water,
+            run,
+            kind,
+            desktop,
+            extra_env,
+            task_identity,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_bound<R: tauri::Runtime>(
+        &self,
+        app: AppHandle<R>,
+        cols: u16,
+        rows: u16,
+        cwd: Option<String>,
+        shell: Option<String>,
+        high_water: Option<usize>,
+        run: Option<RunSpec>,
+        kind: SessionKind,
+        desktop: Option<DesktopSink>,
+        extra_env: Option<Vec<(String, String)>>,
+        task_identity: Option<crate::tasks::AttemptBinding>,
+        execution_context: Option<crate::execution::ExecutionContext>,
     ) -> Result<SpawnResult, String> {
         let state = self;
         // Clamp for the same reason pty_resize does: a terminal spawned into a
@@ -1456,6 +1566,14 @@ impl PtyManager {
             cmd.env("CANOPY_RUN_ID", &task.run_id);
             cmd.env("CANOPY_ATTEMPT_ID", &task.attempt_id);
         }
+        if let Some(context) = &execution_context {
+            cmd.env("CANOPY_ENVIRONMENT_ID", &context.environment_id);
+            cmd.env("CANOPY_PROJECT_ID", &context.project_id);
+            cmd.env("CANOPY_WORKSPACE_ID", &context.workspace_id);
+            if let Some(component_id) = &context.component_id {
+                cmd.env("CANOPY_COMPONENT_ID", component_id);
+            }
+        }
         let cwd = cwd
             .or_else(|| dirs_home())
             .unwrap_or_else(|| "/".to_string());
@@ -1566,6 +1684,7 @@ impl PtyManager {
             session_generation,
             pid,
             kind,
+            execution_context,
             name: Mutex::new(default_name.clone()),
             default_name,
             title: Mutex::new(shell.clone()),
@@ -1820,6 +1939,9 @@ pub fn pty_attach_desktop(
     after: Option<u64>,
     on_data: Channel<InvokeResponseBody>,
 ) -> Result<DesktopAttachResult, String> {
+    if let Some(error) = crate::selftest::renderer_attachment_failure() {
+        return Err(error);
+    }
     state.attach_desktop(id, renderer_generation, after, on_data)
 }
 
@@ -1843,13 +1965,31 @@ pub fn pty_detach_desktop(
 /// the predecessor's PTY streams, closes browser child views whose React owners
 /// disappeared with that page, and returns the live sessions to reconcile.
 #[tauri::command]
-pub fn pty_renderer_register(app: AppHandle, state: State<'_, PtyManager>) -> RendererRegistration {
+pub fn pty_renderer_register(
+    app: AppHandle,
+    state: State<'_, PtyManager>,
+) -> Result<RendererRegistration, String> {
+    if let Some(error) = crate::selftest::renderer_registration_failure() {
+        return Err(error);
+    }
     let registration = state.register_renderer();
     app.state::<crate::browser::BrowserManager>()
         .renderer_registered(&app, registration.generation);
     app.state::<Arc<crate::watchdog::WatchdogState>>()
         .renderer_registered(registration.generation);
-    registration
+    Ok(registration)
+}
+
+/// Reconcile after the replacement page has installed its spawn listener.
+/// Register's snapshot alone cannot include a remote PTY created between that
+/// early handshake and asynchronous workspace hydration.
+#[tauri::command]
+pub fn pty_renderer_sessions(
+    state: State<'_, PtyManager>,
+    renderer_generation: u64,
+) -> Result<Vec<PtySummary>, String> {
+    state.require_renderer(renderer_generation)?;
+    Ok(state.summaries())
 }
 
 /// Frontend ack after xterm.js consumes a chunk — releases backpressure.
@@ -3027,6 +3167,27 @@ mod tests {
         assert_eq!(&replay[..4], DESKTOP_CHUNK_MAGIC);
         assert_ne!(replay[4] & DESKTOP_CHUNK_GAP, 0);
         assert_eq!(replay.len() - DESKTOP_CHUNK_HEADER, SCROLLBACK_CAP);
+        let _ = pm.kill(id);
+    }
+
+    #[test]
+    fn output_larger_than_the_old_replay_cap_is_preserved() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let id = pm
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None, None)
+            .expect("spawn");
+        let session = pm.get(id).unwrap();
+        session.record_remote(&vec![b'x'; 512 * 1024]);
+        let summary = pm
+            .register_renderer()
+            .sessions
+            .into_iter()
+            .find(|summary| summary.id == id)
+            .unwrap();
+        assert_eq!(summary.replay_start, 0);
+        assert_eq!(summary.replay_end, 512 * 1024);
+        assert_eq!(session.dropped_output_bytes.load(Ordering::Relaxed), 0);
         let _ = pm.kill(id);
     }
 

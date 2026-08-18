@@ -144,6 +144,64 @@ describe("the streaming protocol", () => {
   });
 });
 
+describe("the Cursor streaming protocol", () => {
+  it("captures the session, reply, tool activity, and turn boundary", () => {
+    const host = collector();
+    let session = "";
+    const parser = new StructuredEventParser(host, {
+      dialect: "cursor",
+      onThread: (id) => void (session = id),
+    });
+
+    parser.handleLine(line({ type: "system", subtype: "init", session_id: "cur-1" }));
+    parser.handleLine(line({
+      type: "assistant",
+      timestamp_ms: 1,
+      message: { content: [{ type: "text", text: "Checking it" }] },
+    }));
+    parser.handleLine(line({
+      type: "tool_call",
+      subtype: "started",
+      tool_call: { readToolCall: { args: { path: "/repo/src/App.tsx" } } },
+    }));
+    parser.handleLine(line({ type: "result", subtype: "success", result: "done" }));
+
+    expect(session).toBe("cur-1");
+    expect(host.events).toEqual([
+      { kind: "ready" },
+      { kind: "delta", text: "Checking it" },
+      { kind: "tool", name: "read", detail: "/repo/src/App.tsx" },
+      { kind: "turnEnd" },
+    ]);
+  });
+
+  it("surfaces a failed result", () => {
+    const host = collector();
+    const parser = new StructuredEventParser(host, { dialect: "cursor" });
+    parser.handleLine(line({ type: "result", is_error: true, result: "login required" }));
+    expect(host.events).toEqual([
+      { kind: "error", message: "login required" },
+      { kind: "turnEnd" },
+    ]);
+  });
+
+  it("ignores buffered assistant flushes that repeat streamed deltas", () => {
+    const host = collector();
+    const parser = new StructuredEventParser(host, { dialect: "cursor" });
+    parser.handleLine(line({
+      type: "assistant",
+      timestamp_ms: 1,
+      message: { content: [{ type: "text", text: "Hello" }] },
+    }));
+    parser.handleLine(line({
+      type: "assistant",
+      model_call_id: "call-1",
+      message: { content: [{ type: "text", text: "Hello" }] },
+    }));
+    expect(host.events).toEqual([{ kind: "delta", text: "Hello" }]);
+  });
+});
+
 // The failure this exists for, recorded verbatim from
 // ~/.claude/projects/…/1f7f983d-….jsonl: a Build session asked for
 // canopy_project and canopy_start_server, was refused for want of a permission

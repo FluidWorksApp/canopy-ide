@@ -667,6 +667,37 @@ body,
   position: relative;
 }
 
+.workspace-load-failure {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  gap: 14px;
+  padding: 40px;
+  color: var(--text);
+  background: var(--bg);
+  text-align: center;
+}
+
+.workspace-load-failure p,
+.workspace-load-failure pre {
+  max-width: 680px;
+  margin: 0;
+  color: var(--text-dim);
+}
+
+.workspace-load-failure pre {
+  padding: 12px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+
+.workspace-load-failure button {
+  justify-self: center;
+}
+
 /* ---------- project tabs (top bar) ---------- */
 
 .project-manage-btn {
@@ -12017,6 +12048,31 @@ input[type="radio"]:disabled {
 .launch-row .cli-install,
 .launch-row .cli-update {
   margin-left: auto;
+}
+
+.launch-workspace-hint {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.launch-current {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.launch-current:hover,
+.launch-current:focus-visible {
+  border-color: var(--accent);
+  color: var(--text);
+  outline: none;
 }
 
 /* ---------- run states: live / finished / failed ---------- */

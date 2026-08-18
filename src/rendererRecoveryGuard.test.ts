@@ -13,6 +13,9 @@ describe("renderer recovery wiring", () => {
     expect(heartbeat).toBeGreaterThan(registration);
     expect(heartbeat).toBeLessThan(monacoBarrier);
     expect(main).not.toContain('invoke("pty_kill_all")');
+    expect(main).toContain("renderer registration failed; retrying");
+    expect(main).toContain("retryMs = Math.min(retryMs * 2, 2_000)");
+    expect(main).toContain("configureSelftestPtyListenerFailures");
   });
 
   it("restores only tab-backed sessions and preserves ownership on close", () => {
@@ -23,6 +26,42 @@ describe("renderer recovery wiring", () => {
     expect(project).toContain("d.killOnClose === true");
   });
 
+  it("does not consume surviving PTYs before workspace hydration", () => {
+    const app = read("src/App.tsx");
+    const recovery = app.slice(
+      app.indexOf("// A PTY opened from the phone"),
+      app.indexOf("// A clicked notification"),
+    );
+    const hydrationGuard = recovery.indexOf("if (!loaded) return;");
+    const listener = recovery.indexOf(".onPtySpawned");
+    expect(hydrationGuard).toBeGreaterThan(-1);
+    expect(listener).toBeGreaterThan(hydrationGuard);
+    expect(recovery).toContain("terminalProjectSignature");
+  });
+
+  it("reconciles live native sessions and queues them until ProjectView mounts", () => {
+    const app = read("src/App.tsx");
+    const project = read("src/components/ProjectView/index.tsx");
+    const recovery = app.slice(
+      app.indexOf("// A PTY opened from the phone"),
+      app.indexOf("// A clicked notification"),
+    );
+    expect(recovery).toContain(".onPtySpawned");
+    expect(recovery).toContain(".rendererPtySessionsLive()");
+    expect(recovery).toContain("Promise.allSettled([");
+    expect(recovery).toContain("ipc.onPtyExit(terminalEnded)");
+    expect(recovery).toContain("terminalAttachmentQueue.discard");
+    expect(recovery).not.toContain("ipc.rendererPtySessions()");
+    const install = recovery.slice(recovery.indexOf("const install"));
+    expect(install.indexOf(".onPtySpawned")).toBeLessThan(
+      install.indexOf("reconcile();"),
+    );
+    expect(recovery).toContain("terminalAttachmentQueue.enqueue");
+    expect(recovery).toContain("e.project_id");
+    expect(recovery).not.toContain('new CustomEvent("canopy:attach-terminal"');
+    expect(project).toContain("terminalAttachmentQueue.subscribe(project.id");
+  });
+
   it("uses one generation-scoped viewer path for owned and remote PTYs", () => {
     const term = read("src/components/Term.tsx");
     expect(term).toContain("ipc.ptyAttachDesktop");
@@ -31,6 +70,8 @@ describe("renderer recovery wiring", () => {
     expect(term).toContain("streamVisibilityRef.current?.(streaming)");
     expect(term).toContain("new TerminalStreamLedger()");
     expect(term).toContain("streamLedger.replayAfter()");
+    expect(term).toContain("terminal stream interrupted; reconnecting");
+    expect(term).toContain("Math.min(100 * 2 ** (attachFailureCount - 1), 2_000)");
   });
 
   it("streams every visible split pane while only the focused pane owns input", () => {

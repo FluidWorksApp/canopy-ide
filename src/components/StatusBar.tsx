@@ -94,6 +94,10 @@ const SESSION_STATS_CACHE_LIMIT = 128;
 
 interface StatusBarProps {
   roots: string[];
+  /** Git checkout represented by the tab in front. A project can contain
+   *  several repositories (and agent worktrees beside them), so the status
+   *  bar must not assume the first configured component is always current. */
+  contextRoot?: string | null;
   agents: { name: string; cpu: number }[];
   events: AgentEventEntry[];
   /** This project is the one on screen. Hidden projects freeze their polling
@@ -123,6 +127,10 @@ interface StatusBarProps {
   /** The pty of the active terminal tab — the model/token tray follows THIS
    *  tab's session, not whichever session in the project spoke last. */
   activePtyId?: number | null;
+  /** The session actually running in the active terminal. Codex writes plan
+   *  snapshots per rollout, so this prevents another Codex tab's newer file
+   *  from lending its percentage to the terminal in front. */
+  activeSessionId?: string | null;
 }
 
 /** How many agent names the tray spells out before it starts counting.
@@ -141,6 +149,7 @@ const lastFetchAt = new Map<string, number>();
 
 export const StatusBar = memo(function StatusBar({
   roots,
+  contextRoot,
   agents,
   events,
   visible,
@@ -151,7 +160,9 @@ export const StatusBar = memo(function StatusBar({
   agentId,
   agentProfile,
   activePtyId,
+  activeSessionId,
 }: StatusBarProps) {
+  const repo = contextRoot || roots[0];
   const [branch, setBranch] = useState<string | null>(null);
   const [dirty, setDirty] = useState(0);
   const [branches, setBranches] = useState<ipc.BranchInfo[]>([]);
@@ -310,10 +321,19 @@ export const StatusBar = memo(function StatusBar({
   const [plans, setPlans] = useState<ipc.PlanUsage[]>([]);
   useEffect(() => {
     if (!visible) return;
+    setPlans([]);
+    // Without the terminal's Codex session id, a machine-wide "newest file"
+    // guess can only repeat the bug this chip is meant to avoid. Wait for the
+    // hook/resume binding instead of showing another tab's authoritative-looking
+    // percentage in the meantime.
+    const needsSession = Boolean(
+      agentCliFor(agentId)?.capabilities?.planUsageRequiresSession,
+    );
+    if (needsSession && !activeSessionId) return;
     let cancelled = false;
     const pull = () =>
       void ipc
-        .planUsage()
+        .planUsage(needsSession ? activeSessionId : null)
         .then((p) => {
           if (!cancelled) setPlans(p);
         })
@@ -324,7 +344,7 @@ export const StatusBar = memo(function StatusBar({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [visible]);
+  }, [visible, agentId, activeSessionId]);
   const plan = useMemo(
     () => planFor(plans, agentId, agentProfile || "default"),
     [plans, agentId, agentProfile],
@@ -404,11 +424,14 @@ export const StatusBar = memo(function StatusBar({
   // which refreshes immediately. (The transcript reader below is still a
   // poller — that one is reading a file an agent appends to, not git.)
   useEffect(() => {
-    if (!roots[0] || !visible) return;
+    if (!repo || !visible) return;
     let cancelled = false;
+    // Clear the previous tab's branch while this checkout loads.
+    setBranch(null);
+    setDirty(0);
     const refresh = () => {
       void ipc
-        .gitStatus(roots[0])
+        .gitStatus(repo)
         .then((s) => {
           if (cancelled) return;
           setBranch(s.branch);
@@ -428,7 +451,7 @@ export const StatusBar = memo(function StatusBar({
     };
     // `version` bumps whenever the funnel moves a ref, so the chip catches up
     // with a switch immediately instead of waiting on the watcher.
-  }, [roots[0], visible, version]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [repo, visible, version]);
 
   // Base-branch watch. The probe dry-runs the merge in the object store and
   // never touches the worktree, index or HEAD, so it is safe to run on a timer
@@ -439,11 +462,13 @@ export const StatusBar = memo(function StatusBar({
   // `git fetch` (news from the remote can't arrive any other way), while a
   // local commit or checkout re-measures for free off what we already have.
   useEffect(() => {
-    if (!roots[0] || !visible) return;
+    if (!repo || !visible) return;
     let cancelled = false;
+    setSync(null);
+    setSyncOpen(false);
     const run = (fetch: boolean) =>
       void ipc
-        .gitSyncProbe(roots[0], fetch)
+        .gitSyncProbe(repo, fetch)
         .then((p) => !cancelled && setSync(p))
         // No remote, no base branch, not a repo: this chip simply doesn't
         // apply. Nothing to report and nothing broken.
@@ -452,7 +477,6 @@ export const StatusBar = memo(function StatusBar({
     // project becomes visible or the branch funnel moves a ref — so tab-hopping
     // three projects meant three fetches. Keep a floor per repo: inside the
     // probe interval, re-measure for free off what we already have.
-    const repo = roots[0];
     if (Date.now() - (lastFetchAt.get(repo) ?? 0) >= PROBE_INTERVAL_MS) {
       lastFetchAt.set(repo, Date.now());
       run(true);
@@ -472,7 +496,7 @@ export const StatusBar = memo(function StatusBar({
       clearInterval(timer);
       void sub.then((fn) => fn());
     };
-  }, [roots[0], visible, version]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [repo, visible, version]);
 
   // Open the panel by itself the first time a given base tip is seen. Once per
   // set of new commits — closing it counts as "not now", and it stays shut
@@ -516,16 +540,16 @@ export const StatusBar = memo(function StatusBar({
   }); // no deps: closeSync must see the probe from this render
 
   const runMerge = async () => {
-    if (!sync || !roots[0]) return;
+    if (!sync || !repo) return;
     setSyncBusy(true);
     try {
-      const outcome = await ipc.gitSyncApply(roots[0], sync.base);
+      const outcome = await ipc.gitSyncApply(repo, sync.base);
       setSyncResult({
         text: outcomeMessage(sync.base, outcome),
         conflicts: outcome.conflicts,
         ok: outcome.merged,
       });
-      setSync(await ipc.gitSyncProbe(roots[0], false).catch(() => null));
+      setSync(await ipc.gitSyncProbe(repo, false).catch(() => null));
       if (outcome.merged) {
         // Nothing left to decide — let the tray go quiet on its own.
         setTimeout(() => {
@@ -542,12 +566,12 @@ export const StatusBar = memo(function StatusBar({
   };
 
   const undoMerge = async () => {
-    if (!roots[0]) return;
+    if (!repo) return;
     setSyncBusy(true);
     try {
-      const msg = await ipc.gitSyncAbort(roots[0]);
+      const msg = await ipc.gitSyncAbort(repo);
       setSyncResult({ text: msg, conflicts: [], ok: true });
-      setSync(await ipc.gitSyncProbe(roots[0], false).catch(() => null));
+      setSync(await ipc.gitSyncProbe(repo, false).catch(() => null));
     } catch (err) {
       setSyncResult({ text: String(err), conflicts: [], ok: false });
     } finally {
@@ -560,16 +584,17 @@ export const StatusBar = memo(function StatusBar({
   // anything moves a ref is enough, and a third git process every ten seconds
   // per project is exactly the cost this component is careful about.
   useEffect(() => {
-    if (!roots[0] || !visible) return;
+    if (!repo || !visible) return;
     let cancelled = false;
+    setBranches([]);
     void ipc
-      .gitBranches(roots[0])
+      .gitBranches(repo)
       .then((b) => !cancelled && setBranches(b))
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [roots[0], visible, version]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [repo, visible, version]);
 
   useEffect(() => {
     // Cached value first (or nothing if this session was never seen) — the
@@ -655,7 +680,6 @@ export const StatusBar = memo(function StatusBar({
    *  the one funnel, so a branch held by another workspace asks its question
    *  here exactly as it does in the Git panel. */
   const branchItems = (): MenuItem[] => {
-    const repo = roots[0];
     const items: MenuItem[] = [];
     if (detached)
       items.push({

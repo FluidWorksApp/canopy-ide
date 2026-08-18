@@ -5,7 +5,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const openUrl = vi.fn();
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
 
-import { OPEN_URL_EVENT, openLink } from "./links";
+import {
+  OPEN_FILE_EVENT,
+  OPEN_URL_EVENT,
+  openFileLink,
+  openLink,
+} from "./links";
 
 /** Stand in for a project view that is in front and takes the URL. */
 function claimUrls(): { urls: string[]; stop: () => void } {
@@ -79,5 +84,29 @@ describe("openLink", () => {
     await settled();
     expect(claimed.urls).toEqual(["http://localhost:4321/"]);
     claimed.stop();
+  });
+});
+
+describe("openFileLink", () => {
+  it("hands an absolute path and line to the visible project", () => {
+    const files: unknown[] = [];
+    const onFile = (event: Event) => {
+      files.push((event as CustomEvent).detail);
+      event.preventDefault();
+    };
+    window.addEventListener(OPEN_FILE_EVENT, onFile);
+    openFileLink("/repo/src/main.ts", 42, "/repo");
+    expect(files).toEqual([
+      { path: "/repo/src/main.ts", line: 42, cwd: "/repo" },
+    ]);
+    window.removeEventListener(OPEN_FILE_EVENT, onFile);
+  });
+
+  it("ignores relative paths", () => {
+    const onFile = vi.fn();
+    window.addEventListener(OPEN_FILE_EVENT, onFile);
+    openFileLink("src/main.ts", 3);
+    expect(onFile).not.toHaveBeenCalled();
+    window.removeEventListener(OPEN_FILE_EVENT, onFile);
   });
 });

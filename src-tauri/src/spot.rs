@@ -921,6 +921,47 @@ pub async fn spot_save_context_image(
     Ok(path.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+pub async fn spot_stage_drop_images(
+    ws: State<'_, WorkspaceManager>,
+    dir: String,
+    paths: Vec<String>,
+) -> Result<Vec<String>, String> {
+    const MAX_FILES: usize = 16;
+    const MAX_BYTES: u64 = 25 * 1024 * 1024;
+    if paths.len() > MAX_FILES {
+        return Err(format!("a drop is limited to {MAX_FILES} files"));
+    }
+    let target = PathBuf::from(&dir).join(".canopy/spot");
+    check_scope(&ws, &target)?;
+    std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+
+    let image_exts = ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "svg"];
+    let mut staged = Vec::with_capacity(paths.len());
+    for path in paths {
+        let source = PathBuf::from(&path);
+        let ext = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase);
+        let Some(ext) = ext.filter(|value| image_exts.contains(&value.as_str())) else {
+            staged.push(path);
+            continue;
+        };
+        let copy = source
+            .metadata()
+            .ok()
+            .filter(|meta| meta.is_file() && meta.len() <= MAX_BYTES)
+            .and_then(|_| {
+                let destination = free_path(&target, now_secs(), "drop", &ext);
+                std::fs::copy(&source, &destination).ok()?;
+                Some(destination.to_string_lossy().to_string())
+            });
+        staged.push(copy.unwrap_or(path));
+    }
+    Ok(staged)
+}
+
 /// Write a brief too long to type at a shell prompt, and return its path.
 ///
 /// A new agent is started by typing its command into a freshly spawned shell,

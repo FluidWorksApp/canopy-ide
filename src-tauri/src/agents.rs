@@ -826,6 +826,14 @@ pub fn setup_agent_in(agent: &str, cfg: &str, home: &str) -> Result<SetupReport,
             ("hooks", setup_amp_plugin(cfg, home)),
             ("mcp", setup_amp_mcp(cfg, home)),
         ],
+        crate::agent_cli::IntegrationAdapter::Cursor => vec![
+            ("hooks", setup_cursor_hooks(cfg, home)),
+            ("mcp", setup_cursor_mcp(cfg, home)),
+        ],
+        crate::agent_cli::IntegrationAdapter::Grok => vec![
+            ("hooks", setup_grok_hooks(cfg, home)),
+            ("mcp", setup_grok_mcp(cfg, home)),
+        ],
     };
     let steps: Vec<SetupStep> = steps
         .into_iter()
@@ -881,6 +889,8 @@ fn hooks_config_path(agent: &str, cfg: &str, home: &str) -> Option<String> {
         // AMP_SETTINGS_FILE relocates settings, not plugin discovery. One
         // global plugin observes every Amp profile.
         "amp" => format!("{home}/.config/amp/plugins/canopy.ts"),
+        "cursor" => format!("{cfg}/.cursor/hooks.json"),
+        "grok" => format!("{cfg}/.grok/hooks/canopy.json"),
         _ => return None,
     })
 }
@@ -1001,8 +1011,127 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
         "aider" => raw.lines().any(|line| {
             line.trim_start().starts_with("notifications-command:") && line.contains("canopy-hook")
         }),
+        "cursor" => serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("hooks").cloned())
+            .is_some_and(|hooks| {
+                complete(
+                    &hooks,
+                    &[
+                        "sessionStart",
+                        "beforeSubmitPrompt",
+                        "postToolUse",
+                        "postToolUseFailure",
+                        "stop",
+                        "sessionEnd",
+                    ],
+                )
+            }),
+        "grok" => serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("hooks").cloned())
+            .is_some_and(|hooks| {
+                complete(
+                    &hooks,
+                    &[
+                        "SessionStart",
+                        "UserPromptSubmit",
+                        "PostToolUse",
+                        "PostToolUseFailure",
+                        "Stop",
+                        "StopFailure",
+                        "StopCancelled",
+                        "Notification",
+                        "SessionEnd",
+                    ],
+                )
+            }),
         _ => MARKERS.iter().any(|m| raw.contains(m)),
     }
+}
+
+fn setup_cursor_hooks(cfg: &str, home: &str) -> Result<String, String> {
+    let helper = require_helper(home, "hooks not installed")?;
+    let path = std::path::PathBuf::from(cfg).join(".cursor/hooks.json");
+    let mut config = read_json_config(&path)?;
+    let root = config
+        .as_object_mut()
+        .ok_or_else(|| format!("{} is not an object", path.display()))?;
+    root.entry("version").or_insert(serde_json::json!(1));
+    let hooks = root
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("Cursor hooks is not an object")?;
+    let command = |signal: &str| {
+        format!(
+            "{} --agent cursor --signal {signal}",
+            sh_quote(&helper.to_string_lossy())
+        )
+    };
+    for (event, signal) in [
+        ("sessionStart", "turn-end"),
+        ("beforeSubmitPrompt", "turn-start"),
+        ("postToolUse", "turn-progress"),
+        ("postToolUseFailure", "turn-progress"),
+        ("stop", "turn-end"),
+        ("sessionEnd", "session-end"),
+    ] {
+        let entries = hooks
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or_else(|| format!("Cursor hook {event} is not an array"))?;
+        entries.retain(|entry| !MARKERS.iter().any(|m| entry.to_string().contains(m)));
+        entries.push(serde_json::json!({ "command": command(signal), "timeout": 10 }));
+    }
+    let body = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    let unchanged = std::fs::read_to_string(&path).is_ok_and(|raw| raw == body);
+    if !unchanged {
+        write_config_atomic(&path, &body)?;
+    }
+    Ok(if unchanged {
+        "Cursor hooks already set up".into()
+    } else {
+        "Cursor hooks installed — restart cursor-agent sessions".into()
+    })
+}
+
+fn setup_grok_hooks(cfg: &str, home: &str) -> Result<String, String> {
+    let helper = require_helper(home, "hooks not installed")?;
+    let command = |signal: &str| {
+        format!(
+            "{} --agent grok --signal {signal}",
+            sh_quote(&helper.to_string_lossy())
+        )
+    };
+    let handler = |signal: &str| {
+        serde_json::json!({ "type": "command", "command": command(signal), "timeout": 10 })
+    };
+    let group = |signal: &str| serde_json::json!({ "hooks": [handler(signal)] });
+    let config = serde_json::json!({
+        "hooks": {
+            "SessionStart": [group("turn-end")],
+            "UserPromptSubmit": [group("turn-start")],
+            "PostToolUse": [group("turn-progress")],
+            "PostToolUseFailure": [group("turn-progress")],
+            "Stop": [group("turn-end")],
+            "StopFailure": [group("turn-end")],
+            "StopCancelled": [group("turn-end")],
+            "Notification": [
+                { "matcher": "idle_prompt", "hooks": [handler("turn-end")] },
+                { "matcher": "permission_prompt", "hooks": [handler("needs-human-permission")] }
+            ],
+            "SessionEnd": [group("session-end")]
+        }
+    });
+    let source = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    install_generated_file(
+        std::path::PathBuf::from(cfg).join(".grok/hooks/canopy.json"),
+        &source,
+        "Grok hooks installed — restart grok sessions",
+        "Grok hooks already set up",
+    )
 }
 
 /// Every Canopy-owned command in a hook config must name the helper for this
@@ -2623,6 +2752,34 @@ fn setup_opencode_mcp(cfg: &str, home: &str) -> Result<String, String> {
     Ok(registered_msg(changed, "opencode"))
 }
 
+fn setup_cursor_mcp(cfg: &str, home: &str) -> Result<String, String> {
+    let helper = require_helper(home, "MCP server not registered")?;
+    let changed = upsert_json_mcp(
+        std::path::PathBuf::from(cfg).join(".cursor/mcp.json"),
+        "mcpServers",
+        canopy_mcp_command(&helper),
+        is_canopy_mcp_entry,
+    )?;
+    Ok(registered_msg(changed, "cursor-agent"))
+}
+
+fn setup_grok_mcp(cfg: &str, home: &str) -> Result<String, String> {
+    let helper = require_helper(home, "MCP server not registered")?;
+    let path = std::path::PathBuf::from(cfg).join(".grok/config.toml");
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("{} could not be read: {e}", path.display())),
+    };
+    match codex_toml_with_canopy(&existing, &helper.to_string_lossy())? {
+        Some(out) => {
+            write_config_atomic(&path, &out)?;
+            Ok(registered_msg(true, "grok"))
+        }
+        None => Ok(registered_msg(false, "grok")),
+    }
+}
+
 /// Amp keeps its MCP servers under a *dotted* key inside a flat settings
 /// object — `"amp.mcpServers"` is one key, not a path — which is why this
 /// cannot go through upsert_json_mcp's nested lookup. The registry table in
@@ -2718,6 +2875,7 @@ fn json_mcp_registry(
         "agy" => (root.join(".gemini/config/mcp_config.json"), "mcpServers"),
         "opencode" => (root.join(".config/opencode/opencode.json"), "mcp"),
         "amp" => (root.join(".config/amp/settings.json"), "amp.mcpServers"),
+        "cursor" => (root.join(".cursor/mcp.json"), "mcpServers"),
         _ => return None,
     })
 }
@@ -2783,15 +2941,18 @@ fn codex_mcp_state(existing: &str) -> &'static str {
 }
 
 fn mcp_state(agent: &str, cfg: &str, home: &str) -> &'static str {
-    if agent == "codex" {
+    if matches!(agent, "codex" | "grok") {
         let helper = helper_path_in(home);
         let expected = helper.to_string_lossy().to_string();
-        let state =
-            match std::fs::read_to_string(std::path::PathBuf::from(cfg).join(".codex/config.toml"))
-            {
+        let rel = if agent == "codex" {
+            ".codex/config.toml"
+        } else {
+            ".grok/config.toml"
+        };
+        let state = match std::fs::read_to_string(std::path::PathBuf::from(cfg).join(rel)) {
                 Ok(raw) => codex_mcp_state_for(&raw, Some(&expected)),
                 Err(_) => "missing",
-            };
+        };
         return if state == "ours" && !helper.exists() {
             "stale"
         } else {
@@ -4038,19 +4199,36 @@ fn stored_plan_usage(home: &str) -> Vec<PlanUsage> {
     out
 }
 
-/// Codex's limits, read straight from the newest rollout that carries them.
+/// Codex's limits, read from the requested session's rollout when one is active,
+/// or from the newest rollout that carries them for account-wide callers.
 ///
 /// Scans newest-first and stops at the first populated snapshot: a session that
 /// only ever got rate-limited writes `primary: null`, so "newest file" and
 /// "newest usable number" are not the same file. The schema has already
 /// changed once in the field (`limit_id`/`plan_type` appeared, `primary` became
 /// nullable), so every field is treated as optional.
-fn codex_plan_usage(cfg: &str, profile: &str) -> Option<PlanUsage> {
+fn codex_plan_usage(
+    cfg: &str,
+    profile: &str,
+    preferred_session_id: Option<&str>,
+) -> Option<PlanUsage> {
     use std::io::{BufRead, BufReader};
     const MAX_FILES: usize = 40;
     let root = std::path::PathBuf::from(cfg).join(".codex/sessions");
     let mut files: Vec<(u64, std::path::PathBuf)> = Vec::new();
     collect_jsonl(&root, 4, &mut files);
+    // A rollout's UUID is the Codex session id. Filter before the global file
+    // cap: a long-running active session can easily have more than forty newer
+    // rollouts beside it, but its own percentage remains the one shown by
+    // `codex /status` in that terminal.
+    if let Some(session_id) = preferred_session_id.filter(|id| !id.is_empty()) {
+        let suffix = format!("-{session_id}.jsonl");
+        files.retain(|(_, path)| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(&suffix))
+        });
+    }
     files.sort_by(|a, b| b.0.cmp(&a.0));
     files.truncate(MAX_FILES);
 
@@ -4116,13 +4294,20 @@ fn codex_plan_usage(cfg: &str, profile: &str) -> Option<PlanUsage> {
 /// Subscription headroom per CLI, for the status-tray plan chip and the
 /// Statistics panel. Only CLIs that actually report appear in the result.
 #[tauri::command]
-pub async fn plan_usage() -> Result<Vec<PlanUsage>, String> {
+pub async fn plan_usage(session_id: Option<String>) -> Result<Vec<PlanUsage>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
+    let session_id = session_id.filter(|id| !id.is_empty());
     let mut out = stored_plan_usage(&home);
     // Codex is read live; drop any stale stored copy, per profile.
     for (id, root) in crate::profiles::roots(&home) {
-        if let Some(codex) = codex_plan_usage(&root.to_string_lossy(), &id) {
+        let codex = codex_plan_usage(&root.to_string_lossy(), &id, session_id.as_deref());
+        // When a session was named, silence is safer than borrowing a cached
+        // percentage from another session/profile and presenting it as this
+        // tab's value.
+        if session_id.is_some() || codex.is_some() {
             out.retain(|p| !(p.agent == "codex" && p.profile == id));
+        }
+        if let Some(codex) = codex {
             out.push(codex);
         }
     }
@@ -4791,6 +4976,51 @@ mod integration_tests {
             read_json_config(&path).unwrap()["mcp"]["canopy"]["enabled"],
             false
         );
+    }
+
+    #[test]
+    fn cursor_setup_preserves_foreign_hooks_and_registers_mcp() {
+        let home = scratch_home("cursor-setup");
+        let h = home.to_str().unwrap();
+        let hooks = home.join(".cursor/hooks.json");
+        write(
+            &hooks,
+            r#"{"version":1,"theme":"dark","hooks":{"stop":[{"command":"notify-me"}]}}"#,
+        );
+
+        let first = setup_agent_in("cursor", h, h).unwrap();
+        let second = setup_agent_in("cursor", h, h).unwrap();
+        assert!(first.ok && second.ok);
+        let config = read_json_config(&hooks).unwrap();
+        assert_eq!(config["theme"], "dark");
+        assert!(config["hooks"]["stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["command"] == "notify-me"));
+        assert!(hooks_are_ours_in("cursor", h, h));
+        let mcp = read_json_config(&home.join(".cursor/mcp.json")).unwrap();
+        assert!(is_canopy_mcp_entry(&mcp["mcpServers"]["canopy"]));
+    }
+
+    #[test]
+    fn grok_setup_installs_grouped_hooks_and_toml_mcp() {
+        let home = scratch_home("grok-setup");
+        let h = home.to_str().unwrap();
+
+        let first = setup_agent_in("grok", h, h).unwrap();
+        let second = setup_agent_in("grok", h, h).unwrap();
+        assert!(first.ok && second.ok);
+        assert!(hooks_are_ours_in("grok", h, h));
+        let hooks = read_json_config(&home.join(".grok/hooks/canopy.json")).unwrap();
+        assert_eq!(hooks["hooks"]["Notification"][0]["matcher"], "idle_prompt");
+        assert_eq!(
+            hooks["hooks"]["Notification"][1]["matcher"],
+            "permission_prompt"
+        );
+        let mcp = std::fs::read_to_string(home.join(".grok/config.toml")).unwrap();
+        assert!(mcp.contains("[mcp_servers.canopy]"));
+        assert!(mcp.contains("canopy-hook"));
     }
 
     /// `[mcp_servers."canopy"]` is the same table as the bare spelling. Missing
@@ -5790,10 +6020,11 @@ mod integration_tests {
         rollout(&home, 10.0);
         rollout(&crate::profiles::root_for(h, "work"), 90.0);
 
-        let default = codex_plan_usage(h, "default").unwrap();
+        let default = codex_plan_usage(h, "default", None).unwrap();
         let work = codex_plan_usage(
             &crate::profiles::root_for(h, "work").to_string_lossy(),
             "work",
+            None,
         )
         .unwrap();
         assert_eq!(default.windows[0].used_percent, 10.0);
@@ -6033,10 +6264,16 @@ mod tests {
 
     /// Write a rollout under `home`, dated by `day` so filename order matches
     /// the order the test means.
-    fn write_rollout(home: &std::path::Path, day: &str, rate_limits: &str) -> std::path::PathBuf {
+    fn write_rollout_for(
+        home: &std::path::Path,
+        day: &str,
+        session_id: Option<&str>,
+        rate_limits: &str,
+    ) -> std::path::PathBuf {
         let dir = home.join(".codex/sessions/2026/07").join(day);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("rollout-{day}.jsonl"));
+        let suffix = session_id.map(|id| format!("-{id}")).unwrap_or_default();
+        let path = dir.join(format!("rollout-{day}{suffix}.jsonl"));
         // JSONL is one record per line; the fixtures above are wrapped for
         // readability, so collapse them back. Safe here because none of these
         // JSON values contain a literal space.
@@ -6046,6 +6283,10 @@ mod tests {
         );
         std::fs::write(&path, format!("{line}\n")).unwrap();
         path
+    }
+
+    fn write_rollout(home: &std::path::Path, day: &str, rate_limits: &str) -> std::path::PathBuf {
+        write_rollout_for(home, day, None, rate_limits)
     }
 
     fn tmp_home(tag: &str) -> std::path::PathBuf {
@@ -6064,12 +6305,62 @@ mod tests {
             r#"{"primary":{"used_percent":58.0,"window_minutes":10080,"resets_at":1785291145},
                 "secondary":null,"credits":{"has_credits":false},"plan_type":"free"}"#,
         );
-        let plan = super::codex_plan_usage(home.to_str().unwrap(), "default").expect("limits");
+        let plan =
+            super::codex_plan_usage(home.to_str().unwrap(), "default", None).expect("limits");
         assert_eq!(plan.agent, "codex");
         assert_eq!(plan.plan.as_deref(), Some("free"));
         assert_eq!(plan.windows.len(), 1, "a null secondary is not a window");
         assert_eq!(plan.windows[0].label, "7d");
         assert_eq!(plan.windows[0].used_percent, 58.0);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn active_codex_session_does_not_borrow_a_newer_sessions_percentage() {
+        let home = tmp_home("active-session");
+        let active_id = "019fe3a6-5c29-7d62-a51d-9803afc76843";
+        write_rollout_for(
+            &home,
+            "20",
+            Some(active_id),
+            r#"{"primary":{"used_percent":39.0,"window_minutes":10080,"resets_at":1},
+                "secondary":null,"credits":{"has_credits":false},"plan_type":"pro"}"#,
+        );
+        let other = write_rollout_for(
+            &home,
+            "29",
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            r#"{"primary":{"used_percent":2.0,"window_minutes":10080,"resets_at":2},
+                "secondary":null,"credits":{"has_credits":false},"plan_type":"pro"}"#,
+        );
+        filetime_bump(&other);
+
+        let global = super::codex_plan_usage(home.to_str().unwrap(), "default", None)
+            .expect("newest account snapshot");
+        assert_eq!(global.windows[0].used_percent, 2.0);
+
+        let active = super::codex_plan_usage(home.to_str().unwrap(), "default", Some(active_id))
+            .expect("active session snapshot");
+        assert_eq!(active.windows[0].label, "7d");
+        assert_eq!(active.windows[0].used_percent, 39.0);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn unknown_codex_session_does_not_borrow_another_sessions_percentage() {
+        let home = tmp_home("unknown-session");
+        write_rollout_for(
+            &home,
+            "29",
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            r#"{"primary":{"used_percent":2.0,"window_minutes":10080,"resets_at":2}}"#,
+        );
+        assert!(super::codex_plan_usage(
+            home.to_str().unwrap(),
+            "default",
+            Some("019fe3a6-5c29-7d62-a51d-9803afc76843"),
+        )
+        .is_none());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -6096,8 +6387,8 @@ mod tests {
         );
         filetime_bump(&newer);
 
-        let plan =
-            super::codex_plan_usage(home.to_str().unwrap(), "default").expect("last good reading");
+        let plan = super::codex_plan_usage(home.to_str().unwrap(), "default", None)
+            .expect("last good reading");
         assert_eq!(plan.windows[0].used_percent, 58.0);
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -6108,7 +6399,7 @@ mod tests {
         write_rollout(&home, "29", r#"{"primary":null,"secondary":null}"#);
         // Not zeros: a 0% chip would read as "plenty left" when the truth is
         // that we do not know.
-        assert!(super::codex_plan_usage(home.to_str().unwrap(), "default").is_none());
+        assert!(super::codex_plan_usage(home.to_str().unwrap(), "default", None).is_none());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -6122,7 +6413,8 @@ mod tests {
                 "secondary":{"used_percent":10.0,"window_minutes":10080,"resets_at":2},
                 "credits":{"has_credits":false},"plan_type":null}"#,
         );
-        let plan = super::codex_plan_usage(home.to_str().unwrap(), "default").expect("limits");
+        let plan =
+            super::codex_plan_usage(home.to_str().unwrap(), "default", None).expect("limits");
         let labels: Vec<&str> = plan.windows.iter().map(|w| w.label.as_str()).collect();
         assert_eq!(labels, vec!["5h", "7d"]);
         let _ = std::fs::remove_dir_all(&home);

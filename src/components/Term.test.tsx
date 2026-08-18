@@ -35,6 +35,9 @@ vi.mock("@xterm/xterm", () => {
       Object.assign(this.options, opts);
     }
     loadAddon() {}
+    registerLinkProvider() {
+      return { dispose() {} };
+    }
     attachCustomKeyEventHandler() {}
     open() {}
     refresh() {}

@@ -70,12 +70,16 @@ function graphGroup(
   projects: { name: string; roots: string[] }[],
 ): { key: string; label: string; title: string } {
   const cleanCwd = cwd.replace(/\/+$/, "") || "/";
+  const checkout = checkoutKey(cleanCwd);
   let match: { projectIndex: number; root: string } | undefined;
   projects.forEach((project, projectIndex) => {
     for (const rawRoot of project.roots) {
       const root = rawRoot.replace(/\/+$/, "") || "/";
       if (
-        (cleanCwd === root || cleanCwd.startsWith(`${root}/`)) &&
+        (cleanCwd === root ||
+          cleanCwd.startsWith(`${root}/`) ||
+          checkout === root ||
+          checkout.startsWith(`${root}/`)) &&
         (!match || root.length > match.root.length)
       ) {
         match = { projectIndex, root };
@@ -90,7 +94,6 @@ function graphGroup(
       title: project.roots.join("\n"),
     };
   }
-  const checkout = checkoutKey(cleanCwd);
   return {
     key: `checkout:${checkout}`,
     label: basename(checkout) || checkout,

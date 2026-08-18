@@ -193,6 +193,23 @@ describe("the control panel graph", () => {
     expect(container.querySelector(".acp-group-name")?.textContent).toBe("CORAA");
   });
 
+  it("keeps a Canopy sibling worktree inside its owning project frame", async () => {
+    seams.messages = [];
+    seams.severed = [];
+    seams.digests = [];
+    seams.stats = [
+      session({ id: 31, cwd: "/w/canopy" }),
+      session({ id: 32, cwd: "/w/canopy-wt-agent-codex-20260818/src" }),
+    ];
+    const { container } = render(
+      <AgentControlPanel active mode="graph" allProjects={allProjects} />,
+    );
+
+    await waitFor(() => expect(container.querySelectorAll(".acp-node")).toHaveLength(2));
+    expect(container.querySelectorAll(".acp-group")).toHaveLength(1);
+    expect(container.querySelector(".acp-group-name")?.textContent).toBe("canopy");
+  });
+
   it("draws edges only where messages were recorded, oriented by who briefs", async () => {
     seed();
     const { container } = renderPanel("graph");

@@ -1,6 +1,5 @@
 // The portal's link to the embedded server (src-tauri/src/portal.rs): a PIN
-// exchange for a bearer token, then a single WebSocket carrying the same JSON
-// protocol Phase 2 will move onto WebTransport unchanged.
+// exchange for a bearer token, then short-lived tickets for WebSocket upgrades.
 
 export type Msg = Record<string, any>
 
@@ -32,8 +31,10 @@ type AuthFailCb = () => void
 export class Wire {
   private ws?: WebSocket
   private handlers = new Set<(m: Msg) => void>()
-  private everOpened = false
   private closed = false
+  private attempt = 0
+  private generation = 0
+  private retryTimer?: ReturnType<typeof setTimeout>
   onStatus?: StatusCb
   onAuthFail?: AuthFailCb
 
@@ -41,24 +42,45 @@ export class Wire {
 
   connect() {
     this.closed = false
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    const url = `${proto}://${location.host}/remote/ws?token=${encodeURIComponent(this.token)}`
-    const ws = new WebSocket(url)
-    this.ws = ws
-    ws.onopen = () => {
-      this.everOpened = true
-      this.onStatus?.(true)
-    }
-    ws.onclose = () => {
-      this.onStatus?.(false)
-      if (this.closed) return
-      // Never opened → the token was rejected at upgrade; send the user back
-      // to the PIN screen instead of reconnecting forever.
-      if (!this.everOpened) {
+    const generation = ++this.generation
+    void this.open(generation)
+  }
+
+  private async open(generation: number) {
+    let ticket: string
+    try {
+      const response = await fetch('/remote/ws-ticket', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${this.token}` },
+      })
+      if (response.status === 401) {
         this.onAuthFail?.()
         return
       }
-      setTimeout(() => this.connect(), 1500)
+      if (!response.ok) throw new Error(`ticket request failed: ${response.status}`)
+      ticket = String((await response.json()).ticket ?? '')
+      if (!ticket) throw new Error('ticket response was empty')
+    } catch {
+      if (generation === this.generation && !this.closed) this.scheduleReconnect()
+      return
+    }
+    if (generation !== this.generation || this.closed) return
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    const url = `${proto}://${location.host}/remote/ws?ticket=${encodeURIComponent(ticket)}`
+    const ws = new WebSocket(url)
+    this.ws = ws
+    ws.onopen = () => {
+      if (generation !== this.generation || this.closed) {
+        ws.close()
+        return
+      }
+      this.attempt = 0
+      this.onStatus?.(true)
+    }
+    ws.onclose = () => {
+      if (generation !== this.generation) return
+      this.onStatus?.(false)
+      if (!this.closed) this.scheduleReconnect()
     }
     ws.onmessage = (e) => {
       try {
@@ -68,6 +90,16 @@ export class Wire {
         /* ignore malformed frames */
       }
     }
+  }
+
+  private scheduleReconnect() {
+    if (this.retryTimer || this.closed) return
+    const base = Math.min(30_000, 750 * 2 ** Math.min(this.attempt++, 6))
+    const delay = base * (0.8 + Math.random() * 0.4)
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined
+      this.connect()
+    }, delay)
   }
 
   send(m: Msg) {
@@ -83,6 +115,9 @@ export class Wire {
 
   close() {
     this.closed = true
+    this.generation += 1
+    if (this.retryTimer) clearTimeout(this.retryTimer)
+    this.retryTimer = undefined
     this.ws?.close()
   }
 }

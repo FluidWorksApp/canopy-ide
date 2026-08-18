@@ -300,10 +300,51 @@ export const CODEX_RUNNER: StructuredRunner = {
   ],
 };
 
+/** Cursor Agent print mode, verified against the vendor CLI docs on 2026-08-18. */
+export const CURSOR_RUNNER: StructuredRunner = {
+  tier: "oneshot",
+  dialect: "cursor",
+  verification: {
+    cliVersion: "current beta",
+    checkedOn: "2026-08-18",
+    source: "docs.cursor.com/en/cli/reference/parameters; /reference/output-format; /headless",
+    flags: {
+      structuredJson: true,
+      systemPrompt: false,
+      planMode: false,
+      toolAllowlist: false,
+      workspaceSandbox: false,
+    },
+    caveats: [
+      "No OS-backed workspace sandbox; --force grants writes subject to Cursor deny rules.",
+      "No system-prompt flag; Canopy prepends the brief to each turn.",
+    ],
+  },
+  args: (o) => [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--stream-partial-output",
+    ...(o.policy.authority === "workspace-write" ? ["--force"] : []),
+    ...(o.policy.model ? ["--model", o.policy.model] : []),
+  ],
+  resumeArgs: (o) => [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--stream-partial-output",
+    "--resume",
+    o.policy.sessionId,
+    ...(o.policy.authority === "workspace-write" ? ["--force"] : []),
+    ...(o.policy.model ? ["--model", o.policy.model] : []),
+  ],
+};
+
 /** Verified non-interactive argv shapes, keyed by the agent registry id. */
 export const STRUCTURED_RUNNERS: Record<string, StructuredRunner> = {
   claude: CLAUDE_RUNNER,
   codex: CODEX_RUNNER,
+  cursor: CURSOR_RUNNER,
 };
 
 /** Whether this CLI can run a task that is read back off a JSON stream.

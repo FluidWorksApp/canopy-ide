@@ -160,11 +160,19 @@ pub async fn dispatch(
                 app.clone(),
                 app.state::<PtyManager>(),
                 app.state::<crate::tasks::TaskStore>(),
+                app.state::<crate::execution::ExecutionRegistry>(),
                 cwd,
                 command,
                 None,
                 None,
                 None,
+                args.get("projectId").and_then(Value::as_str).map(str::to_string),
+                args.get("componentId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                args.get("workspacePath")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             )
             .and_then(|r| serde_json::to_value(r).map_err(|e| e.to_string()))
         }
@@ -303,7 +311,13 @@ pub async fn dispatch(
             .await
             .and_then(to_value),
 
-        "plan_usage" => crate::agents::plan_usage().await.and_then(to_value),
+        "plan_usage" => crate::agents::plan_usage(
+            args.get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        )
+        .await
+        .and_then(to_value),
 
         // Unreachable while GRANTS and this match agree; the test below is what
         // keeps them agreeing.

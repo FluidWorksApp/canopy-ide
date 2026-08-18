@@ -36,7 +36,7 @@ describe("first-class agent CLI architecture", () => {
       "src/structuredEvents.ts",
       "src/structuredRunners.ts",
     ]);
-    const vendorLiteral = /(["'])(?:claude|codex|amp|aider|agy|opencode|omp)\1/g;
+    const vendorLiteral = /(["'])(?:claude|codex|amp|aider|agy|opencode|omp|grok)\1/g;
     const violations = [resolve(root, "src"), resolve(root, "shared"), resolve(root, "portal/src")]
       .flatMap((dir) => sources(dir))
       .flatMap((path) => {
@@ -64,7 +64,7 @@ describe("first-class agent CLI architecture", () => {
       "src-tauri/src/profiles.rs",
       "src-tauri/src/stores.rs",
     ]);
-    const vendorBranch = /(?:[=!]=\s*"(?:claude|codex|amp|aider|agy|opencode|omp)"|"(?:claude|codex|amp|aider|agy|opencode|omp)"\s*=>|Some\("(?:claude|codex|amp|aider|agy|opencode|omp)"[^)]*\))/g;
+    const vendorBranch = /(?:[=!]=\s*"(?:claude|codex|amp|aider|agy|opencode|omp|cursor|grok)"|"(?:claude|codex|amp|aider|agy|opencode|omp|cursor|grok)"\s*=>|Some\("(?:claude|codex|amp|aider|agy|opencode|omp|cursor|grok)"[^)]*\))/g;
     const violations = sources(resolve(root, "src-tauri/src"), /\.rs$/)
       .flatMap((path) => {
         const name = relative(root, path).replaceAll("\\", "/");

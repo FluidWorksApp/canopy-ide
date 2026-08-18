@@ -12,12 +12,16 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { openLink } from "../links";
+import { openFileLink, openLink } from "../links";
 import { matchesModifierClick } from "../shortcuts";
 import * as ipc from "../ipc";
 import { getSettings, type Settings } from "../settings";
 import { terminalTheme } from "../terminalThemes";
-import { createLinkHint, opensLink } from "../terminalLinks";
+import {
+  createLinkHint,
+  opensLink,
+  terminalFileLinks,
+} from "../terminalLinks";
 import { matchesChord, resolve } from "../shortcuts";
 import { TerminalStreamLedger } from "../terminalStreamLedger";
 import { terminalRetentionRegistry } from "../terminalRetention";
@@ -70,6 +74,10 @@ export interface TermHandle {
 
 interface TermProps {
   cwd?: string;
+  /** Stable owner persisted with desktop PTY lifetime state for recovery. */
+  projectId?: string;
+  componentId?: string;
+  workspacePath?: string;
   /** Per-cell foreground/background correction performed by xterm. Leave at 1
    *  for ordinary shells and CLIs so their authored colours remain untouched;
    *  Codex uses 4.5 to repair its mixed light/dark TUI surfaces. */
@@ -113,6 +121,9 @@ interface TermProps {
 export const Term = forwardRef<TermHandle, TermProps>(function Term(
   {
     cwd,
+    projectId,
+    componentId,
+    workspacePath,
     minimumContrastRatio = 1,
     active,
     streaming,
@@ -302,6 +313,29 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       hover: (event) => linkHint.show(event),
       leave: () => linkHint.hide(),
     };
+    const fileLinkProvider = term.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        const text = term.buffer.active
+          .getLine(bufferLineNumber - 1)
+          ?.translateToString(true);
+        if (!text) return callback(undefined);
+        const links = terminalFileLinks(text).map((file) => ({
+          range: {
+            start: { x: file.start + 1, y: bufferLineNumber },
+            end: { x: file.end, y: bufferLineNumber },
+          },
+          text: file.path,
+          activate: (event: MouseEvent) => {
+            if (!opensLink(event, term.hasSelection())) return;
+            linkHint.hide();
+            openFileLink(file.path, file.line, cwd);
+          },
+          hover: (event: MouseEvent) => linkHint.show(event, "file"),
+          leave: () => linkHint.hide(),
+        }));
+        callback(links.length ? links : undefined);
+      },
+    });
     term.open(el);
 
     // xterm does not expose trustworthy heap-byte accounting: cell strings,
@@ -591,6 +625,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     let streamEpoch = 0;
     let streamAttached = false;
     let streamConnecting = false;
+    let attachRetryTimer: ReturnType<typeof setTimeout> | undefined;
+    let attachFailureCount = 0;
     let hasBound = false;
     let setResizeObservation = (_visible: boolean) => {};
 
@@ -598,6 +634,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       const { bytes } = chunk;
       if (disposed) return;
       if (!streamLedger.accept(epoch, streamEpoch, chunk.end)) return;
+      el.dataset.streamEnd = String(chunk.end);
       // xterm owns the bytes as soon as write() accepts them into its ordered
       // parser queue. Advancing here (rather than in the completion callback)
       // makes a hide/show between enqueue and parse resume after this chunk,
@@ -625,6 +662,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // command that fails immediately cannot disappear between spawn and listen.
     const bound = (id: number, geom: { cols: number; rows: number; name?: string }) => {
       ptyIdRef.current = id;
+      el.dataset.ptyId = String(id);
       applyGeometry(geom);
       if (!hasBound) {
         hasBound = true;
@@ -645,6 +683,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     ) => {
       streamGeneration = generation;
       streamAttached = true;
+      el.dataset.streamAttached = "true";
       bound(id, geom);
       const pending = streamLedger.takePendingAck(epoch);
       if (pending > 0) {
@@ -662,7 +701,11 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       const generation = streamGeneration;
       streamGeneration = null;
       streamAttached = false;
+      el.dataset.streamAttached = "false";
       streamConnecting = false;
+      clearTimeout(attachRetryTimer);
+      attachRetryTimer = undefined;
+      attachFailureCount = 0;
       if (id != null && generation != null) {
         void ipc.ptyDetachDesktop(id, generation);
       }
@@ -685,9 +728,24 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
           return;
         }
         adoptStream(id, attached, attached.generation, epoch);
+        attachFailureCount = 0;
       } catch (err) {
-        if (!disposed && epoch === streamEpoch)
-          term.writeln(`\r\n\x1b[31mfailed to attach: ${err}\x1b[0m`);
+        if (!disposed && epoch === streamEpoch && streamingRef.current) {
+          attachFailureCount += 1;
+          if (attachFailureCount === 1) {
+            term.writeln(`\r\n\x1b[33mterminal stream interrupted; reconnecting: ${err}\x1b[0m`);
+          }
+          // A committed tab is not a receipt for a native stream. Retry this
+          // independent boundary forever with a bounded delay: the PTY remains
+          // alive and its native ring keeps draining while the bridge recovers.
+          // One timer + streamConnecting make the retry resource-bounded.
+          const retryMs = Math.min(100 * 2 ** (attachFailureCount - 1), 2_000);
+          clearTimeout(attachRetryTimer);
+          attachRetryTimer = setTimeout(() => {
+            attachRetryTimer = undefined;
+            if (!disposed && streamingRef.current) void attachViewer();
+          }, retryMs);
+        }
       } finally {
         if (epoch === streamEpoch) streamConnecting = false;
       }
@@ -744,6 +802,9 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             env,
             runId,
             attemptId,
+            projectId,
+            componentId,
+            workspacePath,
           };
         const onData = (chunk: ipc.PtyChunk) => {
           // Feed xterm's own write buffer and ack once it has consumed the
@@ -853,14 +914,30 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // event closures and a Tauri drag/drop subscription.
     const unregisterWindowEvents = registerTerminalWindowEvents({
       active: () => activeRef.current,
+      containsPoint: (x, y) => {
+        const rect = el.getBoundingClientRect();
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          x >= rect.left &&
+          x <= rect.right &&
+          y >= rect.top &&
+          y <= rect.bottom
+        );
+      },
       focus: () => onFocus(),
       insertText: (text) => {
         term.paste(text);
         term.focus();
       },
       dropPaths: (paths) => {
-        term.paste(paths.map(shellQuote).join(" ") + " ");
-        term.focus();
+        const paste = (ready: string[]) => {
+          if (disposed) return;
+          term.paste(ready.map(shellQuote).join(" ") + " ");
+          term.focus();
+        };
+        if (!cwd) return paste(paths);
+        void ipc.spotStageDropImages(cwd, paths).then(paste).catch(() => paste(paths));
       },
       themeChanged: onThemeChange,
     });
@@ -891,8 +968,10 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     return () => {
       disposed = true;
       clearTimeout(resizeTimer);
+      clearTimeout(attachRetryTimer);
       observer.disconnect();
       unregisterWindowEvents();
+      fileLinkProvider.dispose();
       linkHint.dispose();
       dataSub.dispose();
       titleSub.dispose();

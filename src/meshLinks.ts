@@ -237,16 +237,12 @@ export function isSevered(
   );
 }
 
-/**
- * The grouping key for one agent session: its checkout, with a Canopy
- * workspace folded to the repo it was made under. Workspaces live at
- * `<repo>/.claude/worktrees/<name>` (workspaces.ts, prune.ts key off the same
- * convention), so a lead in the main checkout and its executors in worktrees
- * share one group — the strongest signal the app already records app-wide.
- */
+/** Fold nested and sibling agent worktrees to their main checkout. */
 export function checkoutKey(cwd: string): string {
   const at = cwd.indexOf("/.claude/worktrees/");
-  const folded = at >= 0 ? cwd.slice(0, at) : cwd;
+  const nested = at >= 0 ? cwd.slice(0, at) : cwd;
+  const sibling = /^(.*)-wt-[^/]+(?:\/.*)?$/.exec(nested);
+  const folded = sibling?.[1] ?? nested;
   return folded.replace(/\/+$/, "") || "/";
 }
 

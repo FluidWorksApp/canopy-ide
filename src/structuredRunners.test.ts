@@ -51,6 +51,16 @@ describe("structured runner sandbox policy", () => {
         workspaceSandbox: true,
       },
     });
+    expect(STRUCTURED_RUNNERS.cursor.verification).toMatchObject({
+      checkedOn: "2026-08-18",
+      flags: {
+        structuredJson: true,
+        systemPrompt: false,
+        planMode: false,
+        toolAllowlist: false,
+        workspaceSandbox: false,
+      },
+    });
     expect(STRUCTURED_RUNNERS.claude.verification.caveats.join(" ")).toContain(
       "Edit/Write paths are not confined",
     );
@@ -92,5 +102,34 @@ describe("structured runner sandbox policy", () => {
 
     expect(codex).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(claude).not.toContain("--dangerously-skip-permissions");
+  });
+
+  it("only gives Cursor write authority when requested", () => {
+    const readOnly = STRUCTURED_RUNNERS.cursor.args({
+      ...launch("read-only"),
+      bin: "cursor-agent",
+    });
+    const writable = STRUCTURED_RUNNERS.cursor.args({
+      ...launch("workspace-write"),
+      bin: "cursor-agent",
+    });
+
+    expect(readOnly).toEqual([
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--stream-partial-output",
+      "--model",
+      "gpt-5.6-sol",
+    ]);
+    expect(writable).toContain("--force");
+  });
+
+  it("resumes Cursor by the captured session id", () => {
+    const args = STRUCTURED_RUNNERS.cursor.resumeArgs({
+      ...launch("workspace-write"),
+      bin: "cursor-agent",
+    });
+    expect(args).toEqual(expect.arrayContaining(["--resume", "thread-1", "--force"]));
   });
 });

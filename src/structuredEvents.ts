@@ -24,7 +24,7 @@ export interface StructuredRunnerHost {
  *  failing launch actually produces are the ones least likely to identify
  *  themselves: a codex turn that dies on a bad flag emits clap's usage text on
  *  stderr and nothing at all on stdout. */
-export type StructuredDialect = "claude" | "codex";
+export type StructuredDialect = "claude" | "codex" | "cursor";
 
 /** `codex exec --json` emits one of these per line. Fields are those observed
  *  against codex-cli 0.146.1 on 2026-08-07; everything else on the line is
@@ -73,6 +73,10 @@ interface StreamMessage {
   };
   result?: string;
   is_error?: boolean;
+  session_id?: string;
+  timestamp_ms?: number;
+  model_call_id?: string;
+  tool_call?: Record<string, { args?: Record<string, unknown> }>;
 }
 
 /** What the CLI says when a tool call needed a permission it never got.
@@ -146,7 +150,52 @@ export class StructuredEventParser {
       this.codexLine(parsed as CodexMessage);
       return;
     }
+    if (this.dialect === "cursor") {
+      this.cursorLine(parsed as StreamMessage);
+      return;
+    }
     this.claudeLine(parsed as StreamMessage);
+  }
+
+  // ---------------------------------------------------------------- cursor
+
+  private cursorLine(msg: StreamMessage): void {
+    if (msg.type === "system" && msg.subtype === "init") {
+      if (msg.session_id) this.onThread?.(msg.session_id);
+      this.host.emit({ kind: "ready" });
+      return;
+    }
+    if (msg.type === "assistant") {
+      if (msg.timestamp_ms == null || msg.model_call_id != null) return;
+      for (const block of msg.message?.content ?? []) {
+        if (block.type === "text" && block.text) {
+          this.sawDelta = true;
+          this.host.emit({ kind: "delta", text: block.text });
+        }
+      }
+      return;
+    }
+    if (msg.type === "tool_call" && msg.subtype === "started") {
+      const [name, call] = Object.entries(msg.tool_call ?? {})[0] ?? [];
+      if (name) {
+        this.host.emit({
+          kind: "tool",
+          name: name.replace(/ToolCall$/, ""),
+          detail: toolDetail(call?.args),
+        });
+      }
+      return;
+    }
+    if (msg.type === "result") {
+      if (msg.is_error) {
+        this.host.emit({
+          kind: "error",
+          message: msg.result || "The agent ended the turn with an error.",
+        });
+      }
+      this.beginTurn();
+      this.host.emit({ kind: "turnEnd" });
+    }
   }
 
   // ------------------------------------------------------------------ codex

@@ -368,6 +368,44 @@ export type SubTab =
   | ClaimSubTab
   | ChatSubTab;
 
+/** Filesystem context carried by the focused tab. */
+export function tabContextPath(tab: SubTab | null | undefined): string | null {
+  if (!tab) return null;
+  switch (tab.type) {
+    case "file":
+      // Git needs the containing directory, not the file itself.
+      return tab.file.path.replace(/[\\/][^\\/]*$/, "") || tab.file.path;
+    case "terminal":
+      return tab.cwd;
+    case "branch":
+    case "commit":
+    case "pr":
+      return tab.repo;
+    case "ticket":
+      return tab.repo ?? null;
+    case "agent":
+      return tab.cwd || tab.repo;
+    case "device":
+      return tab.projectDir;
+    default:
+      return null;
+  }
+}
+
+/** Resolve the focused tab to its component or sibling worktree. */
+export function statusContextRoot(
+  tab: SubTab | null | undefined,
+  roots: string[],
+): string | null {
+  const path = tabContextPath(tab)?.replaceAll("\\", "/").replace(/\/+$/, "");
+  if (!path) return roots[0] ?? null;
+  const matches = roots
+    .map((root) => root.replaceAll("\\", "/").replace(/\/+$/, ""))
+    .filter((root) => path === root || path.startsWith(`${root}/`))
+    .sort((a, b) => b.length - a.length);
+  return matches[0] ?? path;
+}
+
 /** Every tab that isn't a terminal — the "document" tabs, rendered together
  *  below the terminals and display-toggled the same way. */
 export type DocSubTab = Exclude<SubTab, TermSubTab>;

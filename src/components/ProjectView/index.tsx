@@ -151,6 +151,7 @@ import {
 import { pickLaunchCli, startCommandParked } from "../../agentSeed";
 import {
   placeSpawnedTab,
+  agentWorkspaceBranch,
   spawnedAgentTakesFocus,
   type AgentSpawnPlacement,
 } from "../../agentSpawn";
@@ -425,7 +426,12 @@ import DeviceView from "../DeviceView";
 import type { PreviewServer } from "../../preview";
 import { dispatchBrowserOp, forgetBrowserTarget } from "../../previewAgent";
 import { suppressBrowserViewsOver, useBrowserEngine } from "../../browserHost";
-import { OPEN_URL_EVENT, type OpenUrlDetail } from "../../links";
+import {
+  OPEN_FILE_EVENT,
+  OPEN_URL_EVENT,
+  type OpenFileDetail,
+  type OpenUrlDetail,
+} from "../../links";
 import { resolveGitLink } from "../../gitLinks";
 import { previewAgentTarget, serverForUrl } from "../../preview";
 import { TRACKERS, ticketBranch, ticketContext, ticketResearchQuestion, ticketTaskLabel, ticketWorktree } from "../../trackers";
@@ -506,6 +512,7 @@ import {
 } from "../../terminalMemoryPressure";
 import { TerminalMemoryFlyout } from "../TerminalMemoryFlyout";
 import { getVibePreviewAttemptTabId } from "../../vibePreviewContext";
+import { terminalAttachmentQueue } from "../../terminalAttachmentQueue";
 
 /** Work items join PRs through the provenance cache — synchronous on purpose,
  *  like every read the gesture path makes. A PR tab loads its edges on open,
@@ -565,6 +572,7 @@ import {
   vibeRunReady,
   vibeSetupGate,
   tabsPresentedByMode,
+  statusContextRoot,
 } from "./helpers";
 import { Button } from "../ui";
 import {
@@ -1828,21 +1836,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [],
   );
 
-  // A PTY spawned from the phone (App routes pty:spawned to the project whose
-  // components own its cwd). Not gated on `visible`: a remote spawn can target a
-  // project sitting in the background, and the tab should be waiting there.
+  // App routes native PTYs to the owning project through an acknowledged queue.
+  // Not gated on `visible`: a remote spawn can target a background project, and
+  // subscribing flushes recovery that waited while this view was closed/asleep.
   useEffect(() => {
-    const onAttach = (e: Event) => {
-      const d = (e as CustomEvent).detail as {
-        projectId: string;
-        ptyId: number;
-        cwd: string;
-        title: string;
-        name?: string;
-        activate?: boolean;
-        killOnClose?: boolean;
-      };
-      if (d?.projectId !== project.id) return;
+    return terminalAttachmentQueue.subscribe(project.id, (d) => {
       attachTerminal(
         d.ptyId,
         d.cwd,
@@ -1852,10 +1850,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
         d.killOnClose === true,
         d.name,
       );
-    };
-    window.addEventListener("canopy:attach-terminal", onAttach);
-    return () => window.removeEventListener("canopy:attach-terminal", onAttach);
+    });
   }, [project.id, attachTerminal]);
+  useEffect(() => {
+    // Receipt means a render committed the attached tab, not merely that its
+    // setState was requested. If this view unmounted mid-render, the queue must
+    // still offer the live PTY to its next mount.
+    for (const tab of tabs) {
+      if (tab.type === "terminal" && tab.attachId != null) {
+        terminalAttachmentQueue.acknowledge(project.id, tab.attachId);
+      }
+    }
+  }, [project.id, tabs]);
 
   /** Open a pull request as its own tab, reusing one already open for it. */
   const openPr = useCallback((repo: string, pr: ipc.PrInfo) => {
@@ -3649,6 +3655,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
             env: [["CANOPY_MICRO_TASK", "1"], ...extraEnv],
             runId,
             attemptId,
+            projectId: project.id,
+            componentId: component?.id,
+            workspacePath: dir,
           });
           pty = res.id;
         } catch (err) {
@@ -5911,6 +5920,38 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return () => window.removeEventListener(OPEN_URL_EVENT, onUrl);
   }, [visible, openGitLink, openPreview]);
 
+  useEffect(() => {
+    if (!visible) return;
+    const onFile = (event: Event) => {
+      const { path, line, cwd } =
+        (event as CustomEvent<OpenFileDetail>).detail ?? {};
+      if (!path) return;
+      event.preventDefault();
+      const inside = digestRootsRef.current.some(
+        (root) => path === root || path.startsWith(`${root}/`),
+      );
+      const ready =
+        !inside && cwd
+          ? ipc
+              .spotStageDropImages(cwd, [path])
+              .then(([staged]) => staged ?? path)
+          : Promise.resolve(path);
+      void ready.then(async (target) => {
+        await openFileRef.current(target);
+        if (!line) return;
+        requestAnimationFrame(() =>
+          window.dispatchEvent(
+            new CustomEvent("canopy:reveal-line", {
+              detail: { path: target, line },
+            }),
+          ),
+        );
+      });
+    };
+    window.addEventListener(OPEN_FILE_EVENT, onFile);
+    return () => window.removeEventListener(OPEN_FILE_EVENT, onFile);
+  }, [visible]);
+
   const patchTab = useCallback(
     (id: string, patch: Partial<TermSubTab> & Partial<FileSubTab>) => {
       setTabs((prev) =>
@@ -6357,6 +6398,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const completePendingSplit = useCallback(
     (terminal: {
+      cwd?: string;
       command?: string;
       title?: string;
       icon?: string;
@@ -6379,7 +6421,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         : undefined;
       const groupId = current?.id ?? splitId();
       const nextId = addTerminal(
-        source.cwd,
+        terminal.cwd ?? source.cwd,
         terminal.command,
         terminal.title,
         terminal.icon,
@@ -7024,6 +7066,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const activeTab = useMemo(
     () => tabs.find((t) => t.id === activeTabId) ?? null,
     [tabs, activeTabId],
+  );
+  const activeContextRoot = useMemo(
+    () => statusContextRoot(activeTab, roots),
+    [activeTab, roots],
   );
   // A full strip with nothing in front renders a blank workspace, and every
   // path that opens tabs without activating one can leave it there. The invariant
@@ -8364,21 +8410,59 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [onNotice],
   );
 
-  // Launch an agent CLI in the project's first component — or, if it isn't on
-  // PATH, run its install command in a terminal and re-probe afterwards.
-  /** Launch an agent CLI. `at` defaults to the first component; right-clicking a
-   *  component header passes that component's path so it starts in the right
-   *  directory rather than wherever the ＋ menu would have put it. */
+  /** Launch in an explicit component or the focused tab's repository. */
   const launchCli = useCallback(
-    async (cli: AgentCli, at?: string) => {
-      const cwd = at ?? componentsRef.current[0]?.path;
+    async (
+      cli: AgentCli,
+      at?: string,
+      where: "workspace" | "current" = "workspace",
+    ) => {
+      const cwd = at ?? activeContextRoot ?? componentsRef.current[0]?.path;
       if (!cwd) return;
       if (installed[cli.bin]) {
+        let launchCwd = cwd;
+        if (where === "workspace") {
+          const repo =
+            [...repoPaths]
+              .sort((a, b) => b.length - a.length)
+              .find(
+                (path) =>
+                  cwd === path ||
+                  cwd.startsWith(`${path}/`) ||
+                  cwd.startsWith(`${path}-wt-`),
+              ) ??
+            (await ipc.gitRepos([[project.name, cwd]]).catch(() => []))[0]?.path;
+          if (!repo) {
+            onNotice(
+              `${cli.name} opened in the current folder because it is not inside a Git repository.`,
+              "info",
+            );
+          } else {
+            const branch = agentWorkspaceBranch(cli.id);
+            const result = await switchTo(
+              repo,
+              { kind: "workspace", branch, create: true },
+              { because: `the new ${cli.name} agent` },
+            );
+            if (result.kind !== "settled") return;
+            launchCwd = result.path;
+            // Setup failure does not invalidate the new worktree.
+            if (result.created && getSettings().workspaceBootstrap) {
+              await ipc.gitWorktreeBootstrap(repo, launchCwd).catch((error) =>
+                onNotice(
+                  `${cli.name}'s workspace is ready, but setup could not be copied: ${String(error)}`,
+                  "warn",
+                ),
+              );
+            }
+          }
+        }
         // Before the terminal opens: the CLI reads the config-dir variable at
         // startup, so exporting it afterwards is too late.
         const profile = activeProfile();
         const env = await launchEnv(cli.id);
         const terminal = {
+          cwd: launchCwd,
           command: launchCommand(cli),
           title: cli.name,
           icon: cli.icon,
@@ -8388,7 +8472,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (pendingSplitRef.current) completePendingSplit(terminal);
         else
           addTerminal(
-            cwd,
+            launchCwd,
             terminal.command,
             terminal.title,
             terminal.icon,
@@ -8414,7 +8498,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
         addTerminal(cwd, cli.install, `install ${cli.name}`, "⬇", "chore");
       }
     },
-    [installed, addTerminal, completePendingSplit, onNotice],
+    [
+      installed,
+      addTerminal,
+      completePendingSplit,
+      onNotice,
+      project.name,
+      activeContextRoot,
+      repoPaths,
+      switchTo,
+    ],
   );
 
   /** Run `cli`'s updater in a run tab. Its exit re-probes versions (see
@@ -8455,7 +8548,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ? `⇡ ${cliUpdates[cli.bin]?.latest}`
           : undefined
         : "install",
-      onClick: () => void launchCli(cli, cwd),
+      onClick: () => void launchCli(cli, cwd, "current"),
     })),
   ];
 
@@ -11049,11 +11142,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       completePendingSplit({ title: "shell" });
       return;
     }
-    const cwd = componentsRef.current[0]?.path;
+    const cwd = activeContextRoot ?? componentsRef.current[0]?.path;
     if (cwd) addTerminal(cwd);
-  }, [addTerminal, completePendingSplit]);
+  }, [activeContextRoot, addTerminal, completePendingSplit]);
   const onLaunchCli = useCallback(
-    (cli: AgentCli) => launchCli(cli),
+    (cli: AgentCli, where: "workspace" | "current" = "workspace") =>
+      launchCli(cli, undefined, where),
     [launchCli],
   );
   const onRunCliUpdate = useCallback(
@@ -12075,6 +12169,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
               tab.ptyId != null
                 ? identifyAgent(statsByPty.get(tab.ptyId)?.agent_hint)
                 : null;
+            const executionComponent =
+              components.find((component) => component.id === tab.componentId) ??
+              [...components]
+                .filter(
+                  (component) =>
+                    tab.cwd === component.path ||
+                    tab.cwd.startsWith(`${component.path}/`),
+                )
+                .sort((a, b) => b.path.length - a.path.length)[0];
             const shown =
               !vibe &&
               !softClosed &&
@@ -12240,6 +12343,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   termHandles.current.set(tab.id, h);
                 }}
                 cwd={tab.cwd}
+                projectId={project.id}
+                componentId={executionComponent?.id}
+                workspacePath={executionComponent?.path ?? tab.cwd}
                 minimumContrastRatio={terminalMinimumContrast(
                   agentIdForCommand(tab.command),
                 )}
@@ -13501,6 +13607,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   return (
     <div
       ref={rootRef}
+      data-project-id={project.id}
       className={`project-view ${vibe ? "project-view-vibe" : ""}`}
       style={{ display: visible ? "flex" : "none" }}
     >
@@ -13714,6 +13821,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       {/* Full-width, spanning rail + sidebar + main. Zen hides it via CSS. */}
       <StatusBar
         roots={roots}
+        contextRoot={activeContextRoot}
         agents={runningAgents}
         events={projectEvents}
         visible={visible}
@@ -13724,6 +13832,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         agentId={activeAgentId}
         agentProfile={activeAgent.profile}
         activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
+        activeSessionId={
+          activeTab?.type === "terminal" && activeTab.ptyId != null
+            ? (liveSessionByPty.get(activeTab.ptyId) ??
+              resumeSessionId(activeTab.command))
+            : null
+        }
       />
       <AgentCloseUndo
         pending={[...pendingAgentCloses.values()]}
@@ -13778,13 +13892,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
         <LaunchPalette
           installed={installed}
           cliUpdates={cliUpdates}
-          targetLabel={pendingSplit ? "new split pane" : components[0]?.label}
+          targetLabel={
+            pendingSplit
+              ? "new split pane"
+              : activeContextRoot
+                ? basename(activeContextRoot)
+                : components[0]?.label
+          }
           onShell={() => {
             onNewShell();
             setLauncherOpen(false);
           }}
-          onLaunchCli={(cli) => {
-            void launchCli(cli).finally(() => {
+          onLaunchCli={(cli, where) => {
+            void launchCli(cli, activeContextRoot ?? undefined, where).finally(() => {
               setLauncherOpen(false);
               // A successful split consumes this itself. Clear only a launch
               // that failed before it reached completePendingSplit.

@@ -85,6 +85,19 @@ export interface SpawnResult extends PtyGeometry {
 
 export type PtySessionKind = "desktop" | "remote" | "detached";
 
+export interface ExecutionContext {
+  environmentId: string;
+  projectId: string;
+  componentId?: string | null;
+  workspaceId: string;
+  workspacePath: string;
+  runId?: string | null;
+  attemptId?: string | null;
+}
+
+export const environmentIdentity = () =>
+  invoke<string>("environment_identity");
+
 export interface PtySummary extends PtyGeometry {
   id: number;
   session_generation: number;
@@ -93,6 +106,9 @@ export interface PtySummary extends PtyGeometry {
   name?: string;
   title: string;
   kind: PtySessionKind;
+  /** Stable owner for desktop sessions; null for remote/detached sessions. */
+  project_id?: string | null;
+  execution_context?: ExecutionContext | null;
   replay_start: number;
   replay_end: number;
 }
@@ -135,6 +151,12 @@ export const decodePtyChunk = (payload: ArrayBuffer | number[]): PtyChunk => {
 };
 
 let renderer: RendererRegistration | null = null;
+let selftestPtyListenerFailuresRemaining = 0;
+
+/** Bootstrap-only fault injection for the isolated full-app selftest. */
+export const configureSelftestPtyListenerFailures = (count: number) => {
+  selftestPtyListenerFailuresRemaining = Math.max(0, Math.floor(count));
+};
 
 /** Make this page authoritative before mounting anything that can spawn a PTY.
  * Rust detaches predecessor channels and returns the children that survived it. */
@@ -146,6 +168,15 @@ export async function ptyRendererRegister(): Promise<RendererRegistration> {
 
 /** Snapshot returned by the boot handshake, consumed idempotently by App. */
 export const rendererPtySessions = (): PtySummary[] => renderer?.sessions ?? [];
+
+/** Current native sessions, read only after pty:spawned has a listener. The
+ * listener + snapshot order makes a spawn racing renderer hydration appear in
+ * at least one path (and harmlessly in both at the boundary). */
+export async function rendererPtySessionsLive(): Promise<PtySummary[]> {
+  return invoke<PtySummary[]>("pty_renderer_sessions", {
+    rendererGeneration: rendererGeneration(),
+  });
+}
 
 const rendererGeneration = (): number => {
   if (renderer == null) throw new Error("terminal renderer is not registered");
@@ -180,6 +211,10 @@ export async function ptySpawn(
      * binding before starting the child. */
     runId?: string;
     attemptId?: string;
+    /** Native recovery identity for the ProjectView that owns this tab. */
+    projectId?: string;
+    componentId?: string;
+    workspacePath?: string;
   },
   onData: (chunk: PtyChunk) => void,
 ): Promise<SpawnResult> {
@@ -235,6 +270,9 @@ export const ptySpawnArgv = (opts: {
   env?: [string, string][];
   runId?: string;
   attemptId?: string;
+  projectId?: string;
+  componentId?: string;
+  workspacePath?: string;
 }) => invoke<SpawnResult>("pty_spawn_argv", opts);
 
 /** An argv-native process whose output is streamed into a visible terminal. */
@@ -248,6 +286,9 @@ export async function ptySpawnAttachedArgv(
     env?: [string, string][];
     runId?: string;
     attemptId?: string;
+    projectId?: string;
+    componentId?: string;
+    workspacePath?: string;
   },
   onData: (chunk: PtyChunk) => void,
 ): Promise<SpawnResult> {
@@ -271,6 +312,9 @@ export const ptySpawnDetached = (opts: {
   env?: [string, string][];
   runId?: string;
   attemptId?: string;
+  projectId?: string;
+  componentId?: string;
+  workspacePath?: string;
 }) => invoke<SpawnResult>("pty_spawn_detached", opts);
 
 /** The tail of a PTY's raw output, escape sequences and all — the transcript of
@@ -330,11 +374,18 @@ export interface PtySpawned {
   title: string;
   cols: number;
   rows: number;
+  project_id?: string | null;
+  execution_context?: ExecutionContext | null;
 }
 export const onPtySpawned = (
   cb: (e: PtySpawned) => void,
-): Promise<UnlistenFn> =>
-  listen<PtySpawned>("pty:spawned", (event) => cb(event.payload));
+): Promise<UnlistenFn> => {
+  if (selftestPtyListenerFailuresRemaining > 0) {
+    selftestPtyListenerFailuresRemaining -= 1;
+    return Promise.reject(new Error("selftest injected pty:spawned listener failure"));
+  }
+  return listen<PtySpawned>("pty:spawned", (event) => cb(event.payload));
+};
 
 /** An action an agent requested through the MCP context bridge (start a run
  *  command, open a preview). `route` is a path used to pick the target project;
@@ -749,11 +800,38 @@ export interface SelftestConfig {
   url: string;
   /** A throwaway directory to open as the project the scenario runs in. */
   projectDir: string;
+  /** Every isolated project used by a scenario; projectDir remains the primary
+   * fixture for older scenarios. */
+  projectDirs: string[];
   reportPath: string;
+  /** Reload/recovery cycles requested by the isolated launcher. */
+  iterations: number;
+  /** Critical renderer handshakes deliberately failed before first mount. */
+  registrationFailures: number;
+  /** pty:spawned listener registrations failed on each renderer generation. */
+  listenerFailures: number;
+  /** Recovered desktop stream attachments failed before succeeding. */
+  attachFailures: number;
 }
 
 export const selftestConfig = () =>
   invoke<SelftestConfig | null>("selftest_config").catch(() => null);
+
+/** Native checkpoint for a selftest that deliberately destroys its renderer. */
+export const selftestCheckpoint = <T>() =>
+  invoke<T | null>("selftest_checkpoint");
+
+export const selftestCheckpointSave = (checkpoint: unknown) =>
+  invoke<void>("selftest_checkpoint_save", { checkpoint });
+
+/** The watchdog's native webview reload primitive, exposed only while an
+ * isolated selftest is active. A successful call destroys this JS page. */
+export const selftestReloadRenderer = () =>
+  invoke<void>("selftest_reload_renderer");
+
+/** A native-owned, phone-equivalent PTY in the disposable selftest project. */
+export const selftestSpawnRemote = (cwd: string) =>
+  invoke<PtySummary>("selftest_spawn_remote", { cwd });
 
 /** Hand back the report and end the process — 0 if every step passed. */
 export const selftestFinish = (report: unknown) =>
@@ -1833,6 +1911,9 @@ export const spotIndexClear = () => invoke<void>("spot_index_clear");
 export const spotSaveContextImage = (dir: string, base64Png: string) =>
   invoke<string>("spot_save_context_image", { dir, base64Png });
 
+export const spotStageDropImages = (dir: string, paths: string[]) =>
+  invoke<string[]>("spot_stage_drop_images", { dir, paths });
+
 /** Persist a brief too long to type at a shell prompt (see agentSeed.ts) under
  *  `<dir>/.canopy/spot/`, and return its path for the agent to read. */
 export const spotSaveContextText = (dir: string, text: string) =>
@@ -1922,7 +2003,8 @@ export interface PlanUsage {
    *  where a rate-limited request returns no limit headers. */
   observed: number;
 }
-export const planUsage = () => invoke<PlanUsage[]>("plan_usage");
+export const planUsage = (sessionId?: string | null) =>
+  invoke<PlanUsage[]>("plan_usage", { sessionId: sessionId ?? null });
 
 // ---------- account profiles ----------
 

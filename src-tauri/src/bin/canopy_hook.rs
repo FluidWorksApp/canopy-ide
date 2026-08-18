@@ -607,6 +607,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 
     normalize_event(&mut event, agent_override.as_deref().unwrap_or("claude"));
 
+    if event["agent"].as_str() == Some("grok") && event["subagent_type"].is_string() {
+        return Ok(());
+    }
+
     let session_id = event["session_id"].as_str().unwrap_or("").to_string();
     let cwd = event["cwd"].as_str().unwrap_or("").to_string();
     let hook_event = event["hook_event_name"].as_str().unwrap_or("").to_string();
@@ -740,6 +744,70 @@ fn normalize_event(event: &mut serde_json::Value, agent: &str) {
         return;
     };
     map.insert("agent".into(), serde_json::json!(agent));
+    if matches!(agent, "cursor" | "grok") {
+        for (from, to) in [
+            ("sessionId", "session_id"),
+            ("conversationId", "session_id"),
+            ("conversation_id", "session_id"),
+            ("workspaceRoot", "cwd"),
+            ("hookEventName", "hook_event_name"),
+            ("toolName", "tool_name"),
+            ("toolInput", "tool_input"),
+            ("notificationType", "notification_type"),
+            ("promptId", "prompt_id"),
+            ("subagentType", "subagent_type"),
+        ] {
+            if map.get(to).is_none() {
+                if let Some(value) = map.get(from).cloned() {
+                    map.insert(to.into(), value);
+                }
+            }
+        }
+        if map.get("cwd").and_then(|v| v.as_str()).is_none() {
+            let roots = map
+                .get("workspaceRoots")
+                .or_else(|| map.get("workspace_roots"));
+            if let Some(cwd) = roots
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+            {
+                map.insert("cwd".into(), serde_json::json!(cwd));
+            }
+        }
+        if agent == "grok" {
+            if map.get("session_id").is_none() {
+                if let Ok(value) = std::env::var("GROK_SESSION_ID") {
+                    map.insert("session_id".into(), serde_json::json!(value));
+                }
+            }
+            if map.get("cwd").is_none() {
+                if let Ok(value) = std::env::var("GROK_WORKSPACE_ROOT") {
+                    map.insert("cwd".into(), serde_json::json!(value));
+                }
+            }
+        }
+        if let Some(name) = map
+            .get("hook_event_name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            let canonical = match name.as_str() {
+                "session_start" | "sessionStart" => "SessionStart",
+                "session_end" | "sessionEnd" => "SessionEnd",
+                "user_prompt_submit" | "beforeSubmitPrompt" => "UserPromptSubmit",
+                "pre_tool_use" | "preToolUse" => "PreToolUse",
+                "post_tool_use" | "postToolUse" => "PostToolUse",
+                "post_tool_use_failure" | "postToolUseFailure" => "PostToolUseFailure",
+                "stop" => "Stop",
+                "stop_failure" => "StopFailure",
+                "stop_cancelled" => "StopCancelled",
+                "notification" => "Notification",
+                _ => name.as_str(),
+            };
+            map.insert("hook_event_name".into(), serde_json::json!(canonical));
+        }
+    }
     if agent == "agy" {
         // Antigravity 1.1.x uses protojson camelCase, unlike the Claude-shaped
         // contract every downstream consumer reads.
@@ -6967,6 +7035,38 @@ mod tests {
         });
         normalize_event(&mut informational, "claude");
         assert!(informational.get("canopy_signal").is_none());
+    }
+
+    #[test]
+    fn cursor_hooks_normalize_to_the_shared_lifecycle() {
+        let mut event = serde_json::json!({
+            "conversation_id": "cur-1",
+            "workspace_roots": ["/repo"],
+            "hook_event_name": "beforeSubmitPrompt"
+        });
+        normalize_event(&mut event, "cursor");
+        assert_eq!(event["session_id"], "cur-1");
+        assert_eq!(event["cwd"], "/repo");
+        assert_eq!(event["hook_event_name"], "UserPromptSubmit");
+        assert_eq!(event["canopy_signal"], "turn-start");
+    }
+
+    #[test]
+    fn grok_hooks_keep_prompt_and_tool_identity() {
+        let mut event = serde_json::json!({
+            "sessionId": "grok-1",
+            "workspaceRoot": "/repo",
+            "hookEventName": "PostToolUse",
+            "promptId": "prompt-2",
+            "toolName": "edit",
+            "toolInput": { "path": "/repo/a.rs" }
+        });
+        normalize_event(&mut event, "grok");
+        assert_eq!(event["session_id"], "grok-1");
+        assert_eq!(event["prompt_id"], "prompt-2");
+        assert_eq!(event["tool_name"], "edit");
+        assert_eq!(event["tool_input"]["path"], "/repo/a.rs");
+        assert_eq!(event["canopy_signal"], "turn-progress");
     }
 
     #[test]

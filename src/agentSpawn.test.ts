@@ -1,6 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { leafIds } from "./terminalGroups";
-import { placeSpawnedTab, spawnedAgentTakesFocus } from "./agentSpawn";
+import {
+  agentWorkspaceBranch,
+  placeSpawnedTab,
+  spawnedAgentTakesFocus,
+} from "./agentSpawn";
+
+describe("agent worktree branch", () => {
+  it("names the owner and remains unique for rapid launches", () => {
+    expect(
+      agentWorkspaceBranch("Codex CLI", new Date("2026-08-18T11:15:30.123Z")),
+    ).toBe("agent/codex-cli-20260818-111530-123");
+    expect(
+      agentWorkspaceBranch("Codex CLI", new Date("2026-08-18T11:15:30.124Z")),
+    ).not.toBe(
+      agentWorkspaceBranch("Codex CLI", new Date("2026-08-18T11:15:30.123Z")),
+    );
+  });
+});
 
 describe("spawn focus", () => {
   it("honours the existing attention preference both ways", () => {

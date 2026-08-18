@@ -1,0 +1,98 @@
+# Destruction test for Canopy's most important invariant: replacing the entire
+# JavaScript renderer must not replace, duplicate, disconnect, or lose output
+# from a live native PTY. The scenario drives the real macOS app because unit
+# DOMs cannot exercise Tauri channels, WebView reload, or native process life.
+name: terminal recovery selftest
+
+on:
+  pull_request:
+    paths:
+      - "src/App.tsx"
+      - "src/main.tsx"
+      - "src/ipc.ts"
+      - "src/projects.ts"
+      - "src/terminalAttachmentQueue*"
+      - "src/terminalStreamLedger*"
+      - "src/components/Term.tsx"
+      - "src/components/ProjectView/**"
+      - "src/selftest/terminalRecoverySelftest.ts"
+      - "src-tauri/src/fsx.rs"
+      - "src-tauri/src/lib.rs"
+      - "src-tauri/src/pty.rs"
+      - "src-tauri/src/selftest.rs"
+      - "src-tauri/src/watchdog.rs"
+      - ".github/workflows/terminal-recovery-selftest.yml"
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: terminal-recovery-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  recovery:
+    name: Terminal recovery (macOS)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: terminal-recovery-selftest
+
+      - run: npm ci
+
+      - name: Stub hook sidecar
+        run: |
+          mkdir -p src-tauri/binaries
+          triple=$(rustc -vV | grep '^host:' | awk '{print $2}')
+          touch "src-tauri/binaries/canopy-hook-${triple}"
+
+      - name: Build the frontend
+        run: |
+          npm run build:portal
+          npm run build
+
+      - name: Build the app (debug, no signing)
+        working-directory: src-tauri
+        run: cargo build --no-default-features --features custom-protocol
+
+      # Force failure at every recovery boundary in one run. The app may take
+      # longer, but it must converge without losing native identity or output.
+      - name: Run fault-boundary matrix
+        run: |
+          CANOPY_SELFTEST_REPORT="$RUNNER_TEMP/terminal-recovery-faults.json" \
+          CANOPY_SELFTEST_ITERATIONS=5 \
+          CANOPY_SELFTEST_REGISTER_FAILURES=3 \
+          CANOPY_SELFTEST_LISTENER_FAILURES=2 \
+          CANOPY_SELFTEST_ATTACH_FAILURES=3 \
+            ./src-tauri/target/debug/canopy --selftest=terminal-recovery
+
+      - name: Run repeated renderer-destruction soak
+        env:
+          ITERATIONS: ${{ github.event_name == 'schedule' && '100' || '50' }}
+        run: |
+          CANOPY_SELFTEST_REPORT="$RUNNER_TEMP/terminal-recovery-soak.json" \
+          CANOPY_SELFTEST_ITERATIONS="$ITERATIONS" \
+            ./src-tauri/target/debug/canopy --selftest=terminal-recovery
+
+      - name: Keep recovery reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-recovery-reports
+          path: ${{ runner.temp }}/terminal-recovery-*.json
+          if-no-files-found: warn

@@ -22,7 +22,7 @@ interface LaunchPaletteProps {
   /** Where the launch lands — shown in the footer so it isn't a guess. */
   targetLabel?: string;
   onShell: () => void;
-  onLaunchCli: (cli: AgentCli) => void;
+  onLaunchCli: (cli: AgentCli, where: "workspace" | "current") => void;
   /** Escape/backdrop cancellation only. A committed row uses its own callback. */
   onCancel: () => void;
 }
@@ -69,10 +69,10 @@ export function LaunchPalette({
       ?.scrollIntoView({ block: "nearest" });
   }, [sel]);
 
-  const commit = (row: Row | undefined) => {
+  const commit = (row: Row | undefined, where: "workspace" | "current" = "workspace") => {
     if (!row) return;
     if (row.kind === "shell") onShell();
-    else onLaunchCli(row.cli);
+    else onLaunchCli(row.cli, where);
   };
 
   return (
@@ -96,7 +96,7 @@ export function LaunchPalette({
               setSel((i) => Math.max(i - 1, 0));
             } else if (e.key === "Enter") {
               e.preventDefault();
-              commit(rows[sel]);
+              commit(rows[sel], e.shiftKey ? "current" : "workspace");
             }
           }}
         />
@@ -120,11 +120,28 @@ export function LaunchPalette({
                   )}
                 </span>
                 <span className="palette-name">{rowLabel(r)}</span>
+                {r.kind === "cli" && !missing && (
+                  <span className="launch-workspace-hint">new workspace</span>
+                )}
                 {missing && <span className="cli-install">install</span>}
                 {!missing && up?.hasUpdate && (
                   <span className="cli-update" title={`${up.installed} → ${up.latest}`}>
                     ⇡ {up.latest}
                   </span>
+                )}
+                {r.kind === "cli" && !missing && (
+                  <button
+                    type="button"
+                    className="launch-current"
+                    aria-label={`Open ${r.cli.name} in the current checkout`}
+                    title={`Open ${r.cli.name} in the current checkout`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      commit(r, "current");
+                    }}
+                  >
+                    here
+                  </button>
                 )}
               </div>
             );
@@ -132,7 +149,7 @@ export function LaunchPalette({
         </div>
         <div className="palette-foot">
           <span>New{targetLabel ? ` · ${targetLabel}` : ""}</span>
-          <span>↑↓ navigate · ↵ open · esc close</span>
+          <span>↑↓ navigate · ↵ new workspace · ⇧↵ here · esc close</span>
         </div>
       </div>
     </div>

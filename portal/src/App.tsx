@@ -307,8 +307,22 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     command?: string,
     options?: { agent?: string; profile?: string },
   ) => {
-    wireRef.current?.send({ t: 'spawn', cwd, command, ...options })
-  }, [])
+    const candidates = projects.flatMap((candidateProject) =>
+      candidateProject.components.map((component) => ({ candidateProject, component })),
+    )
+    const owner = candidates
+      .filter(({ component }) => cwd === component.path || cwd.startsWith(`${component.path}/`))
+      .sort((a, b) => b.component.path.length - a.component.path.length)[0]
+    wireRef.current?.send({
+      t: 'spawn',
+      cwd,
+      command,
+      ...options,
+      projectId: owner?.candidateProject.id ?? project?.id,
+      componentId: owner?.component.id,
+      workspacePath: owner?.component.path ?? cwd,
+    })
+  }, [project?.id, projects])
 
   const goHome = useCallback((id?: string) => {
     if (id) setProjectId(id)

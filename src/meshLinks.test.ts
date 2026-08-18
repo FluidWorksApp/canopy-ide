@@ -200,6 +200,8 @@ describe("grouping folds a workspace into the checkout it was made under", () =>
     expect(checkoutKey("/w/canopy")).toBe("/w/canopy");
     expect(checkoutKey("/w/canopy/.claude/worktrees/agent-x")).toBe("/w/canopy");
     expect(checkoutKey("/w/canopy/.claude/worktrees/agent-x/src")).toBe("/w/canopy");
+    expect(checkoutKey("/w/canopy-wt-agent-codex-1")).toBe("/w/canopy");
+    expect(checkoutKey("/w/canopy-wt-agent-codex-1/src")).toBe("/w/canopy");
     expect(checkoutKey("/w/other")).not.toBe(checkoutKey("/w/canopy"));
   });
 });

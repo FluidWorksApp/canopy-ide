@@ -318,7 +318,7 @@ export interface PaneBarProps {
   onShareFile: (memberId: string, memberName: string) => void;
   onShareProject: (memberId: string, memberName: string) => void;
   onOpenPreview: () => void;
-  onLaunchCli: (cli: AgentCli) => void;
+  onLaunchCli: (cli: AgentCli, where?: "workspace" | "current") => void;
   /** The non-default account new agents launch as, and the profile-capable
    *  CLIs it holds no login for yet. Null on the default account. */
   account?: { label: string; missing: string[] } | null;
@@ -817,7 +817,7 @@ function PaneBarImpl({
                 </div>
               )}
               {AGENT_CLIS.map((cli) => (
-                <div key={cli.id} className="cli-item" onClick={() => { setCliMenuOpen(false); onLaunchCli(cli); }}>
+                <div key={cli.id} className="cli-item" onClick={() => { setCliMenuOpen(false); onLaunchCli(cli, "workspace"); }}>
                   <span><AgentIcon id={cli.id} size={15} className="cli-icon" /> {cli.name}</span>
                   {/* This account has no login for that CLI yet. Still
                       launchable — that is how you sign in. */}
@@ -835,6 +835,21 @@ function PaneBarImpl({
                     >
                       ⇡ {cliUpdates[cli.bin]?.latest}
                     </span>
+                  )}
+                  {installed[cli.bin] && (
+                    <button
+                      type="button"
+                      className="launch-current"
+                      aria-label={`Open ${cli.name} in the current checkout`}
+                      title={`Open ${cli.name} in the current checkout`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setCliMenuOpen(false);
+                        onLaunchCli(cli, "current");
+                      }}
+                    >
+                      here
+                    </button>
                   )}
                 </div>
               ))}

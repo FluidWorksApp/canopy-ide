@@ -72,6 +72,31 @@ describe("default project lens adoption", () => {
   });
 });
 
+describe("workspace loading", () => {
+  it("uses an empty workspace only when native reports no saved store", async () => {
+    mockCommands({ store_load: "null" });
+    await expect(loadWorkspace()).resolves.toEqual({
+      projects: [],
+      openIds: [],
+      activeId: null,
+    });
+  });
+
+  it("does not reinterpret a corrupt store as an empty workspace", async () => {
+    mockCommands({ store_load: "{truncated" });
+    await expect(loadWorkspace()).rejects.toThrow();
+  });
+
+  it("propagates native failure when neither primary nor backup is readable", async () => {
+    mockCommands({
+      store_load: () => {
+        throw new Error("workspace primary and backup unavailable");
+      },
+    });
+    await expect(loadWorkspace()).rejects.toThrow("primary and backup unavailable");
+  });
+});
+
 describe("shellQuote", () => {
   it("wraps in single quotes", () => {
     expect(shellQuote("hello world")).toBe("'hello world'");
@@ -110,6 +135,8 @@ describe("restoreCommand", () => {
     expect(restoreCommand("claude", "abc123")).toBe("claude --resume abc123");
     expect(restoreCommand("codex", "s-1")).toBe("codex resume s-1");
     expect(restoreCommand("amp", "T-9")).toBe("amp threads continue T-9");
+    expect(restoreCommand("cursor", "cur-1")).toBe("cursor-agent --resume cur-1");
+    expect(restoreCommand("grok", "grok-1")).toBe("grok --resume grok-1");
   });
 
   it("returns null for an empty/whitespace session id (never a bare continue)", () => {
@@ -243,6 +270,10 @@ describe("dangerouslySkipPermissions", () => {
       .toBe("aider --model 'opus' --reasoning-effort 'medium'");
     expect(startCommand("omp", "build", { provider: "anthropic", model: "opus", effort: "max" })?.command)
       .toBe("omp --approval-mode=write --model 'opus' --provider 'anthropic' --thinking 'max'");
+    expect(startCommand("cursor", "build", { model: "composer-1" })?.command)
+      .toBe("cursor-agent 'build' --model 'composer-1'");
+    expect(startCommand("grok", "build", { model: "grok-4.5" })?.command)
+      .toBe("grok 'build' --model 'grok-4.5'");
   });
 
   it("leaves custom CLIs alone — we know nothing about their flags", () => {
@@ -277,6 +308,14 @@ describe("dangerouslySkipPermissions", () => {
       command: "claude --dangerously-skip-permissions",
       resumeTemplate:
         "claude --resume __CANOPY_SESSION_ID__ --dangerously-skip-permissions",
+    });
+    expect(rows.find((row) => row.id === "cursor")).toMatchObject({
+      command: "cursor-agent --force",
+      resumeTemplate: "cursor-agent --resume __CANOPY_SESSION_ID__ --force",
+    });
+    expect(rows.find((row) => row.id === "grok")).toMatchObject({
+      command: "grok --always-approve",
+      resumeTemplate: "grok --resume __CANOPY_SESSION_ID__ --always-approve",
     });
   });
 });

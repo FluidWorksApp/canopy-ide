@@ -12,10 +12,8 @@
 //!   `PtyManager::write` / `::kill`.
 //!
 //! Off by default. A dedicated numeric PIN (NOT the team join code) gates
-//! `POST /remote/auth`, which mints a bearer token; the WebSocket requires that
-//! token. The token has no wall-clock expiry — it stays valid for the whole life
-//! of this enable session, dying only when the PIN owner disables the server or
-//! rotates the PIN. Wrong PINs are constant-time-compared and tarpitted.
+//! `POST /remote/auth` mints a bearer. The client exchanges it for a short-lived,
+//! one-use WebSocket ticket, keeping the durable credential out of URLs.
 //!
 //! Transport: plain HTTP on 6680 — fine on a trusted LAN, and a
 //! Tailscale/Cloudflare/ngrok tunnel (see tunnel.rs) adds real TLS for remote
@@ -37,7 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, EventId, Listener, Manager};
 use tokio::sync::{broadcast, mpsc, OwnedSemaphorePermit, Semaphore};
 
@@ -116,6 +114,8 @@ impl PortalOut {
 /// exactly as long as this session lives — no wall-clock expiry. Re-auth is only
 /// ever forced by the PIN owner tearing the session down or rotating the PIN.
 type Tokens = Arc<Mutex<HashSet<String>>>;
+type Tickets = Arc<Mutex<HashMap<String, Instant>>>;
+const WS_TICKET_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Managed state: at most one running server. Enabling twice is a no-op that
 /// returns the current status.
@@ -268,6 +268,7 @@ struct Portal {
     app: AppHandle,
     pin: Arc<String>,
     tokens: Tokens,
+    tickets: Tickets,
     /// Fan-out of forwarded app events (as ready-to-send JSON) to all sockets.
     events: broadcast::Sender<String>,
     /// Shared handle to the desktop-pushed theme tokens (see RemoteManager).
@@ -359,6 +360,7 @@ pub async fn remote_enable(
 
     let pin = gen_pin();
     let tokens: Tokens = Default::default();
+    let tickets: Tickets = Default::default();
     let (events_tx, _keep) = broadcast::channel::<String>(1024);
 
     // Tap the app event bus and re-broadcast as portal messages. Dropped on
@@ -378,6 +380,7 @@ pub async fn remote_enable(
         app: app.clone(),
         pin: Arc::new(pin.clone()),
         tokens,
+        tickets,
         events: events_tx,
         theme: mgr.theme.clone(),
         clis: mgr.clis.clone(),
@@ -388,6 +391,7 @@ pub async fn remote_enable(
     };
     let router = Router::new()
         .route("/remote/auth", post(auth_handler))
+        .route("/remote/ws-ticket", post(ws_ticket_handler))
         .route("/remote/ws", get(ws_handler))
         .route("/remote/health", get(|| async { "ok" }))
         // Team relay ingress on the same server — the internet path, where the
@@ -581,7 +585,26 @@ async fn auth_handler(AxumState(p): AxumState<Portal>, Json(body): Json<AuthReq>
 
 #[derive(Deserialize)]
 struct WsQuery {
-    token: String,
+    ticket: String,
+}
+
+async fn ws_ticket_handler(
+    AxumState(p): AxumState<Portal>,
+    headers: header::HeaderMap,
+) -> Response {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    if !token.is_some_and(|token| valid_token(&p.tokens, token)) {
+        return (StatusCode::UNAUTHORIZED, "bad token").into_response();
+    }
+    let ticket = gen_token();
+    let expires = Instant::now() + WS_TICKET_TTL;
+    let mut tickets = p.tickets.lock().unwrap();
+    tickets.retain(|_, expiry| *expiry > Instant::now());
+    tickets.insert(ticket.clone(), expires);
+    Json(json!({ "ticket": ticket, "expiresIn": WS_TICKET_TTL.as_secs() })).into_response()
 }
 
 async fn ws_handler(
@@ -589,8 +612,8 @@ async fn ws_handler(
     Query(q): Query<WsQuery>,
     AxumState(p): AxumState<Portal>,
 ) -> Response {
-    if !valid_token(&p.tokens, &q.token) {
-        return (StatusCode::UNAUTHORIZED, "bad token").into_response();
+    if !consume_ticket(&p.tickets, &q.ticket, Instant::now()) {
+        return (StatusCode::UNAUTHORIZED, "bad ticket").into_response();
     }
     let Some(socket_owner) = SocketOwnership::try_acquire(p.sockets.clone()) else {
         return (StatusCode::SERVICE_UNAVAILABLE, "too many remote sockets").into_response();
@@ -802,6 +825,12 @@ fn handle_client_msg(
             let command = v.get("command").and_then(|x| x.as_str()).map(String::from);
             let agent = v.get("agent").and_then(|x| x.as_str()).map(String::from);
             let profile = v.get("profile").and_then(|x| x.as_str()).map(String::from);
+            let project_id = v.get("projectId").and_then(|x| x.as_str()).map(String::from);
+            let component_id = v.get("componentId").and_then(|x| x.as_str()).map(String::from);
+            let workspace_path = v
+                .get("workspacePath")
+                .and_then(|x| x.as_str())
+                .map(String::from);
             let app = p.app.clone();
             let out = out.clone();
             tokio::spawn(async move {
@@ -823,7 +852,15 @@ fn handle_client_msg(
                 };
                 let msg = match account.and_then(|account| {
                     app.state::<PtyManager>()
-                        .spawn_headless(app.clone(), cwd, command, account)
+                        .spawn_headless_bound(
+                            app.clone(),
+                            cwd,
+                            command,
+                            account,
+                            project_id,
+                            component_id,
+                            workspace_path,
+                        )
                 }) {
                     Ok(id) => json!({ "t": "spawned", "pty": id }),
                     Err(e) => json!({ "t": "spawn-error", "message": e }),
@@ -1064,8 +1101,13 @@ async fn snapshot_msg(
         let a = mgr.attention.lock().unwrap().clone();
         (h, a)
     };
+    let environment_id = app
+        .state::<crate::execution::ExecutionRegistry>()
+        .environment_id()
+        .ok();
     json!({
         "t": "snapshot",
+        "environmentId": environment_id,
         "projects": projects,
         "sessions": sessions,
         "usage": usage,
@@ -1333,6 +1375,14 @@ fn valid_token(tokens: &Tokens, tok: &str) -> bool {
     tokens.lock().unwrap().contains(tok)
 }
 
+fn consume_ticket(tickets: &Tickets, ticket: &str, now: Instant) -> bool {
+    tickets
+        .lock()
+        .unwrap()
+        .remove(ticket)
+        .is_some_and(|expires| expires > now)
+}
+
 fn gen_pin() -> String {
     let mut b = [0u8; 4];
     let _ = getrandom::getrandom(&mut b);
@@ -1470,6 +1520,23 @@ mod tests {
         let tok = gen_token();
         assert_eq!(tok.len(), 32);
         assert!(tok.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn websocket_tickets_are_one_use_and_expire() {
+        let tickets: Tickets = Default::default();
+        let now = Instant::now();
+        tickets
+            .lock()
+            .unwrap()
+            .insert("fresh".into(), now + Duration::from_secs(1));
+        tickets
+            .lock()
+            .unwrap()
+            .insert("old".into(), now - Duration::from_secs(1));
+        assert!(consume_ticket(&tickets, "fresh", now));
+        assert!(!consume_ticket(&tickets, "fresh", now));
+        assert!(!consume_ticket(&tickets, "old", now));
     }
 
     #[test]

@@ -21,7 +21,12 @@ import { openLink } from "./links";
 import { matchesModifierClick } from "./shortcuts";
 import App from "./App.tsx";
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { installEarlyWatchdogHeartbeat, ptyRendererRegister } from "./ipc";
+import {
+  configureSelftestPtyListenerFailures,
+  installEarlyWatchdogHeartbeat,
+  ptyRendererRegister,
+  selftestConfig,
+} from "./ipc";
 
 // Before first paint, so there's no flash of the wrong palette.
 applyTheme(getSettings().theme, getSettings().customAccent);
@@ -84,12 +89,25 @@ jsLog("info", "webview booting");
 // PTY children survive and keep draining into bounded Rust rings; orphaned
 // native browser views are closed because their React owners cannot survive a
 // page replacement. App reconciles the returned sessions after projects mount.
-const rendererReady = ptyRendererRegister()
+const registerRenderer = async () => {
+  let retryMs = 100;
+  while (true) {
+    try {
+      return await ptyRendererRegister();
+    } catch (err) {
+      jsLog("error", `renderer registration failed; retrying: ${err}`);
+      await new Promise<void>((resolve) => window.setTimeout(resolve, retryMs));
+      retryMs = Math.min(retryMs * 2, 2_000);
+    }
+  }
+};
+const rendererReady = registerRenderer()
   .then(async (registration) => {
     await installEarlyWatchdogHeartbeat();
+    const selftest = await selftestConfig();
+    configureSelftestPtyListenerFailures(selftest?.listenerFailures ?? 0);
     return registration;
-  })
-  .catch((err) => jsLog("error", `renderer registration failed: ${err}`));
+  });
 // A native panic from a previous run parks a report on disk; flush it now if
 // the user is opted in (the backend clears it either way, so it's offered once).
 void import("./crash").then(({ flushPendingCrash }) => flushPendingCrash());

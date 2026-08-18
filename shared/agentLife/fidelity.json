@@ -80,6 +80,28 @@
       "notification": "none",
       "verifiedAt": "2026-08-03",
       "$note": "The plugin normalizes agent.start/end and tool.result with explicit lifecycle signals. No reliable permission event is installed, so blocked-on-user remains unprovable and decays to unknown rather than being fabricated."
+    },
+    {
+      "id": "cursor",
+      "endsSession": ["SessionEnd"],
+      "endsTurn": ["Stop"],
+      "startsTurn": ["UserPromptSubmit"],
+      "toolActivity": ["PostToolUse", "PostToolUseFailure"],
+      "structuredBlock": [],
+      "notification": "none",
+      "verifiedAt": "2026-08-18",
+      "$note": "Cursor hooks expose turn and tool boundaries, but no permission or notification event that proves the CLI is waiting for a person."
+    },
+    {
+      "id": "grok",
+      "endsSession": ["SessionEnd"],
+      "endsTurn": ["Stop", "StopFailure", "StopCancelled"],
+      "startsTurn": ["UserPromptSubmit"],
+      "toolActivity": ["PostToolUse", "PostToolUseFailure"],
+      "structuredBlock": ["Notification"],
+      "notification": "block",
+      "verifiedAt": "2026-08-18",
+      "$note": "Grok's global hooks report all turn endings plus idle_prompt and permission_prompt notifications; Canopy maps each matcher to an explicit signal and ignores subagent events."
     }
   ]
 }

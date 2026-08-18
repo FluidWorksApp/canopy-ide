@@ -41,6 +41,18 @@ function setupBody(id: string): string {
   return "";
 }
 
+const cursorEvent: Record<string, string> = {
+  SessionEnd: "sessionEnd",
+  Stop: "stop",
+  UserPromptSubmit: "beforeSubmitPrompt",
+  PostToolUse: "postToolUse",
+  PostToolUseFailure: "postToolUseFailure",
+};
+
+function registers(body: string, id: string, event: string): boolean {
+  return body.includes(event) || (id === "cursor" && body.includes(cursorEvent[event] ?? event));
+}
+
 describe("the fidelity manifest matches the installers", () => {
   it("covers exactly the supported agents", () => {
     const supported = [
@@ -70,7 +82,7 @@ describe("the fidelity manifest matches the installers", () => {
       for (const ev of claimed) {
         // "PreToolUse:AskUserQuestion" is registered as an event plus a matcher.
         for (const part of ev.split(":")) {
-          if (!body.includes(part)) missing.push(`${f.id} claims ${ev} (${part})`);
+          if (!registers(body, f.id, part)) missing.push(`${f.id} claims ${ev} (${part})`);
         }
       }
     }
@@ -79,7 +91,7 @@ describe("the fidelity manifest matches the installers", () => {
 
   it("only lets a CLI that registers SessionEnd claim it can end a session", () => {
     for (const f of ALL_FIDELITY) {
-      const registersEnd = setupBody(f.id).includes("SessionEnd");
+      const registersEnd = registers(setupBody(f.id), f.id, "SessionEnd");
       expect(
         f.endsSession.length > 0,
         `${f.id}: endsSession must match whether its installer registers SessionEnd`,

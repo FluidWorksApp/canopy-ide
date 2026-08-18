@@ -85,6 +85,10 @@ import {
   terminalMemoryPromptsVisible,
 } from "./terminalMemoryPromptVisibility";
 import { spawnedAgentTakesFocus } from "./agentSpawn";
+import {
+  projectForTerminalCwd,
+  terminalAttachmentQueue,
+} from "./terminalAttachmentQueue";
 import { readRemoteThemeTokens } from "./remoteTheme";
 import { useTabDrag } from "./tabDrag";
 import * as prWatch from "./prWatchStore";
@@ -247,6 +251,8 @@ function publishScopes(state: WorkspaceState) {
 export default function App() {
   const [ws, setWs] = useState<WorkspaceState>(emptyWorkspace);
   const [loaded, setLoaded] = useState(false);
+  const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(null);
+  const [workspaceLoadAttempt, setWorkspaceLoadAttempt] = useState(0);
   const [dialog, setDialog] = useState<
     { mode: "new" } | { mode: "edit"; project: Project } | null
   >(null);
@@ -923,7 +929,10 @@ export default function App() {
   // A tab that was asleep when the app last quit comes back asleep — and a
   // sleeping project watches nothing, so it registers nothing until it wakes.
   useEffect(() => {
+    let cancelled = false;
+    setWorkspaceLoadError(null);
     void loadWorkspace().then(async (loadedState) => {
+      if (cancelled) return;
       // Give legacy project structure stable identity, then move old app-wide
       // custom tasks onto their project. Both are one-shot, persisted before
       // anything reads the workspace.
@@ -946,6 +955,8 @@ export default function App() {
               ?.components.map((c) => c.path) ?? [],
         );
       await Promise.all(paths.map((p) => ipc.workspaceAdd(p).catch(() => {})));
+    }).catch((error) => {
+      if (!cancelled) setWorkspaceLoadError(String(error));
     });
     const subs = [
       ipc.onAgentEvents((raws) => {
@@ -1324,13 +1335,14 @@ export default function App() {
       .then(setRelayStatus)
       .catch(() => {});
     return () => {
+      cancelled = true;
       window.removeEventListener("keydown", keys);
       window.removeEventListener("canopy:open-settings", openSettings);
       if (zoomHideTimer.current !== null)
         window.clearTimeout(zoomHideTimer.current);
       subs.forEach((s) => void s.then((fn) => fn()));
     };
-  }, []);
+  }, [workspaceLoadAttempt]);
 
   // First launch on this machine: greet with the walkthrough once the
   // workspace has loaded (so it sits above the empty Welcome, not a blank app).
@@ -1519,6 +1531,16 @@ export default function App() {
                   p.components.some((c) => c.path === dir),
                 )?.id,
             }))
+          : cfg.scenario === "terminal-recovery"
+            ? import("./selftest/terminalRecoverySelftest").then((m) =>
+                m.runTerminalRecoverySelftest(cfg, {
+                  openDirAsProject,
+                  projectIdFor: (dir) =>
+                    wsRef.current.projects.find((p) =>
+                      p.components.some((c) => c.path === dir),
+                    )?.id,
+                }),
+              )
           : Promise.reject(new Error(`unknown selftest scenario: ${cfg.scenario}`));
       void scenario
         // A scenario that cannot even start must still report, or the run ends
@@ -1564,12 +1586,17 @@ export default function App() {
       // After the updater returns — a disk write and an IPC don't belong in
       // the render phase.
       queueMicrotask(() => {
-        void saveWorkspace(next);
+        void saveWorkspaceStrict(next).catch((error) => {
+          notify("Workspace changes are not saved", "error", {
+            body: String(error),
+            dedupe: "workspace-save-failed",
+          });
+        });
         publishScopes(next);
       });
       return next;
     });
-  }, []);
+  }, [notify]);
 
   const openProject = useCallback(
     async (id: string) => {
@@ -1912,95 +1939,157 @@ export default function App() {
   );
   useEffect(() => startSpotIndexJob(() => spotRoots.current), []);
 
+  // A project may be added after a failed/corrupt workspace read left this
+  // renderer with no routing map. Keep native lifetime identities already
+  // handed off, while retrying only the unmatched ones when roots change.
+  const routedTerminalIdentities = useRef(new Set<string>());
+  const endedTerminalIdentities = useRef(new Set<string>());
+  const terminalProjectSignature = useMemo(
+    () =>
+      JSON.stringify(
+        ws.projects.map((project) => [
+          project.id,
+          project.components.map((component) => component.path),
+        ]),
+      ),
+    [ws.projects],
+  );
+
   // A PTY opened from the phone (spawn_headless emits pty:spawned). Route it to
   // the project whose component path most-specifically contains its cwd, open
   // that project, and hand the tab to its ProjectView. The desktop mirrors the
   // agent the phone started — same session, both surfaces driving one PTY.
   useEffect(() => {
-    const norm = (p: string) => {
-      const normalized = p.replaceAll("\\", "/").replace(/\/+$/, "");
-      // Windows drive paths are case-insensitive; POSIX paths are not.
-      return /^[A-Za-z]:\//.test(normalized)
-        ? normalized.toLocaleLowerCase()
-        : normalized;
-    };
-    // Deepest matching component path wins, so a broad root never steals an
-    // agent from a nested project (mirrors model.ts bestProjectId).
-    const projectForCwd = (cwd: string): string | undefined => {
-      const c = norm(cwd);
-      let bestId: string | undefined;
-      let bestLen = -1;
-      for (const p of wsRef.current.projects) {
-        for (const comp of p.components) {
-          const r = norm(comp.path);
-          if (r && (c === r || c.startsWith(r + "/")) && r.length > bestLen) {
-            bestLen = r.length;
-            bestId = p.id;
-          }
-        }
-      }
-      return bestId;
-    };
-    let un: (() => void) | undefined;
+    // Renderer registration happens before React mounts, while workspace
+    // hydration is asynchronous. Routing against the initial empty workspace
+    // classifies every surviving PTY as outside a project. Wait for the
+    // persisted project map; after the listener is live, reconcile against a
+    // fresh native snapshot so a phone spawn during hydration is not trapped
+    // between the boot snapshot and this listener.
+    if (!loaded) return;
+    let cancelled = false;
+    let unSpawn: (() => void) | undefined;
+    let unExit: (() => void) | undefined;
+    let listenerRetry: number | undefined;
+    let snapshotRetry: number | undefined;
+    let snapshotInFlight = false;
+    let listenerInFlight = false;
     const routePty = async (
       e: ipc.PtySpawned | ipc.PtySummary,
       restored = false,
     ) => {
-        const projectId = projectForCwd(e.cwd);
-        if (!projectId) {
-          notify(
-            `An active terminal is in ${e.cwd}, outside any project.`,
-            "info",
-          );
+      const identity = `${e.id}:${e.session_generation}`;
+      if (
+        routedTerminalIdentities.current.has(identity) ||
+        endedTerminalIdentities.current.has(identity)
+      ) return;
+      const projectId =
+        (e.project_id && wsRef.current.projects.some((project) => project.id === e.project_id)
+          ? e.project_id
+          : undefined) ?? projectForTerminalCwd(wsRef.current.projects, e.cwd);
+      if (!projectId) {
+        notify(
+          `An active terminal is in ${e.cwd}, outside any project.`,
+          "info",
+          { dedupe: `unrouted-terminal:${identity}` },
+        );
+        return;
+      }
+      await prepareProjectForAgentAction(
+        projectId,
+        restored ? false : getSettings().agentAskForAttention,
+      );
+      if (cancelled || endedTerminalIdentities.current.has(identity)) return;
+      // The queue is the acknowledgement boundary. A closed or hibernated
+      // project's view may mount much later than this async preparation;
+      // delivery waits for that mount instead of betting the PTY on a timer.
+      terminalAttachmentQueue.enqueue({
+        projectId,
+        ptyId: e.id,
+        sessionGeneration: e.session_generation,
+        cwd: e.cwd,
+        name: e.name,
+        title: e.title,
+        // Recovery must not steal focus or manufacture attention.
+        activate: restored ? false : getSettings().agentAskForAttention,
+        // Desktop-owned sessions were previously killed by their tab.
+        killOnClose: "kind" in e && e.kind === "desktop",
+      });
+      routedTerminalIdentities.current.add(identity);
+    };
+    const terminalEnded = (e: ipc.PtyExit) => {
+      const identity = `${e.id}:${e.session_generation}`;
+      endedTerminalIdentities.current.add(identity);
+      routedTerminalIdentities.current.delete(identity);
+      terminalAttachmentQueue.discard(e.id, e.session_generation);
+    };
+    const scheduleSnapshotRetry = () => {
+      if (cancelled || snapshotRetry != null) return;
+      snapshotRetry = window.setTimeout(() => {
+        snapshotRetry = undefined;
+        reconcile();
+      }, 1_000);
+    };
+    const reconcile = () => {
+      if (cancelled || snapshotInFlight) return;
+      snapshotInFlight = true;
+      void ipc
+        .rendererPtySessionsLive()
+        .then((sessions) => {
+          if (cancelled) return;
+          for (const session of sessions) {
+            if (session.kind !== "detached") void routePty(session, true);
+          }
+        })
+        .catch(scheduleSnapshotRetry)
+        .finally(() => {
+          snapshotInFlight = false;
+        });
+    };
+    const install = () => {
+      if (cancelled || listenerInFlight || (unSpawn && unExit)) return;
+      listenerInFlight = true;
+      void Promise.allSettled([
+        ipc.onPtySpawned((e) => void routePty(e)),
+        ipc.onPtyExit(terminalEnded),
+      ]).then(([spawnResult, exitResult]) => {
+        listenerInFlight = false;
+        const spawn = spawnResult.status === "fulfilled" ? spawnResult.value : undefined;
+        const exit = exitResult.status === "fulfilled" ? exitResult.value : undefined;
+        if (cancelled) {
+          spawn?.();
+          exit?.();
           return;
         }
-        await prepareProjectForAgentAction(
-          projectId,
-          restored ? false : getSettings().agentAskForAttention,
-        );
-        // A beat so a not-yet-open project's ProjectView mounts and registers
-        // its listener before the event fires; attachTerminal is idempotent by
-        // pty id, so a redundant dispatch just re-focuses the tab. A timer, not
-        // requestAnimationFrame: rAF stops firing while the window is occluded,
-        // and these flows start from an agent/phone precisely when the user is
-        // looking elsewhere. React commits (and timers) run fine unpainted.
-        window.setTimeout(
-          () =>
-            window.dispatchEvent(
-              new CustomEvent("canopy:attach-terminal", {
-                detail: {
-                  projectId,
-                  ptyId: e.id,
-                  cwd: e.cwd,
-                  name: e.name,
-                  title: e.title,
-                  // Recovery must not steal focus or manufacture attention.
-                  activate: restored ? false : getSettings().agentAskForAttention,
-                  // Desktop-owned sessions were previously killed by their
-                  // tab. Preserve that ownership after converting the restored
-                  // tab into an attachment; remote sessions remain viewers.
-                  killOnClose: "kind" in e && e.kind === "desktop",
-                },
-              }),
-            ),
-          80,
-        );
-    };
-    void ipc
-      .onPtySpawned((e) => routePty(e))
-      .then((u) => {
-        un = u;
-      })
-      .catch(() => {})
-      .finally(() => {
-        // Listener first, then recovery: a remote spawn racing this pass is
-        // harmless because attachTerminal is idempotent by PTY id.
-        for (const session of ipc.rendererPtySessions()) {
-          if (session.kind !== "detached") void routePty(session, true);
+        if (spawn && exit) {
+          unSpawn = spawn;
+          unExit = exit;
+          reconcile();
+          return;
+        }
+        // Treat the pair as one boundary. Keeping only the successful half
+        // leaks listeners across retries and still permits either missed spawns
+        // or stale post-exit delivery.
+        spawn?.();
+        exit?.();
+        reconcile();
+        if (listenerRetry == null) {
+          listenerRetry = window.setTimeout(() => {
+            listenerRetry = undefined;
+            install();
+          }, 1_000);
         }
       });
-    return () => un?.();
-  }, [notify, prepareProjectForAgentAction]);
+    };
+    install();
+    return () => {
+      cancelled = true;
+      if (listenerRetry != null) window.clearTimeout(listenerRetry);
+      if (snapshotRetry != null) window.clearTimeout(snapshotRetry);
+      unSpawn?.();
+      unExit?.();
+    };
+  }, [loaded, notify, prepareProjectForAgentAction, terminalProjectSignature]);
 
   // A clicked notification, or a `canopy 'canopy://…'` from a terminal.
   //
@@ -3342,6 +3431,21 @@ export default function App() {
     );
   }, []);
 
+  if (workspaceLoadError) {
+    return (
+      <main className="workspace-load-failure">
+        <h1>Your workspace was not replaced with an empty one</h1>
+        <p>
+          Canopy could not safely read either the workspace or its last-known-good
+          backup. No workspace changes will be saved until loading succeeds.
+        </p>
+        <pre>{workspaceLoadError}</pre>
+        <button type="button" onClick={() => setWorkspaceLoadAttempt((value) => value + 1)}>
+          Retry loading
+        </button>
+      </main>
+    );
+  }
   if (!loaded) return null;
 
   return (

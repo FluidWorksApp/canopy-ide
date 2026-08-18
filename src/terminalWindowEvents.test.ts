@@ -1,8 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { onDragDropEvent, unlisten } = vi.hoisted(() => ({
+const { onDragDropEvent, unlisten, drag } = vi.hoisted(() => ({
   onDragDropEvent: vi.fn(),
   unlisten: vi.fn(),
+  drag: {
+    handler: undefined as
+      | ((event: {
+          payload:
+            | { type: "drop"; paths: string[]; position: { x: number; y: number } }
+            | { type: "leave" };
+        }) => void)
+      | undefined,
+  },
 }));
 
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
@@ -27,7 +36,11 @@ const target = (active: () => boolean): TerminalWindowEventTarget => ({
 describe("terminal window event router", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    onDragDropEvent.mockResolvedValue(unlisten);
+    drag.handler = undefined;
+    onDragDropEvent.mockImplementation((handler) => {
+      drag.handler = handler;
+      return Promise.resolve(unlisten);
+    });
   });
 
   it("installs one listener set and routes active-only input", async () => {
@@ -88,5 +101,41 @@ describe("terminal window event router", () => {
     });
     firstOff();
     vi.useRealTimers();
+  });
+
+  it("routes a drop to the visible split pane under the pointer", async () => {
+    const active = target(() => true);
+    active.containsPoint = (x) => x < 100;
+    const hovered = target(() => false);
+    hovered.containsPoint = (x) => x >= 100 && x < 200;
+    const offActive = registerTerminalWindowEvents(active);
+    const offHovered = registerTerminalWindowEvents(hovered);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    drag.handler?.({
+      payload: {
+        type: "drop",
+        paths: ["/tmp/reference image.png"],
+        position: { x: 150, y: 20 },
+      },
+    });
+    expect(hovered.dropPaths).toHaveBeenCalledWith(["/tmp/reference image.png"]);
+    expect(active.dropPaths).not.toHaveBeenCalled();
+
+    // Another drop surface can sit over a terminal. If the release is outside
+    // every visible terminal, do not paste into the previously focused shell.
+    drag.handler?.({
+      payload: {
+        type: "drop",
+        paths: ["/tmp/not-for-the-shell.png"],
+        position: { x: 250, y: 20 },
+      },
+    });
+    expect(active.dropPaths).not.toHaveBeenCalled();
+    expect(hovered.dropPaths).toHaveBeenCalledTimes(1);
+
+    offActive();
+    offHovered();
   });
 });

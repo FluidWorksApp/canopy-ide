@@ -639,16 +639,131 @@ fn store_path() -> Result<std::path::PathBuf, String> {
 #[tauri::command]
 pub async fn store_load() -> Result<String, String> {
     let path = store_path()?;
-    if !path.exists() {
-        return Ok("null".into());
-    }
-    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+    store_load_from(&path)
 }
 
 #[tauri::command]
 pub async fn store_save(data: String) -> Result<(), String> {
     let path = store_path()?;
-    std::fs::write(&path, data).map_err(|e| e.to_string())
+    store_save_to(&path, &data)
+}
+
+fn workspace_body_valid(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("projects")?.as_array().cloned())
+        .is_some()
+}
+
+fn store_backup_path(path: &Path) -> PathBuf {
+    path.with_extension("json.bak")
+}
+
+/// A missing primary with a valid backup is the expected crash window between
+/// atomic renames. A corrupt primary also falls back without telling the
+/// renderer it has a genuinely empty workspace.
+fn store_load_from(path: &Path) -> Result<String, String> {
+    let backup = store_backup_path(path);
+    let read_valid = |candidate: &Path| -> Result<Option<String>, String> {
+        match std::fs::read_to_string(candidate) {
+            Ok(body) if workspace_body_valid(&body) => Ok(Some(body)),
+            Ok(_) => Err(format!(
+                "{} is not a valid Canopy workspace",
+                candidate.display()
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("read {}: {error}", candidate.display())),
+        }
+    };
+
+    match read_valid(path) {
+        Ok(Some(body)) => Ok(body),
+        Ok(None) if !backup.exists() => Ok("null".into()),
+        primary => match read_valid(&backup) {
+            Ok(Some(body)) => {
+                log::error!(
+                    "workspace store recovered from {} after primary failure: {:?}",
+                    backup.display(),
+                    primary
+                );
+                Ok(body)
+            }
+            backup_error => Err(format!(
+                "workspace primary unavailable ({primary:?}); backup unavailable ({backup_error:?})"
+            )),
+        },
+    }
+}
+
+/// Write and sync beside the target, retain the previous valid generation as a
+/// backup, then publish by rename. A corrupt old primary is quarantined instead
+/// of replacing the last-known-good backup.
+fn store_save_to(path: &Path, data: &str) -> Result<(), String> {
+    use std::io::Write;
+
+    if !workspace_body_valid(data) {
+        return Err("refusing to persist an invalid Canopy workspace".into());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent", path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("projects.json");
+    let tmp = parent.join(format!(".{name}.tmp-{}-{stamp}", std::process::id()));
+    let write_result = (|| -> Result<(), String> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|error| error.to_string())?;
+        file.write_all(data.as_bytes())
+            .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+
+    let backup = store_backup_path(path);
+    let mut rotated_valid_primary = false;
+    if path.exists() {
+        let current_valid = std::fs::read_to_string(path)
+            .map(|body| workspace_body_valid(&body))
+            .unwrap_or(false);
+        if current_valid {
+            // Safe to remove the prior backup: the primary remains valid until
+            // the following rename succeeds.
+            let _ = std::fs::remove_file(&backup);
+            std::fs::rename(path, &backup)
+                .map_err(|error| format!("back up workspace: {error}"))?;
+            rotated_valid_primary = true;
+        } else {
+            let corrupt = parent.join(format!("{name}.corrupt-{}-{stamp}", std::process::id()));
+            std::fs::rename(path, &corrupt)
+                .map_err(|error| format!("quarantine corrupt workspace: {error}"))?;
+        }
+    }
+
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        if rotated_valid_primary && !path.exists() {
+            let _ = std::fs::rename(&backup, path);
+        }
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("publish workspace: {error}"));
+    }
+    #[cfg(unix)]
+    if let Ok(directory) = std::fs::File::open(parent) {
+        let _ = directory.sync_all();
+    }
+    Ok(())
 }
 
 // Workspace/project export + import. These deliberately sit outside the
@@ -1167,6 +1282,56 @@ mod tests {
     fn write(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    fn workspace(label: &str) -> String {
+        format!(r#"{{"projects":[{{"id":"{label}"}}],"openIds":[],"activeId":null}}"#)
+    }
+
+    fn workspace_test_path(label: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!(
+                "canopy-workspace-{label}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ))
+            .join("projects.json")
+    }
+
+    #[test]
+    fn workspace_store_keeps_a_last_known_good_generation() {
+        let path = workspace_test_path("backup");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+        store_save_to(&path, &workspace("one")).unwrap();
+        store_save_to(&path, &workspace("two")).unwrap();
+        assert!(store_load_from(&path).unwrap().contains("two"));
+        assert!(std::fs::read_to_string(store_backup_path(&path))
+            .unwrap()
+            .contains("one"));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn workspace_store_recovers_backup_instead_of_returning_empty() {
+        let path = workspace_test_path("recover");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+        store_save_to(&path, &workspace("one")).unwrap();
+        store_save_to(&path, &workspace("two")).unwrap();
+        std::fs::write(&path, "{truncated").unwrap();
+        let recovered = store_load_from(&path).unwrap();
+        assert!(recovered.contains("one"));
+        assert!(!recovered.contains("two"));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn workspace_store_rejects_invalid_new_state_without_touching_disk() {
+        let path = workspace_test_path("refuse");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+        store_save_to(&path, &workspace("safe")).unwrap();
+        assert!(store_save_to(&path, "{}").is_err());
+        assert!(store_load_from(&path).unwrap().contains("safe"));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     /// The other half of replacing the polls: a burst has to arrive as one

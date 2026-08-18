@@ -43,13 +43,29 @@ describe("LaunchPalette", () => {
     await userEvent.keyboard("{Enter}");
     expect(onLaunchCli).toHaveBeenCalledWith(
       expect.objectContaining({ id: "claude" }),
+      "workspace",
     );
   });
 
   it("moves the selection with the arrow keys", async () => {
     const { onLaunchCli } = open();
     await userEvent.keyboard("{ArrowDown}{Enter}");
-    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0]);
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "workspace");
+  });
+
+  it("offers an explicit current-checkout launch", async () => {
+    const cli = claude();
+    const { onLaunchCli } = open({ installed: { [cli.bin]: true } });
+    await userEvent.click(
+      screen.getByRole("button", { name: `Open ${cli.name} in the current checkout` }),
+    );
+    expect(onLaunchCli).toHaveBeenCalledWith(cli, "current");
+  });
+
+  it("uses Shift+Enter for the current checkout", async () => {
+    const { onLaunchCli } = open();
+    await userEvent.keyboard("{ArrowDown}{Shift>}{Enter}{/Shift}");
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "current");
   });
 
   it("does not run off the end of the list", async () => {

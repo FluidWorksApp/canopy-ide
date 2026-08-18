@@ -90,6 +90,8 @@ export const MODEL_SWITCH: Record<string, ModelSwitch> = {
   // Verified against omp 17.x's extension/lifecycle docs and interactive
   // command: `/model` opens the active account's model selector.
   omp: { kind: "picker", command: "/model" },
+  cursor: { kind: "picker", command: "/model" },
+  grok: { kind: "picker", command: "/model" },
   // Deliberately absent — nothing here could be verified:
   //   amp: its only "/model" string is a `provider/model` format error.
 };

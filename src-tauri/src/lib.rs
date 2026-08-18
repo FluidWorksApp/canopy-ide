@@ -15,6 +15,7 @@ mod companion;
 mod containment;
 mod context;
 mod crash;
+mod execution;
 #[cfg(feature = "dictation")]
 mod dictation;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
@@ -432,6 +433,7 @@ pub fn run() {
         // while Canopy isn't the focused app.
         .plugin(tauri_plugin_notification::init())
         .manage(pty::PtyManager::default())
+        .manage(execution::ExecutionRegistry::default())
         .manage(fsx::WorkspaceManager::default())
         .manage(lsp::LspManager::default())
         .manage(relay::RelayManager::default())
@@ -570,7 +572,11 @@ pub fn run() {
             cli::cli_install_shim,
             notify::notify_native,
             selftest::selftest_config,
+            selftest::selftest_checkpoint,
+            selftest::selftest_checkpoint_save,
             selftest::selftest_finish,
+            selftest::selftest_reload_renderer,
+            selftest::selftest_spawn_remote,
             selftest::selftest_store_contains,
             companion::companion_spawn,
             companion::companion_write,
@@ -607,6 +613,7 @@ pub fn run() {
             workflow::workflow_run_resume,
             workflow::workflow_run_list,
             workflow::workflow_run_get,
+            execution::environment_identity,
             pty::pty_spawn,
             pty::pty_spawn_detached,
             pty::pty_spawn_argv,
@@ -615,6 +622,7 @@ pub fn run() {
             pty::pty_attach_desktop,
             pty::pty_detach_desktop,
             pty::pty_renderer_register,
+            pty::pty_renderer_sessions,
             pty::pty_write,
             pty::pty_ack,
             pty::pty_resize,
@@ -702,6 +710,7 @@ pub fn run() {
             provenance::provenance_for_session,
             provenance::provenance_backfill,
             spot::spot_save_context_text,
+            spot::spot_stage_drop_images,
             fsx::workspace_add,
             fsx::workspace_remove,
             fsx::workspace_list,
@@ -949,6 +958,13 @@ pub fn run() {
                 app.state::<prwatch::PrWatcher>().shutdown();
                 // ... and stop watching the pasteboard.
                 app.state::<clipboard::Clipboard>().shutdown();
+                // AppHandle::exit(code) does not propagate that code through
+                // wry's macOS event-loop return. Cleanup is complete here, so
+                // make a selftest report authoritative for CI before Tauri can
+                // turn every scenario into process status 0.
+                if let Some(code) = selftest::exit_code() {
+                    std::process::exit(code);
+                }
             }
         });
 }

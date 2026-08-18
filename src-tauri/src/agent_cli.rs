@@ -28,6 +28,8 @@ pub enum IntegrationAdapter {
     Antigravity,
     OpenCode,
     Omp,
+    Cursor,
+    Grok,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,6 +107,24 @@ pub const AGENT_CLIS: &[AgentCliManifest] = &[
         account_probe: AccountProbe::Unknown,
         integration: Some(IntegrationAdapter::Omp),
         mesh_reader: false,
+    },
+    AgentCliManifest {
+        id: "cursor",
+        bin: "cursor-agent",
+        aliases: &[],
+        profile_isolation: None,
+        account_probe: AccountProbe::Unknown,
+        integration: Some(IntegrationAdapter::Cursor),
+        mesh_reader: true,
+    },
+    AgentCliManifest {
+        id: "grok",
+        bin: "grok",
+        aliases: &[],
+        profile_isolation: None,
+        account_probe: AccountProbe::Unknown,
+        integration: Some(IntegrationAdapter::Grok),
+        mesh_reader: true,
     },
 ];
 

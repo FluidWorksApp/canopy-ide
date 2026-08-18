@@ -23,6 +23,18 @@ export interface SpawnPlacementTab {
 export const spawnedAgentTakesFocus = (agentAskForAttention: boolean) =>
   agentAskForAttention;
 
+/** Branch name for a generic agent workspace. */
+export function agentWorkspaceBranch(agentId: string, now = new Date()): string {
+  const safeAgent = agentId.toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
+  const stamp = now
+    .toISOString()
+    .replace(/[-:]/g, "")
+    .replace("T", "-")
+    .replace("Z", "")
+    .replace(".", "-");
+  return `agent/${safeAgent || "agent"}-${stamp}`;
+}
+
 /** Add a new terminal to the existing mux tree without inventing a second
  * geometry model. A missing/stale target is an honest placement failure: the
  * caller can retry as a plain tab instead of silently landing elsewhere. */

@@ -15,6 +15,7 @@ import {
 import {
   CLAUDE_RUNNER,
   CODEX_RUNNER,
+  CURSOR_RUNNER,
   type StructuredRunner,
 } from "./structuredRunners";
 import {
@@ -441,20 +442,17 @@ export function adoptProjectStructureIds(state: WorkspaceState): WorkspaceState 
 }
 
 export async function loadWorkspace(): Promise<WorkspaceState> {
-  try {
-    const raw = await invoke<string>("store_load");
-    const parsed = JSON.parse(raw);
-    if (parsed && Array.isArray(parsed.projects)) {
-      return {
-        projects: parsed.projects,
-        openIds: Array.isArray(parsed.openIds) ? parsed.openIds : [],
-        activeId: parsed.activeId ?? null,
-      };
-    }
-  } catch (err) {
-    console.warn("workspace load failed", err);
+  const raw = await invoke<string>("store_load");
+  const parsed = JSON.parse(raw);
+  if (parsed == null) return emptyWorkspace;
+  if (!Array.isArray(parsed.projects)) {
+    throw new Error("saved workspace has no projects array");
   }
-  return emptyWorkspace;
+  return {
+    projects: parsed.projects,
+    openIds: Array.isArray(parsed.openIds) ? parsed.openIds : [],
+    activeId: parsed.activeId ?? null,
+  };
 }
 
 /** Custom tasks used to be app-wide, kept in settings. They're a project's
@@ -755,6 +753,9 @@ export interface AgentCliCapabilities {
   approvalInput?: "keystroke";
   terminalMinimumContrast?: number;
   eventSessionLookup?: true;
+  /** Usage snapshots belong to one conversation and must not fall back to the
+   *  newest machine-wide store entry when no active session is known. */
+  planUsageRequiresSession?: true;
   /** Conversation history is not safely restorable without a human prompt. */
   restoreRequiresHumanPrompt?: true;
   /** A locally unobservable subscription limit worth disclosing beside usage. */
@@ -941,6 +942,7 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       profiles: true,
       managedIntegration: true,
       approvalInput: "keystroke",
+      planUsageRequiresSession: true,
       terminalMinimumContrast: 4.5,
       routingModelFamily: "openai",
       conversationStore: { path: "~/.codex/sessions/**/rollout-*.jsonl", open: "session" },
@@ -1192,11 +1194,52 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
       ],
     },
   },
+  {
+    id: "cursor",
+    name: "Cursor Agent",
+    bin: "cursor-agent",
+    icon: "⌁",
+    brandColor: "#ffffff",
+    capabilities: {
+      managedIntegration: true,
+    },
+    structuredRunner: CURSOR_RUNNER,
+    modelSwitch: MODEL_SWITCH.cursor,
+    install: "curl https://cursor.com/install -fsS | bash",
+    update: "cursor-agent update",
+    resume: (id, bin) => `${bin} --resume ${id}`,
+    prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
+    skipPermissions: "--force",
+    execution: {
+      fields: [modelField(undefined, "model")],
+      launchArgs: (config) => option("--model", config.model),
+    },
+  },
+  {
+    id: "grok",
+    name: "Grok Build",
+    bin: "grok",
+    icon: "𝕏",
+    brandColor: "#ffffff",
+    capabilities: {
+      managedIntegration: true,
+    },
+    modelSwitch: MODEL_SWITCH.grok,
+    install: "curl -fsSL https://x.ai/cli/install.sh | bash",
+    update: "grok update",
+    resume: (id, bin) => `${bin} --resume ${id}`,
+    prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
+    skipPermissions: "--always-approve",
+    execution: {
+      fields: [modelField(undefined, "model")],
+      launchArgs: (config) => option("--model", config.model),
+    },
+  },
 ];
 
 /** Agents users run by hand that we don't ship a launcher entry for. Their id
  *  is their bin: enough to name a row and pick an icon where one exists. */
-const EXTRA_AGENT_BINS = ["gemini", "goose", "copilot", "cursor-agent", "qwen", "droid"];
+const EXTRA_AGENT_BINS = ["gemini", "goose", "copilot", "qwen", "droid"];
 
 /** Last path segment of a command, folded the same way the process resolver
  *  folds what it observes (case, `.exe`), so an override written as a full path

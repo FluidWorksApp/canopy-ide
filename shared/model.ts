@@ -7,6 +7,7 @@ import { NO_ATTENTION, agentLife, bucketFor } from './agentLife'
 // rows however its layout demands.
 
 export interface Component {
+  id?: string
   label: string
   path: string
 }
@@ -81,6 +82,16 @@ export interface Pty {
   id: number
   cwd: string
   title: string
+  project_id?: string | null
+  execution_context?: {
+    environmentId: string
+    projectId: string
+    componentId?: string | null
+    workspaceId: string
+    workspacePath: string
+    runId?: string | null
+    attemptId?: string | null
+  } | null
 }
 
 /** Token/cost roll-up per session (agent_usage). */

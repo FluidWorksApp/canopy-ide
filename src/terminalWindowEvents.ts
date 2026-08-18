@@ -4,6 +4,8 @@ import { THEME_CHANGE_EVENT } from "./settings";
 
 export interface TerminalWindowEventTarget {
   active: () => boolean;
+  /** Hit-test a drop in CSS pixels. */
+  containsPoint?: (x: number, y: number) => boolean;
   focus: () => void;
   insertText: (text: string) => void;
   dropPaths: (paths: string[]) => void;
@@ -24,6 +26,14 @@ const activeTarget = () => {
   return undefined;
 };
 
+const targetAt = (x: number, y: number) => {
+  const dpr = window.devicePixelRatio || 1;
+  const cssX = x / dpr;
+  const cssY = y / dpr;
+  const hits = [...targets].filter((target) => target.containsPoint?.(cssX, cssY));
+  return hits.find((target) => target.active()) ?? hits[0];
+};
+
 const onFocus = () => activeTarget()?.focus();
 const onInsertText = (event: Event) => {
   const text = (event as CustomEvent).detail;
@@ -38,7 +48,10 @@ const installDropListener = () => {
   dropInstall = getCurrentWebviewWindow()
     .onDragDropEvent((event) => {
       if (event.payload.type !== "drop" || !event.payload.paths.length) return;
-      activeTarget()?.dropPaths(event.payload.paths);
+      // Focus may move while an OS drag crosses a split pane.
+      targetAt(event.payload.position.x, event.payload.position.y)?.dropPaths(
+        event.payload.paths,
+      );
     })
     .then((unlisten) => {
       if (targets.size === 0) unlisten();
