@@ -58,6 +58,9 @@ describe("renderer recovery wiring", () => {
     );
     expect(recovery).toContain("terminalAttachmentQueue.enqueue");
     expect(recovery).toContain("e.project_id");
+    expect(recovery).toContain("run: Boolean(e.run)");
+    expect(recovery).toContain("runCommandId: e.run_command_id");
+    expect(project).toContain("run: presentation?.run || undefined");
     expect(recovery).not.toContain('new CustomEvent("canopy:attach-terminal"');
     expect(project).toContain("terminalAttachmentQueue.subscribe(project.id");
   });

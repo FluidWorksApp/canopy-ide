@@ -109,6 +109,9 @@ export interface PtySummary extends PtyGeometry {
   /** Stable owner for desktop sessions; null for remote/detached sessions. */
   project_id?: string | null;
   execution_context?: ExecutionContext | null;
+  run?: boolean;
+  command?: string | null;
+  run_command_id?: string | null;
   replay_start: number;
   replay_end: number;
 }
@@ -214,6 +217,7 @@ export async function ptySpawn(
     /** Native recovery identity for the ProjectView that owns this tab. */
     projectId?: string;
     componentId?: string;
+    runCommandId?: string;
     workspacePath?: string;
   },
   onData: (chunk: PtyChunk) => void,
@@ -288,6 +292,7 @@ export async function ptySpawnAttachedArgv(
     attemptId?: string;
     projectId?: string;
     componentId?: string;
+    runCommandId?: string;
     workspacePath?: string;
   },
   onData: (chunk: PtyChunk) => void,
@@ -376,6 +381,9 @@ export interface PtySpawned {
   rows: number;
   project_id?: string | null;
   execution_context?: ExecutionContext | null;
+  run?: boolean;
+  command?: string | null;
+  run_command_id?: string | null;
 }
 export const onPtySpawned = (
   cb: (e: PtySpawned) => void,

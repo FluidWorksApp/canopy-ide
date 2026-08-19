@@ -10,6 +10,10 @@ export interface TerminalAttachment {
   cwd: string;
   name?: string;
   title: string;
+  run: boolean;
+  command?: string;
+  componentId?: string;
+  runCommandId?: string;
   activate: boolean;
   killOnClose: boolean;
 }

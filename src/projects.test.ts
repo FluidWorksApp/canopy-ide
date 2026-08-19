@@ -261,7 +261,7 @@ describe("dangerouslySkipPermissions", () => {
     expect(startCommand("claude", "review", { model: "opus", effort: "high" })?.command)
       .toBe("claude 'review' --permission-mode auto --model 'opus' --effort 'high'");
     expect(startCommand("codex", "build", { model: "gpt-5.6-sol", effort: "xhigh" })?.command)
-      .toBe("codex 'build' --ask-for-approval never --sandbox workspace-write -m 'gpt-5.6-sol' -c 'model_reasoning_effort=\"xhigh\"'");
+      .toBe("codex 'build' --ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true -m 'gpt-5.6-sol' -c 'model_reasoning_effort=\"xhigh\"'");
     expect(startCommand("opencode", "build", { provider: "anthropic", model: "claude-opus-5" }))
       .toEqual({ command: "opencode --agent build --model 'anthropic/claude-opus-5'", typePrompt: true });
     expect(startCommand("agy", "build", { model: "gemini-3.1-pro-preview", effort: "high" })?.command)
@@ -330,7 +330,7 @@ describe("unattended working mode", () => {
     // Each of these is read off that CLI's own --help; see the entry comments.
     expect(startCommand("claude", "hi")?.command).toBe("claude 'hi' --permission-mode auto");
     expect(startCommand("codex", "hi")?.command).toBe(
-      "codex 'hi' --ask-for-approval never --sandbox workspace-write",
+      "codex 'hi' --ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true",
     );
     // No prompt builder: the mode still reaches the bare launch that gets the
     // brief typed into it.

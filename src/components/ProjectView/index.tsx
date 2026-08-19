@@ -512,7 +512,10 @@ import {
 } from "../../terminalMemoryPressure";
 import { TerminalMemoryFlyout } from "../TerminalMemoryFlyout";
 import { getVibePreviewAttemptTabId } from "../../vibePreviewContext";
-import { terminalAttachmentQueue } from "../../terminalAttachmentQueue";
+import {
+  terminalAttachmentQueue,
+  type TerminalAttachment,
+} from "../../terminalAttachmentQueue";
 
 /** Work items join PRs through the provenance cache — synchronous on purpose,
  *  like every read the gesture path makes. A PR tab loads its edges on open,
@@ -1807,6 +1810,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       activate = true,
       killOnClose = false,
       name?: string,
+      presentation?: Pick<
+        TerminalAttachment,
+        "run" | "command" | "componentId" | "runCommandId"
+      >,
     ): string => {
       const existing = tabsRef.current.find(
         (t): t is TermSubTab => t.type === "terminal" && t.attachId === ptyId,
@@ -1816,6 +1823,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return existing.id;
       }
       const id = tabId();
+      const configured = presentation?.componentId && presentation.runCommandId
+        ? componentsRef.current
+            .find((component) => component.id === presentation.componentId)
+            ?.commands?.find((command) => command.id === presentation.runCommandId)
+        : undefined;
       setTabs((prev) => [
         ...prev,
         {
@@ -1823,11 +1835,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
           type: "terminal",
           cwd,
           name,
-          title: title || "agent",
+          title: configured?.name || title || "agent",
           ptyId,
           attachId: ptyId,
           killAttachedOnClose: killOnClose || undefined,
           icon,
+          run: presentation?.run || undefined,
+          command: configured
+            ? unattendedManagedRunCommand(configured)
+            : presentation?.command,
+          componentId: presentation?.componentId,
+          runCommandId: presentation?.runCommandId,
         },
       ]);
       if (activate) setActiveTabId(id);
@@ -1849,6 +1867,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         d.activate !== false,
         d.killOnClose === true,
         d.name,
+        d,
       );
     });
   }, [project.id, attachTerminal]);
@@ -12345,6 +12364,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 cwd={tab.cwd}
                 projectId={project.id}
                 componentId={executionComponent?.id}
+                runCommandId={tab.runCommandId}
                 workspacePath={executionComponent?.path ?? tab.cwd}
                 minimumContrastRatio={terminalMinimumContrast(
                   agentIdForCommand(tab.command),

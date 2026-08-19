@@ -77,6 +77,7 @@ interface TermProps {
   /** Stable owner persisted with desktop PTY lifetime state for recovery. */
   projectId?: string;
   componentId?: string;
+  runCommandId?: string;
   workspacePath?: string;
   /** Per-cell foreground/background correction performed by xterm. Leave at 1
    *  for ordinary shells and CLIs so their authored colours remain untouched;
@@ -123,6 +124,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     cwd,
     projectId,
     componentId,
+    runCommandId,
     workspacePath,
     minimumContrastRatio = 1,
     active,
@@ -804,6 +806,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             attemptId,
             projectId,
             componentId,
+            runCommandId,
             workspacePath,
           };
         const onData = (chunk: ipc.PtyChunk) => {

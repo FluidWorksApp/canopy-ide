@@ -973,7 +973,9 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     //
     // NOT `--full-auto`, which every guide still names: it is gone from codex
     // 0.147.0's --help, and a flag clap doesn't know refuses to launch at all.
-    unattended: "--ask-for-approval never --sandbox workspace-write",
+    // Codex disables network access in workspace-write unless it is explicit.
+    unattended:
+      "--ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true",
     execution: {
       fields: [
         modelField(["openai"]),

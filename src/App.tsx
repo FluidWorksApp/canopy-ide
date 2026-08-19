@@ -2010,6 +2010,10 @@ export default function App() {
         cwd: e.cwd,
         name: e.name,
         title: e.title,
+        run: Boolean(e.run),
+        command: e.command ?? undefined,
+        componentId: e.execution_context?.componentId ?? undefined,
+        runCommandId: e.run_command_id ?? undefined,
         // Recovery must not steal focus or manufacture attention.
         activate: restored ? false : getSettings().agentAskForAttention,
         // Desktop-owned sessions were previously killed by their tab.

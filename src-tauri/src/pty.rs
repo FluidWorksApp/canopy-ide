@@ -116,6 +116,9 @@ pub struct Session {
     pub pid: Option<u32>,
     pub kind: SessionKind,
     pub execution_context: Option<crate::execution::ExecutionContext>,
+    pub run: bool,
+    pub command: Option<String>,
+    pub run_command_id: Option<String>,
     /// Canopy's stable, human-facing name for this terminal. This is display
     /// metadata only: bridge credentials and every privileged operation remain
     /// keyed by the PTY id + private token.
@@ -376,6 +379,9 @@ pub struct PtySpawned {
     pub rows: u16,
     pub project_id: Option<String>,
     pub execution_context: Option<crate::execution::ExecutionContext>,
+    pub run: bool,
+    pub command: Option<String>,
+    pub run_command_id: Option<String>,
 }
 
 /// A live PTY session, minimally: enough for a remote client to know which
@@ -393,6 +399,9 @@ pub struct PtySummary {
     pub kind: SessionKind,
     pub project_id: Option<String>,
     pub execution_context: Option<crate::execution::ExecutionContext>,
+    pub run: bool,
+    pub command: Option<String>,
+    pub run_command_id: Option<String>,
     pub replay_start: u64,
     pub replay_end: u64,
 }
@@ -480,6 +489,9 @@ impl PtyManager {
                         .as_ref()
                         .map(|context| context.project_id.clone()),
                     execution_context,
+                    run: s.run,
+                    command: s.command.clone(),
+                    run_command_id: s.run_command_id.clone(),
                     replay_start: s.dropped_output_bytes.load(Ordering::Relaxed),
                     replay_end: s.output_bytes.load(Ordering::Relaxed),
                 }
@@ -1057,6 +1069,7 @@ pub fn pty_spawn(
     attempt_id: Option<String>,
     project_id: Option<String>,
     component_id: Option<String>,
+    run_command_id: Option<String>,
     workspace_path: Option<String>,
     renderer_generation: u64,
     on_data: Channel<InvokeResponseBody>,
@@ -1085,6 +1098,7 @@ pub fn pty_spawn(
         env,
         binding.clone(),
         context,
+        run_command_id,
     );
     finish_task_spawn(&state, &tasks, binding.as_ref(), result)
 }
@@ -1134,6 +1148,7 @@ pub fn pty_spawn_detached(
         env,
         binding.clone(),
         context,
+        None,
     );
     finish_task_spawn(&state, &tasks, binding.as_ref(), result)
 }
@@ -1193,6 +1208,7 @@ pub fn pty_spawn_argv(
         env,
         binding.clone(),
         context,
+        None,
     );
     finish_task_spawn(&state, &tasks, binding.as_ref(), result)
 }
@@ -1216,6 +1232,7 @@ pub fn pty_spawn_attached_argv(
     attempt_id: Option<String>,
     project_id: Option<String>,
     component_id: Option<String>,
+    run_command_id: Option<String>,
     workspace_path: Option<String>,
     renderer_generation: u64,
     on_data: Channel<InvokeResponseBody>,
@@ -1247,6 +1264,7 @@ pub fn pty_spawn_attached_argv(
         env,
         binding.clone(),
         context,
+        run_command_id,
     );
     finish_task_spawn(&state, &tasks, binding.as_ref(), result)
 }
@@ -1363,6 +1381,7 @@ impl PtyManager {
             account,
             None,
             context.clone(),
+            None,
         )?;
         if let Some(cmd) = command {
             let cmd = cmd.trim();
@@ -1386,10 +1405,11 @@ impl PtyManager {
                     title: s.title.lock().unwrap().clone(),
                     cols: res.cols,
                     rows: res.rows,
-                    project_id: context
-                        .as_ref()
-                        .map(|context| context.project_id.clone()),
+                    project_id: context.as_ref().map(|context| context.project_id.clone()),
                     execution_context: context,
+                    run: s.run,
+                    command: s.command.clone(),
+                    run_command_id: s.run_command_id.clone(),
                 },
             );
         }
@@ -1428,6 +1448,7 @@ impl PtyManager {
             extra_env,
             task_identity,
             None,
+            None,
         )
     }
 
@@ -1446,8 +1467,18 @@ impl PtyManager {
         extra_env: Option<Vec<(String, String)>>,
         task_identity: Option<crate::tasks::AttemptBinding>,
         execution_context: Option<crate::execution::ExecutionContext>,
+        run_command_id: Option<String>,
     ) -> Result<SpawnResult, String> {
         let state = self;
+        let recovered_run = kind == SessionKind::Desktop && run.is_some();
+        let recovered_command = if recovered_run {
+            match &run {
+                Some(RunSpec::Shell(command)) => Some(command.clone()),
+                _ => None,
+            }
+        } else {
+            None
+        };
         // Clamp for the same reason pty_resize does: a terminal spawned into a
         // hidden tab measures 0, and a zero-column pty is meaningless. 80x24 is the
         // conventional fallback, and the frontend corrects it the moment the tab is
@@ -1685,6 +1716,9 @@ impl PtyManager {
             pid,
             kind,
             execution_context,
+            run: recovered_run,
+            command: recovered_command,
+            run_command_id: recovered_run.then_some(run_command_id).flatten(),
             name: Mutex::new(default_name.clone()),
             default_name,
             title: Mutex::new(shell.clone()),
@@ -2992,6 +3026,44 @@ mod tests {
         assert!(pm
             .attach_desktop(spawned.id, third.generation, None, Channel::new(|_| Ok(())),)
             .is_ok());
+        let _ = pm.kill(spawned.id);
+    }
+
+    #[test]
+    fn renderer_replacement_preserves_run_presentation() {
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let renderer = pm.register_renderer();
+        let spawned = pm
+            .spawn_bound(
+                app.handle().clone(),
+                120,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Shell("sleep 20".into())),
+                SessionKind::Desktop,
+                Some(DesktopSink {
+                    renderer_generation: renderer.generation,
+                    channel: Channel::new(|_| Ok(())),
+                }),
+                None,
+                None,
+                None,
+                Some("dev".into()),
+            )
+            .expect("run spawn");
+
+        let summary = pm
+            .register_renderer()
+            .sessions
+            .into_iter()
+            .find(|session| session.id == spawned.id)
+            .expect("surviving run");
+        assert!(summary.run);
+        assert_eq!(summary.command.as_deref(), Some("sleep 20"));
+        assert_eq!(summary.run_command_id.as_deref(), Some("dev"));
         let _ = pm.kill(spawned.id);
     }
 

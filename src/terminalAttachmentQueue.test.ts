@@ -14,6 +14,7 @@ const attachment = (
   sessionGeneration: ptyId + 100,
   cwd: `/repo/${projectId}`,
   title: `terminal ${ptyId}`,
+  run: false,
   activate: false,
   killOnClose: true,
 });
@@ -97,6 +98,23 @@ describe("TerminalAttachmentQueue", () => {
     queue.subscribe("project-a", consume);
     expect(consume).not.toHaveBeenCalled();
     expect(queue.pendingIdentities()).toEqual([]);
+  });
+
+  it("keeps run presentation metadata through a delayed reattach", () => {
+    const queue = new TerminalAttachmentQueue();
+    const run = {
+      ...attachment(12),
+      run: true,
+      command: "npm run dev",
+      componentId: "web",
+      runCommandId: "dev",
+    };
+    const consume = vi.fn();
+
+    queue.enqueue(run);
+    queue.subscribe("project-a", consume);
+
+    expect(consume).toHaveBeenCalledWith(run);
   });
 });
 
