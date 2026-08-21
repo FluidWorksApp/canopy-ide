@@ -93,12 +93,23 @@ jsLog("info", "webview booting");
 const registerRenderer = async () => {
   let retryMs = 100;
   while (true) {
+    let timeout: number | undefined;
     try {
-      return await ptyRendererRegister();
+      return await Promise.race([
+        ptyRendererRegister(),
+        new Promise<never>((_, reject) => {
+          timeout = window.setTimeout(
+            () => reject(new Error("renderer registration timed out")),
+            2_000,
+          );
+        }),
+      ]);
     } catch (err) {
       jsLog("error", `renderer registration failed; retrying: ${err}`);
       await new Promise<void>((resolve) => window.setTimeout(resolve, retryMs));
       retryMs = Math.min(retryMs * 2, 2_000);
+    } finally {
+      if (timeout != null) window.clearTimeout(timeout);
     }
   }
 };

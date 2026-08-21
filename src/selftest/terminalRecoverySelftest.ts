@@ -75,6 +75,7 @@ const terminalObservation = (terminals: TerminalCheckpoint[]) => {
     pending: terminals.filter((terminal) =>
       terminalAttachmentQueue.pendingIdentities().includes(identityOf(terminal)),
     ).map(identityOf),
+    queue: terminalAttachmentQueue.diagnostics(),
     appText: document.body.innerText.slice(0, 500),
   };
 };

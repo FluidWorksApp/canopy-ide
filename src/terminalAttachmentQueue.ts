@@ -15,6 +15,7 @@ export interface TerminalAttachment {
   componentId?: string;
   runCommandId?: string;
   activate: boolean;
+  recovered: boolean;
   killOnClose: boolean;
 }
 
@@ -31,6 +32,13 @@ export class TerminalAttachmentQueue {
     string,
     { attachment: TerminalAttachment; consumer: Consumer }
   >();
+  private readonly metrics = {
+    enqueued: 0,
+    acknowledged: 0,
+    discarded: 0,
+    forgotten: 0,
+    requeued: 0,
+  };
 
   private key(attachment: Pick<TerminalAttachment, "ptyId" | "sessionGeneration">) {
     return `${attachment.ptyId}:${attachment.sessionGeneration}`;
@@ -39,6 +47,7 @@ export class TerminalAttachmentQueue {
   /** Publish before or after ProjectView mounts. Repeated native snapshot/event
    * delivery replaces the same lifetime rather than manufacturing extra tabs. */
   enqueue(attachment: TerminalAttachment) {
+    this.metrics.enqueued += 1;
     const key = this.key(attachment);
     const committed = this.committed.get(key);
     if (committed) {
@@ -77,6 +86,7 @@ export class TerminalAttachmentQueue {
         if (entry.consumer !== consumer) continue;
         this.committed.delete(key);
         this.pending.set(key, entry.attachment);
+        this.metrics.requeued += 1;
       }
       this.flush(projectId);
     };
@@ -91,10 +101,48 @@ export class TerminalAttachmentQueue {
       if (attachment.projectId === projectId && attachment.ptyId === ptyId) {
         const consumer = this.offered.get(key);
         if (consumer) this.committed.set(key, { attachment, consumer });
+        this.metrics.acknowledged += 1;
         this.pending.delete(key);
         this.offered.delete(key);
       }
     }
+  }
+
+  /** Reconcile the queue's ownership ledger with the tabs a ProjectView
+   * actually committed. A vanished tab must not permanently consume a native
+   * lifetime; reoffer it to the still-mounted consumer. */
+  reconcile(projectId: string, ptyIds: readonly number[]) {
+    const owned = new Set(ptyIds);
+    for (const [key, entry] of this.committed) {
+      if (entry.attachment.projectId !== projectId || owned.has(entry.attachment.ptyId)) {
+        continue;
+      }
+      this.committed.delete(key);
+      this.pending.set(key, entry.attachment);
+      this.metrics.requeued += 1;
+    }
+    this.flush(projectId);
+  }
+
+  /** An intentional tab close is not a native exit for remote-owned PTYs, but
+   * it is still a deliberate end to this renderer's attachment ownership. */
+  forget(projectId: string, ptyId: number) {
+    let forgotten = false;
+    for (const [key, attachment] of this.pending) {
+      if (attachment.projectId !== projectId || attachment.ptyId !== ptyId) continue;
+      this.pending.delete(key);
+      this.offered.delete(key);
+      forgotten = true;
+    }
+    for (const [key, entry] of this.committed) {
+      if (entry.attachment.projectId !== projectId || entry.attachment.ptyId !== ptyId) {
+        continue;
+      }
+      this.committed.delete(key);
+      this.offered.delete(key);
+      forgotten = true;
+    }
+    if (forgotten) this.metrics.forgotten += 1;
   }
 
   /** A PTY can exit while its project is still mounting. Never turn that stale
@@ -104,6 +152,7 @@ export class TerminalAttachmentQueue {
     this.pending.delete(key);
     this.offered.delete(key);
     this.committed.delete(key);
+    this.metrics.discarded += 1;
   }
 
   private flush(projectId: string) {
@@ -114,12 +163,17 @@ export class TerminalAttachmentQueue {
     for (const [key, attachment] of this.pending) {
       if (attachment.projectId !== projectId) continue;
       if (this.offered.has(key)) continue;
+      // Record the offer before entering React. A synchronous commit may run
+      // acknowledge() before the callback returns; setting this afterwards
+      // would let that acknowledgement delete the pending lifetime without
+      // transferring it to the committed ownership ledger.
+      this.offered.set(key, consumer);
       try {
         consumer(attachment);
-        this.offered.set(key, consumer);
       } catch {
         // A consumer that could not request the tab leaves the pending item for
         // its next mount. The native PTY keeps running either way.
+        if (this.offered.get(key) === consumer) this.offered.delete(key);
       }
     }
   }
@@ -127,6 +181,19 @@ export class TerminalAttachmentQueue {
   /** Test/diagnostic seam: identities only, never terminal output. */
   pendingIdentities(): string[] {
     return [...this.pending.keys()].sort();
+  }
+
+  diagnostics() {
+    return {
+      pending: [...this.pending.keys()].sort(),
+      offered: [...this.offered.keys()].sort(),
+      committed: [...this.committed.keys()].sort(),
+      metrics: { ...this.metrics },
+      consumerProjects: [...this.consumers.entries()]
+        .filter(([, consumers]) => consumers.size > 0)
+        .map(([projectId]) => projectId)
+        .sort(),
+    };
   }
 }
 
