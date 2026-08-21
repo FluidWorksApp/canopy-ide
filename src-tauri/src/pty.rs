@@ -463,6 +463,18 @@ impl PtyManager {
         self.sessions.lock().unwrap().len()
     }
 
+    /// Where every live terminal is working. Just the directories — `summaries`
+    /// answers the same question but builds a whole record per session, and the
+    /// mesh gate calls this on an HTTP path.
+    pub fn live_cwds(&self) -> Vec<String> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .values()
+            .map(|s| s.cwd.clone())
+            .collect()
+    }
+
     /// Every session live right now, so a remote client can determine which
     /// agents are attachable authoritatively — without waiting on (or trusting)
     /// the periodic `pty:stats` event.

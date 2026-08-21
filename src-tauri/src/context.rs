@@ -176,6 +176,21 @@ pub struct ContextBridge {
     /// calls "Shared context"; the mesh is that shared context substrate, so
     /// roster, claims, history and sends all consult this one predicate.
     mesh_scopes: Mutex<Vec<MeshScope>>,
+    /// Directory -> the main checkout it is a worktree of, remembered.
+    ///
+    /// The fold is a `git` subprocess, and running it per gate call made the
+    /// answer only as durable as the directory. An agent working in a worktree
+    /// that is then removed — which is the normal end of an isolated task, and
+    /// is often the very thing the agent was asked to do — stopped resolving to
+    /// any project, and the gate reported that as the user's Shared context
+    /// being off. Remembering the fold means a path that resolved once keeps
+    /// resolving, which is what the recorded mesh history already assumes.
+    ///
+    /// Negative results are cached too: a path that is not in a repo will not
+    /// become one in a way that matters here, and re-probing it on every tool
+    /// call was the other half of the problem. Cleared whenever scopes are
+    /// republished, which is the only moment the mapping's meaning changes.
+    worktree_roots: Mutex<HashMap<String, Option<String>>>,
     /// Every message one agent has sent another, durable across app runs —
     /// see mesh.rs. A message used to leave no trace anywhere: it arrived in
     /// the target's composer looking exactly like something the user had typed,
@@ -379,6 +394,7 @@ impl Default for ContextBridge {
             disabled_tools: Mutex::new(None),
             agents_may_spawn: AtomicBool::new(true),
             mesh_scopes: Mutex::new(Vec::new()),
+            worktree_roots: Mutex::new(HashMap::new()),
             mesh: crate::mesh::MeshStore::load(),
         }
     }
@@ -402,13 +418,67 @@ impl ContextBridge {
         let scopes: Vec<MeshScope> =
             serde_json::from_value(value.clone()).expect("mesh scopes were validated");
         *self.mesh_scopes.lock().unwrap() = scopes;
+        // The remembered folds describe which project owns a directory, and a
+        // republish is the one event that can change that answer.
+        self.worktree_roots.lock().unwrap().clear();
         Ok(())
     }
 
+    /// The main checkout behind a directory, remembered across calls.
+    ///
+    /// Deliberately not holding `mesh_scopes` while it runs: this can spawn a
+    /// subprocess, and the gate is on the path of every mesh tool call.
+    fn worktree_root(&self, path: &str) -> Option<String> {
+        if let Some(hit) = self.worktree_roots.lock().unwrap().get(path) {
+            return hit.clone();
+        }
+        let root = main_worktree(path);
+        self.worktree_roots
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), root.clone());
+        root
+    }
+
+    /// Remember the fold for directories that exist now, so the answer outlives
+    /// them. Only ever adds; a path already known is not re-probed.
+    fn warm_worktree_roots(&self, paths: impl IntoIterator<Item = String>) {
+        for path in paths {
+            if path.is_empty() {
+                continue;
+            }
+            if self.worktree_roots.lock().unwrap().contains_key(&path) {
+                continue;
+            }
+            let root = main_worktree(&path);
+            self.worktree_roots.lock().unwrap().insert(path, root);
+        }
+    }
+
     fn mesh_enabled_path(&self, path: &str) -> bool {
-        let scopes = self.mesh_scopes.lock().unwrap();
-        mesh_enabled_in(&scopes, path)
-            || main_worktree(path).is_some_and(|root| mesh_enabled_in(&scopes, &root))
+        if mesh_enabled_in(&self.mesh_scopes.lock().unwrap(), path) {
+            return true;
+        }
+        // Agents work in worktrees constantly, and a worktree is a sibling of
+        // its checkout rather than a child, so the direct containment test
+        // cannot see it. Fold to the checkout that is actually registered as a
+        // project component.
+        match self.worktree_root(path) {
+            Some(root) => mesh_enabled_in(&self.mesh_scopes.lock().unwrap(), &root),
+            None => false,
+        }
+    }
+
+    /// Whether this path resolves to a project at all — as distinct from
+    /// resolving to one whose Shared context is off. The two used to be one
+    /// bool and one refusal string, so a removed worktree reported itself as a
+    /// setting the user had not touched.
+    fn mesh_path_resolves(&self, path: &str) -> bool {
+        !path.is_empty()
+            && (mesh_scope_for(&self.mesh_scopes.lock().unwrap(), path).is_some()
+                || self.worktree_root(path).is_some_and(|root| {
+                    mesh_scope_for(&self.mesh_scopes.lock().unwrap(), &root).is_some()
+                }))
     }
 
     /// Age out stale mesh messages — the maintenance scheduler's door to a
@@ -1044,6 +1114,12 @@ async fn snapshot(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (S
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     }
     let bridge = app.state::<ContextBridge>();
+    // Remember where every live terminal folds to, while its directory is still
+    // there to answer. The roster gate reads a project's component paths and
+    // the send gate reads the target's own cwd, so without this a worktree
+    // removed between the two — routinely the last thing an isolated task does
+    // — left the roster advertising an agent the send gate then refused.
+    bridge.warm_worktree_roots(app.state::<crate::pty::PtyManager>().live_cwds());
     let projects: Vec<serde_json::Value> = app
         .state::<ContextBridge>()
         .snapshots
@@ -2419,6 +2495,18 @@ fn mesh_enabled_in(scopes: &[MeshScope], path: &str) -> bool {
         .any(|root| !root.trim_matches('/').is_empty() && path_is_within(path, root))
 }
 
+/// The scope that owns a path, whether or not its switch is on. What tells
+/// "this project has Shared context off" apart from "nothing here owns that
+/// directory any more".
+fn mesh_scope_for<'a>(scopes: &'a [MeshScope], path: &str) -> Option<&'a MeshScope> {
+    scopes.iter().find(|scope| {
+        scope
+            .roots
+            .iter()
+            .any(|root| !root.trim_matches('/').is_empty() && path_is_within(path, root))
+    })
+}
+
 fn mesh_surface_enabled(bridge: &ContextBridge, path: &str, _surface: MeshSurface) -> bool {
     bridge.mesh_enabled_path(path)
 }
@@ -2431,6 +2519,30 @@ fn mesh_enabled_for(
 ) -> bool {
     let path = who.cwd().or(route).unwrap_or_default();
     !path.is_empty() && mesh_surface_enabled(&app.state::<ContextBridge>(), path, surface)
+}
+
+/// Why a send was refused, in the caller's terms.
+///
+/// One string used to cover both cases, and it named a setting: a target whose
+/// worktree had been removed reported "Shared context is off" while the switch
+/// was plainly on and the roster was still advertising that agent as
+/// messageable. Saying which half failed is the difference between a toggle to
+/// flip and a directory that no longer exists.
+fn mesh_refusal(app: &tauri::AppHandle, who: &Caller, target: &str) -> String {
+    let bridge = app.state::<ContextBridge>();
+    let unresolved = |path: &str| !bridge.mesh_path_resolves(path);
+    if unresolved(target) {
+        return format!(
+            "No project here owns {target} — if that was a worktree, it may have been removed. \
+             Shared context is not the problem."
+        );
+    }
+    if who.cwd().is_some_and(|path| unresolved(path)) {
+        return "No project here owns your own directory, so Canopy cannot tell whether the \
+                mesh applies to you."
+            .into();
+    }
+    "The mesh is disabled here because Shared context is off.".into()
 }
 
 fn mesh_enabled_between(app: &tauri::AppHandle, who: &Caller, target: &str) -> bool {
@@ -3661,8 +3773,7 @@ async fn action(
                             if !mesh_enabled_between(&app, &who, route) {
                                 return (
                                     StatusCode::FORBIDDEN,
-                                    "The mesh is disabled here because Shared context is off."
-                                        .into(),
+                                    mesh_refusal(&app, &who, route),
                                 );
                             }
                             // Cold PRs become durable task-store runs, not a
@@ -3726,7 +3837,7 @@ async fn action(
                         if !mesh_enabled_between(&app, &who, &target.cwd) {
                             return (
                                 StatusCode::FORBIDDEN,
-                                "The mesh is disabled here because Shared context is off.".into(),
+                                mesh_refusal(&app, &who, &target.cwd),
                             );
                         }
                         if let Err(e) =
@@ -3827,10 +3938,7 @@ async fn action(
             };
             let target_cwd = target.cwd.clone();
             if !mesh_enabled_between(&app, &who, &target_cwd) {
-                return (
-                    StatusCode::FORBIDDEN,
-                    "The mesh is disabled here because Shared context is off.".into(),
-                );
+                return (StatusCode::FORBIDDEN, mesh_refusal(&app, &who, &target_cwd));
             }
             if let Err(e) = may_message_terminal(id, terminal_role(&app, id)) {
                 return (StatusCode::FORBIDDEN, e);
@@ -3913,10 +4021,7 @@ async fn action(
             };
             let target_cwd = target.cwd.clone();
             if !mesh_enabled_between(&app, &who, &target_cwd) {
-                return (
-                    StatusCode::FORBIDDEN,
-                    "The mesh is disabled here because Shared context is off.".into(),
-                );
+                return (StatusCode::FORBIDDEN, mesh_refusal(&app, &who, &target_cwd));
             }
             // The same bar as message_agent, because the notice arrives the
             // same way: typed into the target. A shell would run it.
@@ -6058,6 +6163,105 @@ mod tests {
         for surface in surfaces {
             assert!(mesh_surface_enabled(&bridge, "/w/app/src", surface));
         }
+    }
+
+    /// A worktree that has been removed must not read as "Shared context is
+    /// off". The fold from worktree to checkout is a `git` call, so it used to
+    /// be only as durable as the directory — and removing the worktree is
+    /// routinely the last thing an isolated task does, sometimes the very
+    /// instruction the message being refused was carrying.
+    #[test]
+    fn a_removed_worktree_keeps_the_project_it_folded_to() {
+        let bridge = ContextBridge::default();
+        bridge
+            .set_mesh_scopes(&serde_json::json!([{
+                "name": "app",
+                "roots": ["/w/app"],
+                "enabled": true,
+            }]))
+            .unwrap();
+        // A worktree is a *sibling* of its checkout, so containment alone never
+        // sees it — this is why the fold exists at all.
+        assert!(!mesh_enabled_in(
+            &bridge.mesh_scopes.lock().unwrap(),
+            "/w/app-wt-pr-1"
+        ));
+
+        // Remembered while the directory was still there to answer.
+        bridge
+            .worktree_roots
+            .lock()
+            .unwrap()
+            .insert("/w/app-wt-pr-1".into(), Some("/w/app".into()));
+
+        // The directory is gone now; `main_worktree` would fail. The gate still
+        // resolves, and still says enabled.
+        assert!(bridge.mesh_enabled_path("/w/app-wt-pr-1"));
+        assert!(bridge.mesh_path_resolves("/w/app-wt-pr-1"));
+    }
+
+    /// The two halves the single refusal string used to conflate.
+    #[test]
+    fn an_unresolvable_path_is_not_the_same_as_a_switch_that_is_off() {
+        let bridge = ContextBridge::default();
+        bridge
+            .set_mesh_scopes(&serde_json::json!([{
+                "name": "app",
+                "roots": ["/w/app"],
+                "enabled": false,
+            }]))
+            .unwrap();
+        // Owned by a project, whose switch is off: the setting really is the
+        // reason, and the original message was right about this case.
+        assert!(bridge.mesh_path_resolves("/w/app/src"));
+        assert!(!bridge.mesh_enabled_path("/w/app/src"));
+
+        // Owned by nothing. Same `false` from the gate, entirely different
+        // cause — and no setting the user can flip will change it.
+        bridge
+            .worktree_roots
+            .lock()
+            .unwrap()
+            .insert("/elsewhere/gone".into(), None);
+        assert!(!bridge.mesh_path_resolves("/elsewhere/gone"));
+        assert!(!bridge.mesh_enabled_path("/elsewhere/gone"));
+    }
+
+    /// Republishing scopes is the one event that can change which project owns
+    /// a directory, so it is the one event that may drop a remembered fold.
+    #[test]
+    fn republishing_scopes_forgets_the_remembered_folds() {
+        let bridge = ContextBridge::default();
+        bridge
+            .worktree_roots
+            .lock()
+            .unwrap()
+            .insert("/w/app-wt-pr-1".into(), Some("/w/app".into()));
+        bridge
+            .set_mesh_scopes(&serde_json::json!([{
+                "name": "app",
+                "roots": ["/w/app"],
+                "enabled": true,
+            }]))
+            .unwrap();
+        assert!(bridge.worktree_roots.lock().unwrap().is_empty());
+    }
+
+    /// Warming only ever adds. A second pass must not re-probe a path whose
+    /// answer is already known — that re-probe is what put a `git` subprocess
+    /// on the path of every mesh tool call.
+    #[test]
+    fn warming_does_not_disturb_what_is_already_known() {
+        let bridge = ContextBridge::default();
+        bridge
+            .worktree_roots
+            .lock()
+            .unwrap()
+            .insert("/w/app-wt-pr-1".into(), Some("/w/app".into()));
+        bridge.warm_worktree_roots(vec!["/w/app-wt-pr-1".to_string(), String::new()]);
+        let roots = bridge.worktree_roots.lock().unwrap();
+        assert_eq!(roots.get("/w/app-wt-pr-1"), Some(&Some("/w/app".into())));
+        assert!(!roots.contains_key(""));
     }
 
     /// Claims are the caller's business only when they could collide with it.
