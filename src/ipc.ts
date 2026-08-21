@@ -346,12 +346,26 @@ export async function ptyAttachDesktop(
 }> {
   const channel = new Channel<ArrayBuffer | number[]>();
   channel.onmessage = (data) => onData(decodePtyChunk(data));
-  return invoke("pty_attach_desktop", {
+  const attached = await invoke<PtyGeometry & {
+    generation: number;
+    replay_start: number;
+    replay_end: number;
+  }>("pty_attach_desktop", {
     id,
     rendererGeneration: rendererGeneration(),
     after,
     onData: channel,
   });
+  // The first invoke must return before native replay starts; otherwise a
+  // WebKit reload can wedge Channel delivery and the attach response together.
+  // Starting is fire-and-forget because native delivery deliberately lives
+  // beyond this page and is generation-scoped against every later retry.
+  gone(invoke<void>("pty_start_desktop", {
+    id,
+    rendererGeneration: rendererGeneration(),
+    generation: attached.generation,
+  }));
+  return attached;
 }
 
 export const ptyDetachDesktop = (id: number, generation: number) =>

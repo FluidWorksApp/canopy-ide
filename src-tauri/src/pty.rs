@@ -193,8 +193,17 @@ struct DesktopAttachment {
     renderer_generation: u64,
     generation: u64,
     channel: Channel<InvokeResponseBody>,
+    replay: Option<DesktopReplay>,
+    ready: bool,
+    queued: VecDeque<(u64, Vec<u8>)>,
     outstanding: usize,
     pending_acks: PendingAckLedger,
+}
+
+struct DesktopReplay {
+    start: u64,
+    gap: bool,
+    bytes: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -555,7 +564,35 @@ impl PtyManager {
         let _gate = self.renderer_gate.lock().unwrap();
         self.require_renderer(renderer_generation)?;
         let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
-        session.attach_desktop(renderer_generation, after, channel)
+        Ok(session.prepare_desktop(renderer_generation, after, channel))
+    }
+
+    fn start_desktop(
+        &self,
+        id: u32,
+        renderer_generation: u64,
+        generation: u64,
+    ) -> Result<(), String> {
+        let gate = self.renderer_gate.lock().unwrap();
+        self.require_renderer(renderer_generation)?;
+        let session = self.get(id).ok_or_else(|| format!("no pty session {id}"))?;
+        let replay = session.take_desktop_replay(renderer_generation, generation)?;
+        drop(gate);
+
+        // This command is a second handshake sent only after pty_attach_desktop
+        // has returned to JavaScript, so its Channel is established before the
+        // first replay frame. Delivery still runs independently: a dying
+        // WebKit renderer may wedge a send, but it cannot retain the renderer
+        // gate or session locks needed by the next recovery attempt.
+        let starter = Arc::clone(&session);
+        thread::Builder::new()
+            .name(format!("pty-desktop-start-{id}-{generation}"))
+            .spawn(move || starter.start_desktop(generation, replay))
+            .map_err(|error| {
+                session.detach_matching(renderer_generation, generation);
+                error.to_string()
+            })?;
+        Ok(())
     }
 
     /// Queue bytes for a session's PTY stdin. Shared by the `pty_write` command
@@ -683,12 +720,12 @@ impl Session {
     /// Lock ordering is scrollback -> desktop, matching the flusher's record +
     /// send order. That makes snapshot then live output gap-free without an
     /// unbounded handoff buffer.
-    fn attach_desktop(
+    fn prepare_desktop(
         &self,
         renderer_generation: u64,
         after: Option<u64>,
         channel: Channel<InvokeResponseBody>,
-    ) -> Result<DesktopAttachResult, String> {
+    ) -> DesktopAttachResult {
         let ring = self.scrollback.lock().unwrap();
         let generation = self.next_attachment.fetch_add(1, Ordering::SeqCst) + 1;
         let ring_start = self.dropped_output_bytes.load(Ordering::Relaxed);
@@ -700,61 +737,134 @@ impl Session {
         };
         let skip = replay_start.saturating_sub(ring_start) as usize;
         let snapshot = ring.iter().skip(skip).copied().collect::<Vec<_>>();
+        let snapshot_len = snapshot.len();
         let mut desktop = self.desktop.lock().unwrap();
         *desktop = Some(DesktopAttachment {
             renderer_generation,
             generation,
             channel,
-            outstanding: 0,
+            replay: Some(DesktopReplay {
+                start: replay_start,
+                gap,
+                bytes: snapshot,
+            }),
+            ready: false,
+            queued: VecDeque::new(),
+            outstanding: snapshot_len,
             pending_acks: PendingAckLedger::default(),
         });
-        if !snapshot.is_empty() || gap {
-            let attachment = desktop.as_mut().expect("attachment inserted");
-            attachment.outstanding = snapshot.len();
-            if attachment
-                .channel
-                .send(InvokeResponseBody::Raw(desktop_chunk(
-                    replay_start,
-                    gap,
-                    &snapshot,
-                )))
-                .is_err()
-            {
-                *desktop = None;
-                return Err("renderer closed while the terminal was reattaching".into());
-            }
-            self.record_desktop_delivery(attachment, snapshot.len());
-        }
         drop(desktop);
         drop(ring);
         let (cols, rows) = *self.size.lock().unwrap();
-        Ok(DesktopAttachResult {
+        DesktopAttachResult {
             cols,
             rows,
             generation,
             replay_start,
             replay_end: ring_end,
-        })
+        }
+    }
+
+    fn take_desktop_replay(
+        &self,
+        renderer_generation: u64,
+        generation: u64,
+    ) -> Result<DesktopReplay, String> {
+        self.desktop
+            .lock()
+            .unwrap()
+            .as_mut()
+            .filter(|attachment| {
+                attachment.renderer_generation == renderer_generation
+                    && attachment.generation == generation
+            })
+            .and_then(|attachment| attachment.replay.take())
+            .ok_or_else(|| "terminal attachment is stale or already started".into())
+    }
+
+    fn deliver_desktop(&self, generation: u64, body: InvokeResponseBody, bytes: usize) -> bool {
+        let channel = {
+            let mut desktop = self.desktop.lock().unwrap();
+            let Some(attachment) = desktop
+                .as_mut()
+                .filter(|attachment| attachment.generation == generation)
+            else {
+                return false;
+            };
+            self.record_desktop_delivery(attachment, bytes);
+            attachment.channel.clone()
+        };
+        if channel.send(body).is_ok() {
+            return true;
+        }
+        let mut desktop = self.desktop.lock().unwrap();
+        if desktop
+            .as_ref()
+            .is_some_and(|attachment| attachment.generation == generation)
+        {
+            *desktop = None;
+        }
+        false
+    }
+
+    fn start_desktop(&self, generation: u64, replay: DesktopReplay) {
+        if (!replay.bytes.is_empty() || replay.gap)
+            && !self.deliver_desktop(
+                generation,
+                InvokeResponseBody::Raw(desktop_chunk(replay.start, replay.gap, &replay.bytes)),
+                replay.bytes.len(),
+            )
+        {
+            return;
+        }
+        loop {
+            let queued = {
+                let mut desktop = self.desktop.lock().unwrap();
+                let Some(attachment) = desktop
+                    .as_mut()
+                    .filter(|attachment| attachment.generation == generation)
+                else {
+                    return;
+                };
+                if attachment.queued.is_empty() {
+                    attachment.ready = true;
+                    return;
+                }
+                std::mem::take(&mut attachment.queued)
+            };
+            for (start, data) in queued {
+                let bytes = data.len();
+                if !self.deliver_desktop(
+                    generation,
+                    InvokeResponseBody::Raw(desktop_chunk(start, false, &data)),
+                    bytes,
+                ) {
+                    return;
+                }
+            }
+        }
     }
 
     fn send_desktop(&self, start: u64, data: Vec<u8>) {
-        let generation = {
+        let (generation, channel) = {
             let mut desktop = self.desktop.lock().unwrap();
             let Some(attachment) = desktop.as_mut() else {
                 return;
             };
             attachment.outstanding = attachment.outstanding.saturating_add(data.len());
-            let generation = attachment.generation;
-            if attachment
-                .channel
-                .send(InvokeResponseBody::Raw(desktop_chunk(start, false, &data)))
-                .is_ok()
-            {
-                self.record_desktop_delivery(attachment, data.len());
+            if !attachment.ready {
+                attachment.queued.push_back((start, data));
                 return;
             }
-            generation
+            self.record_desktop_delivery(attachment, data.len());
+            (attachment.generation, attachment.channel.clone())
         };
+        if channel
+            .send(InvokeResponseBody::Raw(desktop_chunk(start, false, &data)))
+            .is_ok()
+        {
+            return;
+        }
         // A failed channel means only that renderer attachment is gone. Never
         // terminate the PTY: a new page can reattach to the same child.
         let mut desktop = self.desktop.lock().unwrap();
@@ -1729,6 +1839,9 @@ impl PtyManager {
                     renderer_generation: sink.renderer_generation,
                     generation: 1,
                     channel: sink.channel,
+                    replay: None,
+                    ready: true,
+                    queued: VecDeque::new(),
                     outstanding: 0,
                     pending_acks: PendingAckLedger::default(),
                 }),
@@ -2006,6 +2119,19 @@ pub fn pty_attach_desktop(
         return Err(error);
     }
     state.attach_desktop(id, renderer_generation, after, on_data)
+}
+
+/// Begin replay only after `pty_attach_desktop` has returned and JavaScript has
+/// established its Channel callback. Delivery itself stays off the command
+/// thread so a renderer disappearing mid-send cannot block later attachments.
+#[tauri::command]
+pub fn pty_start_desktop(
+    state: State<'_, PtyManager>,
+    id: u32,
+    renderer_generation: u64,
+    generation: u64,
+) -> Result<(), String> {
+    state.start_desktop(id, renderer_generation, generation)
 }
 
 /// Release a normal tab-close attachment without killing its remotely-owned
@@ -2580,6 +2706,17 @@ mod tests {
         false
     }
 
+    fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        condition()
+    }
+
     // Regression: the whole output pipeline (spawn -> reader -> flusher ->
     // record_remote -> scrollback) must deliver a headless PTY's output, and a
     // headless PTY must not stall for lack of a WebView acker.
@@ -3075,7 +3212,16 @@ mod tests {
             .attach_desktop(spawned.id, second.generation, None, replacement_sink)
             .expect("replacement attach");
         assert!(
-            String::from_utf8_lossy(&replacement_bytes.lock().unwrap()).contains("AFTER_RELOAD")
+            replacement_bytes.lock().unwrap().is_empty(),
+            "replay started before the attach handshake returned"
+        );
+        pm.start_desktop(spawned.id, second.generation, attached.generation)
+            .expect("start replacement stream");
+        assert!(
+            wait_until(Duration::from_secs(1), || {
+                String::from_utf8_lossy(&replacement_bytes.lock().unwrap()).contains("AFTER_RELOAD")
+            }),
+            "replacement replay was not delivered"
         );
         let before = session.desktop_outstanding();
         assert!(
@@ -3207,10 +3353,17 @@ mod tests {
                 Ok(())
             })
         };
-        pm.attach_desktop(spawned.id, latest.generation, None, sink)
+        let attached = pm
+            .attach_desktop(spawned.id, latest.generation, None, sink)
             .expect("latest renderer reattaches");
+        pm.start_desktop(spawned.id, latest.generation, attached.generation)
+            .expect("start latest renderer stream");
         assert!(
-            String::from_utf8_lossy(&replay.lock().unwrap()).contains("REPLACEMENT_STRESS_MARKER")
+            wait_until(Duration::from_secs(1), || {
+                String::from_utf8_lossy(&replay.lock().unwrap())
+                    .contains("REPLACEMENT_STRESS_MARKER")
+            }),
+            "replacement stress replay was not delivered"
         );
         assert!(pm.get(spawned.id).is_some());
         let _ = pm.kill(spawned.id);
@@ -3300,19 +3453,30 @@ mod tests {
             SCROLLBACK_CAP as u64
         );
 
-        let replay = Arc::new(Mutex::new(Vec::new()));
+        let replay = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
         let sink = {
             let replay = replay.clone();
             Channel::new(move |body| {
                 if let InvokeResponseBody::Raw(chunk) = body {
-                    replay.lock().unwrap().extend(chunk);
+                    replay.lock().unwrap().push(chunk);
                 }
                 Ok(())
             })
         };
-        pm.attach_desktop(id, registration.generation, None, sink)
+        let attached = pm
+            .attach_desktop(id, registration.generation, None, sink)
             .expect("attach");
+        pm.start_desktop(id, registration.generation, attached.generation)
+            .expect("start replay");
+        assert!(
+            wait_until(Duration::from_secs(1), || !replay
+                .lock()
+                .unwrap()
+                .is_empty()),
+            "truncated replay was not delivered"
+        );
         let replay = replay.lock().unwrap();
+        let replay = &replay[0];
         assert!(replay.len() <= SCROLLBACK_CAP + DESKTOP_CHUNK_HEADER);
         assert_eq!(&replay[..4], DESKTOP_CHUNK_MAGIC);
         assert_ne!(replay[4] & DESKTOP_CHUNK_GAP, 0);
@@ -3380,8 +3544,18 @@ mod tests {
                 Ok(())
             })
         };
-        pm.attach_desktop(id, registration.generation, Some(14), sink)
+        let attached = pm
+            .attach_desktop(id, registration.generation, Some(14), sink)
             .expect("incremental attach");
+        pm.start_desktop(id, registration.generation, attached.generation)
+            .expect("start incremental replay");
+        assert!(
+            wait_until(Duration::from_secs(1), || !replay
+                .lock()
+                .unwrap()
+                .is_empty()),
+            "incremental replay was not delivered"
+        );
         let replay = replay.lock().unwrap();
         assert_eq!(&replay[..4], DESKTOP_CHUNK_MAGIC);
         assert_eq!(replay[4] & DESKTOP_CHUNK_GAP, 0);
@@ -3441,14 +3615,29 @@ mod tests {
             }
         });
         barrier.wait();
-        pm.attach_desktop(id, registration.generation, None, sink)
+        let attached = pm
+            .attach_desktop(id, registration.generation, None, sink)
             .expect("attach at producer boundary");
+        pm.start_desktop(id, registration.generation, attached.generation)
+            .expect("start boundary replay");
         producer.join().unwrap();
 
         let mut expected = b"seed".to_vec();
         for value in 0_u32..500 {
             expected.extend_from_slice(&value.to_le_bytes());
         }
+        assert!(
+            wait_until(Duration::from_secs(1), || {
+                frames
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|frame| frame.len().saturating_sub(DESKTOP_CHUNK_HEADER))
+                    .sum::<usize>()
+                    == expected.len()
+            }),
+            "snapshot and queued live output were not delivered"
+        );
         let mut actual = Vec::new();
         let mut cursor = 0_u64;
         for frame in frames.lock().unwrap().iter() {
