@@ -100,6 +100,18 @@ pub(crate) fn child_path() -> Option<String> {
     Some(out.join(":"))
 }
 
+/// Pay for the login shell once, at launch, off the main thread.
+///
+/// Both answers above are cached, but the first caller pays a shell startup —
+/// and that caller is typically a `#[tauri::command]`, which Tauri runs on the
+/// main thread. Without this the cost lands as a UI stall at the exact moment
+/// the user asked for something to run.
+pub(crate) fn warm() {
+    std::thread::spawn(|| {
+        let _ = child_path();
+    });
+}
+
 /// Find a bare command the way a login shell would.
 ///
 /// An absolute path is returned untouched, and a name already on the current

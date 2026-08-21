@@ -544,6 +544,9 @@ pub fn run() {
             // one) is missing from a config set up by an older version. Off the
             // main thread: it shells out to find the CLIs.
             agents::heal_integrations(app.handle().clone());
+            // The login PATH every shell-less spawn needs, resolved before the
+            // first one asks for it.
+            procenv::warm();
             agents::start_monitor(app.handle().clone());
             agents::start_hook_bridge(app.handle().clone());
             maintenance::start(app.handle().clone());

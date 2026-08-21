@@ -1538,6 +1538,23 @@ impl PtyManager {
                 for a in rest {
                     cmd.arg(a);
                 }
+                // The other two arms get a login shell, which rebuilds PATH out
+                // of the user's profile. This one never sees a shell, so both
+                // the lookup of `program` and everything the child later spawns
+                // run on the app's own PATH — and a GUI launch has
+                // `/usr/bin:/bin:/usr/sbin:/sbin` and nothing else. `pnpm`,
+                // `node`, `cargo` are on none of those, so a run command
+                // configured with argv cannot start on a machine where the
+                // identical command works in a terminal.
+                //
+                // What made it read as a project fault rather than an app one:
+                // `which_check` answers on the login PATH, so the preflight
+                // confirms the tool is installed and the spawn a moment later
+                // reports it missing. Set here rather than after `extra_env`
+                // below, so a caller that supplies its own PATH still wins.
+                if let Some(path) = crate::procenv::child_path() {
+                    cmd.env("PATH", path);
+                }
                 cmd
             }
             // A run tab: the shell runs one command and exits with the command's own
@@ -2680,6 +2697,55 @@ mod tests {
             tail.trim_end_matches(['\r', '\n']),
             format!("ARGV_{hostile}"),
             "argv did not reach the process as one literal argument"
+        );
+    }
+
+    #[test]
+    fn an_argv_run_is_given_the_user_s_own_path() {
+        // A shell run inherits the user's PATH because `-l` rebuilds it. An
+        // argv run has no shell to do that, so without this it runs on the
+        // app's PATH — `/usr/bin:/bin:/usr/sbin:/sbin` for a GUI launch, which
+        // has no `pnpm`, `node` or `cargo` on it. Every managed setup/serve
+        // command the survey configures is argv, so the whole of Build failed
+        // to start on a machine where the same commands worked in a terminal.
+        //
+        // Asserted against the child's real environment rather than the
+        // builder's: `printenv` is on the minimal PATH either way, so it runs
+        // whether or not the fix is present and reports what actually reached
+        // the process.
+        let Some(expected) = crate::procenv::child_path() else {
+            return; // no login shell to ask — nothing is claimed
+        };
+        let app = tauri::test::mock_app();
+        let pm = PtyManager::default();
+        let res = pm
+            .spawn(
+                app.handle().clone(),
+                200,
+                40,
+                Some("/tmp".into()),
+                None,
+                None,
+                Some(RunSpec::Argv(vec!["printenv".into(), "PATH".into()])),
+                SessionKind::Detached,
+                None,
+                None,
+                None,
+            )
+            .expect("spawn");
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while pm.get(res.id).is_some() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let tail = pm
+            .scrollback_tail(res.id, 256 * 1024)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        let _ = pm.kill(res.id);
+        assert_eq!(
+            tail.replace(['\r', '\n'], ""),
+            expected,
+            "the argv child did not run on the login PATH"
         );
     }
 
