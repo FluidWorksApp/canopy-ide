@@ -46,7 +46,9 @@ const listen = <T>(
       if (!active) return;
       active = false;
       activeTauriListeners.delete(release);
+      await invoke("js_log", { level: "info", message: `renderer:unlisten start ${event}` });
       await (nativeUnlisten as AsyncUnlisten)();
+      await invoke("js_log", { level: "info", message: `renderer:unlisten done ${event}` });
     };
     if (rendererReplacementPreparing) {
       await release();
