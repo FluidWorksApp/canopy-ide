@@ -5,6 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
+import { checkoutKey } from "./paths";
 import { currentPlatform, type Platform } from "./shortcuts";
 import { SESSION_ID_TOKEN, type RemoteCli } from "../shared/model";
 import { DEFAULT_AGENT_CLI_ID } from "../shared/agentCliIdentity";
@@ -1903,4 +1904,36 @@ export function resumeSessionId(command: string | null | undefined): string | nu
     if (id && !/\s/.test(id)) return id;
   }
   return null;
+}
+
+/**
+ * Which of these paths owns a directory — the one question every surface that
+ * joins an agent to a repository has to answer, asked in one place.
+ *
+ * Two rules, both learnt the hard way:
+ *
+ * 1. **Fold worktrees.** A linked worktree is a sibling of its checkout, so
+ *    containment alone cannot see it. The agent-workspace overlay tested
+ *    containment only, so a session working in `<repo>-wt-<branch>` resolved to
+ *    no repository at all and the view fell back to "showing what the agent
+ *    reported" — while the same session, opened from the Agents panel, showed
+ *    its real diff. Two surfaces, two answers, one session.
+ * 2. **Longest match wins.** With `/repo` and `/repo/packages/app` both
+ *    registered, the first containing path is not necessarily the right one;
+ *    the most specific is. The Rust resolver has always done this.
+ *
+ * Returns null when nothing owns it — deliberately, rather than falling back to
+ * the first candidate. Attributing an unrelated directory to some repository is
+ * a worse answer than admitting there isn't one, and it is unfalsifiable from
+ * the UI.
+ */
+export function componentForPath(
+  candidates: readonly { path: string }[],
+  cwd: string,
+): string | null {
+  const owns = (path: string) =>
+    candidates
+      .filter((c) => path === c.path || path.startsWith(`${c.path}/`))
+      .sort((a, b) => b.path.length - a.path.length)[0]?.path ?? null;
+  return owns(cwd) ?? owns(checkoutKey(cwd));
 }

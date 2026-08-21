@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  componentForPath,
   adoptLegacyCustomTasks,
   adoptDefaultProjectLens,
   adoptProjectStructureIds,
@@ -1168,5 +1169,42 @@ describe("adoptLegacyCustomTasks", () => {
     const state = ws({ projects: [{ ...project("p2"), customTasks: [mine] }] });
     const after = adoptLegacyCustomTasks(state);
     expect(after.projects[0].customTasks).toEqual([mine, task]);
+  });
+});
+
+describe("componentForPath", () => {
+  const comps = [
+    { path: "/w/canopy" },
+    { path: "/w/canopy/packages/ui" },
+    { path: "/w/canopy-website" },
+  ];
+
+  it("folds a sibling worktree back to the checkout that owns it", () => {
+    // The agent-workspace overlay tested containment only, and a linked
+    // worktree is a sibling rather than a child — so a session working in one
+    // resolved to no repository and the view fell back to "showing what the
+    // agent reported", for a session whose pinned tab showed a real diff.
+    expect(componentForPath(comps, "/w/canopy-wt-agent-claude-20260821")).toBe("/w/canopy");
+    expect(componentForPath(comps, "/w/canopy-wt-fix/src/App.tsx")).toBe("/w/canopy");
+  });
+
+  it("folds a nested worktree too", () => {
+    expect(componentForPath(comps, "/w/canopy/.claude/worktrees/agent-x")).toBe("/w/canopy");
+  });
+
+  it("takes the most specific component, not the first that contains", () => {
+    // `/w/canopy` also contains this path; the nested component is the answer.
+    expect(componentForPath(comps, "/w/canopy/packages/ui/src")).toBe("/w/canopy/packages/ui");
+  });
+
+  it("does not confuse a repo with one whose name it prefixes", () => {
+    expect(componentForPath(comps, "/w/canopy-website/src")).toBe("/w/canopy-website");
+  });
+
+  it("answers null rather than blaming an unrelated repo", () => {
+    // Attributing a stray directory to the first candidate is a worse answer
+    // than admitting there isn't one, and it cannot be falsified from the UI.
+    expect(componentForPath(comps, "/elsewhere/thing")).toBeNull();
+    expect(componentForPath([], "/w/canopy")).toBeNull();
   });
 });

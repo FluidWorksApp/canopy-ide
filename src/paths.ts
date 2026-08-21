@@ -42,3 +42,21 @@ export function tailPath(p?: string | null, count = 2): string {
   const parts = p.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean);
   return parts.slice(-count).join(sep);
 }
+
+/**
+ * Fold nested and sibling agent worktrees to their main checkout.
+ *
+ * A linked worktree is a *sibling* of the checkout it belongs to, not a child,
+ * so no containment test can see the relationship — which is why every surface
+ * that asks "which project owns this directory" has to fold first, and why the
+ * ones that forgot reported an agent as being nowhere at all.
+ *
+ * Two layouts: `<repo>/.claude/worktrees/<name>` and `<repo>-wt-<name>`.
+ */
+export function checkoutKey(cwd: string): string {
+  const at = cwd.indexOf("/.claude/worktrees/");
+  const nested = at >= 0 ? cwd.slice(0, at) : cwd;
+  const sibling = /^(.*)-wt-[^/]+(?:\/.*)?$/.exec(nested);
+  const folded = sibling?.[1] ?? nested;
+  return folded.replace(/\/+$/, "") || "/";
+}

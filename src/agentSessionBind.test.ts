@@ -17,7 +17,7 @@
 // the two-answers problem, and was called from nowhere.
 import { describe, expect, it } from "vitest";
 import { resolveSessions } from "../shared/agentLife/bind";
-import { bucketFor, declaredQuiet, NO_ATTENTION } from "../shared/agentLife";
+import { bucketFor, declaredQuiet, LIFE_META, NO_ATTENTION } from "../shared/agentLife";
 import { lifeFor } from "./agentLifeStore";
 import { trimAgentEvents } from "../shared/notifications";
 import type { AgentEventEntry } from "../shared/notifications";
@@ -99,7 +99,8 @@ describe("the whole chain, as the strip runs it", () => {
     session_id: "sess-42",
     surface: "10",
     instance: "run-1",
-    updated: (now - 3600) * 1000,
+    // Seconds, the same units the ladder is handed as `now`.
+    updated: now - 3600,
     agent: "claude",
     state: "idle",
     state_via: "turn-boundary",
@@ -140,6 +141,42 @@ describe("the whole chain, as the strip runs it", () => {
     // Which is what lets the tab fall out of WORKING at all.
     expect(declaredQuiet(life)).toBe(true);
     expect(bucketFor(life, NO_ATTENTION)).not.toBe("active");
+  });
+});
+
+describe("a verdict is only as good as the evidence it is given", () => {
+  // The agent detail header derived its own verdict from a digest frozen at
+  // mount, with no process evidence at all. Past hookTrustSecs (300s) the
+  // digest stops being believed -- correctly, it is what stops a `working`
+  // from a session that died on Tuesday standing forever -- and with nothing
+  // to corroborate it the ladder falls to `unknown`. So a session busy for
+  // more than five minutes read "no signal -- may have stopped" while the tab
+  // strip, looking at the same session's CPU, had it under WORKING.
+  const now = 100_000;
+  const busyFor20Min = {
+    session_id: "sess-42",
+    agent: "claude",
+    state: "working",
+    state_via: "tool-activity",
+    updated: now - 1200,
+  } as never;
+
+  it("reads 'may have stopped' from a stale digest alone", () => {
+    const life = lifeFor({ digest: busyFor20Min, now });
+    expect(life.state).toBe("unknown");
+    expect(LIFE_META[life.state].label).toBe("no signal — may have stopped");
+  });
+
+  it("reads working from the same digest once the pty is in evidence", () => {
+    // Not by trusting the digest longer -- by reaching the rungs that need a
+    // live process, which the detail view had no way to reach.
+    const life = lifeFor({
+      digest: busyFor20Min,
+      stats: { id: 10, total_cpu: 12.0, agent_hint: "claude" } as never,
+      now,
+    });
+    expect(life.state).toBe("working");
+    expect(bucketFor(life, NO_ATTENTION)).toBe("active");
   });
 });
 

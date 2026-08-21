@@ -173,6 +173,7 @@ import {
   PREREQS,
   restoreCommand,
   resumeSessionId,
+  componentForPath,
   launchCommand,
   shellBin,
   type AgentLaunchOptions,
@@ -3016,14 +3017,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
             (c) => [c.label, c.path] as [string, string],
           ),
         );
-        const cwd = p.cwd;
-        repo =
-          repos.find((r) => cwd === r.path || cwd.startsWith(`${r.path}/`))
-            ?.path ??
-          // Sibling worktrees follow the `<repo>-wt-<branch>` convention.
-          repos.find((r) => cwd.startsWith(`${r.path}-wt-`))?.path ??
-          repos[0]?.path ??
-          null;
+        // Same resolver the overlay uses, so both surfaces answer alike. The
+        // last resort stays: this path has always preferred *some* repo to
+        // none, and changing that is a separate decision from making the two
+        // agree.
+        repo = componentForPath(repos, p.cwd) ?? repos[0]?.path ?? null;
       } catch {
         repo = null;
       }
@@ -11027,10 +11025,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // The live session cwd — the same source the Agents panel keys off,
           // so the overlay and a panel-opened tab resolve the same workspace.
           const cwd = stat?.cwd || activeTab.cwd || "";
-          const repo =
-            components.find(
-              (c) => cwd === c.path || cwd.startsWith(c.path + "/"),
-            )?.path ?? null;
+          // Through the shared resolver, which folds worktrees. Containment
+          // alone cannot see a sibling `<repo>-wt-<branch>`, so an agent in one
+          // resolved to no repository and this overlay showed the digest-only
+          // fallback — for a session whose pinned tab showed the real diff.
+          const repo = componentForPath(components, cwd);
           // Bind to the session actually running in this terminal by identity,
           // never by the digest's `surface` (the pty from whenever the hook last
           // wrote — stale across a restart, which is what stapled a dead session
@@ -11621,6 +11620,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return (
           <AgentWorkspaceView
             repo={tab.repo}
+            life={lifeForPty(tab.ptyId)}
             agent={tab.agent}
             cwd={tab.cwd}
             sessionId={tab.sessionId}
@@ -13133,6 +13133,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                       <AgentWorkspaceView
                         key={agentTermWs.ptyId}
                         repo={agentTermWs.repo}
+                        life={lifeForPty(agentTermWs.ptyId)}
                         agent={agentTermWs.agent}
                         cwd={agentTermWs.cwd}
                         sessionId={agentTermWs.sessionId}
