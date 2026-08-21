@@ -462,6 +462,9 @@ export interface AgentAction {
   placement?: "tab" | "split";
   relativeToPtyId?: number;
   direction?: "left" | "right" | "top" | "bottom";
+  /** spawn_agent: the child is a one-shot task — micro-task harness, pane
+   *  closes itself on canopy_job_done. */
+  autoClose?: boolean;
   /** job_done / task_named: what the agent calls this run. Straight from the
    *  model and clamped where it is read (taskIdentity.ts) — nothing here has
    *  been checked for length, for being one glyph, or for being a string. */
@@ -3353,6 +3356,10 @@ export const gitWorktreeBootstrap = (repo: string, path: string) =>
  *  a locked workspace — git needs `remove -f -f` for that and says so. */
 export const gitWorktreeRemove = (repo: string, path: string, force: 0 | 1 | 2) =>
   invoke<string>("git_worktree_remove", { repo, path, force });
+/** Fast-forward a pristine workspace to the main checkout's HEAD. Refuses —
+ *  never rewrites — a dirty tree or a branch with commits of its own. */
+export const gitWorktreeRealign = (repo: string, path: string) =>
+  invoke<string>("git_worktree_realign", { repo, path });
 export const gitWorktreePrune = (repo: string) =>
   invoke<string>("git_worktree_prune", { repo });
 

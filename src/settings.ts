@@ -581,6 +581,11 @@ export interface Settings {
    *  workspace, so it can build the moment it exists. Off means a bare
    *  `git worktree add`, which is what this used to do. */
   workspaceBootstrap: boolean;
+  /** A new agent (⌘N, the launch cards) opens in its own workspace — a fresh
+   *  worktree, so parallel agents can't trample each other's changes. Off
+   *  opens it in the current checkout instead, which is instant. Either way
+   *  the launcher's ⇧↵ / hover action does the opposite for one launch. */
+  agentWorkspaces: boolean;
 
   // ---- Crash reporting ----
   /** Opt-in, default off: when a panel crashes (or a native panic is found on
@@ -680,6 +685,7 @@ export const DEFAULTS: Settings = {
   workspaceBasePort: 5173,
   workspacePorts: {},
   workspaceBootstrap: true,
+  agentWorkspaces: true,
   crashReporting: false,
 };
 

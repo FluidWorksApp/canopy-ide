@@ -23,9 +23,15 @@ export interface SpawnPlacementTab {
 export const spawnedAgentTakesFocus = (agentAskForAttention: boolean) =>
   agentAskForAttention;
 
+/** The sanitized agent id as it appears in workspace branch names — the piece
+ *  reuse and reap match on, so it must never drift from agentWorkspaceBranch. */
+export function agentBranchSlug(agentId: string): string {
+  return agentId.toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
+}
+
 /** Branch name for a generic agent workspace. */
 export function agentWorkspaceBranch(agentId: string, now = new Date()): string {
-  const safeAgent = agentId.toLowerCase().replace(/[^a-z0-9._-]+/g, "-");
+  const safeAgent = agentBranchSlug(agentId);
   const stamp = now
     .toISOString()
     .replace(/[-:]/g, "")

@@ -3704,6 +3704,40 @@ pub async fn git_worktree_remove(
     Ok("Workspace removed".into())
 }
 
+/// Fast-forward a pristine workspace to the main checkout's current HEAD, so a
+/// reused agent workspace starts from the same code a fresh `worktree add`
+/// would. Refuses — never rewrites — anything that could lose work: a dirty
+/// tree, a locked workspace, or a branch holding commits the target doesn't
+/// already contain. The caller treats any refusal as "make a fresh one".
+#[tauri::command]
+pub async fn git_worktree_realign(
+    state: State<'_, WorkspaceManager>,
+    repo: String,
+    path: String,
+) -> Result<String, String> {
+    let top = repo_path(&state, &repo)?;
+    let known = scan_worktrees(&top)?
+        .into_iter()
+        .find(|w| !w.is_main && w.path == path)
+        .ok_or_else(|| format!("{path} is not a workspace of this repository"))?;
+    if known.locked.is_some() {
+        return Err("workspace is locked".into());
+    }
+    let wt = Path::new(&path);
+    if !run(git(wt).args(["status", "--porcelain"]))?.trim().is_empty() {
+        return Err("workspace has uncommitted changes".into());
+    }
+    let target = run(git(&top).args(["rev-parse", "HEAD"]))?.trim().to_string();
+    let head = run(git(wt).args(["rev-parse", "HEAD"]))?.trim().to_string();
+    if head == target {
+        return Ok("Workspace already current".into());
+    }
+    run(git(wt).args(["merge-base", "--is-ancestor", "HEAD", &target]))
+        .map_err(|_| "workspace has its own commits".to_string())?;
+    run(git(wt).args(["reset", "--hard", &target]))?;
+    Ok("Workspace fast-forwarded".into())
+}
+
 /// Drop administrative records for worktrees whose directories are gone.
 #[tauri::command]
 pub async fn git_worktree_prune(

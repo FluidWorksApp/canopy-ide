@@ -156,6 +156,11 @@ import {
   type AgentSpawnPlacement,
 } from "../../agentSpawn";
 import {
+  agentWorkspaceRoot,
+  reapDecision,
+  reuseAgentWorkspace,
+} from "../../agentWorkspaceLifecycle";
+import {
   AGENT_CLIS,
   agentCliFor,
   agentModelSwitchFor,
@@ -1586,7 +1591,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }),
     [project.components, worktreeEnv],
   );
-  const roots = components.map((c) => c.path);
+  const roots = useMemo(() => components.map((c) => c.path), [components]);
   const rootsKey = roots.join("\n");
   // Cmd+T's listener is registered once; without this it closes over the
   // components from mount and opens shells in the main checkout even after a
@@ -3336,7 +3341,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!cli) throw new Error(`Unknown agent "${a.agent}".`);
       const fleet = await gateManagedLaunch(cli, installed);
       if (!fleet.allowed) throw new Error("Canopy's fleet gate refused this agent launch");
-      const start = await startCommandParked(cli.id, a.text, a.route);
+      // autoClose = the micro-task contract, reused whole: the env below
+      // exposes canopy_job_done to the child, and the protocol line tells it
+      // to report and stop — after which the same teardown a Tasks run gets
+      // (wait for its turn to end, kill, forget, close the pane) applies.
+      const oneShot = Boolean(a.autoClose);
+      const seed = oneShot ? `${a.text} ${microTaskProtocol()}` : a.text;
+      const start = await startCommandParked(cli.id, seed, a.route);
       if (!start) throw new Error(`Agent CLI "${cli.id}" cannot be launched`);
       const component = [...project.components]
         .filter(
@@ -3384,15 +3395,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const activate = spawnedAgentTakesFocus(
         getSettings().agentAskForAttention,
       );
+      const spawnEnv: [string, string][] = oneShot
+        ? [...fleet.env, ["CANOPY_MICRO_TASK", "1"]]
+        : fleet.env;
+      // `activate` rides in the activate slot, nowhere else: it used to be
+      // passed as the `run` flag with activate hard-coded true, which is why
+      // a spawned child stole focus whatever the attention setting said.
       const id = addTerminal(
         a.route,
         start.command,
         `${title} · ${cli.name}`,
         cli.icon,
-        activate,
-        fleet.env,
+        false,
+        spawnEnv,
         fleet.route.profile === DEFAULT_PROFILE ? undefined : fleet.route.profile,
-        true,
+        activate,
         undefined,
         undefined,
         spawnedTask,
@@ -3431,20 +3448,47 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }).catch(() => {});
         throw error;
       }
+      if (oneShot) {
+        // The same durable row a Tasks-launched run gets, adopted from the
+        // reservation already made above — so job_done's recordTaskEnd finds
+        // it, settles the attempt as completed, and the run shows in history
+        // instead of vanishing with the pane.
+        const appInstance = await ipc.instanceId().catch(() => undefined);
+        adoptTaskReservation(reservation, {
+          taskId: "agent-delegation",
+          label: title,
+          icon: cli.icon,
+          agent: cli.id,
+          cwd: a.route,
+          projectId: project.id,
+          projectName: project.name,
+          brief: a.brief,
+          ...(appInstance ? { appInstance } : {}),
+        });
+        patchTabRaw(id, {
+          micro: {
+            taskId: "agent-delegation",
+            runId: spawnedTask.runId,
+            attemptId: spawnedTask.attemptId,
+          },
+        } as Partial<SubTab>);
+      }
       pendingAgentSpawnOps.current.set(id, {
         opId: a.opId,
         runId: spawnedTask.runId,
         attemptId: spawnedTask.attemptId,
         cwd: a.route,
       });
-      if (start.typePrompt) pendingTerminalPrompts.current.set(id, a.text);
+      if (start.typePrompt) pendingTerminalPrompts.current.set(id, seed);
     },
     [
       addTerminal,
       gateManagedLaunch,
       getInstalledForLaunch,
+      patchTabRaw,
       project.components,
       project.id,
+      project.name,
     ],
   );
 
@@ -6039,6 +6083,67 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [commitPendingAgentCloses],
   );
 
+  /** Closing the last tab in an agent workspace decides the workspace's fate:
+   *  nothing only-here → removed quietly (with its branch, when the branch too
+   *  holds nothing); uncommitted or unpushed work → one question, with keeping
+   *  it as the safe answer. Fired from finalizeTabClose after a beat so the
+   *  tab's PTY is gone before git touches the folder; every failure is a
+   *  silent keep — a workspace left behind is recoverable, a wrong delete is
+   *  not. */
+  const maybeReapAgentWorkspace = useCallback(
+    async (cwd: string, closedTabId: string) => {
+      const ws = agentWorkspaceRoot(cwd, repoPaths);
+      if (!ws) return;
+      // Splits, extra shells, another agent: any surviving tab in the same
+      // workspace means it is still in use.
+      const inUse = tabsRef.current.some(
+        (t) =>
+          t.id !== closedTabId &&
+          t.type === "terminal" &&
+          (t.cwd === ws.root || t.cwd.startsWith(`${ws.root}/`)),
+      );
+      if (inUse) return;
+      const [worktrees, audit] = await Promise.all([
+        ipc.gitWorktrees(ws.repo),
+        ipc.gitWorkAudit(ws.repo),
+      ]);
+      const worktree = worktrees.find((w) => w.path === ws.root);
+      const decision = reapDecision(
+        worktree,
+        audit.items.find((item) => item.branch === worktree?.branch),
+      );
+      if (decision.kind === "keep") return;
+      if (decision.kind === "remove") {
+        await ipc.gitWorktreeRemove(ws.repo, ws.root, 0);
+        if (decision.deleteBranch)
+          await ipc.gitBranchDelete(ws.repo, decision.branch).catch(() => {});
+        return;
+      }
+      const held = [
+        decision.dirty > 0 &&
+          `${decision.dirty} uncommitted file${decision.dirty === 1 ? "" : "s"}`,
+        decision.unpushed > 0 &&
+          `${decision.unpushed} unpushed commit${decision.unpushed === 1 ? "" : "s"}`,
+      ].filter(Boolean);
+      const action = await ask(
+        askDialog({
+          title: "This agent left work behind",
+          body: `${basename(ws.root)} still holds ${held.join(" and ")} that exist nowhere else. The tab is closed either way — this is only about the folder.`,
+          detail: ws.root,
+          choices: [
+            { action: "cancel", label: "Keep the workspace", recommended: true },
+            { action: "cleanup", label: "Remove it and lose the work" },
+          ],
+        }),
+      );
+      if (action !== "cleanup") return;
+      await ipc.gitWorktreeRemove(ws.repo, ws.root, 1);
+    },
+    [repoPaths, ask],
+  );
+  const maybeReapAgentWorkspaceRef = useRef(maybeReapAgentWorkspace);
+  maybeReapAgentWorkspaceRef.current = maybeReapAgentWorkspace;
+
   const finalizeTabClose = useCallback((
     id: string,
     origin: "automatic" | "user" = "automatic",
@@ -6064,6 +6169,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // once here covers a finished task and an abandoned one alike. recordTaskEnd
     // ignores a run that already settled, so "stopped" can't clobber "done".
     const closingTab = tabsRef.current.find((t) => t.id === id);
+    if (closingTab?.type === "terminal" && closingTab.cwd) {
+      const closingCwd = closingTab.cwd;
+      // After the unmount's PTY kill, not during it: git won't remove a
+      // folder a live process still holds open.
+      setTimeout(
+        () =>
+          void maybeReapAgentWorkspaceRef
+            .current(closingCwd, id)
+            .catch(() => {}),
+        1500,
+      );
+    }
     if (closingTab?.type === "preview") forgetBrowserTarget(id);
     if (
       origin === "user" &&
@@ -8434,13 +8551,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
     async (
       cli: AgentCli,
       at?: string,
-      where: "workspace" | "current" = "workspace",
+      // Unnamed means "the user didn't say": the agentWorkspaces setting
+      // decides. Callers with an explicit gesture (⇧↵, the hover action, a
+      // context-menu entry) still pass their own.
+      where?: "workspace" | "current",
     ) => {
       const cwd = at ?? activeContextRoot ?? componentsRef.current[0]?.path;
       if (!cwd) return;
+      const target =
+        where ?? (getSettings().agentWorkspaces ? "workspace" : "current");
       if (installed[cli.bin]) {
         let launchCwd = cwd;
-        if (where === "workspace") {
+        if (target === "workspace") {
           const repo =
             [...repoPaths]
               .sort((a, b) => b.length - a.length)
@@ -8457,22 +8579,34 @@ const ProjectViewBody = memo(function ProjectViewBody({
               "info",
             );
           } else {
-            const branch = agentWorkspaceBranch(cli.id);
-            const result = await switchTo(
-              repo,
-              { kind: "workspace", branch, create: true },
-              { because: `the new ${cli.name} agent` },
-            );
-            if (result.kind !== "settled") return;
-            launchCwd = result.path;
-            // Setup failure does not invalidate the new worktree.
-            if (result.created && getSettings().workspaceBootstrap) {
-              await ipc.gitWorktreeBootstrap(repo, launchCwd).catch((error) =>
-                onNotice(
-                  `${cli.name}'s workspace is ready, but setup could not be copied: ${String(error)}`,
-                  "warn",
-                ),
+            // A pristine leftover workspace for this CLI beats a fresh one:
+            // already checked out, already bootstrapped, fast-forwarded to
+            // today's HEAD — the launch is instant instead of a worktree add.
+            const reused = await reuseAgentWorkspace(repo, cli.id);
+            if (reused) {
+              launchCwd = reused;
+            } else {
+              const branch = agentWorkspaceBranch(cli.id);
+              // The worktree checkout plus setup copy below take seconds on a
+              // big repo, and nothing is on screen until they finish — without
+              // this the launch reads as the app hanging.
+              onNotice(`Preparing an isolated workspace for ${cli.name}…`, "info");
+              const result = await switchTo(
+                repo,
+                { kind: "workspace", branch, create: true },
+                { because: `the new ${cli.name} agent` },
               );
+              if (result.kind !== "settled") return;
+              launchCwd = result.path;
+              // Setup failure does not invalidate the new worktree.
+              if (result.created && getSettings().workspaceBootstrap) {
+                await ipc.gitWorktreeBootstrap(repo, launchCwd).catch((error) =>
+                  onNotice(
+                    `${cli.name}'s workspace is ready, but setup could not be copied: ${String(error)}`,
+                    "warn",
+                  ),
+                );
+              }
             }
           }
         }
@@ -11165,7 +11299,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (cwd) addTerminal(cwd);
   }, [activeContextRoot, addTerminal, completePendingSplit]);
   const onLaunchCli = useCallback(
-    (cli: AgentCli, where: "workspace" | "current" = "workspace") =>
+    (cli: AgentCli, where?: "workspace" | "current") =>
       launchCli(cli, undefined, where),
     [launchCli],
   );
@@ -11733,7 +11867,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       case "prs-list":
         return (
-          <PrsPanel page localRepos={repoPaths} projectFor={(repo) => repoPaths.includes(repo) ? project.name : undefined} onOpen={(repo, pr) => openPr(repo, pr)} onQuickTask={startPrQuickTask} relay={relay} onNotice={onNotice} onOpenChat={openChat} />
+          <PrsPanel page localRepos={repoPaths} onOpen={(repo, pr) => openPr(repo, pr)} onQuickTask={startPrQuickTask} relay={relay} onNotice={onNotice} onOpenChat={openChat} />
         );
       case "issues-list":
         return (
@@ -13493,9 +13627,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
       {sidePane("prs", () => (
         <PrsPanel
           localRepos={repoPaths}
-          projectFor={(repo) =>
-            repoPaths.includes(repo) ? project.name : undefined
-          }
           onOpen={(repo, pr) => openPr(repo, pr)}
           onOpenAll={() => openCollectionPage("prs-list")}
           onQuickTask={startPrQuickTask}

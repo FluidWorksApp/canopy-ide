@@ -19,6 +19,7 @@ import {
   shouldPrompt,
 } from "../branchSync";
 import { fmtTokens } from "../format";
+import { formatDeepLink } from "../deepLinks";
 import { setBounded } from "../boundedMap";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
@@ -1031,7 +1032,7 @@ export const StatusBar = memo(function StatusBar({
                                 <div
                                   className="bd-row bd-session"
                                   title={withLoadNote(
-                                    s.cwd,
+                                    `${s.cwd}\nClick to go to this terminal · ▸ expands its processes`,
                                     loadNote(
                                       "session",
                                       loadFlags(
@@ -1041,15 +1042,37 @@ export const StatusBar = memo(function StatusBar({
                                       ),
                                     ),
                                   )}
-                                  onClick={() =>
-                                    setOpenSessions((prev) => ({
-                                      ...prev,
-                                      [s.id]: !sOpen,
-                                    }))
-                                  }
+                                  // A row is a terminal, so clicking it goes
+                                  // there — the same deep-link route an OS
+                                  // banner takes, which switches project when
+                                  // the terminal lives in another one. The
+                                  // chevron alone expands the process list.
+                                  onClick={() => {
+                                    setBreakdown(false);
+                                    window.dispatchEvent(
+                                      new CustomEvent("canopy:follow-deep-link", {
+                                        detail: {
+                                          url: formatDeepLink({
+                                            kind: "terminal",
+                                            ptyId: s.id,
+                                            path: s.cwd,
+                                          }),
+                                        },
+                                      }),
+                                    );
+                                  }}
                                 >
                                   <span>
-                                    <span className="tree-chevron">
+                                    <span
+                                      className="tree-chevron"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setOpenSessions((prev) => ({
+                                          ...prev,
+                                          [s.id]: !sOpen,
+                                        }));
+                                      }}
+                                    >
                                       {sOpen ? "▾" : "▸"}
                                     </span>
                                     {s.title || "shell"}

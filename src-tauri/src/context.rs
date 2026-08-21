@@ -3027,11 +3027,15 @@ struct Action {
     icon: Option<String>,
     tags: Option<Vec<String>>,
     /// spawn_agent: the complete delegation brief plus launch presentation.
+    /// The child always opens as a pane beside its parent; `placement` and
+    /// `relativeToPtyId` from older sidecars arrive as unknown fields and are
+    /// ignored.
     agent: Option<String>,
-    placement: Option<String>,
-    #[serde(rename = "relativeToPtyId")]
-    relative_to_pty_id: Option<u32>,
     direction: Option<String>,
+    /// spawn_agent: run the child as a one-shot task — it reports through
+    /// canopy_job_done and Canopy closes its pane when the job is done.
+    #[serde(rename = "autoClose")]
+    auto_close: Option<bool>,
     /// job_done / close_session: the launching app instance (env
     /// CANOPY_INSTANCE), so a pty id recycled across an app restart can't
     /// close an unrelated tab.
@@ -3430,26 +3434,20 @@ async fn action(
                     format!("spawn_agent brief is capped at {} KB", MAX_MESH_TEXT / 1024),
                 );
             }
-            let placement = act.placement.as_deref().unwrap_or("tab");
-            if !matches!(placement, "tab" | "split") {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "placement must be tab or split".into(),
-                );
-            }
-            if placement == "split"
-                && (act.relative_to_pty_id.is_none()
-                    || !matches!(
-                        act.direction.as_deref(),
-                        Some("left" | "right" | "top" | "bottom")
-                    ))
-            {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    "split placement needs relativeToPtyId and direction (left, right, top, bottom)"
-                        .into(),
-                );
-            }
+            // The child always lands beside its parent, in the parent's own
+            // tab — a delegation is part of the work in front of the user, not
+            // a new place to look. The tool no longer offers "tab", and the
+            // relative terminal is the caller itself, never a chosen one.
+            let direction = match act.direction.as_deref() {
+                None => "right",
+                Some(dir @ ("left" | "right" | "top" | "bottom")) => dir,
+                Some(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "direction must be left, right, top or bottom".into(),
+                    );
+                }
+            };
             let live_children = snaps
                 .agents
                 .lock()
@@ -3496,9 +3494,10 @@ async fn action(
                     "brief": body,
                     "title": act.title,
                     "agent": act.agent,
-                    "placement": placement,
-                    "relativeToPtyId": act.relative_to_pty_id,
-                    "direction": act.direction,
+                    "placement": "split",
+                    "relativeToPtyId": parent.pty_id,
+                    "direction": direction,
+                    "autoClose": act.auto_close.unwrap_or(false),
                 }),
             );
             return match tokio::time::timeout(AGENT_SPAWN_TIMEOUT, rx).await {

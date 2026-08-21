@@ -2122,6 +2122,12 @@ export default function App() {
       const hinted = Boolean(link.projectId || link.path);
       const projectId =
         projectForLink(link, state.projects) ??
+        // The cwd-shaped hints (a resources row, an agent's terminal) are
+        // routinely worktree paths that sit beside the component root rather
+        // than under it; the terminal resolver knows how to fold those.
+        (link.path
+          ? projectForTerminalCwd(state.projects, link.path)
+          : undefined) ??
         // An agent running in a worktree has a cwd (`<repo>-wt-…`) under no
         // component root, so a *path*-hinted link can still fail to resolve.
         // With exactly one project open there is only one place it could mean —

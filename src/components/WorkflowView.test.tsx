@@ -117,6 +117,27 @@ describe("WorkflowView", () => {
     expect(screen.queryByText("Completed tasks")).toBeNull();
   });
 
+  it("does not reload the catalog when a parent re-render only changes array identity", async () => {
+    const props = {
+      projectId: "project-1",
+      projectName: "Canopy",
+      projectRoot: "/repo",
+      onRun: vi.fn(),
+      onAnswer: vi.fn(),
+      onResume: vi.fn(),
+      onCreateStarter: vi.fn(),
+      onSave: vi.fn(),
+    };
+    const { rerender } = render(<WorkflowView {...props} componentRoots={["/repo"]} />);
+    expect(await screen.findByRole("button", { name: "Run" })).toBeInTheDocument();
+    expect(mocks.loadWorkflowDefinitions).toHaveBeenCalledTimes(1);
+
+    // A fresh array with the same contents — what every parent render passes.
+    rerender(<WorkflowView {...props} componentRoots={["/repo"]} />);
+    expect(await screen.findByRole("button", { name: "Run" })).toBeInTheDocument();
+    expect(mocks.loadWorkflowDefinitions).toHaveBeenCalledTimes(1);
+  });
+
   it("turns the empty catalog into a starter workflow without leaving the page", async () => {
     mocks.loadWorkflowDefinitions
       .mockReset()

@@ -3908,14 +3908,13 @@ fn tool_defs() -> serde_json::Value {
 fn agent_spawn_tool_defs() -> Vec<serde_json::Value> {
     vec![serde_json::json!({
         "name": "canopy_spawn_agent",
-        "description": "Delegate a bounded piece of this workspace's work to a new, ordinary agent tab. The child starts with no conversation memory: `brief` must be complete. Canopy reserves its durable task identity before spawning, records this parent→child brief in the mesh, and limits delegation depth and live children. Defaults to a plain tab; `placement: split` requires a live `relativeToPtyId` from canopy_agents and a direction.",
+        "description": "Delegate a bounded piece of this workspace's work to a new agent. The child starts with no conversation memory: `brief` must be complete. It always opens as a pane beside your own terminal — never a new tab — and never steals the user's focus. Canopy reserves its durable task identity before spawning, records this parent→child brief in the mesh, and limits delegation depth and live children. Pass `autoClose: true` for a one-shot task: the child is told to report through canopy_job_done and Canopy closes its pane when the job is done.",
         "inputSchema": { "type": "object", "properties": {
             "brief": { "type": "string", "description": "Complete task, relevant context/files, constraints, and what done looks like" },
-            "title": { "type": "string", "description": "Short human-visible name for the child tab and task" },
+            "title": { "type": "string", "description": "Short human-visible name for the child pane and task" },
             "agent": { "type": "string", "description": "CLI id (codex, claude, …); omit to use Canopy's configured route" },
-            "placement": { "type": "string", "enum": ["tab", "split"], "description": "Plain tab (default) or a pane beside an existing terminal" },
-            "relativeToPtyId": { "type": "integer", "description": "Existing terminal ptyId from canopy_agents; required for split" },
-            "direction": { "type": "string", "enum": ["left", "right", "top", "bottom"], "description": "Side of the relative terminal; required for split" }
+            "direction": { "type": "string", "enum": ["left", "right", "top", "bottom"], "description": "Which side of your terminal the child's pane opens on (default right)" },
+            "autoClose": { "type": "boolean", "description": "One-shot: the child reports via canopy_job_done and its pane closes itself when done (default false)" }
         }, "required": ["brief"], "additionalProperties": false }
     })]
 }
@@ -4289,9 +4288,8 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                     "text": brief,
                     "title": args.get("title").and_then(|value| value.as_str()),
                     "agent": args.get("agent").and_then(|value| value.as_str()),
-                    "placement": args.get("placement").and_then(|value| value.as_str()).unwrap_or("tab"),
-                    "relativeToPtyId": args.get("relativeToPtyId").and_then(|value| value.as_u64()),
                     "direction": args.get("direction").and_then(|value| value.as_str()),
+                    "autoClose": args.get("autoClose").and_then(|value| value.as_bool()),
                 }).to_string()),
                 std::time::Duration::from_secs(80),
             ))
@@ -6084,7 +6082,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_agent_requires_a_complete_brief_and_exposes_both_placements() {
+    fn spawn_agent_requires_a_complete_brief_and_stays_in_the_parents_tab() {
         let defs = agent_spawn_tool_defs();
         let tool = defs.first().expect("canopy_spawn_agent is registered");
         assert_eq!(tool["name"], "canopy_spawn_agent");
@@ -6092,10 +6090,16 @@ mod tests {
             tool["inputSchema"]["required"],
             serde_json::json!(["brief"])
         );
+        // The child always opens beside its parent: no placement choice, no
+        // relative terminal to name — and a one-shot flag instead.
+        let props = &tool["inputSchema"]["properties"];
+        assert!(props.get("placement").is_none());
+        assert!(props.get("relativeToPtyId").is_none());
         assert_eq!(
-            tool["inputSchema"]["properties"]["placement"]["enum"],
-            serde_json::json!(["tab", "split"]),
+            props["direction"]["enum"],
+            serde_json::json!(["left", "right", "top", "bottom"]),
         );
+        assert_eq!(props["autoClose"]["type"], "boolean");
         let (action, detail) = describe_action(
             "canopy_spawn_agent",
             &serde_json::json!({ "brief": "Own the parser tests and report back" }),

@@ -111,13 +111,15 @@ describe("PrsPanel dashboard", () => {
       <PrsPanel
         page
         localRepos={["/repo"]}
-        projectFor={() => "Canopy"}
         onOpen={onOpen}
       />,
     );
 
     const stack = await screen.findByRole("button", { name: "Stack on #1" });
     expect(screen.getByText("Main · Features")).toBeInTheDocument();
+    // The row names its repo (the leaf of owner/name), not the project: in a
+    // multi-repo project the project name said nothing about where a PR lives.
+    expect(screen.getAllByText("r").length).toBeGreaterThan(0);
     expect(screen.getByText("codex · session1")).toBeInTheDocument();
     expect(screen.getAllByTitle("Recommended landing order")[0]).toHaveTextContent("1");
 

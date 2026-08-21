@@ -29,7 +29,9 @@ import { ContextMenu, useContextMenu, type MenuItem } from "./ContextMenu";
 import type { RelayHandle } from "../types";
 import { formatDeepLink } from "../deepLinks";
 import {
+  agoLabel,
   dashboardGroups,
+  exactTime,
   indexProbes,
   mergeProbeGroups,
   openAge,
@@ -46,8 +48,6 @@ interface PrsPanelProps {
    *  that spans projects is a stream to scroll, not a queue to work. */
   localRepos: string[];
   onOpen: (repo: string, pr: ipc.PrInfo) => void;
-  /** Repo path → the label to show on the row's second line. */
-  projectFor: (repo: string) => string | undefined;
   page?: boolean;
   onOpenAll?: () => void;
   /** Start the agent micro-task the row's state calls for (review, address
@@ -59,6 +59,13 @@ interface PrsPanelProps {
 }
 
 const PANEL_ROWS = 12;
+
+/** The row's second-line label: which repo the PR is in. The project name it
+ *  used to show was one word for every row of a multi-repo project — #1743 and
+ *  #90 read as neighbours when they were repos apart. Owner stays in the
+ *  hover title; the leaf is what tells rows apart. */
+const repoName = (row: ipc.PrRow) =>
+  row.nwo.split("/").pop() || basename(row.repo);
 
 // A head SHA is the invalidation token. Revisiting the page reuses evidence
 // while the commits are unchanged; a push creates a different key and probes
@@ -99,7 +106,7 @@ const LANE_TONE: Record<Lane, string> = {
   draft: "is-dim",
 };
 
-export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenAll, onQuickTask, relay, onNotice, onOpenChat }: PrsPanelProps) {
+export function PrsPanel({ localRepos, onOpen, page = false, onOpenAll, onQuickTask, relay, onNotice, onOpenChat }: PrsPanelProps) {
   const { rows, fetchedMs, errors, remaining, nextIn, busy, viewer } = usePrWatch();
   const [mineOnly, setMineOnly] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<Lane>>(new Set());
@@ -358,15 +365,18 @@ export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenA
                 {!isCollapsed && (
                   <div className="prs-dashboard-rows">
                     {[...group.rows]
+                      // Landing order first; rows the plan has no opinion on
+                      // follow by recency, so "what moved last" is the tie-break
+                      // rather than an alphabetical accident.
                       .sort((a, b) =>
                         (plan.get(`${a.repo}\0${a.number}`)?.position ?? 999) -
                           (plan.get(`${b.repo}\0${b.number}`)?.position ?? 999) ||
-                        a.repo.localeCompare(b.repo) || a.number - b.number,
+                        (a.updated < b.updated ? 1 : a.updated > b.updated ? -1 : 0) ||
+                        a.number - b.number,
                       )
                       .map((row) => {
                         const step = plan.get(`${row.repo}\0${row.number}`);
                         const st = rowState(row);
-                        const project = projectFor(row.repo);
                         const session = sessionLabel(cachedProvenance(row.repo, row.number));
                         const canRetarget = step?.stackAfter && row.base !== step.stackAfter.branch;
                         return (
@@ -387,10 +397,12 @@ export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenA
                                 <strong>{row.title}</strong>
                               </div>
                               <div className="prs-dashboard-meta">
-                                <span>{project ?? row.nwo}</span>
+                                <span>{repoName(row)}</span>
                                 <span>{row.author}</span>
-                                <span>{openAge(row.created)}</span>
-                                <span title="Authoring agent session">{session}</span>
+                                <span title={`Opened ${exactTime(row.created)}\nLast activity ${exactTime(row.updated)}`}>
+                                  {openAge(row.created)} · updated {agoLabel(row.updated)}
+                                </span>
+                                {session && <span title="Authoring agent session">{session}</span>}
                                 <span>+{row.additions} −{row.deletions}</span>
                               </div>
                             </div>
@@ -457,7 +469,6 @@ export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenA
             {!isCollapsed &&
               laneRows.map((row) => {
                 const st = rowState(row);
-                const project = projectFor(row.repo);
                 return (
                   <div
                     key={`${row.repo}#${row.number}`}
@@ -471,8 +482,11 @@ export function PrsPanel({ localRepos, onOpen, projectFor, page = false, onOpenA
                     <span className="prs-row-title">{row.title}</span>
                     <span className={`prs-row-state tone-${st.tone}`}>{st.text}</span>
                     <div className="prs-row-sub">
-                      <span>{project ?? row.nwo}</span>
+                      <span>{repoName(row)}</span>
                       <span>· {row.mine ? "yours" : row.author}</span>
+                      <span title={`Opened ${exactTime(row.created)}\nLast activity ${exactTime(row.updated)}`}>
+                        · {agoLabel(row.updated)}
+                      </span>
                       {row.threads + row.comments > 0 && (
                         <span title="comments and review threads">
                           · {row.threads + row.comments} 💬

@@ -774,6 +774,7 @@ pub fn run() {
             git::git_worktree_add_pr,
             git::git_worktree_bootstrap,
             git::git_worktree_remove,
+            git::git_worktree_realign,
             git::git_worktree_prune,
             git::gh_available,
             git::gh_auth,

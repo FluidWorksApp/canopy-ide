@@ -1829,6 +1829,16 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item
+                  name="New agents get a workspace"
+                  desc="⌘N and the launch cards open each agent in its own worktree, so parallel agents can't trample each other. Off opens them in the current checkout, which is instant; ⇧↵ or the row's hover action always does the opposite once."
+                >
+                  <Checkbox
+                    checked={s.agentWorkspaces}
+                    onChange={(v) => patch({ agentWorkspaces: v })}
+                    label="Start new agents in their own workspace"
+                  />
+                </Item>
+                <Item
                   name="Set up new workspaces"
                   desc="Copy the gitignored config and install dependencies, so it builds right away."
                 >

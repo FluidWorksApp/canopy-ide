@@ -19,6 +19,7 @@ import {
 } from "./icons";
 import type { AgentCli } from "../projects";
 import { AGENT_CLIS } from "../projects";
+import { getSettings } from "../settings";
 import type { TabDrag } from "../tabDrag";
 import {
   ANCHOR_ATTR,
@@ -817,7 +818,10 @@ function PaneBarImpl({
                 </div>
               )}
               {AGENT_CLIS.map((cli) => (
-                <div key={cli.id} className="cli-item" onClick={() => { setCliMenuOpen(false); onLaunchCli(cli, "workspace"); }}>
+                // Unqualified click follows the agentWorkspaces setting; the
+                // hover action below is always the other choice, same as the
+                // ⌘N palette.
+                <div key={cli.id} className="cli-item" onClick={() => { setCliMenuOpen(false); onLaunchCli(cli); }}>
                   <span><AgentIcon id={cli.id} size={15} className="cli-icon" /> {cli.name}</span>
                   {/* This account has no login for that CLI yet. Still
                       launchable — that is how you sign in. */}
@@ -840,15 +844,26 @@ function PaneBarImpl({
                     <button
                       type="button"
                       className="launch-current"
-                      aria-label={`Open ${cli.name} in the current checkout`}
-                      title={`Open ${cli.name} in the current checkout`}
+                      aria-label={
+                        getSettings().agentWorkspaces
+                          ? `Open ${cli.name} in the current checkout`
+                          : `Open ${cli.name} in a new workspace`
+                      }
+                      title={
+                        getSettings().agentWorkspaces
+                          ? `Open ${cli.name} in the current checkout`
+                          : `Open ${cli.name} in a new workspace`
+                      }
                       onClick={(e) => {
                         e.stopPropagation();
                         setCliMenuOpen(false);
-                        onLaunchCli(cli, "current");
+                        onLaunchCli(
+                          cli,
+                          getSettings().agentWorkspaces ? "current" : "workspace",
+                        );
                       }}
                     >
-                      here
+                      {getSettings().agentWorkspaces ? "here" : "workspace"}
                     </button>
                   )}
                 </div>
