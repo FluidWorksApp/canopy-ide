@@ -20,7 +20,7 @@ const attachment = (
 });
 
 describe("TerminalAttachmentQueue", () => {
-  it("holds recovery until a slow ProjectView mounts, then delivers exactly once", () => {
+  it("holds recovery until a slow ProjectView mounts and reoffers after that owner unmounts", () => {
     const queue = new TerminalAttachmentQueue();
     const consume = vi.fn();
 
@@ -35,9 +35,16 @@ describe("TerminalAttachmentQueue", () => {
     queue.acknowledge("project-a", 7);
     expect(queue.pendingIdentities()).toEqual([]);
 
-    unsubscribe();
-    queue.subscribe("project-a", consume);
+    // A repeated native snapshot while the same owner is mounted refreshes
+    // metadata without manufacturing a second tab.
+    queue.enqueue({ ...attachment(7), title: "refreshed title" });
     expect(consume).toHaveBeenCalledOnce();
+
+    unsubscribe();
+    const replacement = vi.fn();
+    queue.subscribe("project-a", replacement);
+    expect(replacement).toHaveBeenCalledOnce();
+    expect(replacement.mock.calls[0][0].title).toBe("refreshed title");
   });
 
   it("routes concurrent projects independently and coalesces snapshot/event duplicates", () => {

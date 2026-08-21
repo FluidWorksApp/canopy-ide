@@ -25,6 +25,12 @@ export class TerminalAttachmentQueue {
   private readonly consumers = new Map<string, Set<Consumer>>();
   /** Offered to this mounted consumer but not yet acknowledged by a commit. */
   private readonly offered = new Map<string, Consumer>();
+  /** Acknowledged by this consumer. Keep the attachment until native exit so
+   * an owning ProjectView that later unmounts cannot orphan the live PTY. */
+  private readonly committed = new Map<
+    string,
+    { attachment: TerminalAttachment; consumer: Consumer }
+  >();
 
   private key(attachment: Pick<TerminalAttachment, "ptyId" | "sessionGeneration">) {
     return `${attachment.ptyId}:${attachment.sessionGeneration}`;
@@ -34,6 +40,13 @@ export class TerminalAttachmentQueue {
    * delivery replaces the same lifetime rather than manufacturing extra tabs. */
   enqueue(attachment: TerminalAttachment) {
     const key = this.key(attachment);
+    const committed = this.committed.get(key);
+    if (committed) {
+      // Snapshot reconciliation may refresh presentation metadata, but the
+      // mounted owner already has this lifetime and must not receive it twice.
+      committed.attachment = attachment;
+      return;
+    }
     const alreadyPending = this.pending.has(key);
     this.pending.set(key, attachment);
     // Event + live-snapshot reconciliation can report the same native lifetime
@@ -57,6 +70,15 @@ export class TerminalAttachmentQueue {
       for (const [key, offeredTo] of this.offered) {
         if (offeredTo === consumer) this.offered.delete(key);
       }
+      // A React commit only proves that this particular ProjectView owns the
+      // tab. If it unmounts while the native PTY survives, its replacement is
+      // the next owner and must receive the same lifetime again.
+      for (const [key, entry] of this.committed) {
+        if (entry.consumer !== consumer) continue;
+        this.committed.delete(key);
+        this.pending.set(key, entry.attachment);
+      }
+      this.flush(projectId);
     };
   }
 
@@ -67,6 +89,8 @@ export class TerminalAttachmentQueue {
   acknowledge(projectId: string, ptyId: number) {
     for (const [key, attachment] of this.pending) {
       if (attachment.projectId === projectId && attachment.ptyId === ptyId) {
+        const consumer = this.offered.get(key);
+        if (consumer) this.committed.set(key, { attachment, consumer });
         this.pending.delete(key);
         this.offered.delete(key);
       }
@@ -79,6 +103,7 @@ export class TerminalAttachmentQueue {
     const key = this.key({ ptyId, sessionGeneration });
     this.pending.delete(key);
     this.offered.delete(key);
+    this.committed.delete(key);
   }
 
   private flush(projectId: string) {
