@@ -85,6 +85,8 @@ describe("renderer recovery wiring", () => {
     expect(term).toContain("new TerminalStreamLedger()");
     expect(term).toContain("streamLedger.replayAfter()");
     expect(term).toContain("terminal stream interrupted; reconnecting");
+    expect(term).toContain('new Error("terminal attach timed out")');
+    expect(term).toContain("late.generation");
     expect(term).toContain("Math.min(100 * 2 ** (attachFailureCount - 1), 2_000)");
   });
 
