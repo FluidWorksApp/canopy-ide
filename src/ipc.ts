@@ -46,9 +46,7 @@ const listen = <T>(
       if (!active) return;
       active = false;
       activeTauriListeners.delete(release);
-      await invoke("js_log", { level: "info", message: `renderer:unlisten start ${event}` });
       await (nativeUnlisten as AsyncUnlisten)();
-      await invoke("js_log", { level: "info", message: `renderer:unlisten done ${event}` });
     };
     if (rendererReplacementPreparing) {
       await release();
@@ -65,20 +63,14 @@ const listen = <T>(
   return registration;
 };
 
-const prepareRendererReplacement = async () => {
+const releaseRendererListeners = () => {
   rendererReplacementPreparing = true;
-  while (pendingTauriListeners.size > 0) {
-    await Promise.allSettled([...pendingTauriListeners]);
-  }
-  // Tauri unlisten crosses the same IPC bridge as the reload command.  Issuing
-  // every release at once can saturate WebKit's bridge before the reload gets
-  // dispatched, so drain registrations one at a time.
+  // The native reload must already be scheduled before these commands cross
+  // the event bridge. An event emit can hold Tauri's listener lock while its
+  // WebKit evaluation is stalled; cleanup is best-effort and must never gate
+  // renderer recovery on that lock.
   for (const release of [...activeTauriListeners]) {
-    try {
-      await release();
-    } catch {
-      // Keep draining: one stale listener must not strand the replacement.
-    }
+    void release();
   }
 };
 
@@ -1026,8 +1018,8 @@ export const selftestCheckpointSave = (checkpoint: unknown) =>
 /** The watchdog's native webview reload primitive, exposed only while an
  * isolated selftest is active. A successful call destroys this JS page. */
 export const selftestReloadRenderer = async () => {
-  await prepareRendererReplacement();
   await invoke<void>("selftest_reload_renderer");
+  releaseRendererListeners();
 };
 
 /** A native-owned, phone-equivalent PTY in the disposable selftest project. */

@@ -21,12 +21,12 @@ describe("renderer recovery wiring", () => {
     expect(main).toContain("retryMs = Math.min(retryMs * 2, 2_000)");
     const ipc = read("src/ipc.ts");
     expect(ipc).toContain("renderer registration was superseded");
-    expect(ipc).toContain("await prepareRendererReplacement();");
-    expect(ipc).toContain("for (const release of [...activeTauriListeners])");
-    expect(ipc).toContain("await release();");
-    expect(ipc).not.toContain(
-      "Promise.allSettled([...activeTauriListeners].map((release) => release()))",
-    );
+    const reload = ipc.indexOf('await invoke<void>("selftest_reload_renderer")');
+    const cleanup = ipc.indexOf("releaseRendererListeners();", reload);
+    expect(reload).toBeGreaterThan(-1);
+    expect(cleanup).toBeGreaterThan(reload);
+    expect(ipc).toContain("void release();");
+    expect(ipc).not.toContain("prepareRendererReplacement");
     expect(main).toContain("configureSelftestPtyListenerFailures");
   });
 
