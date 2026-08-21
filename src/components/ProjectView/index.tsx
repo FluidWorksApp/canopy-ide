@@ -1859,12 +1859,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // subscribing flushes recovery that waited while this view was closed/asleep.
   useEffect(() => {
     return terminalAttachmentQueue.subscribe(project.id, (d) => {
+      // Recovery must not replace a user's existing selection, but a fresh or
+      // remounted view has no selection to protect. Activate one recovered tab
+      // so its viewer actually resumes instead of leaving every live stream
+      // mounted behind the empty launcher.
+      const activate = d.activate !== false || activeTabIdRef.current == null;
       attachTerminal(
         d.ptyId,
         d.cwd,
         d.title,
         d.killOnClose ? "⌨" : "📱",
-        d.activate !== false,
+        activate,
         d.killOnClose === true,
         d.name,
         d,

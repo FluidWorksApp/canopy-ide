@@ -435,15 +435,20 @@ pub fn selftest_reload_renderer(
     // handler, leaving the reload call and its JavaScript promise wedged
     // together. Dispatching the same native primitive after this synchronous
     // command returns gives the reply a chance to leave the old renderer; the
-    // replacement page resumes from the native checkpoint either way. Keep the
-    // WebKit operation on the UI thread: dispatching it through the async
-    // runtime can eventually wedge during a long reload soak.
-    app.run_on_main_thread(move || {
-        if let Err(error) = main.reload() {
-            log::error!("selftest renderer reload failed: {error}");
+    // replacement page resumes from the native checkpoint either way. The
+    // short async boundary guarantees the invoke response has left this page;
+    // the second dispatch keeps the actual WebKit operation on the UI thread.
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        if let Err(error) = app.run_on_main_thread(move || {
+            if let Err(error) = main.reload() {
+                log::error!("selftest renderer reload failed: {error}");
+            }
+        }) {
+            log::error!("selftest renderer reload dispatch failed: {error}");
         }
-    })
-    .map_err(|error| error.to_string())
+    });
+    Ok(())
 }
 
 /// A phone-equivalent PTY: native-owned, announced through `pty:spawned`, and
