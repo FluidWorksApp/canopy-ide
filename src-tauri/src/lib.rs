@@ -15,9 +15,9 @@ mod companion;
 mod containment;
 mod context;
 mod crash;
-mod execution;
 #[cfg(feature = "dictation")]
 mod dictation;
+mod execution;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
 // keeps the command surface identical so the rest of this file is unchanged.
 #[cfg(not(feature = "dictation"))]

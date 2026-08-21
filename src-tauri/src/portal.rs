@@ -825,8 +825,14 @@ fn handle_client_msg(
             let command = v.get("command").and_then(|x| x.as_str()).map(String::from);
             let agent = v.get("agent").and_then(|x| x.as_str()).map(String::from);
             let profile = v.get("profile").and_then(|x| x.as_str()).map(String::from);
-            let project_id = v.get("projectId").and_then(|x| x.as_str()).map(String::from);
-            let component_id = v.get("componentId").and_then(|x| x.as_str()).map(String::from);
+            let project_id = v
+                .get("projectId")
+                .and_then(|x| x.as_str())
+                .map(String::from);
+            let component_id = v
+                .get("componentId")
+                .and_then(|x| x.as_str())
+                .map(String::from);
             let workspace_path = v
                 .get("workspacePath")
                 .and_then(|x| x.as_str())
@@ -851,16 +857,15 @@ fn handle_client_msg(
                     _ => Err("a restored profile requires its agent id".into()),
                 };
                 let msg = match account.and_then(|account| {
-                    app.state::<PtyManager>()
-                        .spawn_headless_bound(
-                            app.clone(),
-                            cwd,
-                            command,
-                            account,
-                            project_id,
-                            component_id,
-                            workspace_path,
-                        )
+                    app.state::<PtyManager>().spawn_headless_bound(
+                        app.clone(),
+                        cwd,
+                        command,
+                        account,
+                        project_id,
+                        component_id,
+                        workspace_path,
+                    )
                 }) {
                     Ok(id) => json!({ "t": "spawned", "pty": id }),
                     Err(e) => json!({ "t": "spawn-error", "message": e }),

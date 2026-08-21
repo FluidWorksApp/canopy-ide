@@ -37,6 +37,7 @@ import {
   type Violation,
 } from "../browserWatchdog";
 import { markOnboarded } from "../onboarding";
+import { markAllTipsSeen } from "../coachmarks";
 
 export interface SelftestDeps {
   /** Open the scratch directory as a project, exactly as `canopy <dir>` does. */
@@ -187,8 +188,16 @@ function painting(selector: string): boolean {
  *  fresh profile, most likely. The scenario needs an empty stage. */
 async function clearTheStage() {
   markOnboarded();
+  markAllTipsSeen();
   for (let i = 0; i < 6; i++) {
-    const backdrop = document.querySelector(".confirm-backdrop, .dlg-scrim, .modal-backdrop, .palette-backdrop");
+    // A real pointer can be resting over whatever the previous step just
+    // mounted (notably a pane tab). Dismiss its transient tooltip through the
+    // same global path a user press takes; the tooltip itself is exercised
+    // deliberately later in the surface matrix.
+    document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    const backdrop = document.querySelector(
+      ".confirm-backdrop, .dlg-scrim, .modal-backdrop, .palette-backdrop, .coach-layer",
+    );
     if (!backdrop) return;
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     backdrop.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
@@ -383,6 +392,11 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
       target = browserViewSnapshots()[0].tabId;
       return `tab ${target.slice(0, 8)}`;
     });
+
+    // Opening the project and preview mounts new controls under the runner's
+    // real mouse position. Clear any first hover before judging the page; the
+    // transient surfaces are opened and verified explicitly below.
+    await clearTheStage();
 
     if (!view()) {
       notes.push(
