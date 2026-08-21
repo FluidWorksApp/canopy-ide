@@ -78,6 +78,7 @@ describe("renderer recovery wiring", () => {
 
   it("uses one generation-scoped viewer path for owned and remote PTYs", () => {
     const term = read("src/components/Term.tsx");
+    const ipc = read("src/ipc.ts");
     expect(term).toContain("ipc.ptyAttachDesktop");
     expect(term).toContain("ipc.ptyDetachDesktop");
     expect(term).not.toContain("ipc.ptyAttach(");
@@ -88,6 +89,8 @@ describe("renderer recovery wiring", () => {
     expect(term).toContain('new Error("terminal attach timed out")');
     expect(term).toContain("late.generation");
     expect(term).toContain("Math.min(100 * 2 ** (attachFailureCount - 1), 2_000)");
+    expect(ipc).toContain('await invoke<PtyGeometry & {');
+    expect(ipc).toContain('gone(invoke<void>("pty_start_desktop"');
   });
 
   it("streams every visible split pane while only the focused pane owns input", () => {

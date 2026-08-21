@@ -620,6 +620,7 @@ pub fn run() {
             pty::pty_spawn_attached_argv,
             pty::pty_output,
             pty::pty_attach_desktop,
+            pty::pty_start_desktop,
             pty::pty_detach_desktop,
             pty::pty_renderer_register,
             pty::pty_renderer_sessions,
