@@ -454,7 +454,19 @@ pub fn selftest_reload_renderer(
                 if candidate.swap(true, Ordering::SeqCst) {
                     return;
                 }
-                if let Err(error) = candidate_main.reload() {
+                let result =
+                    if let Some(ptys) = candidate_main.try_state::<crate::pty::PtyManager>() {
+                        match ptys.reload_renderer(|| candidate_main.reload()) {
+                            Ok(result) => result,
+                            Err(_) => {
+                                candidate.store(false, Ordering::SeqCst);
+                                return;
+                            }
+                        }
+                    } else {
+                        candidate_main.reload()
+                    };
+                if let Err(error) = result {
                     log::error!("selftest renderer reload failed: {error}");
                 }
             }) {

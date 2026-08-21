@@ -344,27 +344,41 @@ export async function ptyAttachDesktop(
   replay_start: number;
   replay_end: number;
 }> {
-  const channel = new Channel<ArrayBuffer | number[]>();
-  channel.onmessage = (data) => onData(decodePtyChunk(data));
+  const rendererGenerationAtAttach = rendererGeneration();
   const attached = await invoke<PtyGeometry & {
     generation: number;
     replay_start: number;
     replay_end: number;
   }>("pty_attach_desktop", {
     id,
-    rendererGeneration: rendererGeneration(),
+    rendererGeneration: rendererGenerationAtAttach,
     after,
-    onData: channel,
   });
-  // The first invoke must return before native replay starts; otherwise a
-  // WebKit reload can wedge Channel delivery and the attach response together.
-  // Starting is fire-and-forget because native delivery deliberately lives
-  // beyond this page and is generation-scoped against every later retry.
-  gone(invoke<void>("pty_start_desktop", {
-    id,
-    rendererGeneration: rendererGeneration(),
-    generation: attached.generation,
-  }));
+  type DesktopRead = { start: number; gap: boolean; bytes: number[] };
+  const pull = async (): Promise<void> => {
+    try {
+      const chunk = await invoke<DesktopRead | null>("pty_read_desktop", {
+        id,
+        rendererGeneration: rendererGenerationAtAttach,
+        generation: attached.generation,
+      });
+      if (chunk) {
+        const bytes = Uint8Array.from(chunk.bytes);
+        onData({
+          bytes,
+          start: chunk.start,
+          end: chunk.start + bytes.length,
+          gap: chunk.gap,
+        });
+      }
+      // One in-flight renderer-owned read per attachment. A destroyed page
+      // cancels its own timer; native generation checks end stale loops.
+      setTimeout(() => void pull(), chunk ? 0 : 10);
+    } catch {
+      // Detach, PTY exit and renderer replacement all end this pull loop.
+    }
+  };
+  setTimeout(() => void pull(), 0);
   return attached;
 }
 

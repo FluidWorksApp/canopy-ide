@@ -90,7 +90,8 @@ describe("renderer recovery wiring", () => {
     expect(term).toContain("late.generation");
     expect(term).toContain("Math.min(100 * 2 ** (attachFailureCount - 1), 2_000)");
     expect(ipc).toContain('await invoke<PtyGeometry & {');
-    expect(ipc).toContain('gone(invoke<void>("pty_start_desktop"');
+    expect(ipc).toContain('invoke<DesktopRead | null>("pty_read_desktop"');
+    expect(ipc).toContain("One in-flight renderer-owned read per attachment");
   });
 
   it("streams every visible split pane while only the focused pane owns input", () => {

@@ -212,7 +212,13 @@ impl WatchdogState {
         detail: u64,
     ) -> ReloadDecision {
         self.request_reload_with(reason, detail, || {
-            main.reload().map_err(|error| error.to_string())
+            if let Some(ptys) = main.try_state::<crate::pty::PtyManager>() {
+                ptys.reload_renderer(|| main.reload())
+                    .map_err(str::to_string)?
+                    .map_err(|error| error.to_string())
+            } else {
+                main.reload().map_err(|error| error.to_string())
+            }
         })
     }
 
