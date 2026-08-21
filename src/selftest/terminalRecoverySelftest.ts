@@ -97,6 +97,15 @@ async function writeMarker(terminal: TerminalCheckpoint, cycle: number) {
 const visibleStreamObservation = (replayEnds: Map<number, number>) => {
   const visible = [...document.querySelectorAll<HTMLElement>(".term-container")]
     .filter((host) => host.getClientRects().length > 0)
+    // App bootstrap can briefly leave a fresh, unbound terminal container in
+    // front of the recovered tabs. It has no native identity and is not one of
+    // the streams this checkpoint is proving; counting it makes an unrelated
+    // placeholder veto recovery forever. The empty result still fails below,
+    // so at least one checkpointed stream must genuinely be visible.
+    .filter((host) => {
+      const ptyId = Number(host.dataset.ptyId);
+      return Number.isFinite(ptyId) && replayEnds.has(ptyId);
+    })
     .map((host) => {
       const ptyId = Number(host.dataset.ptyId);
       const expectedEnd = replayEnds.get(ptyId);

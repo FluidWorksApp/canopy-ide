@@ -435,13 +435,15 @@ pub fn selftest_reload_renderer(
     // handler, leaving the reload call and its JavaScript promise wedged
     // together. Dispatching the same native primitive after this synchronous
     // command returns gives the reply a chance to leave the old renderer; the
-    // replacement page resumes from the native checkpoint either way.
-    tauri::async_runtime::spawn(async move {
+    // replacement page resumes from the native checkpoint either way. Keep the
+    // WebKit operation on the UI thread: dispatching it through the async
+    // runtime can eventually wedge during a long reload soak.
+    app.run_on_main_thread(move || {
         if let Err(error) = main.reload() {
             log::error!("selftest renderer reload failed: {error}");
         }
-    });
-    Ok(())
+    })
+    .map_err(|error| error.to_string())
 }
 
 /// A phone-equivalent PTY: native-owned, announced through `pty:spawned`, and
