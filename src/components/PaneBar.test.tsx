@@ -33,7 +33,7 @@ const term = (id: string, title: string): TermSubTab => ({
   id,
   type: "terminal",
   cwd: "/repo",
-  title,
+  launchTitle: title,
   ptyId: 1,
 });
 
@@ -200,7 +200,7 @@ describe("PaneBar tab rename", () => {
   });
 
   it("shows the stable assigned name ahead of the CLI title", () => {
-    const tab = { ...term("t1", "canopy"), name: "Juniper" };
+    const tab = { ...term("t1", "canopy"), nativeName: "Juniper" };
     render(paneBar({ tabGroups: [run("all", [tab])] }));
     expect(screen.getByText("Juniper")).toHaveClass("tab-title");
     expect(screen.queryByText("canopy")).toBeNull();
@@ -209,8 +209,8 @@ describe("PaneBar tab rename", () => {
   it("shows an agent-published task title ahead of its generated name", () => {
     const tab = {
       ...term("t1", "codex"),
-      name: "Moss",
-      customTitle: "Fix Codex task status",
+      nativeName: "Moss",
+      agentName: "Fix Codex task status",
     };
     render(paneBar({ tabGroups: [run("all", [tab])] }));
     expect(screen.getByText("Fix Codex task status")).toHaveClass("tab-title");
@@ -218,7 +218,7 @@ describe("PaneBar tab rename", () => {
   });
 
   it("keeps a non-agent run's command title", () => {
-    const tab = { ...term("t1", "npm run dev"), name: "Juniper" };
+    const tab = { ...term("t1", "npm run dev"), nativeName: "Juniper" };
     render(
       paneBar({
         tabGroups: [run("all", [tab])],

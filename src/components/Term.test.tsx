@@ -122,7 +122,7 @@ function consumer(initial: TermSubTab) {
 const runTab = (): TermSubTab => ({
   id: "t1",
   type: "terminal",
-  title: "server",
+  launchTitle: "server",
   cwd: "/w/site",
   command: "npm run dev",
   run: true,

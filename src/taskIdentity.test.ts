@@ -5,7 +5,6 @@ import {
   identityPatch,
   MAX_TAGS,
   promptTaskIdentity,
-  shouldSeedPromptIdentity,
   taskGlyph,
   taskDescription,
   taskIdentity,
@@ -30,12 +29,8 @@ describe("promptTaskIdentity", () => {
       .toEqual({});
   });
 
-  it("only seeds an unnamed ordinary session", () => {
-    expect(shouldSeedPromptIdentity({})).toBe(true);
-    expect(shouldSeedPromptIdentity({ customTitle: "Review agent restore" })).toBe(false);
-    expect(shouldSeedPromptIdentity({ renamed: true })).toBe(false);
-    expect(shouldSeedPromptIdentity({ micro: { taskId: "review" } })).toBe(false);
-  });
+  // "may this prompt name the tab?" is no longer a question a caller can get
+  // wrong: the prompt writes its own slot, and tabName.test.ts owns the rule.
 });
 
 describe("taskDescription", () => {

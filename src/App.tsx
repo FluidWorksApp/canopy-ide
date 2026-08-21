@@ -44,6 +44,7 @@ import {
   derivePending,
   parseAgentEvent,
   pendingForRoots,
+  trimAgentEvents,
 } from "./notifications";
 import {
   formatDeepLink,
@@ -965,10 +966,13 @@ export default function App() {
         // one setState per line — the bridge batches each 500ms window.
         const ts = Date.now();
         setAgentEvents((prev) =>
-          [
-            ...prev,
-            ...raws.map((raw) => ({ ts, data: parseAgentEvent(raw) })),
-          ].slice(-200),
+          // Not a bare slice: the cap is app-wide and one of this list's
+          // consumers is per-pty, so a busy project used to evict a quiet
+          // terminal's only session stamp.
+          trimAgentEvents(
+            [...prev, ...raws.map((raw) => ({ ts, data: parseAgentEvent(raw) }))],
+            200,
+          ),
         );
       }),
       ipc.onRelayState(setRelayStatus),

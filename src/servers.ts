@@ -9,6 +9,7 @@
 // command is not dropped — an agent's canopy_start_server, or a command since
 // renamed in project settings, is still a process you need to be able to stop.
 import { basename } from "./paths";
+import { tabName } from "./tabName";
 import type { TermSubTab } from "./components/ProjectView/helpers";
 import type { Component, RunCommand } from "./projects";
 import type { AgentRef } from "./workspaces";
@@ -198,7 +199,7 @@ export function groupServers(
     if (t.exited) continue;
     const adhoc: ServerEntry = {
       key: `adhoc ${t.id}`,
-      name: t.customTitle ?? t.title,
+      name: tabName(t),
       command: t.command ?? "",
       state: stateOf(t),
       tabId: t.id,

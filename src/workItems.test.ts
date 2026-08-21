@@ -18,7 +18,7 @@ const session = (
   id,
   type: "terminal",
   cwd,
-  title: id,
+  launchTitle: id,
   ptyId,
   command: "claude",
   ...extra,
@@ -28,7 +28,7 @@ const shell = (id: string, cwd: string, ptyId: number): SubTab => ({
   id,
   type: "terminal",
   cwd,
-  title: id,
+  launchTitle: id,
   ptyId,
   command: "zsh",
 });

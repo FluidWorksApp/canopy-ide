@@ -8,6 +8,7 @@ import type { TabStatus } from "../../tabGroups";
 import { getSettings } from "../../settings";
 import { claimLabel } from "../../claims";
 import { basename } from "../../paths";
+import { tabName, type TabNames } from "../../tabName";
 
 export type SideTab =
   | "files"
@@ -24,25 +25,13 @@ export type SideTab =
   | "team"
   | "tools";
 
-export interface TermSubTab {
+export interface TermSubTab extends TabNames {
   id: string;
   type: "terminal";
   cwd: string;
-  /** Auto title, tracked from the shell/OSC. Shown unless the user renamed. */
-  title: string;
-  /** Canopy-owned stable session name. Display-only; PTY id/token remain the
-   *  authority for every privileged operation. */
-  name?: string;
   /** Agent-published one-line description, updated through canopy_name_task
    *  whenever the work changes. */
   description?: string;
-  /** Legacy/prespawn rename. Live sessions move this into native `name`. */
-  customTitle?: string;
-  /** The name on this tab was chosen by the user, not generated. Native owns
-   *  the name but forgets it with the pty, and an auto title is not
-   *  distinguishable from a rename once both live in `name` — so restore needs
-   *  which names are worth re-asserting on the new session. */
-  renamed?: boolean;
   ptyId: number | null;
   /** When set, this tab attaches to an already-running headless PTY (spawned
    *  from the remote portal) instead of spawning its own. Closing it detaches;
@@ -654,7 +643,7 @@ export function describeTab(tab: SubTab | undefined) {
     case "terminal":
       return {
         kind: tab.run ? "run" : "terminal",
-        label: tab.name ?? tab.customTitle ?? tab.title,
+        label: tabName(tab),
         cwd: tab.cwd,
         ptyId: tab.ptyId,
       };
@@ -726,7 +715,7 @@ export const tabId = () =>
 export function tabDisplayLabel(t: SubTab): string {
   switch (t.type) {
     case "terminal":
-      return t.multiplexTitle ?? t.name ?? t.customTitle ?? t.title;
+      return t.multiplexTitle ?? tabName(t);
     case "file":
       return t.file.name;
     case "pr":

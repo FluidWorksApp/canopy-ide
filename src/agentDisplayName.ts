@@ -1,82 +1,30 @@
-// What a running session is called everywhere Canopy surfaces it. The assigned
-// name is stable even when a CLI repeatedly repaints its terminal title.
+// What a running session is called on the surfaces that see sessions rather
+// than tabs — the Agents page, the control panel, the memory flyout.
+//
+// The precedence itself is not here: it lives in tabName.ts, which is the one
+// place any name is decided. This module only adapts a session (which carries a
+// native name and an OSC title, and may have no tab open at all) into the slots
+// that module reads. Two orderings for one question is how the strip and the
+// Agents page came to disagree about what a tab was called.
+
+import { tabName, type TabNames } from "./tabName";
 
 /** The tab showing a session, as far as naming is concerned. */
-export interface TabName {
-  /** Canopy's stable per-session name. */
-  name?: string;
-  /** Auto title, tracked from the shell/OSC — what the CLI calls itself. */
-  title?: string;
-  /** Legacy/prespawn rename, promoted into `name` once the PTY exists. */
-  customTitle?: string;
+export interface TabName extends TabNames {
   /** Agent-published current focus, transiently available before the digest
    *  store-change round trip lands. */
   description?: string;
 }
 
-/** Auto titles that name a terminal rather than the work in it. A shell that
- *  has not been titled by anything reports its own name (or the login shell's,
- *  or nothing at all), and "zsh" is a worse row heading than "claude". Only
- *  consulted for the auto title — a user who renames a tab to "shell" means it.
- */
-const GENERIC = new Set([
-  "",
-  "shell",
-  "terminal",
-  "term",
-  "console",
-  "agent",
-  "sh",
-  "bash",
-  "zsh",
-  "-zsh",
-  "-bash",
-  "fish",
-  "login",
-  "node",
-]);
+const clean = (s?: string) => (s ?? "").trim() || undefined;
 
 /**
- * A terminal's own title, shortened to something a chip can hold.
+ * A session's display name. The tab's slots when there is a tab, with the
+ * session's own name and title standing in for the two slots a tab would have
+ * filled from the same source.
  *
- * On Unix a shell reports "/bin/zsh" or the directory it is in — short either
- * way. cmd.exe reports its own full path, so a Windows terminal was titled
- * `C:\Windows\system32\cmd.exe`, which every surface that shows it then
- * truncated to `C:\Windows\syste…`: forty characters spent saying nothing,
- * and two shells side by side reading identically. The tail is the part that
- * identifies it, so keep that.
- *
- * Only for path-shaped titles. Anything a CLI paints ("✳ Fix the redirect")
- * is left exactly as it is — those are already the good case, and a path
- * separator in prose must not truncate the prose.
- */
-export function shellTitle(title: string): string {
-  const t = title.trim();
-  // A drive letter or a UNC root. Unix paths are left alone: "/bin/zsh" is
-  // already short, it is what macOS has always shown, and shortening it to
-  // "zsh" would land in the GENERIC list above and rename every shell row.
-  if (!/^[a-zA-Z]:[\\/]|^\\\\/.test(t)) return t;
-  const tail = t.split(/[\\/]/).filter(Boolean).pop();
-  return tail && tail.length > 0 ? tail : t;
-}
-
-const clean = (s?: string) => (s ?? "").trim();
-
-/** True when an auto title says nothing the CLI's name doesn't already say. */
-const uninformative = (title: string, agentLabel?: string) =>
-  GENERIC.has(title.toLowerCase()) ||
-  // A path is where it runs, not what it is doing; the row already carries a
-  // directory chip.
-  title.startsWith("/") ||
-  title.startsWith("~/") ||
-  // The bin under its own name adds nothing over the identified label, and the
-  // label is the tidier spelling of the two.
-  (!!agentLabel && title.toLowerCase() === agentLabel.toLowerCase());
-
-/**
- * Precedence is deliberate: task/user title, assigned fallback name, then the
- * CLI's useful title and cwd basename. `agentLabel` exists only for
- * compatibility with an older native core that supplies none of those.
+ * `agentLabel` exists only as a compatibility fallback for an older native core
+ * that supplies no name of its own.
  */
 export function agentDisplayName({
   tab,
@@ -92,12 +40,17 @@ export function agentDisplayName({
   /** Retained only as the last compatibility fallback for old native cores. */
   agentLabel?: string;
 }): string {
-  const assigned = clean(tab?.customTitle) || clean(tab?.name) || clean(sessionName);
-  if (assigned) return assigned;
-  const auto = clean(tab?.title) || clean(sessionTitle);
-  if (auto && !uninformative(auto, agentLabel)) return auto;
-  const dir = clean(cwd).replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).pop();
-  return dir || agentLabel || "shell";
+  return tabName(
+    {
+      ...tab,
+      nativeName: tab?.nativeName ?? clean(sessionName),
+      oscTitle: tab?.oscTitle ?? clean(sessionTitle),
+      cwd,
+    },
+    // These surfaces list agent sessions, so the generated session label is the
+    // identity the rest of Canopy addresses them by, not noise.
+    { agent: true, agentLabel },
+  );
 }
 
 export interface TerminalNameSource {
@@ -121,22 +74,22 @@ export function terminalDisplayName({
 /** ptyId -> the tab showing it, for every terminal tab that has spawned. The
  *  Agents panel keys rows by pty, so that is what the map is keyed by. */
 export function tabNamesByPty(
-  tabs: readonly {
+  tabs: readonly (TabNames & {
     type: string;
     ptyId?: number | null;
-    name?: string;
-    title?: string;
-    customTitle?: string;
     description?: string;
-  }[],
+  })[],
 ): Map<number, TabName> {
   const out = new Map<number, TabName>();
   for (const t of tabs) {
     if (t.type !== "terminal" || t.ptyId == null) continue;
     out.set(t.ptyId, {
-      name: t.name,
-      title: t.title,
-      customTitle: t.customTitle,
+      userName: t.userName,
+      agentName: t.agentName,
+      promptName: t.promptName,
+      nativeName: t.nativeName,
+      oscTitle: t.oscTitle,
+      launchTitle: t.launchTitle,
       description: t.description,
     });
   }

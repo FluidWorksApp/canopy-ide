@@ -81,8 +81,10 @@ import {
   POLICY,
   bucketFor,
   declaredQuiet,
+  resolveSessions,
   ringFor,
   type Attention,
+  type BindableDigest,
   type Life,
   type LifeState,
 } from "../../../shared/agentLife";
@@ -336,7 +338,6 @@ import {
   hasIdentity,
   identityPatch,
   promptTaskIdentity,
-  shouldSeedPromptIdentity,
   taskDescription,
   taskIdentity,
 } from "../../taskIdentity";
@@ -372,8 +373,16 @@ import {
 import {
   agentDisplayName,
   tabNamesByPty,
-  shellTitle,
 } from "../../agentDisplayName";
+import {
+  tabName,
+  namePatch,
+  sessionAddress,
+  snapshotNames,
+  adoptSnapshotNames,
+  isUserNamed,
+} from "../../tabName";
+import { renameSession, onSessionRenamed } from "../../sessionRename";
 import {
   modelCommandLine,
   type ModelChoice,
@@ -1483,10 +1492,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         let changed = false;
         const next = current.map((tab) => {
           if (tab.type !== "terminal" || tab.ptyId == null) return tab;
-          const name = names.get(tab.ptyId);
-          if (!name || name === tab.name) return tab;
+          // The generated label only. A rename made from the Agents page is a
+          // user's choice and reaches the tab through onSessionRenamed, not
+          // through this mirror — which cannot tell the two apart and would
+          // file both under the same slot.
+          const patch = namePatch(tab, "native", names.get(tab.ptyId));
+          if (!patch) return tab;
           changed = true;
-          return { ...tab, name };
+          return { ...tab, ...patch };
         });
         return changed ? next : current;
       });
@@ -1773,7 +1786,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           id,
           type: "terminal",
           cwd,
-          title: title ?? "shell",
+          ...(title ? { launchTitle: title } : {}),
           ptyId: null,
           command,
           icon,
@@ -1839,8 +1852,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           id,
           type: "terminal",
           cwd,
-          name,
-          title: configured?.name || title || "agent",
+          // Two different facts: what native calls the session it handed us,
+          // and what the launcher called the thing running in it.
+          nativeName: name,
+          launchTitle: configured?.name || title || undefined,
           ptyId,
           attachId: ptyId,
           killAttachedOnClose: killOnClose || undefined,
@@ -1954,6 +1969,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
       prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)),
     );
   }, []);
+
+  /** Record a user rename, whichever surface it came from — the inline tab
+   *  rename, a pane header, or the Agents page editor, which addresses a
+   *  session by pty and knows nothing about tabs. One subscription, so the
+   *  choice lands in the user's slot exactly once and no caller has to
+   *  remember to flag it. */
+  useEffect(
+    () =>
+      onSessionRenamed(({ ptyId, accepted, cleared }) => {
+        setTabs((prev) =>
+          prev.map((t) => {
+            if (t.type !== "terminal" || t.ptyId !== ptyId) return t;
+            // Clearing the field asks for the generated label back: forget the
+            // user's name rather than adopting native's fallback as a choice.
+            const patch = namePatch(t, "user", cleared ? undefined : accepted);
+            return patch ? { ...t, ...patch, nativeName: accepted } : t;
+          }),
+        );
+      }),
+    [],
+  );
 
   /** Open an embedded-browser preview tab. With no URL the tab opens on the
    *  pick-a-server form; a URL (a run rail's detected server, a reopened tab)
@@ -2507,11 +2543,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       .map((t) => ({
         cwd: t.cwd,
         command: t.command,
-        // Same reason as the hibernation snapshot: a rename is stored in native
-        // `name` and dies with the pty, so leaving it out is what made a
-        // reopened terminal come back under its generated name.
-        title: (t.renamed ? t.name : undefined) ?? t.customTitle ?? t.title,
-        renamed: t.renamed || undefined,
+        // `title` is the display name for an older build reading this store;
+        // `userName` is what a restore re-asserts on the new session.
+        ...snapshotNames(t, { agent: isAgentTabRef.current(t) }),
         icon: t.icon,
         run: t.run,
         componentId: t.componentId,
@@ -2565,10 +2599,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ? { componentId: t.componentId, runCommandId: t.runCommandId }
           : undefined,
       );
-      // A name the user chose outlives the pty that held it. Handing it back as
-      // a pending rename is what makes the spawn callback re-assert it, instead
-      // of the reopened terminal settling under a freshly generated name.
-      if (t.renamed && t.title) patchTabRaw(id, { customTitle: t.title });
+      // A name the user chose outlives the pty that held it: it comes back in
+      // its own slot, and the spawn callback re-asserts it on the new session.
+      patchTabRaw(id, adoptSnapshotNames(t));
       return id;
     },
     [addTerminal, patchTabRaw],
@@ -4782,7 +4815,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
               ...(nextConfigured
                 ? {
                     command: nextConfigured.command,
-                    title: nextConfigured.name,
+                    // The configured name only. A restart used to write over
+                    // whatever the tab was called, which is how a renamed
+                    // server came back as something else.
+                    launchTitle: nextConfigured.name,
                     componentId: nextConfigured.componentId ?? undefined,
                     runCommandId: nextConfigured.runCommandId ?? undefined,
                   }
@@ -5348,11 +5384,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (tab)
           patchTabRaw(tab.id, {
             ...(description ? { description } : {}),
-            // The generated session name (Moss, Juniper, …) is a fallback,
-            // not the work's identity. Preserve an explicit user rename.
-            ...(named.title && !tab.renamed
-              ? { customTitle: named.title }
-              : {}),
+            // The agent's own name for its run. It outranks the CLI's label and
+            // the generated session name — a codex tab reading "codex" says
+            // nothing the icon does not — and is outranked in turn by a name
+            // the user typed, without either side having to check a flag.
+            ...(namePatch(tab, "agent", named.title) ?? {}),
           });
 
         // Ordinary sessions have no task-history row to update, but their tab
@@ -5370,9 +5406,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
           );
         else if (tab)
           patchTabRaw(tab.id, {
-            customTitle: named.title
-              ? `${named.title} · task`
-              : tab.customTitle,
+            ...(namePatch(
+              tab,
+              "agent",
+              named.title ? `${named.title} · task` : undefined,
+            ) ?? {}),
             icon: named.icon ?? tab.icon,
           } as Partial<SubTab>);
         return;
@@ -6447,7 +6485,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const first = closingTabs[0];
       const baseTitle =
         first.type === "terminal"
-          ? first.customTitle ?? first.title
+          ? tabName(first, { agent: isAgentTabRef.current(first) })
           : "Agent";
       const close: PendingAgentClose = {
         id,
@@ -7284,33 +7322,43 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // across a restart/restore. This is the authoritative terminal→session bond:
   // it can never bind a tab to an unrelated session whose recycled pty number
   // happens to collide. Latest event per pty wins.
-  const liveSessionByPty = useMemo(() => {
-    // Seeded from each terminal's own launch command first: a tab restored as
-    // `codex resume <id>` names its session outright, and Canopy typed that
-    // command into that pty, so the bond holds from the first frame. Without
-    // the seed, a resumed CLI that emits no hook event until its next prompt
-    // (codex does exactly this) leaves its tab unbound after every restart —
-    // the digest it wrote sits on disk saying "idle" while the strip, seeing
-    // no digest at all, reads the resume banner's paint burst as "working".
-    const m = new Map<number, string>();
-    for (const t of tabs) {
-      if (t.type !== "terminal" || t.ptyId == null) continue;
-      const sid = resumeSessionId(t.command);
-      if (sid) m.set(t.ptyId, sid);
-    }
-    const latest = new Map<number, { sid: string; ts: number }>();
-    for (const e of projectEvents) {
-      const d = e.data;
-      if (!d || d.pty == null || !d.sessionId) continue;
-      const prev = latest.get(d.pty);
-      if (!prev || e.ts >= prev.ts)
-        latest.set(d.pty, { sid: d.sessionId, ts: e.ts });
-    }
-    // The event stamp wins where both speak: it is from this launch by
-    // construction and follows the session even if the CLI swaps ids.
-    for (const [pty, v] of latest) m.set(pty, v.sid);
-    return m;
-  }, [projectEvents, tabs]);
+  //
+  // Through `resolveSessions`, which is the one answer to this: the launch
+  // command's seed, corrected by the event stamp, and — for a session whose
+  // events have aged out of App's capped ring — the digest's recorded surface.
+  // That third source is the one this used to be missing, and its absence was
+  // not cosmetic: with no session id there is no digest, and with no digest the
+  // life ladder falls past every hook rung to "the process tree is burning
+  // CPU", which re-stamps itself on every stats tick and never decays. An agent
+  // that finished an hour ago sat in WORKING forever, while the Agents panel —
+  // which already resolved by surface — showed the same session as Idle.
+  const bound = useMemo(
+    () =>
+      resolveSessions({
+        digests: wsDigests as unknown as BindableDigest[],
+        events: projectEvents.map((e) => ({
+          ts: e.ts,
+          data: e.data
+            ? { pty: e.data.pty, sessionId: e.data.sessionId }
+            : null,
+        })),
+        instance: thisInstance,
+        livePtys: new Set(
+          tabs.flatMap((t) =>
+            t.type === "terminal" && t.ptyId != null ? [t.ptyId] : [],
+          ),
+        ),
+        seeds: new Map(
+          tabs.flatMap((t) => {
+            if (t.type !== "terminal" || t.ptyId == null) return [];
+            const sid = resumeSessionId(t.command);
+            return sid ? [[t.ptyId, sid] as [number, string]] : [];
+          }),
+        ),
+      }),
+    [projectEvents, tabs, wsDigests, thisInstance],
+  );
+  const liveSessionByPty = bound.sessionByPty;
   liveSessionIdsRef.current = liveSessionIds;
   const liveSessionByPtyRef = useRef(liveSessionByPty);
   liveSessionByPtyRef.current = liveSessionByPty;
@@ -7344,21 +7392,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
       if (tab && d.event === "UserPromptSubmit" && d.prompt) {
         const baseline = promptTaskIdentity(d.prompt);
-        // The first substantive prompt is a useful temporary label while the
-        // model starts. Follow-ups are conversation, not identity: once this
-        // baseline or canopy_name_task has named the work, raw user messages
-        // must not overwrite the model's title/current-focus summary.
-        if (
-          (baseline.title || baseline.description) &&
-          shouldSeedPromptIdentity(tab)
-        )
-          patchTabRaw(tab.id, {
-            ...(baseline.description ? { description: baseline.description } : {}),
-            // Managed micro-tasks already have a durable launch label. For an
-            // ordinary conversation, the human's request is a better identity
-            // than the generated fallback until the agent refines it.
-            ...(baseline.title ? { customTitle: baseline.title } : {}),
-          });
+        // The opening request, as a stand-in until the agent names the work
+        // itself. Only the first one ever lands: namePatch keeps later messages
+        // out of the slot, and a micro-task's durable launch label out of
+        // reach. Nothing here can touch a name the user typed — that is a
+        // different slot, and this caller has no way to reach it.
+        const name = namePatch(tab, "prompt", baseline.title);
+        // The focus line follows the same rule, yielding to the agent's own
+        // description as soon as canopy_name_task publishes one.
+        const description =
+          baseline.description && !tab.agentName && !tab.micro
+            ? { description: baseline.description }
+            : undefined;
+        if (name || description) patchTabRaw(tab.id, { ...description, ...name });
       }
       if (tab && tab.id === activeTabIdRef.current && visibleRef.current)
         attentionRef.current(d.pty, { t: "focus", at: e.ts, visible: true }, cli);
@@ -7533,7 +7579,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               id: tabId(),
               type: "terminal",
               cwd: t.cwd,
-              title: t.title,
+              ...adoptSnapshotNames(t),
               ptyId: t.attachId,
               attachId: t.attachId,
               icon: t.icon ?? "📱",
@@ -7565,7 +7611,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           );
           // Waking spawns a new pty, which names itself. A name the user chose
           // has to be re-asserted onto it or the wake silently renames the tab.
-          if (t.renamed && t.title) patchTabRaw(id, { customTitle: t.title });
+          patchTabRaw(id, adoptSnapshotNames(t));
           return id;
         }
         case "file": {
@@ -8795,12 +8841,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
     }
   };
 
-  const startRename = useCallback((tab: TermSubTab) => {
-    setRenamingTabId(tab.id);
-    setRenameDraft(tab.name ?? tab.customTitle ?? tab.title);
-  }, []);
-  // Native owns live session names. The tab mirrors the accepted value, while
-  // the PTY id/token remains the authority for every operation.
+  const startRename = useCallback(
+    (tab: TermSubTab) => {
+      setRenamingTabId(tab.id);
+      setRenameDraft(tabName(tab, { agent: isAgentTabRef.current(tab) }));
+    },
+    [],
+  );
+  // A live session is renamed through the one door, which announces the result
+  // and lets the subscription above file it in the user's slot. A tab with no
+  // pty yet has nothing to announce, so it writes that slot directly and the
+  // spawn callback pushes it to native once there is a session to name.
   const commitRename = useCallback(() => {
     if (renamingTabId) {
       const tab = tabsRef.current.find(
@@ -8808,23 +8859,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
           candidate.id === renamingTabId && candidate.type === "terminal",
       );
       if (tab?.ptyId != null) {
-        void ipc
-          .ptySetName(tab.ptyId, renameDraft)
-          .then((name) =>
-            patchTab(tab.id, {
-              name,
-              customTitle: undefined,
-              // Clearing the draft leaves nothing saying this name was chosen
-              // rather than generated, and the snapshots need that to know
-              // which names to carry back.
-              renamed: renameDraft.trim().length > 0,
-            }),
-          )
-          .catch((error) => onNotice(String(error), "error"));
+        void renameSession(tab.ptyId, renameDraft).catch((error) =>
+          onNotice(String(error), "error"),
+        );
       } else if (tab) {
-        // The spawn callback promotes this pending value into native state.
-        const chosen = renameDraft.trim() || undefined;
-        patchTab(tab.id, { customTitle: chosen, renamed: chosen != null });
+        const patch = namePatch(tab, "user", renameDraft.trim() || undefined);
+        if (patch) patchTab(tab.id, patch);
       }
     }
     setRenamingTabId(null);
@@ -8910,9 +8950,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     (ptyId: number | null | undefined): Life => {
       const stats = ptyId != null ? statsByPty.get(ptyId) : undefined;
       const sid = ptyId != null ? liveSessionByPty.get(ptyId) : undefined;
-      const digest = sid
-        ? wsDigests.find((d) => d.session_id === sid)
-        : undefined;
+      // From the bound index rather than a scan: this runs per agent tab per
+      // stats tick, and `digestBySession` already keeps the newest per session.
+      const digest = sid ? bound.digestBySession.get(sid) : undefined;
       return lifeFor({
         digest: (digest ?? null) as never,
         stats,
@@ -8920,7 +8960,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         now: lifeClock / 1000,
       });
     },
-    [statsByPty, liveSessionByPty, wsDigests, firstSeen, lifeClock],
+    [statsByPty, liveSessionByPty, bound, firstSeen, lifeClock],
   );
   const watchdogViews = useStableViews(() => {
     const views: AgentLifeView[] = [];
@@ -8972,13 +9012,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
   const tabLife = useCallback(
     (t: TermSubTab): Life => {
+      // Agent panes only. A plain shell split into the same group has no
+      // digest, paints constantly and burns CPU, so the ladder calls it
+      // "working" — and a `npm run dev` sharing the pane would then pin its
+      // neighbour's agent tab under WORKING whatever the agent was doing.
       const members = t.paneGroup
         ? tabs.filter(
             (member): member is TermSubTab =>
-              member.type === "terminal" && member.paneGroup === t.paneGroup,
+              member.type === "terminal" &&
+              member.paneGroup === t.paneGroup &&
+              isAgentTabRef.current(member),
           )
         : [t];
-      const lives = members.map((member) => lifeForPty(member.ptyId));
+      const lives = (members.length ? members : [t]).map((member) =>
+        lifeForPty(member.ptyId),
+      );
       const order: LifeState[] = [
         "waiting",
         "working",
@@ -9032,7 +9080,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         )
         .map((t) => ({
           tabId: t.id,
-          title: t.customTitle || t.title,
+          title: tabName(t),
           state: tabState(t),
           icon: t.icon,
         })),
@@ -9071,9 +9119,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       out.push({
         ...tab,
         multiplexCount: ids.length,
-        multiplexTitle: tab.customTitle
-          ? `${tab.customTitle} · ${ids.length}`
-          : `${focused.customTitle ?? focused.title} +${ids.length - 1}`,
+        multiplexTitle: tab.userName
+          ? `${tab.userName} · ${ids.length}`
+          : `${tabName(focused, { agent: isAgentTabRef.current(focused) })} +${ids.length - 1}`,
       });
     }
     return out;
@@ -9135,12 +9183,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // unable to leave Working while its own dot said idle — see declaredQuiet.
     const provenIds = new Set<string>();
     for (const t of agentTabs) {
-      const members = t.paneGroup
+      // Agent panes only, for the same reason as tabLife above: a shell sharing
+      // the group is not evidence about this agent.
+      const grouped = t.paneGroup
         ? tabs.filter(
             (member): member is TermSubTab =>
-              member.type === "terminal" && member.paneGroup === t.paneGroup,
+              member.type === "terminal" &&
+              member.paneGroup === t.paneGroup &&
+              isAgentTabRef.current(member),
           )
-        : [t];
+        : [];
+      const members = grouped.length ? grouped : [t];
       const verdicts = members.map((member) => {
         const life = lifeForPty(member.ptyId);
         return {
@@ -9501,7 +9554,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         active: tab.id === activeVisualTabId,
         className: terminalMemoryWarning(tab) ? "run-chip-memory-warning" : undefined,
         dot: <TerminalIcon size={11} className="run-chip-shell-dot" />,
-        title: tab.multiplexTitle ?? tab.customTitle ?? tab.title,
+        title: tab.multiplexTitle ?? tabName(tab),
         tooltip: `${tab.command ?? "shell"} — ${tab.cwd}`,
         onSelect: () => {
           const group = tab.paneGroup
@@ -9535,7 +9588,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ) : (
             <FailIcon size={11} className="run-chip-fail" />
           ),
-          title: tab.title,
+          title: tabName(tab),
           tooltip: tab.exited
             ? `${ok ? "finished" : `exited ${tab.exitCode ?? "?"}`} — ${tab.command ?? ""}`
             : `running — ${tab.command ?? ""}`,
@@ -9708,11 +9761,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
       return {
         tabId: t.id,
-        name:
-          t.name ??
-          projectStats.find((session) => session.id === t.ptyId)?.name ??
-          t.customTitle,
-        title: t.customTitle ?? t.title,
+        // What the mesh routes on, rather than what the tab is called — two
+        // different questions, and substituting one for the other silently is
+        // how they used to drift apart.
+        name: sessionAddress(
+          t,
+          projectStats.find((session) => session.id === t.ptyId)?.name,
+        ),
+        title: tabName(t, { agent: true }),
         description: t.description,
         ptyId: t.ptyId as number,
         agentId: (byProc ?? byCommand)?.id ?? "agent",
@@ -9761,7 +9817,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         url: `http://localhost:${p}`,
         port: p,
         ptyId: t.ptyId as number,
-        title: t.customTitle ?? t.title,
+        title: tabName(t),
         command: t.command,
         cwd: t.cwd,
         componentLabel: comp?.label ?? null,
@@ -10832,7 +10888,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           .filter((t): t is TermSubTab => t.type === "terminal" && !!t.run)
           .map((t) => ({
             ptyId: t.ptyId,
-            title: t.name ?? t.customTitle ?? t.title,
+            title: tabName(t),
             command: t.command ?? "",
             cwd: t.cwd,
             component:
@@ -12388,7 +12444,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   <button
                     type="button"
                     className="multiplex-pane-drag"
-                    aria-label={`Reposition ${tab.name ?? tab.customTitle ?? tab.title}`}
+                    aria-label={`Reposition ${tabName(tab, { agent: !!paneAgent?.id })}`}
                     title="Drag onto another pane to swap positions"
                     onPointerDown={(event) =>
                       startPaneReposition(tab.id, event)
@@ -12440,7 +12496,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         startRename(tab);
                       }}
                     >
-                      {tab.name ?? tab.customTitle ?? tab.title}
+                      {tabName(tab, { agent: !!paneAgent?.id })}
                     </span>
                   )}
                   <span className="multiplex-pane-path" title={tab.cwd}>
@@ -12560,22 +12616,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   // process is the one now running (a red ✕ on a live server).
                   patchTab(tab.id, {
                     ptyId,
-                    name: assignedName,
+                    // The generated label, into its own slot. A restart used to
+                    // write it over whatever the tab was called, so a renamed
+                    // server came back as "Moss"; now it cannot reach the
+                    // user's slot, and a refused spawn — which reports no name
+                    // at all — no longer erases one either.
+                    ...(namePatch(tab, "native", assignedName) ?? {}),
                     exited: false,
                     exitCode: undefined,
                   });
-                  if (tab.customTitle) {
-                    void ipc
-                      .ptySetName(ptyId, tab.customTitle)
-                      .then((name) =>
-                        patchTab(tab.id, {
-                          name,
-                          customTitle: undefined,
-                          renamed: true,
-                        }),
-                      )
-                      .catch((error) => onNotice(String(error), "error"));
-                  }
+                  // A name the user chose outlives the pty that held it, so the
+                  // new session is told about it rather than the other way
+                  // round. Native is where the mesh and the Agents page look.
+                  if (isUserNamed(tab) && tab.userName)
+                    void renameSession(ptyId, tab.userName).catch((error) =>
+                      onNotice(String(error), "error"),
+                    );
                   if (tab.micro?.runId) updateTaskRun(tab.micro.runId, { ptyId });
                   const prompt = pendingTerminalPrompts.current.get(tab.id);
                   const spawn = pendingAgentSpawnOps.current.get(tab.id);
@@ -12673,13 +12729,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     vibeServerExit.current(tab.id, event);
                   } else closeTab(tab.id);
                 }}
-                onTitle={(title) =>
-                  patchTab(tab.id, {
-                    // cmd.exe titles itself with its own full path, which every
-                    // chip then truncates to "C:\\Windows\\syste…".
-                    title: shellTitle(title || tab.command || "shell"),
-                  })
-                }
+                onTitle={(title) => {
+                  // Raw, into the OSC slot. Deciding whether it says anything —
+                  // `/bin/zsh` does not — and shortening cmd.exe's full path
+                  // belong to tabName, not to every writer of this field.
+                  const patch = namePatch(tab, "osc", title);
+                  if (patch) patchTab(tab.id, patch);
+                }}
                 onNotify={(notice) => {
                   // Only a ring if you aren't already looking at it — a ring on
                   // the tab you're watching is noise. The notice itself is
@@ -12776,7 +12832,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               return {
                 status,
                 session: {
-                  name: session?.name ?? tab?.name,
+                  name: sessionAddress(tab, session?.name),
                   agent:
                     identifyAgent(session?.agent_hint) != null ||
                     (tab ? isAgentTab(tab) : false),

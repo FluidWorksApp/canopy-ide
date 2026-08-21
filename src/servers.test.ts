@@ -10,7 +10,7 @@ import type { AgentRef } from "./workspaces";
 
 const term = (t: Partial<TermSubTab> & { id: string; cwd: string }): TermSubTab => ({
   type: "terminal",
-  title: "run",
+  launchTitle: "run",
   ptyId: 1,
   run: true,
   ...t,
@@ -88,7 +88,7 @@ describe("groupServers", () => {
     // What canopy_start_server leaves behind when an agent runs something the
     // project record has never heard of.
     const tabs = [
-      term({ id: "t9", cwd: "/w/site/packages/api", command: "bun serve", title: "api" }),
+      term({ id: "t9", cwd: "/w/site/packages/api", command: "bun serve", launchTitle: "api" }),
     ];
     const [g] = groupServers([web], tabs, noPorts);
     expect(g.label).toBe("canopy-website");

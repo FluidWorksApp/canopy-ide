@@ -20,6 +20,7 @@
 // the snapshot it describes, and a project claiming to be asleep with nothing
 // to wake is the one state this feature cannot afford.
 import type { SubTab, SideTab } from "./components/ProjectView/helpers";
+import { snapshotNames } from "./tabName";
 import type * as ipc from "./ipc";
 import type { ReviewPayload } from "./components/ReviewView";
 import {
@@ -39,9 +40,13 @@ export interface TerminalSnapshot {
   kind: "terminal";
   cwd: string;
   command?: string;
+  /** The display name at the time of the snapshot, so an older build reading
+   *  this store still shows something sensible. */
   title: string;
-  /** `title` is a name the user chose, so waking re-asserts it on the new
-   *  session rather than accepting the generated one. */
+  /** The name the user chose, which waking re-asserts on the new session.
+   *  `renamed` is the pre-tabName spelling of the same fact and is still read
+   *  from stores written before that module existed. */
+  userName?: string;
   renamed?: boolean;
   icon?: string;
   run?: boolean;
@@ -160,11 +165,9 @@ export function snapshotTabs(
           kind: "terminal",
           cwd: t.cwd,
           command,
-          // A rename lands in native `name`, which dies with the pty. Reading
-          // only `customTitle` here put the generated name into the snapshot,
-          // so every wake undid the rename.
-          title: (t.renamed ? t.name : undefined) ?? t.customTitle ?? t.title,
-          renamed: t.renamed || undefined,
+          // The user's name is a slot of its own, so it survives the pty that
+          // held it without a flag having to vouch for which field it was in.
+          ...snapshotNames(t),
           icon: t.icon,
           run: t.run,
           ...(t.componentId && t.runCommandId

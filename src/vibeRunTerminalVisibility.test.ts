@@ -9,7 +9,7 @@ const terminal = (id: string, run: boolean): TermSubTab => ({
   id,
   type: "terminal",
   cwd: "/repo",
-  title: id,
+  launchTitle: id,
   ptyId: Number(id.slice(1)),
   run,
 });

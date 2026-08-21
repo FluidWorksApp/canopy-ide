@@ -9,7 +9,7 @@ describe("agentDisplayName", () => {
   it("uses the Canopy-assigned name ahead of CLI title and cwd", () => {
     expect(
       agentDisplayName({
-        tab: { name: "Juniper", title: "✳ Fix the login redirect" },
+        tab: { nativeName: "Juniper", oscTitle: "✳ Fix the login redirect" },
         sessionName: "Ember",
         sessionTitle: "codex",
         cwd: "/work/canopy",
@@ -20,7 +20,7 @@ describe("agentDisplayName", () => {
   it("uses the published task title ahead of a generated session name", () => {
     expect(
       agentDisplayName({
-        tab: { name: "Moss", customTitle: "Fix Codex task status", title: "codex" },
+        tab: { nativeName: "Moss", agentName: "Fix Codex task status", oscTitle: "codex" },
       }),
     ).toBe("Fix Codex task status");
   });
@@ -38,7 +38,7 @@ describe("agentDisplayName", () => {
   it("shows the name the user typed on the tab", () => {
     expect(
       agentDisplayName({
-        tab: { title: "✳ Fix the login redirect", customTitle: "auth work" },
+        tab: { oscTitle: "✳ Fix the login redirect", userName: "auth work" },
         agentLabel: "claude",
         sessionTitle: "claude",
       }),
@@ -49,7 +49,7 @@ describe("agentDisplayName", () => {
     // The whole point: six claude rows become six different sentences.
     expect(
       agentDisplayName({
-        tab: { title: "✳ Fix browser screenshots" },
+        tab: { oscTitle: "✳ Fix browser screenshots" },
         agentLabel: "claude",
       }),
     ).toBe("✳ Fix browser screenshots");
@@ -57,24 +57,24 @@ describe("agentDisplayName", () => {
 
   it("keeps the CLI's name while its tab is still a bare shell", () => {
     for (const title of ["shell", "zsh", "-bash", "", "   "])
-      expect(agentDisplayName({ tab: { title }, agentLabel: "claude" })).toBe("claude");
+      expect(agentDisplayName({ tab: { oscTitle: title }, agentLabel: "claude" })).toBe("claude");
   });
 
   it("keeps the CLI's name when the tab only repeats it", () => {
-    expect(agentDisplayName({ tab: { title: "Claude" }, agentLabel: "claude" })).toBe("claude");
+    expect(agentDisplayName({ tab: { oscTitle: "Claude" }, agentLabel: "claude" })).toBe("claude");
   });
 
   it("prefers the CLI to a tab titled with a directory", () => {
     // Shells commonly title themselves with the cwd; the row already has a
     // directory chip, so that would be the same fact twice and the name never.
     expect(
-      agentDisplayName({ tab: { title: "~/Documents/GitHub/canopy" }, agentLabel: "claude" }),
+      agentDisplayName({ tab: { oscTitle: "~/Documents/GitHub/canopy" }, agentLabel: "claude" }),
     ).toBe("claude");
   });
 
   it("honours a rename even to something otherwise generic", () => {
     expect(
-      agentDisplayName({ tab: { title: "✳ Fix tests", customTitle: "shell" }, agentLabel: "claude" }),
+      agentDisplayName({ tab: { oscTitle: "✳ Fix tests", userName: "shell" }, agentLabel: "claude" }),
     ).toBe("shell");
   });
 
@@ -104,18 +104,21 @@ describe("terminalDisplayName", () => {
 describe("tabNamesByPty", () => {
   it("keys tabs that have spawned by their pty, skipping the rest", () => {
     const map = tabNamesByPty([
-      { type: "terminal", ptyId: 7, title: "✳ Fix tests" },
-      { type: "terminal", ptyId: null, title: "not spawned yet" },
-      { type: "file", ptyId: 9, title: "README.md" },
-      { type: "terminal", ptyId: 8, title: "zsh", customTitle: "api" },
+      { type: "terminal", ptyId: 7, oscTitle: "✳ Fix tests" },
+      { type: "terminal", ptyId: null, oscTitle: "not spawned yet" },
+      { type: "file", ptyId: 9, oscTitle: "README.md" },
+      { type: "terminal", ptyId: 8, oscTitle: "zsh", userName: "api" },
     ]);
     expect(map.get(7)).toEqual({
-      name: undefined,
-      title: "✳ Fix tests",
-      customTitle: undefined,
+      userName: undefined,
+      agentName: undefined,
+      promptName: undefined,
+      nativeName: undefined,
+      oscTitle: "✳ Fix tests",
+      launchTitle: undefined,
       description: undefined,
     });
-    expect(map.get(8)?.customTitle).toBe("api");
+    expect(map.get(8)?.userName).toBe("api");
     expect(map.has(9)).toBe(false);
     expect(map.size).toBe(2);
   });

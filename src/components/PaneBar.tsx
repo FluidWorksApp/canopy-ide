@@ -35,6 +35,7 @@ import type {
 } from "./ProjectView";
 import { tabDisplayLabel, previewLabel, deviceLabel } from "./ProjectView";
 import { claimOwnerName } from "../claims";
+import { tabName } from "../tabName";
 import { Button } from "./ui";
 import { nextTickMs, PREVIEW_TICK_MS } from "../tabPreview";
 import {
@@ -150,10 +151,7 @@ function tabTitle(tab: SubTab): string {
 function tabText(tab: SubTab, showAssignedName = false): string {
   switch (tab.type) {
     case "terminal":
-      return tab.multiplexTitle ??
-        tab.customTitle ??
-        (showAssignedName ? tab.name : undefined) ??
-        tab.title;
+      return tab.multiplexTitle ?? tabName(tab, { agent: showAssignedName });
     case "pr": return `#${tab.pr.number} ${tab.pr.title}`;
     case "ticket": return `${tab.ticket.id} ${tab.ticket.title}`;
     case "research": return tabDisplayLabel(tab);

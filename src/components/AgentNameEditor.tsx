@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import * as ipc from "../ipc";
+import { renameSession } from "../sessionRename";
 
 export function AgentNameEditor({
   ptyId,
@@ -35,7 +35,7 @@ export function AgentNameEditor({
     setBusy(true);
     setError(null);
     try {
-      const next = await ipc.ptySetName(ptyId, draft);
+      const next = await renameSession(ptyId, draft);
       setSaved(next);
       setDraft(next);
       setEditing(false);
