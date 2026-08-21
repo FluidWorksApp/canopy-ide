@@ -235,16 +235,23 @@ describe("Term spawn failure", () => {
 
 describe("Term recovered attachment", () => {
   it("resumes output even when pty:exit listener registration never settles", async () => {
-    const attach = vi.fn(() => ({
-      cols: 80,
-      rows: 24,
-      generation: 4,
-      replay_start: 0,
-      replay_end: 0,
-    }));
+    const calls: string[] = [];
+    const attach = vi.fn(() => {
+      calls.push("attach");
+      return {
+        cols: 80,
+        rows: 24,
+        generation: 4,
+        replay_start: 0,
+        replay_end: 0,
+      };
+    });
     mockCommands({
       pty_renderer_register: () => ({ generation: 9, sessions: [] }),
-      "plugin:event|listen": () => new Promise(() => {}),
+      "plugin:event|listen": () => {
+        calls.push("listen");
+        return new Promise(() => {});
+      },
       pty_attach_desktop: attach,
       pty_read_desktop: () => null,
       pty_detach_desktop: () => undefined,
@@ -264,5 +271,6 @@ describe("Term recovered attachment", () => {
 
     await waitFor(() => expect(attach).toHaveBeenCalledOnce());
     expect(onSpawned).toHaveBeenCalledWith(77, undefined);
+    expect(calls.slice(0, 2)).toEqual(["attach", "listen"]);
   });
 });

@@ -816,8 +816,11 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         // Waiting here stranded every recovered Term before it could bind.
         const id = attachIdRef.current;
         ptyIdRef.current = id;
-        void installExitListener().catch(() => {});
         if (streamingRef.current) await attachViewer();
+        // Start only after the stream handshake too: invoking listen first can
+        // serialize a later attach behind the same wedged WebKit bridge even
+        // when this promise is intentionally not awaited.
+        void installExitListener().catch(() => {});
         return;
       }
 
