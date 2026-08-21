@@ -24,6 +24,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import {
   configureSelftestPtyListenerFailures,
   installEarlyWatchdogHeartbeat,
+  onPtyExit,
   ptyRendererRegister,
   selftestConfig,
 } from "./ipc";
@@ -115,6 +116,14 @@ const registerRenderer = async () => {
 };
 const rendererReady = registerRenderer()
   .then(async (registration) => {
+    // Establish the renderer's one native exit listener as part of the boot
+    // handshake. Starting this registration from recovered Term effects let a
+    // rapid next reload destroy WebKit while the plugin reply was still in
+    // flight, eventually wedging both pages. The IPC fan-out keeps the native
+    // listener alive after this bootstrap subscriber leaves and replays any
+    // exit that lands before React's consumers subscribe.
+    const releaseBootstrapExitListener = await onPtyExit(() => {});
+    releaseBootstrapExitListener();
     await installEarlyWatchdogHeartbeat();
     const selftest = await selftestConfig();
     if (selftest) setSelftestMode(selftest.scenario);

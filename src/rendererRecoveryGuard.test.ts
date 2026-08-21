@@ -7,10 +7,12 @@ describe("renderer recovery wiring", () => {
   it("registers and answers liveness before Monaco can delay React", () => {
     const main = read("src/main.tsx");
     const registration = main.indexOf("ptyRendererRegister()");
+    const exitListener = main.indexOf("await onPtyExit");
     const heartbeat = main.indexOf("installEarlyWatchdogHeartbeat()");
     const monacoBarrier = main.indexOf("Promise.all([");
     expect(registration).toBeGreaterThan(-1);
-    expect(heartbeat).toBeGreaterThan(registration);
+    expect(exitListener).toBeGreaterThan(registration);
+    expect(heartbeat).toBeGreaterThan(exitListener);
     expect(heartbeat).toBeLessThan(monacoBarrier);
     expect(main).not.toContain('invoke("pty_kill_all")');
     expect(main).toContain("renderer registration failed; retrying");

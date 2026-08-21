@@ -409,10 +409,16 @@ export interface PtyExit {
 // to reopen that recovery boundary.
 const ptyExitSubscribers = new Set<(event: PtyExit) => void>();
 let ptyExitListener: Promise<UnlistenFn> | null = null;
+let ptyExitSequence = 0;
+const ptyExitHistory: Array<{ sequence: number; event: PtyExit }> = [];
+const PTY_EXIT_HISTORY_LIMIT = 512;
 
 const ensurePtyExitListener = () => {
   if (ptyExitListener == null) {
     ptyExitListener = listen<PtyExit>("pty:exit", (event) => {
+      const sequence = ++ptyExitSequence;
+      ptyExitHistory.push({ sequence, event: event.payload });
+      if (ptyExitHistory.length > PTY_EXIT_HISTORY_LIMIT) ptyExitHistory.shift();
       for (const subscriber of [...ptyExitSubscribers]) subscriber(event.payload);
     }).catch((error) => {
       // A rejected registration is retryable. Subscribers whose call observed
@@ -426,12 +432,19 @@ const ensurePtyExitListener = () => {
 };
 
 export const onPtyExit = async (cb: (e: PtyExit) => void): Promise<UnlistenFn> => {
+  // Subscribe before awaiting the native handshake so live events cannot land
+  // in a gap. Replay only the history that predates this subscriber; anything
+  // newer was already delivered by the fan-out above.
+  const replayThrough = ptyExitSequence;
   ptyExitSubscribers.add(cb);
   try {
     await ensurePtyExitListener();
   } catch (error) {
     ptyExitSubscribers.delete(cb);
     throw error;
+  }
+  for (const entry of ptyExitHistory) {
+    if (entry.sequence <= replayThrough) cb(entry.event);
   }
   let listening = true;
   return () => {
