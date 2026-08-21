@@ -2724,19 +2724,16 @@ export interface MemoryPressure {
   free_bytes: number;
 }
 
-/** The webview heartbeat: answer immediately. The Rust watchdog reloads the
- *  window if these stop being answered (a jetsam-killed WebKit renderer
- *  otherwise leaves the app blank with no crash report). */
-export const onWatchdogPing = (cb: () => void): Promise<UnlistenFn> =>
-  listen("watchdog:ping", () => cb());
-
 export const watchdogAck = () =>
   invoke<void>("watchdog_ack", { generation: rendererGeneration() }).catch(() => {});
 
-/** Install liveness before Monaco/React startup can delay the App effect. */
+/** Install liveness before Monaco/React startup can delay the App effect.
+ *  The renderer drives acknowledgements so native recovery never has to
+ *  evaluate a ping event into the WebView it may be about to replace. */
 export const installEarlyWatchdogHeartbeat = async (): Promise<UnlistenFn> => {
   await watchdogAck();
-  return onWatchdogPing(() => void watchdogAck());
+  const timer = window.setInterval(() => void watchdogAck(), 3_000);
+  return () => window.clearInterval(timer);
 };
 
 export interface RecoveryIncident {

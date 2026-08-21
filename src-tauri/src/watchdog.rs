@@ -568,9 +568,10 @@ fn start_webview_watchdog(app: AppHandle) {
                     continue;
                 }
                 let age_ms = now_ms().saturating_sub(ack.last_ack_ms.load(Ordering::Relaxed));
-                let delivered = app.emit("watchdog:ping", ()).is_ok();
-                let stale = !delivered
-                    || ping_is_stale(age_ms, STALE_AFTER.as_millis() as u64);
+                // The renderer acknowledges on its own interval. Pushing a
+                // ping event from this thread could race the native reload and
+                // wedge WebKit's dispatcher while the page was being replaced.
+                let stale = ping_is_stale(age_ms, STALE_AFTER.as_millis() as u64);
                 match heartbeat.observe(now_ms(), stale) {
                     HeartbeatAction::Healthy | HeartbeatAction::Waiting => {}
                     HeartbeatAction::RecoveredAfterShed => {
