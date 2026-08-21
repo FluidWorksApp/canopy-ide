@@ -566,6 +566,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             js_log,
             set_shortcut_profile,
+            change::store_changes,
             crash::report_crash,
             crash::send_crash,
             crash::take_pending_crash,

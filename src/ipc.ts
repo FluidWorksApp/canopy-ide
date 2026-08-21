@@ -1019,7 +1019,10 @@ export const selftestCheckpointSave = (checkpoint: unknown) =>
  * isolated selftest is active. A successful call destroys this JS page. */
 export const selftestReloadRenderer = async () => {
   await invoke<void>("selftest_reload_renderer");
-  releaseRendererListeners();
+  // Native schedules the reload 25ms after acknowledging this call. Give that
+  // already-dispatched recovery the event loop before best-effort teardown;
+  // the timer disappears with the old renderer when recovery succeeds.
+  window.setTimeout(releaseRendererListeners, 100);
 };
 
 /** A native-owned, phone-equivalent PTY in the disposable selftest project. */
@@ -2282,10 +2285,57 @@ export interface StoreChange {
   id: string;
 }
 
+interface StoreChangeEntry {
+  sequence: number;
+  change: StoreChange;
+}
+
+interface StoreChangeBatch {
+  cursor: number;
+  changes: StoreChangeEntry[];
+}
+
+const storeChangeSubscribers = new Set<(change: StoreChange) => void>();
+let storeChangeCursor: number | null = null;
+let storeChangePolling = false;
+let storeChangeTimer: number | undefined;
+
+const pollStoreChanges = async () => {
+  if (!storeChangePolling) return;
+  try {
+    const batch = await invoke<StoreChangeBatch>("store_changes", {
+      after: storeChangeCursor,
+    });
+    storeChangeCursor = batch.cursor;
+    for (const entry of batch.changes) {
+      for (const subscriber of [...storeChangeSubscribers]) subscriber(entry.change);
+    }
+  } catch {
+    // A replacement renderer invalidates this page; its successor handshakes
+    // at the native cursor before subscribing to new store changes.
+  }
+  if (storeChangePolling) {
+    storeChangeTimer = window.setTimeout(() => void pollStoreChanges(), 100);
+  }
+};
+
 export const onStoreChange = (
   cb: (e: StoreChange) => void,
-): Promise<UnlistenFn> =>
-  listen<StoreChange>("store:change", (event) => cb(event.payload));
+): Promise<UnlistenFn> => {
+  storeChangeSubscribers.add(cb);
+  if (!storeChangePolling) {
+    storeChangePolling = true;
+    void pollStoreChanges();
+  }
+  return Promise.resolve(() => {
+    storeChangeSubscribers.delete(cb);
+    if (storeChangeSubscribers.size > 0) return;
+    storeChangePolling = false;
+    storeChangeCursor = null;
+    window.clearTimeout(storeChangeTimer);
+    storeChangeTimer = undefined;
+  });
+};
 
 // ---------- Durable task envelopes ----------
 
