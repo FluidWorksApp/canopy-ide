@@ -572,7 +572,10 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
       );
       const away = Date.now();
       for (let i = 0; i < 6 && view()?.shown !== true; i++) {
-        window.dispatchEvent(new CustomEvent(i % 2 === 0 ? "menu:prev-tab" : "menu:next-tab"));
+        // Keep walking in one direction. Alternating prev/next bounces between
+        // the newest two terminals once earlier steps have opened more than
+        // one, and can miss the preview forever.
+        window.dispatchEvent(new CustomEvent("menu:prev-tab"));
         for (let w = 0; w < 30 && view()?.shown !== true; w++) await sleep(50);
       }
       await until(
@@ -597,7 +600,7 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
       if (!target) throw new StepFailure("no view to photograph");
       const backToThePreview = async () => {
         for (let i = 0; i < 6 && view()?.shown !== true; i++) {
-          window.dispatchEvent(new CustomEvent(i % 2 === 0 ? "menu:prev-tab" : "menu:next-tab"));
+          window.dispatchEvent(new CustomEvent("menu:prev-tab"));
           for (let w = 0; w < 30 && view()?.shown !== true; w++) await sleep(50);
         }
       };
@@ -693,7 +696,7 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
 
       // Back to the browser tab: the whole of the ask, in one line each.
       for (let i = 0; i < 6 && view()?.shown !== true; i++) {
-        window.dispatchEvent(new CustomEvent(i % 2 === 0 ? "menu:prev-tab" : "menu:next-tab"));
+        window.dispatchEvent(new CustomEvent("menu:prev-tab"));
         for (let w = 0; w < 30 && view()?.shown !== true; w++) await sleep(50);
       }
       const gone = await settle(() => !painting(".companion"));
