@@ -430,7 +430,18 @@ pub fn selftest_reload_renderer(
     let main = app
         .get_webview_window("main")
         .ok_or_else(|| "selftest main window is missing".to_string())?;
-    main.reload().map_err(|error| error.to_string())
+    // Do not destroy the page from inside the invoke that asked to destroy it.
+    // WebKit can tear down the command's reply channel before Tauri unwinds the
+    // handler, leaving the reload call and its JavaScript promise wedged
+    // together. Dispatching the same native primitive after this synchronous
+    // command returns gives the reply a chance to leave the old renderer; the
+    // replacement page resumes from the native checkpoint either way.
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = main.reload() {
+            log::error!("selftest renderer reload failed: {error}");
+        }
+    });
+    Ok(())
 }
 
 /// A phone-equivalent PTY: native-owned, announced through `pty:spawned`, and

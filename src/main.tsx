@@ -27,6 +27,7 @@ import {
   ptyRendererRegister,
   selftestConfig,
 } from "./ipc";
+import { setSelftestMode } from "./selftest/mode";
 
 // Before first paint, so there's no flash of the wrong palette.
 applyTheme(getSettings().theme, getSettings().customAccent);
@@ -105,6 +106,7 @@ const rendererReady = registerRenderer()
   .then(async (registration) => {
     await installEarlyWatchdogHeartbeat();
     const selftest = await selftestConfig();
+    if (selftest) setSelftestMode(selftest.scenario);
     configureSelftestPtyListenerFailures(selftest?.listenerFailures ?? 0);
     return registration;
   });
