@@ -15,9 +15,9 @@ mod companion;
 mod containment;
 mod context;
 mod crash;
-mod execution;
 #[cfg(feature = "dictation")]
 mod dictation;
+mod execution;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
 // keeps the command surface identical so the rest of this file is unchanged.
 #[cfg(not(feature = "dictation"))]
@@ -620,6 +620,7 @@ pub fn run() {
             pty::pty_spawn_attached_argv,
             pty::pty_output,
             pty::pty_attach_desktop,
+            pty::pty_start_desktop,
             pty::pty_detach_desktop,
             pty::pty_renderer_register,
             pty::pty_renderer_sessions,

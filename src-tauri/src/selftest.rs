@@ -430,7 +430,40 @@ pub fn selftest_reload_renderer(
     let main = app
         .get_webview_window("main")
         .ok_or_else(|| "selftest main window is missing".to_string())?;
-    main.reload().map_err(|error| error.to_string())
+    // Do not destroy the page from inside the invoke that asked to destroy it.
+    // WebKit can tear down the command's reply channel before Tauri unwinds the
+    // handler, leaving the reload call and its JavaScript promise wedged
+    // together. Dispatching the same native primitive after this synchronous
+    // command returns gives the reply a chance to leave the old renderer; the
+    // replacement page resumes from the native checkpoint either way. The
+    // short async boundary guarantees the invoke response has left this page;
+    // the second dispatch keeps the actual WebKit operation on the UI thread.
+    // A saturated WebKit run loop can drop a single queued callback without
+    // rejecting it. Re-dispatch until exactly one callback claims the reload;
+    // queued duplicates become no-ops when the run loop catches up.
+    let claimed = Arc::new(AtomicBool::new(false));
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        for _ in 0..DEADLINE.as_secs() {
+            if claimed.load(Ordering::SeqCst) {
+                return;
+            }
+            let candidate = Arc::clone(&claimed);
+            let candidate_main = main.clone();
+            if let Err(error) = app.run_on_main_thread(move || {
+                if candidate.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                if let Err(error) = candidate_main.reload() {
+                    log::error!("selftest renderer reload failed: {error}");
+                }
+            }) {
+                log::error!("selftest renderer reload dispatch failed: {error}");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    });
+    Ok(())
 }
 
 /// A phone-equivalent PTY: native-owned, announced through `pty:spawned`, and

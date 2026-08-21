@@ -154,6 +154,7 @@ export const decodePtyChunk = (payload: ArrayBuffer | number[]): PtyChunk => {
 };
 
 let renderer: RendererRegistration | null = null;
+let rendererRegistrationRequest = 0;
 let selftestPtyListenerFailuresRemaining = 0;
 
 /** Bootstrap-only fault injection for the isolated full-app selftest. */
@@ -164,7 +165,11 @@ export const configureSelftestPtyListenerFailures = (count: number) => {
 /** Make this page authoritative before mounting anything that can spawn a PTY.
  * Rust detaches predecessor channels and returns the children that survived it. */
 export async function ptyRendererRegister(): Promise<RendererRegistration> {
+  const request = ++rendererRegistrationRequest;
   const registration = await invoke<RendererRegistration>("pty_renderer_register");
+  if (request !== rendererRegistrationRequest) {
+    throw new Error("renderer registration was superseded");
+  }
   renderer = registration;
   return registration;
 }
@@ -341,12 +346,26 @@ export async function ptyAttachDesktop(
 }> {
   const channel = new Channel<ArrayBuffer | number[]>();
   channel.onmessage = (data) => onData(decodePtyChunk(data));
-  return invoke("pty_attach_desktop", {
+  const attached = await invoke<PtyGeometry & {
+    generation: number;
+    replay_start: number;
+    replay_end: number;
+  }>("pty_attach_desktop", {
     id,
     rendererGeneration: rendererGeneration(),
     after,
     onData: channel,
   });
+  // The first invoke must return before native replay starts; otherwise a
+  // WebKit reload can wedge Channel delivery and the attach response together.
+  // Starting is fire-and-forget because native delivery deliberately lives
+  // beyond this page and is generation-scoped against every later retry.
+  gone(invoke<void>("pty_start_desktop", {
+    id,
+    rendererGeneration: rendererGeneration(),
+    generation: attached.generation,
+  }));
+  return attached;
 }
 
 export const ptyDetachDesktop = (id: number, generation: number) =>

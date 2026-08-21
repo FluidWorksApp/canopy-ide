@@ -2016,6 +2016,7 @@ export default function App() {
         runCommandId: e.run_command_id ?? undefined,
         // Recovery must not steal focus or manufacture attention.
         activate: restored ? false : getSettings().agentAskForAttention,
+        recovered: restored,
         // Desktop-owned sessions were previously killed by their tab.
         killOnClose: "kind" in e && e.kind === "desktop",
       });
@@ -2068,6 +2069,13 @@ export default function App() {
         if (spawn && exit) {
           unSpawn = spawn;
           unExit = exit;
+          // Replay the boot snapshot once more after both listeners are live.
+          // Queue identity makes overlap with the eager replay below harmless,
+          // while this closes a tab-preparation window that may have outlived
+          // the initial generation.
+          for (const session of ipc.rendererPtySessions()) {
+            if (session.kind !== "detached") void routePty(session, true);
+          }
           reconcile();
           return;
         }
@@ -2085,6 +2093,15 @@ export default function App() {
         }
       });
     };
+    // Registration captured the exact survivors before React mounted. Replay
+    // it synchronously instead of making recovery depend on any later IPC
+    // promise settling: WebKit can leave listener registration or a live
+    // snapshot unresolved during a stressed reload. install() still takes
+    // listener-then-snapshot ownership of anything created in this window.
+    for (const session of ipc.rendererPtySessions()) {
+      if (session.kind !== "detached") void routePty(session, true);
+    }
+    reconcile();
     install();
     return () => {
       cancelled = true;

@@ -1105,9 +1105,7 @@ fn setup_grok_hooks(cfg: &str, home: &str) -> Result<String, String> {
             sh_quote(&helper.to_string_lossy())
         )
     };
-    let handler = |signal: &str| {
-        serde_json::json!({ "type": "command", "command": command(signal), "timeout": 10 })
-    };
+    let handler = |signal: &str| serde_json::json!({ "type": "command", "command": command(signal), "timeout": 10 });
     let group = |signal: &str| serde_json::json!({ "hooks": [handler(signal)] });
     let config = serde_json::json!({
         "hooks": {
@@ -2950,8 +2948,8 @@ fn mcp_state(agent: &str, cfg: &str, home: &str) -> &'static str {
             ".grok/config.toml"
         };
         let state = match std::fs::read_to_string(std::path::PathBuf::from(cfg).join(rel)) {
-                Ok(raw) => codex_mcp_state_for(&raw, Some(&expected)),
-                Err(_) => "missing",
+            Ok(raw) => codex_mcp_state_for(&raw, Some(&expected)),
+            Err(_) => "missing",
         };
         return if state == "ours" && !helper.exists() {
             "stale"

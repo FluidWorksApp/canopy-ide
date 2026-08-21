@@ -165,7 +165,10 @@ fn normalize_path(path: &str) -> Result<String, String> {
         return Err("workspace path must be absolute".into());
     }
     let normalized = std::fs::canonicalize(&path).unwrap_or(path);
-    Ok(normalized.to_string_lossy().trim_end_matches(['/', '\\']).to_string())
+    Ok(normalized
+        .to_string_lossy()
+        .trim_end_matches(['/', '\\'])
+        .to_string())
 }
 
 fn random_id(prefix: &str) -> Result<String, String> {
@@ -216,7 +219,10 @@ fn load_workspaces(root: &Path) -> Result<Vec<WorkspaceRecord>, String> {
             !valid_id(&workspace.id, "ws_") || !Path::new(&workspace.path).is_absolute()
         })
     {
-        return Err(format!("{} is not a valid workspace registry", path.display()));
+        return Err(format!(
+            "{} is not a valid workspace registry",
+            path.display()
+        ));
     }
     Ok(file.workspaces)
 }
@@ -260,22 +266,12 @@ mod tests {
         std::fs::create_dir_all(&workspace).unwrap();
         let first = ExecutionRegistry::at(root.clone());
         let context = first
-            .bind(
-                Some("project"),
-                Some("component"),
-                workspace.to_str(),
-                None,
-            )
+            .bind(Some("project"), Some("component"), workspace.to_str(), None)
             .unwrap()
             .unwrap();
         let second = ExecutionRegistry::at(root);
         let restored = second
-            .bind(
-                Some("project"),
-                Some("component"),
-                workspace.to_str(),
-                None,
-            )
+            .bind(Some("project"), Some("component"), workspace.to_str(), None)
             .unwrap()
             .unwrap();
         assert_eq!(context.environment_id, restored.environment_id);

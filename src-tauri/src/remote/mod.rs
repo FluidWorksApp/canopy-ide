@@ -166,7 +166,9 @@ pub async fn dispatch(
                 None,
                 None,
                 None,
-                args.get("projectId").and_then(Value::as_str).map(str::to_string),
+                args.get("projectId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 args.get("componentId")
                     .and_then(Value::as_str)
                     .map(str::to_string),
