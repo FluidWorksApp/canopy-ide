@@ -567,6 +567,10 @@ impl PtyManager {
         }
     }
 
+    pub fn current_renderer_generation(&self) -> u64 {
+        self.renderer_generation.load(Ordering::SeqCst)
+    }
+
     /// Invalidate every desktop stream before native code destroys the main
     /// WebView, excluding Channel evaluation for the whole reload call. A send
     /// that was waiting for the read side rechecks its attachment afterwards

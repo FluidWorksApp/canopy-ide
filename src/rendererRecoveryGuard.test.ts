@@ -6,6 +6,7 @@ const read = (path: string) => readFileSync(path, "utf8");
 describe("renderer recovery wiring", () => {
   it("registers and answers liveness before Monaco can delay React", () => {
     const main = read("src/main.tsx");
+    const selftest = read("src-tauri/src/selftest.rs");
     const registration = main.indexOf("ptyRendererRegister()");
     const exitListener = main.indexOf("await onPtyExit");
     const heartbeat = main.indexOf("installEarlyWatchdogHeartbeat()");
@@ -28,6 +29,9 @@ describe("renderer recovery wiring", () => {
     expect(ipc).toContain("void release();");
     expect(ipc).not.toContain("prepareRendererReplacement");
     expect(ipc).toContain('invoke<StoreChangeBatch>("store_changes"');
+    expect(selftest).toContain("replacement_registered(");
+    expect(selftest).toContain("current_renderer_generation()");
+    expect(selftest).toContain("candidate_attempts.fetch_add(1");
     expect(main).toContain("configureSelftestPtyListenerFailures");
   });
 

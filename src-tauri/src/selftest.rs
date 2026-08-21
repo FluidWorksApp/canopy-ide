@@ -23,7 +23,7 @@
 //!     holding a CI runner.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::http::header;
@@ -419,6 +419,10 @@ pub fn selftest_checkpoint_save(
 /// Exercise the exact native primitive used by watchdog recovery. Restricted
 /// to an isolated selftest launch: ordinary renderer code cannot ask the app to
 /// reload through this command.
+fn replacement_registered(initial: u64, attempts: u64, current: u64) -> bool {
+    current > initial.saturating_add(attempts)
+}
+
 #[tauri::command]
 pub fn selftest_reload_renderer(
     app: tauri::AppHandle,
@@ -438,30 +442,45 @@ pub fn selftest_reload_renderer(
     // replacement page resumes from the native checkpoint either way. The
     // short async boundary guarantees the invoke response has left this page;
     // the second dispatch keeps the actual WebKit operation on the UI thread.
-    // A saturated WebKit run loop can drop a single queued callback without
-    // rejecting it. Re-dispatch until exactly one callback claims the reload;
-    // queued duplicates become no-ops when the run loop catches up.
-    let claimed = Arc::new(AtomicBool::new(false));
+    // WebKit can accept `reload()` and still drop the navigation. Count each
+    // generation invalidation caused by an accepted attempt, and stop only
+    // after renderer registration advances the generation once more. This is
+    // an observed replacement boot, not merely an `Ok(())` from WebKit.
+    let initial_generation = main
+        .try_state::<crate::pty::PtyManager>()
+        .map(|ptys| ptys.current_renderer_generation())
+        .unwrap_or(0);
+    let attempts = Arc::new(AtomicU64::new(0));
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         for _ in 0..DEADLINE.as_secs() {
-            if claimed.load(Ordering::SeqCst) {
-                return;
-            }
-            let candidate = Arc::clone(&claimed);
-            let candidate_main = main.clone();
-            if let Err(error) = app.run_on_main_thread(move || {
-                if candidate.swap(true, Ordering::SeqCst) {
+            if let Some(ptys) = main.try_state::<crate::pty::PtyManager>() {
+                if replacement_registered(
+                    initial_generation,
+                    attempts.load(Ordering::SeqCst),
+                    ptys.current_renderer_generation(),
+                ) {
                     return;
                 }
+            }
+            let candidate_attempts = Arc::clone(&attempts);
+            let candidate_main = main.clone();
+            if let Err(error) = app.run_on_main_thread(move || {
                 let result =
                     if let Some(ptys) = candidate_main.try_state::<crate::pty::PtyManager>() {
+                        if replacement_registered(
+                            initial_generation,
+                            candidate_attempts.load(Ordering::SeqCst),
+                            ptys.current_renderer_generation(),
+                        ) {
+                            return;
+                        }
                         match ptys.reload_renderer(|| candidate_main.reload()) {
-                            Ok(result) => result,
-                            Err(_) => {
-                                candidate.store(false, Ordering::SeqCst);
-                                return;
+                            Ok(result) => {
+                                candidate_attempts.fetch_add(1, Ordering::SeqCst);
+                                result
                             }
+                            Err(_) => return,
                         }
                     } else {
                         candidate_main.reload()
@@ -622,5 +641,13 @@ mod tests {
         assert_eq!(decrement_if_positive(&counter), Ok(1));
         assert_eq!(decrement_if_positive(&counter), Err(0));
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn reload_success_requires_a_registration_beyond_attempt_invalidations() {
+        assert!(!replacement_registered(10, 0, 10));
+        assert!(!replacement_registered(10, 1, 11));
+        assert!(!replacement_registered(10, 2, 12));
+        assert!(replacement_registered(10, 2, 13));
     }
 }
