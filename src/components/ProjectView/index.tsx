@@ -1359,6 +1359,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+  const activatedRecoveredTerminalRef = useRef(false);
   /** Committed activity, newest first. This is session memory rather than a
    *  workspace preference: after a restart there is no honest "previous tab"
    *  until the user has moved between two of them. */
@@ -1884,7 +1885,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       // remounted view has no selection to protect. Activate one recovered tab
       // so its viewer actually resumes instead of leaving every live stream
       // mounted behind the empty launcher.
-      const activate = d.activate !== false || activeTabIdRef.current == null;
+      const activate =
+        d.activate !== false ||
+        (d.recovered && !activatedRecoveredTerminalRef.current);
+      if (d.recovered && activate) activatedRecoveredTerminalRef.current = true;
       attachTerminal(
         d.ptyId,
         d.cwd,
@@ -1906,6 +1910,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         terminalAttachmentQueue.acknowledge(project.id, tab.attachId);
       }
     }
+    terminalAttachmentQueue.reconcile(
+      project.id,
+      tabs.flatMap((tab) =>
+        tab.type === "terminal" && tab.attachId != null ? [tab.attachId] : [],
+      ),
+    );
   }, [project.id, tabs]);
 
   /** Open a pull request as its own tab, reusing one already open for it. */
@@ -6221,6 +6231,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
             .catch(() => {}),
         1500,
       );
+    }
+    if (
+      origin === "user" &&
+      closingTab?.type === "terminal" &&
+      closingTab.attachId != null
+    ) {
+      terminalAttachmentQueue.forget(project.id, closingTab.attachId);
     }
     if (closingTab?.type === "preview") forgetBrowserTarget(id);
     if (

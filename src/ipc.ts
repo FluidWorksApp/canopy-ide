@@ -154,6 +154,7 @@ export const decodePtyChunk = (payload: ArrayBuffer | number[]): PtyChunk => {
 };
 
 let renderer: RendererRegistration | null = null;
+let rendererRegistrationRequest = 0;
 let selftestPtyListenerFailuresRemaining = 0;
 
 /** Bootstrap-only fault injection for the isolated full-app selftest. */
@@ -164,7 +165,11 @@ export const configureSelftestPtyListenerFailures = (count: number) => {
 /** Make this page authoritative before mounting anything that can spawn a PTY.
  * Rust detaches predecessor channels and returns the children that survived it. */
 export async function ptyRendererRegister(): Promise<RendererRegistration> {
+  const request = ++rendererRegistrationRequest;
   const registration = await invoke<RendererRegistration>("pty_renderer_register");
+  if (request !== rendererRegistrationRequest) {
+    throw new Error("renderer registration was superseded");
+  }
   renderer = registration;
   return registration;
 }
