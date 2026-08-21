@@ -96,7 +96,8 @@ async function writeMarker(terminal: TerminalCheckpoint, cycle: number) {
 }
 
 const visibleStreamObservation = (replayEnds: Map<number, number>) => {
-  const visible = [...document.querySelectorAll<HTMLElement>(".term-container")]
+  const containers = [...document.querySelectorAll<HTMLElement>(".term-container")];
+  const visible = containers
     .filter((host) => host.getClientRects().length > 0)
     // App bootstrap can briefly leave a fresh, unbound terminal container in
     // front of the recovered tabs. It has no native identity and is not one of
@@ -122,7 +123,19 @@ const visibleStreamObservation = (replayEnds: Map<number, number>) => {
           receivedEnd >= expectedEnd,
       };
     });
-  return { visible, allReceived: visible.length > 0 && visible.every((item) => item.received) };
+  return {
+    visible,
+    allReceived: visible.length > 0 && visible.every((item) => item.received),
+    activeProjects: [...document.querySelectorAll<HTMLElement>(".project-view[data-project-id]")]
+      .filter((view) => view.getClientRects().length > 0)
+      .map((view) => view.dataset.projectId),
+    activeTabs: [...document.querySelectorAll<HTMLElement>(".tab.tab-active")]
+      .map((tab) => tab.innerText.slice(0, 80)),
+    containers: containers.map((host) => ({
+      ptyId: host.dataset.ptyId,
+      visible: host.getClientRects().length > 0,
+    })),
+  };
 };
 
 async function spawnTerminal(

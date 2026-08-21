@@ -438,14 +438,29 @@ pub fn selftest_reload_renderer(
     // replacement page resumes from the native checkpoint either way. The
     // short async boundary guarantees the invoke response has left this page;
     // the second dispatch keeps the actual WebKit operation on the UI thread.
+    // A saturated WebKit run loop can drop a single queued callback without
+    // rejecting it. Re-dispatch until exactly one callback claims the reload;
+    // queued duplicates become no-ops when the run loop catches up.
+    let claimed = Arc::new(AtomicBool::new(false));
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        if let Err(error) = app.run_on_main_thread(move || {
-            if let Err(error) = main.reload() {
-                log::error!("selftest renderer reload failed: {error}");
+        for _ in 0..DEADLINE.as_secs() {
+            if claimed.load(Ordering::SeqCst) {
+                return;
             }
-        }) {
-            log::error!("selftest renderer reload dispatch failed: {error}");
+            let candidate = Arc::clone(&claimed);
+            let candidate_main = main.clone();
+            if let Err(error) = app.run_on_main_thread(move || {
+                if candidate.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                if let Err(error) = candidate_main.reload() {
+                    log::error!("selftest renderer reload failed: {error}");
+                }
+            }) {
+                log::error!("selftest renderer reload dispatch failed: {error}");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     });
     Ok(())
