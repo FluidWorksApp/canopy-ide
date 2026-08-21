@@ -403,49 +403,70 @@ export interface PtyExit {
 // One short-lived native pull loop per renderer, with ordinary JavaScript
 // fan-out. Tauri's event-plugin listener registration can remain unresolved
 // while WebKit replaces a page and serialize the next renderer's invokes
-// behind it. The bounded Rust exit queue makes every request finite and lets a
-// replacement page resume from cursor zero without losing an exit.
+// behind it. The bounded Rust lifecycle queues make every request finite and
+// let a replacement page resume from cursor zero without losing an event.
 const ptyExitSubscribers = new Set<(event: PtyExit) => void>();
-let ptyExitPolling = false;
-let ptyExitPollTimer: number | undefined;
+const ptySpawnSubscribers = new Set<(event: PtySpawned) => void>();
+let ptyEventPolling = false;
+let ptyEventPollTimer: number | undefined;
 let ptyExitNativeCursor = 0;
+let ptySpawnNativeCursor = 0;
 let ptyExitSequence = 0;
+let ptySpawnSequence = 0;
 const ptyExitHistory: Array<{ sequence: number; event: PtyExit }> = [];
+const ptySpawnHistory: Array<{ sequence: number; event: PtySpawned }> = [];
 const PTY_EXIT_HISTORY_LIMIT = 512;
-const PTY_EXIT_POLL_MS = 250;
+const PTY_EVENT_POLL_MS = 250;
 
-interface PtyExitBatch {
-  cursor: number;
+interface PtyEventBatch {
+  exit_cursor: number;
   exits: PtyExit[];
+  spawn_cursor: number;
+  spawns: PtySpawned[];
 }
 
-const pollPtyExits = async () => {
-  if (!ptyExitPolling) return;
+const pollPtyEvents = async () => {
+  if (!ptyEventPolling) return;
   try {
-    const batch = await invoke<PtyExitBatch>("pty_renderer_exits", {
+    const batch = await invoke<PtyEventBatch>("pty_renderer_events", {
       rendererGeneration: rendererGeneration(),
-      after: ptyExitNativeCursor,
+      exitAfter: ptyExitNativeCursor,
+      spawnAfter: ptySpawnNativeCursor,
     });
-    ptyExitNativeCursor = batch.cursor;
+    ptyExitNativeCursor = batch.exit_cursor;
+    ptySpawnNativeCursor = batch.spawn_cursor;
     for (const event of batch.exits) {
       const sequence = ++ptyExitSequence;
       ptyExitHistory.push({ sequence, event });
       if (ptyExitHistory.length > PTY_EXIT_HISTORY_LIMIT) ptyExitHistory.shift();
       for (const subscriber of [...ptyExitSubscribers]) subscriber(event);
     }
+    for (const event of batch.spawns) {
+      const sequence = ++ptySpawnSequence;
+      ptySpawnHistory.push({ sequence, event });
+      if (ptySpawnHistory.length > PTY_EXIT_HISTORY_LIMIT) ptySpawnHistory.shift();
+      for (const subscriber of [...ptySpawnSubscribers]) subscriber(event);
+    }
   } catch {
     // Renderer replacement invalidates this page's generation. A live page
     // retries; a destroyed page loses its timer with the rest of its JS heap.
   }
-  if (ptyExitPolling) {
-    ptyExitPollTimer = window.setTimeout(() => void pollPtyExits(), PTY_EXIT_POLL_MS);
+  if (ptyEventPolling) {
+    ptyEventPollTimer = window.setTimeout(() => void pollPtyEvents(), PTY_EVENT_POLL_MS);
   }
 };
 
-const ensurePtyExitPolling = () => {
-  if (ptyExitPolling) return;
-  ptyExitPolling = true;
-  void pollPtyExits();
+const ensurePtyEventPolling = () => {
+  if (ptyEventPolling) return;
+  ptyEventPolling = true;
+  void pollPtyEvents();
+};
+
+const stopPtyEventPollingIfIdle = () => {
+  if (ptyExitSubscribers.size > 0 || ptySpawnSubscribers.size > 0) return;
+  ptyEventPolling = false;
+  window.clearTimeout(ptyEventPollTimer);
+  ptyEventPollTimer = undefined;
 };
 
 export const onPtyExit = async (cb: (e: PtyExit) => void): Promise<UnlistenFn> => {
@@ -454,7 +475,7 @@ export const onPtyExit = async (cb: (e: PtyExit) => void): Promise<UnlistenFn> =
   // already delivered by the fan-out above.
   const replayThrough = ptyExitSequence;
   ptyExitSubscribers.add(cb);
-  ensurePtyExitPolling();
+  ensurePtyEventPolling();
   for (const entry of ptyExitHistory) {
     if (entry.sequence <= replayThrough) cb(entry.event);
   }
@@ -463,11 +484,7 @@ export const onPtyExit = async (cb: (e: PtyExit) => void): Promise<UnlistenFn> =
     if (!listening) return;
     listening = false;
     ptyExitSubscribers.delete(cb);
-    if (ptyExitSubscribers.size === 0) {
-      ptyExitPolling = false;
-      window.clearTimeout(ptyExitPollTimer);
-      ptyExitPollTimer = undefined;
-    }
+    stopPtyEventPollingIfIdle();
   };
 };
 
@@ -494,7 +511,19 @@ export const onPtySpawned = (
     selftestPtyListenerFailuresRemaining -= 1;
     return Promise.reject(new Error("selftest injected pty:spawned listener failure"));
   }
-  return listen<PtySpawned>("pty:spawned", (event) => cb(event.payload));
+  const replayThrough = ptySpawnSequence;
+  ptySpawnSubscribers.add(cb);
+  ensurePtyEventPolling();
+  for (const entry of ptySpawnHistory) {
+    if (entry.sequence <= replayThrough) cb(entry.event);
+  }
+  let listening = true;
+  return Promise.resolve(() => {
+    if (!listening) return;
+    listening = false;
+    ptySpawnSubscribers.delete(cb);
+    stopPtyEventPollingIfIdle();
+  });
 };
 
 /** An action an agent requested through the MCP context bridge (start a run

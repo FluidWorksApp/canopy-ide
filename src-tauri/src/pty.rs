@@ -334,6 +334,8 @@ pub struct PtyManager {
     /// bridge, so exits use the same bounded pull model as recovered output.
     exits: Arc<Mutex<VecDeque<(u64, PtyExit)>>>,
     next_exit_sequence: Arc<AtomicU64>,
+    spawns: Arc<Mutex<VecDeque<(u64, PtySpawned)>>>,
+    next_spawn_sequence: Arc<AtomicU64>,
     /// Output of sessions that have exited, kept briefly.
     ///
     /// Teardown removes the session and then emits `pty:exit`, so every
@@ -367,6 +369,8 @@ impl Default for PtyManager {
             sessions: Default::default(),
             exits: Default::default(),
             next_exit_sequence: Default::default(),
+            spawns: Default::default(),
+            next_spawn_sequence: Default::default(),
             reaped: Default::default(),
             next_id: AtomicU32::new(0),
             next_session_generation: AtomicU64::new(0),
@@ -386,9 +390,11 @@ pub struct PtyExit {
 }
 
 #[derive(Serialize)]
-pub struct PtyExitBatch {
-    pub cursor: u64,
+pub struct PtyEventBatch {
+    pub exit_cursor: u64,
     pub exits: Vec<PtyExit>,
+    pub spawn_cursor: u64,
+    pub spawns: Vec<PtySpawned>,
 }
 
 /// Emitted (`pty:spawned`) when a headless PTY is opened remotely, so the
@@ -1509,23 +1515,28 @@ impl PtyManager {
         // Tell the desktop a new terminal/agent appeared so it can open a tab
         // attached to it (pty_attach). Best-effort.
         if let Some(s) = self.get(res.id) {
-            let _ = app.emit(
-                "pty:spawned",
-                PtySpawned {
-                    id: res.id,
-                    session_generation: res.session_generation,
-                    cwd: s.cwd.clone(),
-                    name: s.name.lock().unwrap().clone(),
-                    title: s.title.lock().unwrap().clone(),
-                    cols: res.cols,
-                    rows: res.rows,
-                    project_id: context.as_ref().map(|context| context.project_id.clone()),
-                    execution_context: context,
-                    run: s.run,
-                    command: s.command.clone(),
-                    run_command_id: s.run_command_id.clone(),
-                },
-            );
+            let event = PtySpawned {
+                id: res.id,
+                session_generation: res.session_generation,
+                cwd: s.cwd.clone(),
+                name: s.name.lock().unwrap().clone(),
+                title: s.title.lock().unwrap().clone(),
+                cols: res.cols,
+                rows: res.rows,
+                project_id: context.as_ref().map(|context| context.project_id.clone()),
+                execution_context: context,
+                run: s.run,
+                command: s.command.clone(),
+                run_command_id: s.run_command_id.clone(),
+            };
+            let mut queue = self.spawns.lock().unwrap();
+            let sequence = self.next_spawn_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+            queue.push_back((sequence, event.clone()));
+            while queue.len() > EXIT_EVENTS_MAX {
+                queue.pop_front();
+            }
+            drop(queue);
+            let _ = app.emit("pty:spawned", event);
         }
         Ok(res.id)
     }
@@ -2181,24 +2192,38 @@ pub fn pty_renderer_sessions(
     Ok(state.summaries())
 }
 
-/// Pull PTY exits newer than the renderer's cursor. The bounded native queue
-/// survives a WebView replacement, and generation validation makes a late
-/// request from the destroyed page harmless.
+/// Pull PTY lifecycle events newer than the renderer's cursors. The bounded
+/// native queues survive a WebView replacement, and generation validation
+/// makes a late request from the destroyed page harmless.
 #[tauri::command]
-pub fn pty_renderer_exits(
+pub fn pty_renderer_events(
     state: State<'_, PtyManager>,
     renderer_generation: u64,
-    after: u64,
-) -> Result<PtyExitBatch, String> {
+    exit_after: u64,
+    spawn_after: u64,
+) -> Result<PtyEventBatch, String> {
     state.require_renderer(renderer_generation)?;
-    let queue = state.exits.lock().unwrap();
-    let cursor = queue.back().map_or(0, |(sequence, _)| *sequence);
-    let exits = queue
+    let exit_queue = state.exits.lock().unwrap();
+    let exit_cursor = exit_queue.back().map_or(0, |(sequence, _)| *sequence);
+    let exits = exit_queue
         .iter()
-        .filter(|(sequence, _)| *sequence > after)
+        .filter(|(sequence, _)| *sequence > exit_after)
         .map(|(_, event)| event.clone())
         .collect();
-    Ok(PtyExitBatch { cursor, exits })
+    drop(exit_queue);
+    let spawn_queue = state.spawns.lock().unwrap();
+    let spawn_cursor = spawn_queue.back().map_or(0, |(sequence, _)| *sequence);
+    let spawns = spawn_queue
+        .iter()
+        .filter(|(sequence, _)| *sequence > spawn_after)
+        .map(|(_, event)| event.clone())
+        .collect();
+    Ok(PtyEventBatch {
+        exit_cursor,
+        exits,
+        spawn_cursor,
+        spawns,
+    })
 }
 
 /// Frontend ack after xterm.js consumes a chunk — releases backpressure.

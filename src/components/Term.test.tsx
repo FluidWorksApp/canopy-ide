@@ -255,9 +255,9 @@ describe("Term recovered attachment", () => {
     });
     mockCommands({
       pty_renderer_register: () => ({ generation: 9, sessions: [] }),
-      pty_renderer_exits: () => {
+      pty_renderer_events: () => {
         calls.push("exits");
-        return { cursor: 0, exits: [] };
+        return { exit_cursor: 0, exits: [], spawn_cursor: 0, spawns: [] };
       },
       pty_attach_desktop: attach,
       pty_read_desktop: () => null,
