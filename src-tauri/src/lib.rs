@@ -627,6 +627,7 @@ pub fn run() {
             pty::pty_detach_desktop,
             pty::pty_renderer_register,
             pty::pty_renderer_sessions,
+            pty::pty_renderer_exits,
             pty::pty_write,
             pty::pty_ack,
             pty::pty_resize,

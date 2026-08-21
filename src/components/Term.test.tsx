@@ -233,10 +233,10 @@ describe("Term spawn failure", () => {
 });
 
 describe("Term recovered attachment", () => {
-  it("resumes every stream through one exit listener even when registration never settles", async () => {
+  it("resumes every stream before starting the shared exit puller", async () => {
     // Earlier component tests install and remove their subscribers from the
-    // renderer-level fan-out. Reload the modules so this case exercises its
-    // first native registration, including the never-settling boundary.
+    // renderer-level fan-out. Reload the modules so this case exercises the
+    // first shared pull without inheriting their cursor.
     vi.resetModules();
     const [{ Term: RecoveryTerm }, recoveryIpc] = await Promise.all([
       import("./Term"),
@@ -255,9 +255,9 @@ describe("Term recovered attachment", () => {
     });
     mockCommands({
       pty_renderer_register: () => ({ generation: 9, sessions: [] }),
-      "plugin:event|listen": () => {
-        calls.push("listen");
-        return new Promise(() => {});
+      pty_renderer_exits: () => {
+        calls.push("exits");
+        return { cursor: 0, exits: [] };
       },
       pty_attach_desktop: attach,
       pty_read_desktop: () => null,
@@ -289,6 +289,6 @@ describe("Term recovered attachment", () => {
     await waitFor(() => expect(attach).toHaveBeenCalledTimes(2));
     expect(onSpawned).toHaveBeenCalledWith(77, undefined);
     expect(onSpawned).toHaveBeenCalledWith(88, undefined);
-    expect(calls).toEqual(["attach:77", "attach:88", "listen"]);
+    expect(calls).toEqual(["attach:77", "attach:88", "exits"]);
   });
 });

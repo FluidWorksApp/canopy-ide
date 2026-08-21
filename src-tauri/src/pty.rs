@@ -39,6 +39,7 @@ const READ_BUF_SIZE: usize = 64 * 1024;
 /// a burst can never become one multi-megabyte allocation copied through Rust,
 /// Tauri and JavaScript at once.
 const OUTPUT_CHUNK_MAX: usize = 64 * 1024;
+const EXIT_EVENTS_MAX: usize = 1_024;
 const DEFAULT_HIGH_WATER: usize = 2 * 1024 * 1024;
 /// How much unwritten input a session may queue before writes are refused.
 /// A child that has stopped reading its stdin fills the kernel's tty buffer in
@@ -328,6 +329,11 @@ fn reap_output(reaped: &ReapedOutput, id: u32, session: &Session) {
 
 pub struct PtyManager {
     sessions: Arc<Mutex<HashMap<u32, Arc<Session>>>>,
+    /// Renderer-pulled exit records. Event-plugin listener registration can
+    /// outlive a WebKit page being replaced and wedge the following page's IPC
+    /// bridge, so exits use the same bounded pull model as recovered output.
+    exits: Arc<Mutex<VecDeque<(u64, PtyExit)>>>,
+    next_exit_sequence: Arc<AtomicU64>,
     /// Output of sessions that have exited, kept briefly.
     ///
     /// Teardown removes the session and then emits `pty:exit`, so every
@@ -359,6 +365,8 @@ impl Default for PtyManager {
     fn default() -> Self {
         Self {
             sessions: Default::default(),
+            exits: Default::default(),
+            next_exit_sequence: Default::default(),
             reaped: Default::default(),
             next_id: AtomicU32::new(0),
             next_session_generation: AtomicU64::new(0),
@@ -375,6 +383,12 @@ pub struct PtyExit {
     pub session_generation: u64,
     pub exit_code: Option<u32>,
     pub requested: bool,
+}
+
+#[derive(Serialize)]
+pub struct PtyExitBatch {
+    pub cursor: u64,
+    pub exits: Vec<PtyExit>,
 }
 
 /// Emitted (`pty:spawned`) when a headless PTY is opened remotely, so the
@@ -1977,6 +1991,8 @@ impl PtyManager {
             let session = session.clone();
             let sessions = state.sessions.clone();
             let reaped = state.reaped.clone();
+            let exits = state.exits.clone();
+            let next_exit_sequence = state.next_exit_sequence.clone();
             thread::Builder::new()
                 .name(format!("pty-flush-{id}"))
                 .spawn(move || {
@@ -2052,15 +2068,22 @@ impl PtyManager {
                     // against every other agent until a human noticed the row
                     // and pressed Release.
                     crate::context::release_claims_for_pty(&app, session.id);
-                    let _ = app.emit(
-                        "pty:exit",
-                        PtyExit {
-                            id: session.id,
-                            session_generation: session.session_generation,
-                            exit_code,
-                            requested: session.shutdown.load(Ordering::SeqCst),
-                        },
-                    );
+                    let event = PtyExit {
+                        id: session.id,
+                        session_generation: session.session_generation,
+                        exit_code,
+                        requested: session.shutdown.load(Ordering::SeqCst),
+                    };
+                    let mut queue = exits.lock().unwrap();
+                    let sequence = next_exit_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                    queue.push_back((sequence, event.clone()));
+                    while queue.len() > EXIT_EVENTS_MAX {
+                        queue.pop_front();
+                    }
+                    drop(queue);
+                    // Keep the legacy event for older renderers. Current pages
+                    // never register for it and consume the queue below.
+                    let _ = app.emit("pty:exit", event);
                 })
                 .expect("spawn pty flusher thread");
         }
@@ -2156,6 +2179,26 @@ pub fn pty_renderer_sessions(
 ) -> Result<Vec<PtySummary>, String> {
     state.require_renderer(renderer_generation)?;
     Ok(state.summaries())
+}
+
+/// Pull PTY exits newer than the renderer's cursor. The bounded native queue
+/// survives a WebView replacement, and generation validation makes a late
+/// request from the destroyed page harmless.
+#[tauri::command]
+pub fn pty_renderer_exits(
+    state: State<'_, PtyManager>,
+    renderer_generation: u64,
+    after: u64,
+) -> Result<PtyExitBatch, String> {
+    state.require_renderer(renderer_generation)?;
+    let queue = state.exits.lock().unwrap();
+    let cursor = queue.back().map_or(0, |(sequence, _)| *sequence);
+    let exits = queue
+        .iter()
+        .filter(|(sequence, _)| *sequence > after)
+        .map(|(_, event)| event.clone())
+        .collect();
+    Ok(PtyExitBatch { cursor, exits })
 }
 
 /// Frontend ack after xterm.js consumes a chunk — releases backpressure.

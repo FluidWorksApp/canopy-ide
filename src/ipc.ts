@@ -400,49 +400,61 @@ export interface PtyExit {
   spawnError?: string;
 }
 
-// One native listener per renderer, with ordinary JavaScript fan-out. A
-// recovered workspace can mount many terminals at once; asking Tauri to add a
-// native listener for every pane both duplicates work and, on WebKit, can
-// serialize the next invoke behind a listener registration whose reply was
-// lost during renderer replacement. Keeping the native listener alive until
-// this renderer itself goes away also means later terminal mounts never have
-// to reopen that recovery boundary.
+// One short-lived native pull loop per renderer, with ordinary JavaScript
+// fan-out. Tauri's event-plugin listener registration can remain unresolved
+// while WebKit replaces a page and serialize the next renderer's invokes
+// behind it. The bounded Rust exit queue makes every request finite and lets a
+// replacement page resume from cursor zero without losing an exit.
 const ptyExitSubscribers = new Set<(event: PtyExit) => void>();
-let ptyExitListener: Promise<UnlistenFn> | null = null;
+let ptyExitPolling = false;
+let ptyExitPollTimer: number | undefined;
+let ptyExitNativeCursor = 0;
 let ptyExitSequence = 0;
 const ptyExitHistory: Array<{ sequence: number; event: PtyExit }> = [];
 const PTY_EXIT_HISTORY_LIMIT = 512;
+const PTY_EXIT_POLL_MS = 250;
 
-const ensurePtyExitListener = () => {
-  if (ptyExitListener == null) {
-    ptyExitListener = listen<PtyExit>("pty:exit", (event) => {
-      const sequence = ++ptyExitSequence;
-      ptyExitHistory.push({ sequence, event: event.payload });
-      if (ptyExitHistory.length > PTY_EXIT_HISTORY_LIMIT) ptyExitHistory.shift();
-      for (const subscriber of [...ptyExitSubscribers]) subscriber(event.payload);
-    }).catch((error) => {
-      // A rejected registration is retryable. Subscribers whose call observed
-      // the rejection remove themselves below; newer calls can open a fresh
-      // renderer-level listener.
-      ptyExitListener = null;
-      throw error;
+interface PtyExitBatch {
+  cursor: number;
+  exits: PtyExit[];
+}
+
+const pollPtyExits = async () => {
+  if (!ptyExitPolling) return;
+  try {
+    const batch = await invoke<PtyExitBatch>("pty_renderer_exits", {
+      rendererGeneration: rendererGeneration(),
+      after: ptyExitNativeCursor,
     });
+    ptyExitNativeCursor = batch.cursor;
+    for (const event of batch.exits) {
+      const sequence = ++ptyExitSequence;
+      ptyExitHistory.push({ sequence, event });
+      if (ptyExitHistory.length > PTY_EXIT_HISTORY_LIMIT) ptyExitHistory.shift();
+      for (const subscriber of [...ptyExitSubscribers]) subscriber(event);
+    }
+  } catch {
+    // Renderer replacement invalidates this page's generation. A live page
+    // retries; a destroyed page loses its timer with the rest of its JS heap.
   }
-  return ptyExitListener;
+  if (ptyExitPolling) {
+    ptyExitPollTimer = window.setTimeout(() => void pollPtyExits(), PTY_EXIT_POLL_MS);
+  }
+};
+
+const ensurePtyExitPolling = () => {
+  if (ptyExitPolling) return;
+  ptyExitPolling = true;
+  void pollPtyExits();
 };
 
 export const onPtyExit = async (cb: (e: PtyExit) => void): Promise<UnlistenFn> => {
-  // Subscribe before awaiting the native handshake so live events cannot land
-  // in a gap. Replay only the history that predates this subscriber; anything
-  // newer was already delivered by the fan-out above.
+  // Subscribe before starting the puller so live events cannot land in a gap.
+  // Replay only the history that predates this subscriber; anything newer was
+  // already delivered by the fan-out above.
   const replayThrough = ptyExitSequence;
   ptyExitSubscribers.add(cb);
-  try {
-    await ensurePtyExitListener();
-  } catch (error) {
-    ptyExitSubscribers.delete(cb);
-    throw error;
-  }
+  ensurePtyExitPolling();
   for (const entry of ptyExitHistory) {
     if (entry.sequence <= replayThrough) cb(entry.event);
   }
@@ -451,6 +463,11 @@ export const onPtyExit = async (cb: (e: PtyExit) => void): Promise<UnlistenFn> =
     if (!listening) return;
     listening = false;
     ptyExitSubscribers.delete(cb);
+    if (ptyExitSubscribers.size === 0) {
+      ptyExitPolling = false;
+      window.clearTimeout(ptyExitPollTimer);
+      ptyExitPollTimer = undefined;
+    }
   };
 };
 
