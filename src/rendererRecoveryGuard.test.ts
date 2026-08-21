@@ -19,7 +19,10 @@ describe("renderer recovery wiring", () => {
     expect(main).toContain('new Error("renderer registration timed out")');
     expect(main).toContain("Promise.race([");
     expect(main).toContain("retryMs = Math.min(retryMs * 2, 2_000)");
-    expect(read("src/ipc.ts")).toContain("renderer registration was superseded");
+    const ipc = read("src/ipc.ts");
+    expect(ipc).toContain("renderer registration was superseded");
+    expect(ipc).toContain("await prepareRendererReplacement();");
+    expect(ipc).toContain("await Promise.allSettled([...activeTauriListeners]");
     expect(main).toContain("configureSelftestPtyListenerFailures");
   });
 

@@ -2,7 +2,12 @@
 // servers, fs, watchers) lives in the Rust core; this file is the only place the
 // frontend touches IPC.
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import {
+  listen as nativeListen,
+  type Event as TauriEvent,
+  type Options as TauriListenOptions,
+  type UnlistenFn,
+} from "@tauri-apps/api/event";
 import type { ShortcutProfile } from "./shortcuts";
 import type {
   TaskAttempt,
@@ -24,6 +29,47 @@ import type {
   WorkflowStepRecordInput,
 } from "./workflowRun";
 import { rendererIoBudget } from "./ioBudget";
+
+type AsyncUnlisten = () => void | Promise<void>;
+const activeTauriListeners = new Set<AsyncUnlisten>();
+const pendingTauriListeners = new Set<Promise<UnlistenFn>>();
+let rendererReplacementPreparing = false;
+
+const listen = <T>(
+  event: string,
+  handler: (event: TauriEvent<T>) => void,
+  options?: TauriListenOptions,
+): Promise<UnlistenFn> => {
+  const registration = nativeListen<T>(event, handler, options).then(async (nativeUnlisten) => {
+    let active = true;
+    const release = async () => {
+      if (!active) return;
+      active = false;
+      activeTauriListeners.delete(release);
+      await (nativeUnlisten as AsyncUnlisten)();
+    };
+    if (rendererReplacementPreparing) {
+      await release();
+      return () => {};
+    }
+    activeTauriListeners.add(release);
+    return () => void release();
+  });
+  pendingTauriListeners.add(registration);
+  void registration.then(
+    () => pendingTauriListeners.delete(registration),
+    () => pendingTauriListeners.delete(registration),
+  );
+  return registration;
+};
+
+const prepareRendererReplacement = async () => {
+  rendererReplacementPreparing = true;
+  while (pendingTauriListeners.size > 0) {
+    await Promise.allSettled([...pendingTauriListeners]);
+  }
+  await Promise.allSettled([...activeTauriListeners].map((release) => release()));
+};
 
 // ---------- App shell ----------
 
@@ -968,8 +1014,10 @@ export const selftestCheckpointSave = (checkpoint: unknown) =>
 
 /** The watchdog's native webview reload primitive, exposed only while an
  * isolated selftest is active. A successful call destroys this JS page. */
-export const selftestReloadRenderer = () =>
-  invoke<void>("selftest_reload_renderer");
+export const selftestReloadRenderer = async () => {
+  await prepareRendererReplacement();
+  await invoke<void>("selftest_reload_renderer");
+};
 
 /** A native-owned, phone-equivalent PTY in the disposable selftest project. */
 export const selftestSpawnRemote = (cwd: string) =>
