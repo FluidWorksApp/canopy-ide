@@ -399,8 +399,47 @@ export interface PtyExit {
    *  was refused (no process ever existed); the Rust event never carries it. */
   spawnError?: string;
 }
-export const onPtyExit = (cb: (e: PtyExit) => void): Promise<UnlistenFn> =>
-  listen<PtyExit>("pty:exit", (event) => cb(event.payload));
+
+// One native listener per renderer, with ordinary JavaScript fan-out. A
+// recovered workspace can mount many terminals at once; asking Tauri to add a
+// native listener for every pane both duplicates work and, on WebKit, can
+// serialize the next invoke behind a listener registration whose reply was
+// lost during renderer replacement. Keeping the native listener alive until
+// this renderer itself goes away also means later terminal mounts never have
+// to reopen that recovery boundary.
+const ptyExitSubscribers = new Set<(event: PtyExit) => void>();
+let ptyExitListener: Promise<UnlistenFn> | null = null;
+
+const ensurePtyExitListener = () => {
+  if (ptyExitListener == null) {
+    ptyExitListener = listen<PtyExit>("pty:exit", (event) => {
+      for (const subscriber of [...ptyExitSubscribers]) subscriber(event.payload);
+    }).catch((error) => {
+      // A rejected registration is retryable. Subscribers whose call observed
+      // the rejection remove themselves below; newer calls can open a fresh
+      // renderer-level listener.
+      ptyExitListener = null;
+      throw error;
+    });
+  }
+  return ptyExitListener;
+};
+
+export const onPtyExit = async (cb: (e: PtyExit) => void): Promise<UnlistenFn> => {
+  ptyExitSubscribers.add(cb);
+  try {
+    await ensurePtyExitListener();
+  } catch (error) {
+    ptyExitSubscribers.delete(cb);
+    throw error;
+  }
+  let listening = true;
+  return () => {
+    if (!listening) return;
+    listening = false;
+    ptyExitSubscribers.delete(cb);
+  };
+};
 
 /** A PTY opened headlessly from the remote portal, announced so the desktop can
  *  open a tab attached to it (via ptyAttach) in the matching project. */

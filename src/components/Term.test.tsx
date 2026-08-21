@@ -90,7 +90,6 @@ if (!globalThis.ResizeObserver)
   } as unknown as typeof ResizeObserver;
 
 import { Term } from "./Term";
-import * as ipc from "../ipc";
 
 const component: ServerComponent = {
   id: "cmp-web",
@@ -234,10 +233,18 @@ describe("Term spawn failure", () => {
 });
 
 describe("Term recovered attachment", () => {
-  it("resumes output even when pty:exit listener registration never settles", async () => {
+  it("resumes every stream through one exit listener even when registration never settles", async () => {
+    // Earlier component tests install and remove their subscribers from the
+    // renderer-level fan-out. Reload the modules so this case exercises its
+    // first native registration, including the never-settling boundary.
+    vi.resetModules();
+    const [{ Term: RecoveryTerm }, recoveryIpc] = await Promise.all([
+      import("./Term"),
+      import("../ipc"),
+    ]);
     const calls: string[] = [];
-    const attach = vi.fn(() => {
-      calls.push("attach");
+    const attach = vi.fn(({ id }: { id: number }) => {
+      calls.push(`attach:${id}`);
       return {
         cols: 80,
         rows: 24,
@@ -256,21 +263,32 @@ describe("Term recovered attachment", () => {
       pty_read_desktop: () => null,
       pty_detach_desktop: () => undefined,
     });
-    await ipc.ptyRendererRegister();
+    await recoveryIpc.ptyRendererRegister();
     const onSpawned = vi.fn();
     render(
-      <Term
-        cwd="/w/site"
-        active
-        streaming
-        attachId={77}
-        onSpawned={onSpawned}
-        onExited={vi.fn()}
-      />,
+      <>
+        <RecoveryTerm
+          cwd="/w/site"
+          active
+          streaming
+          attachId={77}
+          onSpawned={onSpawned}
+          onExited={vi.fn()}
+        />
+        <RecoveryTerm
+          cwd="/w/site"
+          active
+          streaming
+          attachId={88}
+          onSpawned={onSpawned}
+          onExited={vi.fn()}
+        />
+      </>,
     );
 
-    await waitFor(() => expect(attach).toHaveBeenCalledOnce());
+    await waitFor(() => expect(attach).toHaveBeenCalledTimes(2));
     expect(onSpawned).toHaveBeenCalledWith(77, undefined);
-    expect(calls.slice(0, 2)).toEqual(["attach", "listen"]);
+    expect(onSpawned).toHaveBeenCalledWith(88, undefined);
+    expect(calls).toEqual(["attach:77", "attach:88", "listen"]);
   });
 });
