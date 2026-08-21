@@ -24,7 +24,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 use tokio::sync::broadcast;
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
@@ -1536,7 +1536,6 @@ impl PtyManager {
                 queue.pop_front();
             }
             drop(queue);
-            let _ = app.emit("pty:spawned", event);
         }
         Ok(res.id)
     }
@@ -2092,9 +2091,6 @@ impl PtyManager {
                         queue.pop_front();
                     }
                     drop(queue);
-                    // Keep the legacy event for older renderers. Current pages
-                    // never register for it and consume the queue below.
-                    let _ = app.emit("pty:exit", event);
                 })
                 .expect("spawn pty flusher thread");
         }
