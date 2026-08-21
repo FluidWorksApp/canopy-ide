@@ -68,7 +68,16 @@ const prepareRendererReplacement = async () => {
   while (pendingTauriListeners.size > 0) {
     await Promise.allSettled([...pendingTauriListeners]);
   }
-  await Promise.allSettled([...activeTauriListeners].map((release) => release()));
+  // Tauri unlisten crosses the same IPC bridge as the reload command.  Issuing
+  // every release at once can saturate WebKit's bridge before the reload gets
+  // dispatched, so drain registrations one at a time.
+  for (const release of [...activeTauriListeners]) {
+    try {
+      await release();
+    } catch {
+      // Keep draining: one stale listener must not strand the replacement.
+    }
+  }
 };
 
 // ---------- App shell ----------

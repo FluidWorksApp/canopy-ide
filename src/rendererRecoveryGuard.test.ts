@@ -22,7 +22,11 @@ describe("renderer recovery wiring", () => {
     const ipc = read("src/ipc.ts");
     expect(ipc).toContain("renderer registration was superseded");
     expect(ipc).toContain("await prepareRendererReplacement();");
-    expect(ipc).toContain("await Promise.allSettled([...activeTauriListeners]");
+    expect(ipc).toContain("for (const release of [...activeTauriListeners])");
+    expect(ipc).toContain("await release();");
+    expect(ipc).not.toContain(
+      "Promise.allSettled([...activeTauriListeners].map((release) => release()))",
+    );
     expect(main).toContain("configureSelftestPtyListenerFailures");
   });
 
