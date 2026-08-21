@@ -789,7 +789,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       }
     };
 
-    const start = async () => {
+    const installExitListener = async () => {
       const off = await ipc.onPtyExit((event) => {
         const id = ptyIdRef.current;
         if (id == null) earlyExits.set(event.id, event);
@@ -797,19 +797,33 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       });
       if (disposed) {
         off();
-        return;
+        return false;
       }
       unlistenExit = off;
+      return true;
+    };
 
+    const start = async () => {
       if (attachIdRef.current != null) {
         // Every desktop viewer gets one bounded, generation-scoped stream.
         // Ownership changes only close behaviour: a restored desktop-owned PTY
         // is killed on explicit close; a remote/micro-task viewer detaches.
+        //
+        // Do not put native listener registration in front of this attach.
+        // WebKit can leave a listen invoke unresolved while a renderer is being
+        // replaced; the PTY identity and pull stream are already sufficient to
+        // resume output, while App owns a renderer-global exit listener too.
+        // Waiting here stranded every recovered Term before it could bind.
         const id = attachIdRef.current;
         ptyIdRef.current = id;
+        void installExitListener().catch(() => {});
         if (streamingRef.current) await attachViewer();
         return;
       }
+
+      // A fresh command can exit as soon as it spawns, so keep its listener as
+      // the prerequisite and retain the early-exit buffer above.
+      if (!(await installExitListener())) return;
 
       try {
         const spawnEpoch = streamEpoch;

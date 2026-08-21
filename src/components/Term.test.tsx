@@ -90,6 +90,7 @@ if (!globalThis.ResizeObserver)
   } as unknown as typeof ResizeObserver;
 
 import { Term } from "./Term";
+import * as ipc from "../ipc";
 
 const component: ServerComponent = {
   id: "cmp-web",
@@ -229,5 +230,39 @@ describe("Term spawn failure", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(onSpawned).not.toHaveBeenCalled();
     expect(onExited).not.toHaveBeenCalled();
+  });
+});
+
+describe("Term recovered attachment", () => {
+  it("resumes output even when pty:exit listener registration never settles", async () => {
+    const attach = vi.fn(() => ({
+      cols: 80,
+      rows: 24,
+      generation: 4,
+      replay_start: 0,
+      replay_end: 0,
+    }));
+    mockCommands({
+      pty_renderer_register: () => ({ generation: 9, sessions: [] }),
+      "plugin:event|listen": () => new Promise(() => {}),
+      pty_attach_desktop: attach,
+      pty_read_desktop: () => null,
+      pty_detach_desktop: () => undefined,
+    });
+    await ipc.ptyRendererRegister();
+    const onSpawned = vi.fn();
+    render(
+      <Term
+        cwd="/w/site"
+        active
+        streaming
+        attachId={77}
+        onSpawned={onSpawned}
+        onExited={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(attach).toHaveBeenCalledOnce());
+    expect(onSpawned).toHaveBeenCalledWith(77, undefined);
   });
 });
