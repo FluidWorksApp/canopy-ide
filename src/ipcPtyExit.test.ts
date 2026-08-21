@@ -12,7 +12,7 @@ it("pulls each native PTY exit once and replays it to a later subscriber", async
   };
   mockCommands({
     pty_renderer_register: () => ({ generation: 7, sessions: [] }),
-    pty_renderer_exits: ({ after }) => {
+    pty_renderer_exits: ({ after }: { after?: unknown }) => {
       pulls += 1;
       return after === 0
         ? { cursor: 1, exits: [exited] }
