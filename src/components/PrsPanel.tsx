@@ -65,7 +65,7 @@ const PANEL_ROWS = 12;
  *  #90 read as neighbours when they were repos apart. Owner stays in the
  *  hover title; the leaf is what tells rows apart. */
 const repoName = (row: ipc.PrRow) =>
-  row.nwo.split("/").pop() || basename(row.repo);
+  basename(row.nwo) || basename(row.repo);
 
 // A head SHA is the invalidation token. Revisiting the page reuses evidence
 // while the commits are unchanged; a push creates a different key and probes
