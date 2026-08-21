@@ -718,12 +718,31 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       if (disposed || id == null || streamAttached || streamConnecting) return;
       streamConnecting = true;
       const epoch = ++streamEpoch;
+      let attachTimeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        const attached = await ipc.ptyAttachDesktop(
+        const pending = ipc.ptyAttachDesktop(
           id,
           streamLedger.replayAfter(),
           (chunk) => writeStream(chunk, epoch),
         );
+        const attached = await Promise.race([
+          pending,
+          new Promise<never>((_, reject) => {
+            attachTimeout = setTimeout(
+              () => reject(new Error("terminal attach timed out")),
+              2_000,
+            );
+          }),
+        ]).catch((error) => {
+          // A native attach can commit even when WebKit loses its invoke
+          // response. If that response eventually arrives after our deadline,
+          // release only its exact attachment generation; a newer retry is
+          // protected by Rust's generation match.
+          void pending
+            .then((late) => ipc.ptyDetachDesktop(id, late.generation))
+            .catch(() => {});
+          throw error;
+        });
         if (disposed || epoch !== streamEpoch || !streamingRef.current) {
           streamLedger.discard(epoch);
           void ipc.ptyDetachDesktop(id, attached.generation);
@@ -749,6 +768,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
           }, retryMs);
         }
       } finally {
+        clearTimeout(attachTimeout);
         if (epoch === streamEpoch) streamConnecting = false;
       }
     };
