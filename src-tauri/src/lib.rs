@@ -442,6 +442,7 @@ pub fn run() {
         .manage(browser::BrowserManager::default())
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
+        .manage(agents::AppStatsCache::default())
         .manage(governor::TerminalGovernor::default())
         .manage(containment::ContainmentManager::default())
         .manage(tunnel::TunnelManager::default())
@@ -847,6 +848,7 @@ pub fn run() {
             agents::set_context_scopes,
             agents::session_digests,
             agents::pty_stats,
+            agents::app_stats,
             agents::probe_http_readiness,
             governor::terminal_governor_status,
             governor::terminal_governor_incidents,

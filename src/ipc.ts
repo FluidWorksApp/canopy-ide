@@ -2521,10 +2521,62 @@ export const ptyStats = (): Promise<SessionStats[]> => invoke<SessionStats[]>("p
 export const probeHttpReadiness = (port: number, path: string): Promise<boolean> =>
   invoke<boolean>("probe_http_readiness", { port, path });
 
-export const onPtyStats = (
-  cb: (stats: SessionStats[]) => void,
-): Promise<UnlistenFn> =>
-  listen<SessionStats[]>("pty:stats", (event) => cb(event.payload));
+const ptyStatsSubscribers = new Set<(stats: SessionStats[]) => void>();
+const appStatsSubscribers = new Set<(stats: AppStats) => void>();
+let resourceStatsPolling = false;
+let resourceStatsTimer: number | undefined;
+let latestPtyStats: SessionStats[] | undefined;
+let latestAppStats: AppStats | undefined;
+const RESOURCE_STATS_POLL_MS = 2_000;
+
+const pollResourceStats = async () => {
+  if (!resourceStatsPolling) return;
+  if (ptyStatsSubscribers.size > 0) {
+    try {
+      latestPtyStats = await ptyStats();
+      for (const subscriber of [...ptyStatsSubscribers]) subscriber(latestPtyStats);
+    } catch {
+      // A replacement renderer invalidates this page's generation and heap.
+    }
+  }
+  if (appStatsSubscribers.size > 0) {
+    try {
+      const stats = await invoke<AppStats | null>("app_stats");
+      if (stats) {
+        latestAppStats = stats;
+        for (const subscriber of [...appStatsSubscribers]) subscriber(stats);
+      }
+    } catch {
+      // A replacement renderer invalidates this page's generation and heap.
+    }
+  }
+  if (resourceStatsPolling) {
+    resourceStatsTimer = window.setTimeout(() => void pollResourceStats(), RESOURCE_STATS_POLL_MS);
+  }
+};
+
+const ensureResourceStatsPolling = () => {
+  if (resourceStatsPolling) return;
+  resourceStatsPolling = true;
+  void pollResourceStats();
+};
+
+const stopResourceStatsPollingIfIdle = () => {
+  if (ptyStatsSubscribers.size > 0 || appStatsSubscribers.size > 0) return;
+  resourceStatsPolling = false;
+  window.clearTimeout(resourceStatsTimer);
+  resourceStatsTimer = undefined;
+};
+
+export const onPtyStats = (cb: (stats: SessionStats[]) => void): Promise<UnlistenFn> => {
+  ptyStatsSubscribers.add(cb);
+  if (latestPtyStats) cb(latestPtyStats);
+  ensureResourceStatsPolling();
+  return Promise.resolve(() => {
+    ptyStatsSubscribers.delete(cb);
+    stopResourceStatsPollingIfIdle();
+  });
+};
 
 // ---------- Terminal resource governor ----------
 
@@ -2706,10 +2758,17 @@ export interface AppStats {
   includes_webviews: boolean;
 }
 
-/** Native process-tree footprint, emitted every 2s. `includes_webviews` says
+/** Native process-tree footprint, sampled every 2s. `includes_webviews` says
  * whether that tree is also a whole-app footprint on the current platform. */
-export const onAppStats = (cb: (s: AppStats) => void): Promise<UnlistenFn> =>
-  listen<AppStats>("app:stats", (e) => cb(e.payload));
+export const onAppStats = (cb: (stats: AppStats) => void): Promise<UnlistenFn> => {
+  appStatsSubscribers.add(cb);
+  if (latestAppStats) cb(latestAppStats);
+  ensureResourceStatsPolling();
+  return Promise.resolve(() => {
+    appStatsSubscribers.delete(cb);
+    stopResourceStatsPollingIfIdle();
+  });
+};
 
 // ---------- Resident watchdogs ----------
 

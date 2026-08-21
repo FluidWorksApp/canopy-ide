@@ -205,11 +205,13 @@ fn candidate_pid(
     kids.next().is_none().then_some(only)
 }
 
-/// The most recent `pty:stats` reading, kept so the context bridge can serve
-/// live CPU/memory to agents (canopy_resources) without re-deriving it — the
-/// monitor loop already pays for the sysinfo walk once per tick.
+/// The most recent PTY resource reading, kept so renderer and context-bridge
+/// pulls can share the monitor's one sysinfo walk per tick.
 #[derive(Default)]
 pub struct StatsCache(pub std::sync::Mutex<Vec<SessionStats>>);
+
+#[derive(Default)]
+pub struct AppStatsCache(pub std::sync::Mutex<Option<AppStats>>);
 
 fn clear_stale_stats(cache: Option<&StatsCache>, last_ports: &mut HashMap<u32, Vec<u16>>) -> bool {
     let mut changed = !last_ports.is_empty();
@@ -224,20 +226,23 @@ fn clear_stale_stats(cache: Option<&StatsCache>, last_ports: &mut HashMap<u32, V
 
 /// The latest process reading for every live terminal, on demand.
 ///
-/// The monitor emits `pty:stats` every 2s, which serves anything already
-/// mounted and subscribed. This is for a caller that needs one reading *now*
-/// and has no subscription — the companion, which answers "what are my agents
-/// doing" from session digests and, without this, could only report what a
-/// digest last claimed. A digest written by a session that died mid-turn keeps
-/// claiming "working" indefinitely, so Ash would say an agent was working on
-/// something it stopped days ago. Reads the cache the monitor already fills:
-/// no refresh, no syscall.
+/// The renderer polls this cache every 2s while it has subscribers. The
+/// companion also reads it on demand when answering from session digests. A
+/// digest written by a session that died mid-turn otherwise keeps claiming
+/// "working" indefinitely. No refresh or syscall occurs in this command.
 #[tauri::command]
 pub fn pty_stats(app: tauri::AppHandle) -> Vec<SessionStats> {
     use tauri::Manager;
     app.try_state::<StatsCache>()
         .map(|c| c.0.lock().unwrap().clone())
         .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn app_stats(app: tauri::AppHandle) -> Option<AppStats> {
+    use tauri::Manager;
+    app.try_state::<AppStatsCache>()
+        .and_then(|cache| cache.0.lock().unwrap().clone())
 }
 
 fn http_readiness_url(port: u16, path: &str) -> Result<String, String> {
@@ -431,15 +436,12 @@ pub fn start_monitor(app: AppHandle) {
                         delivery: s.desktop_delivery_metrics(),
                     })
                     .collect();
-                // Publish the transition to zero once. Otherwise the final
-                // terminal remains in StatsCache and every frontend subscriber
-                // indefinitely, which looks like a live resource after its PTY
-                // and process are already gone.
+                // Store the transition to zero. Otherwise the final terminal
+                // remains in StatsCache and every frontend poll indefinitely,
+                // which looks like a live resource after its PTY is gone.
                 if sessions.is_empty() {
                     let cache = app.try_state::<StatsCache>();
-                    if clear_stale_stats(cache.as_deref(), &mut last_ports) {
-                        let _ = app.emit("pty:stats", Vec::<SessionStats>::new());
-                    }
+                    clear_stale_stats(cache.as_deref(), &mut last_ports);
                 }
                 // With no terminals there is nothing hot to watch — only the
                 // app-footprint number in the status bar, which nobody needs at
@@ -499,15 +501,15 @@ pub fn start_monitor(app: AppHandle) {
                         queue.extend(kids);
                     }
                 }
-                let _ = app.emit(
-                    "app:stats",
-                    AppStats {
-                        cpu: app_cpu,
-                        mem_bytes: app_mem,
-                        procs: app_procs,
-                        includes_webviews: !cfg!(target_os = "macos"),
-                    },
-                );
+                let app_stats = AppStats {
+                    cpu: app_cpu,
+                    mem_bytes: app_mem,
+                    procs: app_procs,
+                    includes_webviews: !cfg!(target_os = "macos"),
+                };
+                if let Some(cache) = app.try_state::<AppStatsCache>() {
+                    *cache.0.lock().unwrap() = Some(app_stats);
+                }
 
                 // Session stats are only interesting when terminals exist, but
                 // app stats above must keep flowing regardless — a project with
@@ -640,7 +642,6 @@ pub fn start_monitor(app: AppHandle) {
                 if let Some(cache) = app.try_state::<StatsCache>() {
                     *cache.0.lock().unwrap() = stats.clone();
                 }
-                let _ = app.emit("pty:stats", &stats);
             }
         })
         .expect("spawn pty monitor thread");
