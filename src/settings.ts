@@ -533,34 +533,10 @@ export interface Settings {
    *  Settings restores the whole choice, not just the running link. */
   remoteTunnelProvider: string;
 
-  // ---- Embedded browser ----
-  /** Which engine preview tabs run on.
-   *
-   *  "proxy" is an iframe on a loopback reverse proxy: ordinary DOM, so
-   *  panels and menus paint over it, screenshots see it, and nothing has to
-   *  be hidden for anything. The cost is that every site is served from one
-   *  origin, so sessions are shared and do not survive a restart.
-   *
-   *  "webview" is a real child webview at the page's real origin with a
-   *  persistent profile — log into a site once and stay logged in. It buys
-   *  that with two limits neither this app nor Tauri can lift:
-   *
-   *    * a child webview is composited ABOVE the whole window and there is no
-   *      z-order API for it (tauri-apps/tauri#9798; Electron's BrowserView is
-   *      the same), so anything drawn over it forces the page off screen;
-   *    * a hidden WKWebView does not render and cannot be made to — Apple
-   *      exposes no API for offscreen rendering — so a page that loads behind
-   *      a panel comes back blank until something forces a repaint.
-   *
-   *  Everything in browserHost.ts, browserFrame.ts and the freeze-frame
-   *  machinery exists to soften those two facts. The proxy needs none of it —
-   *  VS Code's Simple Browser is an iframe for exactly that reason — which is
-   *  what makes it the right fallback when a session does not matter.
-   *
-   *  The default, because a preview of your own app is usually a preview of
-   *  it logged in, and that is the only engine that can hold a session. The
-   *  compensation above is the price; opening a preview closes the panel that
-   *  would cover it, which is the case that actually bit. */
+  // ---- Browser ----
+  /** The browsing choice: "proxy" is Embedded (the project-scoped iframe),
+   *  and "chrome" is Playwright (the user's Chrome session streamed into an
+   *  iframe). Retired native-webview preferences migrate to Embedded. */
   browserEngine: BrowserEngine;
 
   /** What the preview's Screenshot button grabs when clicked without opening
@@ -680,7 +656,7 @@ export const DEFAULTS: Settings = {
   dictationMuteOutput: true,
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
-  browserEngine: "webview",
+  browserEngine: "proxy",
   previewCaptureMode: "visible",
   workspaceBasePort: 5173,
   workspacePorts: {},
@@ -744,10 +720,10 @@ export function getSettings(): Settings {
     // The one stored value that can name something that no longer exists.
     value.theme = migrateTheme(value.theme);
     if (!isShortcutProfile(value.keymapProfile)) value.keymapProfile = "canopy";
-    // The chromium engine is gone; anyone who had it selected gets the
-    // default back rather than an unknown value every chooseEngine call
-    // would have to defend against.
-    if ((value.browserEngine as string) === "chromium") value.browserEngine = "webview";
+    // Retired native engines (and unknown values) become Embedded. Keep the
+    // established storage keys for the two remaining browsing options.
+    if (value.browserEngine !== "proxy" && value.browserEngine !== "chrome")
+      value.browserEngine = "proxy";
   } catch {
     value = { ...DEFAULTS };
   }

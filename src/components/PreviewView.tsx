@@ -4,8 +4,11 @@
 // to an agent through the same AgentLaunchButton + PTY-seed path tickets and
 // PRs use.
 //
-// Two engines sit behind the same toolbar (see browserBounds.chooseEngine):
+// Three engines sit behind the same toolbar (see browserBounds.chooseEngine):
 //
+//   chrome   — Chrome executes the page through the Playwright extension. An
+//              ordinary iframe displays frames and forwards input. It never
+//              registers a native view with browserHost.
 //   webview  — a real child webview at the page's real origin, on a persistent
 //              profile, so a site you log into stays logged in. It is a native
 //              view drawn OVER the window, so this component renders only a
@@ -20,6 +23,8 @@
 // travel differs — postMessage through the iframe, or an evaluated call
 // through browser.rs (see browserTransport.ts).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { captureChromeFrame } from "../chromeStream";
 import {
   browserPageChanged,
   browserViewChanged,
@@ -193,7 +198,7 @@ export function PreviewView({
   // until the proxy's origin became project-scoped and stable, because its
   // cookies were host-shared and its port ephemeral; that is what preview.rs
   // now provides.
-  const engine = buildMode && chosenEngine !== null ? "proxy" : chosenEngine;
+  const engine = buildMode && chosenEngine === "webview" ? "proxy" : chosenEngine;
   const native = engine === "webview";
   // What the placeholder stands in with while the native view is out of the
   // way: a still of the page, or the app's own background — never a white hole.
@@ -204,6 +209,9 @@ export function PreviewView({
   const [draft, setDraft] = useState(url);
   const [picking, setPicking] = useState(false);
   const [proxyError, setProxyError] = useState<string | null>(null);
+  const [chromeSrc, setChromeSrc] = useState<string | null>(null);
+  const [chromeStarted, setChromeStarted] = useState(false);
+  const [chromeRetry, setChromeRetry] = useState(0);
   const [capturing, setCapturing] = useState(false);
   // The mode the plain click uses, remembered across sessions. Held in state as
   // well as settings so the menu's "default" hint updates without a reload.
@@ -253,6 +261,37 @@ export function PreviewView({
   transportRef.current = transport;
 
   const origin = originOf(url);
+  const hasUrl = !!origin;
+
+  useEffect(() => {
+    if (engine === "chrome" && hasUrl && (visible || streaming)) setChromeStarted(true);
+  }, [engine, hasUrl, visible, streaming]);
+
+  useEffect(() => {
+    if (engine !== "chrome" || !hasUrl || !chromeStarted) return;
+    let stale = false;
+    const sessionId = `${tabId}-${crypto.randomUUID()}`;
+    setProxyError(null);
+    setChromeSrc(null);
+    void ipc.chromeStreamOpen(sessionId, urlRef.current).then(src => {
+      if (stale) { void ipc.chromeStreamClose(sessionId); return; }
+      setChromeSrc(src);
+    }, error => { if (!stale) setProxyError(String(error)); });
+    return () => {
+      stale = true;
+      void ipc.chromeStreamClose(sessionId);
+    };
+  }, [engine, hasUrl, tabId, chromeStarted, chromeRetry]);
+
+  const initChromeFrame = useCallback(() => {
+    if (!chromeSrc) return;
+    iframeRef.current?.contentWindow?.postMessage({ canopy: "stream-init", url: urlRef.current, visible: visibleRef.current || streamingRef.current }, new URL(chromeSrc).origin);
+  }, [chromeSrc]);
+
+  useEffect(() => {
+    if (!chromeSrc || engine !== "chrome") return;
+    iframeRef.current?.contentWindow?.postMessage({ canopy: "stream-visible", visible: visible || streaming }, new URL(chromeSrc).origin);
+  }, [engine, chromeSrc, visible, streaming]);
 
   const post = useCallback((msg: Record<string, unknown>) => {
     const t = transportRef.current;
@@ -411,6 +450,7 @@ export function PreviewView({
    *  is already the truth. */
   const unproxied = useCallback((pageUrl: string): string | null => {
     if (nativeRef.current) return pageUrl;
+    if (engineRef.current === "chrome") return /^https?:\/\//i.test(pageUrl) ? pageUrl : null;
     const p = proxyRef.current;
     if (!p) return null;
     try {
@@ -518,6 +558,10 @@ export function PreviewView({
       }
       setDraft(target);
       onPatchRef.current({ url: target });
+      if (engineRef.current === "chrome") {
+        post({ canopy: "navigate", url: target });
+        return;
+      }
       const t = transportRef.current;
       if (t) {
         if (opened.current) void t.navigate(tabId, target, null).catch(() => {});
@@ -531,7 +575,7 @@ export function PreviewView({
       }
       // A different origin re-runs the proxy effect via the `origin` dep.
     },
-    [tabId],
+    [tabId, post],
   );
 
   /** Consecutive off-origin redirects followed, so a redirect loop between two
@@ -633,14 +677,22 @@ export function PreviewView({
   // The picker inside a proxied page talks postMessage; accept only messages
   // from our own iframe's window.
   useEffect(() => {
-    if (engine !== "proxy") return;
+    if (engine !== "proxy" && engine !== "chrome") return;
     const onMessage = (e: MessageEvent) => {
       if (e.source !== iframeRef.current?.contentWindow) return;
+      if (engine === "chrome") {
+        if (!chromeSrc || e.origin !== new URL(chromeSrc).origin) return;
+        if (e.data?.canopy === "stream-ready") { initChromeFrame(); return; }
+        if (e.data?.canopy === "install-extension") {
+          void openUrl("https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm");
+          return;
+        }
+      }
       handleMessage(e.data);
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [engine, handleMessage]);
+  }, [engine, chromeSrc, initChromeFrame, handleMessage]);
 
   // A native page's messages arrive drained, in batches, addressed by tab.
   useEffect(() => {
@@ -744,6 +796,13 @@ export function PreviewView({
       return;
     }
     if (op.op === "screenshot") {
+      if (engineRef.current === "chrome") {
+        void captureChromeFrame(iframeRef.current).then(
+          shot => ipc.browserResult(op.id, true, { ...shot, mimeType: "image/png", url: urlRef.current }),
+          error => ipc.browserResult(op.id, false, String(error)),
+        );
+        return;
+      }
       // Pixels, not structure: the DOM snapshot can say a button exists, not
       // that it's sitting on top of the heading.
       //
@@ -859,6 +918,10 @@ export function PreviewView({
    *  an image-space one. Under the webview engine the page is its own view and
    *  is captured whole; under the proxy it is one rectangle of this window. */
   const shootPane = useCallback(async (): Promise<{ png: string; cssWidth: number }> => {
+    if (engineRef.current === "chrome") {
+      const shot = await captureChromeFrame(iframeRef.current);
+      return { png: shot.image, cssWidth: shot.width };
+    }
     const el = nativeRef.current ? hostRef.current : iframeRef.current;
     const rect = el?.getBoundingClientRect();
     if (!rect || !painted() || rect.width < 1 || rect.height < 1) {
@@ -1118,16 +1181,23 @@ export function PreviewView({
         <div className="preview-error">
           <p>Couldn't reach {origin}.</p>
           <pre>{proxyError}</pre>
-          <Button onClick={() => navigate(urlRef.current)}>
+          <Button onClick={() => engine === "chrome" ? setChromeRetry(n => n + 1) : navigate(urlRef.current)}>
             Retry
           </Button>
         </div>
       );
     }
+    if (engine === "chrome") {
+      return chromeSrc ? (
+        <iframe ref={iframeRef} className="preview-frame" src={chromeSrc}
+          title="Chrome live preview" sandbox="allow-scripts allow-same-origin"
+          onLoad={initChromeFrame} />
+      ) : <div className="preview-error"><p>Starting Chrome preview…</p></div>;
+    }
     return frameSrc ? (
       <iframe ref={iframeRef} className="preview-frame" src={frameSrc} title="preview" />
     ) : null;
-  }, [engine, native, proxyError, origin, frameSrc, navigate, pane]);
+  }, [engine, native, proxyError, origin, frameSrc, navigate, pane, chromeSrc, initChromeFrame]);
 
   // ---------- empty tab: pick one of the project's own servers ----------
   // The empty tab offers only servers Canopy can trace back to a component, so

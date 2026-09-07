@@ -1200,11 +1200,6 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   // (Intel macOS). Default true so the tab doesn't flicker in on every supported
   // platform while the check resolves; only hide once we learn it's unavailable.
   const [dictationOk, setDictationOk] = useState(true);
-  // Whether this platform has the real embedded browser at all. Only macOS
-  // does so far; everywhere else the engine choice is decoration and the
-  // section says so instead of offering a switch that does nothing.
-  const [browserOk, setBrowserOk] = useState(false);
-  const [clearing, setClearing] = useState<null | "busy" | "done" | string>(null);
   const [skinPickerOpen, setSkinPickerOpen] = useState(false);
   const skinPickerTrigger = useRef<HTMLButtonElement>(null);
   const [fleetReadoutOpen, setFleetReadoutOpen] = useState(false);
@@ -1220,9 +1215,6 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
         if (!ok) setTab((t) => (t === "dictation" ? "appearance" : t));
       })
       .catch(() => {});
-  }, []);
-  useEffect(() => {
-    void ipc.browserSupported().then(setBrowserOk);
   }, []);
   // Memoised so the key handler below isn't rebound on every render.
   const visibleTabs = useMemo(
@@ -2034,57 +2026,27 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               <>
                 <Item
                   name="Engine"
-                  desc="How preview tabs show a page. The trade is logins against layering."
+                  desc="Choose where websites run and how their pages appear in Canopy."
                 >
-                  {browserOk ? (
                     <div className="set-checks">
                       <Radio
                         name="browser-engine"
                         checked={s.browserEngine === "proxy"}
                         onChange={() => patch({ browserEngine: "proxy" })}
-                        label="Loopback proxy"
-                        hint="Always visible and screenshot-able. One shared session."
+                        label="Embedded"
+                        hint="An iframe with a separate session for each project."
                       />
                       <Radio
                         name="browser-engine"
-                        checked={s.browserEngine === "webview"}
-                        onChange={() => patch({ browserEngine: "webview" })}
-                        label="Embedded browser"
-                        hint="Real logins, kept across restarts. Hidden while a panel covers it."
+                        checked={s.browserEngine === "chrome"}
+                        onChange={() => patch({ browserEngine: "chrome" })}
+                        label="Playwright"
+                        hint="Your Chrome logins, streamed into Canopy. Requires Chrome, the Playwright extension and Node.js 20+."
                       />
                       <p className="set-item-desc">
-                        Open tabs keep the engine they started on.
+                        Reopen preview tabs after changing engines. Chrome asks you to approve its connection.
                       </p>
                     </div>
-                  ) : (
-                    <p className="set-item-desc">
-                      Loopback proxy only — the embedded browser is macOS-only so far.
-                    </p>
-                  )}
-                </Item>
-                <Item
-                  name="Browsing data"
-                  desc="Every preview tab shares one profile. Clearing it signs you out of all of them."
-                >
-                  <div className="set-inline">
-                    <Button
-                      disabled={!browserOk || clearing === "busy"}
-                      onClick={() => {
-                        setClearing("busy");
-                        void ipc.browserClearData().then(
-                          () => setClearing("done"),
-                          (err) => setClearing(String(err)),
-                        );
-                      }}>
-                      {clearing === "busy" ? "Clearing…" : "Clear browsing data"}
-                    </Button>
-                    {clearing === "done" && (
-                      <span className="set-item-desc">Cleared. Reload any open page to see it.</span>
-                    )}
-                    {typeof clearing === "string" && clearing !== "busy" && clearing !== "done" && (
-                      <span className="set-item-desc">{clearing}</span>
-                    )}
-                  </div>
                 </Item>
                 {/* The vault is the browser's other half: it exists to fill
                     logins into these same preview tabs, and as its own tab it

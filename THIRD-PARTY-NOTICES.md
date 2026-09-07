@@ -842,7 +842,7 @@ terms govern use of the model:
 
 - **foldhash 0.2.0** — Copyright (c) 2024 Orson Peters
 
-## npm packages (236)
+## npm packages (237)
 
 ### MIT — 174
 
@@ -1072,12 +1072,13 @@ terms govern use of the model:
 - **rw 1.3.3** — Copyright (c) 2014-2016, Michael Bostock
 - **sprintf-js 1.0.3** — Copyright (c) 2007-2014, Alexandru Marasteanu <hello [at) alexei (dot] ro>
 
-### Apache-2.0 — 5
+### Apache-2.0 — 6
 
 - **@chevrotain/types 11.1.2** — Copyright Shahar Soel (per package manifest; the distributed license file carries no copyright line)
 - **dompurify 3.3.1** — Copyright 2025 Dr.-Ing. Mario Heiderich, Cure53
 - **dompurify 3.4.12** — Copyright Dr.-Ing. Mario Heiderich, Cure53 (per package manifest; the distributed license file carries no copyright line)
 - **fast-diff 1.3.0** — Copyright Jason Chen (per package manifest; the distributed license file carries no copyright line)
+- **playwright-core 1.63.0-alpha-2026-08-31** — Copyright (c) Microsoft Corporation
 - **xlsx 0.20.3** — Copyright sheetjs (per package manifest; the distributed license file carries no copyright line)
 
 ### BSD-2-Clause — 5

@@ -22,10 +22,11 @@
 (function () {
   "use strict";
   var NATIVE = !!window.__canopyNativeBrowser;
+  var STREAM = !!window.__canopyStreamBrowser;
   // Under the proxy the picker belongs to the framed page only; the app's own
   // window loads it too and must skip. A native child webview IS the top
   // window, so that test has to stand down there.
-  if (window.__canopyPicker || (!NATIVE && window.top === window)) return;
+  if (window.__canopyPicker || (!NATIVE && !STREAM && window.top === window)) return;
   window.__canopyPicker = true;
 
   // Did this document ever actually render? requestAnimationFrame only runs
@@ -67,7 +68,9 @@
   }
 
   function send(msg) {
-    if (NATIVE) {
+    if (STREAM) {
+      void window.__canopyStreamSend(msg).catch(function () {});
+    } else if (NATIVE) {
       outbox.push(msg);
       signal();
     } else {
@@ -1367,7 +1370,7 @@
     }
   }
 
-  if (NATIVE) {
+  if (NATIVE || STREAM) {
     // The host reaches these by evaluating JavaScript in this webview and
     // reading the returned value, so everything here must be JSON-serialisable
     // and must not throw across the boundary — an exception there comes back

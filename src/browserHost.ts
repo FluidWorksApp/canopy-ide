@@ -1001,7 +1001,9 @@ async function probeSupport(): Promise<EngineSupport> {
  *  shows nothing rather than briefly showing the wrong engine. */
 export function useBrowserEngine(): BrowserEngine | null {
   const [, bump] = useState(0);
+  const preferred = getSettings().browserEngine;
   useEffect(() => {
+    if (preferred === "chrome" || preferred === "proxy") return;
     if (supported !== null) return;
     probe ??= probeSupport().then((s) => {
       supported = s;
@@ -1011,8 +1013,9 @@ export function useBrowserEngine(): BrowserEngine | null {
     return () => {
       live = false;
     };
-  }, []);
-  return supported === null ? null : chooseEngine(getSettings().browserEngine, supported);
+  }, [preferred]);
+  if (preferred === "chrome" || preferred === "proxy") return preferred;
+  return supported === null ? null : chooseEngine(preferred, supported);
 }
 
 /** Test seam: drop all state between cases. */

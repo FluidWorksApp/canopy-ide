@@ -7,6 +7,7 @@ mod android;
 mod blocking;
 mod bounded_file;
 mod browser;
+mod chrome_stream;
 mod change;
 mod cleanup;
 mod cli;
@@ -440,6 +441,7 @@ pub fn run() {
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
         .manage(browser::BrowserManager::default())
+        .manage(chrome_stream::ChromeStreams::default())
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
         .manage(governor::TerminalGovernor::default())
@@ -875,6 +877,8 @@ pub fn run() {
             preview::preview_start,
             preview::preview_stop,
             browser::browser_supported,
+            chrome_stream::chrome_stream_open,
+            chrome_stream::chrome_stream_close,
             browser::browser_open,
             browser::browser_navigate,
             browser::browser_painted,
@@ -956,6 +960,7 @@ pub fn run() {
                 app.state::<preview::PreviewManager>().shutdown_all();
                 // ... and any embedded-browser views.
                 app.state::<browser::BrowserManager>().shutdown_all(app);
+                app.state::<chrome_stream::ChromeStreams>().shutdown_all();
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
                 // ... and stop polling GitHub for pull requests.

@@ -21,6 +21,7 @@ describe("getSettings / updateSettings", () => {
     expect(s.scrollback).toBe(5_000);
     expect(s.sessionNameTheme).toBe("canopy");
     expect(s.theme).toBe("gotham");
+    expect(s.browserEngine).toBe("proxy");
     expect(s.trackerKeys).toEqual({});
     expect(s.tabSwitchMode).toBe("recent");
     expect(s.restoreUserClosedSessions).toBe(false);
@@ -43,6 +44,16 @@ describe("getSettings / updateSettings", () => {
       JSON.stringify({ scrollback: Number.MAX_SAFE_INTEGER }),
     );
     expect(getSettings().scrollback).toBe(TERMINAL_SCROLLBACK_MAX_ROWS);
+  });
+
+  it.each(["webview", "chromium", "unknown"])("migrates retired browser choice %s to Embedded", (browserEngine) => {
+    localStorage.setItem("canopy.settings", JSON.stringify({ browserEngine }));
+    expect(getSettings().browserEngine).toBe("proxy");
+  });
+
+  it.each(["proxy", "chrome"] as const)("preserves browser choice %s", (browserEngine) => {
+    updateSettings({ browserEngine });
+    expect(getSettings().browserEngine).toBe(browserEngine);
   });
 
   it("round-trips a patch through localStorage", () => {

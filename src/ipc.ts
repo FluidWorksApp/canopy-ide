@@ -27,6 +27,11 @@ import { rendererIoBudget } from "./ioBudget";
 
 // ---------- App shell ----------
 
+export const chromeStreamOpen = (sessionId: string, url: string) =>
+  invoke<string>("chrome_stream_open", { sessionId, url });
+export const chromeStreamClose = (sessionId: string) =>
+  invoke<void>("chrome_stream_close", { sessionId });
+
 /** Rebuild the native menu so its accelerators match the live webview profile. */
 export const setShortcutProfile = (profile: ShortcutProfile) =>
   invoke<void>("set_shortcut_profile", { profile });
