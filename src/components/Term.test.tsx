@@ -231,3 +231,64 @@ describe("Term spawn failure", () => {
     expect(onExited).not.toHaveBeenCalled();
   });
 });
+
+describe("Term recovered attachment", () => {
+  it("resumes every stream before starting the shared exit puller", async () => {
+    // Earlier component tests install and remove their subscribers from the
+    // renderer-level fan-out. Reload the modules so this case exercises the
+    // first shared pull without inheriting their cursor.
+    vi.resetModules();
+    const [{ Term: RecoveryTerm }, recoveryIpc] = await Promise.all([
+      import("./Term"),
+      import("../ipc"),
+    ]);
+    const calls: string[] = [];
+    const attach = vi.fn(({ id }: { id: number }) => {
+      calls.push(`attach:${id}`);
+      return {
+        cols: 80,
+        rows: 24,
+        generation: 4,
+        replay_start: 0,
+        replay_end: 0,
+      };
+    });
+    mockCommands({
+      pty_renderer_register: () => ({ generation: 9, sessions: [] }),
+      pty_renderer_events: () => {
+        calls.push("exits");
+        return { exit_cursor: 0, exits: [], spawn_cursor: 0, spawns: [] };
+      },
+      pty_attach_desktop: attach,
+      pty_read_desktop: () => null,
+      pty_detach_desktop: () => undefined,
+    });
+    await recoveryIpc.ptyRendererRegister();
+    const onSpawned = vi.fn();
+    render(
+      <>
+        <RecoveryTerm
+          cwd="/w/site"
+          active
+          streaming
+          attachId={77}
+          onSpawned={onSpawned}
+          onExited={vi.fn()}
+        />
+        <RecoveryTerm
+          cwd="/w/site"
+          active
+          streaming
+          attachId={88}
+          onSpawned={onSpawned}
+          onExited={vi.fn()}
+        />
+      </>,
+    );
+
+    await waitFor(() => expect(attach).toHaveBeenCalledTimes(2));
+    expect(onSpawned).toHaveBeenCalledWith(77, undefined);
+    expect(onSpawned).toHaveBeenCalledWith(88, undefined);
+    expect(calls).toEqual(["attach:77", "attach:88", "exits"]);
+  });
+});

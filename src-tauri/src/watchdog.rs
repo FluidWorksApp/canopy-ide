@@ -212,7 +212,13 @@ impl WatchdogState {
         detail: u64,
     ) -> ReloadDecision {
         self.request_reload_with(reason, detail, || {
-            main.reload().map_err(|error| error.to_string())
+            if let Some(ptys) = main.try_state::<crate::pty::PtyManager>() {
+                ptys.reload_renderer(|| main.reload())
+                    .map_err(str::to_string)?
+                    .map_err(|error| error.to_string())
+            } else {
+                main.reload().map_err(|error| error.to_string())
+            }
         })
     }
 
@@ -562,9 +568,10 @@ fn start_webview_watchdog(app: AppHandle) {
                     continue;
                 }
                 let age_ms = now_ms().saturating_sub(ack.last_ack_ms.load(Ordering::Relaxed));
-                let delivered = app.emit("watchdog:ping", ()).is_ok();
-                let stale = !delivered
-                    || ping_is_stale(age_ms, STALE_AFTER.as_millis() as u64);
+                // The renderer acknowledges on its own interval. Pushing a
+                // ping event from this thread could race the native reload and
+                // wedge WebKit's dispatcher while the page was being replaced.
+                let stale = ping_is_stale(age_ms, STALE_AFTER.as_millis() as u64);
                 match heartbeat.observe(now_ms(), stale) {
                     HeartbeatAction::Healthy | HeartbeatAction::Waiting => {}
                     HeartbeatAction::RecoveredAfterShed => {

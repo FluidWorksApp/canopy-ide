@@ -2,7 +2,12 @@
 // servers, fs, watchers) lives in the Rust core; this file is the only place the
 // frontend touches IPC.
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import {
+  listen as nativeListen,
+  type Event as TauriEvent,
+  type Options as TauriListenOptions,
+  type UnlistenFn,
+} from "@tauri-apps/api/event";
 import type { ShortcutProfile } from "./shortcuts";
 import type {
   TaskAttempt,
@@ -24,6 +29,50 @@ import type {
   WorkflowStepRecordInput,
 } from "./workflowRun";
 import { rendererIoBudget } from "./ioBudget";
+
+type AsyncUnlisten = () => void | Promise<void>;
+const activeTauriListeners = new Set<AsyncUnlisten>();
+const pendingTauriListeners = new Set<Promise<UnlistenFn>>();
+let rendererReplacementPreparing = false;
+
+const listen = <T>(
+  event: string,
+  handler: (event: TauriEvent<T>) => void,
+  options?: TauriListenOptions,
+): Promise<UnlistenFn> => {
+  const registration = nativeListen<T>(event, handler, options).then(async (nativeUnlisten) => {
+    let active = true;
+    const release = async () => {
+      if (!active) return;
+      active = false;
+      activeTauriListeners.delete(release);
+      await (nativeUnlisten as AsyncUnlisten)();
+    };
+    if (rendererReplacementPreparing) {
+      await release();
+      return () => {};
+    }
+    activeTauriListeners.add(release);
+    return () => void release();
+  });
+  pendingTauriListeners.add(registration);
+  void registration.then(
+    () => pendingTauriListeners.delete(registration),
+    () => pendingTauriListeners.delete(registration),
+  );
+  return registration;
+};
+
+const releaseRendererListeners = () => {
+  rendererReplacementPreparing = true;
+  // The native reload must already be scheduled before these commands cross
+  // the event bridge. An event emit can hold Tauri's listener lock while its
+  // WebKit evaluation is stalled; cleanup is best-effort and must never gate
+  // renderer recovery on that lock.
+  for (const release of [...activeTauriListeners]) {
+    void release();
+  }
+};
 
 // ---------- App shell ----------
 
@@ -159,6 +208,7 @@ export const decodePtyChunk = (payload: ArrayBuffer | number[]): PtyChunk => {
 };
 
 let renderer: RendererRegistration | null = null;
+let rendererRegistrationRequest = 0;
 let selftestPtyListenerFailuresRemaining = 0;
 
 /** Bootstrap-only fault injection for the isolated full-app selftest. */
@@ -169,7 +219,11 @@ export const configureSelftestPtyListenerFailures = (count: number) => {
 /** Make this page authoritative before mounting anything that can spawn a PTY.
  * Rust detaches predecessor channels and returns the children that survived it. */
 export async function ptyRendererRegister(): Promise<RendererRegistration> {
+  const request = ++rendererRegistrationRequest;
   const registration = await invoke<RendererRegistration>("pty_renderer_register");
+  if (request !== rendererRegistrationRequest) {
+    throw new Error("renderer registration was superseded");
+  }
   renderer = registration;
   return registration;
 }
@@ -344,14 +398,42 @@ export async function ptyAttachDesktop(
   replay_start: number;
   replay_end: number;
 }> {
-  const channel = new Channel<ArrayBuffer | number[]>();
-  channel.onmessage = (data) => onData(decodePtyChunk(data));
-  return invoke("pty_attach_desktop", {
+  const rendererGenerationAtAttach = rendererGeneration();
+  const attached = await invoke<PtyGeometry & {
+    generation: number;
+    replay_start: number;
+    replay_end: number;
+  }>("pty_attach_desktop", {
     id,
-    rendererGeneration: rendererGeneration(),
+    rendererGeneration: rendererGenerationAtAttach,
     after,
-    onData: channel,
   });
+  type DesktopRead = { start: number; gap: boolean; bytes: number[] };
+  const pull = async (): Promise<void> => {
+    try {
+      const chunk = await invoke<DesktopRead | null>("pty_read_desktop", {
+        id,
+        rendererGeneration: rendererGenerationAtAttach,
+        generation: attached.generation,
+      });
+      if (chunk) {
+        const bytes = Uint8Array.from(chunk.bytes);
+        onData({
+          bytes,
+          start: chunk.start,
+          end: chunk.start + bytes.length,
+          gap: chunk.gap,
+        });
+      }
+      // One in-flight renderer-owned read per attachment. A destroyed page
+      // cancels its own timer; native generation checks end stale loops.
+      setTimeout(() => void pull(), chunk ? 0 : 10);
+    } catch {
+      // Detach, PTY exit and renderer replacement all end this pull loop.
+    }
+  };
+  setTimeout(() => void pull(), 0);
+  return attached;
 }
 
 export const ptyDetachDesktop = (id: number, generation: number) =>
@@ -371,8 +453,94 @@ export interface PtyExit {
    *  was refused (no process ever existed); the Rust event never carries it. */
   spawnError?: string;
 }
-export const onPtyExit = (cb: (e: PtyExit) => void): Promise<UnlistenFn> =>
-  listen<PtyExit>("pty:exit", (event) => cb(event.payload));
+
+// One short-lived native pull loop per renderer, with ordinary JavaScript
+// fan-out. Tauri's event-plugin listener registration can remain unresolved
+// while WebKit replaces a page and serialize the next renderer's invokes
+// behind it. The bounded Rust lifecycle queues make every request finite and
+// let a replacement page resume from cursor zero without losing an event.
+const ptyExitSubscribers = new Set<(event: PtyExit) => void>();
+const ptySpawnSubscribers = new Set<(event: PtySpawned) => void>();
+let ptyEventPolling = false;
+let ptyEventPollTimer: number | undefined;
+let ptyExitNativeCursor = 0;
+let ptySpawnNativeCursor = 0;
+let ptyExitSequence = 0;
+let ptySpawnSequence = 0;
+const ptyExitHistory: Array<{ sequence: number; event: PtyExit }> = [];
+const ptySpawnHistory: Array<{ sequence: number; event: PtySpawned }> = [];
+const PTY_EXIT_HISTORY_LIMIT = 512;
+const PTY_EVENT_POLL_MS = 250;
+
+interface PtyEventBatch {
+  exit_cursor: number;
+  exits: PtyExit[];
+  spawn_cursor: number;
+  spawns: PtySpawned[];
+}
+
+const pollPtyEvents = async () => {
+  if (!ptyEventPolling) return;
+  try {
+    const batch = await invoke<PtyEventBatch>("pty_renderer_events", {
+      rendererGeneration: rendererGeneration(),
+      exitAfter: ptyExitNativeCursor,
+      spawnAfter: ptySpawnNativeCursor,
+    });
+    ptyExitNativeCursor = batch.exit_cursor;
+    ptySpawnNativeCursor = batch.spawn_cursor;
+    for (const event of batch.exits) {
+      const sequence = ++ptyExitSequence;
+      ptyExitHistory.push({ sequence, event });
+      if (ptyExitHistory.length > PTY_EXIT_HISTORY_LIMIT) ptyExitHistory.shift();
+      for (const subscriber of [...ptyExitSubscribers]) subscriber(event);
+    }
+    for (const event of batch.spawns) {
+      const sequence = ++ptySpawnSequence;
+      ptySpawnHistory.push({ sequence, event });
+      if (ptySpawnHistory.length > PTY_EXIT_HISTORY_LIMIT) ptySpawnHistory.shift();
+      for (const subscriber of [...ptySpawnSubscribers]) subscriber(event);
+    }
+  } catch {
+    // Renderer replacement invalidates this page's generation. A live page
+    // retries; a destroyed page loses its timer with the rest of its JS heap.
+  }
+  if (ptyEventPolling) {
+    ptyEventPollTimer = window.setTimeout(() => void pollPtyEvents(), PTY_EVENT_POLL_MS);
+  }
+};
+
+const ensurePtyEventPolling = () => {
+  if (ptyEventPolling) return;
+  ptyEventPolling = true;
+  void pollPtyEvents();
+};
+
+const stopPtyEventPollingIfIdle = () => {
+  if (ptyExitSubscribers.size > 0 || ptySpawnSubscribers.size > 0) return;
+  ptyEventPolling = false;
+  window.clearTimeout(ptyEventPollTimer);
+  ptyEventPollTimer = undefined;
+};
+
+export const onPtyExit = async (cb: (e: PtyExit) => void): Promise<UnlistenFn> => {
+  // Subscribe before starting the puller so live events cannot land in a gap.
+  // Replay only the history that predates this subscriber; anything newer was
+  // already delivered by the fan-out above.
+  const replayThrough = ptyExitSequence;
+  ptyExitSubscribers.add(cb);
+  ensurePtyEventPolling();
+  for (const entry of ptyExitHistory) {
+    if (entry.sequence <= replayThrough) cb(entry.event);
+  }
+  let listening = true;
+  return () => {
+    if (!listening) return;
+    listening = false;
+    ptyExitSubscribers.delete(cb);
+    stopPtyEventPollingIfIdle();
+  };
+};
 
 /** A PTY opened headlessly from the remote portal, announced so the desktop can
  *  open a tab attached to it (via ptyAttach) in the matching project. */
@@ -397,7 +565,19 @@ export const onPtySpawned = (
     selftestPtyListenerFailuresRemaining -= 1;
     return Promise.reject(new Error("selftest injected pty:spawned listener failure"));
   }
-  return listen<PtySpawned>("pty:spawned", (event) => cb(event.payload));
+  const replayThrough = ptySpawnSequence;
+  ptySpawnSubscribers.add(cb);
+  ensurePtyEventPolling();
+  for (const entry of ptySpawnHistory) {
+    if (entry.sequence <= replayThrough) cb(entry.event);
+  }
+  let listening = true;
+  return Promise.resolve(() => {
+    if (!listening) return;
+    listening = false;
+    ptySpawnSubscribers.delete(cb);
+    stopPtyEventPollingIfIdle();
+  });
 };
 
 /** An action an agent requested through the MCP context bridge (start a run
@@ -842,8 +1022,13 @@ export const selftestCheckpointSave = (checkpoint: unknown) =>
 
 /** The watchdog's native webview reload primitive, exposed only while an
  * isolated selftest is active. A successful call destroys this JS page. */
-export const selftestReloadRenderer = () =>
-  invoke<void>("selftest_reload_renderer");
+export const selftestReloadRenderer = async () => {
+  await invoke<void>("selftest_reload_renderer");
+  // Native schedules the reload 25ms after acknowledging this call. Give that
+  // already-dispatched recovery the event loop before best-effort teardown;
+  // the timer disappears with the old renderer when recovery succeeds.
+  window.setTimeout(releaseRendererListeners, 100);
+};
 
 /** A native-owned, phone-equivalent PTY in the disposable selftest project. */
 export const selftestSpawnRemote = (cwd: string) =>
@@ -2105,10 +2290,57 @@ export interface StoreChange {
   id: string;
 }
 
+interface StoreChangeEntry {
+  sequence: number;
+  change: StoreChange;
+}
+
+interface StoreChangeBatch {
+  cursor: number;
+  changes: StoreChangeEntry[];
+}
+
+const storeChangeSubscribers = new Set<(change: StoreChange) => void>();
+let storeChangeCursor: number | null = null;
+let storeChangePolling = false;
+let storeChangeTimer: number | undefined;
+
+const pollStoreChanges = async () => {
+  if (!storeChangePolling) return;
+  try {
+    const batch = await invoke<StoreChangeBatch>("store_changes", {
+      after: storeChangeCursor,
+    });
+    storeChangeCursor = batch.cursor;
+    for (const entry of batch.changes) {
+      for (const subscriber of [...storeChangeSubscribers]) subscriber(entry.change);
+    }
+  } catch {
+    // A replacement renderer invalidates this page; its successor handshakes
+    // at the native cursor before subscribing to new store changes.
+  }
+  if (storeChangePolling) {
+    storeChangeTimer = window.setTimeout(() => void pollStoreChanges(), 100);
+  }
+};
+
 export const onStoreChange = (
   cb: (e: StoreChange) => void,
-): Promise<UnlistenFn> =>
-  listen<StoreChange>("store:change", (event) => cb(event.payload));
+): Promise<UnlistenFn> => {
+  storeChangeSubscribers.add(cb);
+  if (!storeChangePolling) {
+    storeChangePolling = true;
+    void pollStoreChanges();
+  }
+  return Promise.resolve(() => {
+    storeChangeSubscribers.delete(cb);
+    if (storeChangeSubscribers.size > 0) return;
+    storeChangePolling = false;
+    storeChangeCursor = null;
+    window.clearTimeout(storeChangeTimer);
+    storeChangeTimer = undefined;
+  });
+};
 
 // ---------- Durable task envelopes ----------
 
@@ -2395,10 +2627,62 @@ export const ptyStats = (): Promise<SessionStats[]> => invoke<SessionStats[]>("p
 export const probeHttpReadiness = (port: number, path: string): Promise<boolean> =>
   invoke<boolean>("probe_http_readiness", { port, path });
 
-export const onPtyStats = (
-  cb: (stats: SessionStats[]) => void,
-): Promise<UnlistenFn> =>
-  listen<SessionStats[]>("pty:stats", (event) => cb(event.payload));
+const ptyStatsSubscribers = new Set<(stats: SessionStats[]) => void>();
+const appStatsSubscribers = new Set<(stats: AppStats) => void>();
+let resourceStatsPolling = false;
+let resourceStatsTimer: number | undefined;
+let latestPtyStats: SessionStats[] | undefined;
+let latestAppStats: AppStats | undefined;
+const RESOURCE_STATS_POLL_MS = 2_000;
+
+const pollResourceStats = async () => {
+  if (!resourceStatsPolling) return;
+  if (ptyStatsSubscribers.size > 0) {
+    try {
+      latestPtyStats = await ptyStats();
+      for (const subscriber of [...ptyStatsSubscribers]) subscriber(latestPtyStats);
+    } catch {
+      // A replacement renderer invalidates this page's generation and heap.
+    }
+  }
+  if (appStatsSubscribers.size > 0) {
+    try {
+      const stats = await invoke<AppStats | null>("app_stats");
+      if (stats) {
+        latestAppStats = stats;
+        for (const subscriber of [...appStatsSubscribers]) subscriber(stats);
+      }
+    } catch {
+      // A replacement renderer invalidates this page's generation and heap.
+    }
+  }
+  if (resourceStatsPolling) {
+    resourceStatsTimer = window.setTimeout(() => void pollResourceStats(), RESOURCE_STATS_POLL_MS);
+  }
+};
+
+const ensureResourceStatsPolling = () => {
+  if (resourceStatsPolling) return;
+  resourceStatsPolling = true;
+  void pollResourceStats();
+};
+
+const stopResourceStatsPollingIfIdle = () => {
+  if (ptyStatsSubscribers.size > 0 || appStatsSubscribers.size > 0) return;
+  resourceStatsPolling = false;
+  window.clearTimeout(resourceStatsTimer);
+  resourceStatsTimer = undefined;
+};
+
+export const onPtyStats = (cb: (stats: SessionStats[]) => void): Promise<UnlistenFn> => {
+  ptyStatsSubscribers.add(cb);
+  if (latestPtyStats) cb(latestPtyStats);
+  ensureResourceStatsPolling();
+  return Promise.resolve(() => {
+    ptyStatsSubscribers.delete(cb);
+    stopResourceStatsPollingIfIdle();
+  });
+};
 
 // ---------- Terminal resource governor ----------
 
@@ -2580,10 +2864,17 @@ export interface AppStats {
   includes_webviews: boolean;
 }
 
-/** Native process-tree footprint, emitted every 2s. `includes_webviews` says
+/** Native process-tree footprint, sampled every 2s. `includes_webviews` says
  * whether that tree is also a whole-app footprint on the current platform. */
-export const onAppStats = (cb: (s: AppStats) => void): Promise<UnlistenFn> =>
-  listen<AppStats>("app:stats", (e) => cb(e.payload));
+export const onAppStats = (cb: (stats: AppStats) => void): Promise<UnlistenFn> => {
+  appStatsSubscribers.add(cb);
+  if (latestAppStats) cb(latestAppStats);
+  ensureResourceStatsPolling();
+  return Promise.resolve(() => {
+    appStatsSubscribers.delete(cb);
+    stopResourceStatsPollingIfIdle();
+  });
+};
 
 // ---------- Resident watchdogs ----------
 
@@ -2598,19 +2889,16 @@ export interface MemoryPressure {
   free_bytes: number;
 }
 
-/** The webview heartbeat: answer immediately. The Rust watchdog reloads the
- *  window if these stop being answered (a jetsam-killed WebKit renderer
- *  otherwise leaves the app blank with no crash report). */
-export const onWatchdogPing = (cb: () => void): Promise<UnlistenFn> =>
-  listen("watchdog:ping", () => cb());
-
 export const watchdogAck = () =>
   invoke<void>("watchdog_ack", { generation: rendererGeneration() }).catch(() => {});
 
-/** Install liveness before Monaco/React startup can delay the App effect. */
+/** Install liveness before Monaco/React startup can delay the App effect.
+ *  The renderer drives acknowledgements so native recovery never has to
+ *  evaluate a ping event into the WebView it may be about to replace. */
 export const installEarlyWatchdogHeartbeat = async (): Promise<UnlistenFn> => {
   await watchdogAck();
-  return onWatchdogPing(() => void watchdogAck());
+  const timer = window.setInterval(() => void watchdogAck(), 3_000);
+  return () => window.clearInterval(timer);
 };
 
 export interface RecoveryIncident {

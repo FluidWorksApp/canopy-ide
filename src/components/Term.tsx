@@ -718,12 +718,31 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       if (disposed || id == null || streamAttached || streamConnecting) return;
       streamConnecting = true;
       const epoch = ++streamEpoch;
+      let attachTimeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        const attached = await ipc.ptyAttachDesktop(
+        const pending = ipc.ptyAttachDesktop(
           id,
           streamLedger.replayAfter(),
           (chunk) => writeStream(chunk, epoch),
         );
+        const attached = await Promise.race([
+          pending,
+          new Promise<never>((_, reject) => {
+            attachTimeout = setTimeout(
+              () => reject(new Error("terminal attach timed out")),
+              2_000,
+            );
+          }),
+        ]).catch((error) => {
+          // A native attach can commit even when WebKit loses its invoke
+          // response. If that response eventually arrives after our deadline,
+          // release only its exact attachment generation; a newer retry is
+          // protected by Rust's generation match.
+          void pending
+            .then((late) => ipc.ptyDetachDesktop(id, late.generation))
+            .catch(() => {});
+          throw error;
+        });
         if (disposed || epoch !== streamEpoch || !streamingRef.current) {
           streamLedger.discard(epoch);
           void ipc.ptyDetachDesktop(id, attached.generation);
@@ -749,6 +768,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
           }, retryMs);
         }
       } finally {
+        clearTimeout(attachTimeout);
         if (epoch === streamEpoch) streamConnecting = false;
       }
     };
@@ -769,7 +789,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       }
     };
 
-    const start = async () => {
+    const installExitListener = async () => {
       const off = await ipc.onPtyExit((event) => {
         const id = ptyIdRef.current;
         if (id == null) earlyExits.set(event.id, event);
@@ -777,19 +797,36 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       });
       if (disposed) {
         off();
-        return;
+        return false;
       }
       unlistenExit = off;
+      return true;
+    };
 
+    const start = async () => {
       if (attachIdRef.current != null) {
         // Every desktop viewer gets one bounded, generation-scoped stream.
         // Ownership changes only close behaviour: a restored desktop-owned PTY
         // is killed on explicit close; a remote/micro-task viewer detaches.
+        //
+        // Do not put native listener registration in front of this attach.
+        // WebKit can leave a listen invoke unresolved while a renderer is being
+        // replaced; the PTY identity and pull stream are already sufficient to
+        // resume output, while App owns a renderer-global exit listener too.
+        // Waiting here stranded every recovered Term before it could bind.
         const id = attachIdRef.current;
         ptyIdRef.current = id;
         if (streamingRef.current) await attachViewer();
+        // Start only after the stream handshake too: invoking listen first can
+        // serialize a later attach behind the same wedged WebKit bridge even
+        // when this promise is intentionally not awaited.
+        void installExitListener().catch(() => {});
         return;
       }
+
+      // A fresh command can exit as soon as it spawns, so keep its listener as
+      // the prerequisite and retain the early-exit buffer above.
+      if (!(await installExitListener())) return;
 
       try {
         const spawnEpoch = streamEpoch;

@@ -16,9 +16,9 @@ mod companion;
 mod containment;
 mod context;
 mod crash;
-mod execution;
 #[cfg(feature = "dictation")]
 mod dictation;
+mod execution;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
 // keeps the command surface identical so the rest of this file is unchanged.
 #[cfg(not(feature = "dictation"))]
@@ -444,6 +444,7 @@ pub fn run() {
         .manage(chrome_stream::ChromeStreams::default())
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
+        .manage(agents::AppStatsCache::default())
         .manage(governor::TerminalGovernor::default())
         .manage(containment::ContainmentManager::default())
         .manage(tunnel::TunnelManager::default())
@@ -567,6 +568,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             js_log,
             set_shortcut_profile,
+            change::store_changes,
             crash::report_crash,
             crash::send_crash,
             crash::take_pending_crash,
@@ -625,9 +627,11 @@ pub fn run() {
             pty::pty_spawn_attached_argv,
             pty::pty_output,
             pty::pty_attach_desktop,
+            pty::pty_read_desktop,
             pty::pty_detach_desktop,
             pty::pty_renderer_register,
             pty::pty_renderer_sessions,
+            pty::pty_renderer_events,
             pty::pty_write,
             pty::pty_ack,
             pty::pty_resize,
@@ -847,6 +851,7 @@ pub fn run() {
             agents::set_context_scopes,
             agents::session_digests,
             agents::pty_stats,
+            agents::app_stats,
             agents::probe_http_readiness,
             governor::terminal_governor_status,
             governor::terminal_governor_incidents,
