@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 
 /** Constant-size native preview-pressure lifecycle counters. */
 export interface BrowserPressureReloadMetrics {

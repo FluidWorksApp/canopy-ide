@@ -16,6 +16,9 @@
 pub mod streams;
 pub mod verbs;
 
+/// Version of the typed host wire contract (shared/host/contract.ts).
+pub const HOST_PROTOCOL: u32 = 1;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::Read;
@@ -65,6 +68,7 @@ pub const GRANTS: &[(&str, Scope, Option<&str>)] = &[
     ("fs_list_files", Scope::View, None),
     ("fs_read_dir", Scope::View, None),
     ("fs_read_file", Scope::View, None),
+    ("fs_read_text", Scope::View, None),
     ("fs_search", Scope::View, None),
     ("gh_issue_list", Scope::View, None),
     ("gh_pr_body", Scope::View, None),
@@ -186,7 +190,18 @@ pub async fn dispatch(
             .await
             .and_then(to_value),
 
-        "fs_read_file" => read_text_capped(app, &str_arg(args, "path")?),
+        "fs_read_file" => crate::fsx::read_file_bytes(
+            app.state(),
+            str_arg(args, "path")?,
+            Some(args.get("maxBytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(512 * 1024)
+                .min(512 * 1024)),
+        )
+        .await
+        .and_then(to_value),
+
+        "fs_read_text" => read_text_capped(app, &str_arg(args, "path")?),
 
         "fs_list_files" => crate::fsx::fs_list_files(
             app.state(),

@@ -2,7 +2,7 @@
 // or more labeled component directories (frontend, backend, ...). The whole
 // workspace (projects, which are open, which is active) persists via the Rust
 // core to ~/.canopy/projects.json.
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
 import { checkoutKey } from "./paths";

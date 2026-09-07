@@ -114,7 +114,7 @@ impl PortalOut {
 /// exactly as long as this session lives — no wall-clock expiry. Re-auth is only
 /// ever forced by the PIN owner tearing the session down or rotating the PIN.
 type Tokens = Arc<Mutex<HashSet<String>>>;
-type Tickets = Arc<Mutex<HashMap<String, Instant>>>;
+type Tickets = Arc<Mutex<HashMap<String, (Instant, String)>>>;
 const WS_TICKET_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Managed state: at most one running server. Enabling twice is a no-op that
@@ -596,14 +596,14 @@ async fn ws_ticket_handler(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    if !token.is_some_and(|token| valid_token(&p.tokens, token)) {
+    let Some(token) = token.filter(|token| valid_token(&p.tokens, token)) else {
         return (StatusCode::UNAUTHORIZED, "bad token").into_response();
-    }
+    };
     let ticket = gen_token();
     let expires = Instant::now() + WS_TICKET_TTL;
     let mut tickets = p.tickets.lock().unwrap();
-    tickets.retain(|_, expiry| *expiry > Instant::now());
-    tickets.insert(ticket.clone(), expires);
+    tickets.retain(|_, (expiry, _)| *expiry > Instant::now());
+    tickets.insert(ticket.clone(), (expires, token.to_string()));
     Json(json!({ "ticket": ticket, "expiresIn": WS_TICKET_TTL.as_secs() })).into_response()
 }
 
@@ -612,13 +612,13 @@ async fn ws_handler(
     Query(q): Query<WsQuery>,
     AxumState(p): AxumState<Portal>,
 ) -> Response {
-    if !consume_ticket(&p.tickets, &q.ticket, Instant::now()) {
+    let Some(principal) = consume_ticket(&p.tickets, &q.ticket, Instant::now()) else {
         return (StatusCode::UNAUTHORIZED, "bad ticket").into_response();
-    }
+    };
     let Some(socket_owner) = SocketOwnership::try_acquire(p.sockets.clone()) else {
         return (StatusCode::SERVICE_UNAVAILABLE, "too many remote sockets").into_response();
     };
-    ws.on_upgrade(move |socket| ws_conn(socket, p, socket_owner))
+    ws.on_upgrade(move |socket| ws_conn(socket, p, socket_owner, principal))
 }
 
 /// Team relay ingress on the shared server. Unlike `/remote/*`, this carries the
@@ -711,7 +711,12 @@ fn etag_of(bytes: &[u8]) -> String {
 
 // ---- WebSocket session ----------------------------------------------------
 
-async fn ws_conn(mut socket: WebSocket, p: Portal, _socket_owner: SocketOwnership) {
+async fn ws_conn(
+    mut socket: WebSocket,
+    p: Portal,
+    _socket_owner: SocketOwnership,
+    principal: String,
+) {
     // Single writer: every outbound message (snapshot, forwarded events, pty
     // chunks) funnels through this byte-accounted queue so we never contend on
     // the socket or retain unlimited strings behind a slow client.
@@ -753,7 +758,7 @@ async fn ws_conn(mut socket: WebSocket, p: Portal, _socket_owner: SocketOwnershi
                         if t.len() > PORTAL_MAX_INBOUND_BYTES {
                             break;
                         }
-                        handle_client_msg(&t, &p, &out_tx, &mut attaches);
+                        handle_client_msg(&t, &p, &out_tx, &mut attaches, &principal);
                     }
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     _ => {}
@@ -782,11 +787,27 @@ fn handle_client_msg(
     p: &Portal,
     out: &PortalOut,
     attaches: &mut HashMap<u32, tokio::task::JoinHandle<()>>,
+    principal: &str,
 ) {
     let Ok(v) = serde_json::from_str::<Value>(text) else {
         return;
     };
     match v.get("t").and_then(|t| t.as_str()) {
+        Some("hello") => {
+            let app = p.app.clone();
+            let out = out.clone();
+            tokio::spawn(async move {
+                let environment = crate::execution::environment_identity(app.state());
+                let Ok(environment_id) = environment else { return };
+                let _ = out.send(json!({ "t": "hello", "host": {
+                    "protocol": crate::remote::HOST_PROTOCOL,
+                    "environmentId": environment_id,
+                    "commands": crate::remote::GRANTS.iter().filter(|(_, scope, _)| TOKEN_SCOPE.allows(*scope)).map(|(name, _, _)| *name).collect::<Vec<_>>(),
+                    "events": FORWARDED_EVENTS,
+                    "streams": crate::remote::streams::KINDS
+                }}).to_string()).await;
+            });
+        }
         Some("attach") => {
             if let Some(id) = v.get("pty").and_then(|x| x.as_u64()) {
                 let id = id as u32;
@@ -868,7 +889,7 @@ fn handle_client_msg(
                 let _ = out.send(msg.to_string()).await;
             });
         }
-        Some("act") => act(&v, p, out),
+        Some("act") => act(&v, p, out, principal),
         Some("caps") => {
             let out = out.clone();
             let msg = json!({ "t": "caps", "caps": crate::remote::capabilities() }).to_string();
@@ -900,20 +921,32 @@ fn handle_client_msg(
 /// Every action goes through the router first, commands included. A phone
 /// retries on reconnect, and `pty_spawn_detached` replayed is a second agent
 /// nobody asked for.
-fn act(v: &Value, p: &Portal, out: &PortalOut) {
+fn act(v: &Value, p: &Portal, out: &PortalOut, principal: &str) {
     let (Some(id), Some(action)) = (
         v.get("id").and_then(|x| x.as_str()),
         v.get("action").and_then(|x| x.as_str()),
     ) else {
         return;
     };
-    let (id, action) = (id.to_string(), action.to_string());
+    if id.is_empty() || id.len() > 128 {
+        return;
+    }
+    let request_key = format!("{principal}:{id}");
+    let action = protocol_action(v.get("protocol"), action).map(str::to_string);
+    let id = id.to_string();
     let args = v.get("args").cloned().unwrap_or(Value::Null);
     let app = p.app.clone();
     let router = p.verbs.clone();
     let out = out.clone();
 
     tokio::spawn(async move {
+        let action = match action {
+            Ok(action) => action,
+            Err(error) => {
+                let _ = out.send(ack_err(&id, error.into())).await;
+                return;
+            }
+        };
         // A dotted name is a desktop-executed verb. None are registered yet —
         // every module shipped so far is backed by state Rust already holds —
         // so today this can only be an unknown action, and the hop to the
@@ -932,9 +965,9 @@ fn act(v: &Value, p: &Portal, out: &PortalOut) {
             crate::remote::guard_of(&action)
         };
 
-        match router.begin(&action, guard, &id) {
-            Begin::Replay(Answer::Ok) => {
-                let _ = out.send(ack_ok(&id)).await;
+        match router.begin_request(&action, guard, &request_key, &args) {
+            Begin::Replay(Answer::Ok(value)) => {
+                let _ = out.send(ack_ok(&id, value)).await;
                 return;
             }
             Begin::Replay(Answer::Err(why)) | Begin::Refused(why) => {
@@ -947,11 +980,11 @@ fn act(v: &Value, p: &Portal, out: &PortalOut) {
         let result = crate::remote::dispatch(&app, &action, &args, TOKEN_SCOPE).await;
         let msg = match &result {
             Ok(value) => {
-                router.finish(&id, Answer::Ok);
+                router.finish(&request_key, Answer::Ok(value.clone()));
                 json!({ "t": "act-ack", "id": id, "ok": true, "result": value }).to_string()
             }
             Err(why) => {
-                router.finish(&id, Answer::Err(why.clone()));
+                router.finish(&request_key, Answer::Err(why.clone()));
                 ack_err(&id, why.clone())
             }
         };
@@ -959,8 +992,19 @@ fn act(v: &Value, p: &Portal, out: &PortalOut) {
     });
 }
 
-fn ack_ok(id: &str) -> String {
-    json!({ "t": "act-ack", "id": id, "ok": true }).to_string()
+/// Preserve existing portal pages while keeping versioned IDE command results
+/// identical to native IPC. Unknown versions must never reach a mutation.
+fn protocol_action<'a>(protocol: Option<&Value>, action: &'a str) -> Result<&'a str, &'static str> {
+    match protocol {
+        None if action == "fs_read_file" => Ok("fs_read_text"),
+        None => Ok(action),
+        Some(version) if version.as_u64() == Some(u64::from(crate::remote::HOST_PROTOCOL)) => Ok(action),
+        _ => Err("incompatible host protocol; reload the client"),
+    }
+}
+
+fn ack_ok(id: &str, result: Value) -> String {
+    json!({ "t": "act-ack", "id": id, "ok": true, "result": result }).to_string()
 }
 
 fn ack_err(id: &str, error: String) -> String {
@@ -1375,12 +1419,12 @@ fn valid_token(tokens: &Tokens, tok: &str) -> bool {
     tokens.lock().unwrap().contains(tok)
 }
 
-fn consume_ticket(tickets: &Tickets, ticket: &str, now: Instant) -> bool {
+fn consume_ticket(tickets: &Tickets, ticket: &str, now: Instant) -> Option<String> {
     tickets
         .lock()
         .unwrap()
         .remove(ticket)
-        .is_some_and(|expires| expires > now)
+        .and_then(|(expires, principal)| (expires > now).then_some(principal))
 }
 
 fn gen_pin() -> String {
@@ -1523,20 +1567,28 @@ mod tests {
     }
 
     #[test]
+    fn host_protocol_keeps_legacy_text_reads_and_rejects_unknown_versions() {
+        assert_eq!(protocol_action(None, "fs_read_file"), Ok("fs_read_text"));
+        assert_eq!(protocol_action(Some(&json!(1)), "fs_read_file"), Ok("fs_read_file"));
+        assert!(protocol_action(Some(&json!(2)), "pty_spawn_detached").is_err());
+        assert!(protocol_action(Some(&json!("1")), "pty_kill").is_err());
+    }
+
+    #[test]
     fn websocket_tickets_are_one_use_and_expire() {
         let tickets: Tickets = Default::default();
         let now = Instant::now();
         tickets
             .lock()
             .unwrap()
-            .insert("fresh".into(), now + Duration::from_secs(1));
+            .insert("fresh".into(), (now + Duration::from_secs(1), "client".into()));
         tickets
             .lock()
             .unwrap()
-            .insert("old".into(), now - Duration::from_secs(1));
-        assert!(consume_ticket(&tickets, "fresh", now));
-        assert!(!consume_ticket(&tickets, "fresh", now));
-        assert!(!consume_ticket(&tickets, "old", now));
+            .insert("old".into(), (now - Duration::from_secs(1), "client".into()));
+        assert_eq!(consume_ticket(&tickets, "fresh", now), Some("client".into()));
+        assert!(consume_ticket(&tickets, "fresh", now).is_none());
+        assert!(consume_ticket(&tickets, "old", now).is_none());
     }
 
     #[test]

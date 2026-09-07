@@ -1157,7 +1157,7 @@ export default function App() {
       }),
       // Native menu accelerators (Cmd+W etc.) → scoped in-app actions. The
       // visible ProjectView handles tab-level ones; close-project is ours.
-      import("@tauri-apps/api/event").then(({ listen }) =>
+      import("./host").then(({ listen }) =>
         listen<string>("menu", (e) => {
           if (e.payload === "close-project") {
             const active = wsRef.current.activeId;
@@ -1192,7 +1192,7 @@ export default function App() {
               })
               .catch((err) => notify(`Update check failed: ${err}`, "error"));
           } else if (e.payload === "install-cli") {
-            void import("@tauri-apps/api/core").then(({ invoke }) =>
+            void import("./host").then(({ invoke }) =>
               invoke<string>("cli_install_shim")
                 .then((m) => notify(m, "success"))
                 .catch((err) => notify(String(err), "error")),
@@ -1459,13 +1459,13 @@ export default function App() {
   // plugin.
   useEffect(() => {
     if (!loaded) return;
-    void import("@tauri-apps/api/core").then(({ invoke }) =>
+    void import("./host").then(({ invoke }) =>
       invoke<string | null>("cli_take_pending_open")
         .then((dir) => (dir ? openDirAsProject(dir) : undefined))
         .catch(() => {}),
     );
     let unlisten: (() => void) | undefined;
-    void import("@tauri-apps/api/event").then(({ listen }) =>
+    void import("./host").then(({ listen }) =>
       listen<string>("cli-open", (e) => void openDirAsProject(e.payload)).then(
         (fn) => {
           unlisten = fn;
@@ -2203,7 +2203,7 @@ export default function App() {
   // the project would race the workspace it resolves against.
   useEffect(() => {
     if (!loaded) return;
-    void import("@tauri-apps/api/core").then(({ invoke }) =>
+    void import("./host").then(({ invoke }) =>
       invoke<string | null>("cli_take_pending_link")
         .then((raw) => (raw ? followDeepLink(parseDeepLink(raw)) : undefined))
         .catch(() => {}),

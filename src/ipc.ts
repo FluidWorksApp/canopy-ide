@@ -1,8 +1,7 @@
-// Typed wrappers around the Tauri command surface. All native work (PTYs, LSP
-// servers, fs, watchers) lives in the Rust core; this file is the only place the
-// frontend touches IPC.
-import { Channel, invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+// Typed feature API shared by IDE clients. Host adapters carry commands,
+// events and channels; native work (PTYs, LSP, files) remains in the Rust core.
+import { createChannel, invoke } from "./host";
+import { listen, type UnlistenFn } from "./host";
 import type { ShortcutProfile } from "./shortcuts";
 import type {
   TaskAttempt,
@@ -227,7 +226,7 @@ export async function ptySpawn(
   },
   onData: (chunk: PtyChunk) => void,
 ): Promise<SpawnResult> {
-  const channel = new Channel<ArrayBuffer | number[]>();
+  const channel = createChannel<ArrayBuffer | number[]>();
   // Raw channel payloads arrive as ArrayBuffer for large chunks but as plain
   // number[] below Tauri's internal direct-execute threshold — handle both.
   channel.onmessage = (data) => onData(decodePtyChunk(data));
@@ -302,7 +301,7 @@ export async function ptySpawnAttachedArgv(
   },
   onData: (chunk: PtyChunk) => void,
 ): Promise<SpawnResult> {
-  const channel = new Channel<ArrayBuffer | number[]>();
+  const channel = createChannel<ArrayBuffer | number[]>();
   channel.onmessage = (data) => onData(decodePtyChunk(data));
   return invoke<SpawnResult>("pty_spawn_attached_argv", {
     ...opts,
@@ -344,7 +343,7 @@ export async function ptyAttachDesktop(
   replay_start: number;
   replay_end: number;
 }> {
-  const channel = new Channel<ArrayBuffer | number[]>();
+  const channel = createChannel<ArrayBuffer | number[]>();
   channel.onmessage = (data) => onData(decodePtyChunk(data));
   return invoke("pty_attach_desktop", {
     id,
@@ -2313,7 +2312,7 @@ export async function lspStart(
   root: string,
   onMessage: (message: string) => void,
 ): Promise<number> {
-  const channel = new Channel<string>();
+  const channel = createChannel<string>();
   channel.onmessage = onMessage;
   return invoke("lsp_start", { command, args, root, onMessage: channel });
 }
@@ -4335,7 +4334,7 @@ export async function structuredRunnerSpawn(
   onData: (out: StructuredRunnerOut) => void,
 ): Promise<void> {
   if (!opts.cwd) throw new Error("A project runner requires a cwd");
-  const channel = new Channel<StructuredRunnerOut>();
+  const channel = createChannel<StructuredRunnerOut>();
   channel.onmessage = onData;
   return invoke("structured_runner_spawn", {
     attemptId,
@@ -4386,7 +4385,7 @@ export async function companionSpawn(
   },
   onData: (out: CompanionOut) => void,
 ): Promise<void> {
-  const channel = new Channel<CompanionOut>();
+  const channel = createChannel<CompanionOut>();
   channel.onmessage = onData;
   return invoke("companion_spawn", { ...opts, onData: channel });
 }

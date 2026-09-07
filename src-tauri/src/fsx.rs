@@ -508,6 +508,19 @@ pub async fn fs_read_file(
     path: String,
     max_bytes: Option<u64>,
 ) -> Result<tauri::ipc::Response, String> {
+    read_file_bytes(state, path, max_bytes)
+        .await
+        .map(tauri::ipc::Response::new)
+}
+
+/// Shared bounded file reader for native IPC and the remote host adapter.
+/// Transport encoding belongs to the caller; authorization and stable-handle
+/// checks must be identical for both paths.
+pub async fn read_file_bytes(
+    state: State<'_, WorkspaceManager>,
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<Vec<u8>, String> {
     let file = check_scope(&state, Path::new(&path))?;
     let source = std::fs::File::open(&file).map_err(|e| e.to_string())?;
     let opened_identity =
@@ -523,7 +536,7 @@ pub async fn fs_read_file(
         return Err("file changed while opening; retry the read".into());
     }
     let bytes = read_file_capped(source, max_bytes)?;
-    Ok(tauri::ipc::Response::new(bytes))
+    Ok(bytes)
 }
 
 #[tauri::command]

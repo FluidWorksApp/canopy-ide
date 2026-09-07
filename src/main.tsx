@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 // Bundled, not fetched: this is a desktop app that has to look the same on a
 // machine with no network and no fonts installed. Variable weight axis only —
 // one file per subset covers 100–900, so the four weights the Vitrine skin
