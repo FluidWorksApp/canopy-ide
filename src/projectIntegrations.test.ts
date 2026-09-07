@@ -105,6 +105,7 @@ describe("normalizeProjectIntegrations", () => {
           resourceId: "db-1",
           kind: "database",
           endpoint: "postgresql://user:secret@db.example.test/app",
+          environment: "production",
           status: "needs-attention",
         },
       ],
@@ -129,6 +130,7 @@ describe("normalizeProjectIntegrations", () => {
       providerId: "neon",
       resourceId: "db-1",
       kind: "database",
+      environment: "production",
       status: "needs-attention",
     }]);
     expect(normalized.deployments).toEqual([{
@@ -381,4 +383,19 @@ describe("project integration selectors", () => {
       "new-production",
     );
   });
+});
+
+it("retains operation history across stale component saves without retaining secrets or SQL", async () => {
+  const { mergeIntegrationOperations } = await import("./projectIntegrations");
+  const current = normalizeProjectIntegrations({ version: 1, operations: [{ id: "op-1", providerId: "supabase", resourceId: "app-prod", environment: "production", kind: "migrate", status: "succeeded", startedAt: "2026-09-07T00:00:00Z", completedAt: "2026-09-07T00:00:01Z", fingerprint: "a".repeat(64), migrationIds: ["202609070001"], sql: "SECRET" }] });
+  const merged = mergeIntegrationOperations(current, createProjectIntegrationState());
+  expect(merged.operations).toHaveLength(1);
+  expect(merged.operations![0].status).toBe("succeeded");
+  expect(JSON.stringify(merged)).not.toContain("SECRET");
+});
+
+it("keeps resources distinct across components and environments", () => {
+  const resource = { providerId: "supabase", resourceId: "shared-db", kind: "database", status: "connected" };
+  const state = normalizeProjectIntegrations({ version: 1, resources: [{ ...resource, environment: "local", componentId: "web" }, { ...resource, environment: "production", componentId: "web" }, { ...resource, environment: "production", componentId: "api" }] });
+  expect(state.resources).toHaveLength(3);
 });

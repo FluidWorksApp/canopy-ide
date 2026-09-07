@@ -134,9 +134,9 @@ describe("deploying", () => {
     expect(p.kind).toBe("refuse");
   });
 
-  it("carries a preview's missing-evidence caveat rather than hiding it", () => {
+  it("keeps previews local even with incomplete verification", () => {
     const p = propose({ kind: "deploy", target: "preview" }, withProvider(), "incomplete");
-    if (p.kind !== "run") throw new Error("expected a run");
-    expect(p.caveat).toBeTruthy();
+    expect(p.kind).toBe("refuse");
+    expect(p.detail).toContain("locally");
   });
 });

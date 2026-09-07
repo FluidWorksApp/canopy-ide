@@ -35,7 +35,7 @@ export function judgeVibeServerExit(
 ): { state: VibeServerHealthState; action: VibeServerHealthAction } {
   const state =
     current.targetKey === targetKey ? current : resetVibeServerHealth(targetKey);
-  if (sample.requested || sample.exitCode === 0) {
+  if (sample.requested) {
     return { state: resetVibeServerHealth(targetKey), action: "ignore" };
   }
   if (state.halted) return { state, action: "ignore" };

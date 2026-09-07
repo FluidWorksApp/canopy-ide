@@ -819,6 +819,8 @@ pub fn run() {
             fsx::git_head_content,
             fsx::store_load,
             fsx::store_save,
+            fsx::build_operation_acquire,
+            fsx::build_operation_release,
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_stop,

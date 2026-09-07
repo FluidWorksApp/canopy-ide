@@ -2,6 +2,7 @@ import type { RunCommand } from "./projects";
 
 export const MANAGED_PROCESS_ALIVE_SETTLE_MS = 2_500;
 export const MANAGED_PROCESS_STALL_MS = 45_000;
+export const MANAGED_PROCESS_STARTUP_MS = 180_000;
 export const MANAGED_PROMPT_RESPONSE_TIMEOUT_MS = 10_000;
 
 export type ManagedProcessKind = NonNullable<RunCommand["purpose"]>;
@@ -208,7 +209,7 @@ export function classifyManagedProcess(
 ): ManagedProcessClassification {
   const kind = observation.kind ?? "serve";
   if (observation.exited) {
-    return observation.exitCode === 0
+    return observation.exitCode === 0 && (kind === "setup" || kind === "check" || observation.readinessKind === "one-shot")
       ? classification(kind, "exited-ok", "complete", null, null)
       : classification(kind, "failed", "repair", observation.now, null);
   }
@@ -235,7 +236,6 @@ export function classifyManagedProcess(
 
   const readiness = observation.readinessKind ?? "process-alive";
   const aliveLongEnough =
-    observation.outputBytes > 0 &&
     observation.now - observation.spawnedAt >= MANAGED_PROCESS_ALIVE_SETTLE_MS;
   if (
     (readiness === "port" && observation.ports.length > 0) ||
@@ -246,9 +246,9 @@ export function classifyManagedProcess(
   }
 
   const readinessTimeoutMs =
-    readiness === "one-shot" && observation.readinessTimeoutMs != null
+    observation.readinessTimeoutMs != null
       ? observation.readinessTimeoutMs
-      : MANAGED_PROCESS_STALL_MS;
+      : MANAGED_PROCESS_STARTUP_MS;
   const deadlineAt = observation.spawnedAt + readinessTimeoutMs;
   if (observation.now >= deadlineAt) {
     return classification(kind, "hung", "repair", deadlineAt, null);

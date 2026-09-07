@@ -169,6 +169,22 @@ async function executeAgent(
   context: WorkflowExecutionContext,
   deps: WorkflowExecutorDeps,
 ): Promise<WorkflowRunDetail> {
+  const previousStep = initialRun.steps.find((candidate) => candidate.id === step.id);
+  const previousId = previousStep?.attemptIds.at(-1);
+  if (previousId) {
+    const evidence = await deps.taskGetForAttempt(previousId);
+    const metadata = (evidence?.envelope.metadata as { workflow?: { round?: number } } | undefined)?.workflow;
+    const sameRound = metadata?.round === previousStep?.round || (metadata?.round == null && previousStep?.round === 0);
+    if (sameRound) {
+      const attempt = evidence?.attempts.find((candidate) => candidate.attemptId === previousId);
+      if (attempt?.state === "completed") return advance(initialRun, step, "success", deps);
+      // An interrupted or still-active attempt may already have changed external
+      // state. A Resume click cannot turn uncertainty into a fresh execution.
+      if (!attempt || !["failed", "cancelled"].includes(attempt.state)) throw new Error("Reconcile the existing workflow attempt before resuming this step.");
+    } else if (metadata?.round == null) {
+      throw new Error("This older workflow attempt has no round identity. Reconcile it before resuming.");
+    }
+  }
   const agentBlock = workflowAgentForStep(initialRun.definition, step);
   const prompt = workflowAgentPrompt(agentBlock, step);
   const firstPlan = deps.routeFor(step);
@@ -179,6 +195,7 @@ async function executeAgent(
       definitionId: initialRun.definitionId,
       definitionVersion: initialRun.definitionVersion,
       stepId: step.id,
+      round: previousStep?.round ?? 0,
       capabilities: [...step.capabilities],
       constraints: step.constraints ?? initialRun.definition.constraints,
       agentBlockId: agentBlock?.id ?? null,
@@ -298,10 +315,6 @@ export async function continueWorkflow(
       return { state: "waiting-human", run, card: cardForHuman(step) };
     }
     if (step.kind === "watch") {
-      if (run.trigger.kind === step.event) {
-        run = await advance(run, step, "pass", deps);
-        continue;
-      }
       run = await deps.recordStep({ runId, stepId: step.id, state: "waiting" });
       return { state: "waiting-event", run };
     }
@@ -348,5 +361,18 @@ export async function answerWorkflowHuman(
     throw new Error("workflow response is not one of the card actions");
   }
   const next = await advance(run, step, response, deps);
+  return continueWorkflow(next.runId, context, deps);
+}
+
+/** A watch consumes a later event for the same pinned resource. */
+export async function deliverWorkflowEvent(runId: string, event: WorkflowTriggerProvenance, context: WorkflowExecutionContext, deps: WorkflowExecutorDeps): Promise<WorkflowExecutionResult | null> {
+  const run = await deps.getRun(runId);
+  if (!run || run.status !== "waiting" || run.projectId !== context.projectId) return null;
+  const step = run.definition.steps.find((candidate) => candidate.id === run.currentStepId);
+  const state = run.steps.find((candidate) => candidate.id === run.currentStepId);
+  if (!step || step.kind !== "watch" || step.event !== event.kind || !state || event.occurredAt <= state.updatedAt || event.eventId === run.trigger.eventId) return null;
+  const keys = event.kind.startsWith("issue.") ? ["source", "repo", "issueId"] : ["repo", "prNumber"];
+  if (keys.some((key) => run.trigger.payload[key] == null || String(run.trigger.payload[key]) !== String(event.payload[key]))) return null;
+  const next = await advance(run, step, "pass", deps);
   return continueWorkflow(next.runId, context, deps);
 }

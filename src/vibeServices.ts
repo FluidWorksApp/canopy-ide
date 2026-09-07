@@ -22,6 +22,7 @@ export interface ServiceSecret {
   purpose: string;
   /** Publishable keys are safe in a client bundle; secret ones never are. */
   publishable: boolean;
+  optional?: boolean;
 }
 
 export interface ServiceProvider {
@@ -53,12 +54,13 @@ export const SERVICE_PROVIDERS: readonly ServiceProvider[] = [
     label: "Supabase",
     reach: ["cli", "api", "mcp"],
     account: { label: "Supabase", mcpAliases: ["supabase"] },
-    cli: { bin: "supabase", install: "npm install -g supabase" },
+    cli: { bin: "supabase", install: "npm install --save-dev supabase" },
     secrets: [
       { name: "SUPABASE_URL", purpose: "which project to talk to", publishable: true },
       { name: "SUPABASE_ANON_KEY", purpose: "browser-side access", publishable: true },
       {
         name: "SUPABASE_SERVICE_ROLE_KEY",
+        optional: true,
         purpose: "server-side access that bypasses row security",
         publishable: false,
       },
@@ -90,6 +92,7 @@ export const SERVICE_PROVIDERS: readonly ServiceProvider[] = [
       { name: "FIREBASE_API_KEY", purpose: "browser-side access", publishable: true },
       {
         name: "FIREBASE_SERVICE_ACCOUNT",
+        optional: true,
         purpose: "server-side admin access",
         publishable: false,
       },
@@ -157,6 +160,9 @@ export interface LinkContext {
   presentSecrets: readonly string[];
   /** Whether git would track the env file. True means refuse. */
   envFileTracked: boolean;
+  /** Request privileged keys only when the application actually needs them. */
+  requiredSecrets?: readonly string[];
+  clientPrefix?: string;
 }
 
 /** Order matters: nothing can authenticate before the CLI exists, and nothing
@@ -213,7 +219,7 @@ export function planLink(providerId: string, context: LinkContext): LinkPlan {
   }
 
   const present = new Set(context.presentSecrets);
-  const missing = provider.secrets.filter((s) => !present.has(s.name));
+  const missing = provider.secrets.filter((s) => !present.has(s.name) && !present.has(clientVarName(provider, s, context.clientPrefix ?? "")) && (!s.optional || context.requiredSecrets?.includes(s.name)));
   for (const secret of missing) {
     steps.push({
       kind: "collect-secret",
@@ -227,7 +233,7 @@ export function planLink(providerId: string, context: LinkContext): LinkPlan {
     steps.push({
       kind: "write-env",
       file: provider.envFile,
-      names: missing.map((s) => s.name),
+      names: missing.map((s) => clientVarName(provider, s, context.clientPrefix ?? "")),
       why: `${provider.envFile} is untracked, so these stay out of git`,
     });
   }
@@ -275,9 +281,9 @@ export function providerMcpToolAllowances(
 /** What a client-exposed variable must be called for this project's framework
  *  to expose it. A publishable key with no prefix silently never reaches the
  *  browser, which reads as a broken integration rather than a naming mistake. */
-export function clientVarName(provider: ServiceProvider, secret: ServiceSecret): string {
-  if (!secret.publishable || !provider.clientPrefix) return secret.name;
-  return secret.name.startsWith(provider.clientPrefix)
+export function clientVarName(provider: ServiceProvider, secret: ServiceSecret, prefix = provider.clientPrefix ?? ""): string {
+  if (!secret.publishable || !prefix) return secret.name;
+  return secret.name.startsWith(prefix)
     ? secret.name
-    : `${provider.clientPrefix}${secret.name}`;
+    : `${prefix}${secret.name}`;
 }

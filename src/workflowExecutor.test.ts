@@ -265,3 +265,37 @@ describe("workflow linear executor", () => {
     expect(deps.resume).not.toHaveBeenCalled();
   });
 });
+
+it("reconciles a completed attempt after interruption without launching it again", async () => {
+  const { deps } = harness();
+  const context = { projectId: "project", componentId: "component", worktreePath: "/repo" };
+  const run = await deps.createRun({ projectId: "project", definitionId: definition.id, definitionVersion: "1", definitionHash: "hash", definition, triggerKind: "manual", trigger: { kind: "manual", eventId: "manual-1", occurredAt: 1, payload: {} }, startStepId: "agent", steps: definition.steps.map((step) => ({ id: step.id, kind: step.kind })) });
+  await deps.recordStep({ runId: run.runId, stepId: "agent", state: "running", attemptId: "attempt-1" });
+  expect((await continueWorkflow(run.runId, context, deps)).state).toBe("waiting-human");
+  expect(deps.reserveTask).not.toHaveBeenCalled();
+  expect(deps.launchAgent).not.toHaveBeenCalled();
+});
+
+it("refuses a duplicate attempt while the existing attempt is still running", async () => {
+  const { deps } = harness();
+  const evidence = (await deps.taskGetForAttempt("attempt-1"))!;
+  evidence.attempts[0].state = "running";
+  const run = await deps.createRun({ projectId: "project", definitionId: definition.id, definitionVersion: "1", definitionHash: "hash", definition, triggerKind: "manual", trigger: { kind: "manual", eventId: "manual-1", occurredAt: 1, payload: {} }, startStepId: "agent", steps: definition.steps.map((step) => ({ id: step.id, kind: step.kind })) });
+  await deps.recordStep({ runId: run.runId, stepId: "agent", state: "running", attemptId: "attempt-1" });
+  await expect(continueWorkflow(run.runId, { projectId: "project", componentId: "component", worktreePath: "/repo" }, deps)).rejects.toThrow(/Reconcile/);
+  expect(deps.launchAgent).not.toHaveBeenCalled();
+});
+
+it("delivers only later events for the waiting issue", async () => {
+  const { deliverWorkflowEvent } = await import("./workflowExecutor");
+  const { deps } = harness();
+  const watched: WorkflowDefinition = { ...definition, start: "watch", steps: [{ id: "watch", name: "Wait", kind: "watch", event: "issue.closed", capabilities: [] }], edges: [{ from: "watch", on: "pass", to: "$completed" }, { from: "watch", on: "fail", to: "$failed" }] };
+  const trigger = { kind: "issue.opened" as const, eventId: "open-1", occurredAt: 1, payload: { source: "github", repo: "owner/repo", issueId: "#1" } };
+  const run = await deps.createRun({ projectId: "project", definitionId: watched.id, definitionVersion: "1", definitionHash: "hash", definition: watched, triggerKind: trigger.kind, trigger, startStepId: "watch", steps: [{ id: "watch", kind: "watch" }] });
+  const context = { projectId: "project", componentId: "component", worktreePath: "/repo" };
+  expect((await continueWorkflow(run.runId, context, deps)).state).toBe("waiting-event");
+  const event = { ...trigger, kind: "issue.closed" as const, eventId: "closed-1", occurredAt: 10 };
+  expect(await deliverWorkflowEvent(run.runId, { ...event, payload: { ...event.payload, issueId: "#2" } }, context, deps)).toBeNull();
+  expect((await deliverWorkflowEvent(run.runId, event, context, deps))?.state).toBe("settled");
+  expect(await deliverWorkflowEvent(run.runId, event, context, deps)).toBeNull();
+});

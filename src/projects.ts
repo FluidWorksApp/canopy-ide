@@ -40,9 +40,9 @@ export interface RunCommand {
    * because the project was opened. */
   automatic?: boolean;
   readiness?:
-    | { kind: "http"; path: string }
-    | { kind: "port" }
-    | { kind: "process-alive" }
+    | { kind: "http"; path: string; timeoutMs?: number }
+    | { kind: "port"; timeoutMs?: number }
+    | { kind: "process-alive"; timeoutMs?: number }
     | { kind: "one-shot"; timeoutMs: number };
 }
 

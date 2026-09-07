@@ -157,3 +157,14 @@ describe("vibeRunReady", () => {
     )).toBe(false);
   });
 });
+
+it("does not mistake queued setup for completed setup", () => {
+  const setup: RunCommand = { id: "install", name: "Install", command: "npm ci", purpose: "setup" };
+  expect(vibeSetupGate({ id: "dev", name: "Dev", command: "npm run dev" }, { id: "app", commands: [setup] }, [], () => true, () => false).ready).toBe(false);
+});
+it("releases a one-shot dependency only after successful exit", () => {
+  const command: RunCommand = { id: "db", name: "DB", command: "supabase start", readiness: { kind: "one-shot", timeoutMs: 120_000 } };
+  expect(vibeRunReady({ ptyId: 1, exited: false }, command, [], new Set())).toBe(false);
+  expect(vibeRunReady({ ptyId: 1, exited: true, exitCode: 0 }, command, [], new Set())).toBe(true);
+  expect(vibeRunReady({ ptyId: 1, exited: true, exitCode: 1 }, command, [], new Set())).toBe(false);
+});

@@ -272,6 +272,37 @@ export interface ProjectIntegrationState {
   connections: ProjectIntegrationConnection[];
   resources: ProjectIntegrationResource[];
   deployments: ProjectDeploymentState[];
+  operations?: IntegrationOperation[];
+}
+
+/** Safe receipts only. SQL, command output and credential values never belong here. */
+export interface IntegrationOperation {
+  id: string;
+  providerId: IntegrationProviderId;
+  resourceId: string;
+  environment: "local" | "production";
+  kind: "connect" | "migrate" | "deploy";
+  status: "running" | "succeeded" | "failed" | "unknown";
+  startedAt: string;
+  completedAt?: string;
+  fingerprint?: string;
+  migrationIds?: string[];
+}
+
+function normalizeOperation(value: unknown): IntegrationOperation | null {
+  const item = record(value);
+  if (!item || !isIntegrationProviderId(item.providerId) ||
+    !["local", "production"].includes(String(item.environment)) ||
+    !["connect", "migrate", "deploy"].includes(String(item.kind)) ||
+    !["running", "succeeded", "failed", "unknown"].includes(String(item.status))) return null;
+  const id = safeText(item.id, 128), resourceId = safeText(item.resourceId, 128), startedAt = safeDate(item.startedAt);
+  if (!id || !resourceId || !startedAt) return null;
+  return { id, providerId: item.providerId, resourceId, startedAt,
+    environment: item.environment as IntegrationOperation["environment"], kind: item.kind as IntegrationOperation["kind"], status: item.status as IntegrationOperation["status"],
+    ...(safeDate(item.completedAt) ? { completedAt: safeDate(item.completedAt) } : {}),
+    ...(typeof item.fingerprint === "string" && /^[a-f0-9]{64}$/.test(item.fingerprint) ? { fingerprint: item.fingerprint } : {}),
+    ...(Array.isArray(item.migrationIds) ? { migrationIds: item.migrationIds.filter((id): id is string => typeof id === "string" && /^[\w.-]{1,128}$/.test(id)).slice(0, 1000) } : {}),
+  };
 }
 
 /** Alternate name for callers that use the project field name as the type. */
@@ -502,7 +533,7 @@ export function normalizeProjectIntegrations(value: unknown): ProjectIntegration
   if (Array.isArray(raw.resources)) {
     for (const item of raw.resources) {
       const resource = normalizeResource(item);
-      if (resource) resources.set(`${resource.providerId}\0${resource.resourceId}`, resource);
+      if (resource) resources.set(`${resource.providerId}\0${resource.resourceId}\0${resource.environment ?? ""}\0${resource.componentId ?? ""}`, resource);
     }
   }
 
@@ -535,6 +566,7 @@ export function normalizeProjectIntegrations(value: unknown): ProjectIntegration
     }),
     resources: [...resources.values()],
     deployments: [...deployments.values()],
+    ...(Array.isArray(raw.operations) ? { operations: raw.operations.slice(-200).map(normalizeOperation).filter((operation): operation is IntegrationOperation => operation !== null) } : {}),
   };
 }
 
@@ -631,7 +663,9 @@ export function projectIntegrationsReducer(
         resources: [
           ...current.resources.filter((item) =>
             item.providerId !== resource.providerId ||
-            item.resourceId !== resource.resourceId
+            item.resourceId !== resource.resourceId ||
+            item.environment !== resource.environment ||
+            item.componentId !== resource.componentId
           ),
           resource,
         ],
@@ -775,4 +809,16 @@ export function selectAvailableProviders(
 ): IntegrationProvider[] {
   const configured = new Set(state.connections.map((connection) => connection.providerId));
   return INTEGRATION_PROVIDERS.filter((provider) => !configured.has(provider.id));
+}
+
+/** Operation history is append-only across concurrent component updates. */
+export function mergeIntegrationOperations(current: ProjectIntegrationState | undefined, incoming: ProjectIntegrationState): ProjectIntegrationState {
+  const operations = new Map((current?.operations ?? []).map((operation) => [operation.id, operation]));
+  for (const operation of incoming.operations ?? []) {
+    const previous = operations.get(operation.id);
+    // A delayed in-flight snapshot cannot undo an observed final outcome.
+    if (previous?.completedAt && !operation.completedAt) continue;
+    operations.set(operation.id, operation);
+  }
+  return normalizeProjectIntegrations({ ...incoming, operations: [...operations.values()] });
 }

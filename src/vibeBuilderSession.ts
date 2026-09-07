@@ -1,3 +1,4 @@
+import { nativeProviderDeps } from "./buildProviders";
 import * as ipc from "./ipc";
 import {
   createProjectRunner,
@@ -129,6 +130,8 @@ export interface VibeBuilderSessionOptions {
   cliId: string;
   cliBin: string;
   checkCommand?: string | string[] | null;
+  /** First user request can create an app before there are commands to discover. */
+  onBootstrapReady?: () => Promise<void>;
   /** Why there is no check command, when there is none — the one sentence
    *  `inferVibeCheck` produces for a project a non-coder set up. Without it the
    *  turn records `check: unknown` forever and says nothing about why, which
@@ -214,7 +217,7 @@ export interface VibeServerStartupInput
     VibeServerIncidentInput,
     "exitCode" | "crashTimes" | "automaticRestarts"
   > {
-  reason: "interactive-prompt" | "readiness-timeout";
+  reason: "interactive-prompt" | "readiness-timeout" | "health-regression";
   /** The prompt class is evidence for the repair agent, never an instruction
    * to type a guessed answer. */
   promptCode?: string;
@@ -905,9 +908,28 @@ async function nativeAbstractionContext(
     deployBin ? probeCli(deployBin, nativeCliProbeDeps) : Promise.resolve(false),
   ]);
   const linkProvider = intent.kind === "link" ? providerById(intent.provider) : undefined;
+  let revision: string | null = null;
+  if (intent.kind === "deploy") {
+    const head = worktreeFor(worktrees, cwd)?.head;
+    const configPaths = ["vercel.json", ".vercel/project.json", "netlify.toml", ".netlify/state.json", "fly.toml", "wrangler.toml", "wrangler.json", "wrangler.jsonc"];
+    const presentConfigs = await ipc.fsStatMany(configPaths.map((path) => `${cwd}/${path}`));
+    const configs = await Promise.all(configPaths.map(async (path) => {
+      const stat = presentConfigs.find((item) => item.path === `${cwd}/${path}`);
+      if (!stat) return [path, null];
+      if (stat.is_dir || stat.size > 256 * 1024) throw new Error("Deployment configuration could not be fully reviewed.");
+      return [path, await ipc.fsReadText(`${cwd}/${path}`, 256 * 1024)];
+    }));
+    if (head) {
+      const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(configs)));
+      revision = `${head}:${Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+    }
+  }
   const toolAllowances = intent.kind === "link"
     ? providerMcpToolAllowances(intent.provider, mcpServers)
     : [];
+
+  const verifiedAccount = intent.kind === "link" && (intent.provider === "supabase" || intent.provider === "firebase") && toolAllowances.length > 0
+    ? await nativeProviderDeps.projectsViaMcp(intent.provider, cwd) !== null : false;
 
   return {
     cwd,
@@ -917,7 +939,7 @@ async function nativeAbstractionContext(
     dependencies: record(pkg?.dependencies),
     devDependencies: record(pkg?.devDependencies),
     link: {
-      linkedReaches: toolAllowances.length > 0
+      linkedReaches: verifiedAccount
         ? [linkProvider?.reach.includes("mcp") ? "mcp" : "api"]
         : [],
       toolAllowances,
@@ -926,10 +948,14 @@ async function nativeAbstractionContext(
       authenticated: false,
       presentSecrets: [],
       envFileTracked,
+      clientPrefix: record(pkg?.dependencies).next || record(pkg?.devDependencies).next ? "NEXT_PUBLIC_"
+        : record(pkg?.dependencies).vite || record(pkg?.devDependencies).vite ? "VITE_"
+          : record(pkg?.dependencies).expo ? "EXPO_PUBLIC_" : "",
     },
     deploy: {
       dirty,
       cliInstalled: deployCliPresent,
+      revision,
     },
   };
 }
@@ -1038,6 +1064,8 @@ export class VibeBuilderSession implements BuilderSession {
      *  phrase, which is why it is compared and never offered as a button. */
     confirm: string;
     requiresTypedPhrase: boolean;
+    intent: VibeIntent;
+    revision: string | null;
   } | null = null;
   /** The process a confirmed abstraction is running in, for exactly as long as
    *  it is running. Held because nothing else does: runAbstractionPlan keeps
@@ -1496,7 +1524,7 @@ export class VibeBuilderSession implements BuilderSession {
     // the person's request anywhere. The guide then appeared as a question
     // even though it contained no single thing a person could answer.
     if (intent?.kind === "link") return this.sendLinkTurn(intent, message);
-    if (intent) {
+    if (intent && !(intent.kind === "deploy" && intent.target === "preview")) {
       return this.enqueue(() => this.proposeIntent(intent, message));
     }
     let sent!: () => void;
@@ -1591,14 +1619,22 @@ export class VibeBuilderSession implements BuilderSession {
     if (this.stopped) return;
     const cwd = this.options.componentPath;
     let proposal: AbstractionProposal;
+    let revision: string | null = null;
     try {
       // The session is the only party that watched anything get verified, so
       // it supplies that verdict; the reader supplies the project.
-      proposal = proposeAbstraction(
-        intent,
-        await this.deps.abstractionContext(cwd, intent),
-        this.lastVerification,
-      );
+      let context = await this.deps.abstractionContext(cwd, intent);
+      let verification = this.lastVerification;
+      if (intent.kind === "deploy" && verification === "verified" && !context.deploy.dirty) {
+        const before = context.deploy.revision;
+        const check = await this.runProjectChecks(this.deps.now());
+        const browser = await this.deps.inspectBrowser(this.options.previewTabId(), false, this.deps.now(), false);
+        verification = judgeVerification(contractFor("production deployment"), [check.observation, ...browser.observations]).outcome;
+        context = await this.deps.abstractionContext(cwd, intent);
+        if (!before || context.deploy.revision !== before) verification = "incomplete";
+        revision = context.deploy.revision ?? null;
+      }
+      proposal = proposeAbstraction(intent, context, verification);
     } catch {
       if (this.stopped) return;
       // If the project can't be read, the honest answer is to stop, not to
@@ -1644,6 +1680,8 @@ export class VibeBuilderSession implements BuilderSession {
 
     this.pendingAbstraction = {
       proposal,
+      intent,
+      revision,
       confirm: requiresTypedPhrase ? PUBLISH_CONFIRMATION : ABSTRACTION_CONFIRM,
       requiresTypedPhrase,
     };
@@ -1666,7 +1704,7 @@ export class VibeBuilderSession implements BuilderSession {
    *  else is a build request and reaches the agent. */
   private async reroute(message: string): Promise<void> {
     const intent = parseVibeIntent(message);
-    if (intent) return this.proposeIntent(intent, message);
+    if (intent && !(intent.kind === "deploy" && intent.target === "preview")) return this.proposeIntent(intent, message);
     let sent!: () => void;
     let failed!: (error: unknown) => void;
     const accepted = new Promise<void>((resolve, reject) => {
@@ -1715,6 +1753,20 @@ export class VibeBuilderSession implements BuilderSession {
     }
 
     const { proposal } = pending;
+    if (pending.intent.kind === "deploy") {
+      try {
+        const current = await this.deps.abstractionContext(proposal.cwd, pending.intent);
+        const refreshed = proposeAbstraction(pending.intent, current, this.lastVerification);
+        if (!pending.revision || current.deploy.revision !== pending.revision || current.deploy.dirty || refreshed.kind !== "run" || JSON.stringify(refreshed.argv) !== JSON.stringify(proposal.argv)) {
+          this.present({ kind: "idle" }, { id: `vibe-deploy-stale-${this.deps.now()}`, kind: "notice", prompt: "The project changed after it was checked.", detail: "Ask to publish again so I can check the current version before you approve it." });
+          return;
+        }
+      } catch {
+        this.present({ kind: "idle" }, { id: `vibe-deploy-unreadable-${this.deps.now()}`, kind: "notice", prompt: "I couldn't recheck the version to publish.", detail: "Nothing was deployed. Try publishing again." });
+        return;
+      }
+    }
+    if (this.stopped) return;
     this.present({ kind: "turn-progress" }, null);
     const result = await this.deps.runAbstraction(proposal.argv, proposal.cwd, {
       spawned: (handle) => {
@@ -1908,7 +1960,7 @@ export class VibeBuilderSession implements BuilderSession {
       {
         id: `vibe-startup-${input.componentId}-${input.runCommandId}`,
         kind: "notice",
-        prompt: `The ${input.component?.label ?? "project"} process is waiting instead of starting.`,
+        prompt: input.reason === "health-regression" ? `The ${input.component?.label ?? "project"} health check stopped responding.` : `The ${input.component?.label ?? "project"} process is waiting instead of starting.`,
         detail: "I'm reading its terminal output and checking the supported unattended setup.",
       },
     );
@@ -1923,9 +1975,11 @@ export class VibeBuilderSession implements BuilderSession {
       },
       logTail,
       {
-        code: "server-start-failed",
+        code: input.reason === "health-regression" ? "server-health-regression" : "server-start-failed",
         statement: (label) =>
-          input.reason === "interactive-prompt"
+          input.reason === "health-regression"
+            ? `The ${label} was ready but its HTTP health check has failed continuously for at least ten seconds.`
+            : input.reason === "interactive-prompt"
             ? `The ${label} process is alive but its terminal is waiting for interactive input instead of becoming ready.`
             : `The ${label} process stayed alive but did not reach its declared readiness signal.`,
         context: [
@@ -2353,6 +2407,8 @@ export class VibeBuilderSession implements BuilderSession {
         verification = (
           this.currentTurnMode === "question" && !this.currentTurnChanged
             ? this.finishQuestionTurn(turnEpoch)
+            : this.options.onBootstrapReady
+              ? this.finishBootstrapTurn(turnEpoch)
             : this.verifyTurn(turnEpoch)
         )
           .catch((error) => {
@@ -2435,6 +2491,39 @@ export class VibeBuilderSession implements BuilderSession {
     }
   }
 
+  private async finishBootstrapTurn(turnEpoch: number): Promise<void> {
+    await this.flushAssistant();
+    if (this.stopped || turnEpoch !== this.turnEpoch) return;
+    await this.recordTurnSummary(this.reservation!.envelope.runId, "Initial app changes are ready for setup verification.");
+    await this.finishAttempt("completed");
+    this.publish({ kind: "reply", text: "I'm checking the new app's setup and starting its local preview." });
+    await this.options.onBootstrapReady?.();
+  }
+
+  private async runProjectChecks(at: number): Promise<CheckRunResult> {
+    const targets = (this.options.projectComponents ?? []).flatMap((component) =>
+      (component.commands ?? []).filter((command) => command.purpose === "check")
+        .map((command) => ({ name: `${component.label}: ${command.name}`, cwd: command.cwd ?? component.path, command: command.argv ?? command.command })),
+    );
+    if (!targets.length && !(this.options.projectComponents ?? []).some((component) => ["web", "api", "worker"].includes(component.role ?? ""))) return this.deps.runCheck(this.options.checkCommand ?? null, this.options.componentPath, at);
+    const results: CheckRunResult[] = [];
+    for (const target of targets) {
+      if (this.stopped) break;
+      const result = await this.deps.runCheck(target.command, target.cwd, at);
+      results.push({ observation: result.observation, output: `${target.name}\n${result.output}` });
+    }
+    const missing = (this.options.projectComponents ?? []).filter((component) =>
+      ["web", "api", "worker"].includes(component.role ?? "") &&
+      !(component.commands ?? []).some((command) => command.purpose === "check"),
+    );
+    const verdict = results.some((result) => result.observation.verdict === "fail") ? "fail"
+      : missing.length || results.length !== targets.length || results.some((result) => result.observation.verdict !== "pass") ? "unknown" : "pass";
+    return {
+      observation: { kind: "check", verdict, at, note: missing.length ? `Missing checks for ${missing.map((component) => component.label).join(", ")}.` : `${results.length} project checks ${verdict === "pass" ? "passed" : "did not all pass"}.` },
+      output: results.map((result) => result.output).join("\n\n"),
+    };
+  }
+
   private async verifyTurn(turnEpoch: number): Promise<void> {
     const reservation = this.reservation;
     const baseline = this.baseline;
@@ -2449,11 +2538,7 @@ export class VibeBuilderSession implements BuilderSession {
 
     this.present({ kind: "verify-running" }, null);
     const at = this.deps.now();
-    const check = await this.deps.runCheck(
-      this.options.checkCommand ?? null,
-      this.options.componentPath,
-      at,
-    );
+    const check = await this.runProjectChecks(at);
     if (turnEpoch !== this.turnEpoch) return;
     // With no command to run, the default note ("no configured check command is
     // available") describes Canopy's state rather than the user's: it never
@@ -2892,9 +2977,7 @@ export class VibeBuilderSession implements BuilderSession {
         detail: result.verdict.diagnosis,
       },
     );
-    return this.deps
-      .runCheck(this.options.checkCommand ?? null, this.options.componentPath, at)
-      .catch(() => null);
+    return this.runProjectChecks(at).catch(() => null);
   }
 
   /** One launch spec for both the first attempt and any reseeded one, so a
@@ -2925,6 +3008,7 @@ export class VibeBuilderSession implements BuilderSession {
       bin: agentCliFor(cli)?.bin ?? this.options.cliBin,
       policy: {
         systemPromptAppend:
+          (this.options.onBootstrapReady ? "This project has no application yet. Implement the person's brief in the existing project directory. Default to React, TypeScript and Vite for a web app unless the brief requires a different stack. Add dev, build and check scripts, a lockfile and tests for core behavior. Install dependencies, build and check the app. For database features prefer a local Supabase stack or Firebase emulators, preserve migrations/rules/indexes in source, and add seeded authenticated CRUD and authorization tests. Never provision or change production to make a local preview work. Canopy will discover and supervise the created app after this turn. " : "") +
           `You are the Build-mode collaborator for ${this.options.projectName}. ` +
           `The project components and their observed runtime/data topology are ${JSON.stringify({
             components: (this.options.projectComponents ?? []).map((component) => ({
@@ -2944,6 +3028,7 @@ export class VibeBuilderSession implements BuilderSession {
           "If they ask for a change, make it actually run: create or update every affected component, preserve database schema changes as migrations, install what it needs, build it, and check your own work. " +
           "Test database changes locally when a local workflow exists. For a managed provider, prefer an already-linked account API or provider MCP tool over a shell CLI. If no account route is linked, use canopy_ask_user to ask the person to link their provider account; if account linking is unavailable or they decline, use the provider's authenticated CLI as the fallback. Never ask them to paste a long-lived provider access token into chat. Never push a managed database migration merely because Build opened; inspect migration status and ask explicitly before changing remote schema or data, whether the operation uses an API, MCP tool, or CLI. " +
           "Explain outcomes in plain language — the person reading you does not read stack traces. " +
+          "Preview always runs on local development servers in the project browser. A request to preview must never deploy to a hosting provider or change production resources. Deployment means publishing to production through Canopy's explicit publish flow. " +
           "Canopy runs verification independently.",
         permissionMode: grant.permissionMode,
         // The whole sidecar, not the three tools someone thought of. Nobody is

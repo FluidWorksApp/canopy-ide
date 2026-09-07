@@ -97,7 +97,7 @@ export function parseVibeIntent(message: string): VibeIntent | null {
   if (DEPLOY_VERB.test(text)) {
     return {
       kind: "deploy",
-      target: PRODUCTION.test(text) ? "production" : "preview",
+      target: !PRODUCTION.test(text) && /\bpreview\b/i.test(text) ? "preview" : "production",
     };
   }
 

@@ -113,7 +113,7 @@ function harness(
       },
       // No `verification` here on purpose — it is the session's observation,
       // not the project's, and the type no longer allows it to be smuggled in.
-      deploy: { dirty: false, cliInstalled: true },
+      deploy: { dirty: false, cliInstalled: true, revision: "head-1:config-1" },
     })),
     runAbstraction: vi.fn(async (argv: string[], cwd: string) => {
       abstractionRuns.push({ argv, cwd });
@@ -1708,7 +1708,7 @@ describe("managed abstractions", () => {
           presentSecrets: [],
           envFileTracked: false,
         },
-        deploy: { dirty: false, cliInstalled: true },
+        deploy: { dirty: false, cliInstalled: true, revision: "head-1:config-1" },
       })),
     });
 
@@ -1855,16 +1855,37 @@ describe("managed abstractions", () => {
     expect(h.order).toContain("spawn");
   });
 
-  it("offers a preview without a typed phrase, and runs it on confirm", async () => {
+  it("routes explicit previews to the local agent without a hosting command", async () => {
     const h = harness();
     await deployable(h);
+    await h.session.send("deploy a preview");
+    expect(h.order).toContain("spawn");
+    expect(h.abstractionRuns).toHaveLength(0);
+  });
+
+  it("rechecks the source after publish approval", async () => {
+    const h = harness();
+    await deployable(h);
+    await verified(h);
     await h.session.send("deploy this");
-    const q = h.session.state.question;
-    expect(q?.kind).toBe("confirm");
-    const confirm = q!.actions![0];
-    await h.session.send(confirm.response);
-    expect(h.abstractionRuns).toHaveLength(1);
-    expect(h.abstractionRuns[0].argv[0]).toBe("vercel");
+    const read = h.deps.abstractionContext;
+    h.deps.abstractionContext = async (cwd, intent) => {
+      const context = await read(cwd, intent);
+      return { ...context, deploy: { ...context.deploy, revision: "head-2:config-1" } };
+    };
+    await h.session.send("Publish to production");
+    expect(h.abstractionRuns).toHaveLength(0);
+    expect(h.session.state.question?.prompt).toContain("changed");
+  });
+
+  it("refuses publishing when fresh checks fail after a verified turn", async () => {
+    const h = harness();
+    await deployable(h);
+    await verified(h);
+    h.deps.runCheck = async () => ({ observation: observation("check", "fail"), output: "broken" });
+    await h.session.send("deploy this");
+    expect(h.session.state.question?.kind).toBe("notice");
+    expect(h.abstractionRuns).toHaveLength(0);
   });
 
   it("leaves an ordinary build request alone", async () => {
@@ -2015,4 +2036,28 @@ describe("concurrent messages", () => {
 
     expect(h.abstractionRuns).toHaveLength(1);
   });
+});
+
+it("checks every runnable component before reporting verified work", async () => {
+  const runCheck = vi.fn(async (_command, cwd) => ({ observation: observation("check", cwd === "/api" ? "fail" : "pass"), output: cwd }));
+  const h = harness({ runCheck }, { projectComponents: [
+    { id: "web", label: "Web", path: "/web", role: "web", commands: [{ id: "test", name: "Test", command: "npm test", purpose: "check" }] },
+    { id: "api", label: "API", path: "/api", role: "api", commands: [{ id: "test", name: "Test", command: "npm test", purpose: "check" }] },
+  ] });
+  await h.session.send("Make the button blue");
+  h.emit({ kind: "turnEnd" });
+  await vi.waitFor(() => expect(runCheck).toHaveBeenCalledWith("npm test", "/api", 10));
+  expect(runCheck).toHaveBeenCalledWith("npm test", "/web", 10);
+  await h.session.stop();
+});
+
+it("hands a first app creation to setup before browser verification", async () => {
+  const onBootstrapReady = vi.fn(async () => {});
+  const h = harness({}, { onBootstrapReady, previewTabId: () => null });
+  await h.session.send("Create a notes app");
+  h.emit({ kind: "turnEnd" });
+  await vi.waitFor(() => expect(onBootstrapReady).toHaveBeenCalledOnce());
+  expect(h.deps.runCheck).not.toHaveBeenCalled();
+  expect(h.replies.join(" ")).toContain("local preview");
+  await h.session.stop();
 });

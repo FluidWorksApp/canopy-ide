@@ -121,6 +121,7 @@ export interface WorkflowHumanStep extends WorkflowStepBase {
 export interface WorkflowGitOpStep extends WorkflowStepBase {
   kind: "git-op";
   operation: "open-pr" | "update-branch";
+  parameters?: { repo: string; number?: number; head?: string; base?: string; title?: string; body?: string };
 }
 
 export type WorkflowStep =
@@ -456,7 +457,7 @@ export function validateWorkflowDefinition(
             : kind === "human"
               ? ["card"]
               : kind === "git-op"
-                ? ["operation"]
+                ? ["operation", "parameters"]
                 : [];
     exactKeys(step, [...common, ...specific], at, errors);
     if (!text(step.id) || !ID.test(step.id)) errors.push(`${at}.id is invalid`);
@@ -536,6 +537,18 @@ export function validateWorkflowDefinition(
       }
     } else if (kind === "git-op") {
       if (!["open-pr", "update-branch"].includes(String(step.operation))) errors.push(`${at}.operation is invalid in P1`);
+      if (step.parameters !== undefined) {
+        const parameters = record(step.parameters);
+        if (!parameters) errors.push(`${at}.parameters must be an object`);
+        else {
+          exactKeys(parameters, ["repo", "number", "head", "base", "title", "body"], `${at}.parameters`, errors);
+          if (typeof parameters.repo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(parameters.repo)) errors.push(`${at}.parameters.repo must be owner/repository`);
+          if (step.operation === "update-branch" && (!Number.isSafeInteger(parameters.number) || Number(parameters.number) < 1)) errors.push(`${at}.parameters.number must identify a pull request`);
+          if (step.operation === "open-pr") for (const name of ["head", "base", "title", "body"]) {
+            if (typeof parameters[name] !== "string" || !String(parameters[name]).trim()) errors.push(`${at}.parameters.${name} is required`);
+          }
+        }
+      }
       const grants = Array.isArray(step.capabilities) ? step.capabilities : [];
       for (const required of ["network", "git-write", step.operation]) {
         if (!grants.includes(required)) errors.push(`${at} must declare ${required}`);

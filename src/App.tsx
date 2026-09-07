@@ -28,7 +28,7 @@ import {
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, Notify, RelayHandle } from "./types";
 import type { CustomMicroTask } from "./microTasks";
-import type { ProjectIntegrationState } from "./projectIntegrations";
+import { mergeIntegrationOperations, type ProjectIntegrationState } from "./projectIntegrations";
 import { shedRendererPressure } from "./rendererPressureRelief";
 import { bindMemoryPressure } from "./memoryPressureBinding";
 import {
@@ -3337,7 +3337,7 @@ export default function App() {
         onEdit: () => void;
         onShareContext: (on: boolean) => void;
         onSaveCustomTasks: (tasks: CustomMicroTask[]) => void;
-        onSaveIntegrations: (state: ProjectIntegrationState) => void;
+        onSaveIntegrations: (state: ProjectIntegrationState) => Promise<void>;
         onPersistVibeTarget: (selection: VibeTargetSelection) => Promise<boolean>;
         onPersistVibeSetup: (project: Project) => Promise<boolean>;
       }
@@ -3363,9 +3363,20 @@ export default function App() {
           const p = find();
           if (p) void saveProject({ ...p, customTasks: tasks });
         },
-        onSaveIntegrations: (integrations) => {
-          const p = find();
-          if (p) void saveProject({ ...p, integrations });
+        onSaveIntegrations: async (integrations) => {
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            const state = wsRef.current;
+            const current = state.projects.find((candidate) => candidate.id === id);
+            if (!current) throw new Error("The project is no longer open.");
+            const projects = state.projects.map((candidate) => candidate.id === id ? { ...current, integrations: mergeIntegrationOperations(current.integrations, integrations) } : candidate);
+            const candidate = { ...state, projects };
+            await saveWorkspaceStrict(candidate);
+            if (wsRef.current !== state) continue;
+            wsRef.current = candidate;
+            update({ projects });
+            return;
+          }
+          throw new Error("The project changed while saving its integrations. Try again.");
         },
         onPersistVibeTarget: async (selection) => {
           // Re-read after every awaited write. A teammate/project event may

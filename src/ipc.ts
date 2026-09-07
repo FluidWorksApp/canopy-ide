@@ -2395,6 +2395,9 @@ export const ptyStats = (): Promise<SessionStats[]> => invoke<SessionStats[]>("p
 export const probeHttpReadiness = (port: number, path: string): Promise<boolean> =>
   invoke<boolean>("probe_http_readiness", { port, path });
 
+export const buildOperationAcquire = (key: string) => invoke<string>("build_operation_acquire", { key });
+export const buildOperationRelease = (key: string, token: string) => invoke<void>("build_operation_release", { key, token });
+
 export const onPtyStats = (
   cb: (stats: SessionStats[]) => void,
 ): Promise<UnlistenFn> =>

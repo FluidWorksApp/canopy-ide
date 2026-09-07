@@ -42,7 +42,7 @@ describe("a failed check is diagnosed, not reported", () => {
     // The second run is gated on the repair agent reporting a fix. Re-running
     // a command that nothing has changed is the blind-retry pattern.
     const fixedGate = repair.indexOf("result.verdict.fixed");
-    const rerun = repair.indexOf(".runCheck(");
+    const rerun = repair.indexOf(".runProjectChecks(");
     expect(fixedGate).toBeGreaterThan(-1);
     expect(rerun).toBeGreaterThan(fixedGate);
   });
