@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LaunchPalette } from "./LaunchPalette";
 import { AGENT_CLIS } from "../projects";
+import { updateSettings } from "../settings";
 
 const open = (over: Partial<Parameters<typeof LaunchPalette>[0]> = {}) => {
   const props = {
@@ -20,6 +21,8 @@ const open = (over: Partial<Parameters<typeof LaunchPalette>[0]> = {}) => {
 const claude = () => AGENT_CLIS.find((c) => c.id === "claude")!;
 
 describe("LaunchPalette", () => {
+  afterEach(() => localStorage.clear());
+
   it("lists the shell and every agent CLI", () => {
     open();
     expect(screen.getByText("Shell")).toBeInTheDocument();
@@ -43,13 +46,48 @@ describe("LaunchPalette", () => {
     await userEvent.keyboard("{Enter}");
     expect(onLaunchCli).toHaveBeenCalledWith(
       expect.objectContaining({ id: "claude" }),
+      "workspace",
     );
   });
 
   it("moves the selection with the arrow keys", async () => {
     const { onLaunchCli } = open();
     await userEvent.keyboard("{ArrowDown}{Enter}");
-    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0]);
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "workspace");
+  });
+
+  it("offers an explicit current-checkout launch", async () => {
+    const cli = claude();
+    const { onLaunchCli } = open({ installed: { [cli.bin]: true } });
+    await userEvent.click(
+      screen.getByRole("button", { name: `Open ${cli.name} in the current checkout` }),
+    );
+    expect(onLaunchCli).toHaveBeenCalledWith(cli, "current");
+  });
+
+  it("uses Shift+Enter for the current checkout", async () => {
+    const { onLaunchCli } = open();
+    await userEvent.keyboard("{ArrowDown}{Shift>}{Enter}{/Shift}");
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "current");
+  });
+
+  it("flips the default to the current checkout when the setting says so", async () => {
+    updateSettings({ agentWorkspaces: false });
+    const { onLaunchCli } = open();
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "current");
+    await userEvent.keyboard("{Shift>}{Enter}{/Shift}");
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "workspace");
+  });
+
+  it("offers a workspace launch from the hover action when the default is here", async () => {
+    updateSettings({ agentWorkspaces: false });
+    const cli = claude();
+    const { onLaunchCli } = open({ installed: { [cli.bin]: true } });
+    await userEvent.click(
+      screen.getByRole("button", { name: `Open ${cli.name} in a new workspace` }),
+    );
+    expect(onLaunchCli).toHaveBeenCalledWith(cli, "workspace");
   });
 
   it("does not run off the end of the list", async () => {

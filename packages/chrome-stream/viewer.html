@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Canopy Chrome preview</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #17191c; color: #ddd; font: 13px system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 10px; padding: 6px 10px; min-height: 34px; border-bottom: 1px solid #34373b; }
+  #status { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #status.error { color: #ffbb9e; }
+  button, select { font: inherit; color: inherit; background: #282c31; border: 1px solid #50565e; border-radius: 4px; padding: 3px 8px; }
+  select { max-width: 40%; }
+  button { cursor: pointer; }
+  #screen { position: relative; flex: 1; min-height: 0; display: grid; place-items: center; overflow: hidden; }
+  canvas { display: block; max-width: 100%; max-height: 100%; outline: none; }
+  #welcome { padding: 30px; max-width: 560px; line-height: 1.6; }
+  a { color: #a9c9ff; }
+  #typing { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  dialog { max-width: 440px; color: #ddd; background: #282c31; border: 1px solid #50565e; border-radius: 6px; }
+  dialog::backdrop { background: #0009; }
+  dialog input { width: 100%; margin-bottom: 12px; }
+  [hidden] { display: none !important; }
+</style>
+<header><span id="status" role="status">Connecting to Chrome…</span><select id="tabs" aria-label="Chrome project tabs" hidden></select><button id="reconnect">Reconnect</button></header>
+<main id="screen">
+  <div id="welcome">Approve the connection in Chrome to view your project here. Install the <a href="https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm" id="install">Playwright extension</a> if it is missing. Canopy opens its own tab and uses your existing Chrome session.</div>
+  <canvas id="canvas" aria-label="Live Chrome page" hidden></canvas>
+  <textarea id="typing" aria-label="Type into Chrome" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+</main>
+<dialog id="dialog"><p id="dialog-message"></p><input id="dialog-text" aria-label="Dialog response"><button id="dialog-cancel">Cancel</button> <button id="dialog-ok">OK</button></dialog>
+<script src="viewer.js"></script>
+</html>

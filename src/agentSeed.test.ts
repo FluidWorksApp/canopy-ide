@@ -106,6 +106,18 @@ describe("startCommandParked", () => {
     expect(fitsOnOneLine(start!.command)).toBe(true);
   });
 
+  it("keeps pinned route flags when it parks a long workflow prompt", async () => {
+    const start = await startCommandParked(
+      "codex",
+      long,
+      "/repo",
+      { model: "gpt-5.6-sol", effort: "high" },
+    );
+    expect(start?.command).toContain("-m 'gpt-5.6-sol'");
+    expect(start?.command).toContain("model_reasoning_effort=\"high\"");
+    expect(start?.command).toContain("/repo/.canopy/spot/brief-1.md");
+  });
+
   it("keeps the brief whole — nothing is trimmed to fit", async () => {
     await startCommandParked("claude", long, "/repo");
     expect(spotSaveContextText.mock.calls[0][1]).toHaveLength(long.length);

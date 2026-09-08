@@ -100,10 +100,10 @@ describe("deploying", () => {
     }
   });
 
-  it("treats a bare deploy as a preview", () => {
+  it("treats deployment as production and explicit preview as local", () => {
     expect(parseVibeIntent("deploy this")).toEqual({
       kind: "deploy",
-      target: "preview",
+      target: "production",
     });
     expect(parseVibeIntent("publish a preview")).toMatchObject({
       target: "preview",

@@ -46,8 +46,9 @@ export function restorableSessions(
     if ((digest.updated ?? 0) <= (forgotten[sessionId] ?? -1)) continue
     if (bestProjectId(cwd, projects) !== project.id) continue
     if (liveIds.has(sessionId) || livePlaces.has(`${agentId}\0${cwd}`)) continue
-    if (agentId === 'claude' && !lastHumanPrompt(digest.prompts)) continue
-    const command = commandToResume(clis.find((cli) => cli.id === agentId), sessionId)
+    const cli = clis.find((candidate) => candidate.id === agentId)
+    if (cli?.restoreRequiresHumanPrompt && !lastHumanPrompt(digest.prompts)) continue
+    const command = commandToResume(cli, sessionId)
     if (!command) continue
     const profile = digest.profile?.trim() || 'default'
     const key = `${agentId}\0${profile}\0${cwd}`

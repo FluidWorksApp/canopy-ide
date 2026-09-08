@@ -119,6 +119,34 @@ export function taskDescription(raw: unknown): string | undefined {
   return clamp(flatten(raw), 160) || undefined;
 }
 
+/** Baseline identity available before the model has done any work: the human
+ * prompt that began the turn. Explicit canopy_name_task output can refine it
+ * later. Attachment markers are transport metadata, and terse acknowledgments
+ * must not replace a useful existing title with "Continue" or "OK". */
+export function promptTaskIdentity(raw: unknown): {
+  title?: string;
+  description?: string;
+} {
+  if (typeof raw !== "string") return {};
+  const prompt = flatten(raw)
+    .replace(/^(?:\[Image #\d+\]\s*)+/i, "")
+    .trim();
+  if (!prompt || prompt.startsWith("<")) return {};
+  const description = taskDescription(prompt);
+  const acknowledgement = /^(?:ok(?:ay)?|yes|no|continue|go ahead|do it|proceed|thanks?)[.!]?$/i
+    .test(prompt);
+  return {
+    ...(!acknowledgement ? { title: taskTitle(prompt) } : {}),
+    ...(description ? { description } : {}),
+  };
+}
+
+// A human prompt is only a session's temporary identity, and the rule that
+// keeps follow-up messages from rewriting a tab's name now lives in tabName.ts
+// — the prompt writes its own slot, so "may I overwrite?" is not a question it
+// can ask wrongly. What used to be `shouldSeedPromptIdentity` was a guard that
+// every other writer had to remember to consult, and two of them did not.
+
 /** Everything an agent may say about its own run, cleaned. */
 export function taskIdentity(raw: {
   title?: unknown;

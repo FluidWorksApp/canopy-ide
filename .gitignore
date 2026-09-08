@@ -40,6 +40,7 @@ portal/dist/*
 
 # Sidecar binaries staged by scripts/prepare-sidecar.mjs (built artifacts)
 /src-tauri/binaries/
+/src-tauri/chrome-stream/
 
 # design-sync: staged scripts, build output, and all sync state/inputs
 /.ds-sync/

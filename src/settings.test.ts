@@ -3,6 +3,8 @@ import {
   formatHotkey,
   getSettings,
   DEFAULT_DICTATION_HOTKEY,
+  TERMINAL_SCROLLBACK_MAX_ROWS,
+  TERMINAL_SCROLLBACK_MIN_ROWS,
   type Hotkey,
   keyLabel,
   matchesHotkey,
@@ -17,36 +19,65 @@ describe("getSettings / updateSettings", () => {
   it("returns defaults when nothing is stored", () => {
     const s = getSettings();
     expect(s.scrollback).toBe(5_000);
+    expect(s.sessionNameTheme).toBe("canopy");
     expect(s.theme).toBe("gotham");
+    expect(s.browserEngine).toBe("proxy");
     expect(s.trackerKeys).toEqual({});
     expect(s.tabSwitchMode).toBe("recent");
     expect(s.restoreUserClosedSessions).toBe(false);
     expect(s.agentAskForAttention).toBe(false);
+    expect(s.agentsMaySpawn).toBe(true);
+    expect(s.notificationPopupsEnabled).toBe(true);
+    expect(s.terminalMemoryPromptsEnabled).toBe(true);
     expect(s.dictationTriggerMode).toBe("hold");
     expect(s.dictationModKey).toBe("ShiftLeft");
   });
 
-  it("overlays stored values on top of defaults", () => {
+  it("overlays stored values and clamps scrollback to its renderer bound", () => {
     updateSettings({ scrollback: 500 });
     const s = getSettings();
-    expect(s.scrollback).toBe(500);
+    expect(s.scrollback).toBe(TERMINAL_SCROLLBACK_MIN_ROWS);
     expect(s.fontSize).toBe(13); // untouched default still present
+
+    localStorage.setItem(
+      "canopy.settings",
+      JSON.stringify({ scrollback: Number.MAX_SAFE_INTEGER }),
+    );
+    expect(getSettings().scrollback).toBe(TERMINAL_SCROLLBACK_MAX_ROWS);
+  });
+
+  it.each(["webview", "chromium", "unknown"])("migrates retired browser choice %s to Embedded", (browserEngine) => {
+    localStorage.setItem("canopy.settings", JSON.stringify({ browserEngine }));
+    expect(getSettings().browserEngine).toBe("proxy");
+  });
+
+  it.each(["proxy", "chrome"] as const)("preserves browser choice %s", (browserEngine) => {
+    updateSettings({ browserEngine });
+    expect(getSettings().browserEngine).toBe(browserEngine);
   });
 
   it("round-trips a patch through localStorage", () => {
     updateSettings({
+      sessionNameTheme: "retro",
       theme: "gotham",
       customAccent: "#ff0000",
       tabSwitchMode: "order",
       restoreUserClosedSessions: true,
       agentAskForAttention: false,
+      agentsMaySpawn: false,
+      notificationPopupsEnabled: false,
+      terminalMemoryPromptsEnabled: false,
     });
     const s = getSettings();
     expect(s.theme).toBe("gotham");
+    expect(s.sessionNameTheme).toBe("retro");
     expect(s.customAccent).toBe("#ff0000");
     expect(s.tabSwitchMode).toBe("order");
     expect(s.restoreUserClosedSessions).toBe(true);
     expect(s.agentAskForAttention).toBe(false);
+    expect(s.agentsMaySpawn).toBe(false);
+    expect(s.notificationPopupsEnabled).toBe(false);
+    expect(s.terminalMemoryPromptsEnabled).toBe(false);
   });
 
   it("merges successive patches rather than replacing the whole object", () => {
@@ -60,6 +91,14 @@ describe("getSettings / updateSettings", () => {
   it("falls back to defaults on corrupt stored JSON", () => {
     localStorage.setItem("canopy.settings", "{not json");
     expect(getSettings().scrollback).toBe(5_000);
+  });
+
+  it("rejects a hand-edited unknown session-name theme", () => {
+    localStorage.setItem(
+      "canopy.settings",
+      JSON.stringify({ sessionNameTheme: "definitely-not-a-theme" }),
+    );
+    expect(getSettings().sessionNameTheme).toBe("canopy");
   });
 
   it("migrates the former default combo and reserved Command trigger", () => {

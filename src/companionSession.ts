@@ -15,6 +15,7 @@ import * as ipc from "./ipc";
 import {
   actionPolicy,
   companionCli,
+  companionModelForCli,
   companionSessionId,
   forgetCompanionSession,
   tierFor,
@@ -156,6 +157,15 @@ function amendReply(fn: (m: CompanionMessage) => CompanionMessage): void {
   set({ messages });
 }
 
+const NO_REPLY =
+  "No reply came back. The agent may have hit a limit — try again, or check Settings → Agents.";
+
+/** A concrete transport error already has its own recovery card. Adding a
+ * guessed usage-limit message above it produced two contradictory failures for
+ * one turn, so the generic fallback exists only when there is no real error. */
+export const emptyTurnFallback = (error: string | null): string | null =>
+  error?.trim() ? null : NO_REPLY;
+
 function onEvent(event: StructuredRunnerEvent): void {
   switch (event.kind) {
     case "ready":
@@ -188,11 +198,17 @@ function onEvent(event: StructuredRunnerEvent): void {
       // not an empty bubble: it means the CLI accepted the message and said
       // nothing back, which is indistinguishable from being ignored.
       const reply = openReply();
-      if (reply && !reply.text.trim() && !(reply.tools ?? []).length) {
+      const fallback = emptyTurnFallback(state.error);
+      if (
+        fallback &&
+        reply &&
+        !reply.text.trim() &&
+        !(reply.tools ?? []).length
+      ) {
         amendReply((m) => ({
           ...m,
           failed: true,
-          text: "No reply came back. The agent may have hit a limit — try again, or check Settings → Agents.",
+          text: fallback,
         }));
       }
       set({ status: "ready" });
@@ -350,7 +366,7 @@ export async function startCompanion(
       sessionId,
       systemPrompt,
       roots,
-      model: s.companionModel,
+      model: companionModelForCli(cli.id, s.companionModel),
       authority,
     };
 
@@ -482,6 +498,53 @@ export async function stopCompanion(): Promise<void> {
   set({ ...EMPTY, generation: state.generation });
   await t?.stop().catch(() => {});
   await ipc.companionKill().catch(() => {});
+}
+
+/** Stop the work in flight without making the user hunt for the underlying
+ * CLI process. One-shot transports remain ready for the next message; older
+ * streaming transports fall back to stopping the session cleanly. */
+export async function cancelCompanionTurn(): Promise<void> {
+  const t = transport;
+  if (!t || state.status !== "working") return;
+  if (t.cancelTurn) {
+    await t.cancelTurn().catch((err) => {
+      set({ status: "ready", error: String(err) });
+    });
+    return;
+  }
+  transport = null;
+  await t.stop().catch(() => {});
+  set({ status: "failed", error: "Turn cancelled. Retry to reconnect." });
+}
+
+/** The panel's Retry button is real intent. A one-shot runner can replay the
+ * exact wire message; a stopped session is started again from the last known
+ * workspace context. */
+export async function retryCompanion(): Promise<boolean> {
+  if (transport?.retryTurn) {
+    const messages = state.messages.slice();
+    const last = messages[messages.length - 1];
+    if (last?.who === "ash") {
+      messages[messages.length - 1] = { ...last, text: "", tools: [], failed: false };
+    }
+    set({ status: "working", error: null, messages });
+    try {
+      await transport.retryTurn();
+    } catch (err) {
+      set({ status: "ready", error: String(err) });
+    }
+    return true;
+  }
+  if (!transport && lastStart) {
+    set({ error: null });
+    await startCompanion(lastStart);
+    return true;
+  }
+  if (transport) {
+    set({ status: "ready", error: null });
+    return true;
+  }
+  return false;
 }
 
 /** Send a message. Adds the user's turn and an empty reply for the stream to

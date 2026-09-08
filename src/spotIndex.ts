@@ -8,6 +8,7 @@
 // never reports any messages.
 import { getSettings } from "./settings";
 import * as ipc from "./ipc";
+import { AGENT_CLIS } from "./projects";
 
 export interface IndexableAgent {
   /** Registry id, as used by projects.ts and by stores.rs. */
@@ -23,46 +24,21 @@ export interface IndexableAgent {
 /** Every CLI whose own on-disk store Canopy can read. Amp is deliberately
  *  absent: its threads live on Sourcegraph's servers, so there is nothing on
  *  this machine to index. */
-export const INDEXABLE_AGENTS: IndexableAgent[] = [
-  {
-    id: "claude",
-    label: "Claude Code",
-    store: "~/.claude/projects/**/*.jsonl",
-  },
-  {
-    id: "codex",
-    label: "Codex CLI",
-    store: "~/.codex/sessions/**/rollout-*.jsonl",
-  },
-  {
-    id: "omp",
-    label: "oh-my-pi",
-    store: "~/.omp/agent/sessions/**/*.jsonl",
-    note: "Sub-agent transcripts are indexed under the conversation that spawned them.",
-  },
+const LEGACY_INDEXABLE_AGENTS: IndexableAgent[] = [
   {
     id: "gemini",
     label: "Gemini CLI",
     store: "~/.gemini/tmp/<project>/chats/*.json",
     note: "Filed under a hash of the project path, so only projects open in Canopy can be found.",
   },
-  {
-    id: "agy",
-    label: "Antigravity",
-    store: "~/.gemini/antigravity-cli/conversations/*.db",
-    note: "Stored as protobuf; the text is recovered from the blobs, so snippets can read roughly.",
-  },
-  {
-    id: "opencode",
-    label: "OpenCode",
-    store: "~/.local/share/opencode/opencode.db",
-  },
-  {
-    id: "aider",
-    label: "Aider",
-    store: "<project>/.aider.chat.history.md",
-    note: "No session ids: a hit opens the history file itself.",
-  },
+];
+
+export const INDEXABLE_AGENTS: IndexableAgent[] = [
+  ...AGENT_CLIS.flatMap((cli): IndexableAgent[] => {
+    const store = cli.capabilities?.conversationStore;
+    return store ? [{ id: cli.id, label: cli.name, store: store.path, note: store.note }] : [];
+  }),
+  ...LEGACY_INDEXABLE_AGENTS,
 ];
 
 /** The ingest call for the user's current choices. Kept here so the palette and

@@ -51,6 +51,9 @@ interface ChangesPanelProps {
   /** Throw one file's changes away — restored from HEAD, or deleted when it's
    *  untracked. The panel confirms first; this is called on yes. */
   onDiscard?: (repo: string, file: FileChange) => void;
+  /** Removes the outer sidebar role when this is the Changes subview of the
+   * combined Source control panel. It still owns its own scrolling region. */
+  embedded?: boolean;
 }
 
 /** Staged / not-yet-staged within one repo group. Conflicted files are neither:
@@ -90,6 +93,7 @@ export function ChangesPanel({
   onUnstage,
   onCommit,
   onDiscard,
+  embedded = false,
 }: ChangesPanelProps) {
   /** One message per repo: a project with two components has two working trees
    *  and two commits to write, and sharing one box between them would put the
@@ -150,7 +154,7 @@ export function ChangesPanel({
   const collabEdited = (collab ?? []).filter((c) => c.edited);
   const shown = total + collabEdited.length;
   return (
-    <div className="side-panel">
+    <div className={embedded ? "changes-panel-embedded" : "side-panel"}>
       {menu.menu && (
         <ContextMenu
           x={menu.menu.x}

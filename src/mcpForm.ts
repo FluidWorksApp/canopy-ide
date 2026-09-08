@@ -12,6 +12,45 @@
 // send a call the user didn't write.
 import type { JsonSchema } from "./ipc";
 
+const MAX_SCHEMA_BYTES = 512 * 1024;
+const MAX_SCHEMA_NODES = 10_000;
+const MAX_SCHEMA_DEPTH = 64;
+
+/** A cheap, deterministic safety pass for server-authored Draft 2020-12
+ * schemas. Unknown keywords remain valid and fall back to JSON controls; only
+ * resource exhaustion and references that would require external I/O are
+ * rejected. The native client applies the same limits before IPC. */
+export function schemaSafety(schema: unknown): string | null {
+  let encoded: string;
+  try {
+    encoded = JSON.stringify(schema);
+  } catch {
+    return "schema is not JSON";
+  }
+  if (encoded.length > MAX_SCHEMA_BYTES) return "schema is too large";
+  if (typeof schema !== "boolean" && (!schema || typeof schema !== "object"))
+    return "schema must be an object or boolean";
+
+  let nodes = 0;
+  const visit = (value: unknown, depth: number): string | null => {
+    if (depth > MAX_SCHEMA_DEPTH) return "schema is too deep";
+    nodes += 1;
+    if (nodes > MAX_SCHEMA_NODES) return "schema has too many nodes";
+    if (!value || typeof value !== "object") return null;
+    if (!Array.isArray(value)) {
+      const reference = (value as Record<string, unknown>).$ref;
+      if (typeof reference === "string" && !reference.startsWith("#"))
+        return "external $ref is not allowed";
+    }
+    for (const child of Object.values(value)) {
+      const error = visit(child, depth + 1);
+      if (error) return error;
+    }
+    return null;
+  };
+  return visit(schema, 0);
+}
+
 /** A control the form knows how to draw. */
 export type FieldKind = "string" | "text" | "number" | "boolean" | "enum" | "json";
 
@@ -70,6 +109,7 @@ function kindOf(name: string, schema: JsonSchema): FieldKind {
  *  so it is preserved rather than sorted, except that required fields come
  *  first: they are what the user has to fill in to press Run. */
 export function fieldsOf(schema: JsonSchema | null | undefined): Field[] {
+  if (schemaSafety(schema) !== null) return [];
   const properties = schema?.properties;
   if (!properties || typeof properties !== "object") return [];
   const required = new Set(

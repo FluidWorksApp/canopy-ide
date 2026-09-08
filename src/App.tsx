@@ -20,6 +20,7 @@ import {
   loadWorkspace,
   newComponentId,
   newProjectId,
+  recordVibeDiscoveryFailure,
   saveWorkspace,
   saveWorkspaceStrict,
   type Project,
@@ -27,6 +28,14 @@ import {
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, Notify, RelayHandle } from "./types";
 import type { CustomMicroTask } from "./microTasks";
+import { mergeIntegrationOperations, type ProjectIntegrationState } from "./projectIntegrations";
+import { shedRendererPressure } from "./rendererPressureRelief";
+import { bindMemoryPressure } from "./memoryPressureBinding";
+import {
+  memoryPressureMessage,
+  RECOVERY_NOTICE_SESSION_KEY,
+  rendererRecoveryNotice,
+} from "./memoryResilienceMessages";
 import {
   applyVibeTargetSelection,
   type VibeTargetSelection,
@@ -35,6 +44,7 @@ import {
   derivePending,
   parseAgentEvent,
   pendingForRoots,
+  trimAgentEvents,
 } from "./notifications";
 import {
   formatDeepLink,
@@ -45,6 +55,7 @@ import {
 import {
   attentionItems,
   badgeFor,
+  buildAttentionItems,
   dismissToast,
   forProject,
   isOutstanding,
@@ -59,6 +70,7 @@ import {
   toastMs,
   type AttentionItem,
 } from "./attention";
+import { fidelityFor, POLICY } from "../shared/agentLife";
 import { remoteAttentionSnapshot } from "./remoteAttention";
 import { useAttention } from "./useAttention";
 import { NotificationCenter } from "./components/NotificationCenter";
@@ -68,6 +80,16 @@ import { companionName, summonCompanion } from "./companion";
 import type { CompanionProposal } from "./companionSession";
 import { personaBinding } from "./personaBinding";
 import { getSettings, subscribeSettings, THEME_CHANGE_EVENT } from "./settings";
+import {
+  dismissTerminalMemoryPromptsForWindow,
+  subscribeTerminalMemoryPromptVisibility,
+  terminalMemoryPromptsVisible,
+} from "./terminalMemoryPromptVisibility";
+import { spawnedAgentTakesFocus } from "./agentSpawn";
+import {
+  projectForTerminalCwd,
+  terminalAttachmentQueue,
+} from "./terminalAttachmentQueue";
 import { readRemoteThemeTokens } from "./remoteTheme";
 import { useTabDrag } from "./tabDrag";
 import * as prWatch from "./prWatchStore";
@@ -114,6 +136,17 @@ import { TooltipLayer } from "./components/TooltipLayer";
 import { Onboarding } from "./components/Onboarding";
 import { Welcome } from "./components/Welcome";
 import { Dialog } from "./components/Dialog";
+import { TerminalGovernorCard } from "./components/TerminalGovernorDialog";
+import {
+  terminalMemoryQuotaSummary,
+} from "./terminalMemoryPressure";
+import {
+  beginGovernorPromptCooldown as addGovernorPromptCooldown,
+  governorPromptEligible,
+  pruneGovernorPromptCooldowns,
+} from "./governorPrompt";
+import { identifyAgent } from "./agentIdentity";
+import { terminalDisplayName } from "./agentDisplayName";
 import { shouldOnboard, markOnboarded } from "./onboarding";
 import { isSelftest, setSelftestMode } from "./selftest/mode";
 import { startBrowserWatchdog } from "./browserWatchdog";
@@ -150,6 +183,8 @@ import {
 // restarts and re-associates with the same relay on reconnect. Capped, and
 // scoped by relay so joining a different team never mixes transcripts.
 const RELAY_CHAT_PREFIX = "canopy.relayChat:";
+const governorAttentionKey = (id: number) => `governor-memory:${id}`;
+const NO_DISMISSED_GOVERNOR_REQUESTS = new Set<string>();
 function loadRelayChat(label: string): ipc.RelayChatMsg[] {
   try {
     const raw = localStorage.getItem(RELAY_CHAT_PREFIX + label);
@@ -217,6 +252,8 @@ function publishScopes(state: WorkspaceState) {
 export default function App() {
   const [ws, setWs] = useState<WorkspaceState>(emptyWorkspace);
   const [loaded, setLoaded] = useState(false);
+  const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(null);
+  const [workspaceLoadAttempt, setWorkspaceLoadAttempt] = useState(0);
   const [dialog, setDialog] = useState<
     { mode: "new" } | { mode: "edit"; project: Project } | null
   >(null);
@@ -248,12 +285,204 @@ export default function App() {
   // Host memory pressure (0 fine / 1 warn / 2 critical). Non-null while the
   // user should shed load — cleared by Dismiss or an "ok" reading.
   const [memPressure, setMemPressure] = useState<ipc.MemoryPressure | null>(null);
+  const [terminalGovernor, setTerminalGovernor] =
+    useState<ipc.TerminalGovernorSnapshot | null>(null);
+  const [terminalQuotaGroupsByProject, setTerminalQuotaGroupsByProject] =
+    useState<Record<string, number[][]>>({});
+  const onTerminalQuotaGroupsChange = useCallback(
+    (projectId: string, groups: number[][]) => {
+      setTerminalQuotaGroupsByProject((current) => {
+        if (JSON.stringify(current[projectId] ?? []) === JSON.stringify(groups)) {
+          return current;
+        }
+        return { ...current, [projectId]: groups };
+      });
+    },
+    [],
+  );
+  const [governorBusy, setGovernorBusy] = useState(false);
+  const [governorError, setGovernorError] = useState<string | null>(null);
+  const [activeGovernorRequestId, setActiveGovernorRequestId] =
+    useState<string | null>(null);
+  const [governorPromptCooldowns, setGovernorPromptCooldowns] = useState<
+    Record<number, number>
+  >({});
+  const beginGovernorPromptCooldown = useCallback((id: number) => {
+    setGovernorPromptCooldowns((current) =>
+      addGovernorPromptCooldown(current, id, Date.now()),
+    );
+  }, []);
+  useEffect(() => {
+    const expiries = Object.values(governorPromptCooldowns);
+    if (expiries.length === 0) return;
+    const nextExpiry = Math.min(...expiries);
+    const timer = window.setTimeout(() => {
+      const now = Date.now();
+      setGovernorPromptCooldowns((current) =>
+        pruneGovernorPromptCooldowns(current, now),
+      );
+    }, Math.max(0, nextExpiry - Date.now()) + 20);
+    return () => window.clearTimeout(timer);
+  }, [governorPromptCooldowns]);
+  const quotaGroupByPty = useMemo(() => {
+    const groups = new Map<number, number[]>();
+    for (const projectGroups of Object.values(terminalQuotaGroupsByProject)) {
+      for (const projectGroup of projectGroups) {
+        for (const id of projectGroup) groups.set(id, projectGroup);
+      }
+    }
+    return groups;
+  }, [terminalQuotaGroupsByProject]);
+  const quotaMembersFor = useCallback(
+    (id: number) => {
+      const ids = quotaGroupByPty.get(id) ?? [id];
+      const byId = new Map(
+        (terminalGovernor?.sessions ?? []).map((status) => [status.id, status]),
+      );
+      return ids.flatMap((memberId) => {
+        const status = byId.get(memberId);
+        return status ? [status] : [];
+      });
+    },
+    [quotaGroupByPty, terminalGovernor],
+  );
+  const showTerminalMemoryPrompts = useSyncExternalStore(
+    subscribeTerminalMemoryPromptVisibility,
+    terminalMemoryPromptsVisible,
+    () => true,
+  );
+  const pendingGovernor = showTerminalMemoryPrompts
+    ? terminalGovernor?.sessions.find((session) => {
+        if (!governorPromptEligible(
+          session,
+          NO_DISMISSED_GOVERNOR_REQUESTS,
+          governorPromptCooldowns,
+          activeGovernorRequestId,
+          Date.now(),
+        )) return false;
+        return quotaMembersFor(session.id).length > 0;
+      })
+    : undefined;
+  const pendingGovernorMembers = pendingGovernor
+    ? quotaMembersFor(pendingGovernor.id)
+    : [];
+  const pendingGovernorQuota = pendingGovernor
+    ? terminalMemoryQuotaSummary(pendingGovernorMembers, "over_allowance")
+    : null;
+  const pendingGovernorId = pendingGovernor?.id;
+  const pendingGovernorRequestId = pendingGovernor?.grant_request?.request_id;
+  const [pendingGovernorSessions, setPendingGovernorSessions] =
+    useState<ipc.SessionStats[]>([]);
+  const pendingGovernorTargetSession = pendingGovernorSessions.find(
+    (session) => session.id === pendingGovernorId,
+  );
+  const pendingGovernorMemberIds = pendingGovernorMembers
+    .map((member) => member.id)
+    .join(",");
+  useEffect(() => {
+    if (pendingGovernorId == null || !pendingGovernorRequestId) return;
+    const terminalName = terminalDisplayName({
+      id: pendingGovernorId,
+      name: pendingGovernorTargetSession?.name,
+      agent: identifyAgent(pendingGovernorTargetSession?.agent_hint) != null,
+    });
+    const attentionId = postAttention({
+      kind: "question",
+      tone: "warn",
+      title: `${terminalName} needs a memory decision`,
+      body: `Current use is ${fmtBytes(pendingGovernorQuota?.current_bytes ?? 0)} against the current ${fmtBytes(pendingGovernorQuota?.allowance_bytes ?? 0)} allowance. This platform remains monitor-only unless its capability says otherwise.`,
+      source: "app",
+      where: {
+        kind: "terminal",
+        ptyId: pendingGovernorId,
+        path: pendingGovernorTargetSession?.cwd,
+      },
+      dedupeKey: governorAttentionKey(pendingGovernorId),
+    });
+    // The actionable card below is this question's live renderer. Keep the
+    // durable item in Notifications without rendering a duplicate toast.
+    dismissToast(attentionId);
+    if (activeGovernorRequestId === pendingGovernorRequestId) return;
+    setActiveGovernorRequestId(pendingGovernorRequestId);
+    beginGovernorPromptCooldown(pendingGovernorId);
+  }, [
+    activeGovernorRequestId,
+    beginGovernorPromptCooldown,
+    pendingGovernorId,
+    pendingGovernorRequestId,
+    pendingGovernorQuota?.allowance_bytes,
+    pendingGovernorQuota?.current_bytes,
+    pendingGovernorTargetSession?.agent_hint,
+    pendingGovernorTargetSession?.cwd,
+    pendingGovernorTargetSession?.name,
+  ]);
+  useEffect(() => {
+    if (showTerminalMemoryPrompts) return;
+    setActiveGovernorRequestId(null);
+    for (const item of attentionItems()) {
+      if (
+        item.resolvedAt == null &&
+        item.dedupeKey?.startsWith("governor-memory:")
+      ) {
+        resolveAttentionByKey(item.dedupeKey, "withdrawn");
+      }
+    }
+  }, [showTerminalMemoryPrompts]);
+  useEffect(() => {
+    for (const item of attentionItems()) {
+      const rawId = item.dedupeKey?.match(/^governor-memory:(\d+)$/)?.[1];
+      if (!rawId || item.resolvedAt != null) continue;
+      const members = quotaMembersFor(Number(rawId));
+      const owner = members.find((member) => member.id === Number(rawId));
+      if (
+        owner == null ||
+        owner.state !== "over_allowance" ||
+        owner.grant_request == null
+      ) {
+        resolveAttentionByKey(item.dedupeKey!, "withdrawn");
+      }
+    }
+  }, [quotaMembersFor, terminalGovernor]);
+  useEffect(() => {
+    if (pendingGovernorId == null) {
+      setPendingGovernorSessions([]);
+      return;
+    }
+    const ids = new Set(
+      pendingGovernorMemberIds.split(",").filter(Boolean).map(Number),
+    );
+    const select = (sessions: ipc.SessionStats[]) => {
+      setPendingGovernorSessions(sessions.filter((session) => ids.has(session.id)));
+    };
+    void ipc.ptyStats().then(select).catch(() => {});
+    let cancelled = false;
+    let un: (() => void) | undefined;
+    void ipc.onPtyStats(select).then((stop) => {
+      if (cancelled) stop();
+      else un = stop;
+    });
+    return () => {
+      cancelled = true;
+      un?.();
+    };
+  }, [pendingGovernorId, pendingGovernorMemberIds]);
   // Everything that has asked for the user's attention (attention.ts). One
   // queue, one urgency model, one rule for when something leaves the app for
   // the OS — replacing a single-slot toast that the next caller overwrote, and
   // eight call sites that each decided for themselves whether to raise a
   // native banner and what to call it.
   const attention = useAttention();
+  const notificationPopupsEnabled = useSyncExternalStore(
+    subscribeSettings,
+    () => getSettings().notificationPopupsEnabled,
+    () => true,
+  );
+  const refreshTerminalGovernor = useCallback(() => {
+    return ipc
+      .terminalGovernorStatus()
+      .then(setTerminalGovernor)
+      .catch(() => {});
+  }, []);
   /** Which project a path belongs to, as the `projectId` / `projectName` pair
    *  every posted item carries. The name is stamped in rather than looked up
    *  later, like TaskRun.projectName: the history outlives the project being
@@ -326,6 +555,23 @@ export default function App() {
     },
     [projectIdentity, projectNameFor],
   );
+  useEffect(() => {
+    let cancelled = false;
+    void ipc.watchdogIncidents().then((incidents) => {
+      if (cancelled) return;
+      const seen = sessionStorage.getItem(RECOVERY_NOTICE_SESSION_KEY);
+      const recovery = rendererRecoveryNotice(incidents, seen);
+      if (!recovery) return;
+      sessionStorage.setItem(RECOVERY_NOTICE_SESSION_KEY, recovery.key);
+      notify(recovery.title, "info", {
+        body: recovery.body,
+        dedupe: recovery.key,
+      });
+    }).catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [notify]);
   // A micro-task in flight when Canopy last quit has no terminal to come back
   // to — its tab is ephemeral and never restored — so it can never report.
   // Settle those before anything new is recorded, or they stay "running"
@@ -348,6 +594,19 @@ export default function App() {
         resolveAttentionByKey(key, "withdrawn");
     }
   }, []);
+
+  // Resource decisions are Rust-owned and rare. Subscribe to state changes
+  // rather than mirroring the 2s process scan in App; the prompt asks before a
+  // one-session allowance is raised and remains honest when the platform has
+  // measurement but no proven hard boundary.
+  useEffect(() => {
+    let unGovernor: (() => void) | undefined;
+    refreshTerminalGovernor();
+    void ipc.onTerminalGovernor(() => refreshTerminalGovernor()).then((un) => {
+      unGovernor = un;
+    });
+    return () => unGovernor?.();
+  }, [refreshTerminalGovernor]);
   // The one place anything leaves the app for the OS.
   //
   // Was `if (document.hasFocus()) return;` copied into every call site that
@@ -363,6 +622,10 @@ export default function App() {
     for (const item of attention) {
       if (notifiedIds.current.has(item.id)) continue;
       notifiedIds.current.add(item.id);
+      // Count notices seen while delivery is disabled so switching the setting
+      // back on does not unleash a backlog of stale system banners. The item
+      // itself remains untouched in the notification centre.
+      if (!notificationPopupsEnabled) continue;
       if (!shouldReachOS(item, document.hasFocus())) continue;
       const { title, body } = osPayload(item);
       void ipc
@@ -378,7 +641,7 @@ export default function App() {
         // Notifications are a garnish — never fail anything over them.
         .catch(() => {});
     }
-  }, [attention]);
+  }, [attention, notificationPopupsEnabled]);
   // Toasts fade on a clock the store knows nothing about, so a tick drives the
   // re-render that retires them. Only while something is actually on screen:
   // an idle app should not hold a repeating timer for an empty overlay. The
@@ -564,6 +827,10 @@ export default function App() {
       id: newProjectId(),
       name,
       components: [{ id: newComponentId(), label: name, path: dir, commands: [] }],
+      vibe: {
+        version: 1,
+        enabled: getSettings().defaultProjectLens === "build",
+      },
     });
   }, []);
 
@@ -663,7 +930,10 @@ export default function App() {
   // A tab that was asleep when the app last quit comes back asleep — and a
   // sleeping project watches nothing, so it registers nothing until it wakes.
   useEffect(() => {
+    let cancelled = false;
+    setWorkspaceLoadError(null);
     void loadWorkspace().then(async (loadedState) => {
+      if (cancelled) return;
       // Give legacy project structure stable identity, then move old app-wide
       // custom tasks onto their project. Both are one-shot, persisted before
       // anything reads the workspace.
@@ -686,6 +956,8 @@ export default function App() {
               ?.components.map((c) => c.path) ?? [],
         );
       await Promise.all(paths.map((p) => ipc.workspaceAdd(p).catch(() => {})));
+    }).catch((error) => {
+      if (!cancelled) setWorkspaceLoadError(String(error));
     });
     const subs = [
       ipc.onAgentEvents((raws) => {
@@ -694,10 +966,13 @@ export default function App() {
         // one setState per line — the bridge batches each 500ms window.
         const ts = Date.now();
         setAgentEvents((prev) =>
-          [
-            ...prev,
-            ...raws.map((raw) => ({ ts, data: parseAgentEvent(raw) })),
-          ].slice(-200),
+          // Not a bare slice: the cap is app-wide and one of this list's
+          // consumers is per-pty, so a busy project used to evict a quiet
+          // terminal's only session stamp.
+          trimAgentEvents(
+            [...prev, ...raws.map((raw) => ({ ts, data: parseAgentEvent(raw) }))],
+            200,
+          ),
         );
       }),
       ipc.onRelayState(setRelayStatus),
@@ -882,7 +1157,7 @@ export default function App() {
       }),
       // Native menu accelerators (Cmd+W etc.) → scoped in-app actions. The
       // visible ProjectView handles tab-level ones; close-project is ours.
-      import("@tauri-apps/api/event").then(({ listen }) =>
+      import("./host").then(({ listen }) =>
         listen<string>("menu", (e) => {
           if (e.payload === "close-project") {
             const active = wsRef.current.activeId;
@@ -917,7 +1192,7 @@ export default function App() {
               })
               .catch((err) => notify(`Update check failed: ${err}`, "error"));
           } else if (e.payload === "install-cli") {
-            void import("@tauri-apps/api/core").then(({ invoke }) =>
+            void import("./host").then(({ invoke }) =>
               invoke<string>("cli_install_shim")
                 .then((m) => notify(m, "success"))
                 .catch((err) => notify(String(err), "error")),
@@ -1064,13 +1339,14 @@ export default function App() {
       .then(setRelayStatus)
       .catch(() => {});
     return () => {
+      cancelled = true;
       window.removeEventListener("keydown", keys);
       window.removeEventListener("canopy:open-settings", openSettings);
       if (zoomHideTimer.current !== null)
         window.clearTimeout(zoomHideTimer.current);
       subs.forEach((s) => void s.then((fn) => fn()));
     };
-  }, []);
+  }, [workspaceLoadAttempt]);
 
   // First launch on this machine: greet with the walkthrough once the
   // workspace has loaded (so it sits above the empty Welcome, not a blank app).
@@ -1078,13 +1354,17 @@ export default function App() {
     if (loaded && shouldOnboard()) setOnboarding(true);
   }, [loaded]);
 
-  // The webview resolves shortcuts from settings on every keydown. Native menu
-  // accelerators need the same profile pushed across the Tauri boundary, both
-  // on launch and whenever onboarding or Settings changes it.
+  // The webview resolves shortcuts and terminal names from settings. Their
+  // native owners need the same choices pushed across the Tauri boundary, both
+  // on launch and whenever onboarding or Settings changes them.
   useEffect(() => {
     const sync = () => {
-      void ipc.setShortcutProfile(getSettings().keymapProfile).catch((err) =>
+      const settings = getSettings();
+      void ipc.setShortcutProfile(settings.keymapProfile).catch((err) =>
         console.warn("failed to apply native shortcut profile", err),
+      );
+      void ipc.ptySetNameTheme(settings.sessionNameTheme).catch((err) =>
+        console.warn("failed to apply session name theme", err),
       );
     };
     sync();
@@ -1095,7 +1375,10 @@ export default function App() {
   // Republished on every settings write, because the sidecar reads it when an
   // agent asks for its tool list — which can be at any moment.
   useEffect(() => {
-    const publish = () => void ipc.contextTools(getSettings().disabledTools);
+    const publish = () => {
+      const settings = getSettings();
+      void ipc.contextTools(settings.disabledTools, settings.agentsMaySpawn);
+    };
     publish();
     window.addEventListener(THEME_CHANGE_EVENT, publish);
     return () => window.removeEventListener(THEME_CHANGE_EVENT, publish);
@@ -1139,7 +1422,9 @@ export default function App() {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const publish = () =>
-      void ipc.remoteSetAttention(remoteAttentionSnapshot()).catch(() => {});
+      void ipc
+        .remoteSetAttention(notificationPopupsEnabled ? remoteAttentionSnapshot() : [])
+        .catch(() => {});
     publish();
     const unsub = subscribeAttention(() => {
       if (timer) clearTimeout(timer);
@@ -1149,7 +1434,7 @@ export default function App() {
       if (timer) clearTimeout(timer);
       unsub();
     };
-  }, []);
+  }, [notificationPopupsEnabled]);
 
   // Remote launches from the same resolved registry as desktop: custom CLIs,
   // binary overrides, availability and verified resume syntax included.
@@ -1174,13 +1459,13 @@ export default function App() {
   // plugin.
   useEffect(() => {
     if (!loaded) return;
-    void import("@tauri-apps/api/core").then(({ invoke }) =>
+    void import("./host").then(({ invoke }) =>
       invoke<string | null>("cli_take_pending_open")
         .then((dir) => (dir ? openDirAsProject(dir) : undefined))
         .catch(() => {}),
     );
     let unlisten: (() => void) | undefined;
-    void import("@tauri-apps/api/event").then(({ listen }) =>
+    void import("./host").then(({ listen }) =>
       listen<string>("cli-open", (e) => void openDirAsProject(e.payload)).then(
         (fn) => {
           unlisten = fn;
@@ -1234,16 +1519,34 @@ export default function App() {
     void ipc.selftestConfig().then((cfg) => {
       if (!cfg || cancelled) return;
       setSelftestMode(cfg.scenario);
-      void import("./selftest/browserSelftest")
-        .then((m) =>
-          m.runBrowserSelftest(cfg, {
+      const scenario = cfg.scenario === "browser"
+        ? import("./selftest/browserSelftest").then((m) => m.runBrowserSelftest(cfg, {
             openDirAsProject,
             projectIdFor: (dir) =>
               wsRef.current.projects.find((p) =>
                 p.components.some((c) => c.path === dir),
               )?.id,
-          }),
-        )
+          }))
+        : cfg.scenario === "vibe-exit"
+          ? import("./selftest/vibeExitSelftest").then((m) => m.runVibeExitSelftest(cfg, {
+              openDirAsProject,
+              projectIdFor: (dir) =>
+                wsRef.current.projects.find((p) =>
+                  p.components.some((c) => c.path === dir),
+                )?.id,
+            }))
+          : cfg.scenario === "terminal-recovery"
+            ? import("./selftest/terminalRecoverySelftest").then((m) =>
+                m.runTerminalRecoverySelftest(cfg, {
+                  openDirAsProject,
+                  projectIdFor: (dir) =>
+                    wsRef.current.projects.find((p) =>
+                      p.components.some((c) => c.path === dir),
+                    )?.id,
+                }),
+              )
+          : Promise.reject(new Error(`unknown selftest scenario: ${cfg.scenario}`));
+      void scenario
         // A scenario that cannot even start must still report, or the run ends
         // as a timeout that says nothing about why.
         .catch((err) =>
@@ -1287,12 +1590,17 @@ export default function App() {
       // After the updater returns — a disk write and an IPC don't belong in
       // the render phase.
       queueMicrotask(() => {
-        void saveWorkspace(next);
+        void saveWorkspaceStrict(next).catch((error) => {
+          notify("Workspace changes are not saved", "error", {
+            body: String(error),
+            dedupe: "workspace-save-failed",
+          });
+        });
         publishScopes(next);
       });
       return next;
     });
-  }, []);
+  }, [notify]);
 
   const openProject = useCallback(
     async (id: string) => {
@@ -1635,71 +1943,161 @@ export default function App() {
   );
   useEffect(() => startSpotIndexJob(() => spotRoots.current), []);
 
+  // A project may be added after a failed/corrupt workspace read left this
+  // renderer with no routing map. Keep native lifetime identities already
+  // handed off, while retrying only the unmatched ones when roots change.
+  const routedTerminalIdentities = useRef(new Set<string>());
+  const endedTerminalIdentities = useRef(new Set<string>());
+  const terminalProjectSignature = useMemo(
+    () =>
+      JSON.stringify(
+        ws.projects.map((project) => [
+          project.id,
+          project.components.map((component) => component.path),
+        ]),
+      ),
+    [ws.projects],
+  );
+
   // A PTY opened from the phone (spawn_headless emits pty:spawned). Route it to
   // the project whose component path most-specifically contains its cwd, open
   // that project, and hand the tab to its ProjectView. The desktop mirrors the
   // agent the phone started — same session, both surfaces driving one PTY.
   useEffect(() => {
-    const norm = (p: string) => p.replace(/\/+$/, "");
-    // Deepest matching component path wins, so a broad root never steals an
-    // agent from a nested project (mirrors model.ts bestProjectId).
-    const projectForCwd = (cwd: string): string | undefined => {
-      const c = norm(cwd);
-      let bestId: string | undefined;
-      let bestLen = -1;
-      for (const p of wsRef.current.projects) {
-        for (const comp of p.components) {
-          const r = norm(comp.path);
-          if (r && (c === r || c.startsWith(r + "/")) && r.length > bestLen) {
-            bestLen = r.length;
-            bestId = p.id;
-          }
-        }
+    // Renderer registration happens before React mounts, while workspace
+    // hydration is asynchronous. Routing against the initial empty workspace
+    // classifies every surviving PTY as outside a project. Wait for the
+    // persisted project map; after the listener is live, reconcile against a
+    // fresh native snapshot so a phone spawn during hydration is not trapped
+    // between the boot snapshot and this listener.
+    if (!loaded) return;
+    let cancelled = false;
+    let unSpawn: (() => void) | undefined;
+    let unExit: (() => void) | undefined;
+    let listenerRetry: number | undefined;
+    let snapshotRetry: number | undefined;
+    let snapshotInFlight = false;
+    let listenerInFlight = false;
+    const routePty = async (
+      e: ipc.PtySpawned | ipc.PtySummary,
+      restored = false,
+    ) => {
+      const identity = `${e.id}:${e.session_generation}`;
+      if (
+        routedTerminalIdentities.current.has(identity) ||
+        endedTerminalIdentities.current.has(identity)
+      ) return;
+      const projectId =
+        (e.project_id && wsRef.current.projects.some((project) => project.id === e.project_id)
+          ? e.project_id
+          : undefined) ?? projectForTerminalCwd(wsRef.current.projects, e.cwd);
+      if (!projectId) {
+        notify(
+          `An active terminal is in ${e.cwd}, outside any project.`,
+          "info",
+          { dedupe: `unrouted-terminal:${identity}` },
+        );
+        return;
       }
-      return bestId;
+      await prepareProjectForAgentAction(
+        projectId,
+        restored ? false : getSettings().agentAskForAttention,
+      );
+      if (cancelled || endedTerminalIdentities.current.has(identity)) return;
+      // The queue is the acknowledgement boundary. A closed or hibernated
+      // project's view may mount much later than this async preparation;
+      // delivery waits for that mount instead of betting the PTY on a timer.
+      terminalAttachmentQueue.enqueue({
+        projectId,
+        ptyId: e.id,
+        sessionGeneration: e.session_generation,
+        cwd: e.cwd,
+        name: e.name,
+        title: e.title,
+        run: Boolean(e.run),
+        command: e.command ?? undefined,
+        componentId: e.execution_context?.componentId ?? undefined,
+        runCommandId: e.run_command_id ?? undefined,
+        // Recovery must not steal focus or manufacture attention.
+        activate: restored ? false : getSettings().agentAskForAttention,
+        // Desktop-owned sessions were previously killed by their tab.
+        killOnClose: "kind" in e && e.kind === "desktop",
+      });
+      routedTerminalIdentities.current.add(identity);
     };
-    let un: (() => void) | undefined;
-    void ipc
-      .onPtySpawned(async (e) => {
-        const projectId = projectForCwd(e.cwd);
-        if (!projectId) {
-          notify(
-            `A remote agent started in ${e.cwd}, outside any project.`,
-            "info",
-          );
+    const terminalEnded = (e: ipc.PtyExit) => {
+      const identity = `${e.id}:${e.session_generation}`;
+      endedTerminalIdentities.current.add(identity);
+      routedTerminalIdentities.current.delete(identity);
+      terminalAttachmentQueue.discard(e.id, e.session_generation);
+    };
+    const scheduleSnapshotRetry = () => {
+      if (cancelled || snapshotRetry != null) return;
+      snapshotRetry = window.setTimeout(() => {
+        snapshotRetry = undefined;
+        reconcile();
+      }, 1_000);
+    };
+    const reconcile = () => {
+      if (cancelled || snapshotInFlight) return;
+      snapshotInFlight = true;
+      void ipc
+        .rendererPtySessionsLive()
+        .then((sessions) => {
+          if (cancelled) return;
+          for (const session of sessions) {
+            if (session.kind !== "detached") void routePty(session, true);
+          }
+        })
+        .catch(scheduleSnapshotRetry)
+        .finally(() => {
+          snapshotInFlight = false;
+        });
+    };
+    const install = () => {
+      if (cancelled || listenerInFlight || (unSpawn && unExit)) return;
+      listenerInFlight = true;
+      void Promise.allSettled([
+        ipc.onPtySpawned((e) => void routePty(e)),
+        ipc.onPtyExit(terminalEnded),
+      ]).then(([spawnResult, exitResult]) => {
+        listenerInFlight = false;
+        const spawn = spawnResult.status === "fulfilled" ? spawnResult.value : undefined;
+        const exit = exitResult.status === "fulfilled" ? exitResult.value : undefined;
+        if (cancelled) {
+          spawn?.();
+          exit?.();
           return;
         }
-        await prepareProjectForAgentAction(
-          projectId,
-          getSettings().agentAskForAttention,
-        );
-        // A beat so a not-yet-open project's ProjectView mounts and registers
-        // its listener before the event fires; attachTerminal is idempotent by
-        // pty id, so a redundant dispatch just re-focuses the tab. A timer, not
-        // requestAnimationFrame: rAF stops firing while the window is occluded,
-        // and these flows start from an agent/phone precisely when the user is
-        // looking elsewhere. React commits (and timers) run fine unpainted.
-        window.setTimeout(
-          () =>
-            window.dispatchEvent(
-              new CustomEvent("canopy:attach-terminal", {
-                detail: {
-                  projectId,
-                  ptyId: e.id,
-                  cwd: e.cwd,
-                  title: e.title,
-                  activate: getSettings().agentAskForAttention,
-                },
-              }),
-            ),
-          80,
-        );
-      })
-      .then((u) => {
-        un = u;
+        if (spawn && exit) {
+          unSpawn = spawn;
+          unExit = exit;
+          reconcile();
+          return;
+        }
+        // Treat the pair as one boundary. Keeping only the successful half
+        // leaks listeners across retries and still permits either missed spawns
+        // or stale post-exit delivery.
+        spawn?.();
+        exit?.();
+        reconcile();
+        if (listenerRetry == null) {
+          listenerRetry = window.setTimeout(() => {
+            listenerRetry = undefined;
+            install();
+          }, 1_000);
+        }
       });
-    return () => un?.();
-  }, [notify, prepareProjectForAgentAction]);
+    };
+    install();
+    return () => {
+      cancelled = true;
+      if (listenerRetry != null) window.clearTimeout(listenerRetry);
+      if (snapshotRetry != null) window.clearTimeout(snapshotRetry);
+      unSpawn?.();
+      unExit?.();
+    };
+  }, [loaded, notify, prepareProjectForAgentAction, terminalProjectSignature]);
 
   // A clicked notification, or a `canopy 'canopy://…'` from a terminal.
   //
@@ -1728,6 +2126,12 @@ export default function App() {
       const hinted = Boolean(link.projectId || link.path);
       const projectId =
         projectForLink(link, state.projects) ??
+        // The cwd-shaped hints (a resources row, an agent's terminal) are
+        // routinely worktree paths that sit beside the component root rather
+        // than under it; the terminal resolver knows how to fold those.
+        (link.path
+          ? projectForTerminalCwd(state.projects, link.path)
+          : undefined) ??
         // An agent running in a worktree has a cwd (`<repo>-wt-…`) under no
         // component root, so a *path*-hinted link can still fail to resolve.
         // With exactly one project open there is only one place it could mean —
@@ -1799,7 +2203,7 @@ export default function App() {
   // the project would race the workspace it resolves against.
   useEffect(() => {
     if (!loaded) return;
-    void import("@tauri-apps/api/core").then(({ invoke }) =>
+    void import("./host").then(({ invoke }) =>
       invoke<string | null>("cli_take_pending_link")
         .then((raw) => (raw ? followDeepLink(parseDeepLink(raw)) : undefined))
         .catch(() => {}),
@@ -2022,9 +2426,12 @@ export default function App() {
           );
           return;
         }
+        const askForAttention = getSettings().agentAskForAttention;
         await prepareProjectForAgentAction(
           projectId,
-          getSettings().agentAskForAttention,
+          a.kind === "spawn_agent"
+            ? spawnedAgentTakesFocus(askForAttention)
+            : askForAttention,
         );
         // Timer, not rAF — see the attach-terminal dispatch above.
         window.setTimeout(
@@ -2233,31 +2640,18 @@ export default function App() {
     return () => un?.();
   }, [projectIdentity]);
 
-  // The watchdog pings this webview to confirm it is alive; the Rust loop
-  // reloads the window if the answers stop (a jetsam-killed renderer leaves
-  // the app blank with no crash report otherwise — issue #488). Answer the
-  // pings, and surface host memory pressure so the user can shed load before
-  // the system takes the renderer itself.
+  // Liveness is installed in main.tsx before Monaco/React startup, so a slow
+  // editor boot cannot be mistaken for a dead renderer. This effect only
+  // surfaces host pressure once the UI exists.
   useEffect(() => {
-    let unPing: (() => void) | undefined;
-    let unMem: (() => void) | undefined;
-    void ipc
-      .onWatchdogPing(() => void ipc.watchdogAck())
-      .then((u) => {
-        unPing = u;
-      });
-    void ipc
-      .onMemoryPressure((p) => setMemPressure(p.level > 0 ? p : null))
-      .then((u) => {
-        unMem = u;
-      });
-    void ipc
-      .memoryInfo()
-      .then((p) => p && p.level > 0 && setMemPressure(p));
-    return () => {
-      unPing?.();
-      unMem?.();
-    };
+    return bindMemoryPressure(
+      ipc.onMemoryPressure,
+      ipc.memoryInfo,
+      (p) => {
+        shedRendererPressure(p.level);
+        setMemPressure(p.level > 0 ? p : null);
+      },
+    );
   }, []);
 
   const saveProject = useCallback(
@@ -2396,7 +2790,13 @@ export default function App() {
     [followDeepLink],
   );
   const [notifOpen, setNotifOpen] = useState(false);
-  const notifBadge = useMemo(() => badgeFor(attention), [attention]);
+  const activeBuildMode =
+    ws.projects.find((project) => project.id === ws.activeId)?.vibe?.enabled === true;
+  const visibleAttention = useMemo(
+    () => (activeBuildMode ? buildAttentionItems(attention) : attention),
+    [activeBuildMode, attention],
+  );
+  const notifBadge = useMemo(() => badgeFor(visibleAttention), [visibleAttention]);
   // Stable, so TitleBar's memo isn't defeated by a fresh closure every tick.
   const openNotifications = useCallback(() => setNotifOpen(true), []);
 
@@ -2573,8 +2973,6 @@ export default function App() {
     () => getSettings().companionEnabled,
     () => false,
   );
-  const activeBuildMode =
-    ws.projects.find((project) => project.id === ws.activeId)?.vibe?.enabled === true;
   const { companionVisible, attentionFallbackVisible } = personaBinding(
     companionOn,
     activeBuildMode,
@@ -2604,11 +3002,14 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [attention, askedInDialog, toastTick],
   );
+  // Delivery surfaces use this view; the notification bell intentionally uses
+  // `visibleAttention` below so disabling pop-ups never loses a notice.
+  const deliveredToasts = notificationPopupsEnabled ? toasts : [];
   // Depend on the *fact* that something is timed, not on the array. `toasts` is
   // a fresh array every tick, so `[toasts]` tore the interval down and built a
   // new one on each of its own ticks — nine teardown/setup cycles for a 4.5s
   // toast, on top of nine full App re-renders.
-  const toastsAreTimed = toasts.some((t) => toastMs(t) != null);
+  const toastsAreTimed = deliveredToasts.some((t) => toastMs(t) != null);
   useEffect(() => {
     if (!toastsAreTimed) return;
     const t = window.setInterval(() => setToastTick((n) => n + 1), 500);
@@ -2847,25 +3248,36 @@ export default function App() {
     const blocked = allPending.filter((i) => i.kind !== "idle");
     const live = new Set(blocked.map((i) => `agent:${i.sessionId}`));
     for (const p of blocked) {
-      postAttention({
-        kind: "question",
-        tone: "info",
-        title:
-          p.kind === "question"
-            ? (p.questions?.[0]?.question ?? `${p.agent} is asking`)
-            : (p.message ?? `${p.agent} needs your attention`),
-        body: p.agent,
-        source: "agent",
-        ...projectIdentity(p.cwd),
-        // The terminal it is blocked in is the only place the answer can be
-        // typed. Without a pty stamp (codex, an agent outside a Canopy tab)
-        // the Agents panel is the nearest true answer.
-        where:
-          p.pty != null
-            ? { kind: "terminal", ptyId: p.pty, path: p.cwd }
-            : { kind: "panel", panel: "agents", path: p.cwd },
-        dedupeKey: `agent:${p.sessionId}`,
-      });
+      const transientPermission =
+        p.kind === "notification" &&
+        fidelityFor(p.agent).dwellStructuredBlock;
+      postAttention(
+        {
+          kind: "question",
+          tone: "info",
+          title:
+            p.kind === "question"
+              ? (p.questions?.[0]?.question ?? `${p.agent} is asking`)
+              : (p.message ?? `${p.agent} needs your attention`),
+          body: p.agent,
+          source: "agent",
+          ...projectIdentity(p.cwd),
+          // The terminal it is blocked in is the only place the answer can be
+          // typed. Without a pty stamp (codex, an agent outside a Canopy tab)
+          // the Agents panel is the nearest true answer.
+          where:
+            p.pty != null
+              ? { kind: "terminal", ptyId: p.pty, path: p.cwd }
+              : { kind: "panel", panel: "agents", path: p.cwd },
+          dedupeKey: `agent:${p.sessionId}`,
+        },
+        transientPermission
+          ? {
+              dwellMs: POLICY.structuredBlockDwellMs,
+              collapseMs: POLICY.permissionNoticeCooldownMs,
+            }
+          : undefined,
+      );
     }
     for (const key of bridgedAgentKeys.current) {
       if (!live.has(key)) resolveAttentionByKey(key, "withdrawn");
@@ -2925,6 +3337,7 @@ export default function App() {
         onEdit: () => void;
         onShareContext: (on: boolean) => void;
         onSaveCustomTasks: (tasks: CustomMicroTask[]) => void;
+        onSaveIntegrations: (state: ProjectIntegrationState) => Promise<void>;
         onPersistVibeTarget: (selection: VibeTargetSelection) => Promise<boolean>;
         onPersistVibeSetup: (project: Project) => Promise<boolean>;
       }
@@ -2949,6 +3362,21 @@ export default function App() {
         onSaveCustomTasks: (tasks) => {
           const p = find();
           if (p) void saveProject({ ...p, customTasks: tasks });
+        },
+        onSaveIntegrations: async (integrations) => {
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            const state = wsRef.current;
+            const current = state.projects.find((candidate) => candidate.id === id);
+            if (!current) throw new Error("The project is no longer open.");
+            const projects = state.projects.map((candidate) => candidate.id === id ? { ...current, integrations: mergeIntegrationOperations(current.integrations, integrations) } : candidate);
+            const candidate = { ...state, projects };
+            await saveWorkspaceStrict(candidate);
+            if (wsRef.current !== state) continue;
+            wsRef.current = candidate;
+            update({ projects });
+            return;
+          }
+          throw new Error("The project changed while saving its integrations. Try again.");
         },
         onPersistVibeTarget: async (selection) => {
           // Re-read after every awaited write. A teammate/project event may
@@ -2988,13 +3416,24 @@ export default function App() {
             const state = wsRef.current;
             const current = state.projects.find((candidate) => candidate.id === id);
             if (!current || configured.id !== id) return false;
+            const failedDiscovery = configured.vibe?.discovery;
             // A setup proposal was validated against the component identities
             // it observed. If they changed while persistence waited, discard it
             // rather than overwrite newer project structure.
             const observed = current.components.map((component) => `${component.id}:${component.path}`).join("|");
             const proposedFrom = configured.components.map((component) => `${component.id}:${component.path}`).join("|");
-            if (observed !== proposedFrom && current.vibe?.setupRevision) return false;
-            const projects = state.projects.map((candidate) => candidate.id === id ? configured : candidate);
+            if (!failedDiscovery && observed !== proposedFrom && current.vibe?.setupRevision) return false;
+            // Failure is a marker, not a project snapshot. Merge it onto the
+            // latest value so a long survey cannot undo edits made while it
+            // was running.
+            const next = failedDiscovery?.status === "failed"
+              ? recordVibeDiscoveryFailure(
+                  current,
+                  failedDiscovery.message,
+                  failedDiscovery.attemptedAt,
+                )
+              : configured;
+            const projects = state.projects.map((candidate) => candidate.id === id ? next : candidate);
             const candidate = { ...state, projects };
             try { await saveWorkspaceStrict(candidate); } catch { return false; }
             if (wsRef.current !== state) continue;
@@ -3017,6 +3456,21 @@ export default function App() {
     );
   }, []);
 
+  if (workspaceLoadError) {
+    return (
+      <main className="workspace-load-failure">
+        <h1>Your workspace was not replaced with an empty one</h1>
+        <p>
+          Canopy could not safely read either the workspace or its last-known-good
+          backup. No workspace changes will be saved until loading succeeds.
+        </p>
+        <pre>{workspaceLoadError}</pre>
+        <button type="button" onClick={() => setWorkspaceLoadAttempt((value) => value + 1)}>
+          Retry loading
+        </button>
+      </main>
+    );
+  }
   if (!loaded) return null;
 
   return (
@@ -3030,15 +3484,156 @@ export default function App() {
         <div
           className={`mem-banner ${memPressure.level === 2 ? "critical" : "warning"}`}
         >
-          <span>
-            Your Mac is low on memory — {fmtBytes(memPressure.free_bytes)} of{" "}
-            {fmtBytes(memPressure.total_bytes)} free. Close preview tabs or
-            agent terminals before the system force-quits this app.
-          </span>
+          <span>{memoryPressureMessage(memPressure, fmtBytes)}</span>
           <button onClick={() => setMemPressure(null)}>Dismiss</button>
         </div>
       )}
+      {/* One non-blocking corner stack for the governor question and ordinary
+          attention cards. It never takes focus or blocks workbench interaction. */}
+      {((pendingGovernor && pendingGovernorQuota && terminalGovernor) ||
+        (deliveredToasts.length > 0 && attentionFallbackVisible)) && (
+        <div className="notice-stack">
+        {pendingGovernor && pendingGovernorQuota && terminalGovernor && (
+          <TerminalGovernorCard
+          status={pendingGovernor}
+          quota={pendingGovernorQuota}
+          members={pendingGovernorMembers.map((status) => {
+            const session = pendingGovernorSessions.find(
+              (candidate) => candidate.id === status.id,
+            );
+            return {
+              status,
+              session: session
+                ? {
+                    name: session.name,
+                    agent: identifyAgent(session.agent_hint) != null,
+                  }
+                : undefined,
+            };
+          })}
+          capability={terminalGovernor.capability}
+          headroomBytes={terminalGovernor.grantable_headroom_bytes}
+          busy={governorBusy}
+          error={governorError}
+          onMaximumChange={(maxAllowanceBytes) => {
+            if (!pendingGovernor.cli_key || governorBusy) return;
+            beginGovernorPromptCooldown(pendingGovernor.id);
+            setGovernorBusy(true);
+            setGovernorError(null);
+            void ipc
+              .terminalGovernorSetMemoryMaximum(
+                pendingGovernor.cli_key,
+                maxAllowanceBytes,
+              )
+              .then(() => {
+                // A ceiling change is policy, not the requested grant. Keep
+                // this same decision open instead of closing it and then
+                // reopening an identical popup against the unchanged allowance.
+                refreshTerminalGovernor();
+              })
+              .catch((error) => setGovernorError(String(error)))
+              .finally(() => setGovernorBusy(false));
+          }}
+          onGrant={(incrementBytes, rememberForCli) => {
+            const request = pendingGovernor.grant_request;
+            if (!request || governorBusy) return;
+            beginGovernorPromptCooldown(pendingGovernor.id);
+            setGovernorBusy(true);
+            setGovernorError(null);
+            void ipc
+              .terminalGovernorGrant(
+                pendingGovernor.id,
+                request.budget_generation,
+                request.request_id,
+                incrementBytes,
+              )
+              .then(async (outcome) => {
+                setActiveGovernorRequestId(null);
+                resolveAttentionByKey(
+                  governorAttentionKey(pendingGovernor.id),
+                  "answered",
+                );
+                setTerminalGovernor((current) =>
+                  current == null
+                    ? current
+                    : {
+                        ...current,
+                        sessions: current.sessions.map((session) =>
+                          session.id === outcome.status.id
+                            ? outcome.status
+                            : session,
+                        ),
+                      },
+                );
+                if (rememberForCli) {
+                  try {
+                    await ipc.terminalGovernorRememberDefault(
+                      pendingGovernor.id,
+                      request.request_id,
+                      request.budget_generation,
+                      incrementBytes,
+                      true,
+                    );
+                  } catch (error) {
+                    notify(
+                      `Allowance raised, but the CLI default was not saved: ${String(error)}`,
+                      "warn",
+                    );
+                  }
+                }
+                await refreshTerminalGovernor();
+              })
+              .catch((error) => setGovernorError(String(error)))
+              .finally(() => setGovernorBusy(false));
+          }}
+          onStop={() => {
+            if (governorBusy) return;
+            beginGovernorPromptCooldown(pendingGovernor.id);
+            setGovernorBusy(true);
+            setGovernorError(null);
+            void ipc
+              .terminalGovernorStop(
+                pendingGovernor.id,
+                pendingGovernor.budget_generation,
+                pendingGovernor.stop_request_id,
+              )
+              .then(() => {
+                setActiveGovernorRequestId(null);
+                resolveAttentionByKey(
+                  governorAttentionKey(pendingGovernor.id),
+                  "answered",
+                );
+                refreshTerminalGovernor();
+              })
+              .catch((error) => setGovernorError(String(error)))
+              .finally(() => setGovernorBusy(false));
+          }}
+          onDismiss={() => {
+            const request = pendingGovernor.grant_request;
+            if (!request) return;
+            dismissTerminalMemoryPromptsForWindow();
+            beginGovernorPromptCooldown(pendingGovernor.id);
+            setActiveGovernorRequestId(null);
+            resolveAttentionByKey(
+              governorAttentionKey(pendingGovernor.id),
+              "dismissed",
+            );
+            setGovernorError(null);
+          }}
+          />
+        )}
+        {attentionFallbackVisible && deliveredToasts.map((t) => (
+          <NoticeToast
+            key={t.id}
+            item={t}
+            onDismiss={() => dismissToast(t.id)}
+            onFollow={() => void followAttention(t)}
+          />
+        ))}
+        </div>
+      )}
       <TitleBar
+        projects={ws.projects}
         openProjects={openProjects}
         activeId={ws.activeId}
         pendingCount={pendingCount}
@@ -3051,6 +3646,7 @@ export default function App() {
         notifCount={notifBadge.count}
         notifUrgency={notifBadge.urgency}
         onOpenNotifications={openNotifications}
+        onOpenProject={(id) => void openProject(id)}
         onSelectProject={selectProject}
         onCloseProject={handleCloseProject}
         onHibernateProject={hibernateProject}
@@ -3108,6 +3704,8 @@ export default function App() {
               allProjects={allProjectRoots}
               events={agentEvents}
               hookPath={hookPath}
+              terminalGovernor={terminalGovernor}
+              onTerminalQuotaGroupsChange={onTerminalQuotaGroupsChange}
               relay={relay}
               dismissedPending={dismissedPending}
               onDismissPending={dismissPending}
@@ -3115,6 +3713,7 @@ export default function App() {
               onNotice={notify}
               onShareContext={handlersFor(p.id).onShareContext}
               onSaveCustomTasks={handlersFor(p.id).onSaveCustomTasks}
+              onSaveIntegrations={handlersFor(p.id).onSaveIntegrations}
               onPersistVibeTarget={handlersFor(p.id).onPersistVibeTarget}
               onPersistVibeSetup={handlersFor(p.id).onPersistVibeSetup}
             />
@@ -3147,7 +3746,7 @@ export default function App() {
         })}
       </div>
 
-      {updateAvail && (
+      {!activeBuildMode && updateAvail && (
         <UpdateToast
           update={updateAvail}
           progress={updateProgress}
@@ -3157,7 +3756,7 @@ export default function App() {
           onDismiss={dismissUpdate}
         />
       )}
-      {releaseNotes && !updateAvail && (
+      {!activeBuildMode && releaseNotes && !updateAvail && (
         <ReleaseNotesToast
           release={releaseNotes}
           onOpen={() => openReleaseNotes(releaseNotes)}
@@ -3165,32 +3764,9 @@ export default function App() {
         />
       )}
 
-      {/* A stack, not a slot. Two things reporting at once used to mean the
-          first was destroyed before it could be read. Newest at the bottom,
-          nearest the corner the eye is already in.
-
-          Suppressed while the companion is up: the same items are delivered by
-          it instead, from wherever it is standing. This is a second *renderer*
-          on the one attention queue, never a second queue — urgency, fading and
-          whether something reaches the OS are still decided in attention.ts,
-          and a question is still outstanding until it is answered rather than
-          until its card is closed. */}
-      {toasts.length > 0 && attentionFallbackVisible && (
-        <div className="notice-stack">
-          {toasts.map((t) => (
-            <NoticeToast
-              key={t.id}
-              item={t}
-              onDismiss={() => dismissToast(t.id)}
-              onFollow={() => void followAttention(t)}
-            />
-          ))}
-        </div>
-      )}
-
       {companionVisible && (
         <Companion
-          notices={toasts}
+          notices={deliveredToasts}
           onDismissNotice={dismissToast}
           onFollowNotice={(item) => void followAttention(item)}
           onInstallCli={() => setSettingsOpen({ tab: "agents" })}
@@ -3212,7 +3788,7 @@ export default function App() {
 
       {notifOpen && (
         <NotificationCenter
-          items={attention}
+          items={visibleAttention}
           onFollow={(item) => void followAttention(item)}
           onClose={() => setNotifOpen(false)}
         />
@@ -3359,7 +3935,7 @@ export default function App() {
           }}
         />
       )}
-      <Dictation />
+      <Dictation notify={notify} />
       {/* Last, and once: every `title` in the app is drawn by this one bubble
           instead of the webview's native grey box. */}
       <TooltipLayer />

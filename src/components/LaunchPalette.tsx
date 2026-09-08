@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AGENT_CLIS, type AgentCli } from "../projects";
 import { AgentIcon, TerminalIcon } from "./icons";
 import { fuzzy } from "../fuzzy";
+import { getSettings } from "../settings";
 import { useEscapeLayer } from "../useEscape";
 
 type Row =
@@ -22,7 +23,7 @@ interface LaunchPaletteProps {
   /** Where the launch lands — shown in the footer so it isn't a guess. */
   targetLabel?: string;
   onShell: () => void;
-  onLaunchCli: (cli: AgentCli) => void;
+  onLaunchCli: (cli: AgentCli, where: "workspace" | "current") => void;
   /** Escape/backdrop cancellation only. A committed row uses its own callback. */
   onCancel: () => void;
 }
@@ -69,10 +70,17 @@ export function LaunchPalette({
       ?.scrollIntoView({ block: "nearest" });
   }, [sel]);
 
-  const commit = (row: Row | undefined) => {
+  // The setting names the default; ⇧↵ and the row's hover action are always
+  // the other one. Read at render: the palette is remounted per open, so a
+  // change in Settings is picked up the next time it appears.
+  const workspaceDefault = getSettings().agentWorkspaces;
+  const defaultWhere = workspaceDefault ? "workspace" : "current";
+  const altWhere = workspaceDefault ? "current" : "workspace";
+
+  const commit = (row: Row | undefined, where: "workspace" | "current" = defaultWhere) => {
     if (!row) return;
     if (row.kind === "shell") onShell();
-    else onLaunchCli(row.cli);
+    else onLaunchCli(row.cli, where);
   };
 
   return (
@@ -96,7 +104,7 @@ export function LaunchPalette({
               setSel((i) => Math.max(i - 1, 0));
             } else if (e.key === "Enter") {
               e.preventDefault();
-              commit(rows[sel]);
+              commit(rows[sel], e.shiftKey ? altWhere : defaultWhere);
             }
           }}
         />
@@ -120,11 +128,38 @@ export function LaunchPalette({
                   )}
                 </span>
                 <span className="palette-name">{rowLabel(r)}</span>
+                {r.kind === "cli" && !missing && (
+                  <span className="launch-workspace-hint">
+                    {workspaceDefault ? "new workspace" : "here"}
+                  </span>
+                )}
                 {missing && <span className="cli-install">install</span>}
                 {!missing && up?.hasUpdate && (
                   <span className="cli-update" title={`${up.installed} → ${up.latest}`}>
                     ⇡ {up.latest}
                   </span>
+                )}
+                {r.kind === "cli" && !missing && (
+                  <button
+                    type="button"
+                    className="launch-current"
+                    aria-label={
+                      workspaceDefault
+                        ? `Open ${r.cli.name} in the current checkout`
+                        : `Open ${r.cli.name} in a new workspace`
+                    }
+                    title={
+                      workspaceDefault
+                        ? `Open ${r.cli.name} in the current checkout`
+                        : `Open ${r.cli.name} in a new workspace`
+                    }
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      commit(r, altWhere);
+                    }}
+                  >
+                    {workspaceDefault ? "here" : "workspace"}
+                  </button>
                 )}
               </div>
             );
@@ -132,7 +167,11 @@ export function LaunchPalette({
         </div>
         <div className="palette-foot">
           <span>New{targetLabel ? ` · ${targetLabel}` : ""}</span>
-          <span>↑↓ navigate · ↵ open · esc close</span>
+          <span>
+            {workspaceDefault
+              ? "↑↓ navigate · ↵ new workspace · ⇧↵ here · esc close"
+              : "↑↓ navigate · ↵ here · ⇧↵ new workspace · esc close"}
+          </span>
         </div>
       </div>
     </div>

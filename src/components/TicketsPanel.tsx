@@ -5,7 +5,7 @@
 // an already-open agent terminal, or a fresh one started in a worktree on
 // the ticket's branch. It stops there on purpose — no auto-commit, no
 // auto-PR.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import { agentMenuItems } from "../agentMenu";
 import {
@@ -22,10 +22,16 @@ import { useBranchSwitch } from "../useBranchSwitch";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import { PlayIcon, TrackerIcon } from "./icons";
 import { Button, TextInput } from "./ui";
+import { diffIssueWorkflowEvents } from "../issueWorkflowEvents";
+import type { WorkflowTriggerProvenance } from "../workflowDefinition";
 
 export interface AgentTarget {
   tabId: string;
+  /** Stable Canopy-assigned session name. */
+  name?: string;
   title: string;
+  /** Agent-published current focus. */
+  description?: string;
   ptyId: number;
   /** Registry id of the CLI running in it, for its brand mark. */
   agentId: string;
@@ -53,6 +59,8 @@ interface TicketsPanelProps {
   onOpenTicket: (ticket: ipc.TicketInfo, source: string, repo: string) => void;
   /** Jump to Settings → Integrations (where sources get connected). */
   onOpenIntegrations: () => void;
+  /** Feed successful provider refresh deltas into the workflow dispatcher. */
+  onWorkflowEvent?: (event: WorkflowTriggerProvenance) => void | Promise<void>;
   page?: boolean;
   onOpenAll?: () => void;
 }
@@ -73,6 +81,10 @@ const LAST_GOOD = new Map<
   { tickets: SourcedTicket[]; connected: string[]; worktrees: ipc.WorktreeInfo[] }
 >();
 
+/** Successful provider observations, separate from the render cache because a
+ * partial provider failure must never look like a wave of closed issues. */
+const WORKFLOW_BASELINES = new Map<string, ipc.TicketInfo[]>();
+
 export function TicketsPanel({
   components,
   agentTargets,
@@ -82,6 +94,7 @@ export function TicketsPanel({
   onResearch,
   onOpenTicket,
   onOpenIntegrations,
+  onWorkflowEvent,
   page = false,
   onOpenAll,
 }: TicketsPanelProps) {
@@ -100,6 +113,8 @@ export function TicketsPanel({
   const [query, setQuery] = useState("");
   const menu = useContextMenu();
   const { openThere, version } = useBranchSwitch();
+  const workflowEventRef = useRef(onWorkflowEvent);
+  useEffect(() => { workflowEventRef.current = onWorkflowEvent; }, [onWorkflowEvent]);
 
   const key = components.map((c) => c.path).join("\n");
 
@@ -150,6 +165,14 @@ export function TicketsPanel({
           on.push(p.id);
           try {
             const list = await p.fetch(repo);
+            const baselineKey = `${p.id}\0${p.scope === "global" ? "global" : repo}`;
+            const previous = WORKFLOW_BASELINES.get(baselineKey);
+            WORKFLOW_BASELINES.set(baselineKey, list);
+            if (previous && workflowEventRef.current) {
+              for (const event of diffIssueWorkflowEvents(previous, list, p.id, repo)) {
+                void Promise.resolve(workflowEventRef.current(event)).catch(() => {});
+              }
+            }
             all.push(...list.map((t) => ({ ...t, source: p.id })));
           } catch (err) {
             errs.push(`${p.name}: ${String(err)}`);

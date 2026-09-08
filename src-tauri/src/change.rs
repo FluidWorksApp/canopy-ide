@@ -30,19 +30,23 @@ use tauri::{AppHandle, Emitter};
 /// `src/stores.ts`, and `notesGuard.test.ts` fails until both exist.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Store {
+    Mesh,
     Notes,
     Provenance,
     Sessions,
     Tasks,
+    Workflows,
 }
 
 impl Store {
     pub fn as_str(self) -> &'static str {
         match self {
+            Store::Mesh => "mesh",
             Store::Notes => "notes",
             Store::Provenance => "provenance",
             Store::Sessions => "sessions",
             Store::Tasks => "tasks",
+            Store::Workflows => "workflows",
         }
     }
 
@@ -55,6 +59,10 @@ impl Store {
     /// meta and body writes of a single edit.
     fn settle(self) -> Duration {
         match self {
+            // A mesh write is one send or one severed edge — there is no burst
+            // shape to coalesce, and the panel animates the delivery, so the
+            // event should arrive while the send still feels current.
+            Store::Mesh => Duration::from_millis(60),
             Store::Notes => Duration::from_millis(60),
             // Longer, because the writes come in a different shape. A backfill
             // sweep appends one edge per matching digest as fast as it can read
@@ -70,6 +78,8 @@ impl Store {
             // Attempt/transcript writes arrive in short structured-event
             // bursts; one quarter-second event is enough for every open view.
             Store::Tasks => Duration::from_millis(250),
+            // A step may reserve an attempt and advance in one short burst.
+            Store::Workflows => Duration::from_millis(250),
         }
     }
 

@@ -16,8 +16,12 @@
 pub mod streams;
 pub mod verbs;
 
+/// Version of the typed host wire contract (shared/host/contract.ts).
+pub const HOST_PROTOCOL: u32 = 1;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::io::Read;
 use tauri::{AppHandle, Manager};
 
 use crate::pty::PtyManager;
@@ -64,6 +68,7 @@ pub const GRANTS: &[(&str, Scope, Option<&str>)] = &[
     ("fs_list_files", Scope::View, None),
     ("fs_read_dir", Scope::View, None),
     ("fs_read_file", Scope::View, None),
+    ("fs_read_text", Scope::View, None),
     ("fs_search", Scope::View, None),
     ("gh_issue_list", Scope::View, None),
     ("gh_pr_body", Scope::View, None),
@@ -159,11 +164,19 @@ pub async fn dispatch(
                 app.clone(),
                 app.state::<PtyManager>(),
                 app.state::<crate::tasks::TaskStore>(),
+                app.state::<crate::execution::ExecutionRegistry>(),
                 cwd,
                 command,
                 None,
                 None,
                 None,
+                args.get("projectId").and_then(Value::as_str).map(str::to_string),
+                args.get("componentId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                args.get("workspacePath")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
             )
             .and_then(|r| serde_json::to_value(r).map_err(|e| e.to_string()))
         }
@@ -177,7 +190,18 @@ pub async fn dispatch(
             .await
             .and_then(to_value),
 
-        "fs_read_file" => read_text_capped(app, &str_arg(args, "path")?),
+        "fs_read_file" => crate::fsx::read_file_bytes(
+            app.state(),
+            str_arg(args, "path")?,
+            Some(args.get("maxBytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(512 * 1024)
+                .min(512 * 1024)),
+        )
+        .await
+        .and_then(to_value),
+
+        "fs_read_text" => read_text_capped(app, &str_arg(args, "path")?),
 
         "fs_list_files" => crate::fsx::fs_list_files(
             app.state(),
@@ -302,7 +326,13 @@ pub async fn dispatch(
             .await
             .and_then(to_value),
 
-        "plan_usage" => crate::agents::plan_usage().await.and_then(to_value),
+        "plan_usage" => crate::agents::plan_usage(
+            args.get("sessionId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        )
+        .await
+        .and_then(to_value),
 
         // Unreachable while GRANTS and this match agree; the test below is what
         // keeps them agreeing.
@@ -322,8 +352,13 @@ fn read_text_capped(app: &AppHandle, path: &str) -> Result<Value, String> {
     const MAX: usize = 512 * 1024;
     let state = app.state::<crate::fsx::WorkspaceManager>();
     let file = crate::fsx::check_scope(&state, std::path::Path::new(path))?;
-    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
-    let total = bytes.len();
+    let total = std::fs::metadata(&file).map_err(|e| e.to_string())?.len();
+    let mut bytes = Vec::with_capacity((total as usize).min(MAX + 4));
+    std::fs::File::open(&file)
+        .map_err(|e| e.to_string())?
+        .take((MAX + 4) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
     // A NUL in the head is the cheap, conventional binary test. Saying so beats
     // rendering a screenful of replacement characters.
     if bytes.iter().take(8000).any(|b| *b == 0) {
@@ -338,7 +373,7 @@ fn read_text_capped(app: &AppHandle, path: &str) -> Result<Value, String> {
     Ok(json!({
         "binary": false,
         "bytes": total,
-        "truncated": cut < total,
+        "truncated": (cut as u64) < total,
         "text": String::from_utf8_lossy(&bytes[..cut]),
     }))
 }

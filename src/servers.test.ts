@@ -10,7 +10,7 @@ import type { AgentRef } from "./workspaces";
 
 const term = (t: Partial<TermSubTab> & { id: string; cwd: string }): TermSubTab => ({
   type: "terminal",
-  title: "run",
+  launchTitle: "run",
   ptyId: 1,
   run: true,
   ...t,
@@ -88,7 +88,7 @@ describe("groupServers", () => {
     // What canopy_start_server leaves behind when an agent runs something the
     // project record has never heard of.
     const tabs = [
-      term({ id: "t9", cwd: "/w/site/packages/api", command: "bun serve", title: "api" }),
+      term({ id: "t9", cwd: "/w/site/packages/api", command: "bun serve", launchTitle: "api" }),
     ];
     const [g] = groupServers([web], tabs, noPorts);
     expect(g.label).toBe("canopy-website");
@@ -215,21 +215,25 @@ describe("workspaces nest under their component", () => {
     ],
   };
 
-  it("does not make a top-level group per component-and-branch pair", () => {
+  it("collapses dormant branch copies into the component's one command list", () => {
     const groups = groupServers([wsWeb], [], noPorts);
-    // Two workspaces must not become two more headings — that is what turned
-    // four components into sixteen.
     expect(groups).toHaveLength(1);
     expect(groups[0].label).toBe("canopy-website");
-    expect(groups[0].workspaces.map((w) => w.label)).toEqual(["feat/a", "feat/b"]);
+    expect(groups[0].entries.map((entry) => entry.name)).toEqual(["server", "build"]);
+    expect(groups[0].workspaces).toEqual([]);
   });
 
-  it("gives each workspace the component's commands, in its own directory", () => {
-    const [g] = groupServers([wsWeb], [], noPorts);
+  it("materializes a branch only after a command has actually run there", () => {
+    const [g] = groupServers(
+      [wsWeb],
+      [term({ id: "t1", cwd: "/w/site-wt-a", command: "npm run dev" })],
+      noPorts,
+    );
     const a = g.workspaces[0];
     expect(a.path).toBe("/w/site-wt-a");
     expect(a.entries.map((e) => e.name)).toEqual(["server", "build"]);
     expect(a.agents.map((x) => x.ptyId)).toEqual([7]);
+    expect(g.workspaces.map((workspace) => workspace.label)).toEqual(["feat/a"]);
   });
 
   it("puts a run started on a branch under that branch, not the component", () => {
@@ -265,7 +269,7 @@ describe("workspaces nest under their component", () => {
     );
     // Before this it fell through to the ad-hoc pass and became an orphan
     // group named after a directory.
-    expect(g.workspaces[1].entries.some((e) => e.adhoc)).toBe(true);
+    expect(g.workspaces[0].entries.some((e) => e.adhoc)).toBe(true);
     expect(groupServers([wsWeb], [term({ id: "t9", cwd: "/w/site-wt-b/api" })], noPorts))
       .toHaveLength(1);
   });
@@ -283,13 +287,20 @@ describe("workspaces an agent is in lead the list", () => {
     port: null,
     agents,
   });
+  const runIn = (label: string, over: Partial<TermSubTab> = {}) =>
+    term({
+      id: `run-${label}`,
+      cwd: `/w/site-wt-${label}`,
+      command: "npm run dev",
+      ...over,
+    });
 
   it("puts the occupied ones above the empty ones", () => {
     const c: ServerComponent = {
       ...web,
       workspaces: [ws("a"), ws("b", [claudeIn(7)]), ws("c"), ws("d", [claudeIn(8)])],
     };
-    const [g] = groupServers([c], [], noPorts);
+    const [g] = groupServers([c], ["a", "b", "c", "d"].map((x) => runIn(x)), noPorts);
     expect(g.workspaces.map((w) => w.label)).toEqual(["b", "d", "a", "c"]);
   });
 
@@ -298,7 +309,7 @@ describe("workspaces an agent is in lead the list", () => {
       ...web,
       workspaces: [ws("a"), ws("b"), ws("c", [claudeIn(7)])],
     };
-    const [g] = groupServers([c], [], noPorts);
+    const [g] = groupServers([c], ["a", "b", "c"].map((x) => runIn(x)), noPorts);
     expect(g.workspaces.map((w) => w.label)).toEqual(["c", "a", "b"]);
   });
 
@@ -312,7 +323,7 @@ describe("workspaces an agent is in lead the list", () => {
         ws("b", [claudeIn(8)]),
       ],
     };
-    const [g] = groupServers([c], [], noPorts);
+    const [g] = groupServers([c], [runIn("a"), runIn("b")], noPorts);
     expect(g.workspaces.map((w) => w.label)).toEqual(["a", "b"]);
   });
 
@@ -320,7 +331,10 @@ describe("workspaces an agent is in lead the list", () => {
     const c: ServerComponent = { ...web, workspaces: [ws("a"), ws("b")] };
     const [g] = groupServers(
       [c],
-      [term({ id: "t1", cwd: "/w/site-wt-b", command: "npm run dev" })],
+      [
+        runIn("a", { exited: true, exitCode: 1 }),
+        runIn("b"),
+      ],
       noPorts,
     );
     expect(g.workspaces.map((w) => w.label)).toEqual(["a", "b"]);

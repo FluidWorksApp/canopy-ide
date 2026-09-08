@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StatusBar } from "./StatusBar";
 import { BranchSwitchProvider } from "../useBranchSwitch";
 import * as ipc from "../ipc";
@@ -105,6 +105,16 @@ const base = {
   projects: [{ name: "canopy", roots: ["/repo"] }],
 };
 
+it("reads Git state from the focused tab's checkout", async () => {
+  const { rerender } = render(
+    <StatusBar {...base} contextRoot="/repo-two" events={[]} />,
+  );
+  await waitFor(() => expect(ipc.gitStatus).toHaveBeenCalledWith("/repo-two"));
+
+  rerender(<StatusBar {...base} contextRoot="/repo-three" events={[]} />);
+  await waitFor(() => expect(ipc.gitStatus).toHaveBeenCalledWith("/repo-three"));
+});
+
 describe("the tray's base-branch chip", () => {
   const behind = {
     ...inSync,
@@ -196,6 +206,38 @@ describe("the tray's plan chip", () => {
     vi.mocked(ipc.planUsage).mockResolvedValue([claudePlan] as never);
     render(<StatusBar {...base} events={[]} agentId="claude" />);
     expect(await screen.findByText("7d 52% · 5h 18%")).toBeTruthy();
+  });
+
+  it("requests the active Codex session's own limit snapshot", async () => {
+    const codexPlan = {
+      ...claudePlan,
+      agent: "codex",
+      plan: "pro",
+      windows: [{ label: "7d", used_percent: 39, resets_at: null }],
+    };
+    vi.mocked(ipc.planUsage).mockResolvedValue([codexPlan] as never);
+    render(
+      <StatusBar
+        {...base}
+        events={[]}
+        agentId="codex"
+        activePtyId={9}
+        activeSessionId="019fe3a6-5c29-7d62-a51d-9803afc76843"
+      />,
+    );
+    expect(await screen.findByText("7d 39%")).toBeTruthy();
+    expect(ipc.planUsage).toHaveBeenCalledWith(
+      "019fe3a6-5c29-7d62-a51d-9803afc76843",
+    );
+  });
+
+  it("does not guess Codex usage before the active session is identified", async () => {
+    render(
+      <StatusBar {...base} events={[]} agentId="codex" activePtyId={9} />,
+    );
+    await screen.findByText(/main/);
+    expect(ipc.planUsage).not.toHaveBeenCalled();
+    expect(screen.queryByText(/^7d /)).toBeNull();
   });
 
   // The important negative: a chip belonging to another CLI is worse than no
@@ -476,6 +518,44 @@ describe("the tray's branch chip", () => {
     expect(
       screen.getByText(/Pick a branch to go back — nothing you had is lost/),
     ).toBeTruthy();
+  });
+});
+
+describe("the app resource boundary", () => {
+  const publish = (includesWebviews: boolean) => {
+    vi.mocked(ipc.onAppStats).mockImplementation(async (cb) => {
+      cb({
+        cpu: 44,
+        mem_bytes: 2.4 * 1024 ** 3,
+        procs: 93,
+        includes_webviews: includesWebviews,
+      });
+      return () => {};
+    });
+  };
+
+  it("marks the macOS descendant reading as a lower bound and names WebKit", async () => {
+    publish(false);
+    render(<StatusBar {...base} events={[]} />);
+
+    const chip = await screen.findByTitle(/canopy lower bound/);
+    expect(chip.textContent).toContain("44% cpu · 2.4 GB");
+    expect(chip.textContent).not.toContain("≥");
+    expect(chip.getAttribute("title")).toContain("Activity Monitor");
+
+    fireEvent.click(chip);
+    expect(screen.getByText("WebKit layers")).toBeTruthy();
+    expect(screen.getByText("OS-owned · add separately")).toBeTruthy();
+  });
+
+  it("keeps an exact total when the platform process tree includes WebViews", async () => {
+    publish(true);
+    render(<StatusBar {...base} events={[]} />);
+
+    const chip = await screen.findByTitle(/^canopy:/);
+    expect(chip.textContent).toContain("44% cpu · 2.4 GB");
+    expect(chip.textContent).not.toContain("≥");
+    expect(chip.getAttribute("title")).toContain("Includes WebView helper processes");
   });
 });
 

@@ -17,12 +17,12 @@ const fail = (state = INITIAL_VIBE_SERVER_HEALTH, at = 1_000) =>
   });
 
 describe("vibe server crash policy", () => {
-  it("restarts two isolated failures, then halts on the third nearby failure", () => {
+  it("repairs from the first failure, then identifies a nearby third as a crash loop", () => {
     const first = fail();
     const second = fail(first.state, 2_000);
     const third = fail(second.state, 3_000);
-    expect(first.action).toBe("restart");
-    expect(second.action).toBe("restart");
+    expect(first.action).toBe("repair");
+    expect(second.action).toBe("repair");
     expect(third.action).toBe("crash-loop");
     expect(third.state.halted).toBe(true);
   });
@@ -37,21 +37,25 @@ describe("vibe server crash policy", () => {
   it("ages old failures out without a timer", () => {
     const first = fail();
     const later = fail(first.state, 1_000 + VIBE_SERVER_CRASH_WINDOW_MS);
-    expect(later.action).toBe("restart");
+    expect(later.action).toBe("repair");
     expect(later.state.failures).toEqual([1_000 + VIBE_SERVER_CRASH_WINDOW_MS]);
   });
 
-  it("ignores and resets requested or successful exits", () => {
+  it("ignores and resets requested exits", () => {
     const failed = fail().state;
     for (const sample of [
       { at: 2_000, exitCode: 1, requested: true },
-      { at: 2_000, exitCode: 0, requested: false },
+      { at: 2_000, exitCode: 0, requested: true },
     ]) {
       expect(judgeVibeServerExit(failed, TARGET, sample)).toEqual({
         state: resetVibeServerHealth(TARGET),
         action: "ignore",
       });
     }
+  });
+
+  it("repairs unexpected clean exits of required servers", () => {
+    expect(judgeVibeServerExit(INITIAL_VIBE_SERVER_HEALTH, TARGET, { at: 1, exitCode: 0, requested: false }).action).toBe("repair");
   });
 
   it("starts a new episode when target, checkout, or command fingerprint changes", () => {
@@ -61,7 +65,7 @@ describe("vibe server crash policy", () => {
       exitCode: 1,
       requested: false,
     });
-    expect(changed.action).toBe("restart");
+    expect(changed.action).toBe("repair");
     expect(changed.state.failures).toEqual([2_000]);
   });
 

@@ -18,6 +18,7 @@ const panel = (over: Partial<React.ComponentProps<typeof TasksPanel>> = {}) => {
     onRunCustom: vi.fn(),
     onRunOneOff: vi.fn(),
     onOpenHistory: vi.fn(),
+    onOpenWorkflows: vi.fn(),
     custom: [] as CustomMicroTask[],
     onSaveCustom: vi.fn(),
     projectId: "p1",
@@ -94,6 +95,7 @@ describe("the Running list", () => {
         onRunCustom={vi.fn()}
         onRunOneOff={vi.fn()}
         onOpenHistory={vi.fn()}
+        onOpenWorkflows={vi.fn()}
         custom={[]}
         onSaveCustom={vi.fn()}
         projectId="p1"
@@ -114,6 +116,7 @@ describe("the Running list", () => {
         onRunCustom={vi.fn()}
         onRunOneOff={vi.fn()}
         onOpenHistory={vi.fn()}
+        onOpenWorkflows={vi.fn()}
         custom={[]}
         onSaveCustom={vi.fn()}
         projectId="p1"

@@ -70,16 +70,22 @@ describe("resolveServerRoot", () => {
     expect(root).toBe("/repo");
   });
 
-  it("leaves a spec without markers on the root Canopy passed", async () => {
+  it("roots TypeScript in the nearest package instead of a monorepo shell", async () => {
     const ts = SERVERS.find((s) => s.id === "typescript")!;
-    expect(ts.rootMarkers).toBeUndefined();
     const root = await resolveServerRoot(
-      "/repo/src/deep/a.ts",
+      "/repo/packages/agent/src/deep/a.ts",
       "/repo",
       ts,
-      statter(["/repo/src/deep/Cargo.toml"]),
+      statter(["/repo/package.json", "/repo/packages/agent/tsconfig.json"]),
     );
-    expect(root).toBe("/repo");
+    expect(root).toBe("/repo/packages/agent");
+  });
+
+  it("falls back to the root when no language marker exists", async () => {
+    const ts = SERVERS.find((s) => s.id === "typescript")!;
+    expect(
+      await resolveServerRoot("/repo/src/deep/a.ts", "/repo", ts, statter([])),
+    ).toBe("/repo");
   });
 });
 
@@ -171,5 +177,17 @@ describe("resolveTypescriptLaunch", () => {
     const l = await launch([]);
     expect(l.command).toBe("/proj/node_modules/.bin/tsls");
     expect(l.initializationOptions).toEqual({ tsserver: { path: undefined } });
+  });
+
+  it("uses a TypeScript toolchain hoisted above the nearest package root", async () => {
+    const hoisted = "/repo/node_modules/typescript/lib/tsserver.js";
+    const l = await resolveTypescriptLaunch(
+      ts,
+      "/repo/packages/agent",
+      "/repo/node_modules/.bin/typescript-language-server",
+      statter([hoisted]),
+      "/repo",
+    );
+    expect(l.initializationOptions).toEqual({ tsserver: { path: hoisted } });
   });
 });

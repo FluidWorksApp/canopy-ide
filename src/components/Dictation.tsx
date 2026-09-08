@@ -36,9 +36,12 @@ import {
   type TranscriptEntry,
 } from "../dictationHistory";
 import { insertTextAtCursor } from "../insertText";
+import type { Notify } from "../types";
 
 type Phase =
   "idle" | "downloading" | "loading" | "recording" | "transcribing" | "notice";
+
+const ENGINE_LOAD_FAILURE_PREFIX = "Dictation can't load its speech model";
 
 /** The animated visualiser. Its rAF loop runs only while the pill is mounted,
  *  which is only while the mic is open — an idle 60fps canvas is exactly the
@@ -119,7 +122,7 @@ function HistoryPicker({
   );
 }
 
-export function Dictation() {
+export function Dictation({ notify }: { notify: Notify }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [detail, setDetail] = useState("");
   const [partial, setPartial] = useState<ipc.DictationPartial | null>(null);
@@ -261,7 +264,15 @@ export function Dictation() {
           void stop();
         }
       } catch (e) {
-        notice(String(e));
+        const message = String(e);
+        notice(message);
+        // The pill is the immediate retry surface; the shared attention path
+        // makes the failure durable and delivers its native banner when Canopy
+        // is in the background. Detailed launch advice belongs in Rust logs,
+        // never in this user-facing copy.
+        if (message.includes(ENGINE_LOAD_FAILURE_PREFIX)) {
+          notify(message, "error", { dedupe: "dictation:engine-load" });
+        }
       }
     };
 
@@ -421,7 +432,7 @@ export function Dictation() {
       void levels.then((fn) => fn());
       void partials.then((fn) => fn());
     };
-  }, []);
+  }, [notify]);
 
   const s = getSettings();
   const how = describeTrigger(

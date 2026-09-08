@@ -216,6 +216,19 @@ export function agentLife(ev: LifeEvidence): Life {
       // Rung 2 — a tool-name equality or a dedicated permission event. Zero
       // free text was involved in reaching this.
       case "structured-block":
+        // Codex auto mode emits PermissionRequest and may approve it again in
+        // the same breath. The event is still structural evidence, but it is
+        // only a user-facing block if it survives the manifest-selected dwell.
+        // `updated` is the episode start, so the ladder stays pure: the shared
+        // clock drives promotion and a later progress event replaces the
+        // digest before the threshold when auto mode handled it.
+        if (
+          f.dwellStructuredBlock &&
+          updated > 0 &&
+          silentFor * 1000 < POLICY.structuredBlockDwellMs
+        ) {
+          break;
+        }
         return say("waiting", "proven", via, updated, `${label} is blocked on you`, agent);
 
       // Rung 3 — the CLI raised its notification and its manifest says what

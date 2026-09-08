@@ -64,12 +64,19 @@ fn process_memory_bytes(_pid: u32, rss_bytes: u64) -> u64 {
     rss_bytes
 }
 
-/// Whole-app resource usage: this process and every descendant.
+/// App resource usage from the native process tree.
+///
+/// On Windows and Linux the webview helpers are descendants and land in this
+/// tree. macOS launches WKWebView's WebContent/GPU/Networking helpers as XPC
+/// services parented to launchd; there is no public WKWebView API that lists
+/// all of their pids. `includes_webviews` makes that missing layer explicit so
+/// the frontend never presents this lower bound as an exact app total.
 #[derive(Serialize, Clone)]
 pub struct AppStats {
     pub cpu: f32,
     pub mem_bytes: u64,
     pub procs: u32,
+    pub includes_webviews: bool,
 }
 
 /// A live terminal as the monitor sees it before it walks any processes.
@@ -77,6 +84,7 @@ struct SessionMeta {
     id: u32,
     /// The process we spawned the terminal with — usually the shell.
     root: Option<u32>,
+    name: String,
     title: String,
     cwd: String,
     /// Process group the pty currently has in the foreground.
@@ -88,11 +96,13 @@ struct SessionMeta {
     quiet_ms: Option<u64>,
     since_input_ms: Option<u64>,
     output_bytes: u64,
+    delivery: crate::pty::DesktopDeliveryMetrics,
 }
 
 #[derive(Serialize, Clone)]
 pub struct SessionStats {
     pub id: u32,
+    pub name: String,
     pub title: String,
     pub cwd: String,
     pub total_cpu: f32,
@@ -124,6 +134,18 @@ pub struct SessionStats {
     pub quiet_ms: Option<u64>,
     pub since_input_ms: Option<u64>,
     pub output_bytes: u64,
+    pub desktop_attached: bool,
+    pub desktop_outstanding_bytes: u64,
+    pub replay_bytes: u64,
+    pub dropped_output_bytes: u64,
+    pub desktop_delivery_chunks: u64,
+    pub desktop_delivery_bytes: u64,
+    pub desktop_acked_bytes: u64,
+    pub desktop_delivery_chunk_bytes_max: u64,
+    pub desktop_ack_latency_last_ms: u64,
+    pub desktop_ack_latency_max_ms: u64,
+    pub desktop_ack_latency_total_ms: u64,
+    pub desktop_ack_latency_samples: u64,
 }
 
 /// The one process worth identifying in a terminal.
@@ -218,6 +240,45 @@ pub fn pty_stats(app: tauri::AppHandle) -> Vec<SessionStats> {
         .unwrap_or_default()
 }
 
+fn http_readiness_url(port: u16, path: &str) -> Result<String, String> {
+    if path.is_empty()
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || path.len() > 2_048
+        || path.contains(['\r', '\n'])
+    {
+        return Err("HTTP readiness path must be a local absolute path".into());
+    }
+    Ok(format!("http://127.0.0.1:{port}{path}"))
+}
+
+fn http_readiness_status(status: reqwest::StatusCode) -> bool {
+    status.is_success() || status.is_redirection()
+}
+
+/// Prove the HTTP readiness contract a Build setup declared. Listening on a
+/// port is only a transport fact: another endpoint (or another service in the
+/// same process tree) must not release dependent processes. Native reqwest
+/// avoids browser CORS policy turning a healthy local endpoint into a false
+/// negative. Redirects count as a response from the declared path but are not
+/// followed outside localhost.
+#[tauri::command]
+pub async fn probe_http_readiness(port: u16, path: String) -> Result<bool, String> {
+    let url = http_readiness_url(port, &path)?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(750))
+        .timeout(Duration::from_millis(1_500))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .map_err(|error| format!("could not create readiness probe: {error}"))?;
+    let response = match client.get(url).send().await {
+        Ok(response) => response,
+        Err(_) => return Ok(false),
+    };
+    Ok(http_readiness_status(response.status()))
+}
+
 static MONITOR_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// TCP listening ports for `pids`, as pid -> ports.
@@ -241,10 +302,9 @@ fn listening_ports(pids: &[u32]) -> HashMap<u32, Vec<u16>> {
         .map(|p| p.to_string())
         .collect::<Vec<_>>()
         .join(",");
-    let Ok(res) = std::process::Command::new("lsof")
-        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &list, "-Fpn"])
-        .output()
-    else {
+    let mut command = std::process::Command::new("lsof");
+    command.args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &list, "-Fpn"]);
+    let Ok(res) = crate::process_capture::output(&mut command, 1024 * 1024) else {
         return out;
     };
     let mut pid = 0_u32;
@@ -273,6 +333,59 @@ fn listening_ports(pids: &[u32]) -> HashMap<u32, Vec<u16>> {
 #[cfg(not(unix))]
 fn listening_ports(_pids: &[u32]) -> HashMap<u32, Vec<u16>> {
     HashMap::new()
+}
+
+/// Feed the terminal governor from this monitor's already-refreshed process
+/// tree. The only additional refresh is the host-wide memory counters; this
+/// deliberately does not create another process-table walker.
+fn update_terminal_governor(app: &AppHandle, sys: &mut System, stats: &[SessionStats]) {
+    let host = crate::watchdog::memory_pressure(sys);
+    let containment = app.try_state::<crate::containment::ContainmentManager>();
+    let observations: Vec<crate::governor::TerminalObservation> = stats
+        .iter()
+        .map(|session| {
+            let bytes = containment
+                .as_ref()
+                .map_or(session.total_mem_bytes, |manager| {
+                    manager.measured_bytes(session.id, session.total_mem_bytes)
+                });
+            crate::governor::TerminalObservation {
+                id: session.id,
+                bytes,
+                cli_key: crate::governor::cli_key(session.agent_hint.as_ref()),
+            }
+        })
+        .collect();
+    let Some(governor) = app.try_state::<crate::governor::TerminalGovernor>() else {
+        return;
+    };
+    for event in governor.observe_detailed(
+        &observations,
+        host.total_bytes,
+        host.available_bytes,
+        crate::pty::now_ms(),
+        |id, allowance| {
+            if let Some(containment) = containment.as_ref() {
+                containment.raise_allowance(id, allowance)
+            } else {
+                Ok(())
+            }
+        },
+    ) {
+        if event.status.current_bytes > event.status.allowance_bytes {
+            crate::notify::notify_native(
+                app.clone(),
+                "An agent needs a memory decision".into(),
+                format!(
+                    "Current use is {} MiB against a {} MiB allowance. Open Canopy to allow more or stop it.",
+                    event.status.current_bytes / (1024 * 1024),
+                    event.status.allowance_bytes / (1024 * 1024),
+                ),
+                Some(format!("canopy://terminal?pty={}", event.status.id)),
+            );
+        }
+        let _ = app.emit("terminal:governor", event);
+    }
 }
 
 pub fn start_monitor(app: AppHandle) {
@@ -307,6 +420,7 @@ pub fn start_monitor(app: AppHandle) {
                     .map(|s| SessionMeta {
                         id: s.id,
                         root: s.pid,
+                        name: s.name.lock().unwrap().clone(),
                         title: s.title.lock().unwrap().clone(),
                         cwd: s.cwd.clone(),
                         foreground: s.foreground_pid(),
@@ -314,6 +428,7 @@ pub fn start_monitor(app: AppHandle) {
                         quiet_ms: s.quiet_ms(now_ms),
                         since_input_ms: s.since_input_ms(now_ms),
                         output_bytes: s.output_bytes(),
+                        delivery: s.desktop_delivery_metrics(),
                     })
                     .collect();
                 // Publish the transition to zero once. Otherwise the final
@@ -361,10 +476,10 @@ pub fn start_monitor(app: AppHandle) {
                     }
                 }
 
-                // Our own footprint: this process plus everything under it —
-                // WebView helpers, language servers, PTY children and all. That
-                // total is what "the app is using" honestly means, and it's the
-                // number the memory-light claim has to answer to.
+                // Our native process-tree footprint: core, language servers,
+                // PTY children and every descendant. Windows/Linux webview
+                // helpers are descendants too. macOS WKWebView helpers are XPC
+                // services parented to launchd, so this is a lower bound there.
                 let mut app_cpu = 0.0_f32;
                 let mut app_mem = 0_u64;
                 let mut app_procs = 0_u32;
@@ -390,6 +505,7 @@ pub fn start_monitor(app: AppHandle) {
                         cpu: app_cpu,
                         mem_bytes: app_mem,
                         procs: app_procs,
+                        includes_webviews: !cfg!(target_os = "macos"),
                     },
                 );
 
@@ -397,6 +513,7 @@ pub fn start_monitor(app: AppHandle) {
                 // app stats above must keep flowing regardless — a project with
                 // no terminal open still shows its footprint.
                 if sessions.is_empty() {
+                    update_terminal_governor(&app, &mut sys, &[]);
                     continue;
                 }
 
@@ -405,6 +522,7 @@ pub fn start_monitor(app: AppHandle) {
                     let SessionMeta {
                         id,
                         root,
+                        name,
                         title,
                         cwd,
                         foreground,
@@ -412,6 +530,7 @@ pub fn start_monitor(app: AppHandle) {
                         quiet_ms,
                         since_input_ms,
                         output_bytes,
+                        delivery,
                     } = meta;
                     let Some(root) = root else { continue };
                     // What this terminal is running, identified once from the
@@ -456,6 +575,7 @@ pub fn start_monitor(app: AppHandle) {
                     }
                     stats.push(SessionStats {
                         id,
+                        name,
                         title,
                         cwd,
                         total_cpu: procs.iter().map(|p| p.cpu).sum(),
@@ -466,6 +586,18 @@ pub fn start_monitor(app: AppHandle) {
                         quiet_ms,
                         since_input_ms,
                         output_bytes,
+                        desktop_attached: delivery.attached,
+                        desktop_outstanding_bytes: delivery.outstanding_bytes,
+                        replay_bytes: delivery.replay_bytes,
+                        dropped_output_bytes: delivery.dropped_output_bytes,
+                        desktop_delivery_chunks: delivery.delivery_chunks,
+                        desktop_delivery_bytes: delivery.delivery_bytes,
+                        desktop_acked_bytes: delivery.acked_bytes,
+                        desktop_delivery_chunk_bytes_max: delivery.delivery_chunk_bytes_max,
+                        desktop_ack_latency_last_ms: delivery.ack_latency_last_ms,
+                        desktop_ack_latency_max_ms: delivery.ack_latency_max_ms,
+                        desktop_ack_latency_total_ms: delivery.ack_latency_total_ms,
+                        desktop_ack_latency_samples: delivery.ack_latency_samples,
                     });
                 }
 
@@ -504,6 +636,7 @@ pub fn start_monitor(app: AppHandle) {
                         }
                     }
                 }
+                update_terminal_governor(&app, &mut sys, &stats);
                 if let Some(cache) = app.try_state::<StatsCache>() {
                     *cache.0.lock().unwrap() = stats.clone();
                 }
@@ -592,19 +725,6 @@ pub async fn hook_bridge_path() -> Option<String> {
     )
 }
 
-/// Every CLI Canopy knows how to wire up, with the binary that proves it is
-/// installed. One list, so the panel, the health check and the startup repair
-/// can't drift apart about who is supported.
-pub const SUPPORTED_AGENTS: &[(&str, &str)] = &[
-    ("claude", "claude"),
-    ("codex", "codex"),
-    ("agy", "agy"),
-    ("aider", "aider"),
-    ("opencode", "opencode"),
-    ("omp", "omp"),
-    ("amp", "amp"),
-];
-
 /// What one step of an agent's setup did. Steps are reported individually
 /// because they fail independently: an MCP registry that can't be parsed says
 /// nothing about whether the hooks landed, and collapsing the two into a single
@@ -642,39 +762,78 @@ pub fn setup_agent(agent: &str, home: &str) -> Result<SetupReport, String> {
     setup_agent_in(agent, home, home)
 }
 
+/// A config root may be the selected home or one account profile directly
+/// beneath it. Refuse every other pairing before an installer gets a path.
+/// This turns the two-root profile API into a containment boundary: an e2e
+/// helper home can never be paired with (and then written into) the real home.
+fn config_root_belongs_to_home(cfg: &std::path::Path, home: &std::path::Path) -> bool {
+    let cfg = cfg.canonicalize().unwrap_or_else(|_| cfg.to_path_buf());
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    if cfg == home {
+        return true;
+    }
+    let profiles = home.join(".canopy").join("profiles");
+    let Ok(relative) = cfg.strip_prefix(profiles) else {
+        return false;
+    };
+    let mut parts = relative.components();
+    matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none()
+}
+
 /// The same setup against an arbitrary config root — how a profile gets hooked.
 ///
 /// Two roots: `cfg` is the CLI's own configuration and moves with the profile;
 /// `home` never moves, because the helper binary, the event bus and the session
 /// digests all live there.
 pub fn setup_agent_in(agent: &str, cfg: &str, home: &str) -> Result<SetupReport, String> {
+    if !config_root_belongs_to_home(std::path::Path::new(cfg), std::path::Path::new(home)) {
+        return Err(format!(
+            "refusing to write agent config outside the selected home: {cfg} is not {home} or one of its profiles"
+        ));
+    }
     let bridge = format!("{home}/.canopy/agent-events.jsonl");
+    let Some(cli) = crate::agent_cli::resolve(agent) else {
+        return Err(format!("auto-setup not supported for {agent} yet"));
+    };
+    let Some(adapter) = cli.integration else {
+        return Err(format!("auto-setup not supported for {agent} yet"));
+    };
+    let agent = cli.id;
     // Eager, not `?`-chained: every step runs even when an earlier one failed,
     // so the report says what actually happened to each.
-    let steps: Vec<(&str, Result<String, String>)> = match agent {
-        "claude" => vec![
+    let steps: Vec<(&str, Result<String, String>)> = match adapter {
+        crate::agent_cli::IntegrationAdapter::Claude => vec![
             ("hooks", setup_claude_hooks(cfg, home, &bridge)),
             ("mcp", setup_claude_mcp(cfg, home)),
         ],
-        "codex" => vec![
+        crate::agent_cli::IntegrationAdapter::Codex => vec![
             ("hooks", setup_codex_hooks(cfg, home, &bridge)),
             ("mcp", setup_codex_mcp(cfg, home)),
         ],
-        "agy" => vec![
+        crate::agent_cli::IntegrationAdapter::Antigravity => vec![
             ("hooks", setup_agy_hooks(cfg, home)),
             ("mcp", setup_agy_mcp(cfg, home)),
         ],
-        "aider" => vec![("hooks", setup_aider_hooks(cfg, home))],
-        "opencode" => vec![
+        crate::agent_cli::IntegrationAdapter::Aider => {
+            vec![("hooks", setup_aider_hooks(cfg, home))]
+        }
+        crate::agent_cli::IntegrationAdapter::OpenCode => vec![
             ("hooks", setup_opencode_plugin(cfg, home)),
             ("mcp", setup_opencode_mcp(cfg, home)),
         ],
-        "omp" => vec![("hooks", setup_omp_hook(cfg, home))],
-        "amp" => vec![
+        crate::agent_cli::IntegrationAdapter::Omp => vec![("hooks", setup_omp_hook(cfg, home))],
+        crate::agent_cli::IntegrationAdapter::Amp => vec![
             ("hooks", setup_amp_plugin(cfg, home)),
             ("mcp", setup_amp_mcp(cfg, home)),
         ],
-        _ => return Err(format!("auto-setup not supported for {agent} yet")),
+        crate::agent_cli::IntegrationAdapter::Cursor => vec![
+            ("hooks", setup_cursor_hooks(cfg, home)),
+            ("mcp", setup_cursor_mcp(cfg, home)),
+        ],
+        crate::agent_cli::IntegrationAdapter::Grok => vec![
+            ("hooks", setup_grok_hooks(cfg, home)),
+            ("mcp", setup_grok_mcp(cfg, home)),
+        ],
     };
     let steps: Vec<SetupStep> = steps
         .into_iter()
@@ -730,6 +889,8 @@ fn hooks_config_path(agent: &str, cfg: &str, home: &str) -> Option<String> {
         // AMP_SETTINGS_FILE relocates settings, not plugin discovery. One
         // global plugin observes every Amp profile.
         "amp" => format!("{home}/.config/amp/plugins/canopy.ts"),
+        "cursor" => format!("{cfg}/.cursor/hooks.json"),
+        "grok" => format!("{cfg}/.grok/hooks/canopy.json"),
         _ => return None,
     })
 }
@@ -830,6 +991,8 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
         .all(|part| raw.contains(part)),
         "omp" => [
             "before_agent_start",
+            "CANOPY_CONTEXT",
+            "systemPrompt:",
             "agent_end",
             "session_shutdown",
             "event?.toolName",
@@ -848,7 +1011,197 @@ fn hooks_are_ours_in(agent: &str, cfg: &str, home: &str) -> bool {
         "aider" => raw.lines().any(|line| {
             line.trim_start().starts_with("notifications-command:") && line.contains("canopy-hook")
         }),
+        "cursor" => serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("hooks").cloned())
+            .is_some_and(|hooks| {
+                complete(
+                    &hooks,
+                    &[
+                        "sessionStart",
+                        "beforeSubmitPrompt",
+                        "postToolUse",
+                        "postToolUseFailure",
+                        "stop",
+                        "sessionEnd",
+                    ],
+                )
+            }),
+        "grok" => serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("hooks").cloned())
+            .is_some_and(|hooks| {
+                complete(
+                    &hooks,
+                    &[
+                        "SessionStart",
+                        "UserPromptSubmit",
+                        "PostToolUse",
+                        "PostToolUseFailure",
+                        "Stop",
+                        "StopFailure",
+                        "StopCancelled",
+                        "Notification",
+                        "SessionEnd",
+                    ],
+                )
+            }),
         _ => MARKERS.iter().any(|m| raw.contains(m)),
+    }
+}
+
+fn setup_cursor_hooks(cfg: &str, home: &str) -> Result<String, String> {
+    let helper = require_helper(home, "hooks not installed")?;
+    let path = std::path::PathBuf::from(cfg).join(".cursor/hooks.json");
+    let mut config = read_json_config(&path)?;
+    let root = config
+        .as_object_mut()
+        .ok_or_else(|| format!("{} is not an object", path.display()))?;
+    root.entry("version").or_insert(serde_json::json!(1));
+    let hooks = root
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("Cursor hooks is not an object")?;
+    let command = |signal: &str| {
+        format!(
+            "{} --agent cursor --signal {signal}",
+            sh_quote(&helper.to_string_lossy())
+        )
+    };
+    for (event, signal) in [
+        ("sessionStart", "turn-end"),
+        ("beforeSubmitPrompt", "turn-start"),
+        ("postToolUse", "turn-progress"),
+        ("postToolUseFailure", "turn-progress"),
+        ("stop", "turn-end"),
+        ("sessionEnd", "session-end"),
+    ] {
+        let entries = hooks
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .ok_or_else(|| format!("Cursor hook {event} is not an array"))?;
+        entries.retain(|entry| !MARKERS.iter().any(|m| entry.to_string().contains(m)));
+        entries.push(serde_json::json!({ "command": command(signal), "timeout": 10 }));
+    }
+    let body = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    let unchanged = std::fs::read_to_string(&path).is_ok_and(|raw| raw == body);
+    if !unchanged {
+        write_config_atomic(&path, &body)?;
+    }
+    Ok(if unchanged {
+        "Cursor hooks already set up".into()
+    } else {
+        "Cursor hooks installed — restart cursor-agent sessions".into()
+    })
+}
+
+fn setup_grok_hooks(cfg: &str, home: &str) -> Result<String, String> {
+    let helper = require_helper(home, "hooks not installed")?;
+    let command = |signal: &str| {
+        format!(
+            "{} --agent grok --signal {signal}",
+            sh_quote(&helper.to_string_lossy())
+        )
+    };
+    let handler = |signal: &str| {
+        serde_json::json!({ "type": "command", "command": command(signal), "timeout": 10 })
+    };
+    let group = |signal: &str| serde_json::json!({ "hooks": [handler(signal)] });
+    let config = serde_json::json!({
+        "hooks": {
+            "SessionStart": [group("turn-end")],
+            "UserPromptSubmit": [group("turn-start")],
+            "PostToolUse": [group("turn-progress")],
+            "PostToolUseFailure": [group("turn-progress")],
+            "Stop": [group("turn-end")],
+            "StopFailure": [group("turn-end")],
+            "StopCancelled": [group("turn-end")],
+            "Notification": [
+                { "matcher": "idle_prompt", "hooks": [handler("turn-end")] },
+                { "matcher": "permission_prompt", "hooks": [handler("needs-human-permission")] }
+            ],
+            "SessionEnd": [group("session-end")]
+        }
+    });
+    let source = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    install_generated_file(
+        std::path::PathBuf::from(cfg).join(".grok/hooks/canopy.json"),
+        &source,
+        "Grok hooks installed — restart grok sessions",
+        "Grok hooks already set up",
+    )
+}
+
+/// Every Canopy-owned command in a hook config must name the helper for this
+/// home. One correct lifecycle entry is not enough: a stale status line or
+/// notify command can still fail every session that reaches it.
+fn hook_commands_point_to_home(agent: &str, cfg: &str, home: &str) -> bool {
+    let Some(config) = hooks_config_path(agent, cfg, home) else {
+        return false;
+    };
+    let Ok(raw) = std::fs::read_to_string(config) else {
+        return false;
+    };
+    let helper = helper_path_in(home);
+    if !helper.exists() {
+        return false;
+    }
+    let expected = helper.to_string_lossy().to_string();
+    fn inspect(value: &serde_json::Value, expected: &str, seen: &mut bool) -> bool {
+        match value {
+            serde_json::Value::String(s) if s.contains("canopy-hook") => {
+                *seen = true;
+                s.contains(expected)
+            }
+            serde_json::Value::Array(items) => {
+                items.iter().all(|item| inspect(item, expected, seen))
+            }
+            serde_json::Value::Object(fields) => {
+                fields.values().all(|value| inspect(value, expected, seen))
+            }
+            _ => true,
+        }
+    }
+    let config_matches = if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+        let mut seen = false;
+        inspect(&value, &expected, &mut seen) && seen
+    } else {
+        let owned: Vec<&str> = raw
+            .lines()
+            .filter(|line| line.contains("canopy-hook"))
+            .collect();
+        !owned.is_empty() && owned.iter().all(|line| line.contains(&expected))
+    };
+    if !config_matches {
+        return false;
+    }
+    // Codex's legacy notify fallback lives beside its MCP table rather than in
+    // hooks.json. It is still a hook command and must participate in the same
+    // liveness check, or a stale notify survives whenever native hooks and MCP
+    // already point at the current helper.
+    if agent == "codex" {
+        let config = std::path::PathBuf::from(cfg).join(".codex/config.toml");
+        if let Ok(toml) = std::fs::read_to_string(config) {
+            return toml.lines().all(|line| {
+                let line = line.trim_start();
+                !line.starts_with("notify")
+                    || !line.contains("canopy-hook")
+                    || line.contains(&expected)
+            });
+        }
+    }
+    true
+}
+
+fn hooks_state(agent: &str, cfg: &str, home: &str) -> &'static str {
+    if !hooks_are_ours_in(agent, cfg, home) {
+        "missing"
+    } else if hook_commands_point_to_home(agent, cfg, home) {
+        "ours"
+    } else {
+        "stale"
     }
 }
 
@@ -861,15 +1214,39 @@ fn setup_aider_hooks(cfg: &str, home: &str) -> Result<String, String> {
     let helper = require_helper(home, "hooks not installed")?;
     let path = std::path::PathBuf::from(cfg).join(".aider.conf.yml");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    if existing.lines().any(|line| {
+    let command = format!(
+        "{} --agent aider --signal needs-human-ambiguous",
+        sh_quote(&helper.to_string_lossy())
+    );
+    let command = serde_json::to_string(&command).map_err(|e| e.to_string())?;
+    let wanted = format!("notifications-command: {command}");
+    let owns_line = |line: &str| {
         line.trim_start().starts_with("notifications-command:") && line.contains("canopy-hook")
-    }) {
+    };
+    if existing.lines().any(|line| line.trim() == wanted) {
         return Ok("Aider notifications already set up".into());
+    }
+    if existing.lines().any(owns_line) {
+        let replaced = existing
+            .lines()
+            .map(|line| {
+                if owns_line(line) {
+                    wanted.as_str()
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let trailing = if existing.ends_with('\n') { "\n" } else { "" };
+        std::fs::write(&path, format!("{replaced}{trailing}")).map_err(|e| e.to_string())?;
+        return Ok("Aider notifications updated — restart aider sessions".into());
     }
     if existing.lines().any(|line| {
         let line = line.trim_start();
         !line.starts_with('#')
             && (line.starts_with("notifications:") || line.starts_with("notifications-command:"))
+            && !owns_line(line)
     }) {
         return Err(
             "~/.aider.conf.yml already configures notifications — point \
@@ -887,14 +1264,8 @@ fn setup_aider_hooks(cfg: &str, home: &str) -> Result<String, String> {
     // The honest classification is that aider wants the keyboard and cannot say
     // which kind. `needs-human-ambiguous` records exactly that: waiting, at
     // `reported` confidence, never reclaimable.
-    let command = format!(
-        "{} --agent aider --signal needs-human-ambiguous",
-        sh_quote(&helper.to_string_lossy())
-    );
-    let command = serde_json::to_string(&command).map_err(|e| e.to_string())?;
-    let block = format!(
-        "\n# canopy: surface \"needs you\" in the IDE\nnotifications: true\nnotifications-command: {command}\n"
-    );
+    let block =
+        format!("\n# canopy: surface \"needs you\" in the IDE\nnotifications: true\n{wanted}\n");
     std::fs::write(&path, format!("{existing}{block}")).map_err(|e| e.to_string())?;
     Ok("Aider notifications hooked (~/.aider.conf.yml) — restart aider sessions".into())
 }
@@ -1101,6 +1472,7 @@ fn setup_omp_hook(cfg: &str, home: &str) -> Result<String, String> {
 import { spawn } from "node:child_process"
 
 const HELPER = "__HELPER__"
+const CANOPY_CONTEXT = __CANOPY_CONTEXT__
 let pending = Promise.resolve()
 
 const send = (obj) => {
@@ -1135,15 +1507,19 @@ export default function canopyBridge(pi) {
       model: ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
     }),
   )
-  on("before_agent_start", (event, ctx) =>
+  on("before_agent_start", (event, ctx) => {
     send({
       ...base(ctx),
       hook_event_name: "UserPromptSubmit",
       canopy_signal: "turn-start",
       prompt: event?.prompt ?? "",
       model: ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
-    }),
-  )
+    })
+    if (process.env.CANOPY !== "1") return
+    return {
+      systemPrompt: `${event?.systemPrompt ?? ""}\n\n${CANOPY_CONTEXT}`,
+    }
+  })
   on("agent_end", (event, ctx) => {
     if (event?.willContinue) {
       send({ ...base(ctx), hook_event_name: "AgentContinue", canopy_signal: "turn-progress" })
@@ -1182,7 +1558,11 @@ export default function canopyBridge(pi) {
   )
 }
 "#;
-    let source = TEMPLATE.replace("__HELPER__", &helper.to_string_lossy());
+    let context = serde_json::to_string(crate::agent_instructions::SESSION_CONTEXT)
+        .map_err(|e| e.to_string())?;
+    let source = TEMPLATE
+        .replace("__HELPER__", &helper.to_string_lossy())
+        .replace("__CANOPY_CONTEXT__", &context);
     // Builds before 0.3.3 wrote the bridge to hooks/. A root-level file there
     // is not auto-discovered by 17.0.5 (native hooks live under hooks/pre and
     // hooks/post), but `--hook <path>` can still load it explicitly. Remove our
@@ -1399,7 +1779,7 @@ const WRITE_TOOLS_MATCHER: &str = "Write|Edit|MultiEdit|NotebookEdit";
 /// Where the hook helper lives once installed. Hooks reference this stable path
 /// rather than the app bundle, so they keep working across upgrades and don't
 /// break if the app is moved.
-fn helper_path() -> Result<std::path::PathBuf, String> {
+pub(crate) fn helper_path() -> Result<std::path::PathBuf, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     Ok(helper_path_in(&home))
 }
@@ -1412,7 +1792,11 @@ fn helper_path_in(home: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(home)
         .join(".canopy")
         .join("bin")
-        .join("canopy-hook")
+        .join(if cfg!(windows) {
+            "canopy-hook.exe"
+        } else {
+            "canopy-hook"
+        })
 }
 
 /// Copy the helper next to our own binary into ~/.canopy/bin. Called at
@@ -1455,7 +1839,11 @@ pub fn install_hook_helper() -> Result<(), String> {
 /// unless a project turns it on — one session's prompts landing in another's
 /// context is a privacy decision the user makes, not a default.
 #[tauri::command]
-pub async fn set_context_scopes(scopes: serde_json::Value) -> Result<(), String> {
+pub async fn set_context_scopes(
+    app: tauri::AppHandle,
+    scopes: serde_json::Value,
+) -> Result<(), String> {
+    crate::context::ContextBridge::validate_mesh_scopes(&scopes)?;
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
     let dir = std::path::PathBuf::from(&home).join(".canopy");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -1463,7 +1851,12 @@ pub async fn set_context_scopes(scopes: serde_json::Value) -> Result<(), String>
         dir.join("context-scopes.json"),
         serde_json::to_string_pretty(&scopes).map_err(|e| e.to_string())?,
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    // Only publish after the hook-facing copy is durable. A failed disk write
+    // therefore leaves both readers on the previous value instead of creating
+    // a live-bridge/file split.
+    app.state::<crate::context::ContextBridge>()
+        .set_mesh_scopes(&scopes)
 }
 
 /// Delete one session's digest — the user removing a restorable session they
@@ -1712,6 +2105,95 @@ fn tail_of(file: &std::path::Path, max: u64) -> Option<(String, bool)> {
 /// through them (gemini files chats under a hash of the project path, aider
 /// writes into the repo), and passing them also keeps the walk to what the
 /// caller is going to show.
+fn status_line(raw: &str) -> Option<String> {
+    let flat = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.is_empty() {
+        return None;
+    }
+    let mut out = flat.chars().take(160).collect::<String>();
+    if flat.chars().count() > 160 {
+        while out.ends_with(char::is_whitespace) {
+            out.pop();
+        }
+        out.push('…');
+    }
+    Some(out)
+}
+
+/// Update the existing session digest owned by one authenticated PTY.
+///
+/// A terminal can have old digests carrying the same surface after the user
+/// starts a second CLI in it, so newest wins. The initial prompt and rotating
+/// prompt history are deliberately untouched: current focus is a separate
+/// fact, not a rewrite of what started the session.
+fn update_working_on_in_dir(
+    dir: &std::path::Path,
+    instance: &str,
+    pty_id: u32,
+    raw: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(working_on) = status_line(raw) else {
+        return Err("working-on status needs a non-empty description".into());
+    };
+    let surface = pty_id.to_string();
+    let mut candidates = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        if value["instance"].as_str() != Some(instance)
+            || value["surface"].as_str() != Some(surface.as_str())
+        {
+            continue;
+        }
+        candidates.push((value["updated"].as_u64().unwrap_or(0), path, value));
+    }
+    let Some((_, path, mut digest)) = candidates.into_iter().max_by_key(|row| row.0) else {
+        return Ok(None);
+    };
+    digest["working_on"] = serde_json::json!(working_on);
+    digest["working_on_updated"] = serde_json::json!(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0));
+    let tmp = path.with_extension(format!("json.status-{}", std::process::id()));
+    std::fs::write(
+        &tmp,
+        serde_json::to_vec(&digest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|error| error.to_string())?;
+    Ok(Some(path))
+}
+
+pub fn update_session_working_on(
+    instance: &str,
+    pty_id: u32,
+    description: &str,
+) -> Result<bool, String> {
+    let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
+    let dir = std::path::PathBuf::from(home)
+        .join(".canopy")
+        .join("sessions");
+    let changed = update_working_on_in_dir(&dir, instance, pty_id, description)?.is_some();
+    if changed {
+        crate::change::pulse(crate::change::Store::Sessions, "", "");
+    }
+    Ok(changed)
+}
+
 #[tauri::command]
 pub async fn session_digests(roots: Option<Vec<String>>) -> Result<Vec<serde_json::Value>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
@@ -2061,7 +2543,7 @@ pub(crate) fn read_json_config(path: &std::path::Path) -> Result<serde_json::Val
 /// setup step. The temp file is created in the destination directory to keep
 /// the rename within one filesystem, and inherits the original's permissions
 /// so a 0600 config doesn't come back world-readable.
-fn write_config_atomic(path: &std::path::Path, body: &str) -> Result<(), String> {
+pub(crate) fn write_config_atomic(path: &std::path::Path, body: &str) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
@@ -2270,6 +2752,34 @@ fn setup_opencode_mcp(cfg: &str, home: &str) -> Result<String, String> {
     Ok(registered_msg(changed, "opencode"))
 }
 
+fn setup_cursor_mcp(cfg: &str, home: &str) -> Result<String, String> {
+    let helper = require_helper(home, "MCP server not registered")?;
+    let changed = upsert_json_mcp(
+        std::path::PathBuf::from(cfg).join(".cursor/mcp.json"),
+        "mcpServers",
+        canopy_mcp_command(&helper),
+        is_canopy_mcp_entry,
+    )?;
+    Ok(registered_msg(changed, "cursor-agent"))
+}
+
+fn setup_grok_mcp(cfg: &str, home: &str) -> Result<String, String> {
+    let helper = require_helper(home, "MCP server not registered")?;
+    let path = std::path::PathBuf::from(cfg).join(".grok/config.toml");
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("{} could not be read: {e}", path.display())),
+    };
+    match codex_toml_with_canopy(&existing, &helper.to_string_lossy())? {
+        Some(out) => {
+            write_config_atomic(&path, &out)?;
+            Ok(registered_msg(true, "grok"))
+        }
+        None => Ok(registered_msg(false, "grok")),
+    }
+}
+
 /// Amp keeps its MCP servers under a *dotted* key inside a flat settings
 /// object — `"amp.mcpServers"` is one key, not a path — which is why this
 /// cannot go through upsert_json_mcp's nested lookup. The registry table in
@@ -2338,6 +2848,7 @@ fn setup_amp_mcp(cfg: &str, home: &str) -> Result<String, String> {
 /// State of one half of one CLI's integration.
 /// - `ours`: present and pointing at our helper
 /// - `missing`: nothing registered
+/// - `stale`: ours, but pointing at a helper outside the selected home
 /// - `foreign`: something else claimed the name — never touched, only reported
 /// - `unreadable`: the config exists but can't be parsed
 /// - `unsupported`: this CLI has no such integration point
@@ -2364,13 +2875,14 @@ fn json_mcp_registry(
         "agy" => (root.join(".gemini/config/mcp_config.json"), "mcpServers"),
         "opencode" => (root.join(".config/opencode/opencode.json"), "mcp"),
         "amp" => (root.join(".config/amp/settings.json"), "amp.mcpServers"),
+        "cursor" => (root.join(".cursor/mcp.json"), "mcpServers"),
         _ => return None,
     })
 }
 
 /// Read the `[mcp_servers.canopy]` section out of codex's TOML without a
 /// parser, the same way `codex_toml_with_canopy` writes it.
-fn codex_mcp_state(existing: &str) -> &'static str {
+fn codex_mcp_state_for(existing: &str, expected: Option<&str>) -> &'static str {
     let mut section = "";
     let mut body = String::new();
     for line in existing.lines() {
@@ -2384,11 +2896,16 @@ fn codex_mcp_state(existing: &str) -> &'static str {
         }
         if section == "[mcp_servers.canopy]" {
             body.push_str(line);
+            body.push('\n');
         } else if section == "[mcp_servers]" {
             let key = t.split('=').next().unwrap_or("").trim().trim_matches('"');
             if key == "canopy" {
                 return if t.contains("canopy-hook") {
-                    "ours"
+                    if expected.map_or(true, |path| t.contains(path)) {
+                        "ours"
+                    } else {
+                        "stale"
+                    }
                 } else {
                     "foreign"
                 };
@@ -2399,19 +2916,47 @@ fn codex_mcp_state(existing: &str) -> &'static str {
         return "missing";
     }
     if body.contains("canopy-hook") {
-        "ours"
+        let points_to_expected = expected.map_or(true, |expected| {
+            let quoted = format!("{expected:?}");
+            body.lines().any(|line| {
+                let Some((key, value)) = line.split_once('=') else {
+                    return false;
+                };
+                key.trim() == "command" && value.trim() == quoted
+            })
+        });
+        if points_to_expected {
+            "ours"
+        } else {
+            "stale"
+        }
     } else {
         "foreign"
     }
 }
 
+#[cfg(test)]
+fn codex_mcp_state(existing: &str) -> &'static str {
+    codex_mcp_state_for(existing, None)
+}
+
 fn mcp_state(agent: &str, cfg: &str, home: &str) -> &'static str {
-    if agent == "codex" {
-        return match std::fs::read_to_string(
-            std::path::PathBuf::from(cfg).join(".codex/config.toml"),
-        ) {
-            Ok(raw) => codex_mcp_state(&raw),
-            Err(_) => "missing",
+    if matches!(agent, "codex" | "grok") {
+        let helper = helper_path_in(home);
+        let expected = helper.to_string_lossy().to_string();
+        let rel = if agent == "codex" {
+            ".codex/config.toml"
+        } else {
+            ".grok/config.toml"
+        };
+        let state = match std::fs::read_to_string(std::path::PathBuf::from(cfg).join(rel)) {
+                Ok(raw) => codex_mcp_state_for(&raw, Some(&expected)),
+                Err(_) => "missing",
+        };
+        return if state == "ours" && !helper.exists() {
+            "stale"
+        } else {
+            state
         };
     }
     let Some((path, key)) = json_mcp_registry(agent, cfg, home) else {
@@ -2422,7 +2967,22 @@ fn mcp_state(agent: &str, cfg: &str, home: &str) -> &'static str {
     };
     match registry.get(key).and_then(|servers| servers.get("canopy")) {
         None => "missing",
-        Some(entry) if is_canopy_mcp_entry(entry) => "ours",
+        Some(entry) if is_canopy_mcp_entry(entry) => {
+            let helper = helper_path_in(home);
+            let expected = helper.to_string_lossy();
+            let command = entry.get("command");
+            let actual = command.and_then(|value| value.as_str()).or_else(|| {
+                command
+                    .and_then(|value| value.as_array())
+                    .and_then(|args| args.first())
+                    .and_then(|value| value.as_str())
+            });
+            if actual == Some(expected.as_ref()) && helper.exists() {
+                "ours"
+            } else {
+                "stale"
+            }
+        }
         Some(_) => "foreign",
     }
 }
@@ -2435,17 +2995,12 @@ pub fn integration_health(
     home: &str,
     installed: &HashMap<String, bool>,
 ) -> Vec<IntegrationHealth> {
-    SUPPORTED_AGENTS
-        .iter()
-        .map(|(agent, bin)| IntegrationHealth {
-            agent: (*agent).into(),
-            cli_installed: installed.get(*bin).copied().unwrap_or(false),
-            hooks: if hooks_are_ours_in(agent, cfg, home) {
-                "ours"
-            } else {
-                "missing"
-            },
-            mcp: mcp_state(agent, cfg, home),
+    crate::agent_cli::integrated_clis()
+        .map(|cli| IntegrationHealth {
+            agent: cli.id.into(),
+            cli_installed: installed.get(cli.bin).copied().unwrap_or(false),
+            hooks: hooks_state(cli.id, cfg, home),
+            mcp: mcp_state(cli.id, cfg, home),
         })
         .collect()
 }
@@ -2453,7 +3008,9 @@ pub fn integration_health(
 #[tauri::command]
 pub async fn agent_integration_health() -> Result<Vec<IntegrationHealth>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
-    let bins: Vec<String> = SUPPORTED_AGENTS.iter().map(|(_, b)| (*b).into()).collect();
+    let bins: Vec<String> = crate::agent_cli::integrated_clis()
+        .map(|cli| cli.bin.into())
+        .collect();
     Ok(integration_health(&home, &home, &which_installed(&bins)))
 }
 
@@ -2492,7 +3049,9 @@ pub fn heal_integrations(app: AppHandle) {
             let Ok(home) = std::env::var("HOME") else {
                 return;
             };
-            let bins: Vec<String> = SUPPORTED_AGENTS.iter().map(|(_, b)| (*b).into()).collect();
+            let bins: Vec<String> = crate::agent_cli::integrated_clis()
+                .map(|cli| cli.bin.into())
+                .collect();
             let installed = which_installed(&bins);
             let report = heal_integrations_in(&home, env!("CARGO_PKG_VERSION"), &installed);
             for line in &report.repaired {
@@ -2590,7 +3149,8 @@ fn heal_root(
     failed: &mut Vec<String>,
 ) {
     for health in healths {
-        let owned = health.hooks == "ours" || health.mcp == "ours";
+        let owned =
+            matches!(health.hooks, "ours" | "stale") || matches!(health.mcp, "ours" | "stale");
         // Nothing installed and nothing of ours to maintain — writing a config
         // for a CLI this machine doesn't have is pure noise. Ownership still
         // counts on its own, because PATH detection runs a login shell that a
@@ -2606,6 +3166,8 @@ fn heal_root(
             Some("not set up yet".to_string())
         } else if upgraded {
             Some(format!("upgraded to {version}"))
+        } else if health.hooks == "stale" || health.mcp == "stale" {
+            Some("stale helper path".to_string())
         } else if health.hooks == "missing" {
             Some("hooks missing".to_string())
         } else if health.mcp == "missing" {
@@ -3637,19 +4199,36 @@ fn stored_plan_usage(home: &str) -> Vec<PlanUsage> {
     out
 }
 
-/// Codex's limits, read straight from the newest rollout that carries them.
+/// Codex's limits, read from the requested session's rollout when one is active,
+/// or from the newest rollout that carries them for account-wide callers.
 ///
 /// Scans newest-first and stops at the first populated snapshot: a session that
 /// only ever got rate-limited writes `primary: null`, so "newest file" and
 /// "newest usable number" are not the same file. The schema has already
 /// changed once in the field (`limit_id`/`plan_type` appeared, `primary` became
 /// nullable), so every field is treated as optional.
-fn codex_plan_usage(cfg: &str, profile: &str) -> Option<PlanUsage> {
+fn codex_plan_usage(
+    cfg: &str,
+    profile: &str,
+    preferred_session_id: Option<&str>,
+) -> Option<PlanUsage> {
     use std::io::{BufRead, BufReader};
     const MAX_FILES: usize = 40;
     let root = std::path::PathBuf::from(cfg).join(".codex/sessions");
     let mut files: Vec<(u64, std::path::PathBuf)> = Vec::new();
     collect_jsonl(&root, 4, &mut files);
+    // A rollout's UUID is the Codex session id. Filter before the global file
+    // cap: a long-running active session can easily have more than forty newer
+    // rollouts beside it, but its own percentage remains the one shown by
+    // `codex /status` in that terminal.
+    if let Some(session_id) = preferred_session_id.filter(|id| !id.is_empty()) {
+        let suffix = format!("-{session_id}.jsonl");
+        files.retain(|(_, path)| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(&suffix))
+        });
+    }
     files.sort_by(|a, b| b.0.cmp(&a.0));
     files.truncate(MAX_FILES);
 
@@ -3715,13 +4294,20 @@ fn codex_plan_usage(cfg: &str, profile: &str) -> Option<PlanUsage> {
 /// Subscription headroom per CLI, for the status-tray plan chip and the
 /// Statistics panel. Only CLIs that actually report appear in the result.
 #[tauri::command]
-pub async fn plan_usage() -> Result<Vec<PlanUsage>, String> {
+pub async fn plan_usage(session_id: Option<String>) -> Result<Vec<PlanUsage>, String> {
     let home = std::env::var("HOME").map_err(|_| "no home dir".to_string())?;
+    let session_id = session_id.filter(|id| !id.is_empty());
     let mut out = stored_plan_usage(&home);
     // Codex is read live; drop any stale stored copy, per profile.
     for (id, root) in crate::profiles::roots(&home) {
-        if let Some(codex) = codex_plan_usage(&root.to_string_lossy(), &id) {
+        let codex = codex_plan_usage(&root.to_string_lossy(), &id, session_id.as_deref());
+        // When a session was named, silence is safer than borrowing a cached
+        // percentage from another session/profile and presenting it as this
+        // tab's value.
+        if session_id.is_some() || codex.is_some() {
             out.retain(|p| !(p.agent == "codex" && p.profile == id));
+        }
+        if let Some(codex) = codex {
             out.push(codex);
         }
     }
@@ -3803,10 +4389,9 @@ fn which_installed(commands: &[String]) -> HashMap<String, bool> {
             })
             .collect::<Vec<_>>()
             .join("; ");
-        if let Ok(out) = std::process::Command::new(shell)
-            .args(["-lc", &script])
-            .output()
-        {
+        let mut command = std::process::Command::new(shell);
+        command.args(["-lc", &script]);
+        if let Ok(out) = crate::process_capture::output(&mut command, 1024 * 1024) {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 if let Some(found) = result.get_mut(line.trim()) {
                     *found = true;
@@ -3838,10 +4423,9 @@ fn which_installed(commands: &[String]) -> HashMap<String, bool> {
                         .filter(|e| !e.is_empty())
                         .any(|ext| std::path::Path::new(&format!("{target}{ext}")).is_file())
             } else {
-                std::process::Command::new("where")
-                    .no_console_window()
-                    .arg(&target)
-                    .output()
+                let mut command = std::process::Command::new("where");
+                command.no_console_window().arg(&target);
+                crate::process_capture::output(&mut command, 1024 * 1024)
                     .map(|o| o.status.success())
                     .unwrap_or(false)
             };
@@ -3924,15 +4508,16 @@ fn run_donor(target: &str, argv: &[String]) -> Option<String> {
                 .chain(a.iter().map(|s| sh_quote(s)))
                 .collect::<Vec<_>>()
                 .join(" ");
-            std::process::Command::new(shell)
-                .args(["-lc", &line])
-                .output()
+            let mut command = std::process::Command::new(shell);
+            command.args(["-lc", &line]);
+            crate::process_capture::output(&mut command, 1024 * 1024)
         };
         #[cfg(windows)]
-        let out = std::process::Command::new(&t)
-            .no_console_window()
-            .args(&a)
-            .output();
+        let out = {
+            let mut command = std::process::Command::new(&t);
+            command.no_console_window().args(&a);
+            crate::process_capture::output(&mut command, 1024 * 1024)
+        };
         let _ = tx.send(
             out.ok()
                 .filter(|o| o.status.success())
@@ -4075,15 +4660,17 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                     // One login shell (the costly part) yields both the version
                     // string and the resolved binary path, split on a sentinel —
                     // the path is how we learn who installed it.
-                    let probe = tokio::process::Command::new(&shell)
+                    let mut probe_command = tokio::process::Command::new(&shell);
+                    probe_command
                         .args([
                             "-lc",
                             &format!(
                                 "{qb} --version 2>&1; echo '@@P@@'; command -v {qb} 2>/dev/null"
                             ),
                         ])
-                        .kill_on_drop(true)
-                        .output();
+                        .kill_on_drop(true);
+                    let probe =
+                        crate::process_capture::tokio_output(&mut probe_command, 1024 * 1024);
                     if let Ok(Ok(o)) = tokio::time::timeout(Duration::from_secs(10), probe).await {
                         let out = String::from_utf8_lossy(&o.stdout);
                         let (ver, path) = out.split_once("@@P@@").unwrap_or((out.as_ref(), ""));
@@ -4103,13 +4690,17 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                             // the frontend asks — same gate as the registry path.
                             if q.latest_url.is_some() {
                                 let flag = if is_cask { "--cask " } else { "" };
-                                let info = tokio::process::Command::new(&shell)
+                                let mut info_command = tokio::process::Command::new(&shell);
+                                info_command
                                     .args([
                                         "-lc",
                                         &format!("brew info --json=v2 {flag}{pkg} 2>/dev/null"),
                                     ])
-                                    .kill_on_drop(true)
-                                    .output();
+                                    .kill_on_drop(true);
+                                let info = crate::process_capture::tokio_output(
+                                    &mut info_command,
+                                    4 * 1024 * 1024,
+                                );
                                 if let Ok(Ok(o)) =
                                     tokio::time::timeout(Duration::from_secs(10), info).await
                                 {
@@ -4142,10 +4733,14 @@ pub async fn cli_versions(queries: Vec<CliVersionQuery>) -> HashMap<String, CliV
                 // Homebrew has its own version stream, populated above.
                 if v.managed_by.as_deref() != Some("homebrew") {
                     if let Some(url) = q.latest_url.filter(|u| u.starts_with("https://")) {
-                        let fetch = tokio::process::Command::new("curl")
+                        let mut fetch_command = tokio::process::Command::new("curl");
+                        fetch_command
                             .args(["-fsSL", "-m", "8", url.as_str()])
-                            .kill_on_drop(true)
-                            .output();
+                            .kill_on_drop(true);
+                        let fetch = crate::process_capture::tokio_output(
+                            &mut fetch_command,
+                            4 * 1024 * 1024,
+                        );
                         if let Ok(Ok(o)) =
                             tokio::time::timeout(Duration::from_secs(10), fetch).await
                         {
@@ -4381,6 +4976,51 @@ mod integration_tests {
             read_json_config(&path).unwrap()["mcp"]["canopy"]["enabled"],
             false
         );
+    }
+
+    #[test]
+    fn cursor_setup_preserves_foreign_hooks_and_registers_mcp() {
+        let home = scratch_home("cursor-setup");
+        let h = home.to_str().unwrap();
+        let hooks = home.join(".cursor/hooks.json");
+        write(
+            &hooks,
+            r#"{"version":1,"theme":"dark","hooks":{"stop":[{"command":"notify-me"}]}}"#,
+        );
+
+        let first = setup_agent_in("cursor", h, h).unwrap();
+        let second = setup_agent_in("cursor", h, h).unwrap();
+        assert!(first.ok && second.ok);
+        let config = read_json_config(&hooks).unwrap();
+        assert_eq!(config["theme"], "dark");
+        assert!(config["hooks"]["stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["command"] == "notify-me"));
+        assert!(hooks_are_ours_in("cursor", h, h));
+        let mcp = read_json_config(&home.join(".cursor/mcp.json")).unwrap();
+        assert!(is_canopy_mcp_entry(&mcp["mcpServers"]["canopy"]));
+    }
+
+    #[test]
+    fn grok_setup_installs_grouped_hooks_and_toml_mcp() {
+        let home = scratch_home("grok-setup");
+        let h = home.to_str().unwrap();
+
+        let first = setup_agent_in("grok", h, h).unwrap();
+        let second = setup_agent_in("grok", h, h).unwrap();
+        assert!(first.ok && second.ok);
+        assert!(hooks_are_ours_in("grok", h, h));
+        let hooks = read_json_config(&home.join(".grok/hooks/canopy.json")).unwrap();
+        assert_eq!(hooks["hooks"]["Notification"][0]["matcher"], "idle_prompt");
+        assert_eq!(
+            hooks["hooks"]["Notification"][1]["matcher"],
+            "permission_prompt"
+        );
+        let mcp = std::fs::read_to_string(home.join(".grok/config.toml")).unwrap();
+        assert!(mcp.contains("[mcp_servers.canopy]"));
+        assert!(mcp.contains("canopy-hook"));
     }
 
     /// `[mcp_servers."canopy"]` is the same table as the bare spelling. Missing
@@ -4709,6 +5349,13 @@ mod integration_tests {
         let path = home.join(".omp/agent/extensions/canopy.ts");
         let src = std::fs::read_to_string(path).unwrap();
         assert!(src.contains("before_agent_start"));
+        assert!(src.contains("systemPrompt:"));
+        let encoded_context = src
+            .lines()
+            .find_map(|line| line.strip_prefix("const CANOPY_CONTEXT = "))
+            .expect("generated extension carries its Canopy context");
+        let context: String = serde_json::from_str(encoded_context).unwrap();
+        assert_eq!(context, crate::agent_instructions::SESSION_CONTEXT);
         assert!(src.contains("agent_end"));
         assert!(!src.contains("agent_settled"));
         assert!(src.contains("event?.willContinue"));
@@ -4892,13 +5539,62 @@ mod integration_tests {
         assert_eq!(mcp_state("amp", h, h), "foreign");
     }
 
+    /// The vibe e2e harness once paired its throwaway helper home with the
+    /// user's real config root. That stamped the temporary helper into both
+    /// Claude and Codex's real files. The two-root profile seam must reject the
+    /// pair before any per-agent writer runs, while normal setup remains fully
+    /// contained in the overridden home.
+    #[test]
+    fn an_e2e_home_cannot_write_in_the_real_config_root() {
+        let real = scratch_home("e2e-real-home");
+        let e2e = scratch_home("e2e-overridden-home");
+        let real_codex = real.join(".codex/config.toml");
+        let real_claude = real.join(".claude/settings.json");
+        let codex_before = "model = \"user-choice\"\n";
+        let claude_before = r#"{"theme":"dark"}"#;
+        write(&real_codex, codex_before);
+        write(&real_claude, claude_before);
+
+        for agent in ["codex", "claude"] {
+            let error =
+                setup_agent_in(agent, real.to_str().unwrap(), e2e.to_str().unwrap()).unwrap_err();
+            assert!(error.contains("outside the selected home"), "{error}");
+            let report = setup_agent(agent, e2e.to_str().unwrap()).unwrap();
+            assert!(report.ok, "{}", report.summary);
+        }
+
+        assert_eq!(std::fs::read_to_string(&real_codex).unwrap(), codex_before);
+        assert_eq!(
+            std::fs::read_to_string(&real_claude).unwrap(),
+            claude_before
+        );
+        let e2e_helper = helper_path_in(e2e.to_str().unwrap());
+        assert!(e2e_helper.exists(), "setup must only stamp a live helper");
+        for path in [
+            e2e.join(".codex/config.toml"),
+            e2e.join(".codex/hooks.json"),
+            e2e.join(".claude/settings.json"),
+        ] {
+            let body = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                body.contains(&e2e_helper.to_string_lossy().to_string()),
+                "{}",
+                path.display()
+            );
+            assert!(
+                !body.contains(&real.to_string_lossy().to_string()),
+                "{}",
+                path.display()
+            );
+        }
+    }
+
     /// The PATH probe, as a launch would hand it over. Only agy, so a test's
     /// result never depends on which CLIs the machine running it happens to
     /// have installed.
     fn only_agy_installed() -> HashMap<String, bool> {
-        SUPPORTED_AGENTS
-            .iter()
-            .map(|(_, bin)| ((*bin).to_string(), *bin == "agy"))
+        crate::agent_cli::integrated_clis()
+            .map(|cli| (cli.bin.to_string(), cli.id == "agy"))
             .collect()
     }
 
@@ -4977,6 +5673,120 @@ mod integration_tests {
             before,
             "an unchanged integration must not be rewritten"
         );
+    }
+
+    /// A cleaned e2e home leaves syntactically valid, Canopy-owned entries
+    /// behind. Version-only healing treated those as healthy forever. A normal
+    /// restart on the same version must repoint hooks, notify, status line and
+    /// MCP registrations to the live helper installed for this home.
+    #[test]
+    fn a_same_version_launch_repoints_stale_helper_paths() {
+        let home = scratch_home("heal-stale-helper");
+        let h = home.to_str().unwrap();
+        for agent in ["codex", "claude", "aider"] {
+            setup_agent(agent, h).unwrap();
+        }
+        heal_integrations_in(h, "1.2.3", &HashMap::new());
+
+        let old = "/tmp/canopy-vibe-e2e-home/.canopy/bin/canopy-hook";
+        let current = helper_path_in(h).to_string_lossy().to_string();
+        for path in [
+            home.join(".codex/config.toml"),
+            home.join(".codex/hooks.json"),
+            home.join(".claude/settings.json"),
+            home.join(".claude.json"),
+            home.join(".aider.conf.yml"),
+        ] {
+            let body = std::fs::read_to_string(&path).unwrap();
+            write(&path, &body.replace(&current, old));
+        }
+        assert_eq!(mcp_state("codex", h, h), "stale");
+        assert_eq!(mcp_state("claude", h, h), "stale");
+        assert_eq!(hooks_state("codex", h, h), "stale");
+        assert_eq!(hooks_state("claude", h, h), "stale");
+        assert_eq!(hooks_state("aider", h, h), "stale");
+
+        let report = heal_integrations_in(h, "1.2.3", &HashMap::new());
+        assert!(!report.upgraded);
+        for agent in ["codex", "claude", "aider"] {
+            assert!(
+                report
+                    .repaired
+                    .iter()
+                    .any(|line| line.starts_with(agent) && line.contains("stale helper path")),
+                "{agent} was not repaired: {:?}",
+                report.repaired
+            );
+            assert_eq!(hooks_state(agent, h, h), "ours");
+        }
+        assert_eq!(
+            mcp_state("codex", h, h),
+            "ours",
+            "expected {current:?} in {}",
+            std::fs::read_to_string(home.join(".codex/config.toml")).unwrap()
+        );
+        assert_eq!(mcp_state("claude", h, h), "ours");
+        assert!(helper_path_in(h).exists(), "repaired commands must resolve");
+        for path in [
+            home.join(".codex/config.toml"),
+            home.join(".codex/hooks.json"),
+            home.join(".claude/settings.json"),
+            home.join(".claude.json"),
+            home.join(".aider.conf.yml"),
+        ] {
+            let body = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                body.contains(&current),
+                "{} still lacks live helper",
+                path.display()
+            );
+            assert!(
+                !body.contains(old),
+                "{} still points at dead helper",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_stale_codex_notify_is_healed_even_when_native_hooks_and_mcp_are_current() {
+        let home = scratch_home("heal-stale-notify-only");
+        let h = home.to_str().unwrap();
+        setup_agent("codex", h).unwrap();
+        heal_integrations_in(h, "1.2.3", &HashMap::new());
+
+        let config = home.join(".codex/config.toml");
+        let current = helper_path_in(h).to_string_lossy().to_string();
+        let old = "/tmp/cleaned-e2e-home/.canopy/bin/canopy-hook";
+        let body = std::fs::read_to_string(&config).unwrap();
+        let stale = body
+            .lines()
+            .map(|line| {
+                if line.trim_start().starts_with("notify") {
+                    line.replace(&current, old)
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        write(&config, &format!("{stale}\n"));
+
+        assert_eq!(mcp_state("codex", h, h), "ours");
+        assert_eq!(hooks_state("codex", h, h), "stale");
+        let report = heal_integrations_in(h, "1.2.3", &HashMap::new());
+        assert!(
+            report
+                .repaired
+                .iter()
+                .any(|line| line.starts_with("codex") && line.contains("stale helper path")),
+            "{:?}",
+            report.repaired
+        );
+        let healed = std::fs::read_to_string(config).unwrap();
+        assert!(healed.contains(&current));
+        assert!(!healed.contains(old));
+        assert_eq!(hooks_state("codex", h, h), "ours");
     }
 
     /// A version bump re-applies owned integrations, because that is when a
@@ -5210,10 +6020,11 @@ mod integration_tests {
         rollout(&home, 10.0);
         rollout(&crate::profiles::root_for(h, "work"), 90.0);
 
-        let default = codex_plan_usage(h, "default").unwrap();
+        let default = codex_plan_usage(h, "default", None).unwrap();
         let work = codex_plan_usage(
             &crate::profiles::root_for(h, "work").to_string_lossy(),
             "work",
+            None,
         )
         .unwrap();
         assert_eq!(default.windows[0].used_percent, 10.0);
@@ -5226,7 +6037,78 @@ mod integration_tests {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{clear_stale_stats, SessionStats, StatsCache};
+    use super::{
+        clear_stale_stats, http_readiness_status, http_readiness_url, update_working_on_in_dir,
+        SessionStats, StatsCache,
+    };
+
+    #[test]
+    fn live_status_updates_the_current_digest_without_rewriting_the_initial_prompt() {
+        let dir = std::env::temp_dir().join(format!("canopy-working-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.json");
+        let current = dir.join("current.json");
+        std::fs::write(
+            &old,
+            serde_json::json!({
+                "session_id": "old", "instance": "app", "surface": "7",
+                "updated": 1, "working_on": "old focus"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &current,
+            serde_json::json!({
+                "session_id": "current", "instance": "app", "surface": "7",
+                "updated": 2, "first_prompt": "build the panel",
+                "prompts": ["build the panel", "keep going"]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            update_working_on_in_dir(&dir, "app", 7, "  Wiring the status\nthrough the digest  ",)
+                .unwrap(),
+            Some(current.clone())
+        );
+        let changed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(current).unwrap()).unwrap();
+        assert_eq!(
+            changed["working_on"],
+            "Wiring the status through the digest"
+        );
+        assert_eq!(changed["first_prompt"], "build the panel");
+        assert_eq!(
+            changed["prompts"],
+            serde_json::json!(["build the panel", "keep going"])
+        );
+        let untouched: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(old).unwrap()).unwrap();
+        assert_eq!(untouched["working_on"], "old focus");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn http_readiness_is_pinned_to_localhost_and_the_declared_path() {
+        assert_eq!(
+            http_readiness_url(4173, "/health/ready?deep=1").unwrap(),
+            "http://127.0.0.1:4173/health/ready?deep=1"
+        );
+        for path in ["", "health", "//example.com/", "/ok\r\nHost: example.com"] {
+            assert!(http_readiness_url(4173, path).is_err(), "accepted {path:?}");
+        }
+        assert!(http_readiness_status(reqwest::StatusCode::NO_CONTENT));
+        assert!(http_readiness_status(
+            reqwest::StatusCode::TEMPORARY_REDIRECT
+        ));
+        assert!(!http_readiness_status(reqwest::StatusCode::NOT_FOUND));
+        assert!(!http_readiness_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -5242,6 +6124,7 @@ mod tests {
     fn final_pty_clears_cached_stats_and_ports_once() {
         let cache = StatsCache(std::sync::Mutex::new(vec![SessionStats {
             id: 7,
+            name: "Ember".into(),
             title: "agent".into(),
             cwd: "/tmp/project".into(),
             total_cpu: 1.0,
@@ -5252,6 +6135,18 @@ mod tests {
             quiet_ms: None,
             since_input_ms: None,
             output_bytes: 0,
+            desktop_attached: false,
+            desktop_outstanding_bytes: 0,
+            replay_bytes: 0,
+            dropped_output_bytes: 0,
+            desktop_delivery_chunks: 0,
+            desktop_delivery_bytes: 0,
+            desktop_acked_bytes: 0,
+            desktop_delivery_chunk_bytes_max: 0,
+            desktop_ack_latency_last_ms: 0,
+            desktop_ack_latency_max_ms: 0,
+            desktop_ack_latency_total_ms: 0,
+            desktop_ack_latency_samples: 0,
         }]));
         let mut ports = HashMap::from([(7, vec![4321])]);
 
@@ -5268,10 +6163,11 @@ mod tests {
     #[test]
     fn the_fidelity_manifest_covers_every_supported_agent() {
         let declared = crate::agent_life::all_fidelity();
-        for (id, _) in crate::agents::SUPPORTED_AGENTS {
+        for cli in crate::agent_cli::integrated_clis() {
             assert!(
-                declared.iter().any(|c| c.id == *id),
-                "{id} is in SUPPORTED_AGENTS but absent from shared/agentLife/fidelity.json"
+                declared.iter().any(|c| c.id == cli.id),
+                "{} has an integration adapter but is absent from shared/agentLife/fidelity.json",
+                cli.id,
             );
         }
     }
@@ -5368,10 +6264,16 @@ mod tests {
 
     /// Write a rollout under `home`, dated by `day` so filename order matches
     /// the order the test means.
-    fn write_rollout(home: &std::path::Path, day: &str, rate_limits: &str) -> std::path::PathBuf {
+    fn write_rollout_for(
+        home: &std::path::Path,
+        day: &str,
+        session_id: Option<&str>,
+        rate_limits: &str,
+    ) -> std::path::PathBuf {
         let dir = home.join(".codex/sessions/2026/07").join(day);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("rollout-{day}.jsonl"));
+        let suffix = session_id.map(|id| format!("-{id}")).unwrap_or_default();
+        let path = dir.join(format!("rollout-{day}{suffix}.jsonl"));
         // JSONL is one record per line; the fixtures above are wrapped for
         // readability, so collapse them back. Safe here because none of these
         // JSON values contain a literal space.
@@ -5381,6 +6283,10 @@ mod tests {
         );
         std::fs::write(&path, format!("{line}\n")).unwrap();
         path
+    }
+
+    fn write_rollout(home: &std::path::Path, day: &str, rate_limits: &str) -> std::path::PathBuf {
+        write_rollout_for(home, day, None, rate_limits)
     }
 
     fn tmp_home(tag: &str) -> std::path::PathBuf {
@@ -5399,12 +6305,62 @@ mod tests {
             r#"{"primary":{"used_percent":58.0,"window_minutes":10080,"resets_at":1785291145},
                 "secondary":null,"credits":{"has_credits":false},"plan_type":"free"}"#,
         );
-        let plan = super::codex_plan_usage(home.to_str().unwrap(), "default").expect("limits");
+        let plan =
+            super::codex_plan_usage(home.to_str().unwrap(), "default", None).expect("limits");
         assert_eq!(plan.agent, "codex");
         assert_eq!(plan.plan.as_deref(), Some("free"));
         assert_eq!(plan.windows.len(), 1, "a null secondary is not a window");
         assert_eq!(plan.windows[0].label, "7d");
         assert_eq!(plan.windows[0].used_percent, 58.0);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn active_codex_session_does_not_borrow_a_newer_sessions_percentage() {
+        let home = tmp_home("active-session");
+        let active_id = "019fe3a6-5c29-7d62-a51d-9803afc76843";
+        write_rollout_for(
+            &home,
+            "20",
+            Some(active_id),
+            r#"{"primary":{"used_percent":39.0,"window_minutes":10080,"resets_at":1},
+                "secondary":null,"credits":{"has_credits":false},"plan_type":"pro"}"#,
+        );
+        let other = write_rollout_for(
+            &home,
+            "29",
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            r#"{"primary":{"used_percent":2.0,"window_minutes":10080,"resets_at":2},
+                "secondary":null,"credits":{"has_credits":false},"plan_type":"pro"}"#,
+        );
+        filetime_bump(&other);
+
+        let global = super::codex_plan_usage(home.to_str().unwrap(), "default", None)
+            .expect("newest account snapshot");
+        assert_eq!(global.windows[0].used_percent, 2.0);
+
+        let active = super::codex_plan_usage(home.to_str().unwrap(), "default", Some(active_id))
+            .expect("active session snapshot");
+        assert_eq!(active.windows[0].label, "7d");
+        assert_eq!(active.windows[0].used_percent, 39.0);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn unknown_codex_session_does_not_borrow_another_sessions_percentage() {
+        let home = tmp_home("unknown-session");
+        write_rollout_for(
+            &home,
+            "29",
+            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+            r#"{"primary":{"used_percent":2.0,"window_minutes":10080,"resets_at":2}}"#,
+        );
+        assert!(super::codex_plan_usage(
+            home.to_str().unwrap(),
+            "default",
+            Some("019fe3a6-5c29-7d62-a51d-9803afc76843"),
+        )
+        .is_none());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -5431,8 +6387,8 @@ mod tests {
         );
         filetime_bump(&newer);
 
-        let plan =
-            super::codex_plan_usage(home.to_str().unwrap(), "default").expect("last good reading");
+        let plan = super::codex_plan_usage(home.to_str().unwrap(), "default", None)
+            .expect("last good reading");
         assert_eq!(plan.windows[0].used_percent, 58.0);
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -5443,7 +6399,7 @@ mod tests {
         write_rollout(&home, "29", r#"{"primary":null,"secondary":null}"#);
         // Not zeros: a 0% chip would read as "plenty left" when the truth is
         // that we do not know.
-        assert!(super::codex_plan_usage(home.to_str().unwrap(), "default").is_none());
+        assert!(super::codex_plan_usage(home.to_str().unwrap(), "default", None).is_none());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -5457,7 +6413,8 @@ mod tests {
                 "secondary":{"used_percent":10.0,"window_minutes":10080,"resets_at":2},
                 "credits":{"has_credits":false},"plan_type":null}"#,
         );
-        let plan = super::codex_plan_usage(home.to_str().unwrap(), "default").expect("limits");
+        let plan =
+            super::codex_plan_usage(home.to_str().unwrap(), "default", None).expect("limits");
         let labels: Vec<&str> = plan.windows.iter().map(|w| w.label.as_str()).collect();
         assert_eq!(labels, vec!["5h", "7d"]);
         let _ = std::fs::remove_dir_all(&home);

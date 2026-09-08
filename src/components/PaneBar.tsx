@@ -19,6 +19,7 @@ import {
 } from "./icons";
 import type { AgentCli } from "../projects";
 import { AGENT_CLIS } from "../projects";
+import { getSettings } from "../settings";
 import type { TabDrag } from "../tabDrag";
 import {
   ANCHOR_ATTR,
@@ -34,6 +35,7 @@ import type {
 } from "./ProjectView";
 import { tabDisplayLabel, previewLabel, deviceLabel } from "./ProjectView";
 import { claimOwnerName } from "../claims";
+import { tabName } from "../tabName";
 import { Button } from "./ui";
 import { nextTickMs, PREVIEW_TICK_MS } from "../tabPreview";
 import {
@@ -56,6 +58,7 @@ function HoverPreview({
   paneRef,
   termText,
   state,
+  showAssignedName,
 }: {
   tab: SubTab;
   left: number;
@@ -63,6 +66,7 @@ function HoverPreview({
   paneRef: React.RefObject<HTMLDivElement | null>;
   termText: (id: string) => string | null;
   state?: LifeState;
+  showAssignedName: boolean;
 }) {
   const [tick, setTick] = useState(0);
   const everyRef = useRef(PREVIEW_TICK_MS);
@@ -88,7 +92,7 @@ function HoverPreview({
     >
       <div className="tab-hover-preview-head">
         <span className="tab-hover-preview-icon">{tabPreviewIcon(tab)}</span>
-        <span className="tab-hover-preview-title">{tabText(tab)}</span>
+        <span className="tab-hover-preview-title">{tabText(tab, showAssignedName)}</span>
       </div>
       {tab.type === "terminal" && tab.description && (
         <div className="tab-hover-preview-activity">
@@ -133,6 +137,7 @@ function tabTitle(tab: SubTab): string {
     case "prs-list": return "Every open pull request in this project";
     case "issues-list": return "Every issue from this project's connected trackers";
     case "task-history": return "Every one-shot task that has finished, and what it reported";
+    case "workflows": return "Repository workflows, live steps, decisions, and durable run history";
     case "instructions": return "CLAUDE.md, AGENTS.md, skills and subagents — what every agent reads first";
     case "mcp": return `${tab.server.name} — the tools this MCP server exposes, and who can reach it`;
     case "claim": return `${claimOwnerName(tab.claim.owner)} claimed ${tab.claim.paths.join(", ")}${tab.claim.note ? `\n${tab.claim.note}` : ""}`;
@@ -143,9 +148,10 @@ function tabTitle(tab: SubTab): string {
   }
 }
 
-function tabText(tab: SubTab): string {
+function tabText(tab: SubTab, showAssignedName = false): string {
   switch (tab.type) {
-    case "terminal": return tab.multiplexTitle ?? tab.customTitle ?? tab.title;
+    case "terminal":
+      return tab.multiplexTitle ?? tabName(tab, { agent: showAssignedName });
     case "pr": return `#${tab.pr.number} ${tab.pr.title}`;
     case "ticket": return `${tab.ticket.id} ${tab.ticket.title}`;
     case "research": return tabDisplayLabel(tab);
@@ -162,6 +168,7 @@ function tabText(tab: SubTab): string {
     case "prs-list": return "Pull requests";
     case "issues-list": return "Issues";
     case "task-history": return "Completed tasks";
+    case "workflows": return "Workflows";
     case "instructions": return "Agent instructions";
     case "mcp": return tab.server.name;
     case "claim": return tabDisplayLabel(tab);
@@ -241,6 +248,9 @@ export interface PaneBarProps {
   collabPaths: Set<string>;
   isAgentTab: (t: SubTab) => t is TermSubTab;
   tabState: (t: TermSubTab) => LifeState;
+  /** The native governor says this terminal is relatively high against its
+   * own allowance. This is intentionally not inferred from frontend bytes. */
+  tabMemoryWarning?: (t: TermSubTab) => boolean;
   /** Unseen activity on this terminal — an additive ring, never a state of its
    *  own and never a reason to move the tab. */
   tabRing?: (t: TermSubTab) => boolean;
@@ -267,6 +277,8 @@ export interface PaneBarProps {
   shellChips: RailChip[];
   runChips: RailChip[];
   runSummary: React.ReactNode;
+  /** Build mode supervises runs without exposing their terminal surfaces. */
+  showRunRail: boolean;
   shellMenuOpen: boolean;
   setShellMenuOpen: (v: boolean) => void;
   runMenuOpen: boolean;
@@ -305,7 +317,7 @@ export interface PaneBarProps {
   onShareFile: (memberId: string, memberName: string) => void;
   onShareProject: (memberId: string, memberName: string) => void;
   onOpenPreview: () => void;
-  onLaunchCli: (cli: AgentCli) => void;
+  onLaunchCli: (cli: AgentCli, where?: "workspace" | "current") => void;
   /** The non-default account new agents launch as, and the profile-capable
    *  CLIs it holds no login for yet. Null on the default account. */
   account?: { label: string; missing: string[] } | null;
@@ -323,8 +335,8 @@ export interface PaneBarProps {
 function PaneBarImpl({
   tabGroups, stripDrag, stripRef, paneRef, termText, openStacks, onToggleStack,
   stripTabs, activeTabId, flashTabId, renamingTabId, renameDraft,
-  collabPaths, isAgentTab, tabState, tabRing, showHints,
-  shellChips, runChips, runSummary, shellMenuOpen, setShellMenuOpen,
+  collabPaths, isAgentTab, tabState, tabRing, tabMemoryWarning, showHints,
+  shellChips, runChips, runSummary, showRunRail, shellMenuOpen, setShellMenuOpen,
   runMenuOpen, setRunMenuOpen, activeSection,
   activeFileKind, activeFileView,
   isSharedFile, isRelayConnectedWithPeers, isTerminalTab,
@@ -464,6 +476,8 @@ function PaneBarImpl({
   // directly.
   useStickyLayout(stripRef);
   const drawn = tabGroups.filter((g) => g.tabs.length > 0);
+  const visibleActiveSection =
+    !showRunRail && activeSection === "runs" ? "tabs" : activeSection;
   const hoverTab = hoverPreview
     ? stripTabs.find((tab) => tab.id === hoverPreview.tabId)
     : undefined;
@@ -471,13 +485,13 @@ function PaneBarImpl({
   for (const g of drawn) if (g.label) pinIndex.set(g.key, pinIndex.size);
 
   return (
-    <div className={`pane-bar pane-bar-focus-${activeSection}`}>
+    <div className={`pane-bar pane-bar-focus-${visibleActiveSection}`}>
       <div
         ref={(el) => {
           tabsRowRef.current = el;
           stripRef.current = el;
         }}
-        className={`tabs tabs-harbor ${activeSection !== "tabs" ? "pane-section-dim" : ""}`}
+        className={`tabs tabs-harbor ${visibleActiveSection !== "tabs" ? "pane-section-dim" : ""}`}
       >
         {blob && (
           <span
@@ -555,6 +569,8 @@ function PaneBarImpl({
                     tab.type === "terminal" && (tab.multiplexCount ?? 0) > 1 ? "tab-multiplexed" : ""
                   } ${tab.id === flashTabId ? "tab-flash" : ""} ${
                     tab.id === stripDrag.dragId ? "tab-dragging" : ""
+                  } ${
+                    tab.type === "terminal" && tabMemoryWarning?.(tab) ? "tab-memory-warning" : ""
                   }`}
                   {...stripDrag.itemProps(tab.id)}
                   onMouseEnter={(e) => armHoverPreview(tab, e.currentTarget)}
@@ -633,7 +649,7 @@ function PaneBarImpl({
                       className="tab-title"
                       title={tab.type === "terminal" ? "Double-click or right-click to rename" : undefined}
                     >
-                      {tabText(tab)}
+                      {tabText(tab, tab.type === "terminal" && isAgentTab(tab))}
                     </span>
                   )}
                   {/* Non-default accounts only — the point is telling two
@@ -677,6 +693,7 @@ function PaneBarImpl({
           paneRef={paneRef}
           termText={termText}
           state={hoverTab.type === "terminal" ? tabState(hoverTab) : undefined}
+          showAssignedName={hoverTab.type === "terminal" && isAgentTab(hoverTab)}
         />
       )}
 
@@ -686,16 +703,18 @@ function PaneBarImpl({
         summary={<TerminalIcon size={11} className="run-chip-shell-dot" />}
         open={shellMenuOpen}
         setOpen={setShellMenuOpen}
-        dim={activeSection !== "shells"}
+        dim={visibleActiveSection !== "shells"}
       />
-      <Rail
-        label="RUNS"
-        chips={runChips}
-        summary={runSummary}
-        open={runMenuOpen}
-        setOpen={setRunMenuOpen}
-        dim={activeSection !== "runs"}
-      />
+      {showRunRail && (
+        <Rail
+          label="RUNS"
+          chips={runChips}
+          summary={runSummary}
+          open={runMenuOpen}
+          setOpen={setRunMenuOpen}
+          dim={visibleActiveSection !== "runs"}
+        />
+      )}
 
       <div className="pane-actions">
         {stripTabs.length > 4 && (
@@ -797,6 +816,9 @@ function PaneBarImpl({
                 </div>
               )}
               {AGENT_CLIS.map((cli) => (
+                // Unqualified click follows the agentWorkspaces setting; the
+                // hover action below is always the other choice, same as the
+                // ⌘N palette.
                 <div key={cli.id} className="cli-item" onClick={() => { setCliMenuOpen(false); onLaunchCli(cli); }}>
                   <span><AgentIcon id={cli.id} size={15} className="cli-icon" /> {cli.name}</span>
                   {/* This account has no login for that CLI yet. Still
@@ -815,6 +837,32 @@ function PaneBarImpl({
                     >
                       ⇡ {cliUpdates[cli.bin]?.latest}
                     </span>
+                  )}
+                  {installed[cli.bin] && (
+                    <button
+                      type="button"
+                      className="launch-current"
+                      aria-label={
+                        getSettings().agentWorkspaces
+                          ? `Open ${cli.name} in the current checkout`
+                          : `Open ${cli.name} in a new workspace`
+                      }
+                      title={
+                        getSettings().agentWorkspaces
+                          ? `Open ${cli.name} in the current checkout`
+                          : `Open ${cli.name} in a new workspace`
+                      }
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setCliMenuOpen(false);
+                        onLaunchCli(
+                          cli,
+                          getSettings().agentWorkspaces ? "current" : "workspace",
+                        );
+                      }}
+                    >
+                      {getSettings().agentWorkspaces ? "here" : "workspace"}
+                    </button>
                   )}
                 </div>
               ))}

@@ -8,10 +8,12 @@ import type { TabStatus } from "../../tabGroups";
 import { getSettings } from "../../settings";
 import { claimLabel } from "../../claims";
 import { basename } from "../../paths";
+import { tabName, type TabNames } from "../../tabName";
 
 export type SideTab =
   | "files"
   | "servers"
+  | "integrations"
   | "changes"
   | "git"
   | "prs"
@@ -23,18 +25,13 @@ export type SideTab =
   | "team"
   | "tools";
 
-export interface TermSubTab {
+export interface TermSubTab extends TabNames {
   id: string;
   type: "terminal";
   cwd: string;
-  /** Auto title, tracked from the shell/OSC. Shown unless the user renamed. */
-  title: string;
   /** Agent-published one-line description, updated through canopy_name_task
    *  whenever the work changes. */
   description?: string;
-  /** User-set name (double-click the tab). Wins over `title` for display and
-   *  survives the shell repainting its own title; cleared by renaming to empty. */
-  customTitle?: string;
   ptyId: number | null;
   /** When set, this tab attaches to an already-running headless PTY (spawned
    *  from the remote portal) instead of spawning its own. Closing it detaches;
@@ -81,6 +78,15 @@ export interface TermSubTab {
    *  `runId` keys this run's entry in the task history — the record outlives
    *  the tab, which is the point. */
   micro?: { taskId: string; runId?: string; attemptId?: string };
+  /** A long-lived child delegated by another agent. Unlike `micro`, it is an
+   * ordinary visible/restorable terminal; these ids only bind its PTY and
+   * settle the durable attempt when it exits or the user closes it. */
+  spawnedTask?: {
+    runId: string;
+    attemptId: string;
+    parentPtyId: number;
+    depth: number;
+  };
   /** Visual-only grouping. Every member remains a normal terminal tab with its
    * own PTY; ProjectView lays members of the same group into one split surface. */
   paneGroup?: string;
@@ -217,6 +223,12 @@ export interface TaskHistorySubTab {
   focus?: { runId: string; nonce: number };
 }
 
+/** Repository-defined automations and their durable execution history. */
+export interface WorkflowsSubTab {
+  id: string;
+  type: "workflows";
+}
+
 /** The instruction files every agent reads before it sees any code — the
  *  project's, the user's own, and the skill and subagent packs. One per
  *  project; `focus` is the file a panel row asked it to open on. */
@@ -339,14 +351,64 @@ export type SubTab =
   | PrsListSubTab
   | IssuesListSubTab
   | TaskHistorySubTab
+  | WorkflowsSubTab
   | InstructionsSubTab
   | McpSubTab
   | ClaimSubTab
   | ChatSubTab;
 
+/** Filesystem context carried by the focused tab. */
+export function tabContextPath(tab: SubTab | null | undefined): string | null {
+  if (!tab) return null;
+  switch (tab.type) {
+    case "file":
+      // Git needs the containing directory, not the file itself.
+      return tab.file.path.replace(/[\\/][^\\/]*$/, "") || tab.file.path;
+    case "terminal":
+      return tab.cwd;
+    case "branch":
+    case "commit":
+    case "pr":
+      return tab.repo;
+    case "ticket":
+      return tab.repo ?? null;
+    case "agent":
+      return tab.cwd || tab.repo;
+    case "device":
+      return tab.projectDir;
+    default:
+      return null;
+  }
+}
+
+/** Resolve the focused tab to its component or sibling worktree. */
+export function statusContextRoot(
+  tab: SubTab | null | undefined,
+  roots: string[],
+): string | null {
+  const path = tabContextPath(tab)?.replaceAll("\\", "/").replace(/\/+$/, "");
+  if (!path) return roots[0] ?? null;
+  const matches = roots
+    .map((root) => root.replaceAll("\\", "/").replace(/\/+$/, ""))
+    .filter((root) => path === root || path.startsWith(`${root}/`))
+    .sort((a, b) => b.length - a.length);
+  return matches[0] ?? path;
+}
+
 /** Every tab that isn't a terminal — the "document" tabs, rendered together
  *  below the terminals and display-toggled the same way. */
 export type DocSubTab = Exclude<SubTab, TermSubTab>;
+
+/** Tabs a person may navigate to in the current workspace mode. Build keeps
+ * run terminals alive for supervision, but they are an implementation detail
+ * there; Engineer continues to expose every tab. */
+export function tabsPresentedByMode(
+  tabs: SubTab[],
+  buildMode: boolean,
+): SubTab[] {
+  if (!buildMode) return tabs;
+  return tabs.filter((tab) => tab.type !== "terminal" || !tab.run);
+}
 
 /** One entry in a right-hand rail (a shell or a running command). */
 export interface RailChip {
@@ -409,6 +471,12 @@ export interface ProjectViewProps {
   zen: boolean;
   events: AgentEventEntry[];
   hookPath: string | null;
+  /** App's one native-governor snapshot. ProjectView only joins its terminal
+   * PTY ids onto it; it does not calculate a second memory policy. */
+  terminalGovernor: import("../../ipc").TerminalGovernorSnapshot | null;
+  /** Publish visual multiplex membership so App's one grant dialog can compare
+   * summed usage with summed per-agent allowances. */
+  onTerminalQuotaGroupsChange?: (projectId: string, groups: number[][]) => void;
   /** Every open project (name + roots) — the resource breakdown groups the
    *  machine-wide session stats by project, which one project can't know. */
   allProjects: { name: string; roots: string[]; asleep?: boolean }[];
@@ -421,6 +489,10 @@ export interface ProjectViewProps {
   /** Persist this project's custom tasks — they live on the project record, so
    *  writing one is a workspace save. */
   onSaveCustomTasks: (tasks: import("../../microTasks").CustomMicroTask[]) => void;
+  /** Persist non-secret provider, resource and deployment observations. */
+  onSaveIntegrations: (
+    state: import("../../projectIntegrations").ProjectIntegrationState,
+  ) => void | Promise<void>;
   /** Persist an inferred Build target without opening or closing Engineer UI. */
   onPersistVibeTarget: (
     selection: import("../../vibeTargetInference").VibeTargetSelection,
@@ -486,6 +558,88 @@ export function matchesVibeRun(
     : tab.command === runCommand.command;
 }
 
+/** Whether a required Build run may start yet, given its component's setup
+ *  commands (`purpose: "setup"`) and the runs already on the rail.
+ *
+ *  Starting a server into a checkout its setup never prepared hands a
+ *  non-engineer a stack trace for a problem Canopy already knew how to
+ *  prevent — the survey found the install command; it has to run first.
+ *
+ *  `started` is the auto-start ledger: a setup with no tab whose start IS
+ *  recorded is a chore that succeeded and reaped itself, which counts as
+ *  done. One that exited non-zero blocks the server and is reported in
+ *  `failed` so the caller can say so (and, eventually, hand it to repair). */
+export function vibeSetupGate(
+  command: RunCommand,
+  component: Pick<Component, "id" | "commands">,
+  tabs: Pick<TermSubTab, "componentId" | "runCommandId" | "exited" | "exitCode">[],
+  started: (setupId: string) => boolean,
+  completed: (setupId: string) => boolean = started,
+): { ready: boolean; start: RunCommand[]; failed: RunCommand[] } {
+  const start: RunCommand[] = [];
+  const failed: RunCommand[] = [];
+  let ready = true;
+  if (command.purpose === "setup") return { ready, start, failed };
+  for (const setup of (component.commands ?? []).filter(
+    (candidate) =>
+      candidate.purpose === "setup" &&
+      candidate.id !== command.id &&
+      candidate.automatic !== false,
+  )) {
+    const tab = tabs.find(
+      (candidate) =>
+        candidate.componentId === component.id &&
+        candidate.runCommandId === setup.id,
+    );
+    if (tab && !tab.exited) {
+      ready = false;
+      break;
+    } else if (tab?.exited && tab.exitCode !== 0) {
+      ready = false;
+      failed.push(setup);
+      break;
+    } else if (!tab && completed(setup.id)) {
+      continue;
+    } else if (!tab && started(setup.id)) {
+      ready = false;
+      break;
+    } else if (!tab) {
+      ready = false;
+      start.push(setup);
+      // Setup order is declaration order. Starting install and migrate in the
+      // same render races the migration against its own dependencies.
+      break;
+    }
+  }
+  return { ready, start, failed };
+}
+
+/** A dependency is ready, not merely allocated a tab. This distinction is what
+ * makes `database -> API -> web` startup deterministic: a tab exists before
+ * its child process has bound a port. */
+export function vibeRunReady(
+  tab: Pick<TermSubTab, "ptyId" | "exited" | "exitCode"> | undefined,
+  command: Pick<RunCommand, "readiness">,
+  stats: Pick<ipc.SessionStats, "id" | "ports">[],
+  verifiedReadinessPtys: ReadonlySet<number>,
+): boolean {
+  const readiness = command.readiness?.kind ?? "process-alive";
+  if (readiness === "one-shot") return Boolean(tab?.exited && tab.exitCode === 0);
+  if (!tab || tab.exited || tab.ptyId == null) return false;
+  if (readiness === "port") {
+    return Boolean(stats.find((sample) => sample.id === tab.ptyId)?.ports.length);
+  }
+  // A socket is not proof of an HTTP endpoint, and a process can be alive while
+  // npx/pnpm/auth is waiting at a prompt. The one supervisor grants both kinds
+  // only after their declared evidence has been verified.
+  if (readiness === "http" || readiness === "process-alive") {
+    return verifiedReadinessPtys.has(tab.ptyId);
+  }
+  // One-shot commands become ready by exiting successfully; they cannot
+  // release a dependent while their PTY is still running.
+  return false;
+}
+
 /** One tab as canopy_editor_state describes it: enough for an agent to know
  *  what the user has in front of them, without shipping the tab's contents. */
 export function describeTab(tab: SubTab | undefined) {
@@ -496,7 +650,7 @@ export function describeTab(tab: SubTab | undefined) {
     case "terminal":
       return {
         kind: tab.run ? "run" : "terminal",
-        label: tab.customTitle ?? tab.title,
+        label: tabName(tab),
         cwd: tab.cwd,
         ptyId: tab.ptyId,
       };
@@ -532,6 +686,8 @@ export function describeTab(tab: SubTab | undefined) {
       return { kind: "issues-list", label: "Issues" };
     case "task-history":
       return { kind: "task-history", label: "Completed tasks" };
+    case "workflows":
+      return { kind: "workflows", label: "Workflows" };
     case "instructions":
       return { kind: "instructions", label: "Agent instructions" };
     case "mcp":
@@ -566,7 +722,7 @@ export const tabId = () =>
 export function tabDisplayLabel(t: SubTab): string {
   switch (t.type) {
     case "terminal":
-      return t.multiplexTitle ?? t.customTitle ?? t.title;
+      return t.multiplexTitle ?? tabName(t);
     case "file":
       return t.file.name;
     case "pr":
@@ -606,6 +762,8 @@ export function tabDisplayLabel(t: SubTab): string {
       return "Issues";
     case "task-history":
       return "Completed tasks";
+    case "workflows":
+      return "Workflows";
     case "instructions":
       return "Agent instructions";
     case "mcp":
@@ -671,9 +829,17 @@ export function pickBrowserTab<
     /** The tab this session is on — where its pip points. Ignored when it names
      *  a tab that is gone or was never this session's. */
     currentTabId?: string | null;
+    /** A Build/repair attempt's immutable preview. Undefined means ordinary
+     * browser routing; null means the attempt began with no preview. */
+    attemptTabId?: string | null;
   },
   activeTabId: string | null,
 ): T | undefined {
+  if (op.attemptTabId !== undefined) {
+    return op.attemptTabId
+      ? previews.find((tab) => tab.id === op.attemptTabId)
+      : undefined;
+  }
   const origin = (u: string): string | null => {
     try {
       return new URL(u).origin;

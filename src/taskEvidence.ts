@@ -32,6 +32,7 @@
 // `recoveryFromAttemptId` so the failover reads as the story it was.
 
 import * as ipc from "./ipc";
+import { rendererIoBudget } from "./ioBudget";
 import { taskEvents, taskGet } from "./taskEnvelopes";
 import type { TaskAttempt, TaskEvent, TaskRouteSnapshot } from "./taskEnvelope";
 import { listTranscript, type TaskTranscriptEntry } from "./taskTranscript";
@@ -72,7 +73,9 @@ export function routeFacts(route: TaskRouteSnapshot): RouteFact[] {
     fact("Agent", route.cli, NOT_RECORDED),
     fact("Version", route.cliVersion, NOT_RECORDED),
     fact("Profile", route.profileId, NOT_RECORDED),
+    fact("Provider", route.requestedProvider, NONE_REQUESTED),
     fact("Requested model", route.requestedModel, NONE_REQUESTED),
+    fact("Effort", route.requestedEffort, NONE_REQUESTED),
     // Deliberately not `route.observedModel ?? route.requestedModel`. See the
     // module header: that substitution is the whole failure this reads against.
     fact("Observed model", route.observedModel, NOT_OBSERVED),
@@ -371,5 +374,11 @@ export async function loadTaskEvidence(
 /** Read one stored artifact. Separate from `loadTaskEvidence` on purpose: a
  *  turn diff and a screenshot are capped but not small, and fetching every one
  *  of them to render a collapsed row would be paying for what nobody opened. */
-export const readEvidenceArtifact = (id: string): Promise<string> =>
-  ipc.taskArtifactRead(id);
+export const readEvidenceArtifact = (
+  id: string,
+  signal?: AbortSignal,
+): Promise<string> =>
+  rendererIoBudget.run(
+    { scope: "task-evidence", bytes: 2 * 1024 * 1024, signal },
+    () => ipc.taskArtifactRead(id),
+  );

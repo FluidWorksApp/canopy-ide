@@ -27,11 +27,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
+use std::process::{Command, ExitStatus, Stdio};
 
 // The lifecycle ladder, shared with the app crate. Compiled in rather than
 // imported because this binary is standalone by design — but it must decide
 // state exactly as the app does, and `shared/agentLife/fixtures.json` is
 // replayed on both sides to prove it.
+#[path = "../agent_instructions.rs"]
+mod agent_instructions;
 #[path = "../agent_life.rs"]
 mod agent_life;
 
@@ -78,6 +81,32 @@ fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
 }
 
+const SMALL_PROCESS_OUTPUT_MAX: u64 = 1024 * 1024;
+
+/// The hook only shells out for tiny git/ps answers. Drain stdout before wait,
+/// cap it at 1 MiB, and discard stderr so a corrupted process table or wrapper
+/// cannot make this short-lived sidecar allocate without bound.
+fn small_process_output(command: &mut Command) -> Option<(ExitStatus, Vec<u8>)> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let mut bytes = Vec::new();
+    stdout
+        .by_ref()
+        .take(SMALL_PROCESS_OUTPUT_MAX + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > SMALL_PROCESS_OUTPUT_MAX {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    Some((child.wait().ok()?, bytes))
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -86,6 +115,15 @@ fn now_secs() -> u64 {
 }
 
 fn main() {
+    // Linux terminal containment launcher. This path must run before any mode
+    // that can spawn work: it joins the already-prepared cgroup, proves that to
+    // the parent through a private gate, waits for release, and only then execs
+    // the user's actual argv. The original program therefore cannot win a fork
+    // race against cgroup membership.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--containment-launch")) {
+        containment_launcher_main();
+    }
     // Third job, distinct transport: `canopy-hook --mcp` speaks MCP over stdio
     // (registered in the CLI's user-scope MCP config by agents.rs) and serves
     // the IDE-context tools. Everything else is the hook contract below.
@@ -115,6 +153,89 @@ fn main() {
     // it's attached to.
     if let Err(_e) = real_main() {
         std::process::exit(0);
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", all(test, unix)))]
+#[cfg_attr(
+    all(test, not(any(target_os = "linux", target_os = "windows"))),
+    allow(dead_code)
+)]
+fn containment_launcher_main() -> ! {
+    use std::fs::OpenOptions;
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
+
+    let mut args = std::env::args_os().skip(2);
+    let Some(cgroup_procs) = args.next() else {
+        eprintln!("canopy containment: missing cgroup.procs path");
+        std::process::exit(125);
+    };
+    let Some(ready) = args.next() else {
+        eprintln!("canopy containment: missing ready gate");
+        std::process::exit(125);
+    };
+    let Some(release) = args.next() else {
+        eprintln!("canopy containment: missing release gate");
+        std::process::exit(125);
+    };
+    if args.next().as_deref() != Some(std::ffi::OsStr::new("--")) {
+        eprintln!("canopy containment: malformed command boundary");
+        std::process::exit(125);
+    }
+    let Some(program) = args.next() else {
+        eprintln!("canopy containment: missing program");
+        std::process::exit(126);
+    };
+    let program_args: Vec<_> = args.collect();
+
+    #[cfg(target_os = "linux")]
+    {
+        let joined = std::fs::write(&cgroup_procs, std::process::id().to_string());
+        if let Err(error) = joined {
+            eprintln!("canopy containment: could not join cgroup: {error}");
+            std::process::exit(125);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = cgroup_procs;
+    if let Err(error) = OpenOptions::new().write(true).create_new(true).open(&ready) {
+        eprintln!("canopy containment: could not signal readiness: {error}");
+        std::process::exit(125);
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !std::path::Path::new(&release).is_file() {
+        if std::time::Instant::now() >= deadline {
+            eprintln!("canopy containment: parent did not release spawn gate");
+            std::process::exit(125);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    #[cfg(unix)]
+    {
+        let error = std::process::Command::new(program)
+            .args(program_args)
+            .exec();
+        eprintln!("canopy containment: exec failed: {error}");
+        std::process::exit(126);
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no exec(2). The launcher deliberately remains the job's
+        // root and waits: descendants inherit its verified Job Object before
+        // any user code can start, and the PTY observes the actual exit code.
+        match std::process::Command::new(program)
+            .args(program_args)
+            .status()
+        {
+            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            Err(error) => {
+                eprintln!("canopy containment: launch failed: {error}");
+                std::process::exit(126);
+            }
+        }
     }
 }
 
@@ -486,6 +607,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
 
     normalize_event(&mut event, agent_override.as_deref().unwrap_or("claude"));
 
+    if event["agent"].as_str() == Some("grok") && event["subagent_type"].is_string() {
+        return Ok(());
+    }
+
     let session_id = event["session_id"].as_str().unwrap_or("").to_string();
     let cwd = event["cwd"].as_str().unwrap_or("").to_string();
     let hook_event = event["hook_event_name"].as_str().unwrap_or("").to_string();
@@ -554,6 +679,10 @@ fn real_main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     return Ok(());
                 }
+                if let Some(decision) = build_shell_decision(&hook_event, &event) {
+                    println!("{}", decision);
+                    return Ok(());
+                }
             }
             if hook_event == "UserPromptSubmit" || hook_event == "SessionStart" {
                 // A session that has just started has never been told any of
@@ -615,6 +744,70 @@ fn normalize_event(event: &mut serde_json::Value, agent: &str) {
         return;
     };
     map.insert("agent".into(), serde_json::json!(agent));
+    if matches!(agent, "cursor" | "grok") {
+        for (from, to) in [
+            ("sessionId", "session_id"),
+            ("conversationId", "session_id"),
+            ("conversation_id", "session_id"),
+            ("workspaceRoot", "cwd"),
+            ("hookEventName", "hook_event_name"),
+            ("toolName", "tool_name"),
+            ("toolInput", "tool_input"),
+            ("notificationType", "notification_type"),
+            ("promptId", "prompt_id"),
+            ("subagentType", "subagent_type"),
+        ] {
+            if map.get(to).is_none() {
+                if let Some(value) = map.get(from).cloned() {
+                    map.insert(to.into(), value);
+                }
+            }
+        }
+        if map.get("cwd").and_then(|v| v.as_str()).is_none() {
+            let roots = map
+                .get("workspaceRoots")
+                .or_else(|| map.get("workspace_roots"));
+            if let Some(cwd) = roots
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .and_then(|v| v.as_str())
+            {
+                map.insert("cwd".into(), serde_json::json!(cwd));
+            }
+        }
+        if agent == "grok" {
+            if map.get("session_id").is_none() {
+                if let Ok(value) = std::env::var("GROK_SESSION_ID") {
+                    map.insert("session_id".into(), serde_json::json!(value));
+                }
+            }
+            if map.get("cwd").is_none() {
+                if let Ok(value) = std::env::var("GROK_WORKSPACE_ROOT") {
+                    map.insert("cwd".into(), serde_json::json!(value));
+                }
+            }
+        }
+        if let Some(name) = map
+            .get("hook_event_name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            let canonical = match name.as_str() {
+                "session_start" | "sessionStart" => "SessionStart",
+                "session_end" | "sessionEnd" => "SessionEnd",
+                "user_prompt_submit" | "beforeSubmitPrompt" => "UserPromptSubmit",
+                "pre_tool_use" | "preToolUse" => "PreToolUse",
+                "post_tool_use" | "postToolUse" => "PostToolUse",
+                "post_tool_use_failure" | "postToolUseFailure" => "PostToolUseFailure",
+                "stop" => "Stop",
+                "stop_failure" => "StopFailure",
+                "stop_cancelled" => "StopCancelled",
+                "notification" => "Notification",
+                _ => name.as_str(),
+            };
+            map.insert("hook_event_name".into(), serde_json::json!(canonical));
+        }
+    }
     if agent == "agy" {
         // Antigravity 1.1.x uses protojson camelCase, unlike the Claude-shaped
         // contract every downstream consumer reads.
@@ -1141,6 +1334,23 @@ fn update_digest(
         if let Some(p) = event["prompt"].as_str() {
             let p = p.trim();
             if !p.is_empty() {
+                // A prompt is the universal baseline status. Agents may later
+                // refine it through canopy_name_task, but the UI must not
+                // depend on a voluntary tool call to say what a turn is about.
+                let working_on = p.split_whitespace().collect::<Vec<_>>().join(" ");
+                digest["working_on"] = serde_json::json!(truncate(&working_on, 160));
+                digest["working_on_updated"] = serde_json::json!(now);
+                // The prompt that started the session, kept apart from the
+                // rotating window above: `prompts` drops its oldest entries,
+                // so on a long session the reason it exists at all was the
+                // first thing lost.
+                if digest
+                    .get("first_prompt")
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
+                    digest["first_prompt"] = serde_json::json!(truncate(p, 220));
+                }
                 if let Some(arr) = digest["prompts"].as_array_mut() {
                     arr.push(serde_json::json!(truncate(p, 220)));
                     while arr.len() > MAX_PROMPTS {
@@ -1273,11 +1483,11 @@ fn git_branch(cwd: &str) -> Option<String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    let out = cmd.output().ok()?;
-    if !out.status.success() {
+    let (status, stdout) = small_process_output(&mut cmd)?;
+    if !status.success() {
         return None;
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let s = String::from_utf8_lossy(&stdout).trim().to_string();
     if s.is_empty() {
         None
     } else {
@@ -1519,6 +1729,119 @@ const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 /// The file a PostToolUse event wrote to, or None when the tool didn't write
 /// one. NotebookEdit names its target `notebook_path`.
+/// Irreversible inside the workspace, or an attempt to leave it — the shell
+/// half of the authority model.
+///
+/// This mirrors `DESTRUCTIVE` in `src/workspaceAuthority.ts`, and the pairing is
+/// deliberate rather than duplicated by accident: codex is confined by the OS
+/// sandbox, but Claude Code has no equivalent, so for that dialect the only
+/// real enforcement point is this hook. A rule that lives only in the prompt is
+/// a request; here it is a refusal. The two lists must be changed together, and
+/// the tests below carry the same cases as the TypeScript ones so a drift shows
+/// up as a failure on one side.
+///
+/// Each entry returns what the action COSTS, not what the command says: the
+/// person answering has been promised they never need to read a shell command,
+/// and "git reset --hard" is not a question they can be expected to adjudicate.
+fn destructive_reason(command: &str) -> Option<&'static str> {
+    let c = command.trim();
+    let has = |needle: &str| c.contains(needle);
+    // `rm` with a recursive or force flag, in any order or combination.
+    let rm_destroys = c.split_whitespace().enumerate().any(|(i, word)| {
+        (word == "rm" || word.ends_with("/rm") || (i > 0 && word == "rm"))
+            && c.split_whitespace()
+                .skip(i + 1)
+                .take_while(|w| w.starts_with('-'))
+                .any(|w| w.contains('r') || w.contains('f'))
+    });
+    if rm_destroys {
+        return Some("This deletes files for good. I can't undo it afterwards.");
+    }
+    if has("git reset --hard")
+        || has("git clean -f")
+        || has("git clean -df")
+        || has("git clean -fd")
+        || has("git checkout -- ")
+        || has("git restore ")
+    {
+        return Some("This throws away changes that haven't been saved to a version.");
+    }
+    if has("git push") && (has("--force") || has(" -f")) {
+        return Some("This overwrites the shared history everyone else is working from.");
+    }
+    let lower = c.to_ascii_lowercase();
+    if lower.contains("drop database")
+        || lower.contains("drop table")
+        || lower.contains("drop schema")
+        || lower.contains("truncate table")
+        || lower.contains("migrate reset")
+        || lower.contains("db push --force")
+    {
+        return Some("This deletes data that isn't coming back.");
+    }
+    if has("sudo ")
+        || has("brew install")
+        || has("brew uninstall")
+        || has("brew upgrade")
+        || (has("npm install") && has(" -g"))
+        || (has("npm i ") && has(" -g"))
+    {
+        return Some("This changes software for your whole computer, not just this project.");
+    }
+    if has(".env") || lower.contains("secret") {
+        return Some("This touches the private keys this project uses.");
+    }
+    None
+}
+
+/// A Build turn is about to run a shell command. Decide, and when the cost is
+/// irreversible, put the question to the person before it happens.
+///
+/// Only Build sessions (`CANOPY_VIBE`) are gated. An Engineer-mode agent runs
+/// with its user present and Claude's own permission flow in front of it;
+/// interposing here would be answering a question that was never ours.
+///
+/// Returns the JSON to print, or None to stay out of the way.
+fn build_shell_decision(hook_event: &str, event: &serde_json::Value) -> Option<String> {
+    if hook_event != "PreToolUse" || std::env::var("CANOPY_VIBE").is_err() {
+        return None;
+    }
+    if event["tool_name"].as_str()? != "Bash" {
+        return None;
+    }
+    let command = event["tool_input"]["command"].as_str()?;
+    let reason = destructive_reason(command)?;
+    let approved = ui_op(
+        "ask",
+        &serde_json::json!({
+            "question": format!("{reason} Go ahead?"),
+            "options": ["Yes, go ahead", "No, leave it"],
+        }),
+        180,
+    )
+    .map(|answer| {
+        let a = answer.to_ascii_lowercase();
+        a.contains("yes") || a.contains("go ahead")
+    })
+    // No answer is not consent. A timeout, a closed project or an unreachable
+    // app all land here, and every one of them means nobody said yes.
+    .unwrap_or(false);
+    Some(
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": if approved { "allow" } else { "deny" },
+                "permissionDecisionReason": if approved {
+                    "You approved this.".to_string()
+                } else {
+                    format!("{reason} I left it alone because that wasn't approved.")
+                },
+            }
+        })
+        .to_string(),
+    )
+}
+
 fn edited_path(event: &serde_json::Value) -> Option<&str> {
     let tool = event["tool_name"].as_str()?;
     if !EDIT_TOOLS.contains(&tool) {
@@ -1846,79 +2169,13 @@ fn relocate_stray_research(session_id: &str, entry_dir: &std::path::Path) {
     }
 }
 
-/// Server instructions, injected into the agent's system prompt by the client.
-/// Deliberately a routing table, not a feature tour: the failure it exists to
-/// stop is an agent defaulting to the shell (`npm run dev`, `open <url>`,
-/// `kill`) when the IDE it is running inside can do the same thing visibly,
-/// with the output and the preview staying available afterwards.
-const INSTRUCTIONS: &str = "\
-This session runs inside the Canopy IDE. Prefer these tools over shell or \
-system equivalents — they act in the IDE the user is watching, and their \
-results stay inspectable:
-
-- Start a dev server / build / worker -> canopy_start_server (not `npm run dev` \
-  in bash; it runs in Canopy's RUNS rail, with logs via canopy_server_output)
-- Open or look at a page -> canopy_browser_navigate, then canopy_browser_snapshot \
-  (not `open`/`xdg-open`, and never an external browser; the embedded preview is \
-  what the user annotates and what you can drive)
-- Test responsive layouts -> canopy_browser_resize, then reset it when finished \
-  (do not open Playwright just to change the viewport)
-- Interact with a page -> canopy_browser_click / _type / _eval; diagnose with \
-  canopy_browser_console / _network
-- Stop or restart a server -> canopy_stop_server / canopy_restart_server (not \
-  kill/pkill)
-- See what's running, CPU, memory -> canopy_resources (not ps/top/lsof)
-- Read a running server's logs -> canopy_server_output (don't re-run the command)
-- The user's marked-up feedback on a page or a device -> canopy_annotations
-- Run or look at an Android app -> canopy_device_list first, then \
-  canopy_device_run / _screenshot / _snapshot (not adb in bash; these pick the \
-  device and the launcher activity for you)
-- Interact with an Android app -> canopy_device_tap / _type / _key / _swipe \
-  (coordinates from canopy_device_snapshot, never guessed off a screenshot); \
-  diagnose with canopy_device_logcat
-
-- \"this\", \"here\", \"the other one\" in the user's request -> canopy_editor_state \
-  (the file they have open, their caret and selection) before guessing
-- Check your own edit compiles -> canopy_diagnostics (the warm language server, \
-  not a full `tsc --noEmit`); before changing a shared signature -> \
-  canopy_references
-- What a symbol's type and docs are -> canopy_hover; where a symbol by that \
-  name is -> canopy_symbols (not grep)
-- Wait for a server to come up, a build to finish -> canopy_wait_for (don't poll \
-  canopy_server_output in a loop)
-- How something LOOKS -> canopy_screenshot (the DOM snapshot can't see overlap \
-  or contrast)
-- Working in a checkout that other agents share -> canopy_agents first, \
-  canopy_claim on the files you're taking
-- Handing another agent more than one line, or files, or a message it should \
-  be able to find again -> canopy_mesh_send (persistent, by message id); \
-  what you've sent and received, or a message id someone gave you -> \
-  canopy_mesh
-
-- Investigating anything worth writing down (how does X work, which approach, \
-  what would break) -> canopy_research search FIRST, someone may already have \
-  answered it; then canopy_research_write start, and put the findings there as \
-  you go. Never leave research in a scratch markdown file — it is lost the \
-  moment the session ends. Long raw material (file dumps, logs, fetched pages) \
-  goes in `source`, not in the body: the body is what the next agent reads.
-- Noticing something real that is NOT the job you were given (a bug beside the \
-  one you were sent for, a refactor the code obviously wants, a missing test) \
-  -> canopy_notes_write create. Park it and carry on: writing it down is how it \
-  survives, and chasing it is how you deliver the wrong change. Search \
-  canopy_notes first so the same observation is not recorded twice. This is not \
-  a progress log — do not narrate the work you were asked to do into it.
-
-Call canopy_project first for component paths, configured run commands, \
-terminal ids, and the ports servers are listening on. Fall back to the shell \
-only for work these tools don't cover.";
-
 /// The bridge address, from our own environment or from the process that
 /// spawned us.
 ///
 /// Canopy stamps CANOPY_CTX_PORT and _TOKEN onto every PTY it opens, and every
 /// CLI that inherits its environment passes them down to the MCP servers it
-/// starts. Codex does not: verified against codex-cli 0.146.0, it spawns stdio
-/// MCP servers with twelve core variables and nothing else —
+/// starts. Codex does not: verified against codex-cli 0.146.0 on 2026-08-02,
+/// it spawns stdio MCP servers with twelve core variables and nothing else —
 ///
 ///   HOME LANG LOGNAME PATH PWD SHELL SHLVL TERM TMPDIR USER _ __CF_USER_TEXT_ENCODING
 ///
@@ -1968,11 +2225,10 @@ fn parent_of(pid: u32) -> Option<u32> {
     {
         // Absolute: this runs in a sidecar started by a GUI-launched app, where
         // PATH may not contain /bin at all (see spawnPathGuard).
-        let out = std::process::Command::new("/bin/ps")
-            .args(["-o", "ppid=", "-p", &pid.to_string()])
-            .output()
-            .ok()?;
-        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+        let mut command = std::process::Command::new("/bin/ps");
+        command.args(["-o", "ppid=", "-p", &pid.to_string()]);
+        let (_, stdout) = small_process_output(&mut command)?;
+        String::from_utf8_lossy(&stdout).trim().parse().ok()
     }
 }
 
@@ -2006,12 +2262,11 @@ fn read_environ(pid: u32) -> Option<Vec<String>> {
         // `ps eww` prints the environment after the command, space separated.
         // Only our own processes are readable, which is the whole population we
         // care about — and the reason this needs no privileges.
-        let out = std::process::Command::new("/bin/ps")
-            .args(["eww", "-o", "command=", "-p", &pid.to_string()])
-            .output()
-            .ok()?;
+        let mut command = std::process::Command::new("/bin/ps");
+        command.args(["eww", "-o", "command=", "-p", &pid.to_string()]);
+        let (_, stdout) = small_process_output(&mut command)?;
         Some(
-            String::from_utf8_lossy(&out.stdout)
+            String::from_utf8_lossy(&stdout)
                 .split_whitespace()
                 .map(str::to_string)
                 .collect(),
@@ -2033,6 +2288,8 @@ fn mcp_main() {
     // stdout is shared: one message per write, never interleaved.
     let out = std::sync::Arc::new(std::sync::Mutex::new(std::io::stdout()));
     let subscriptions: Subscriptions = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let modern_subscriptions: ModernSubscriptions =
+        std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -2042,6 +2299,26 @@ fn mcp_main() {
         let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
+        if msg.get("method").and_then(|m| m.as_str()) == Some("notifications/cancelled") {
+            if let Some(cancelled) = msg.pointer("/params/requestId").cloned() {
+                let key = cancelled.to_string();
+                if modern_subscriptions.lock().unwrap().remove(&key).is_some() {
+                    write_message(
+                        &out,
+                        &rpc_ok_for(
+                            cancelled.clone(),
+                            serde_json::json!({
+                                "_meta": {
+                                    "io.modelcontextprotocol/subscriptionId": cancelled,
+                                }
+                            }),
+                            true,
+                        ),
+                    );
+                }
+            }
+            continue;
+        }
         // Notifications (no id) expect no reply.
         let Some(id) = msg.get("id").cloned() else {
             continue;
@@ -2055,6 +2332,7 @@ fn mcp_main() {
         // and write_message keeps stdout one-message-at-a-time.
         if msg.get("method").and_then(|m| m.as_str()) == Some("tools/call") {
             let out = out.clone();
+            let modern = request_is_modern(&msg);
             std::thread::spawn(move || {
                 let name = msg
                     .pointer("/params/name")
@@ -2065,15 +2343,16 @@ fn mcp_main() {
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
                 let reply = match call_tool(name, &args) {
-                    Ok(output) => rpc_ok(id, output.into_result(name)),
+                    Ok(output) => rpc_ok_for(id, output.into_result(name), modern),
                     // Tool failures are results with isError, not protocol
                     // errors — the agent reads them and adapts.
-                    Err(text) => rpc_ok(
+                    Err(text) => rpc_ok_for(
                         id,
                         serde_json::json!({
                             "content": [{ "type": "text", "text": text }],
                             "isError": true,
                         }),
+                        modern,
                     ),
                 };
                 write_message(&out, &reply);
@@ -2081,7 +2360,47 @@ fn mcp_main() {
             continue;
         }
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let modern = request_is_modern(&msg);
+        if method == "subscriptions/listen"
+            && msg
+                .pointer("/params/notifications/taskIds")
+                .and_then(|value| value.as_array())
+                .is_some_and(|task_ids| !task_ids.is_empty())
+            && !request_supports_tasks(&msg)
+        {
+            write_message(
+                &out,
+                &rpc_err(
+                    id,
+                    -32003,
+                    "MCP Tasks extension was not declared by the client",
+                ),
+            );
+            continue;
+        }
         let reply = match method {
+            "server/discover" => {
+                if request_protocol(&msg) != Some("2026-07-28") {
+                    rpc_err(id, -32022, "unsupported MCP protocol version")
+                } else {
+                    let mut result = serde_json::json!({
+                        "supportedVersions": ["2026-07-28"],
+                        "capabilities": {
+                            "tools": { "listChanged": false },
+                            "resources": { "listChanged": false },
+                            "prompts": { "listChanged": false },
+                            "extensions": {
+                                "io.modelcontextprotocol/tasks": {}
+                            },
+                        },
+                    });
+                    if in_canopy() {
+                        result["instructions"] =
+                            serde_json::json!(agent_instructions::mcp_instructions());
+                    }
+                    rpc_ok_for(id, cacheable(result, 30_000), true)
+                }
+            }
             "initialize" => {
                 // Echo the client's protocol version: these tools are simple
                 // enough to be valid under every revision so far.
@@ -2108,32 +2427,132 @@ fn mcp_main() {
                 // Only sent inside Canopy — elsewhere the tools can't work, and
                 // telling an agent to prefer them would be actively wrong.
                 if in_canopy() {
-                    result["instructions"] = serde_json::json!(INSTRUCTIONS);
+                    result["instructions"] =
+                        serde_json::json!(agent_instructions::mcp_instructions());
                 }
                 rpc_ok(id, result)
             }
-            "ping" => rpc_ok(id, serde_json::json!({})),
-            "tools/list" => rpc_ok(id, tools_list()),
-            "resources/list" => rpc_ok(id, resources_list()),
-            "resources/templates/list" => {
-                rpc_ok(id, serde_json::json!({ "resourceTemplates": [] }))
+            "ping" => rpc_ok_for(id, serde_json::json!({}), modern),
+            "tools/list" => rpc_ok_for(id, cacheable_if_modern(tools_list(), modern), modern),
+            "resources/list" => {
+                rpc_ok_for(id, cacheable_if_modern(resources_list(), modern), modern)
             }
+            "resources/templates/list" => rpc_ok_for(
+                id,
+                cacheable_if_modern(serde_json::json!({ "resourceTemplates": [] }), modern),
+                modern,
+            ),
             "resources/read" => {
                 let uri = msg
                     .pointer("/params/uri")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 match read_resource(uri) {
-                    Ok(text) => rpc_ok(
+                    Ok(text) => rpc_ok_for(
                         id,
-                        serde_json::json!({ "contents": [
-                            { "uri": uri, "mimeType": "application/json", "text": text }
-                        ]}),
+                        cacheable_if_modern(
+                            serde_json::json!({ "contents": [
+                                { "uri": uri, "mimeType": "application/json", "text": text }
+                            ]}),
+                            modern,
+                        ),
+                        modern,
                     ),
-                    Err(e) => rpc_err(id, -32002, &e),
+                    Err(e) => rpc_err(id, if modern { -32602 } else { -32002 }, &e),
                 }
             }
-            "resources/subscribe" => {
+            "tasks/get" | "tasks/update" | "tasks/cancel" if modern => {
+                if !request_supports_tasks(&msg) {
+                    rpc_err(
+                        id,
+                        -32003,
+                        "MCP Tasks extension was not declared by the client",
+                    )
+                } else {
+                    let task_id = msg
+                        .pointer("/params/taskId")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    if task_id.is_empty() {
+                        rpc_err(id, -32602, "tasks method needs taskId")
+                    } else {
+                        let op = method.strip_prefix("tasks/").unwrap_or("");
+                        let mut body = serde_json::json!({ "op": op, "taskId": task_id });
+                        if method == "tasks/update" {
+                            body["inputResponses"] = msg
+                                .pointer("/params/inputResponses")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({}));
+                        }
+                        match ctx_request("POST", "/ctx/mcp-task", Some(body.to_string())).and_then(
+                            |body| {
+                                serde_json::from_str::<serde_json::Value>(&body)
+                                    .map_err(|error| format!("invalid task response: {error}"))
+                            },
+                        ) {
+                            Ok(result) => rpc_ok(id, result),
+                            Err(error) => rpc_err(id, -32602, &error),
+                        }
+                    }
+                }
+            }
+            "subscriptions/listen" if modern => {
+                let requested = msg
+                    .pointer("/params/notifications/resourceSubscriptions")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.as_str())
+                    .filter(|uri| RESOURCES.iter().any(|(known, _, _)| known == uri))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                let mut bodies = HashMap::new();
+                for uri in &requested {
+                    bodies.insert(uri.clone(), read_resource(uri).unwrap_or_default());
+                }
+                let requested_tasks = msg
+                    .pointer("/params/notifications/taskIds")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.as_str())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                let mut task_bodies = HashMap::new();
+                for task_id in &requested_tasks {
+                    if let Ok(body) = mcp_task_body(task_id) {
+                        task_bodies.insert(task_id.clone(), body);
+                    }
+                }
+                let first = modern_subscriptions.lock().unwrap().is_empty();
+                modern_subscriptions.lock().unwrap().insert(
+                    id.to_string(),
+                    ModernSubscription {
+                        id: id.clone(),
+                        bodies,
+                        task_bodies,
+                    },
+                );
+                if first {
+                    watch_modern_subscriptions(out.clone(), modern_subscriptions.clone());
+                }
+                write_message(
+                    &out,
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/subscriptions/acknowledged",
+                        "params": {
+                            "notifications": {
+                                "resourceSubscriptions": requested,
+                                "taskIds": requested_tasks,
+                            },
+                            "_meta": { "io.modelcontextprotocol/subscriptionId": id },
+                        }
+                    }),
+                );
+                continue;
+            }
+            "resources/subscribe" if !modern => {
                 let uri = msg
                     .pointer("/params/uri")
                     .and_then(|v| v.as_str())
@@ -2153,20 +2572,20 @@ fn mcp_main() {
                     rpc_err(id, -32002, &format!("unknown resource: {uri}"))
                 }
             }
-            "resources/unsubscribe" => {
+            "resources/unsubscribe" if !modern => {
                 if let Some(uri) = msg.pointer("/params/uri").and_then(|v| v.as_str()) {
                     subscriptions.lock().unwrap().remove(uri);
                 }
                 rpc_ok(id, serde_json::json!({}))
             }
-            "prompts/list" => rpc_ok(id, prompts_list()),
+            "prompts/list" => rpc_ok_for(id, cacheable_if_modern(prompts_list(), modern), modern),
             "prompts/get" => {
                 let name = msg
                     .pointer("/params/name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 match prompt_get(name) {
-                    Ok(result) => rpc_ok(id, result),
+                    Ok(result) => rpc_ok_for(id, result, modern),
                     Err(e) => rpc_err(id, -32602, &e),
                 }
             }
@@ -2180,6 +2599,14 @@ fn mcp_main() {
 }
 
 type Subscriptions = std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>;
+
+struct ModernSubscription {
+    id: serde_json::Value,
+    bodies: HashMap<String, String>,
+    task_bodies: HashMap<String, String>,
+}
+
+type ModernSubscriptions = std::sync::Arc<std::sync::Mutex<HashMap<String, ModernSubscription>>>;
 
 fn write_message(out: &std::sync::Arc<std::sync::Mutex<std::io::Stdout>>, msg: &serde_json::Value) {
     use std::io::Write;
@@ -2233,6 +2660,70 @@ fn watch_resources(
                     }),
                 );
             }
+        }
+    });
+}
+
+fn watch_modern_subscriptions(
+    out: std::sync::Arc<std::sync::Mutex<std::io::Stdout>>,
+    subscriptions: ModernSubscriptions,
+) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let mut notifications = Vec::new();
+        {
+            let mut held = subscriptions.lock().unwrap();
+            for subscription in held.values_mut() {
+                let uris = subscription.bodies.keys().cloned().collect::<Vec<_>>();
+                for uri in uris {
+                    let Ok(body) = read_resource(&uri) else {
+                        continue;
+                    };
+                    if subscription.bodies.get(&uri) == Some(&body) {
+                        continue;
+                    }
+                    subscription.bodies.insert(uri.clone(), body);
+                    notifications.push(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/resources/updated",
+                        "params": {
+                            "uri": uri,
+                            "_meta": {
+                                "io.modelcontextprotocol/subscriptionId": subscription.id,
+                            }
+                        }
+                    }));
+                }
+                let task_ids = subscription.task_bodies.keys().cloned().collect::<Vec<_>>();
+                for task_id in task_ids {
+                    let Ok(body) = mcp_task_body(&task_id) else {
+                        continue;
+                    };
+                    if subscription.task_bodies.get(&task_id) == Some(&body) {
+                        continue;
+                    }
+                    subscription.task_bodies.insert(task_id, body.clone());
+                    let Ok(mut task) = serde_json::from_str::<serde_json::Value>(&body) else {
+                        continue;
+                    };
+                    if let Some(object) = task.as_object_mut() {
+                        object.insert(
+                            "_meta".into(),
+                            serde_json::json!({
+                                "io.modelcontextprotocol/subscriptionId": subscription.id,
+                            }),
+                        );
+                    }
+                    notifications.push(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/tasks",
+                        "params": task,
+                    }));
+                }
+            }
+        }
+        for notification in notifications {
+            write_message(&out, &notification);
         }
     });
 }
@@ -2343,6 +2834,71 @@ fn rpc_ok(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value
     serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
+fn request_protocol(msg: &serde_json::Value) -> Option<&str> {
+    msg.pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
+        .and_then(|value| value.as_str())
+}
+
+fn request_is_modern(msg: &serde_json::Value) -> bool {
+    request_protocol(msg) == Some("2026-07-28")
+}
+
+fn request_supports_tasks(msg: &serde_json::Value) -> bool {
+    msg.pointer(
+        "/params/_meta/io.modelcontextprotocol~1clientCapabilities/extensions/io.modelcontextprotocol~1tasks",
+    )
+    .is_some()
+}
+
+fn mcp_task_body(task_id: &str) -> Result<String, String> {
+    ctx_request(
+        "POST",
+        "/ctx/mcp-task",
+        Some(serde_json::json!({ "op": "get", "taskId": task_id }).to_string()),
+    )
+}
+
+fn cacheable(mut result: serde_json::Value, ttl_ms: u64) -> serde_json::Value {
+    if let Some(object) = result.as_object_mut() {
+        object.insert("ttlMs".into(), serde_json::json!(ttl_ms));
+        object.insert("cacheScope".into(), serde_json::json!("private"));
+    }
+    result
+}
+
+fn cacheable_if_modern(result: serde_json::Value, modern: bool) -> serde_json::Value {
+    if modern {
+        cacheable(result, 2_000)
+    } else {
+        result
+    }
+}
+
+fn rpc_ok_for(
+    id: serde_json::Value,
+    mut result: serde_json::Value,
+    modern: bool,
+) -> serde_json::Value {
+    if modern {
+        if let Some(object) = result.as_object_mut() {
+            object.insert("resultType".into(), serde_json::json!("complete"));
+            let meta = object
+                .entry("_meta")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(meta) = meta.as_object_mut() {
+                meta.insert(
+                    "io.modelcontextprotocol/serverInfo".into(),
+                    serde_json::json!({
+                        "name": "canopy",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    }),
+                );
+            }
+        }
+    }
+    rpc_ok(id, result)
+}
+
 fn rpc_err(id: serde_json::Value, code: i32, message: &str) -> serde_json::Value {
     serde_json::json!({
         "jsonrpc": "2.0", "id": id,
@@ -2426,7 +2982,11 @@ const STRUCTURED_TOOLS: &[&str] = &[
 ///
 /// Duplicated from PER_PROJECT_TOOLS in companionTools.ts; the guard test holds
 /// the two identical.
-const COMPANION_BLIND_TOOLS: &[&str] = &["canopy_project", "canopy_component_files"];
+const COMPANION_BLIND_TOOLS: &[&str] = &[
+    "canopy_project",
+    "canopy_component_files",
+    "canopy_spawn_agent",
+];
 
 /// Shared tools that change something the user would have to undo.
 ///
@@ -2491,17 +3051,38 @@ fn apply_companion_authority(tools: &mut Vec<serde_json::Value>) {
     });
 }
 
-/// The tools this session gets: everything below, minus whatever the user
-/// switched off in Settings → Agents. A disabled tool is filtered here rather
-/// than refused on call, so it costs the agent no context at all. The bridge
-/// being unreachable means "not inside Canopy" — offer everything and let the
-/// individual calls explain themselves.
+#[derive(Default, serde::Deserialize)]
+struct BridgeToolContract {
+    #[serde(default)]
+    disabled: Vec<String>,
+    /// Absent means a legacy bridge. It is not safe to infer support from a
+    /// newer hook's descriptors: that is the version-skew failure this
+    /// handshake exists to prevent.
+    #[serde(rename = "supportedTools")]
+    supported_tools: Option<Vec<String>>,
+    #[allow(dead_code)]
+    #[serde(rename = "buildId")]
+    build_id: Option<String>,
+}
+
+fn bridge_tool_contract(body: Option<&str>) -> Option<BridgeToolContract> {
+    // No bridge at all is the supported outside-Canopy mode: keep publishing
+    // the descriptors so a call can explain that Canopy is not connected.
+    // A bridge that answered but omitted/malformed the contract is different:
+    // it is an older running app, and no tool is honestly known reachable.
+    body.map(|raw| serde_json::from_str(raw).unwrap_or_default())
+}
+
+/// The tools this session gets: everything below, intersected with the running
+/// bridge's advertised contract, then minus whatever the user switched off in
+/// Settings → Agents. A separately updated hook can therefore never publish a
+/// call the still-running app does not implement.
 fn tools_list() -> serde_json::Value {
-    let disabled: Vec<String> = ctx_get("/ctx/tools".into())
-        .ok()
-        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
-        .and_then(|v| v.get("disabled").cloned())
-        .and_then(|v| serde_json::from_value(v).ok())
+    let bridge_body = ctx_get("/ctx/tools".into()).ok();
+    let contract = bridge_tool_contract(bridge_body.as_deref());
+    let disabled = contract
+        .as_ref()
+        .map(|c| c.disabled.as_slice())
         .unwrap_or_default();
 
     let mut tools = match tool_defs() {
@@ -2513,6 +3094,7 @@ fn tools_list() -> serde_json::Value {
     tools.extend(mesh_tool_defs());
     tools.extend(session_tool_defs());
     tools.extend(task_tool_defs());
+    tools.extend(agent_spawn_tool_defs());
     // The cross-project set, and only for the one session that is allowed to
     // think across projects. An ordinary coding agent never sees these exist.
     if is_companion_session() {
@@ -2522,16 +3104,24 @@ fn tools_list() -> serde_json::Value {
     // core product), and inside a micro-task session (CANOPY_MICRO_TASK=1 on
     // the launch command) it survives even the Settings disable list — a
     // completion tool the user switched off would strand the ephemeral tab
-    // open forever. canopy_name_task rides with it for a smaller reason: the
-    // micro-task protocol instructs every run to call it, and a brief that
-    // names a tool the session doesn't have is a brief that lies.
+    // open forever. canopy_name_task survives for every agent session: live
+    // status is mesh etiquette and the Agents table's data source, not an
+    // optional capability whose absence an instruction can work around.
     // See the matching note in agentTools.ts.
     let micro = std::env::var("CANOPY_MICRO_TASK").is_ok();
     apply_companion_authority(&mut tools);
+    if let Some(contract) = &contract {
+        let supported = contract.supported_tools.as_deref().unwrap_or_default();
+        tools.retain(|t| {
+            t.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|n| supported.iter().any(|s| s == n))
+        });
+    }
     tools.retain(|t| {
-        t.get("name").and_then(|n| n.as_str()).is_some_and(|n| {
-            !disabled.iter().any(|d| d == n) || (micro && MICRO_ALWAYS_TOOLS.contains(&n))
-        })
+        t.get("name")
+            .and_then(|n| n.as_str())
+            .is_some_and(|n| tool_is_enabled(n, disabled, micro))
     });
     for tool in &mut tools {
         let Some(name) = tool
@@ -2563,11 +3153,19 @@ fn tools_list() -> serde_json::Value {
     serde_json::json!({ "tools": tools })
 }
 
-/// The tools a micro-task session keeps whatever the user switched off. Both
-/// are things the micro-task protocol instructs every run to call: without the
-/// first the ephemeral tab is never told the job ended, and without the second
-/// the brief names a tool that isn't there.
-const MICRO_ALWAYS_TOOLS: &[&str] = &["canopy_job_done", "canopy_name_task"];
+/// Every MCP-capable coding session keeps the live-status tool. A user can
+/// still disable unrelated mutation tools; this one is the session's own
+/// retained presence in the mesh.
+const ALWAYS_AGENT_TOOLS: &[&str] = &["canopy_name_task"];
+
+/// A micro-task additionally keeps its ending tool so it cannot be stranded.
+const MICRO_ALWAYS_TOOLS: &[&str] = &["canopy_job_done"];
+
+fn tool_is_enabled(name: &str, disabled: &[String], micro: bool) -> bool {
+    !disabled.iter().any(|disabled| disabled == name)
+        || ALWAYS_AGENT_TOOLS.contains(&name)
+        || (micro && MICRO_ALWAYS_TOOLS.contains(&name))
+}
 
 /// Tools that only look. Everything else changes something the user can see.
 const READ_ONLY_TOOLS: &[&str] = &[
@@ -2782,7 +3380,7 @@ fn research_tool_defs() -> Vec<serde_json::Value> {
                 "id": { "type": "string", "description": "Entry id — required by everything except start" },
                 "title": { "type": "string", "description": "start: the question in a few words. source: what this capture is." },
                 "question": { "type": "string", "description": "start: what is being investigated and why" },
-                "text": { "type": "string", "description": "append: markdown to add to the body. source: the raw material." },
+                "text": { "type": "string", "description": "start: initial context that is too detailed for the question. append: markdown to add to the body. source: the raw material." },
                 "origin": { "type": "string", "description": "source: where it came from — a file path, URL or command" },
                 "digest": { "type": "string", "description": "One paragraph: the finding itself. This is what other agents read." },
                 "recommendation": { "type": "string", "description": "What to do about it, in a sentence or two" },
@@ -3259,9 +3857,10 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_agents",
-            "description": "What the other agent sessions in this project are doing — often where the context behind a request already is. Read it when the user refers to work you can't see, or when you need background another session has: what each was asked, its branch and files, the last thing it said; pass ptyId or session for that agent's full conversation. Also: terminal ids (canopy_message_agent types into them) and held file claims, for a shared checkout.",
+            "description": "What the other agent sessions in this project are doing — often where the context behind a request already is. Each live row has a stable Canopy-assigned name plus its terminal id; pass name, ptyId, or session for that agent's full conversation. Also includes held file claims for the shared checkout.",
             "inputSchema": { "type": "object", "properties": {
                 "ptyId": { "type": "integer", "description": "One agent, by terminal — adds its conversation" },
+                "name": { "type": "string", "description": "One agent, by its stable Canopy-assigned name — adds its conversation" },
                 "session": { "type": "string", "description": "One agent, by session id (prefix is enough)" },
                 "transcript": { "type": "integer", "description": "Turns to include (default 12, max 100)" }
             }, "additionalProperties": false }
@@ -3277,9 +3876,10 @@ fn tool_defs() -> serde_json::Value {
         },
         {
             "name": "canopy_message_agent",
-            "description": "Send a message to another agent session by typing it into its terminal. Hand off work, warn about a shared file, ask what it's doing; ids come from canopy_agents. It replies in its own session — read that with canopy_server_output. The message is tagged with where it came from, so the other agent knows it is talking to you and not to its user.\n\nThis genuinely interrupts: it arrives as keystrokes in whatever the other agent is doing. Check canopy_agents first and prefer a session that is waiting or idle over one mid-task, keep it to one line, and don't expect an acknowledgement — nothing here confirms it was read. Only agent sessions can be messaged; a shell or a dev-server terminal is refused, because typing into one would run what you sent.\n\nPass `pr` instead of `ptyId` to reach whoever raised a pull request, without knowing who that was: Canopy holds the record of which session produced which PR, and routes to it — typing into it if it is still running, reopening its conversation if it has ended, and starting a fresh agent told what it is picking up if there is nothing left to reopen. This is the right way to act on \"change something about PR #N\": the session that wrote it already has the context a new one would have to rediscover. Note that the `pr` form is handed to Canopy to resolve and is not confirmed back to you — if no such PR is open here, the user is told and nothing is delivered.",
+            "description": "Send a one-line message to another agent session by its stable Canopy name or terminal id from canopy_agents. The name is only a label: Canopy resolves it inside this project and still delivers through the authenticated PTY. This genuinely interrupts the target. Pass `pr` instead to reach whoever raised a pull request.",
             "inputSchema": { "type": "object", "properties": {
                 "ptyId": { "type": "integer", "description": "Terminal id of the agent to message (from canopy_agents). Must be an agent session, not a shell or a run" },
+                "name": { "type": "string", "description": "Stable Canopy-assigned agent name from canopy_agents, instead of ptyId" },
                 "pr": { "type": "string", "description": "A pull request number (\"323\") or url, instead of ptyId — Canopy finds the session that raised it" },
                 "text": { "type": "string", "description": "What to say — one line, sent as if typed. Line breaks and control characters are stripped before it is delivered" }
             }, "required": ["text"], "additionalProperties": false }
@@ -3303,6 +3903,20 @@ fn tool_defs() -> serde_json::Value {
         list.append(devices);
     }
     tools
+}
+
+fn agent_spawn_tool_defs() -> Vec<serde_json::Value> {
+    vec![serde_json::json!({
+        "name": "canopy_spawn_agent",
+        "description": "Delegate a bounded piece of this workspace's work to a new agent. The child starts with no conversation memory: `brief` must be complete. It always opens as a pane beside your own terminal — never a new tab — and never steals the user's focus. Canopy reserves its durable task identity before spawning, records this parent→child brief in the mesh, and limits delegation depth and live children. Pass `autoClose: true` for a one-shot task: the child is told to report through canopy_job_done and Canopy closes its pane when the job is done.",
+        "inputSchema": { "type": "object", "properties": {
+            "brief": { "type": "string", "description": "Complete task, relevant context/files, constraints, and what done looks like" },
+            "title": { "type": "string", "description": "Short human-visible name for the child pane and task" },
+            "agent": { "type": "string", "description": "CLI id (codex, claude, …); omit to use Canopy's configured route" },
+            "direction": { "type": "string", "enum": ["left", "right", "top", "bottom"], "description": "Which side of your terminal the child's pane opens on (default right)" },
+            "autoClose": { "type": "boolean", "description": "One-shot: the child reports via canopy_job_done and its pane closes itself when done (default false)" }
+        }, "required": ["brief"], "additionalProperties": false }
+    })]
 }
 
 /// The Android device tools. Same shape as the rest; kept in their own literal
@@ -3433,6 +4047,10 @@ fn describe_action(name: &str, args: &serde_json::Value) -> (String, Option<Stri
         ),
         "canopy_stop_server" => ("Stop a server".into(), arg("ptyId")),
         "canopy_restart_server" => ("Restart a server".into(), arg("ptyId")),
+        "canopy_spawn_agent" => (
+            "Start a child coding agent".into(),
+            arg("brief").map(|brief| brief.chars().take(240).collect()),
+        ),
         // The `pr` form can reopen an ended conversation or start a fresh
         // agent, so it must not be described as typing into a terminal. What
         // the user is approving has to be what actually happens.
@@ -3655,21 +4273,41 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "level": args.get("level").and_then(|v| v.as_str()).unwrap_or("info"),
             })))
         }
+        "canopy_spawn_agent" => {
+            let brief = args
+                .get("brief")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+                .ok_or("missing required argument: brief")?;
+            text(ctx_request_with_timeout(
+                "POST",
+                "/ctx/action",
+                Some(serde_json::json!({
+                    "kind": "spawn_agent",
+                    "cwd": cwd(),
+                    "text": brief,
+                    "title": args.get("title").and_then(|value| value.as_str()),
+                    "agent": args.get("agent").and_then(|value| value.as_str()),
+                    "direction": args.get("direction").and_then(|value| value.as_str()),
+                    "autoClose": args.get("autoClose").and_then(|value| value.as_bool()),
+                }).to_string()),
+                std::time::Duration::from_secs(80),
+            ))
+        }
         "canopy_message_agent" => {
             let pty = args.get("ptyId").and_then(|v| v.as_u64());
+            let name = args.get("name").and_then(|v| v.as_str());
             let pr = args.get("pr").and_then(|v| v.as_str());
             // One of the two, never neither. `pr` is the indirect form: Canopy
             // looks up which session produced that PR and applies the ladder
             // (running here -> reopen its conversation -> a fresh agent told
             // what it is picking up). An agent cannot work that out itself —
             // the record lives in Canopy's provenance store.
-            if pty.is_none() && pr.is_none() {
-                return Err(
-                    "say who to message: ptyId (a terminal id from canopy_agents) \
+            if pty.is_none() && name.is_none() && pr.is_none() {
+                return Err("say who to message: name or ptyId (from canopy_agents) \
                             or pr (a pull request number or url, and Canopy finds whoever \
                             raised it)"
-                        .into(),
-                );
+                    .into());
             }
             let body = args
                 .get("text")
@@ -3679,6 +4317,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "kind": "message_agent",
                 "cwd": cwd(),
                 "ptyId": pty,
+                "name": name,
                 "pr": pr,
                 "text": body,
             });
@@ -3699,11 +4338,15 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 text(ctx_post(request))
             }
         }
-        "canopy_diagnostics" => text(ui_op("diagnostics", args, 25)),
-        "canopy_references" => text(ui_op("references", args, 25)),
-        "canopy_definition" => text(ui_op("definition", args, 25)),
-        "canopy_hover" => text(ui_op("hover", args, 25)),
-        "canopy_symbols" => text(ui_op("symbols", args, 25)),
+        // A cold language server can consume its 15s initialization ceiling,
+        // then recover through three supervised restarts. Keep the bridge open
+        // for that bounded cycle so agents receive the answer or final cause,
+        // never the internal "restarting" state halfway through.
+        "canopy_diagnostics" => text(ui_op("diagnostics", args, 90)),
+        "canopy_references" => text(ui_op("references", args, 90)),
+        "canopy_definition" => text(ui_op("definition", args, 90)),
+        "canopy_hover" => text(ui_op("hover", args, 90)),
+        "canopy_symbols" => text(ui_op("symbols", args, 90)),
         "canopy_tickets" => text(ui_op("tickets", args, 25)),
         // Held open like the other GitHub-delegating tools: one `gh` call per
         // repo, and for the companion that is every repo the user has.
@@ -4373,8 +5016,9 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
     let cwd = cwd();
 
     let want_pty = args.get("ptyId").and_then(|v| v.as_u64());
+    let want_name = args.get("name").and_then(|v| v.as_str());
     let want_session = args.get("session").and_then(|v| v.as_str());
-    let detail = want_pty.is_some() || want_session.is_some();
+    let detail = want_pty.is_some() || want_name.is_some() || want_session.is_some();
     // A roster row shows only the last thing the agent said — but the final
     // turn is often the user's, so read back a few to find one.
     let turns = args
@@ -4562,6 +5206,14 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
                 continue;
             }
         }
+        if let Some(want) = want_name {
+            if !live
+                .and_then(|agent| agent["name"].as_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case(want))
+            {
+                continue;
+            }
+        }
         // Prefix match: session ids are uuids, and no one should have to paste
         // one back in full to ask a follow-up about the same agent.
         if let Some(want) = want_session {
@@ -4578,6 +5230,7 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
             "session": session_id,
             "cwd": peer_cwd,
             "agent": live.and_then(|a| a["agent"].as_str()).or(d["agent"].as_str()),
+            "name": live.and_then(|a| a["name"].as_str()),
             // What the user calls this session: the label on its tab, which is
             // the only name they can point at when they say "the other one".
             "title": live.and_then(|a| a["title"].as_str()),
@@ -4592,6 +5245,7 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
             "recentRequests": d["prompts"].as_array().map(|p| {
                 p.iter().rev().take(3).cloned().collect::<Vec<_>>()
             }),
+            "workingOn": d["working_on"],
             "filesEdited": d["files"].as_array().map(|f| {
                 f.iter().rev().take(10).cloned().collect::<Vec<_>>()
             }),
@@ -4644,6 +5298,14 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
         if want_pty.is_some() && pty_id != want_pty {
             continue;
         }
+        if let Some(want) = want_name {
+            if !a["name"]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case(want))
+            {
+                continue;
+            }
+        }
         // Nothing published a session id for this one, so it can't answer a
         // question asked by session id.
         if want_session.is_some() {
@@ -4653,6 +5315,7 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
             "session": null,
             "cwd": a.get("cwd").cloned().unwrap_or_else(|| a["dir"].clone()),
             "agent": a["agent"],
+            "name": a["name"],
             "title": a["title"],
             "branch": null,
             "state": "unknown",
@@ -4660,6 +5323,7 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
             "ptyId": pty_id,
             "local": true,
             "recentRequests": null,
+            "workingOn": a.get("description").cloned().unwrap_or(serde_json::Value::Null),
             "filesEdited": null,
             "saying": null,
         });
@@ -4719,8 +5383,8 @@ fn agents_json(args: &serde_json::Value) -> Result<String, String> {
              state is as of their last hook event, not this instant: \"stale\" means the tab is \
              still open but has published nothing for half an hour, \"unknown\" that Canopy \
              shows an agent there which has published nothing at all. Both are running and both \
-             can be messaged. Pass ptyId or session for one agent's conversation; \
-             canopy_message_agent(ptyId) types into it. A row with a null ptyId belongs to \
+             can be messaged. Pass name, ptyId, or session for one agent's conversation; \
+             canopy_message_agent(name) resolves it to the authenticated terminal. A row with a null ptyId belongs to \
              another Canopy window and can be read but not messaged."
         },
     })
@@ -5114,6 +5778,137 @@ fn urlencode(s: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn modern_results_carry_identity_and_cache_hints_only_in_the_modern_era() {
+        let modern = rpc_ok_for(
+            serde_json::json!(1),
+            cacheable_if_modern(serde_json::json!({ "tools": [] }), true),
+            true,
+        );
+        assert_eq!(modern["result"]["resultType"], "complete");
+        assert_eq!(modern["result"]["cacheScope"], "private");
+        assert_eq!(
+            modern["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "canopy"
+        );
+
+        let legacy = rpc_ok_for(
+            serde_json::json!(1),
+            cacheable_if_modern(serde_json::json!({ "tools": [] }), false),
+            false,
+        );
+        assert!(legacy["result"].get("resultType").is_none());
+        assert!(legacy["result"].get("ttlMs").is_none());
+    }
+
+    #[test]
+    fn modern_requests_are_selected_by_per_request_metadata() {
+        let modern = serde_json::json!({
+            "params": { "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            }}
+        });
+        assert!(request_is_modern(&modern));
+        assert!(!request_is_modern(&serde_json::json!({ "params": {} })));
+    }
+
+    #[test]
+    fn task_methods_require_the_client_extension_on_each_request() {
+        let declared = serde_json::json!({
+            "params": { "_meta": {
+                "io.modelcontextprotocol/clientCapabilities": {
+                    "extensions": { "io.modelcontextprotocol/tasks": {} }
+                }
+            }}
+        });
+        assert!(request_supports_tasks(&declared));
+        assert!(!request_supports_tasks(
+            &serde_json::json!({ "params": {} })
+        ));
+    }
+
+    /// These carry the same cases as `judgeCommand` in
+    /// src/workspaceAuthority.test.ts. Claude Code has no OS sandbox, so this
+    /// hook is the only place the boundary is actually enforced for that
+    /// dialect — if the two lists drift, one side stops protecting anything.
+    #[test]
+    fn the_work_itself_runs_without_asking() {
+        for command in [
+            "npm install",
+            "pnpm install --frozen-lockfile",
+            "npm create vite@latest . -- --template react-ts",
+            "bash -lc 'pnpm install && pnpm run build'",
+            "cargo build",
+            "npx prisma generate",
+            "git add -A && git commit -m 'wip'",
+        ] {
+            assert!(
+                destructive_reason(command).is_none(),
+                "{command} should not need approval"
+            );
+        }
+    }
+
+    #[test]
+    fn irreversible_work_is_stopped_and_named_by_its_cost() {
+        let cases = [
+            ("rm -rf src/legacy", "deletes files for good"),
+            (
+                "bash -lc \"npm ci && rm -rf ../../other\"",
+                "deletes files for good",
+            ),
+            ("git reset --hard HEAD~3", "haven't been saved"),
+            ("git clean -fd", "haven't been saved"),
+            ("git push --force origin main", "shared history"),
+            ("psql -c 'DROP TABLE donations'", "isn't coming back"),
+            ("npx prisma migrate reset", "isn't coming back"),
+            ("sudo apt-get install pkg-config", "whole computer"),
+            ("brew install postgresql", "whole computer"),
+            ("npm install -g pnpm", "whole computer"),
+            ("cp .env.production .env", "private keys"),
+        ];
+        for (command, expected) in cases {
+            let reason = destructive_reason(command)
+                .unwrap_or_else(|| panic!("{command} should need approval"));
+            assert!(
+                reason.contains(expected),
+                "{command}: expected a reason mentioning {expected:?}, got {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_question_never_quotes_the_command() {
+        // The person answering has been promised they never need to read a
+        // shell command; "git reset --hard" is not something to adjudicate.
+        let reason = destructive_reason("git reset --hard").unwrap();
+        assert!(!reason.contains("git"));
+        assert!(!reason.contains("--hard"));
+    }
+
+    #[test]
+    fn only_build_turns_are_gated() {
+        // An Engineer-mode agent has its user present and Claude's own
+        // permission flow in front of it. Interposing there would be answering
+        // a question that was never ours.
+        let event = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "rm -rf everything" },
+        });
+        std::env::remove_var("CANOPY_VIBE");
+        assert!(build_shell_decision("PreToolUse", &event).is_none());
+    }
+
+    #[test]
+    fn a_non_shell_tool_is_left_alone() {
+        let event = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "/tmp/x", "command": "rm -rf /" },
+        });
+        assert!(build_shell_decision("PreToolUse", &event).is_none());
+        assert!(build_shell_decision("PostToolUse", &event).is_none());
+    }
+
     /// The comment above `peer_context` has always promised this and nothing
     /// implemented it: a ~1000-token blob was rebuilt and re-injected on every
     /// single user prompt, changing as peers moved, which is exactly the
@@ -5148,6 +5943,51 @@ mod tests {
         assert_eq!(fnv1a("abc"), fnv1a("abc"));
         assert_ne!(fnv1a("abc"), fnv1a("abd"));
         assert_ne!(fnv1a(""), fnv1a("a"));
+    }
+
+    /// `prompts` is a rotating window, so on a long session the prompt that
+    /// started it — the one thing that says why the session exists — was the
+    /// first thing dropped. It is retained separately, once, at this same
+    /// write boundary.
+    #[test]
+    fn the_first_prompt_outlives_the_rotating_window() {
+        let session = "first-prompt-test-session";
+        let path = format!("{}/.canopy/sessions/{session}.json", home());
+        let _ = std::fs::remove_file(&path);
+
+        let cwd = std::env::temp_dir().join("canopy-first-prompt-test");
+        let _ = std::fs::create_dir_all(&cwd);
+        let cwd = cwd.to_string_lossy().to_string();
+        for n in 1..=MAX_PROMPTS + 2 {
+            let event = serde_json::json!({
+                "session_id": session,
+                "prompt": format!("p{n}"),
+            });
+            update_digest(session, &cwd, &event, "UserPromptSubmit", None).unwrap();
+        }
+
+        let digest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(digest["first_prompt"].as_str(), Some("p1"));
+        // The window still rotates exactly as before: newest MAX_PROMPTS,
+        // oldest gone.
+        let prompts: Vec<&str> = digest["prompts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect();
+        assert_eq!(prompts.len(), MAX_PROMPTS);
+        assert_eq!(prompts.first().copied(), Some("p3"));
+        assert_eq!(
+            prompts.last().copied(),
+            Some(format!("p{}", MAX_PROMPTS + 2).as_str())
+        );
+        assert_eq!(
+            digest["working_on"].as_str(),
+            Some(format!("p{}", MAX_PROMPTS + 2).as_str())
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The environment is ours to read, so this is the easy half. The half that
@@ -5216,11 +6056,11 @@ mod tests {
         assert_eq!(detail.as_deref(), Some("drop the retry"));
     }
 
-    /// Either form is enough, neither is not. The old schema required `ptyId`;
+    /// Any address form is enough, none is not. The old schema required `ptyId`;
     /// an agent that passes only `pr` must not be told it is missing an
     /// argument it should never have had to know.
     #[test]
-    fn message_agent_takes_a_terminal_or_a_pr_but_needs_one_of_them() {
+    fn message_agent_takes_a_name_terminal_or_pr_but_needs_one_of_them() {
         let def = tool_defs();
         let tool = def
             .as_array()
@@ -5238,6 +6078,37 @@ mod tests {
         let props = &tool["inputSchema"]["properties"];
         assert!(props.get("pr").is_some());
         assert!(props.get("ptyId").is_some());
+        assert!(props.get("name").is_some());
+    }
+
+    #[test]
+    fn spawn_agent_requires_a_complete_brief_and_stays_in_the_parents_tab() {
+        let defs = agent_spawn_tool_defs();
+        let tool = defs.first().expect("canopy_spawn_agent is registered");
+        assert_eq!(tool["name"], "canopy_spawn_agent");
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            serde_json::json!(["brief"])
+        );
+        // The child always opens beside its parent: no placement choice, no
+        // relative terminal to name — and a one-shot flag instead.
+        let props = &tool["inputSchema"]["properties"];
+        assert!(props.get("placement").is_none());
+        assert!(props.get("relativeToPtyId").is_none());
+        assert_eq!(
+            props["direction"]["enum"],
+            serde_json::json!(["left", "right", "top", "bottom"]),
+        );
+        assert_eq!(props["autoClose"]["type"], "boolean");
+        let (action, detail) = describe_action(
+            "canopy_spawn_agent",
+            &serde_json::json!({ "brief": "Own the parser tests and report back" }),
+        );
+        assert_eq!(action, "Start a child coding agent");
+        assert_eq!(
+            detail.as_deref(),
+            Some("Own the parser tests and report back")
+        );
     }
 
     #[test]
@@ -5876,6 +6747,29 @@ mod tests {
     }
 
     #[test]
+    fn bridge_capabilities_distinguish_unreachable_from_legacy() {
+        assert!(bridge_tool_contract(None).is_none());
+
+        let legacy = bridge_tool_contract(Some(r#"{"disabled":[]}"#)).unwrap();
+        assert_eq!(legacy.supported_tools, None);
+
+        let current = bridge_tool_contract(Some(
+            r#"{"buildId":"abc","supportedTools":["canopy_project"],"disabled":["canopy_notify"]}"#,
+        ))
+        .unwrap();
+        assert_eq!(current.build_id.as_deref(), Some("abc"));
+        assert_eq!(current.supported_tools.unwrap(), ["canopy_project"]);
+        assert_eq!(current.disabled, ["canopy_notify"]);
+    }
+
+    #[test]
+    fn a_bridge_that_answered_without_capabilities_is_not_assumed_current() {
+        let contract = bridge_tool_contract(Some(r#"{"disabled":[]}"#)).unwrap();
+        let supported = contract.supported_tools.as_deref().unwrap_or_default();
+        assert!(supported.is_empty());
+    }
+
+    #[test]
     fn research_tools_are_annotated_and_only_the_reader_is_read_only() {
         let names: Vec<String> = research_tool_defs()
             .iter()
@@ -5892,9 +6786,9 @@ mod tests {
     #[test]
     fn a_task_can_name_itself_and_the_naming_survives_the_disable_list() {
         // The tool has to be published (a def nobody lists is invisible), and
-        // it has to be one of the two a micro-task session keeps whatever the
-        // user switched off — the protocol in microTasks.ts instructs every run
-        // to call it, so a session without it is one whose brief is wrong.
+        // every MCP-capable agent keeps it whatever the user switched off: live
+        // status is part of the mesh contract. Micro-tasks separately retain
+        // their completion tool so the ephemeral tab cannot be stranded.
         let published = tools_list();
         let tools = published["tools"].as_array().unwrap().clone();
         let tool = tools
@@ -5908,8 +6802,15 @@ mod tests {
         // Naming is not an outcome: nothing about it is required, so an agent
         // with a title and no glyph yet can still say the title.
         assert!(tool["inputSchema"].get("required").is_none());
-        assert!(MICRO_ALWAYS_TOOLS.contains(&"canopy_name_task"));
+        assert!(ALWAYS_AGENT_TOOLS.contains(&"canopy_name_task"));
         assert!(MICRO_ALWAYS_TOOLS.contains(&"canopy_job_done"));
+        let disabled = vec![
+            "canopy_name_task".to_string(),
+            "canopy_job_done".to_string(),
+        ];
+        assert!(tool_is_enabled("canopy_name_task", &disabled, false));
+        assert!(!tool_is_enabled("canopy_job_done", &disabled, false));
+        assert!(tool_is_enabled("canopy_job_done", &disabled, true));
 
         // The ending carries the same three, for a job short enough that one
         // call is the whole run — plus the ask, restated.
@@ -6067,9 +6968,10 @@ mod tests {
     fn the_instructions_send_research_to_the_store_and_not_to_a_file() {
         // This block is the only channel that makes the tools *chosen*. Without
         // the "never a scratch file" clause an agent still reaches for Write.
-        assert!(INSTRUCTIONS.contains("canopy_research search FIRST"));
-        assert!(INSTRUCTIONS.contains("canopy_research_write start"));
-        assert!(INSTRUCTIONS.contains("scratch markdown file"));
+        let instructions = agent_instructions::mcp_instructions();
+        assert!(instructions.contains("canopy_research search FIRST"));
+        assert!(instructions.contains("canopy_research_write start"));
+        assert!(instructions.contains("scratch markdown file"));
     }
 
     #[test]
@@ -6137,6 +7039,38 @@ mod tests {
         });
         normalize_event(&mut informational, "claude");
         assert!(informational.get("canopy_signal").is_none());
+    }
+
+    #[test]
+    fn cursor_hooks_normalize_to_the_shared_lifecycle() {
+        let mut event = serde_json::json!({
+            "conversation_id": "cur-1",
+            "workspace_roots": ["/repo"],
+            "hook_event_name": "beforeSubmitPrompt"
+        });
+        normalize_event(&mut event, "cursor");
+        assert_eq!(event["session_id"], "cur-1");
+        assert_eq!(event["cwd"], "/repo");
+        assert_eq!(event["hook_event_name"], "UserPromptSubmit");
+        assert_eq!(event["canopy_signal"], "turn-start");
+    }
+
+    #[test]
+    fn grok_hooks_keep_prompt_and_tool_identity() {
+        let mut event = serde_json::json!({
+            "sessionId": "grok-1",
+            "workspaceRoot": "/repo",
+            "hookEventName": "PostToolUse",
+            "promptId": "prompt-2",
+            "toolName": "edit",
+            "toolInput": { "path": "/repo/a.rs" }
+        });
+        normalize_event(&mut event, "grok");
+        assert_eq!(event["session_id"], "grok-1");
+        assert_eq!(event["prompt_id"], "prompt-2");
+        assert_eq!(event["tool_name"], "edit");
+        assert_eq!(event["tool_input"]["path"], "/repo/a.rs");
+        assert_eq!(event["canopy_signal"], "turn-progress");
     }
 
     #[test]

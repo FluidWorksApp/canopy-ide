@@ -18,7 +18,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 
@@ -38,6 +38,100 @@ const SKIP_DIRS: &[&str] = &[
 ];
 const MAX_FILES_DEFAULT: usize = 500;
 const MAX_OUTPUT_BYTES: usize = 512 * 1024;
+
+/// The executable contract implemented by this running bridge. The hook is a
+/// separately installed binary, so it must negotiate this list instead of
+/// assuming the app underneath it was rebuilt at the same time.
+const SUPPORTED_ACTIONS: &[&str] = &[
+    "start_server",
+    "open_preview",
+    "stop_server",
+    "restart_server",
+    "job_done",
+    "task_named",
+    "close_session",
+    "open_file",
+    "show_diff",
+    "notify",
+    "spawn_agent",
+    "message_agent",
+    "message_agent_start",
+    "mesh_send",
+];
+
+const SUPPORTED_TOOLS: &[&str] = &[
+    "canopy_agents",
+    "canopy_annotations",
+    "canopy_ask_user",
+    "canopy_browser_click",
+    "canopy_browser_console",
+    "canopy_browser_eval",
+    "canopy_browser_navigate",
+    "canopy_browser_network",
+    "canopy_browser_point",
+    "canopy_browser_resize",
+    "canopy_browser_snapshot",
+    "canopy_browser_type",
+    "canopy_claim",
+    "canopy_close_session",
+    "canopy_component_files",
+    "canopy_confirm",
+    "canopy_definition",
+    "canopy_device_describe",
+    "canopy_device_key",
+    "canopy_device_list",
+    "canopy_device_logcat",
+    "canopy_device_run",
+    "canopy_device_screenshot",
+    "canopy_device_snapshot",
+    "canopy_device_start",
+    "canopy_device_swipe",
+    "canopy_device_tap",
+    "canopy_device_type",
+    "canopy_diagnostics",
+    "canopy_editor_state",
+    "canopy_hover",
+    "canopy_job_done",
+    "canopy_mesh",
+    "canopy_mesh_send",
+    "canopy_message_agent",
+    "canopy_name_task",
+    "canopy_notes",
+    "canopy_notes_write",
+    "canopy_notify",
+    "canopy_open_file",
+    "canopy_open_preview",
+    "canopy_open_project",
+    "canopy_pr_action",
+    "canopy_pr_details",
+    "canopy_project",
+    "canopy_recall",
+    "canopy_references",
+    "canopy_remember",
+    "canopy_research",
+    "canopy_research_write",
+    "canopy_resources",
+    "canopy_restart_server",
+    "canopy_reviews",
+    "canopy_screenshot",
+    "canopy_server_output",
+    "canopy_show_diff",
+    "canopy_spawn_agent",
+    "canopy_start_server",
+    "canopy_start_session",
+    "canopy_stop_server",
+    "canopy_symbols",
+    "canopy_tickets",
+    "canopy_vault_fill",
+    "canopy_vault_list",
+    "canopy_vault_read",
+    "canopy_wait_for",
+    "canopy_workspace",
+    "canopy_workspace_agents",
+    "canopy_workspace_git",
+    "canopy_workspace_prs",
+    "canopy_workspace_search",
+];
 
 pub struct ContextBridge {
     /// Per-project snapshots the frontend publishes, keyed by project id.
@@ -60,6 +154,10 @@ pub struct ContextBridge {
     /// here and waits; the frontend answers through the `browser_result`
     /// command (one ticket space for every request/response op, browser or not).
     pending: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<(bool, serde_json::Value)>>>,
+    /// Agent-created terminals waiting for the frontend to report their PTY.
+    /// Kept beside `pending` so depth/count gates are enforced by the bridge,
+    /// never by caller-supplied fields or a racy UI snapshot.
+    pending_spawns: Mutex<HashMap<u64, PendingAgentSpawn>>,
     next_op: AtomicU64,
     /// Advisory file claims, held and ended together in the durable mesh store. Several
     /// agents routinely share one checkout; a claim is how one says "I'm editing
@@ -70,12 +168,51 @@ pub struct ContextBridge {
     /// Tools the user switched off in Settings → Agents. `None` until the
     /// frontend publishes, which is the same as "everything is on".
     disabled_tools: Mutex<Option<Vec<String>>>,
+    /// Strong bridge-side delegation gate. Tool-list filtering covers clients
+    /// that initialize after a settings change; this also refuses a call from
+    /// a client that cached the descriptor while delegation was still on.
+    agents_may_spawn: AtomicBool,
+    /// The one cross-session switch. This is the same per-project value the UI
+    /// calls "Shared context"; the mesh is that shared context substrate, so
+    /// roster, claims, history and sends all consult this one predicate.
+    mesh_scopes: Mutex<Vec<MeshScope>>,
+    /// Directory -> the main checkout it is a worktree of, remembered.
+    ///
+    /// The fold is a `git` subprocess, and running it per gate call made the
+    /// answer only as durable as the directory. An agent working in a worktree
+    /// that is then removed — which is the normal end of an isolated task, and
+    /// is often the very thing the agent was asked to do — stopped resolving to
+    /// any project, and the gate reported that as the user's Shared context
+    /// being off. Remembering the fold means a path that resolved once keeps
+    /// resolving, which is what the recorded mesh history already assumes.
+    ///
+    /// Negative results are cached too: a path that is not in a repo will not
+    /// become one in a way that matters here, and re-probing it on every tool
+    /// call was the other half of the problem. Cleared whenever scopes are
+    /// republished, which is the only moment the mapping's meaning changes.
+    worktree_roots: Mutex<HashMap<String, Option<String>>>,
     /// Every message one agent has sent another, durable across app runs —
     /// see mesh.rs. A message used to leave no trace anywhere: it arrived in
     /// the target's composer looking exactly like something the user had typed,
     /// so neither the user nor the receiving agent could tell that another
     /// agent had reached in.
     mesh: crate::mesh::MeshStore,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct MeshScope {
+    #[allow(dead_code)]
+    name: String,
+    roots: Vec<String>,
+    enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MeshSurface {
+    Roster,
+    Claims,
+    History,
+    Send,
 }
 
 /// Who is on the other end of a bridge request, established from the
@@ -91,6 +228,17 @@ pub struct AgentIdentity {
     /// spawned. Both are absent for an ordinary user-directed terminal.
     pub run_id: Option<String>,
     pub attempt_id: Option<String>,
+    /// Delegation lineage is assigned by the bridge before the child receives
+    /// its opening brief. Ordinary user-created agents are roots (depth zero).
+    pub spawn_depth: u8,
+    pub parent_pty_id: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingAgentSpawn {
+    parent: AgentIdentity,
+    child_depth: u8,
+    child_pty_id: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -135,6 +283,14 @@ impl Caller {
         match self {
             Caller::Agent(agent) => Some(&agent.cwd),
             Caller::Attempt(attempt) => Some(&attempt.cwd),
+            Caller::Root => None,
+        }
+    }
+
+    fn attempt_id(&self) -> Option<&str> {
+        match self {
+            Caller::Agent(agent) => agent.attempt_id.as_deref(),
+            Caller::Attempt(attempt) => Some(&attempt.attempt_id),
             Caller::Root => None,
         }
     }
@@ -232,9 +388,13 @@ impl Default for ContextBridge {
             agents: Mutex::new(HashMap::new()),
             attempts: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
+            pending_spawns: Mutex::new(HashMap::new()),
             next_op: AtomicU64::new(1),
             claims: crate::mesh::ClaimStore::load(),
             disabled_tools: Mutex::new(None),
+            agents_may_spawn: AtomicBool::new(true),
+            mesh_scopes: Mutex::new(Vec::new()),
+            worktree_roots: Mutex::new(HashMap::new()),
             mesh: crate::mesh::MeshStore::load(),
         }
     }
@@ -247,6 +407,80 @@ fn random_token() -> String {
 }
 
 impl ContextBridge {
+    pub fn validate_mesh_scopes(value: &serde_json::Value) -> Result<(), String> {
+        serde_json::from_value::<Vec<MeshScope>>(value.clone())
+            .map(|_| ())
+            .map_err(|e| format!("bad mesh scopes: {e}"))
+    }
+
+    pub fn set_mesh_scopes(&self, value: &serde_json::Value) -> Result<(), String> {
+        Self::validate_mesh_scopes(value)?;
+        let scopes: Vec<MeshScope> =
+            serde_json::from_value(value.clone()).expect("mesh scopes were validated");
+        *self.mesh_scopes.lock().unwrap() = scopes;
+        // The remembered folds describe which project owns a directory, and a
+        // republish is the one event that can change that answer.
+        self.worktree_roots.lock().unwrap().clear();
+        Ok(())
+    }
+
+    /// The main checkout behind a directory, remembered across calls.
+    ///
+    /// Deliberately not holding `mesh_scopes` while it runs: this can spawn a
+    /// subprocess, and the gate is on the path of every mesh tool call.
+    fn worktree_root(&self, path: &str) -> Option<String> {
+        if let Some(hit) = self.worktree_roots.lock().unwrap().get(path) {
+            return hit.clone();
+        }
+        let root = main_worktree(path);
+        self.worktree_roots
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), root.clone());
+        root
+    }
+
+    /// Remember the fold for directories that exist now, so the answer outlives
+    /// them. Only ever adds; a path already known is not re-probed.
+    fn warm_worktree_roots(&self, paths: impl IntoIterator<Item = String>) {
+        for path in paths {
+            if path.is_empty() {
+                continue;
+            }
+            if self.worktree_roots.lock().unwrap().contains_key(&path) {
+                continue;
+            }
+            let root = main_worktree(&path);
+            self.worktree_roots.lock().unwrap().insert(path, root);
+        }
+    }
+
+    fn mesh_enabled_path(&self, path: &str) -> bool {
+        if mesh_enabled_in(&self.mesh_scopes.lock().unwrap(), path) {
+            return true;
+        }
+        // Agents work in worktrees constantly, and a worktree is a sibling of
+        // its checkout rather than a child, so the direct containment test
+        // cannot see it. Fold to the checkout that is actually registered as a
+        // project component.
+        match self.worktree_root(path) {
+            Some(root) => mesh_enabled_in(&self.mesh_scopes.lock().unwrap(), &root),
+            None => false,
+        }
+    }
+
+    /// Whether this path resolves to a project at all — as distinct from
+    /// resolving to one whose Shared context is off. The two used to be one
+    /// bool and one refusal string, so a removed worktree reported itself as a
+    /// setting the user had not touched.
+    fn mesh_path_resolves(&self, path: &str) -> bool {
+        !path.is_empty()
+            && (mesh_scope_for(&self.mesh_scopes.lock().unwrap(), path).is_some()
+                || self.worktree_root(path).is_some_and(|root| {
+                    mesh_scope_for(&self.mesh_scopes.lock().unwrap(), &root).is_some()
+                }))
+    }
+
     /// Age out stale mesh messages — the maintenance scheduler's door to a
     /// store that is otherwise private to this bridge.
     pub fn prune_mesh_messages(&self, now_ms: u64) -> usize {
@@ -278,6 +512,8 @@ impl ContextBridge {
                 cwd: cwd.to_string(),
                 run_id: task.map(|task| task.run_id.clone()),
                 attempt_id: task.map(|task| task.attempt_id.clone()),
+                spawn_depth: 0,
+                parent_pty_id: None,
             },
         );
         Some((port, token))
@@ -400,10 +636,246 @@ pub fn start(app: tauri::AppHandle) {
             .route("/ctx/mesh", post(mesh_op))
             .route("/ctx/research", post(research_op))
             .route("/ctx/notes", post(notes_op))
+            .route("/ctx/mcp-task", post(mcp_task_op))
             .route("/ctx/tools", get(tools))
             .with_state(app.clone());
         let _ = axum::serve(listener, router).await;
     });
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpTaskOp {
+    op: String,
+    task_id: String,
+    #[serde(default)]
+    input_responses: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+fn task_timestamp(millis: i64) -> Result<String, String> {
+    use chrono::TimeZone;
+    chrono::Utc
+        .timestamp_millis_opt(millis)
+        .single()
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .ok_or_else(|| "task timestamp is outside the supported range".to_string())
+}
+
+fn recorded_input_requests(
+    detail: &crate::tasks::TaskEnvelopeDetail,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    detail
+        .envelope
+        .summary
+        .metadata
+        .pointer("/mcpTask/inputRequests")
+        .and_then(serde_json::Value::as_object)
+        .filter(|requests| !requests.is_empty())
+        .cloned()
+}
+
+fn recorded_rpc_error(detail: &crate::tasks::TaskEnvelopeDetail) -> Option<serde_json::Value> {
+    detail
+        .envelope
+        .summary
+        .metadata
+        .pointer("/mcpTask/rpcError")
+        .filter(|error| error.is_object())
+        .cloned()
+}
+
+fn mcp_task_result(detail: &crate::tasks::TaskEnvelopeDetail) -> Result<serde_json::Value, String> {
+    let envelope = &detail.envelope;
+    let input_requests = recorded_input_requests(detail);
+    let rpc_error = recorded_rpc_error(detail);
+    let status = match envelope.summary.status.as_str() {
+        "completed" => "completed",
+        // MCP reserves `failed` for a JSON-RPC execution error. A compiler,
+        // process or verification failure is a completed CallToolResult with
+        // `isError`, not a made-up protocol failure.
+        "failed" if rpc_error.is_some() => "failed",
+        "failed" => "completed",
+        "cancelled" => "cancelled",
+        // A recorded question is evidence that input is required even while
+        // the live attempt remains running. `blocked` alone is not: it may be
+        // waiting on a network or process and must not invent a human decision.
+        _ if input_requests.is_some() => "input_required",
+        "running" | "ready" | "blocked" => "working",
+        other => return Err(format!("unknown durable task status {other}")),
+    };
+    let terminal = matches!(status, "completed" | "failed" | "cancelled");
+    let message = envelope
+        .summary
+        .metadata
+        .pointer("/mcpTask/statusMessage")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| envelope.summary.title.clone())
+        .unwrap_or_else(|| envelope.goal.clone());
+    let mut result = serde_json::json!({
+        "resultType": "complete",
+        "taskId": envelope.summary.run_id,
+        "status": status,
+        "statusMessage": message,
+        "createdAt": task_timestamp(envelope.summary.created_at)?,
+        "lastUpdatedAt": task_timestamp(envelope.summary.updated_at)?,
+        "ttlMs": serde_json::Value::Null,
+    });
+    if !terminal {
+        result["pollIntervalMs"] = serde_json::json!(750);
+    }
+    if let Some(requests) = input_requests {
+        result["inputRequests"] = serde_json::Value::Object(requests);
+    }
+    match status {
+        "completed" => {
+            result["result"] = if envelope.summary.status == "failed" {
+                serde_json::json!({
+                    "content": [{
+                        "type": "text",
+                        "text": "The recorded task attempt did not complete."
+                    }],
+                    "isError": true
+                })
+            } else {
+                serde_json::json!({ "content": [], "isError": false })
+            };
+        }
+        "failed" => {
+            result["error"] = rpc_error.expect("failed status requires a recorded RPC error");
+        }
+        _ => {}
+    }
+    Ok(result)
+}
+
+fn accepted_input_value(response: &serde_json::Value) -> Option<&serde_json::Value> {
+    let object = response.as_object()?;
+    match object.get("action").and_then(serde_json::Value::as_str) {
+        Some("accept") => object
+            .get("content")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|content| content.get("response")),
+        _ => None,
+    }
+}
+
+/// MCP Tasks' write boundary. `tasks/update` validates an opaque response
+/// against the recorded card action and hands only that value to Build;
+/// commands, logs, environment and diffs never cross this interface.
+async fn mcp_task_op(
+    State(app): State<tauri::AppHandle>,
+    headers: HeaderMap,
+    Json(op): Json<McpTaskOp>,
+) -> (StatusCode, String) {
+    if caller(&app, &headers).is_none() {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let store = app.state::<crate::tasks::TaskStore>();
+    let Some(detail) = (match store.get(&op.task_id) {
+        Ok(detail) => detail,
+        Err(error) => return (StatusCode::BAD_REQUEST, error),
+    }) else {
+        return (StatusCode::NOT_FOUND, "task not found".into());
+    };
+    match op.op.as_str() {
+        "get" => match mcp_task_result(&detail) {
+            Ok(result) => (StatusCode::OK, result.to_string()),
+            Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error),
+        },
+        "update" => {
+            let Some(responses) = op.input_responses.filter(|value| !value.is_empty()) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "tasks/update needs inputResponses".into(),
+                );
+            };
+            let recorded = recorded_input_requests(&detail).unwrap_or_default();
+            for (key, response) in responses {
+                let Some(request) = recorded.get(&key) else {
+                    // The extension requires unknown and already-satisfied
+                    // keys to be idempotent no-ops, so a retry after a status
+                    // notification cannot turn into a spurious failure.
+                    continue;
+                };
+                let Some(value) = accepted_input_value(&response) else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("input response {key} was not accepted"),
+                    );
+                };
+                let allowed = request
+                    .pointer("/_meta/actions")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|actions| {
+                        actions
+                            .iter()
+                            .any(|action| action.get("response") == Some(value))
+                    });
+                if !allowed {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("input response {key} is not one of the recorded actions"),
+                    );
+                }
+                let Some(response) = value.as_str() else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "card responses must be strings".into(),
+                    );
+                };
+                let _ = app.emit(
+                    "agent:action",
+                    serde_json::json!({
+                        "kind": "mcp_task_update",
+                        "route": detail.envelope.worktree_path,
+                        "runId": op.task_id,
+                        "inputKey": key,
+                        "response": response,
+                    }),
+                );
+            }
+            (
+                StatusCode::OK,
+                serde_json::json!({ "resultType": "complete" }).to_string(),
+            )
+        }
+        "cancel" => {
+            let active_attempt = detail
+                .attempts
+                .iter()
+                .rev()
+                .find(|attempt| {
+                    matches!(
+                        attempt.state.as_str(),
+                        "reserved" | "launching" | "running" | "waiting"
+                    )
+                })
+                .map(|attempt| attempt.attempt_id.clone());
+            if let Err(error) = store.cancel_run(&op.task_id) {
+                return (StatusCode::CONFLICT, error);
+            }
+            if let Some(attempt_id) = active_attempt {
+                let _ = release_claims_for_attempt(&app, &attempt_id, "mcp-task-cancelled");
+            }
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({
+                    "kind": "mcp_task_cancel",
+                    "route": detail.envelope.worktree_path,
+                    "runId": op.task_id,
+                }),
+            );
+            (
+                StatusCode::OK,
+                serde_json::json!({ "resultType": "complete" }).to_string(),
+            )
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            format!("unknown MCP task op {}", op.op),
+        ),
+    }
 }
 
 // ---- commands the frontend feeds the bridge with --------------------------
@@ -429,8 +901,15 @@ pub fn context_remove(state: tauri::State<'_, ContextBridge>, project_id: String
 /// change and at startup; the sidecar filters its `tools/list` against this, so
 /// a disabled tool never even reaches the agent's context window.
 #[tauri::command]
-pub fn context_tools(state: tauri::State<'_, ContextBridge>, disabled: Vec<String>) {
+pub fn context_tools(
+    state: tauri::State<'_, ContextBridge>,
+    disabled: Vec<String>,
+    agents_may_spawn: bool,
+) {
     *state.disabled_tools.lock().unwrap() = Some(disabled);
+    state
+        .agents_may_spawn
+        .store(agents_may_spawn, Ordering::Release);
 }
 
 /// Every advisory claim currently held, for the Agents panel. Held only: the
@@ -438,7 +917,17 @@ pub fn context_tools(state: tauri::State<'_, ContextBridge>, disabled: Vec<Strin
 /// ended claim is history, not a holder.
 #[tauri::command]
 pub fn context_claims(state: tauri::State<'_, ContextBridge>) -> Result<Vec<Claim>, String> {
-    state.claims.held()
+    state.claims.held().map(|claims| {
+        claims
+            .into_iter()
+            .filter(|claim| {
+                claim
+                    .paths
+                    .iter()
+                    .any(|path| mesh_surface_enabled(&state, path, MeshSurface::Claims))
+            })
+            .collect()
+    })
 }
 
 /// Held and ended claims together, newest first — what a claim's detail tab
@@ -446,7 +935,17 @@ pub fn context_claims(state: tauri::State<'_, ContextBridge>) -> Result<Vec<Clai
 /// it always meant.
 #[tauri::command]
 pub fn context_claim_history(state: tauri::State<'_, ContextBridge>) -> Result<Vec<Claim>, String> {
-    state.claims.all_newest()
+    state.claims.all_newest().map(|claims| {
+        claims
+            .into_iter()
+            .filter(|claim| {
+                claim
+                    .paths
+                    .iter()
+                    .any(|path| mesh_surface_enabled(&state, path, MeshSurface::Claims))
+            })
+            .collect()
+    })
 }
 
 #[tauri::command]
@@ -454,6 +953,9 @@ pub fn context_claim_history_for_path(
     state: tauri::State<'_, ContextBridge>,
     path: String,
 ) -> Result<Vec<Claim>, String> {
+    if !mesh_surface_enabled(&state, &path, MeshSurface::Claims) {
+        return Ok(Vec::new());
+    }
     state
         .claims
         .history_for_path(&normalize_claim_path(&path, None))
@@ -473,7 +975,41 @@ pub fn context_release_claim(app: tauri::AppHandle, owner_key: String) {
 /// exist nowhere, and now outlives the app run (see mesh.rs).
 #[tauri::command]
 pub fn context_messages(state: tauri::State<'_, ContextBridge>) -> Vec<crate::mesh::MeshMessage> {
-    state.mesh.all()
+    state
+        .mesh
+        .all()
+        .into_iter()
+        .filter(|message| {
+            [&message.from_cwd, &message.to_cwd]
+                .into_iter()
+                .flatten()
+                .any(|path| mesh_surface_enabled(&state, path, MeshSurface::History))
+        })
+        .collect()
+}
+
+/// The pairs the user has severed in the agent control panel.
+#[tauri::command]
+pub fn context_mesh_severed(
+    state: tauri::State<'_, ContextBridge>,
+) -> Vec<crate::mesh::SeveredPair> {
+    state.mesh.severed_pairs()
+}
+
+/// Sever or reconnect one pair, from the control panel. Always the current
+/// launch's terminals: the panel can only click an edge between live sessions,
+/// and a pty id means nothing outside the launch that minted it.
+#[tauri::command]
+pub fn context_mesh_sever(
+    state: tauri::State<'_, ContextBridge>,
+    a: u32,
+    b: u32,
+    severed: bool,
+) -> Vec<crate::mesh::SeveredPair> {
+    state
+        .mesh
+        .set_severed(a, b, crate::pty::instance_token(), severed, now_ms());
+    state.mesh.severed_pairs()
 }
 
 /// The frontend's answer to a browser-control op: `data` is a JSON document
@@ -481,10 +1017,44 @@ pub fn context_messages(state: tauri::State<'_, ContextBridge>) -> Vec<crate::me
 /// is waiting on (op timed out, duplicate answer) is dropped silently.
 #[tauri::command]
 pub fn browser_result(state: tauri::State<'_, ContextBridge>, id: u64, ok: bool, data: String) {
+    if !ok {
+        state.pending_spawns.lock().unwrap().remove(&id);
+    }
     if let Some(tx) = state.pending.lock().unwrap().remove(&id) {
         let value = serde_json::from_str(&data).unwrap_or(serde_json::Value::String(data));
         let _ = tx.send((ok, value));
     }
+}
+
+/// Bind a newly spawned PTY into the caller's delegation tree before its brief
+/// is submitted. Only the ProjectView can invoke this native command; the MCP
+/// caller cannot choose its own depth or parent.
+#[tauri::command]
+pub fn context_agent_spawn_ready(
+    state: tauri::State<'_, ContextBridge>,
+    id: u64,
+    pty_id: u32,
+) -> Result<(), String> {
+    let pending = state
+        .pending_spawns
+        .lock()
+        .unwrap()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| "agent spawn is no longer pending".to_string())?;
+    let mut agents = state.agents.lock().unwrap();
+    let Some(child) = agents.values_mut().find(|agent| agent.pty_id == pty_id) else {
+        return Err("spawned terminal has no Canopy agent identity".into());
+    };
+    if child.instance != pending.parent.instance {
+        return Err("spawned terminal belongs to another Canopy app run".into());
+    }
+    child.spawn_depth = pending.child_depth;
+    child.parent_pty_id = Some(pending.parent.pty_id);
+    if let Some(spawn) = state.pending_spawns.lock().unwrap().get_mut(&id) {
+        spawn.child_pty_id = Some(pty_id);
+    }
+    Ok(())
 }
 
 // ---- HTTP handlers --------------------------------------------------------
@@ -540,9 +1110,16 @@ async fn identity(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (S
 }
 
 async fn snapshot(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
-    if !authorized(&app, &headers) {
+    if caller(&app, &headers).is_none() {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     }
+    let bridge = app.state::<ContextBridge>();
+    // Remember where every live terminal folds to, while its directory is still
+    // there to answer. The roster gate reads a project's component paths and
+    // the send gate reads the target's own cwd, so without this a worktree
+    // removed between the two — routinely the last thing an isolated task does
+    // — left the roster advertising an agent the send gate then refused.
+    bridge.warm_worktree_roots(app.state::<crate::pty::PtyManager>().live_cwds());
     let projects: Vec<serde_json::Value> = app
         .state::<ContextBridge>()
         .snapshots
@@ -550,6 +1127,24 @@ async fn snapshot(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (S
         .unwrap()
         .values()
         .cloned()
+        .map(|mut project| {
+            let mesh_enabled = project
+                .get("components")
+                .and_then(|value| value.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|component| component.get("path").and_then(|value| value.as_str()))
+                .any(|path| mesh_surface_enabled(&bridge, path, MeshSurface::Roster));
+            if !mesh_enabled {
+                if let Some(object) = project.as_object_mut() {
+                    object.insert("agents".into(), serde_json::json!([]));
+                    object.insert("meshEnabled".into(), serde_json::Value::Bool(false));
+                }
+            } else if let Some(object) = project.as_object_mut() {
+                object.insert("meshEnabled".into(), serde_json::Value::Bool(true));
+            }
+            project
+        })
         .collect();
     (
         StatusCode::OK,
@@ -748,6 +1343,56 @@ fn project_for_cwd(app: &tauri::AppHandle, cwd: &str) -> Option<ProjectCandidate
     resolve_project(&candidates, cwd, main_worktree)
 }
 
+fn same_mesh_project(app: &tauri::AppHandle, a: &str, b: &str) -> bool {
+    match (project_for_cwd(app, a), project_for_cwd(app, b)) {
+        (Some(left), Some(right)) => left.0 == right.0,
+        _ => false,
+    }
+}
+
+/// Resolve a human-facing name back to the PTY credential it labels. Project
+/// scope comes from the authenticated caller whenever possible, so a name can
+/// never become a cross-project authority shortcut.
+fn terminal_for_name(
+    app: &tauri::AppHandle,
+    caller_cwd: &str,
+    requested: &str,
+) -> Result<u32, String> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Err("message_agent needs a non-empty name".into());
+    }
+    let caller_project = project_for_cwd(app, caller_cwd).map(|project| project.0);
+    let manager = app.state::<crate::pty::PtyManager>();
+    let sessions: Vec<_> = manager
+        .sessions()
+        .lock()
+        .unwrap()
+        .values()
+        .cloned()
+        .collect();
+    let mut matches = sessions
+        .into_iter()
+        .filter(|session| session.name.lock().unwrap().eq_ignore_ascii_case(requested))
+        .filter(|session| {
+            caller_project.as_ref().is_none_or(|project_id| {
+                project_for_cwd(app, &session.cwd).is_some_and(|target| &target.0 == project_id)
+            })
+        })
+        .map(|session| session.id)
+        .collect::<Vec<_>>();
+    matches.sort_unstable();
+    match matches.as_slice() {
+        [id] => Ok(*id),
+        [] => Err(format!(
+            "No running Canopy agent named \"{requested}\" in this project (see canopy_agents)"
+        )),
+        _ => Err(format!(
+            "More than one running agent is named \"{requested}\"; use ptyId from canopy_agents"
+        )),
+    }
+}
+
 /// A project a directory can resolve to: its id, its display name, and the
 /// component paths that decide whether a directory belongs to it.
 type ProjectCandidate = (String, String, Vec<String>);
@@ -763,20 +1408,21 @@ type ProjectCandidate = (String, String, Vec<String>);
 /// failed. Research calls are a handful per session, not per tool call, so the
 /// few milliseconds buy correctness cheaply.
 fn main_worktree(cwd: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args([
-            "-C",
-            cwd,
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-common-dir",
-        ])
-        .output()
-        .ok()?;
+    let mut command = std::process::Command::new("git");
+    command.args([
+        "-C",
+        cwd,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    ]);
+    let out =
+        crate::process_capture::output(&mut command, crate::process_capture::DEFAULT_STREAM_MAX)
+            .ok()?;
     if !out.status.success() {
         return None;
     }
-    let git_dir = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    let git_dir = std::str::from_utf8(&out.stdout).ok()?.trim().to_string();
     if git_dir.is_empty() {
         return None;
     }
@@ -950,6 +1596,7 @@ async fn research_op(
             Some(req.cwd.clone()),
             req.pty_id,
             req.tags.clone(),
+            req.text.clone(),
             req.instance.clone(),
         )
         .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
@@ -1232,23 +1879,38 @@ async fn notes_op(
     }
 }
 
-/// The tool switches from Settings → Agents. Answered even when nothing has
-/// been published (nothing disabled), so the sidecar can treat any error as
-/// "everything is on" rather than hiding tools on a hiccup.
-async fn tools(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
-    if !authorized(&app, &headers) {
-        return (StatusCode::UNAUTHORIZED, "bad token".into());
-    }
-    let disabled = app
-        .state::<ContextBridge>()
+/// Tool switches plus the running bridge's exact capability contract. A hook
+/// built after the app can now suppress tools this process cannot service
+/// instead of advertising calls that are guaranteed to 404.
+fn bridge_disabled_tools(state: &ContextBridge) -> Vec<String> {
+    let mut disabled = state
         .disabled_tools
         .lock()
         .unwrap()
         .clone()
         .unwrap_or_default();
+    if !state.agents_may_spawn.load(Ordering::Acquire)
+        && !disabled.iter().any(|tool| tool == "canopy_spawn_agent")
+    {
+        disabled.push("canopy_spawn_agent".into());
+    }
+    disabled
+}
+
+async fn tools(State(app): State<tauri::AppHandle>, headers: HeaderMap) -> (StatusCode, String) {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "bad token".into());
+    }
+    let disabled = bridge_disabled_tools(&app.state::<ContextBridge>());
     (
         StatusCode::OK,
-        serde_json::json!({ "disabled": disabled }).to_string(),
+        serde_json::json!({
+            "disabled": disabled,
+            "buildId": env!("CANOPY_CONTEXT_BUILD_ID"),
+            "supportedActions": SUPPORTED_ACTIONS,
+            "supportedTools": SUPPORTED_TOOLS,
+        })
+        .to_string(),
     )
 }
 
@@ -1259,6 +1921,16 @@ async fn claims_list(
     let Some(who) = caller(&app, &headers) else {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     };
+    if !mesh_enabled_for(&app, &who, None, MeshSurface::Claims) {
+        return (
+            StatusCode::OK,
+            serde_json::json!({
+                "claims": [],
+                "note": "The mesh is disabled here because Shared context is off."
+            })
+            .to_string(),
+        );
+    }
     // Held only. An agent asks this to find out what it must not touch, and a
     // claim somebody let go of is not that.
     //
@@ -1275,7 +1947,7 @@ async fn claims_list(
         .into_iter()
         .filter(|c| c.released_at_ms.is_none())
         .filter(|c| match cwd.as_deref() {
-            Some(cwd) => claim_concerns(c, cwd),
+            Some(cwd) => claim_concerns(&app, c, cwd),
             // The companion asks on the user's behalf, not an agent's.
             None => true,
         })
@@ -1286,14 +1958,18 @@ async fn claims_list(
     )
 }
 
-/// Whether a claim is any of this caller's business: it holds files under the
-/// caller's directory, or its owner works in a directory that contains (or sits
-/// inside) the caller's. Deliberately a tree test rather than a project lookup
-/// — a claim is about files, and the question an agent is really asking is
-/// "could this collide with me".
-fn claim_concerns(claim: &Claim, cwd: &str) -> bool {
-    claim_owner_cwd(&claim.owner).is_some_and(|owner_cwd| paths_overlap(&owner_cwd, cwd))
-        || claim.paths.iter().any(|p| paths_overlap(p, cwd))
+/// Whether a claim belongs to the caller's configured project. A raw symmetric
+/// ancestor test made a terminal at `/Users/alice` concern every repo below it;
+/// project membership is the actual trust boundary and has no such wildcard.
+fn claim_concerns(app: &tauri::AppHandle, claim: &Claim, cwd: &str) -> bool {
+    claim_concerns_by(claim, cwd, |left, right| {
+        same_mesh_project(app, left, right)
+    })
+}
+
+fn claim_concerns_by(claim: &Claim, cwd: &str, same_project: impl Fn(&str, &str) -> bool) -> bool {
+    claim_owner_cwd(&claim.owner).is_some_and(|owner_cwd| same_project(&owner_cwd, cwd))
+        || claim.paths.iter().any(|path| same_project(path, cwd))
 }
 
 /// The directory out of a display owner string ("name (/path)"). Display-only
@@ -1326,6 +2002,12 @@ async fn claims_post(
     let Some(who) = caller(&app, &headers) else {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     };
+    if !mesh_enabled_for(&app, &who, None, MeshSurface::Claims) {
+        return (
+            StatusCode::FORBIDDEN,
+            "The mesh is disabled here because Shared context is off.".into(),
+        );
+    }
     let bridge = app.state::<ContextBridge>();
     let holder = ClaimIdentity::of(&who, &req.owner);
     // Relative paths are resolved against the caller's own directory, and `..`
@@ -1805,6 +2487,74 @@ fn paths_overlap(a: &str, b: &str) -> bool {
     a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
 }
 
+fn mesh_enabled_in(scopes: &[MeshScope], path: &str) -> bool {
+    scopes
+        .iter()
+        .filter(|scope| scope.enabled)
+        .flat_map(|scope| scope.roots.iter())
+        .any(|root| !root.trim_matches('/').is_empty() && path_is_within(path, root))
+}
+
+/// The scope that owns a path, whether or not its switch is on. What tells
+/// "this project has Shared context off" apart from "nothing here owns that
+/// directory any more".
+fn mesh_scope_for<'a>(scopes: &'a [MeshScope], path: &str) -> Option<&'a MeshScope> {
+    scopes.iter().find(|scope| {
+        scope
+            .roots
+            .iter()
+            .any(|root| !root.trim_matches('/').is_empty() && path_is_within(path, root))
+    })
+}
+
+fn mesh_surface_enabled(bridge: &ContextBridge, path: &str, _surface: MeshSurface) -> bool {
+    bridge.mesh_enabled_path(path)
+}
+
+fn mesh_enabled_for(
+    app: &tauri::AppHandle,
+    who: &Caller,
+    route: Option<&str>,
+    surface: MeshSurface,
+) -> bool {
+    let path = who.cwd().or(route).unwrap_or_default();
+    !path.is_empty() && mesh_surface_enabled(&app.state::<ContextBridge>(), path, surface)
+}
+
+/// Why a send was refused, in the caller's terms.
+///
+/// One string used to cover both cases, and it named a setting: a target whose
+/// worktree had been removed reported "Shared context is off" while the switch
+/// was plainly on and the roster was still advertising that agent as
+/// messageable. Saying which half failed is the difference between a toggle to
+/// flip and a directory that no longer exists.
+fn mesh_refusal(app: &tauri::AppHandle, who: &Caller, target: &str) -> String {
+    let bridge = app.state::<ContextBridge>();
+    let unresolved = |path: &str| !bridge.mesh_path_resolves(path);
+    if unresolved(target) {
+        return format!(
+            "No project here owns {target} — if that was a worktree, it may have been removed. \
+             Shared context is not the problem."
+        );
+    }
+    if who.cwd().is_some_and(|path| unresolved(path)) {
+        return "No project here owns your own directory, so Canopy cannot tell whether the \
+                mesh applies to you."
+            .into();
+    }
+    "The mesh is disabled here because Shared context is off.".into()
+}
+
+fn mesh_enabled_between(app: &tauri::AppHandle, who: &Caller, target: &str) -> bool {
+    let bridge = app.state::<ContextBridge>();
+    let sender_enabled = match who.cwd() {
+        Some(path) => mesh_surface_enabled(&bridge, path, MeshSurface::Send),
+        // The companion is projectless; the target is the project it chose.
+        None => true,
+    };
+    sender_enabled && mesh_surface_enabled(&bridge, target, MeshSurface::Send)
+}
+
 /// What the mesh read tool asks. One POST body rather than query params, the
 /// same shape notes and research use, so nothing here needs URL-encoding.
 #[derive(serde::Deserialize)]
@@ -1828,7 +2578,15 @@ struct MeshQuery {
 /// where the old one was — and it is the same posture claims take: a shared
 /// checkout is one trust domain. Root (the companion) asks for the user and
 /// sees everything.
-fn mesh_concerns(m: &crate::mesh::MeshMessage, who: &Caller) -> bool {
+fn mesh_concerns(app: &tauri::AppHandle, m: &crate::mesh::MeshMessage, who: &Caller) -> bool {
+    mesh_concerns_by(m, who, |left, right| same_mesh_project(app, left, right))
+}
+
+fn mesh_concerns_by(
+    m: &crate::mesh::MeshMessage,
+    who: &Caller,
+    same_project: impl Fn(&str, &str) -> bool,
+) -> bool {
     let Some(a) = who.agent() else {
         return true;
     };
@@ -1838,7 +2596,7 @@ fn mesh_concerns(m: &crate::mesh::MeshMessage, who: &Caller) -> bool {
     }
     [&m.from_cwd, &m.to_cwd]
         .iter()
-        .any(|c| c.as_deref().is_some_and(|c| paths_overlap(c, &a.cwd)))
+        .any(|c| c.as_deref().is_some_and(|c| same_project(c, &a.cwd)))
 }
 
 /// The numeric half of a mesh id, for `since` comparisons. A malformed id
@@ -1860,13 +2618,30 @@ async fn mesh_op(
     let Some(who) = caller(&app, &headers) else {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
     };
+    if !mesh_enabled_for(&app, &who, None, MeshSurface::History) {
+        return match q.action.as_str() {
+            "history" => (
+                StatusCode::OK,
+                serde_json::json!({
+                    "messages": [],
+                    "total": 0,
+                    "note": "The mesh is disabled here because Shared context is off."
+                })
+                .to_string(),
+            ),
+            _ => (
+                StatusCode::NOT_FOUND,
+                "The mesh is disabled here because Shared context is off.".into(),
+            ),
+        };
+    }
     let bridge = app.state::<ContextBridge>();
     match q.action.as_str() {
         "get" => {
             let Some(id) = q.id.as_deref() else {
                 return (StatusCode::BAD_REQUEST, "get needs id, e.g. m12".into());
             };
-            match bridge.mesh.get(id).filter(|m| mesh_concerns(m, &who)) {
+            match bridge.mesh.get(id).filter(|m| mesh_concerns(&app, m, &who)) {
                 Some(m) => (
                     StatusCode::OK,
                     serde_json::json!({ "message": m }).to_string(),
@@ -1886,7 +2661,7 @@ async fn mesh_op(
                 .mesh
                 .all()
                 .into_iter()
-                .filter(|m| mesh_concerns(m, &who))
+                .filter(|m| mesh_concerns(&app, m, &who))
                 .filter(|m| since == 0 || mesh_seq(&m.id) > since)
                 .filter(|m| {
                     q.with_pty_id.is_none()
@@ -2004,14 +2779,43 @@ const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 /// thing it could establish — and anything carried in the message inherited the
 /// user's authority by default. Both delivery routes use this, or the one that
 /// doesn't becomes the way around it.
-fn sender_tag(who: &Caller) -> String {
+fn sender_tag(app: &tauri::AppHandle, who: &Caller) -> String {
     match who.agent() {
-        Some(a) => format!(
-            "[canopy: message from the agent in {} (terminal {})]",
-            a.cwd, a.pty_id
-        ),
+        Some(a) => {
+            let name = app
+                .state::<crate::pty::PtyManager>()
+                .get(a.pty_id)
+                .map(|session| session.name.lock().unwrap().clone());
+            match name {
+                Some(name) => format!(
+                    "[canopy: message from {name}, the agent in {} (terminal {})]",
+                    a.cwd, a.pty_id
+                ),
+                None => format!(
+                    "[canopy: message from the agent in {} (terminal {})]",
+                    a.cwd, a.pty_id
+                ),
+            }
+        }
         None => "[canopy: message from the Canopy companion]".to_string(),
     }
+}
+
+/// What a send between a severed pair gets back: the same 404 shape as a
+/// terminal that doesn't exist. The pair is unreachable from this session and
+/// the wording says why, so the sender neither retries into a wall nor
+/// invents a crashed terminal.
+fn severed_refusal(severed: &crate::mesh::Severed) -> (StatusCode, String) {
+    (
+        StatusCode::NOT_FOUND,
+        format!(
+            "No route to Canopy terminal {to} from your terminal {from}: the user disconnected \
+             this pair in the agent control panel. It can be reconnected there; until then, \
+             reach the user with canopy_notify (see canopy_agents).",
+            to = severed.to_pty_id,
+            from = severed.from_pty_id,
+        ),
+    )
 }
 
 /// What is safe to type into somebody else's terminal.
@@ -2053,12 +2857,26 @@ const MAX_MESH_ITEMS: usize = 8;
 /// How much of a mesh body the typed notice carries before pointing at the
 /// store instead.
 const MESH_NOTICE_CHARS: usize = 200;
+const MESH_INLINE_CHARS: usize = 1_200;
+
+fn agent_has_mesh_reader(agent: Option<&str>) -> bool {
+    agent
+        .and_then(crate::agent_cli::resolve)
+        .map_or(true, |cli| cli.mesh_reader)
+}
 
 /// What the published snapshots know about the agent in a terminal: which CLI
 /// it is, and the run's title — "what it is working on" as its tab shows it.
 /// Both `None` for a terminal no snapshot names, which is not an error: the
 /// message still records the pty and cwd it can prove.
-fn agent_meta(app: &tauri::AppHandle, pty_id: u32) -> (Option<String>, Option<String>) {
+fn agent_meta(
+    app: &tauri::AppHandle,
+    pty_id: u32,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let name = app
+        .state::<crate::pty::PtyManager>()
+        .get(pty_id)
+        .map(|session| session.name.lock().unwrap().clone());
     let bridge = app.state::<ContextBridge>();
     let snaps = bridge.snapshots.lock().unwrap();
     for project in snaps.values() {
@@ -2068,13 +2886,14 @@ fn agent_meta(app: &tauri::AppHandle, pty_id: u32) -> (Option<String>, Option<St
         for a in agents {
             if a.get("ptyId").and_then(|v| v.as_u64()) == Some(pty_id as u64) {
                 return (
+                    name,
                     a.get("agent").and_then(|v| v.as_str()).map(str::to_string),
                     a.get("title").and_then(|v| v.as_str()).map(str::to_string),
                 );
             }
         }
     }
-    (None, None)
+    (name, None, None)
 }
 
 /// Assemble a mesh record from what the bridge can prove: the sender from the
@@ -2091,18 +2910,20 @@ fn new_message(
     reply_to: Option<String>,
     reference: Option<crate::mesh::MeshRef>,
 ) -> crate::mesh::NewMessage {
-    let (from_agent, from_task) = who
+    let (from_name, from_agent, from_task) = who
         .agent()
         .map(|a| agent_meta(app, a.pty_id))
-        .unwrap_or((None, None));
-    let (to_agent, to_task) = agent_meta(app, to_pty_id);
+        .unwrap_or((None, None, None));
+    let (to_name, to_agent, to_task) = agent_meta(app, to_pty_id);
     crate::mesh::NewMessage {
         from_pty_id: who.agent().map(|a| a.pty_id),
         from_cwd: who.agent().map(|a| a.cwd.clone()),
+        from_name,
         from_agent,
         from_task,
         to_pty_id,
         to_cwd: Some(to_cwd),
+        to_name,
         to_agent,
         to_task,
         text,
@@ -2173,6 +2994,41 @@ fn mesh_notice(id: &str, reply_to: Option<&str>, text: &str, items: usize) -> St
         notice.push_str(&format!(" … full message via canopy_mesh get {id}"));
         if items > 0 {
             notice.push_str(&format!(" ({items} shared item(s))"));
+        }
+    }
+    notice
+}
+
+/// Aider and oh-my-pi have no MCP transport, so a pointer to canopy_mesh is a
+/// dead instruction. Give those two the body inline (bounded for terminal
+/// safety) and name shared paths directly; MCP-capable targets keep the compact
+/// id-first notice and fetch the durable record themselves.
+fn mesh_notice_for(message: &crate::mesh::MeshMessage) -> String {
+    if agent_has_mesh_reader(message.to_agent.as_deref()) {
+        return mesh_notice(
+            &message.id,
+            message.reply_to.as_deref(),
+            &message.text,
+            message.items.len(),
+        );
+    }
+    let flat = sanitize_message(&message.text);
+    let preview: String = flat.chars().take(MESH_INLINE_CHARS).collect();
+    let clipped = flat.chars().count() > MESH_INLINE_CHARS;
+    let reply = message
+        .reply_to
+        .as_deref()
+        .map(|id| format!(", replying to {id}"))
+        .unwrap_or_default();
+    let mut notice = format!("[mesh {}{}] {}", message.id, reply, preview);
+    if clipped {
+        notice.push_str(" … [truncated]");
+    }
+    if !message.items.is_empty() {
+        notice.push_str(" Shared files:");
+        for item in &message.items {
+            notice.push(' ');
+            notice.push_str(&item.path);
         }
     }
     notice
@@ -2251,6 +3107,10 @@ struct Action {
     /// CANOPY_PTY — the tool takes no id, so it can name no other terminal.
     #[serde(rename = "ptyId")]
     pty_id: Option<u32>,
+    /// message_agent: the stable Canopy-assigned display name, resolved back
+    /// to a PTY inside the caller's project. It labels the credential; it does
+    /// not replace it.
+    name: Option<String>,
     /// open_file / show_diff: the file to put in front of the user, and where
     /// in it to land.
     path: Option<String>,
@@ -2278,6 +3138,16 @@ struct Action {
     description: Option<String>,
     icon: Option<String>,
     tags: Option<Vec<String>>,
+    /// spawn_agent: the complete delegation brief plus launch presentation.
+    /// The child always opens as a pane beside its parent; `placement` and
+    /// `relativeToPtyId` from older sidecars arrive as unknown fields and are
+    /// ignored.
+    agent: Option<String>,
+    direction: Option<String>,
+    /// spawn_agent: run the child as a one-shot task — it reports through
+    /// canopy_job_done and Canopy closes its pane when the job is done.
+    #[serde(rename = "autoClose")]
+    auto_close: Option<bool>,
     /// job_done / close_session: the launching app instance (env
     /// CANOPY_INSTANCE), so a pty id recycled across an app restart can't
     /// close an unrelated tab.
@@ -2289,6 +3159,28 @@ struct Action {
     reply_to: Option<String>,
     #[serde(rename = "ref")]
     mesh_ref: Option<crate::mesh::MeshRef>,
+}
+
+const MAX_AGENT_SPAWN_DEPTH: u8 = 2;
+const MAX_AGENT_SPAWN_CHILDREN: usize = 4;
+const AGENT_SPAWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
+
+fn next_agent_spawn_depth(
+    parent_depth: u8,
+    live_children: usize,
+    pending_children: usize,
+) -> Result<u8, String> {
+    if parent_depth >= MAX_AGENT_SPAWN_DEPTH {
+        return Err(format!(
+            "delegation depth limit reached ({MAX_AGENT_SPAWN_DEPTH}); continue this work yourself or message an existing agent"
+        ));
+    }
+    if live_children + pending_children >= MAX_AGENT_SPAWN_CHILDREN {
+        return Err(format!(
+            "this agent already has {MAX_AGENT_SPAWN_CHILDREN} live or starting children; finish or close one before spawning another"
+        ));
+    }
+    Ok(parent_depth + 1)
 }
 
 /// One shared item as the sender passes it: only the path is required, and the
@@ -2481,25 +3373,43 @@ async fn action(
                         .into(),
                 );
             }
-            let stale = act
-                .instance
-                .as_deref()
-                .is_some_and(|i| i != crate::pty::instance_token());
-            if !stale {
-                let _ = app.emit(
-                    "agent:action",
-                    serde_json::json!({
-                        "kind": "task_named",
-                        "route": "",
-                        "ptyId": act.pty_id,
-                        "cwd": act.cwd,
-                        "title": act.title,
-                        "description": act.description,
-                        "icon": act.icon,
-                        "tags": act.tags,
-                    }),
+            let Some(identity) = who.agent() else {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Only a Canopy agent terminal can publish live working status.".into(),
                 );
+            };
+            if let Some(description) = act.description.as_deref() {
+                if description.trim().is_empty() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "working-on status needs a non-empty description".into(),
+                    );
+                }
+                if let Err(error) = crate::agents::update_session_working_on(
+                    &identity.instance,
+                    identity.pty_id,
+                    description,
+                ) {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, error);
+                }
             }
+            // The credential supplies terminal, instance and cwd. Body fields
+            // are intentionally ignored: a display label or claimed pty id is
+            // never allowed to become identity.
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({
+                    "kind": "task_named",
+                    "route": "",
+                    "ptyId": identity.pty_id,
+                    "cwd": identity.cwd,
+                    "title": act.title,
+                    "description": act.description,
+                    "icon": act.icon,
+                    "tags": act.tags,
+                }),
+            );
             "Noted — the run name and live description are updated. Carry on with the job."
                 .to_string()
         }
@@ -2600,19 +3510,217 @@ async fn action(
             );
             "Told the user.".to_string()
         }
+        "spawn_agent" => {
+            if !snaps.agents_may_spawn.load(Ordering::Acquire) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Agent delegation is off in Settings → Agents; ask the user to enable ‘Agents may spawn new agent tabs’."
+                        .into(),
+                );
+            }
+            let Some(parent) = who.agent().cloned() else {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Only a Canopy agent terminal can spawn a child agent; the companion uses canopy_start_session."
+                        .into(),
+                );
+            };
+            if !mesh_enabled_for(&app, &who, None, MeshSurface::Send) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "The mesh is disabled here because Shared context is off.".into(),
+                );
+            }
+            let body = act
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string);
+            let Some(body) = body else {
+                return (StatusCode::BAD_REQUEST, "spawn_agent needs a brief".into());
+            };
+            if body.len() > MAX_MESH_TEXT {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("spawn_agent brief is capped at {} KB", MAX_MESH_TEXT / 1024),
+                );
+            }
+            // The child always lands beside its parent, in the parent's own
+            // tab — a delegation is part of the work in front of the user, not
+            // a new place to look. The tool no longer offers "tab", and the
+            // relative terminal is the caller itself, never a chosen one.
+            let direction = match act.direction.as_deref() {
+                None => "right",
+                Some(dir @ ("left" | "right" | "top" | "bottom")) => dir,
+                Some(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "direction must be left, right, top or bottom".into(),
+                    );
+                }
+            };
+            let live_children = snaps
+                .agents
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|agent| {
+                    agent.instance == parent.instance && agent.parent_pty_id == Some(parent.pty_id)
+                })
+                .count();
+            let pending_children = snaps
+                .pending_spawns
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|spawn| spawn.parent.key() == parent.key() && spawn.child_pty_id.is_none())
+                .count();
+            let child_depth =
+                match next_agent_spawn_depth(parent.spawn_depth, live_children, pending_children) {
+                    Ok(depth) => depth,
+                    Err(error) => return (StatusCode::TOO_MANY_REQUESTS, error),
+                };
+            let id = snaps.next_op.fetch_add(1, Ordering::Relaxed);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            snaps.pending.lock().unwrap().insert(id, tx);
+            snaps.pending_spawns.lock().unwrap().insert(
+                id,
+                PendingAgentSpawn {
+                    parent: parent.clone(),
+                    child_depth,
+                    child_pty_id: None,
+                },
+            );
+            let delivered = format!("{} {body}", sender_tag(&app, &who));
+            let _ = app.emit(
+                "agent:action",
+                serde_json::json!({
+                    "kind": "spawn_agent",
+                    "route": parent.cwd,
+                    "cwd": parent.cwd,
+                    "parentPtyId": parent.pty_id,
+                    "spawnDepth": child_depth,
+                    "opId": id,
+                    "text": delivered,
+                    "brief": body,
+                    "title": act.title,
+                    "agent": act.agent,
+                    "placement": "split",
+                    "relativeToPtyId": parent.pty_id,
+                    "direction": direction,
+                    "autoClose": act.auto_close.unwrap_or(false),
+                }),
+            );
+            return match tokio::time::timeout(AGENT_SPAWN_TIMEOUT, rx).await {
+                Ok(Ok((true, data))) => {
+                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    let Some(child_id) = data.get("ptyId").and_then(|value| value.as_u64()) else {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Canopy started a child but did not report its terminal id".into(),
+                        );
+                    };
+                    let child_id = child_id as u32;
+                    let target_cwd = data
+                        .get("cwd")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(&parent.cwd)
+                        .to_string();
+                    // The opening brief uses the same write door as every
+                    // other mesh delivery. `record` owns severed-pair
+                    // enforcement; treating its Result as an infallible row
+                    // here would both fail to compile and, worse, create a
+                    // second path that could claim a refused brief landed.
+                    let record = match snaps.mesh.record(new_message(
+                        &app,
+                        &who,
+                        child_id,
+                        target_cwd,
+                        body,
+                        Vec::new(),
+                        None,
+                        None,
+                    )) {
+                        Ok(record) => record,
+                        Err(cut) => {
+                            return (
+                                StatusCode::CONFLICT,
+                                format!(
+                                    "Started child agent in terminal {child_id}, but its opening brief was refused because the connection between terminals {} and {} is severed",
+                                    cut.from_pty_id, cut.to_pty_id
+                                ),
+                            )
+                        }
+                    };
+                    snaps.mesh.note_delivery(&record.id, &delivered);
+                    snaps.mesh.mark_submitted(&record.id);
+                    (
+                        StatusCode::OK,
+                        format!(
+                            "Started child agent in terminal {child_id} as task {} (attempt {}). Opening brief recorded as mesh message {}.",
+                            data.get("runId").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                            data.get("attemptId").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                            record.id,
+                        ),
+                    )
+                }
+                Ok(Ok((false, data))) => {
+                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    (StatusCode::BAD_REQUEST, body_text(data))
+                }
+                Ok(Err(_)) => {
+                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Canopy dropped this agent spawn request".into(),
+                    )
+                }
+                Err(_) => {
+                    snaps.pending.lock().unwrap().remove(&id);
+                    snaps.pending_spawns.lock().unwrap().remove(&id);
+                    (
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "Canopy did not report the child launch in time; check canopy_agents before retrying"
+                            .into(),
+                    )
+                }
+            };
+        }
         "message_agent" => {
             let Some(text) = act.text.as_deref() else {
                 return (StatusCode::BAD_REQUEST, "message_agent needs text".into());
+            };
+            if act.pty_id.is_some() && act.name.is_some() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "message_agent accepts either ptyId or name, not both".into(),
+                );
+            }
+            let addressed_id = if let Some(id) = act.pty_id {
+                Some(id)
+            } else if let Some(name) = act.name.as_deref() {
+                let caller_cwd = who
+                    .agent()
+                    .map(|agent| agent.cwd.as_str())
+                    .or(act.cwd.as_deref())
+                    .unwrap_or_default();
+                match terminal_for_name(&app, caller_cwd, name) {
+                    Ok(id) => Some(id),
+                    Err(error) => return (StatusCode::NOT_FOUND, error),
+                }
+            } else {
+                None
             };
             // The `pr` form names a pull request rather than a terminal, and
             // resolving it is the frontend's job: only it holds the pty→session
             // binding, and only it can reopen an ended conversation or open a
             // tab for a fresh agent. So this hands over rather than answering.
-            if act.pty_id.is_none() {
+            if addressed_id.is_none() {
                 let Some(pr) = act.pr.as_deref() else {
                     return (
                         StatusCode::BAD_REQUEST,
-                        "message_agent needs ptyId or pr".into(),
+                        "message_agent needs ptyId, name, or pr".into(),
                     );
                 };
                 // Prepared here, exactly as the ptyId form is. The frontend
@@ -2625,6 +3733,12 @@ async fn action(
                     return (
                         StatusCode::BAD_REQUEST,
                         "message_agent needs text with something in it".into(),
+                    );
+                }
+                if who.cwd().is_some() && !mesh_enabled_for(&app, &who, None, MeshSurface::Send) {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        "The mesh is disabled here because Shared context is off.".into(),
                     );
                 }
                 // Waited on rather than fired off. The frontend is the only
@@ -2645,7 +3759,7 @@ async fn action(
                         "cwd": act.cwd,
                         "pr": pr,
                         "opId": id,
-                        "text": format!("{} {body}", sender_tag(&who)),
+                        "text": body,
                     }),
                 );
                 // Generous, because the honest answers are the slow ones:
@@ -2653,7 +3767,134 @@ async fn action(
                 // and a PR with nothing left to reopen gets a fresh agent in a
                 // workspace that has to be prepared first.
                 return match tokio::time::timeout(MESSAGE_PR_TIMEOUT, rx).await {
-                    Ok(Ok((true, data))) => (StatusCode::OK, body_text(data)),
+                    Ok(Ok((true, data))) => {
+                        if data.get("cold").and_then(|v| v.as_bool()) == Some(true) {
+                            let route = data.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+                            if !mesh_enabled_between(&app, &who, route) {
+                                return (
+                                    StatusCode::FORBIDDEN,
+                                    mesh_refusal(&app, &who, route),
+                                );
+                            }
+                            // Cold PRs become durable task-store runs, not a
+                            // PTY write. Start only after the bridge authorizes
+                            // the resolved project's mesh scope.
+                            let start_id = snaps.next_op.fetch_add(1, Ordering::Relaxed);
+                            let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+                            snaps.pending.lock().unwrap().insert(start_id, start_tx);
+                            let _ = app.emit(
+                                "agent:action",
+                                serde_json::json!({
+                                    "kind": "message_agent_start",
+                                    "route": route,
+                                    "pr": pr,
+                                    "opId": start_id,
+                                    "text": body,
+                                }),
+                            );
+                            return match tokio::time::timeout(MESSAGE_PR_TIMEOUT, start_rx).await {
+                                Ok(Ok((true, started))) => (
+                                    StatusCode::OK,
+                                    started
+                                        .get("note")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Started a fresh agent for the PR.")
+                                        .to_string(),
+                                ),
+                                Ok(Ok((false, failed))) => {
+                                    (StatusCode::BAD_REQUEST, body_text(failed))
+                                }
+                                Ok(Err(_)) => (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    "Canopy dropped the approved PR start".into(),
+                                ),
+                                Err(_) => {
+                                    snaps.pending.lock().unwrap().remove(&start_id);
+                                    (
+                                        StatusCode::GATEWAY_TIMEOUT,
+                                        format!("Canopy didn't start an agent for {pr} in time"),
+                                    )
+                                }
+                            };
+                        }
+                        let Some(target_id) = data
+                            .get("ptyId")
+                            .and_then(|v| v.as_u64())
+                            .and_then(|v| u32::try_from(v).ok())
+                        else {
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "Canopy resolved the PR without a target terminal".into(),
+                            );
+                        };
+                        let manager = app.state::<crate::pty::PtyManager>();
+                        let Some(target) = manager.get(target_id) else {
+                            return (
+                                StatusCode::NOT_FOUND,
+                                format!("The agent for {pr} stopped before delivery"),
+                            );
+                        };
+                        if !mesh_enabled_between(&app, &who, &target.cwd) {
+                            return (
+                                StatusCode::FORBIDDEN,
+                                mesh_refusal(&app, &who, &target.cwd),
+                            );
+                        }
+                        if let Err(e) =
+                            may_message_terminal(target_id, terminal_role(&app, target_id))
+                        {
+                            return (StatusCode::FORBIDDEN, e);
+                        }
+                        if who.agent().is_some_and(|a| a.pty_id == target_id) {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                "That's your own terminal — say it to the user instead.".into(),
+                            );
+                        }
+                        let routed = data
+                            .get("line")
+                            .and_then(|v| v.as_str())
+                            .map(sanitize_message)
+                            .filter(|v| !v.is_empty())
+                            .unwrap_or_else(|| body.clone());
+                        let record = match snaps.mesh.record(new_message(
+                            &app,
+                            &who,
+                            target_id,
+                            target.cwd.clone(),
+                            body.clone(),
+                            Vec::new(),
+                            None,
+                            Some(crate::mesh::MeshRef {
+                                kind: "pr".into(),
+                                id: pr.to_string(),
+                            }),
+                        )) {
+                            Ok(record) => record,
+                            Err(severed) => return severed_refusal(&severed),
+                        };
+                        let line = format!("{} {routed}", sender_tag(&app, &who));
+                        if let Err(e) = deliver_line(
+                            &app,
+                            target_id,
+                            target.cwd.clone(),
+                            record.id.clone(),
+                            &line,
+                        ) {
+                            return (StatusCode::BAD_REQUEST, e);
+                        }
+                        snaps.mesh.note_delivery(&record.id, &line);
+                        (
+                            StatusCode::OK,
+                            format!(
+                                "Sent to the agent for {pr} as mesh message {}. {}",
+                                record.id,
+                                data.get("note").and_then(|v| v.as_str()).unwrap_or("")
+                            )
+                            .trim()
+                            .to_string(),
+                        )
+                    }
                     Ok(Ok((false, data))) => (StatusCode::BAD_REQUEST, body_text(data)),
                     Ok(Err(_)) => (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -2676,10 +3917,10 @@ async fn action(
                     }
                 };
             }
-            let Some(id) = act.pty_id else {
+            let Some(id) = addressed_id else {
                 return (
                     StatusCode::BAD_REQUEST,
-                    "message_agent needs ptyId and text".into(),
+                    "message_agent needs ptyId or name and text".into(),
                 );
             };
             // Straight into the other agent's stdin, exactly as if the user had
@@ -2696,6 +3937,9 @@ async fn action(
                 );
             };
             let target_cwd = target.cwd.clone();
+            if !mesh_enabled_between(&app, &who, &target_cwd) {
+                return (StatusCode::FORBIDDEN, mesh_refusal(&app, &who, &target_cwd));
+            }
             if let Err(e) = may_message_terminal(id, terminal_role(&app, id)) {
                 return (StatusCode::FORBIDDEN, e);
             }
@@ -2716,7 +3960,7 @@ async fn action(
                     "message_agent needs text with something in it".into(),
                 );
             }
-            let record = snaps.mesh.record(new_message(
+            let record = match snaps.mesh.record(new_message(
                 &app,
                 &who,
                 id,
@@ -2728,13 +3972,16 @@ async fn action(
                 Vec::new(),
                 None,
                 None,
-            ));
+            )) {
+                Ok(record) => record,
+                Err(severed) => return severed_refusal(&severed),
+            };
             // The receiving agent is told where this came from. Without it a
             // message is indistinguishable from the user typing, so "another
             // agent asked me to do this" was not a thing the target could
             // establish — and anything carried in the message inherited the
             // user's authority by default.
-            let line = format!("{} {body}", sender_tag(&who));
+            let line = format!("{} {body}", sender_tag(&app, &who));
             if let Err(e) = deliver_line(&app, id, target_cwd, record.id.clone(), &line) {
                 return (StatusCode::BAD_REQUEST, e);
             }
@@ -2773,6 +4020,9 @@ async fn action(
                 );
             };
             let target_cwd = target.cwd.clone();
+            if !mesh_enabled_between(&app, &who, &target_cwd) {
+                return (StatusCode::FORBIDDEN, mesh_refusal(&app, &who, &target_cwd));
+            }
             // The same bar as message_agent, because the notice arrives the
             // same way: typed into the target. A shell would run it.
             if let Err(e) = may_message_terminal(id, terminal_role(&app, id)) {
@@ -2798,7 +4048,7 @@ async fn action(
                     );
                 }
             }
-            let record = snaps.mesh.record(new_message(
+            let record = match snaps.mesh.record(new_message(
                 &app,
                 &who,
                 id,
@@ -2807,36 +4057,41 @@ async fn action(
                 items,
                 act.reply_to.clone(),
                 act.mesh_ref.clone(),
-            ));
+            )) {
+                Ok(record) => record,
+                Err(severed) => return severed_refusal(&severed),
+            };
             // The full body lives on the mesh; what lands in the terminal is a
             // one-line notice carrying the id, so the target knows to look —
             // and a 40-line handoff stops arriving as 40 keystroke lines.
-            let notice = format!(
-                "{} {}",
-                sender_tag(&who),
-                mesh_notice(
-                    &record.id,
-                    record.reply_to.as_deref(),
-                    text,
-                    record.items.len()
-                )
-            );
-            snaps.mesh.note_delivery(&record.id, &notice);
+            let notice = format!("{} {}", sender_tag(&app, &who), mesh_notice_for(&record));
             if let Err(e) = deliver_line(&app, id, target_cwd, record.id.clone(), &notice) {
                 return (StatusCode::BAD_REQUEST, e);
             }
-            format!(
-                "Sent mesh message {rid} to terminal {id}: a one-line notice with the id was \
-                 typed into its session, and the full message ({}between you on the mesh). It \
-                 can read it with canopy_mesh get {rid} and reply with canopy_mesh_send \
-                 replyTo \"{rid}\".",
-                if record.items.is_empty() {
-                    "kept "
-                } else {
-                    "with its shared items, kept "
-                },
-                rid = record.id,
-            )
+            // A failed first PTY write means nothing was delivered. Record the
+            // concrete notice only after that write succeeds; `submitted`
+            // remains the separate truth about the delayed Return.
+            snaps.mesh.note_delivery(&record.id, &notice);
+            if agent_has_mesh_reader(record.to_agent.as_deref()) {
+                format!(
+                    "Sent mesh message {rid} to terminal {id}: a one-line notice with the id was \
+                     typed into its session, and the full message ({}between you on the mesh). It \
+                     can read it with canopy_mesh get {rid} and reply with canopy_mesh_send \
+                     replyTo \"{rid}\".",
+                    if record.items.is_empty() {
+                        "kept "
+                    } else {
+                        "with its shared items, kept "
+                    },
+                    rid = record.id,
+                )
+            } else {
+                format!(
+                    "Sent mesh message {} to terminal {id}. That CLI has no mesh reader, so its \
+                     bounded body and shared file paths were typed inline.",
+                    record.id
+                )
+            }
         }
         other => return (StatusCode::BAD_REQUEST, format!("unknown action: {other}")),
     };
@@ -3081,9 +4336,9 @@ async fn browser(
     headers: HeaderMap,
     Json(op): Json<BrowserOp>,
 ) -> (StatusCode, String) {
-    if !authorized(&app, &headers) {
+    let Some(who) = caller(&app, &headers) else {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
-    }
+    };
     // Everything checkable without the page is checked here, so the agent gets
     // an immediate 4xx to correct against instead of a UI round-trip.
     match op.op.as_str() {
@@ -3174,6 +4429,7 @@ async fn browser(
             "op": op.op,
             "route": route,
             "ptyId": op.pty_id,
+            "attemptId": who.attempt_id(),
             "scope": op.scope,
             "url": op.url,
             "action": op.action,
@@ -4087,6 +5343,115 @@ fn strip_ansi(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn task_detail(status: &str, metadata: serde_json::Value) -> crate::tasks::TaskEnvelopeDetail {
+        crate::tasks::TaskEnvelopeDetail {
+            envelope: crate::tasks::TaskEnvelope {
+                summary: crate::tasks::TaskEnvelopeSummary {
+                    run_id: "run-1".into(),
+                    project_id: "project-1".into(),
+                    component_id: "app".into(),
+                    kind: "vibe-turn".into(),
+                    title: Some("Installing dependencies".into()),
+                    status: status.into(),
+                    attempt_count: 1,
+                    created_at: 1_700_000_000_000,
+                    updated_at: 1_700_000_001_000,
+                    metadata,
+                },
+                schema_version: 1,
+                worktree_path: "/project".into(),
+                goal: "Make the app work".into(),
+                acceptance: Vec::new(),
+                task_classes: serde_json::json!({}),
+                context_summary: String::new(),
+                risk_class: "reversible".into(),
+                authority_policy: serde_json::json!({}),
+                failover_policy: serde_json::json!({}),
+                deadline_at: None,
+                attempt_cap: 1,
+                base_baseline_id: None,
+                last_green_baseline_id: None,
+            },
+            attempts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mcp_task_status_never_improves_ready_or_generic_blocked_evidence() {
+        let ready = mcp_task_result(&task_detail("ready", serde_json::json!({}))).unwrap();
+        assert_eq!(ready["status"], "working");
+        assert_eq!(ready["resultType"], "complete");
+        let blocked = mcp_task_result(&task_detail("blocked", serde_json::json!({}))).unwrap();
+        assert_eq!(blocked["status"], "working");
+    }
+
+    #[test]
+    fn mcp_task_input_required_needs_a_recorded_plain_language_card() {
+        let task = mcp_task_result(&task_detail(
+            "running",
+            serde_json::json!({
+                "mcpTask": {
+                    "statusMessage": "Choose an account",
+                    "inputRequests": {
+                        "account": {
+                            "method": "elicitation/create",
+                            "params": {
+                                "mode": "form", "message": "Choose an account",
+                                "requestedSchema": { "type": "object" }
+                            },
+                            "_meta": { "reason": "account-link",
+                                "actions": [{ "label": "Team", "response": "team" }] }
+                        }
+                    }
+                }
+            }),
+        ))
+        .unwrap();
+        assert_eq!(task["status"], "input_required");
+        assert_eq!(
+            task["inputRequests"]["account"]["_meta"]["reason"],
+            "account-link"
+        );
+        assert!(task.get("output").is_none());
+    }
+
+    #[test]
+    fn mcp_task_reserves_failed_for_recorded_json_rpc_errors() {
+        let build_failure = mcp_task_result(&task_detail("failed", serde_json::json!({}))).unwrap();
+        assert_eq!(build_failure["status"], "completed");
+        assert_eq!(build_failure["result"]["isError"], true);
+
+        let rpc_failure = mcp_task_result(&task_detail(
+            "failed",
+            serde_json::json!({
+                "mcpTask": {
+                    "rpcError": { "code": -32603, "message": "Internal error" }
+                }
+            }),
+        ))
+        .unwrap();
+        assert_eq!(rpc_failure["status"], "failed");
+        assert_eq!(rpc_failure["error"]["code"], -32603);
+        assert!(rpc_failure.get("result").is_none());
+    }
+
+    #[test]
+    fn mcp_task_updates_accept_only_standard_accepted_form_responses() {
+        let accepted = serde_json::json!({
+            "action": "accept",
+            "content": { "response": "opaque:team" }
+        });
+        assert_eq!(
+            accepted_input_value(&accepted),
+            Some(&serde_json::json!("opaque:team"))
+        );
+        assert!(accepted_input_value(&serde_json::json!({
+            "action": "decline"
+        }))
+        .is_none());
+        assert!(accepted_input_value(&serde_json::json!("opaque:team")).is_none());
+    }
+
     #[test]
     fn configured_server_resolution_carries_stable_ids() {
         let bridge = ContextBridge::default();
@@ -4521,6 +5886,8 @@ mod tests {
             cwd: "/w".into(),
             run_id: None,
             attempt_id: None,
+            spawn_depth: 0,
+            parent_pty_id: None,
         };
         let b = AgentIdentity {
             pty_id: 2,
@@ -4528,6 +5895,8 @@ mod tests {
             cwd: "/w".into(),
             run_id: None,
             attempt_id: None,
+            spawn_depth: 0,
+            parent_pty_id: None,
         };
         let recycled = AgentIdentity {
             pty_id: 1,
@@ -4535,6 +5904,8 @@ mod tests {
             cwd: "/w".into(),
             run_id: None,
             attempt_id: None,
+            spawn_depth: 0,
+            parent_pty_id: None,
         };
         assert_ne!(a.key(), b.key());
         assert_ne!(a.key(), recycled.key());
@@ -4546,9 +5917,60 @@ mod tests {
                 cwd: "/elsewhere".into(),
                 run_id: Some("run_task".into()),
                 attempt_id: Some("attempt_task".into()),
+                spawn_depth: 0,
+                parent_pty_id: None,
             }
             .key()
         );
+    }
+
+    #[test]
+    fn browser_attempt_identity_comes_from_the_authenticated_caller() {
+        let terminal = Caller::Agent(AgentIdentity {
+            pty_id: 7,
+            instance: "run-a".into(),
+            cwd: "/w".into(),
+            run_id: Some("run-1".into()),
+            attempt_id: Some("attempt-terminal".into()),
+            spawn_depth: 0,
+            parent_pty_id: None,
+        });
+        let structured = Caller::Attempt(AttemptIdentity {
+            instance: "run-a".into(),
+            cwd: "/w".into(),
+            run_id: "run-2".into(),
+            attempt_id: "attempt-structured".into(),
+        });
+
+        assert_eq!(terminal.attempt_id(), Some("attempt-terminal"));
+        assert_eq!(structured.attempt_id(), Some("attempt-structured"));
+        assert_eq!(Caller::Root.attempt_id(), None);
+    }
+
+    #[test]
+    fn agent_spawn_gate_bounds_depth_and_live_plus_starting_children() {
+        assert_eq!(next_agent_spawn_depth(0, 0, 0).unwrap(), 1);
+        assert_eq!(next_agent_spawn_depth(1, 3, 0).unwrap(), 2);
+        assert!(next_agent_spawn_depth(2, 0, 0)
+            .unwrap_err()
+            .contains("depth limit"));
+        assert!(next_agent_spawn_depth(0, 3, 1)
+            .unwrap_err()
+            .contains("4 live or starting children"));
+    }
+
+    #[test]
+    fn agent_spawn_permission_defaults_on_and_changes_at_the_bridge() {
+        let bridge = ContextBridge::default();
+        assert!(bridge.agents_may_spawn.load(Ordering::Acquire));
+        assert!(!bridge_disabled_tools(&bridge)
+            .iter()
+            .any(|tool| tool == "canopy_spawn_agent"));
+        bridge.agents_may_spawn.store(false, Ordering::Release);
+        assert!(!bridge.agents_may_spawn.load(Ordering::Acquire));
+        assert!(bridge_disabled_tools(&bridge)
+            .iter()
+            .any(|tool| tool == "canopy_spawn_agent"));
     }
 
     /// The registry is what makes "who is calling" answerable, and what tells
@@ -4626,6 +6048,21 @@ mod tests {
         assert!(may_act_on_terminal(&Caller::Root, 2, Agent, "stop").is_ok());
     }
 
+    /// A severed pair answers a send with the missing-terminal status — 404,
+    /// one sentence — naming both ends and where to reconnect them, so the
+    /// sender is told this route is gone rather than that its target crashed.
+    #[test]
+    fn a_severed_pair_reads_as_not_found_to_the_sender() {
+        let (status, body) = severed_refusal(&crate::mesh::Severed {
+            from_pty_id: 3,
+            to_pty_id: 9,
+        });
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.contains("terminal 9"), "got: {body}");
+        assert!(body.contains("terminal 3"), "got: {body}");
+        assert!(body.contains("disconnected"), "got: {body}");
+    }
+
     /// The half that is easy to get backwards. The monitor classifies on a
     /// tick, so a session that has only just started — and any CLI the monitor
     /// cannot name at all — is `Unknown`; reading that as "not an agent" would
@@ -4701,6 +6138,132 @@ mod tests {
         assert!(bridge.identify(&token).is_none());
     }
 
+    #[test]
+    fn one_mesh_switch_flips_every_cross_session_surface() {
+        let bridge = ContextBridge::default();
+        let scopes = |enabled| {
+            serde_json::json!([{
+                "name": "app",
+                "roots": ["/w/app"],
+                "enabled": enabled,
+            }])
+        };
+        let surfaces = [
+            MeshSurface::Roster,
+            MeshSurface::Claims,
+            MeshSurface::History,
+            MeshSurface::Send,
+        ];
+
+        bridge.set_mesh_scopes(&scopes(false)).unwrap();
+        for surface in surfaces {
+            assert!(!mesh_surface_enabled(&bridge, "/w/app", surface));
+        }
+        bridge.set_mesh_scopes(&scopes(true)).unwrap();
+        for surface in surfaces {
+            assert!(mesh_surface_enabled(&bridge, "/w/app/src", surface));
+        }
+    }
+
+    /// A worktree that has been removed must not read as "Shared context is
+    /// off". The fold from worktree to checkout is a `git` call, so it used to
+    /// be only as durable as the directory — and removing the worktree is
+    /// routinely the last thing an isolated task does, sometimes the very
+    /// instruction the message being refused was carrying.
+    #[test]
+    fn a_removed_worktree_keeps_the_project_it_folded_to() {
+        let bridge = ContextBridge::default();
+        bridge
+            .set_mesh_scopes(&serde_json::json!([{
+                "name": "app",
+                "roots": ["/w/app"],
+                "enabled": true,
+            }]))
+            .unwrap();
+        // A worktree is a *sibling* of its checkout, so containment alone never
+        // sees it — this is why the fold exists at all.
+        assert!(!mesh_enabled_in(
+            &bridge.mesh_scopes.lock().unwrap(),
+            "/w/app-wt-pr-1"
+        ));
+
+        // Remembered while the directory was still there to answer.
+        bridge
+            .worktree_roots
+            .lock()
+            .unwrap()
+            .insert("/w/app-wt-pr-1".into(), Some("/w/app".into()));
+
+        // The directory is gone now; `main_worktree` would fail. The gate still
+        // resolves, and still says enabled.
+        assert!(bridge.mesh_enabled_path("/w/app-wt-pr-1"));
+        assert!(bridge.mesh_path_resolves("/w/app-wt-pr-1"));
+    }
+
+    /// The two halves the single refusal string used to conflate.
+    #[test]
+    fn an_unresolvable_path_is_not_the_same_as_a_switch_that_is_off() {
+        let bridge = ContextBridge::default();
+        bridge
+            .set_mesh_scopes(&serde_json::json!([{
+                "name": "app",
+                "roots": ["/w/app"],
+                "enabled": false,
+            }]))
+            .unwrap();
+        // Owned by a project, whose switch is off: the setting really is the
+        // reason, and the original message was right about this case.
+        assert!(bridge.mesh_path_resolves("/w/app/src"));
+        assert!(!bridge.mesh_enabled_path("/w/app/src"));
+
+        // Owned by nothing. Same `false` from the gate, entirely different
+        // cause — and no setting the user can flip will change it.
+        bridge
+            .worktree_roots
+            .lock()
+            .unwrap()
+            .insert("/elsewhere/gone".into(), None);
+        assert!(!bridge.mesh_path_resolves("/elsewhere/gone"));
+        assert!(!bridge.mesh_enabled_path("/elsewhere/gone"));
+    }
+
+    /// Republishing scopes is the one event that can change which project owns
+    /// a directory, so it is the one event that may drop a remembered fold.
+    #[test]
+    fn republishing_scopes_forgets_the_remembered_folds() {
+        let bridge = ContextBridge::default();
+        bridge
+            .worktree_roots
+            .lock()
+            .unwrap()
+            .insert("/w/app-wt-pr-1".into(), Some("/w/app".into()));
+        bridge
+            .set_mesh_scopes(&serde_json::json!([{
+                "name": "app",
+                "roots": ["/w/app"],
+                "enabled": true,
+            }]))
+            .unwrap();
+        assert!(bridge.worktree_roots.lock().unwrap().is_empty());
+    }
+
+    /// Warming only ever adds. A second pass must not re-probe a path whose
+    /// answer is already known — that re-probe is what put a `git` subprocess
+    /// on the path of every mesh tool call.
+    #[test]
+    fn warming_does_not_disturb_what_is_already_known() {
+        let bridge = ContextBridge::default();
+        bridge
+            .worktree_roots
+            .lock()
+            .unwrap()
+            .insert("/w/app-wt-pr-1".into(), Some("/w/app".into()));
+        bridge.warm_worktree_roots(vec!["/w/app-wt-pr-1".to_string(), String::new()]);
+        let roots = bridge.worktree_roots.lock().unwrap();
+        assert_eq!(roots.get("/w/app-wt-pr-1"), Some(&Some("/w/app".into())));
+        assert!(!roots.contains_key(""));
+    }
+
     /// Claims are the caller's business only when they could collide with it.
     /// Unscoped, an agent learned every open project's claimed paths — even
     /// with shared context switched off for its own.
@@ -4728,10 +6291,19 @@ mod tests {
             owner: "other (/w/other)".into(),
             ..mine.clone()
         };
-        assert!(claim_concerns(&mine, "/w/app"));
-        assert!(!claim_concerns(&theirs, "/w/app"));
+        let project = |path: &str| {
+            ["/w/app", "/w/other"]
+                .into_iter()
+                .find(|root| path_is_within(path, root))
+        };
+        let same =
+            |left: &str, right: &str| project(left) == project(right) && project(left).is_some();
+        assert!(claim_concerns_by(&mine, "/w/app", same));
+        assert!(!claim_concerns_by(&theirs, "/w/app", same));
         // A subdirectory of the claimed tree still concerns me.
-        assert!(claim_concerns(&mine, "/w/app/src"));
+        assert!(claim_concerns_by(&mine, "/w/app/src", same));
+        // An ancestor cwd is not a wildcard for every project beneath it.
+        assert!(!claim_concerns_by(&mine, "/w", same));
     }
 
     #[test]
@@ -4851,10 +6423,12 @@ mod tests {
             id: "m1".into(),
             from_pty_id: from,
             from_cwd: (!from_cwd.is_empty()).then(|| from_cwd.to_string()),
+            from_name: None,
             from_agent: None,
             from_task: None,
             to_pty_id: to,
             to_cwd: (!to_cwd.is_empty()).then(|| to_cwd.to_string()),
+            to_name: None,
             to_agent: None,
             to_task: None,
             text: "x".into(),
@@ -4875,6 +6449,8 @@ mod tests {
             cwd: cwd.into(),
             run_id: None,
             attempt_id: None,
+            spawn_depth: 0,
+            parent_pty_id: None,
         })
     }
 
@@ -4884,22 +6460,55 @@ mod tests {
     #[test]
     fn mesh_history_is_scoped_like_claims() {
         let msg = mesh_msg(Some(3), "/w/app", 7, "/w/app/.claude/worktrees/x");
+        let project = |path: &str| {
+            ["/w/app", "/w/other"]
+                .into_iter()
+                .find(|root| path_is_within(path, root))
+        };
+        let same =
+            |left: &str, right: &str| project(left) == project(right) && project(left).is_some();
         // Sender and receiver both see it, by credential.
-        assert!(mesh_concerns(&msg, &agent_caller(3, "run-1", "/elsewhere")));
-        assert!(mesh_concerns(&msg, &agent_caller(7, "run-1", "/elsewhere")));
-        // A pty id from another app run names a different terminal now.
-        assert!(!mesh_concerns(
+        assert!(mesh_concerns_by(
             &msg,
-            &agent_caller(3, "run-2", "/elsewhere")
+            &agent_caller(3, "run-1", "/elsewhere"),
+            same
+        ));
+        assert!(mesh_concerns_by(
+            &msg,
+            &agent_caller(7, "run-1", "/elsewhere"),
+            same
+        ));
+        // A pty id from another app run names a different terminal now.
+        assert!(!mesh_concerns_by(
+            &msg,
+            &agent_caller(3, "run-2", "/elsewhere"),
+            same,
         ));
         // But the tree still answers: a relaunched agent working where the old
         // one was reads the old one's traffic.
-        assert!(mesh_concerns(&msg, &agent_caller(9, "run-2", "/w/app")));
-        assert!(mesh_concerns(&msg, &agent_caller(9, "run-2", "/w/app/src")));
+        assert!(mesh_concerns_by(
+            &msg,
+            &agent_caller(9, "run-2", "/w/app"),
+            same
+        ));
+        assert!(mesh_concerns_by(
+            &msg,
+            &agent_caller(9, "run-2", "/w/app/src"),
+            same
+        ));
         // A different project sees nothing.
-        assert!(!mesh_concerns(&msg, &agent_caller(9, "run-2", "/w/other")));
+        assert!(!mesh_concerns_by(
+            &msg,
+            &agent_caller(9, "run-2", "/w/other"),
+            same
+        ));
+        assert!(!mesh_concerns_by(
+            &msg,
+            &agent_caller(9, "run-2", "/w"),
+            same
+        ));
         // The companion asks for the user and sees everything.
-        assert!(mesh_concerns(&msg, &Caller::Root));
+        assert!(mesh_concerns_by(&msg, &Caller::Root, same));
     }
 
     #[test]
@@ -4922,6 +6531,30 @@ mod tests {
         // Items always earn the pointer, and are counted.
         let n = mesh_notice("m11", None, "see attached", 2);
         assert!(n.contains("(2 shared item(s))"), "got: {n}");
+    }
+
+    #[test]
+    fn mcp_less_agents_receive_the_message_not_a_dead_store_pointer() {
+        for agent in ["aider", "omp"] {
+            let mut message = mesh_msg(Some(3), "/w/app", 7, "/w/app");
+            message.id = "m12".into();
+            message.to_agent = Some(agent.into());
+            message.text = "first line\nsecond line".into();
+            message.items = vec![crate::mesh::MeshItem {
+                kind: "file".into(),
+                path: "/w/app/build.log".into(),
+                note: None,
+            }];
+            let notice = mesh_notice_for(&message);
+            assert!(notice.contains("first line second line"), "{notice}");
+            assert!(notice.contains("/w/app/build.log"), "{notice}");
+            assert!(!notice.contains("canopy_mesh get"), "{notice}");
+
+            message.text = "x".repeat(MESH_INLINE_CHARS + 20);
+            let notice = mesh_notice_for(&message);
+            assert!(notice.contains("[truncated]"), "{notice}");
+            assert!(!notice.contains("canopy_mesh get"), "{notice}");
+        }
     }
 
     #[test]

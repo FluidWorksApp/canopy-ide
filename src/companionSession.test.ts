@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { isStaleResume, retryDelay } from "./companionSession";
+import { emptyTurnFallback, isStaleResume, retryDelay } from "./companionSession";
+
+describe("empty companion turns", () => {
+  it("does not guess at a limit when the transport reported a real failure", () => {
+    expect(emptyTurnFallback("Stripe MCP needs authentication.")).toBeNull();
+  });
+
+  it("keeps the generic fallback when the agent truly returned nothing", () => {
+    expect(emptyTurnFallback(null)).toContain("No reply came back");
+  });
+});
 
 // A launch that failed used to sit failed: only a *stale resume* healed itself,
 // and everything else waited for the user to notice a dead mascot and click

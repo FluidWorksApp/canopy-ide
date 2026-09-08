@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  companionMcpAuthError,
+  companionCliError,
   OneshotTransport,
   newText,
 } from "./companionTransport";
@@ -142,6 +144,64 @@ describe("the streaming protocol", () => {
   });
 });
 
+describe("the Cursor streaming protocol", () => {
+  it("captures the session, reply, tool activity, and turn boundary", () => {
+    const host = collector();
+    let session = "";
+    const parser = new StructuredEventParser(host, {
+      dialect: "cursor",
+      onThread: (id) => void (session = id),
+    });
+
+    parser.handleLine(line({ type: "system", subtype: "init", session_id: "cur-1" }));
+    parser.handleLine(line({
+      type: "assistant",
+      timestamp_ms: 1,
+      message: { content: [{ type: "text", text: "Checking it" }] },
+    }));
+    parser.handleLine(line({
+      type: "tool_call",
+      subtype: "started",
+      tool_call: { readToolCall: { args: { path: "/repo/src/App.tsx" } } },
+    }));
+    parser.handleLine(line({ type: "result", subtype: "success", result: "done" }));
+
+    expect(session).toBe("cur-1");
+    expect(host.events).toEqual([
+      { kind: "ready" },
+      { kind: "delta", text: "Checking it" },
+      { kind: "tool", name: "read", detail: "/repo/src/App.tsx" },
+      { kind: "turnEnd" },
+    ]);
+  });
+
+  it("surfaces a failed result", () => {
+    const host = collector();
+    const parser = new StructuredEventParser(host, { dialect: "cursor" });
+    parser.handleLine(line({ type: "result", is_error: true, result: "login required" }));
+    expect(host.events).toEqual([
+      { kind: "error", message: "login required" },
+      { kind: "turnEnd" },
+    ]);
+  });
+
+  it("ignores buffered assistant flushes that repeat streamed deltas", () => {
+    const host = collector();
+    const parser = new StructuredEventParser(host, { dialect: "cursor" });
+    parser.handleLine(line({
+      type: "assistant",
+      timestamp_ms: 1,
+      message: { content: [{ type: "text", text: "Hello" }] },
+    }));
+    parser.handleLine(line({
+      type: "assistant",
+      model_call_id: "call-1",
+      message: { content: [{ type: "text", text: "Hello" }] },
+    }));
+    expect(host.events).toEqual([{ kind: "delta", text: "Hello" }]);
+  });
+});
+
 // The failure this exists for, recorded verbatim from
 // ~/.claude/projects/…/1f7f983d-….jsonl: a Build session asked for
 // canopy_project and canopy_start_server, was refused for want of a permission
@@ -257,19 +317,22 @@ describe("recovering a reply from a redrawing terminal", () => {
 });
 
 describe("the oneshot protocol (codex)", () => {
-  function oneshot(sessionId: string | null = null) {
+  function oneshot(sessionId: string | null = null, timeoutMs = 60_000) {
     const host = collector();
     const sent: { message: string; sessionId: string | null }[] = [];
     let learned: string | null = null;
     let forgotten = 0;
+    const abort = vi.fn(async () => {});
     const t = new OneshotTransport({
       host,
       sessionId,
       onSession: (id) => void (learned = id),
       onForget: () => void (forgotten += 1),
       launch: async (message, sessionId) => void sent.push({ message, sessionId }),
+      abort,
+      timeoutMs,
     });
-    return { t, host, sent, learned: () => learned, forgotten: () => forgotten };
+    return { t, host, sent, abort, learned: () => learned, forgotten: () => forgotten };
   }
 
   it("learns the thread id from the first turn", () => {
@@ -378,7 +441,7 @@ describe("the oneshot protocol (codex)", () => {
   });
 
   it("reads the MCP tool name from the field codex actually sends", () => {
-    // Verified against codex-cli 0.146.0. The event is:
+    // Verified against codex-cli 0.146.0 on 2026-08-02. The event is:
     //   {"type":"mcp_tool_call","server":"canopy","tool":"canopy_project",…}
     // We read `item.name`, which is never set on these, so the companion ran
     // tools on codex and showed an empty trail — a panel that answered from
@@ -435,12 +498,14 @@ describe("the oneshot protocol (codex)", () => {
     });
   });
 
-  it("ends the turn on turn.completed, and reports one that failed", () => {
+  it("ends the turn on turn.completed, and reports one that failed", async () => {
     const o = oneshot();
+    await o.t.send("hello");
     o.t.handleLine(line({ type: "turn.completed" }));
     expect(o.host.events).toEqual([{ kind: "turnEnd" }]);
 
     const b = oneshot();
+    await b.t.send("hello");
     b.t.handleLine(line({ type: "turn.failed", error: { message: "rate limited" } }));
     expect(b.host.events).toEqual([
       { kind: "error", message: "rate limited" },
@@ -454,5 +519,81 @@ describe("the oneshot protocol (codex)", () => {
     o.t.handleLine(line({ type: "turn.started" }));
     o.t.handleLine(line({ type: "item.started", item: { type: "reasoning" } }));
     expect(o.host.events).toEqual([]);
+  });
+
+  it("fails immediately if Codex says it is waiting for additional stdin", async () => {
+    const o = oneshot();
+    await o.t.send("hello");
+    o.t.handleStderr("Reading additional input from stdin...");
+    expect(o.host.events).toEqual([
+      { kind: "error", message: expect.stringContaining("waited for stdin") },
+      { kind: "turnEnd" },
+    ]);
+    expect(o.abort).toHaveBeenCalledOnce();
+  });
+
+  it("turns an MCP authentication crash into an actionable error", async () => {
+    const o = oneshot();
+    await o.t.send("hello");
+    const raw =
+      'rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer resource_metadata=https://mcp.stripe.com/.well-known/oauth-protected-resource" })';
+    o.t.handleStderr(raw);
+
+    expect(o.host.events).toEqual([
+      {
+        kind: "error",
+        message:
+          "Stripe MCP needs authentication. Run `codex mcp login stripe` in a terminal, then Retry. To use Jarvis without it, disable that MCP server in Codex.",
+      },
+      { kind: "turnEnd" },
+    ]);
+    expect(o.abort).toHaveBeenCalledOnce();
+    expect(companionMcpAuthError("ordinary warning")).toBeNull();
+  });
+
+  it("unwraps a Codex JSON error instead of exposing the protocol envelope", async () => {
+    const o = oneshot();
+    await o.t.send("hello");
+    const raw = JSON.stringify({
+      type: "error",
+      status: 400,
+      error: { type: "invalid_request_error", message: "Unsupported model." },
+    });
+    o.t.handleStderr(raw);
+    expect(companionCliError(raw)).toBe("Unsupported model.");
+    expect(o.host.events).toEqual([{ kind: "error", message: "Unsupported model." }]);
+  });
+
+  it("bounds a wedged turn and kills its child", async () => {
+    vi.useFakeTimers();
+    try {
+      const o = oneshot(null, 25);
+      await o.t.send("hello");
+      await vi.advanceTimersByTimeAsync(25);
+      expect(o.host.events).toEqual([
+        { kind: "error", message: expect.stringContaining("did not finish within 5 minutes") },
+        { kind: "turnEnd" },
+      ]);
+      expect(o.abort).toHaveBeenCalledOnce();
+      // The process exit caused by the kill must not close the turn twice.
+      o.t.handleExit();
+      expect(o.host.events.filter((e) => e.kind === "turnEnd")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a turn visibly and remains reusable", async () => {
+    const o = oneshot();
+    await o.t.send("first");
+    await o.t.cancelTurn();
+    expect(o.host.events).toEqual([
+      { kind: "error", message: "Turn cancelled." },
+      { kind: "turnEnd" },
+    ]);
+    expect(o.abort).toHaveBeenCalledOnce();
+    await o.t.send("second");
+    expect(o.sent.at(-1)).toEqual({ message: "second", sessionId: null });
+    await o.t.stop();
   });
 });

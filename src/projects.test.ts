@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  componentForPath,
   adoptLegacyCustomTasks,
+  adoptDefaultProjectLens,
   adoptProjectStructureIds,
   AGENT_CLIS,
   agentForBin,
@@ -15,6 +17,7 @@ import {
   normalizeProjectStructure,
   newCustomCliId,
   refreshAgentClis,
+  recordVibeDiscoveryFailure,
   remoteCliMetadata,
   restoreCommand,
   resumeSessionId,
@@ -41,8 +44,58 @@ const addClis = (clis: CustomAgentCli[]) => {
 };
 
 afterEach(() => {
-  updateSettings({ cliBins: {}, customClis: [] });
+  updateSettings({ cliBins: {}, customClis: [], defaultProjectLens: "engineer" });
   refreshAgentClis();
+});
+
+describe("default project lens adoption", () => {
+  const legacy = (): Project => ({
+    id: "legacy-lens",
+    name: "Legacy",
+    components: [{ id: "cmp", label: "app", path: "/repo" }],
+  });
+
+  it("adopts the onboarding choice once for an uninitialized project", () => {
+    updateSettings({ defaultProjectLens: "build" });
+    expect(adoptDefaultProjectLens(legacy()).vibe).toEqual({
+      version: 1,
+      enabled: true,
+    });
+  });
+
+  it("never overrides a project's explicit lens", () => {
+    updateSettings({ defaultProjectLens: "build" });
+    const project = {
+      ...legacy(),
+      vibe: { version: 1 as const, enabled: false },
+    };
+    expect(adoptDefaultProjectLens(project)).toBe(project);
+  });
+});
+
+describe("workspace loading", () => {
+  it("uses an empty workspace only when native reports no saved store", async () => {
+    mockCommands({ store_load: "null" });
+    await expect(loadWorkspace()).resolves.toEqual({
+      projects: [],
+      openIds: [],
+      activeId: null,
+    });
+  });
+
+  it("does not reinterpret a corrupt store as an empty workspace", async () => {
+    mockCommands({ store_load: "{truncated" });
+    await expect(loadWorkspace()).rejects.toThrow();
+  });
+
+  it("propagates native failure when neither primary nor backup is readable", async () => {
+    mockCommands({
+      store_load: () => {
+        throw new Error("workspace primary and backup unavailable");
+      },
+    });
+    await expect(loadWorkspace()).rejects.toThrow("primary and backup unavailable");
+  });
 });
 
 describe("shellQuote", () => {
@@ -83,6 +136,8 @@ describe("restoreCommand", () => {
     expect(restoreCommand("claude", "abc123")).toBe("claude --resume abc123");
     expect(restoreCommand("codex", "s-1")).toBe("codex resume s-1");
     expect(restoreCommand("amp", "T-9")).toBe("amp threads continue T-9");
+    expect(restoreCommand("cursor", "cur-1")).toBe("cursor-agent --resume cur-1");
+    expect(restoreCommand("grok", "grok-1")).toBe("grok --resume grok-1");
   });
 
   it("returns null for an empty/whitespace session id (never a bare continue)", () => {
@@ -203,10 +258,48 @@ describe("dangerouslySkipPermissions", () => {
     expect(restoreCommand("amp", "T-9")).toBe("amp threads continue T-9");
   });
 
+  it("pins workflow model, provider, and effort with each CLI's verified flags", () => {
+    expect(startCommand("claude", "review", { model: "opus", effort: "high" })?.command)
+      .toBe("claude 'review' --permission-mode auto --model 'opus' --effort 'high'");
+    expect(startCommand("codex", "build", { model: "gpt-5.6-sol", effort: "xhigh" })?.command)
+      .toBe("codex 'build' --ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true -m 'gpt-5.6-sol' -c 'model_reasoning_effort=\"xhigh\"'");
+    expect(startCommand("opencode", "build", { provider: "anthropic", model: "claude-opus-5" }))
+      .toEqual({ command: "opencode --agent build --model 'anthropic/claude-opus-5'", typePrompt: true });
+    expect(startCommand("agy", "build", { model: "gemini-3.1-pro-preview", effort: "high" })?.command)
+      .toBe("agy --mode accept-edits --model 'gemini-3.1-pro-preview' --effort 'high'");
+    expect(startCommand("aider", "build", { model: "opus", effort: "medium" })?.command)
+      .toBe("aider --model 'opus' --reasoning-effort 'medium'");
+    expect(startCommand("omp", "build", { provider: "anthropic", model: "opus", effort: "max" })?.command)
+      .toBe("omp --approval-mode=write --model 'opus' --provider 'anthropic' --thinking 'max'");
+    expect(startCommand("cursor", "build", { model: "composer-1" })?.command)
+      .toBe("cursor-agent 'build' --model 'composer-1'");
+    expect(startCommand("grok", "build", { model: "grok-4.5" })?.command)
+      .toBe("grok 'build' --model 'grok-4.5'");
+  });
+
   it("leaves custom CLIs alone — we know nothing about their flags", () => {
     skipping(true);
     addClis([{ id: "acme", name: "Acme", bin: "acme", promptArgs: "go {prompt}" }]);
     expect(startCommand("acme", "hi")?.command).toBe("acme go 'hi'");
+  });
+
+  it("launches a future agent type entirely from its registry manifest", () => {
+    AGENT_CLIS.push({
+      id: "future-agent",
+      name: "Future Agent",
+      bin: "future-agent",
+      icon: "F",
+      execution: {
+        fields: [{ key: "region", label: "Region", control: "text" }],
+        launchArgs: (config) => config.region
+          ? [{ flag: "--region", value: config.region }]
+          : [],
+      },
+    });
+    expect(startCommand("future-agent", "build", { region: "asia southeast" })).toEqual({
+      command: "future-agent --region 'asia southeast'",
+      typePrompt: true,
+    });
   });
 
   it("reaches agents started from the remote portal", () => {
@@ -216,6 +309,14 @@ describe("dangerouslySkipPermissions", () => {
       command: "claude --dangerously-skip-permissions",
       resumeTemplate:
         "claude --resume __CANOPY_SESSION_ID__ --dangerously-skip-permissions",
+    });
+    expect(rows.find((row) => row.id === "cursor")).toMatchObject({
+      command: "cursor-agent --force",
+      resumeTemplate: "cursor-agent --resume __CANOPY_SESSION_ID__ --force",
+    });
+    expect(rows.find((row) => row.id === "grok")).toMatchObject({
+      command: "grok --always-approve",
+      resumeTemplate: "grok --resume __CANOPY_SESSION_ID__ --always-approve",
     });
   });
 });
@@ -230,7 +331,7 @@ describe("unattended working mode", () => {
     // Each of these is read off that CLI's own --help; see the entry comments.
     expect(startCommand("claude", "hi")?.command).toBe("claude 'hi' --permission-mode auto");
     expect(startCommand("codex", "hi")?.command).toBe(
-      "codex 'hi' --ask-for-approval never --sandbox workspace-write",
+      "codex 'hi' --ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true",
     );
     // No prompt builder: the mode still reaches the bare launch that gets the
     // brief typed into it.
@@ -586,6 +687,8 @@ describe("project vibe serialization", () => {
         componentId: "cmp-app",
         runCommandId: "run-dev",
         requiredProcesses: [{ componentId: "cmp-app", runCommandId: "run-dev" }],
+        componentLinks: [],
+        dataStores: [],
         externalServices: [],
       },
     };
@@ -622,7 +725,7 @@ describe("project vibe serialization", () => {
     expect(project.vibe).toEqual({ version: 1, enabled: true });
   });
 
-  it("adopts deterministic IDs in a pre-vibe workspace without inventing vibe", async () => {
+  it("adopts deterministic IDs and the selected default lens in a pre-vibe workspace", async () => {
     mockCommands({
       store_load: JSON.stringify({
         projects: [
@@ -647,7 +750,7 @@ describe("project vibe serialization", () => {
     const state = adoptProjectStructureIds(loaded);
     const again = adoptProjectStructureIds(state);
 
-    expect(state.projects[0].vibe).toBeUndefined();
+    expect(state.projects[0].vibe).toEqual({ version: 1, enabled: false });
     expect(state.projects[0].components[0].id).toMatch(/^cmp_/);
     expect(state.projects[0].components[0].commands?.[0].id).toMatch(/^run_/);
     expect(again).toBe(state);
@@ -699,6 +802,79 @@ describe("project vibe serialization", () => {
     expect(normalizeProjectStructure(normalized)).toBe(normalized);
   });
 
+  it("preserves a failed discovery marker without preserving partial setup", () => {
+    const failed: Project = {
+      id: "failed-discovery",
+      name: "Failed discovery",
+      components: [{
+        id: "cmp-web",
+        label: "web",
+        path: "/repo/web",
+        commands: [{ id: "run-dev", name: "dev", command: "npm run dev" }],
+      }],
+      vibe: {
+        version: 1,
+        enabled: true,
+        componentId: "stale-component",
+        discovery: {
+          status: "failed",
+          attemptedAt: 1234,
+          message: "I couldn't determine a safe complete setup for this project.",
+        },
+      },
+    };
+
+    expect(normalizeProjectStructure(failed).vibe).toEqual({
+      version: 1,
+      enabled: true,
+      discovery: failed.vibe?.discovery,
+    });
+  });
+
+  it("records discovery failure on the latest project without carrying stale setup", () => {
+    const current: Project = {
+      id: "current",
+      name: "Current",
+      components: [{
+        id: "cmp-web",
+        label: "Web",
+        path: "/repo/web",
+        commands: [{ id: "run-dev", name: "Dev", command: "pnpm dev" }],
+      }],
+      vibe: {
+        version: 1,
+        enabled: true,
+        componentId: "stale-component",
+      },
+    };
+    const next = recordVibeDiscoveryFailure(
+      {
+        ...current,
+        name: "Renamed while discovery ran",
+        components: [...current.components, {
+          id: "cmp-new",
+          label: "New component",
+          path: "/repo/new",
+          commands: [],
+        }],
+      },
+      "Discovery was rejected.",
+      1234,
+    );
+
+    expect(next.name).toBe("Renamed while discovery ran");
+    expect(next.components.at(-1)?.id).toBe("cmp-new");
+    expect(next.vibe).toEqual({
+      version: 1,
+      enabled: current.vibe?.enabled === true,
+      discovery: {
+        status: "failed",
+        attemptedAt: 1234,
+        message: "Discovery was rejected.",
+      },
+    });
+  });
+
   it("preserves a complete agent-owned v1 setup", () => {
     const complete: Project = {
       id: "complete",
@@ -716,11 +892,96 @@ describe("project vibe serialization", () => {
         componentId: "cmp-web",
         runCommandId: "run-dev",
         requiredProcesses: [{ componentId: "cmp-web", runCommandId: "run-dev" }],
+        componentLinks: [],
+        dataStores: [],
         externalServices: [],
       },
     };
 
     expect(normalizeProjectStructure(complete)).toBe(complete);
+  });
+
+  it("drops an obsolete failure marker from a complete setup", () => {
+    const complete: Project = {
+      id: "recovered",
+      name: "Recovered",
+      components: [{
+        id: "cmp-web",
+        label: "web",
+        path: "/repo/web",
+        commands: [{ id: "run-dev", name: "dev", command: "npm run dev" }],
+      }],
+      vibe: {
+        version: 1,
+        enabled: true,
+        setupRevision: "repo-fingerprint",
+        componentId: "cmp-web",
+        runCommandId: "run-dev",
+        requiredProcesses: [{ componentId: "cmp-web", runCommandId: "run-dev" }],
+        componentLinks: [],
+        dataStores: [],
+        externalServices: [],
+        discovery: {
+          status: "failed",
+          attemptedAt: 1234,
+          message: "old failure",
+        },
+      },
+    };
+
+    expect(normalizeProjectStructure(complete).vibe).toEqual({
+      version: 1,
+      enabled: true,
+      setupRevision: "repo-fingerprint",
+      componentId: "cmp-web",
+      runCommandId: "run-dev",
+      requiredProcesses: [{ componentId: "cmp-web", runCommandId: "run-dev" }],
+      componentLinks: [],
+      dataStores: [],
+      externalServices: [],
+    });
+  });
+
+  it("requires an explicit refresh when an old setup omitted a runnable component", () => {
+    const incomplete: Project = {
+      id: "missing-worker",
+      name: "Missing worker",
+      components: [
+        {
+          id: "cmp-web",
+          label: "web",
+          path: "/repo/web",
+          commands: [{ id: "run-web", name: "dev", command: "npm run dev", purpose: "serve" }],
+        },
+        {
+          id: "cmp-worker",
+          label: "worker",
+          path: "/repo/worker",
+          commands: [{ id: "run-worker", name: "work", command: "npm run worker", purpose: "worker" }],
+        },
+      ],
+      vibe: {
+        version: 1,
+        enabled: true,
+        setupRevision: "old-survey",
+        componentId: "cmp-web",
+        runCommandId: "run-web",
+        requiredProcesses: [{ componentId: "cmp-web", runCommandId: "run-web" }],
+        componentLinks: [],
+        dataStores: [],
+        externalServices: [],
+      },
+    };
+
+    expect(normalizeProjectStructure(incomplete).vibe).toEqual({
+      version: 1,
+      enabled: true,
+      discovery: {
+        status: "stale",
+        attemptedAt: 1,
+        message: "The saved project setup needs a refresh. Retry discovery when you want Canopy to inspect it again.",
+      },
+    });
   });
 
   it("leaves ambiguous legacy references in needs-setup shape", () => {
@@ -828,6 +1089,33 @@ describe("project vibe serialization", () => {
     expect(normalized.vibe).toEqual({ version: 1, enabled: true });
     expect(normalized.components[0].commands?.[0].id).not.toBe("run-dev");
   });
+
+  it("normalizes persisted integration observations without dropping them from the project", () => {
+    const project = {
+      id: "integrated",
+      name: "Integrated",
+      components: [],
+      integrations: {
+        version: 1,
+        connections: [{ providerId: "supabase", status: "connected", token: "drop-me" }],
+        resources: [],
+        deployments: [{
+          providerId: "vercel",
+          deploymentId: "deploy-1",
+          status: "connected",
+          url: "https://example.test",
+        }],
+      },
+    } as unknown as Project;
+
+    const normalized = normalizeProjectStructure(project);
+    expect(normalized.integrations?.connections).toEqual([
+      { providerId: "supabase", status: "connected" },
+    ]);
+    expect(normalized.integrations?.deployments[0].url).toBe("https://example.test/");
+    expect(JSON.stringify(normalized.integrations)).not.toContain("drop-me");
+    expect(normalizeProjectStructure(normalized)).toBe(normalized);
+  });
 });
 
 describe("adoptLegacyCustomTasks", () => {
@@ -881,5 +1169,42 @@ describe("adoptLegacyCustomTasks", () => {
     const state = ws({ projects: [{ ...project("p2"), customTasks: [mine] }] });
     const after = adoptLegacyCustomTasks(state);
     expect(after.projects[0].customTasks).toEqual([mine, task]);
+  });
+});
+
+describe("componentForPath", () => {
+  const comps = [
+    { path: "/w/canopy" },
+    { path: "/w/canopy/packages/ui" },
+    { path: "/w/canopy-website" },
+  ];
+
+  it("folds a sibling worktree back to the checkout that owns it", () => {
+    // The agent-workspace overlay tested containment only, and a linked
+    // worktree is a sibling rather than a child — so a session working in one
+    // resolved to no repository and the view fell back to "showing what the
+    // agent reported", for a session whose pinned tab showed a real diff.
+    expect(componentForPath(comps, "/w/canopy-wt-agent-claude-20260821")).toBe("/w/canopy");
+    expect(componentForPath(comps, "/w/canopy-wt-fix/src/App.tsx")).toBe("/w/canopy");
+  });
+
+  it("folds a nested worktree too", () => {
+    expect(componentForPath(comps, "/w/canopy/.claude/worktrees/agent-x")).toBe("/w/canopy");
+  });
+
+  it("takes the most specific component, not the first that contains", () => {
+    // `/w/canopy` also contains this path; the nested component is the answer.
+    expect(componentForPath(comps, "/w/canopy/packages/ui/src")).toBe("/w/canopy/packages/ui");
+  });
+
+  it("does not confuse a repo with one whose name it prefixes", () => {
+    expect(componentForPath(comps, "/w/canopy-website/src")).toBe("/w/canopy-website");
+  });
+
+  it("answers null rather than blaming an unrelated repo", () => {
+    // Attributing a stray directory to the first candidate is a worse answer
+    // than admitting there isn't one, and it cannot be falsified from the UI.
+    expect(componentForPath(comps, "/elsewhere/thing")).toBeNull();
+    expect(componentForPath([], "/w/canopy")).toBeNull();
   });
 });

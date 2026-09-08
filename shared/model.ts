@@ -7,6 +7,7 @@ import { NO_ATTENTION, agentLife, bucketFor } from './agentLife'
 // rows however its layout demands.
 
 export interface Component {
+  id?: string
   label: string
   path: string
 }
@@ -81,6 +82,16 @@ export interface Pty {
   id: number
   cwd: string
   title: string
+  project_id?: string | null
+  execution_context?: {
+    environmentId: string
+    projectId: string
+    componentId?: string | null
+    workspaceId: string
+    workspacePath: string
+    runId?: string | null
+    attemptId?: string | null
+  } | null
 }
 
 /** Token/cost roll-up per session (agent_usage). */
@@ -183,9 +194,12 @@ export interface RemoteCli {
   id: string
   name: string
   command: string
+  icon?: string
+  brandColor?: string
   resumeTemplate?: string
   available: boolean
   custom?: boolean
+  restoreRequiresHumanPrompt?: true
 }
 
 /** Build only verified resume commands. Unknown CLIs never get a guessed flag. */
@@ -364,7 +378,7 @@ export function buildRows(
  *  and each CLI's command head. A near-miss is nobody: no brand from a guess. */
 function agentForWord(word: string | undefined, clis: readonly RemoteCli[]): string | undefined {
   if (!word || word === 'shell') return undefined
-  if (word in AGENT_META) return word
+  if (word in LEGACY_AGENT_META) return word
   const match = clis.find((cli) => {
     const command = cli.command.trim()
     const head = command.startsWith("'")
@@ -434,23 +448,25 @@ export interface AgentMeta {
   hue: string
   label: string
 }
-export const AGENT_META: Record<string, AgentMeta> = {
-  claude: { glyph: '✳', hue: '#d97757', label: 'Claude' },
-  codex: { glyph: '⬢', hue: '#10a37f', label: 'Codex' },
+const LEGACY_AGENT_META: Record<string, AgentMeta> = {
+  // Observed legacy terminals which are intentionally not launcher entries.
   gemini: { glyph: '✦', hue: '#6d7cf5', label: 'Gemini' },
-  agy: { glyph: '◇', hue: '#f59e0b', label: 'Antigravity' },
-  aider: { glyph: '◆', hue: '#14b8a6', label: 'Aider' },
-  opencode: { glyph: '⬣', hue: '#a855f7', label: 'opencode' },
-  amp: { glyph: '✺', hue: '#f97316', label: 'Amp' },
-  omp: { glyph: '⬟', hue: '#ec4899', label: 'omp' },
   shell: { glyph: '❯', hue: '#8894a8', label: 'Terminal' },
 }
-export function agentMeta(agent: string): AgentMeta {
+export function agentMeta(agent: string, clis: readonly RemoteCli[] = []): AgentMeta {
+  const cli = clis.find((candidate) => candidate.id === agent)
+  if (cli) {
+    return {
+      glyph: cli.icon || '◈',
+      hue: cli.brandColor || 'var(--accent, #5b9dff)',
+      label: cli.name,
+    }
+  }
   return (
-    AGENT_META[agent?.toLowerCase?.() ?? ''] ?? {
+    LEGACY_AGENT_META[agent?.toLowerCase?.() ?? ''] ?? {
       glyph: '◈',
       hue: 'var(--accent, #5b9dff)',
-      label: agent || 'agent',
+      label: agent ? agent[0].toUpperCase() + agent.slice(1) : 'agent',
     }
   )
 }

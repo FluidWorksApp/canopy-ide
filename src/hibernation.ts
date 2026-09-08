@@ -20,9 +20,15 @@
 // the snapshot it describes, and a project claiming to be asleep with nothing
 // to wake is the one state this feature cannot afford.
 import type { SubTab, SideTab } from "./components/ProjectView/helpers";
+import { snapshotNames } from "./tabName";
 import type * as ipc from "./ipc";
 import type { ReviewPayload } from "./components/ReviewView";
-import { AGENT_CLIS, restoreCommand, resumeSessionId } from "./projects";
+import {
+  agentCliFor,
+  launchCommand,
+  restoreCommand,
+  resumeSessionId,
+} from "./projects";
 import { agentIdForCommand } from "./agentIdentity";
 import { claimLabel } from "./claims";
 import type { TerminalGroup } from "./terminalGroups";
@@ -34,7 +40,14 @@ export interface TerminalSnapshot {
   kind: "terminal";
   cwd: string;
   command?: string;
+  /** The display name at the time of the snapshot, so an older build reading
+   *  this store still shows something sensible. */
   title: string;
+  /** The name the user chose, which waking re-asserts on the new session.
+   *  `renamed` is the pre-tabName spelling of the same fact and is still read
+   *  from stores written before that module existed. */
+  userName?: string;
+  renamed?: boolean;
   icon?: string;
   run?: boolean;
   componentId?: string;
@@ -77,6 +90,7 @@ export type SnapshotTab =
   | { kind: "prs-list" }
   | { kind: "issues-list" }
   | { kind: "task-history" }
+  | { kind: "workflows" }
   | { kind: "instructions"; focus?: string }
   | { kind: "mcp"; server: ipc.McpServer }
   | { kind: "claim"; claim: ipc.AgentClaim }
@@ -121,6 +135,7 @@ const VERSION = 1;
 export function snapshotTabs(
   tabs: SubTab[],
   sessionFor: (ptyId: number) => string | undefined = () => undefined,
+  agentFor: (ptyId: number) => string | undefined = () => undefined,
 ): SnapshotTab[] {
   const out: SnapshotTab[] = [];
   for (const t of tabs) {
@@ -129,7 +144,16 @@ export function snapshotTabs(
         if (t.micro) break;
         if (t.run && t.exited) break;
         const command = t.command;
-        const agentId = agentIdForCommand(command) ?? undefined;
+        // The process in the PTY is the strongest answer. A CLI may have been
+        // typed into an ordinary shell, in which case the tab has no launch
+        // command at all; treating that as a shell discarded both the CLI and
+        // its otherwise-known conversation on hibernate. The command remains
+        // the restart-proof fallback for a just-spawned terminal that has not
+        // appeared in process stats yet.
+        const agentId =
+          (t.ptyId != null ? agentFor(t.ptyId) : undefined) ??
+          agentIdForCommand(command) ??
+          undefined;
         // The live conversation if the hook reported one, else the id the
         // command itself names (a terminal started as a resume knows its own
         // session even before the agent has said anything).
@@ -141,7 +165,9 @@ export function snapshotTabs(
           kind: "terminal",
           cwd: t.cwd,
           command,
-          title: t.customTitle ?? t.title,
+          // The user's name is a slot of its own, so it survives the pty that
+          // held it without a flag having to vouch for which field it was in.
+          ...snapshotNames(t),
           icon: t.icon,
           run: t.run,
           ...(t.componentId && t.runCommandId
@@ -210,6 +236,9 @@ export function snapshotTabs(
       case "task-history":
         out.push({ kind: "task-history" });
         break;
+      case "workflows":
+        out.push({ kind: "workflows" });
+        break;
       case "instructions":
         out.push({ kind: "instructions", focus: t.focus });
         break;
@@ -246,15 +275,18 @@ export function buildSnapshot(opts: {
   sidePinned: boolean;
   worktree: { repo: string; path: string; branch: string } | null;
   sessionFor?: (ptyId: number) => string | undefined;
+  agentFor?: (ptyId: number) => string | undefined;
   now?: number;
   terminalGroups?: Record<string, TerminalGroup>;
 }): ProjectSnapshot {
-  const kept = opts.tabs.filter((t) => snapshotTabs([t], opts.sessionFor).length > 0);
+  const kept = opts.tabs.filter(
+    (t) => snapshotTabs([t], opts.sessionFor, opts.agentFor).length > 0,
+  );
   const activeIndex = kept.findIndex((t) => t.id === opts.activeTabId);
   return {
     version: VERSION,
     at: opts.now ?? Date.now(),
-    tabs: snapshotTabs(kept, opts.sessionFor),
+    tabs: snapshotTabs(kept, opts.sessionFor, opts.agentFor),
     activeIndex: activeIndex < 0 ? null : activeIndex,
     sideTab: opts.sideTab,
     sidePinned: opts.sidePinned,
@@ -301,7 +333,7 @@ export function stepLabel(t: SnapshotTab): string {
     case "terminal": {
       const where = baseName(t.cwd);
       if (t.agentId) {
-        const name = AGENT_CLIS.find((c) => c.id === t.agentId)?.name ?? t.agentId;
+        const name = agentCliFor(t.agentId)?.name ?? t.agentId;
         return t.sessionId
           ? `Resuming ${name} in ${where}`
           : `Starting ${name} in ${where}`;
@@ -337,6 +369,8 @@ export function stepLabel(t: SnapshotTab): string {
       return "Reopening issues";
     case "task-history":
       return "Reopening completed tasks";
+    case "workflows":
+      return "Reopening workflows";
     case "instructions":
       return "Reopening agent instructions";
     case "mcp":
@@ -362,7 +396,8 @@ export function wakeSteps(snap: ProjectSnapshot | null): WakeStep[] {
 
 /** The command a hibernated terminal comes back with: the agent's own resume
  *  line when there is a conversation to reopen, else whatever it was launched
- *  with. Returns `resumed` so the caller can say which of the two happened. */
+ *  with (or a bare CLI launch when it was started by hand in a shell). Returns
+ *  `resumed` so the caller can say which of the two happened. */
 export function terminalLaunch(t: TerminalSnapshot): {
   command: string | undefined;
   resumed: boolean;
@@ -370,6 +405,13 @@ export function terminalLaunch(t: TerminalSnapshot): {
   if (t.agentId && t.sessionId) {
     const resume = restoreCommand(t.agentId, t.sessionId);
     if (resume) return { command: resume, resumed: true };
+  }
+  // A CLI started by hand in an ordinary shell has no recorded command. Its
+  // live identity is still enough to bring the CLI itself back, even when it
+  // exposed no session id (or no verified resume syntax).
+  if (!t.command && t.agentId) {
+    const cli = agentCliFor(t.agentId);
+    if (cli) return { command: launchCommand(cli), resumed: false };
   }
   return { command: t.command, resumed: false };
 }

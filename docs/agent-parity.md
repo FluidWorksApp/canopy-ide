@@ -18,13 +18,24 @@ Antigravity, OpenCode, and Amp).
 | Hook auto-setup | full | full | plugin | notification | full | plugin | extension |
 | Event stream (stamped w/ pty) | yes | yes | yes | limited | yes | yes | yes |
 | MCP auto-setup | yes | yes | yes | no native MCP | yes | yes | no native MCP |
+| Canopy bootstrap | MCP system instructions | MCP system instructions | MCP system instructions | read-only context | MCP system instructions | MCP system instructions | system-prompt hook |
 | Session digests (powers restore + shared context) | yes | yes | yes | limited | yes | yes | yes |
 | Resume command in registry | yes | yes | yes | – | yes | yes | yes |
 | Token/cost/model tray | yes | model only | – | – | model only | model only | model only |
 | Model switcher | yes | yes | – | yes | yes | yes | yes |
 | Shared context (receive) | yes | yes | – | – | – | – | – |
 | Shared-checkout file attribution | full | full | no | no | tool-dependent | built-in edit/write | no |
+| Build headless runner | yes | partial | no | no | no | no | no |
 | Detection / tab promotion / launcher | yes | yes | yes | yes | yes | yes | yes |
+
+The Build row is deliberately narrower than terminal support. It was
+re-verified against Claude Code 2.1.226, Codex CLI 0.147.0, Antigravity 1.1.11,
+and Aider 0.86.2 on 2026-08-09. Claude has the complete stream-json,
+system-prompt, plan-mode, and tool-list argv surface, but no OS-backed workspace
+boundary. Codex has stream-json and an OS workspace sandbox, but no native
+system-prompt, plan-mode, or tool-list flags; Canopy prepends the brief and
+therefore marks it partial. The other launchers remain terminal-capable but are
+not eligible for Build until a verified structured runner exists.
 
 OpenCode's `chat.message` plugin hook maps to `UserPromptSubmit`, including
 the text parts and active provider/model. Its bus events provide `SessionStart`,
@@ -47,6 +58,13 @@ The load-bearing pieces every feature hangs off:
 
 - Every Canopy PTY exports `CANOPY=1` and `CANOPY_PTY=<id>` (pty.rs). This is
   the identity/trust basis for everything.
+- `agent_instructions.rs` is the canonical bootstrap. MCP-capable clients get
+  its complete workspace/tool routing through the MCP `instructions` field;
+  Aider gets the capability-neutral portion through `AIDER_READ`, and the
+  oh-my-pi extension appends that portion to its real system prompt. The split
+  is intentional: a client without Canopy tools is never instructed to invent
+  them. The MCP prompt starts with `canopy_project` and checks
+  `canopy_agents`/`canopy_mesh history` before shared-checkout edits.
 - `~/.canopy/bin/canopy-hook` reads hook JSON on stdin, gates on `$CANOPY`,
   stamps `canopy_pty` from `$CANOPY_PTY`, appends to
   `~/.canopy/agent-events.jsonl`, maintains per-session digests
@@ -61,7 +79,7 @@ The load-bearing pieces every feature hangs off:
 
 ## What each CLI offers (verified August 2026)
 
-### Codex CLI (`codex`, v0.144.x)
+### Codex CLI (`codex`, v0.147.0; argv rechecked 2026-08-09)
 - **Full hooks system, stable since ~v0.124**: `SessionStart`,
   `UserPromptSubmit`, `Stop`, `PreToolUse`, `PostToolUse`,
   `PermissionRequest`, `PreCompact`/`PostCompact`, subagent events. JSON on
@@ -77,7 +95,7 @@ The load-bearing pieces every feature hangs off:
 - Legacy `notify` fires only `agent-turn-complete` — never approvals. It is
   routed through `canopy-hook` so the same trust gate and pty stamp apply.
 
-### Antigravity CLI (`agy`, v1.1.x)
+### Antigravity CLI (`agy`, v1.1.11; argv rechecked 2026-08-09)
 - **Agent Hooks**: `PostToolUse`, `PreInvocation`,
   `PostInvocation`, and `Stop`. The invocation events bracket individual model
   calls and prove progress; only `Stop` ends the full loop. JSON uses protojson
@@ -95,12 +113,15 @@ The load-bearing pieces every feature hangs off:
   (verified, in registry). `/model` mid-session (Gemini 3.5/3.1, Claude,
   GPT-OSS — plan-gated). AGENTS.md natively.
 
-### Aider (`aider`)
+### Aider (`aider`, v0.86.2; argv rechecked 2026-08-09)
 - **No hooks**, but `--notifications-command CMD` runs an external command
   whenever aider is *waiting for input* — verified in source to fire both at
   the main prompt after an LLM turn and at y/n confirm prompts. This is the
   integration point: point it at a script appending a `Notification` event to
   the bridge.
+- The launcher flags and notification flag were rechecked together against the
+  same installed 0.86.2 help surface. The lifecycle statement above remains
+  source-derived; the help text only promises the command, not when it fires.
 - History: single append-only `.aider.chat.history.md` per directory; no
   session identity → no per-session resume (registry correctly offers none).
   Token/cost printed in-band; `--llm-history-file` (off by default) is the

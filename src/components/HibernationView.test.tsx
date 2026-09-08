@@ -12,8 +12,8 @@ const project: Project = {
 };
 
 const tabs: SubTab[] = [
-  { id: "a", type: "terminal", cwd: "/repo", title: "claude", ptyId: 7, command: "claude" },
-  { id: "d", type: "terminal", cwd: "/repo", title: "dev", ptyId: 8, command: "npm run dev", run: true },
+  { id: "a", type: "terminal", cwd: "/repo", launchTitle: "claude", ptyId: 7, command: "claude" },
+  { id: "d", type: "terminal", cwd: "/repo", launchTitle: "dev", ptyId: 8, command: "npm run dev", run: true },
   {
     id: "f",
     type: "file",

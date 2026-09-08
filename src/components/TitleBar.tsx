@@ -1,4 +1,11 @@
-import { memo, useEffect, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useState,
+  useSyncExternalStore,
+  type MouseEvent,
+} from "react";
 import { BellIcon, CloseIcon, FrostIcon } from "./icons";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import type { Urgency } from "../attention";
@@ -11,6 +18,11 @@ import type { TabDrag } from "../tabDrag";
 // class is simply absent — nothing changes there.
 import { IS_MAC } from "../platform";
 import { Button } from "./ui";
+import { CAPTURE_MODES, captureModeLabel } from "../pageCapture";
+import {
+  getVibePreviewContext,
+  subscribeVibePreviewContext,
+} from "../vibePreviewContext";
 
 /** True while the window is in macOS fullscreen, where the traffic lights are
  *  hidden and the space reserved for them would read as a dead gap. There's no
@@ -48,6 +60,7 @@ function useMacFullscreen(): boolean {
 }
 
 interface TitleBarProps {
+  projects: Project[];
   openProjects: Project[];
   activeId: string | null;
   /** Count of agent items blocked on the user for a project — drives the pill badge. */
@@ -71,6 +84,7 @@ interface TitleBarProps {
   notifCount: number;
   notifUrgency: Urgency;
   onOpenNotifications: () => void;
+  onOpenProject: (id: string) => void;
   onSelectProject: (id: string) => void;
   onCloseProject: (id: string) => void;
   onHibernateProject: (id: string) => void;
@@ -82,10 +96,114 @@ interface TitleBarProps {
   onManageProjects: () => void;
 }
 
+/** Build has one browser chrome row: this title bar. PreviewView publishes its
+ * live controls here instead of rendering a second URL/action shelf above the
+ * page. Text labels stay in accessible names; the chrome itself remains quiet. */
+function BuildBrowserControls({ projectId }: {
+  projectId: string;
+}) {
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeVibePreviewContext(projectId, listener),
+    [projectId],
+  );
+  const snapshot = useCallback(() => getVibePreviewContext(projectId), [projectId]);
+  const preview = useSyncExternalStore(subscribe, snapshot, () => null);
+  const [draft, setDraft] = useState(preview?.url ?? "");
+  const captureMenu = useContextMenu();
+
+  useEffect(() => setDraft(preview?.url ?? ""), [preview?.url]);
+
+  // Empty Build preview is already explained by the canvas. Browser chrome is
+  // useful only once there is a page it can control; before that it is a false
+  // address field and competes with the setup state for attention.
+  if (!preview?.url.trim()) return null;
+
+  const openCaptureOptions = (event: MouseEvent) =>
+    captureMenu.open(
+      event,
+      CAPTURE_MODES.map((mode) => ({
+        label: mode.label,
+        hint: mode.id === preview.captureMode ? "default" : mode.hint,
+        onClick: () => preview.capture(mode.id),
+      })),
+    );
+
+  return (
+    <div className="build-browser-controls">
+      <Button icon className="build-browser-control" title="Back" onClick={() => preview.go(-1)}>
+        ‹
+      </Button>
+      <Button icon className="build-browser-control" title="Forward" onClick={() => preview.go(1)}>
+        ›
+      </Button>
+      <Button icon className="build-browser-control" title="Reload" onClick={() => preview.go(0)}>
+        ↻
+      </Button>
+      <form
+        className="build-browser-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          preview.navigate(draft);
+          (event.currentTarget.firstElementChild as HTMLInputElement | null)?.blur();
+        }}
+      >
+        <span className="build-browser-dot" aria-hidden />
+        <input
+          className="build-browser-input"
+          aria-label="Preview address"
+          value={draft}
+          spellCheck={false}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={() => setDraft(preview.url)}
+        />
+      </form>
+      <Button
+        icon
+        className={`build-browser-control ${preview.picking ? "active" : ""}`}
+        title="Annotate page"
+        aria-label={`Annotate page${preview.annotations.length ? `, ${preview.annotations.length} retained` : ""}`}
+        onClick={preview.togglePicking}
+      >
+        ◎
+      </Button>
+      <Button
+        icon
+        className="build-browser-control"
+        title={`Capture ${captureModeLabel(preview.captureMode).toLowerCase()}`}
+        aria-label={`Capture screenshot${preview.shots.length ? `, ${preview.shots.length} retained` : ""}`}
+        disabled={preview.capturing}
+        onClick={() => preview.capture(preview.captureMode)}
+        onContextMenu={openCaptureOptions}
+      >
+        ▣
+      </Button>
+      <Button
+        icon
+        className="build-browser-control build-browser-capture-options"
+        title="Choose capture type"
+        aria-label="Choose capture type"
+        disabled={preview.capturing}
+        onClick={openCaptureOptions}
+      >
+        ⌄
+      </Button>
+      {captureMenu.menu && (
+        <ContextMenu
+          x={captureMenu.menu.x}
+          y={captureMenu.menu.y}
+          items={captureMenu.menu.items}
+          onClose={captureMenu.close}
+        />
+      )}
+    </div>
+  );
+}
+
 // Top chrome: one pill per open project, a live-collab indicator, and the
 // Projects menu. Memoized — it only re-renders when the project set, the
 // active id, or the collab state actually change, not on every App state tick.
 function TitleBarImpl({
+  projects,
   openProjects,
   activeId,
   pendingCount,
@@ -98,6 +216,7 @@ function TitleBarImpl({
   notifCount,
   notifUrgency,
   onOpenNotifications,
+  onOpenProject,
   onSelectProject,
   onCloseProject,
   onHibernateProject,
@@ -112,19 +231,38 @@ function TitleBarImpl({
   const menu = useContextMenu();
   const activeProject = openProjects.find((project) => project.id === activeId);
   const buildMode = activeProject?.vibe?.enabled === true;
+  const chooseProject = (id: string) =>
+    openProjects.some((project) => project.id === id)
+      ? onSelectProject(id)
+      : onOpenProject(id);
+  const openProjectMenu = (event: MouseEvent) =>
+    menu.open(event, [
+      ...projects.map((project) => ({
+        label: `${project.id === activeId ? "✓  " : ""}${project.name}`,
+        onClick: () => chooseProject(project.id),
+      })),
+      { separator: true },
+      { label: "New project…", icon: "+", onClick: onNewProject },
+      { label: "Manage projects…", icon: "⋯", onClick: onManageProjects },
+    ]);
   return (
     // data-tauri-drag-region makes the bar background draggable (like grabbing
     // a native titlebar). Tauri checks the mousedown target, so interactive
     // children (pills, buttons) — which are the target, not this div — still
     // register clicks normally without opting out.
     <div
-      className={`titlebar ${IS_MAC ? "titlebar-overlay" : ""} ${
+      className={`titlebar ${buildMode ? "titlebar-build" : ""} ${IS_MAC ? "titlebar-overlay" : ""} ${
         IS_MAC && fullscreen ? "titlebar-fullscreen" : ""
       }`}
       data-tauri-drag-region
     >
       {/* The strip around the pills is draggable too — the pills/badges/close
           are their own click targets, so they still work. */}
+      {buildMode && activeProject ? (
+        <BuildBrowserControls
+          projectId={activeProject.id}
+        />
+      ) : (
       <div className="project-tabs" data-tauri-drag-region>
         {openProjects.map((p, i) => {
           const asleep = p.id in hibernated;
@@ -199,6 +337,7 @@ function TitleBarImpl({
           ＋
         </Button>
       </div>
+      )}
       <div className="titlebar-spacer" data-tauri-drag-region />
       {activeProject && !(activeProject.id in hibernated) && (
         <button
@@ -216,7 +355,7 @@ function TitleBarImpl({
           <span className={buildMode ? "" : "active"}>Engineer</span>
         </button>
       )}
-      {collabActive && (
+      {collabActive && !buildMode && (
         <div
           className="collab-live"
           title="Live collaboration in progress — click ✕ to end every share and session"
@@ -237,7 +376,7 @@ function TitleBarImpl({
           a project you are NOT looking at is waiting on you. */}
       <button
         className={`notif-bell${
-          notifCount > 0 ? ` notif-bell-lit notif-bell-counted notif-bell-${notifUrgency}` : ""
+          notifCount > 0 ? ` notif-bell-lit notif-bell-counted notif-bell-${buildMode ? "low" : notifUrgency}` : ""
         }`}
         title={
           notifCount > 0
@@ -254,11 +393,23 @@ function TitleBarImpl({
           <span className="notif-bell-count">{notifCount > 99 ? "99+" : notifCount}</span>
         )}
       </button>
-      <Button className="project-manage-btn"
-        title="Manage projects — open, create, edit, delete"
-        onClick={onManageProjects}>
-        Projects ▾
-      </Button>
+      {buildMode ? (
+        <Button
+          className="build-project-menu"
+          title="Switch or create a project"
+          aria-label="Projects"
+          onClick={openProjectMenu}
+        >
+          <span>{activeProject?.name}</span>
+          <span aria-hidden>⌄</span>
+        </Button>
+      ) : (
+        <Button className="project-manage-btn"
+          title="Manage projects — open, create, edit, delete"
+          onClick={onManageProjects}>
+          Projects ▾
+        </Button>
+      )}
       {menu.menu && (
         <ContextMenu
           x={menu.menu.x}

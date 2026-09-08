@@ -14,7 +14,6 @@ import {
 import { getSettings } from "./settings";
 import type { AgentProfile } from "./ipc";
 import * as ipc from "./ipc";
-import profilesRs from "../src-tauri/src/profiles.rs?raw";
 
 vi.mock("./ipc", () => ({ profileEnv: vi.fn(), profileActivate: vi.fn() }));
 
@@ -158,14 +157,9 @@ describe("capability", () => {
     expect(["agy", "omp", "aider", "gemini"].some(supportsProfiles)).toBe(false);
   });
 
-  /** Rust owns the env mapping; this list only mirrors it so pickers can
-   *  render without awaiting. Drift either way is invisible to the user. */
-  it("matches PROFILE_AGENTS in profiles.rs", () => {
-    const rust = profilesRs.slice(profilesRs.indexOf("PROFILE_AGENTS"));
-    const listed = [
-      ...rust.slice(0, rust.indexOf(";")).matchAll(/"([a-z-]+)"/g),
-    ].map((m) => m[1]);
-    expect(listed.length).toBeGreaterThan(0);
-    expect([...PROFILE_CAPABLE].sort()).toEqual(listed.sort());
+  it("derives the picker capability from the CLI manifests", () => {
+    expect([...PROFILE_CAPABLE].sort()).toEqual(
+      ["amp", "claude", "codex", "opencode"],
+    );
   });
 });

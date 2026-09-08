@@ -120,6 +120,33 @@ describe("pickBrowserTab", () => {
     expect(pickBrowserTab(tabs, act(7, "second"), "first")?.id).toBe("second");
   });
 
+  it("keeps Build and repair tools on the preview snapshotted by their attempt", () => {
+    const tabs: Tab[] = [
+      { id: "attempt-preview", url: "http://localhost:3000/broken" },
+      { id: "new-project-preview", url: "http://localhost:4000/new" },
+    ];
+    expect(pickBrowserTab(tabs, {
+      ...nav("http://localhost:4000/elsewhere"),
+      attemptTabId: "attempt-preview",
+    }, "new-project-preview")?.id).toBe("attempt-preview");
+    expect(pickBrowserTab(tabs, {
+      ...act(),
+      attemptTabId: "attempt-preview",
+    }, "new-project-preview")?.id).toBe("attempt-preview");
+  });
+
+  it("does not float a live attempt onto another tab after its preview closes", () => {
+    const tabs: Tab[] = [{ id: "replacement", url: "http://localhost:3000/" }];
+    expect(pickBrowserTab(tabs, {
+      ...nav("http://localhost:3000/next"),
+      attemptTabId: "closed-attempt-preview",
+    }, "replacement")).toBeUndefined();
+    expect(pickBrowserTab(tabs, {
+      ...act(),
+      attemptTabId: null,
+    }, "replacement")).toBeUndefined();
+  });
+
   it("ignores a current tab that has since been closed", () => {
     const tabs: Tab[] = [
       { id: "first", url: "http://localhost:3000/a", initiatorPtyId: 7 },

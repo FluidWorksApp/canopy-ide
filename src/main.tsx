@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 // Bundled, not fetched: this is a desktop app that has to look the same on a
 // machine with no network and no fonts installed. Variable weight axis only —
 // one file per subset covers 100–900, so the four weights the Vitrine skin
@@ -21,6 +21,12 @@ import { openLink } from "./links";
 import { matchesModifierClick } from "./shortcuts";
 import App from "./App.tsx";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import {
+  configureSelftestPtyListenerFailures,
+  installEarlyWatchdogHeartbeat,
+  ptyRendererRegister,
+  selftestConfig,
+} from "./ipc";
 
 // Before first paint, so there's no flash of the wrong palette.
 applyTheme(getSettings().theme, getSettings().customAccent);
@@ -79,9 +85,29 @@ window.addEventListener("unhandledrejection", (e) =>
   jsLog("error", `unhandled rejection: ${e.reason}`),
 );
 jsLog("info", "webview booting");
-// Reap PTY sessions orphaned by a previous page of this webview (reloads
-// destroy JS state without running React cleanup).
-void invoke("pty_kill_all").catch(() => {});
+// Replace the prior page's native attachments before any terminal can mount.
+// PTY children survive and keep draining into bounded Rust rings; orphaned
+// native browser views are closed because their React owners cannot survive a
+// page replacement. App reconciles the returned sessions after projects mount.
+const registerRenderer = async () => {
+  let retryMs = 100;
+  while (true) {
+    try {
+      return await ptyRendererRegister();
+    } catch (err) {
+      jsLog("error", `renderer registration failed; retrying: ${err}`);
+      await new Promise<void>((resolve) => window.setTimeout(resolve, retryMs));
+      retryMs = Math.min(retryMs * 2, 2_000);
+    }
+  }
+};
+const rendererReady = registerRenderer()
+  .then(async (registration) => {
+    await installEarlyWatchdogHeartbeat();
+    const selftest = await selftestConfig();
+    configureSelftestPtyListenerFailures(selftest?.listenerFailures ?? 0);
+    return registration;
+  });
 // A native panic from a previous run parks a report on disk; flush it now if
 // the user is opted in (the backend clears it either way, so it's offered once).
 void import("./crash").then(({ flushPendingCrash }) => flushPendingCrash());
@@ -91,9 +117,12 @@ void import("./crash").then(({ flushPendingCrash }) => flushPendingCrash());
 // heart of the app) works without Monaco.
 // No StrictMode: its dev-mode double-mount would spawn and kill a real PTY for
 // every terminal on each mount, which churns native child processes.
-monacoReady
-  .then(() => jsLog("info", "monaco services initialized"))
-  .catch((err) => jsLog("error", `monaco services failed to initialize: ${err}`))
+Promise.all([
+  monacoReady
+    .then(() => jsLog("info", "monaco services initialized"))
+    .catch((err) => jsLog("error", `monaco services failed to initialize: ${err}`)),
+  rendererReady,
+])
   .finally(() => {
     createRoot(document.getElementById("root")!).render(
       <ErrorBoundary label="Canopy">

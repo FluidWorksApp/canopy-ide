@@ -10,12 +10,14 @@
 import { useState } from "react";
 import { Mascot } from "./Mascot";
 import type { PendingItem } from "../notifications";
+import { agentCliFor } from "../projects";
 import { Button } from "./ui";
 
 /** CLIs whose approval prompt is a numbered/Escape menu we can drive by
  *  synthesising keystrokes. Anything else gets "answer in terminal" instead of
  *  buttons that might type into the wrong UI. */
-const KEYSTROKE_APPROVAL_AGENTS = new Set(["claude", "codex"]);
+const acceptsKeystrokeApproval = (agentId: string) =>
+  agentCliFor(agentId)?.capabilities?.approvalInput === "keystroke";
 
 export interface PendingCardProps {
   item: PendingItem;
@@ -163,7 +165,7 @@ export function PendingCard({
           {/* Respond without leaving the surface: Allow types the accept key,
               Deny sends Escape. Only for CLIs whose prompt we can drive by
               keystroke — the rest fall back to the terminal. */}
-          {!idle && onRespond && KEYSTROKE_APPROVAL_AGENTS.has(item.agent) && (
+          {!idle && onRespond && acceptsKeystrokeApproval(item.agent) && (
             <div className="pending-respond">
               <button
                 className="pending-approve"

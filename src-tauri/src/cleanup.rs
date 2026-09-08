@@ -618,7 +618,11 @@ pub fn verdict(act: &Activity, category: Category, built_days_ago: u32) -> (bool
 /// this is per-checkout and not per-repo — which is the entire point: the repo
 /// is busy, the branch from last March is not.
 fn last_commit_days(dir: &Path) -> Option<u32> {
-    let out = git(dir).args(["log", "-1", "--format=%ct"]).output().ok()?;
+    let out = crate::process_capture::output(
+        git(dir).args(["log", "-1", "--format=%ct"]),
+        crate::process_capture::DEFAULT_STREAM_MAX,
+    )
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -646,49 +650,53 @@ fn landed(dir: &Path, base: &str, branch: Option<&str>, main: bool) -> Option<St
     if branch.map(|b| crate::git::is_protected_branch(b, base)) == Some(true) {
         return None;
     }
-    let merged = git(dir)
-        .args(["merge-base", "--is-ancestor", "HEAD", base])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let merged = crate::process_capture::output(
+        git(dir).args(["merge-base", "--is-ancestor", "HEAD", base]),
+        crate::process_capture::DEFAULT_STREAM_MAX,
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false);
     if merged {
         return Some(format!("already merged into {base}"));
     }
     // An upstream that was configured and no longer exists. `for-each-ref` on
     // the branch itself, so this reads the same config git push would.
     let b = branch?;
-    let upstream = git(dir)
-        .args([
+    let upstream = crate::process_capture::output(
+        git(dir).args([
             "for-each-ref",
             "--format=%(upstream)",
             &format!("refs/heads/{b}"),
-        ])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())?;
-    let gone = !git(dir)
-        .args(["rev-parse", "--verify", "--quiet", &upstream])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+        ]),
+        crate::process_capture::DEFAULT_STREAM_MAX,
+    )
+    .ok()
+    .filter(|o| o.status.success())
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    .filter(|s| !s.is_empty())?;
+    let gone = !crate::process_capture::output(
+        git(dir).args(["rev-parse", "--verify", "--quiet", &upstream]),
+        crate::process_capture::DEFAULT_STREAM_MAX,
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false);
     gone.then(|| "its remote branch is gone — the work landed".to_string())
 }
 
 fn dirty_count(dir: &Path) -> u32 {
-    git(dir)
-        .args(["status", "--porcelain"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .count() as u32
-        })
-        .unwrap_or(0)
+    crate::process_capture::output(
+        git(dir).args(["status", "--porcelain"]),
+        crate::process_capture::DEFAULT_STREAM_MAX,
+    )
+    .ok()
+    .filter(|o| o.status.success())
+    .map(|o| {
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count() as u32
+    })
+    .unwrap_or(0)
 }
 
 /// Which of these paths the repo ignores, in one process. The safety net under
@@ -704,11 +712,13 @@ fn ignored_set(dir: &Path, paths: &[PathBuf]) -> Option<HashSet<PathBuf>> {
     if paths.is_empty() {
         return Some(HashSet::new());
     }
+    let permit =
+        crate::process_capture::acquire(crate::process_capture::DEFAULT_STREAM_MAX).ok()?;
     let mut child = git(dir)
         .args(["check-ignore", "--stdin", "-z"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .ok()?;
     {
@@ -718,7 +728,12 @@ fn ignored_set(dir: &Path, paths: &[PathBuf]) -> Option<HashSet<PathBuf>> {
             let _ = stdin.write_all(&[0]);
         }
     }
-    let out = child.wait_with_output().ok()?;
+    let out = crate::process_capture::wait_with_capped_output(
+        child,
+        crate::process_capture::DEFAULT_STREAM_MAX,
+        permit,
+    )
+    .ok()?;
     match out.status.code() {
         Some(0) | Some(1) => {}
         _ => return None,
@@ -785,13 +800,14 @@ fn candidates(root: &Path, stop_at: &[PathBuf], budget: &mut usize) -> Vec<PathB
 
 /// The repo a directory belongs to, or None when it is in none.
 fn toplevel(dir: &Path) -> Option<PathBuf> {
-    git(dir)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-        .filter(|p| p.is_dir())
+    crate::process_capture::output(
+        git(dir).args(["rev-parse", "--show-toplevel"]),
+        crate::process_capture::DEFAULT_STREAM_MAX,
+    )
+    .ok()
+    .filter(|o| o.status.success())
+    .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+    .filter(|p| p.is_dir())
 }
 
 /// Repos sitting *inside* a folder that isn't itself one — the "folder of

@@ -160,12 +160,12 @@ export function WideShell(props: ShellProps) {
                       })
                     }}
                   >
-                    {tabLabel(t, ctx.rows)}
+                    {tabLabel(t, ctx.rows, ctx.clis)}
                   </button>
                   <button
                     className="tab-close"
                     onClick={() => onCloseTab(key)}
-                    aria-label={`Close ${tabLabel(t, ctx.rows)}`}
+                    aria-label={`Close ${tabLabel(t, ctx.rows, ctx.clis)}`}
                   >
                     <IconClose s={14} />
                   </button>
@@ -180,7 +180,7 @@ export function WideShell(props: ShellProps) {
             className="portal-tabpanel"
             id="portal-detail-panel"
             role="tabpanel"
-            aria-label={tabLabel(active, ctx.rows)}
+            aria-label={tabLabel(active, ctx.rows, ctx.clis)}
           >
             <Detail ctx={ctx} target={active} onBack={() => onCloseTab(activeKey!)} showBack={false} />
           </div>
@@ -262,12 +262,16 @@ export function ProjectPicker({ projects, ctx, onProject }: ShellProps) {
 /** A tab's label: short enough for a strip, specific enough to tell two diffs
  *  of different files apart. Terminal tabs get what the desktop's tab strip
  *  shows — the pty's own title, then the agent's name — never a raw pty id. */
-export function tabLabel(t: Target, rows: AgentRow[] = []): string {
+export function tabLabel(
+  t: Target,
+  rows: AgentRow[] = [],
+  clis: PanelCtx["clis"] = [],
+): string {
   const tail = (p: string) => p.split('/').filter(Boolean).pop() ?? p
   switch (t.kind) {
     case 'terminal': {
       const row = rows.find((r) => r.ptyId === t.pty)
-      const name = row?.title ?? (row && row.agent !== 'shell' ? agentMeta(row.agent).label : undefined)
+      const name = row?.title ?? (row && row.agent !== 'shell' ? agentMeta(row.agent, clis).label : undefined)
       return name?.slice(0, 24) ?? `pty ${t.pty}`
     }
     case 'history': {

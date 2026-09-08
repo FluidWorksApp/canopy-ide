@@ -110,6 +110,8 @@ export function tabKind(tab: SubTab): TabKind {
       return { label: "issue", tone: "review", detail: tab.source };
     case "task-history":
       return { label: "tasks", tone: "agent", detail: "" };
+    case "workflows":
+      return { label: "workflows", tone: "agent", detail: "" };
     case "mcp":
       return { label: "mcp server", tone: "external", detail: "" };
     case "preview":

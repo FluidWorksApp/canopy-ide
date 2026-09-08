@@ -8,18 +8,27 @@ import {
 } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { INSERT_TEXT_EVENT } from "../insertText";
-import { openLink } from "../links";
+import { openFileLink, openLink } from "../links";
 import { matchesModifierClick } from "../shortcuts";
 import * as ipc from "../ipc";
-import { getSettings, THEME_CHANGE_EVENT, type Settings } from "../settings";
+import { getSettings, type Settings } from "../settings";
 import { terminalTheme } from "../terminalThemes";
-import { createLinkHint, opensLink } from "../terminalLinks";
+import {
+  createLinkHint,
+  opensLink,
+  terminalFileLinks,
+} from "../terminalLinks";
 import { matchesChord, resolve } from "../shortcuts";
+import { TerminalStreamLedger } from "../terminalStreamLedger";
+import { terminalRetentionRegistry } from "../terminalRetention";
+import { TerminalCompactionController } from "../terminalCompaction";
+import { terminalCompactionProtected } from "../terminalGroups";
+import { registerTerminalPressureShedder } from "../rendererPressureRelief";
+import { registerTerminalWindowEvents } from "../terminalWindowEvents";
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -27,6 +36,10 @@ import { matchesChord, resolve } from "../shortcuts";
 const SAFE_PATH = /^[A-Za-z0-9_\-./~+@%:=,]+$/;
 const shellQuote = (p: string) =>
   SAFE_PATH.test(p) ? p : `'${p.replaceAll("'", `'\\''`)}'`;
+
+/** Ids announced for spawns that were refused. Real pty ids from Rust are
+ *  non-negative, so counting down from -1 can never name a live session. */
+let nextSpawnFailureId = -1;
 
 /** The active skin's terminal palette, with the user's accent substituted in
  *  when they set one. Always fully opaque: xterm's DOM renderer paints cell
@@ -38,6 +51,10 @@ function themeFor(settings: Settings) {
 
 export interface TermHandle {
   clearScrollback: () => void;
+  /** Reclaim this terminal's reconstructable renderer state. Hidden terminals
+   * compact losslessly; a visible terminal purges scrollback while keeping the
+   * live screen and PTY. */
+  releaseMemory: () => "compacting" | "purged" | "unavailable";
   hardReset: () => void;
   focus: () => void;
   /** The text currently selected in the terminal, "" when none. */
@@ -57,9 +74,26 @@ export interface TermHandle {
 
 interface TermProps {
   cwd?: string;
+  /** Stable owner persisted with desktop PTY lifetime state for recovery. */
+  projectId?: string;
+  componentId?: string;
+  runCommandId?: string;
+  workspacePath?: string;
+  /** Per-cell foreground/background correction performed by xterm. Leave at 1
+   *  for ordinary shells and CLIs so their authored colours remain untouched;
+   *  Codex uses 4.5 to repair its mixed light/dark TUI surfaces. */
+  minimumContrastRatio?: number;
+  /** Owns keyboard/focus and window-global input events. */
   active: boolean;
+  /** The pane is actually onscreen and should consume native output. All panes
+   *  in a visible split stream; only one of them is `active`. */
+  streaming: boolean;
   /** Typed into the shell right after spawn (e.g. launch an agent CLI). */
   initialCommand?: string;
+  /** Optional native handshake that must finish before `initialCommand` can
+   * start. Spawned agents use it to bind bridge-owned lineage before their CLI
+   * receives a brief and can call tools. */
+  beforeInitialCommand?: (ptyId: number) => Promise<void>;
   /** A run tab's one-shot command: the shell is spawned to run it and exit with
    *  its status (native, per-shell), rather than typing it in. Mutually
    *  exclusive with initialCommand. */
@@ -78,7 +112,7 @@ interface TermProps {
    *  agent (it stays controllable from the phone). */
   attachId?: number;
   killAttachedOnClose?: boolean;
-  onSpawned: (ptyId: number) => void;
+  onSpawned: (ptyId: number, name?: string) => void;
   onExited: (event: ipc.PtyExit) => void;
   onTitle?: (title: string) => void;
   /** The program in this terminal asked for attention — see the OSC handlers. */
@@ -86,7 +120,29 @@ interface TermProps {
 }
 
 export const Term = forwardRef<TermHandle, TermProps>(function Term(
-  { cwd, active, initialCommand, runCommand, runArgv, env, runId, attemptId, attachId, killAttachedOnClose, onSpawned, onExited, onTitle, onNotify },
+  {
+    cwd,
+    projectId,
+    componentId,
+    runCommandId,
+    workspacePath,
+    minimumContrastRatio = 1,
+    active,
+    streaming,
+    initialCommand,
+    beforeInitialCommand,
+    runCommand,
+    runArgv,
+    env,
+    runId,
+    attemptId,
+    attachId,
+    killAttachedOnClose,
+    onSpawned,
+    onExited,
+    onTitle,
+    onNotify,
+  },
   ref,
 ) {
   // Frozen once: a Term never switches between spawn and attach mid-life, and
@@ -96,13 +152,22 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const ptyIdRef = useRef<number | null>(null);
+  /** Attach/detach the native output viewer as this pane becomes visible/hidden. */
+  const streamVisibilityRef = useRef<((visible: boolean) => void) | null>(null);
   /** Repaint + size-sync immediately (no debounce); set by the mount effect. */
   const syncNowRef = useRef<(() => void) | null>(null);
   // Mirrored so the mount-once drop listener can see the current value.
   const activeRef = useRef(active);
   activeRef.current = active;
+  const streamingRef = useRef(streaming);
+  streamingRef.current = streaming;
   const onExitedRef = useRef(onExited);
   onExitedRef.current = onExited;
+  const onSpawnedRef = useRef(onSpawned);
+  onSpawnedRef.current = onSpawned;
+  const releaseMemoryRef = useRef<() => "compacting" | "purged" | "unavailable">(
+    () => "unavailable",
+  );
 
   const captureText = (maxChars = 8000) => {
     const term = termRef.current;
@@ -136,6 +201,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
 
   useImperativeHandle(ref, () => ({
     clearScrollback: () => termRef.current?.clear(),
+    releaseMemory: () => releaseMemoryRef.current(),
     hardReset: () => {
       termRef.current?.reset();
       // \x0c: ask the shell to repaint its prompt after the hard reset
@@ -154,9 +220,18 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     captureText,
     captureTextSettled: (maxChars = 8000) => {
       const term = termRef.current;
-      if (!term) return Promise.resolve("");
-      return new Promise((resolve) => {
-        term.write("", () => resolve(captureText(maxChars)));
+      const id = ptyIdRef.current;
+      // Hidden viewers may have no parsed output. The host retains the final
+      // tail after exit; never let a suspended parser block repair forever.
+      return new Promise<string>((resolve) => {
+        const timer = setTimeout(() => resolve(captureText(maxChars)), 1500);
+        const finish = (text: string) => { clearTimeout(timer); resolve(text); };
+        const parsed = () => {
+          if (term) term.write("", () => finish(captureText(maxChars)));
+          else finish("");
+        };
+        if (id == null) parsed();
+        else void ipc.ptyOutput(id, maxChars).then((text) => text ? finish(text) : parsed()).catch(parsed);
       });
     },
   }));
@@ -174,6 +249,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       cursorStyle: settings.terminalCursorStyle,
       cursorBlink: settings.terminalCursorBlink,
       macOptionIsMeta: true,
+      minimumContrastRatio,
       theme: themeFor(settings),
     });
     termRef.current = term;
@@ -182,7 +258,13 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // skin changes; xterm renders its own surface and needs the theme object
     // pushed explicitly. Reassigning .options.theme repaints immediately — no
     // remount, no fresh PTY, the running shell/agent is untouched.
+    let deferredTheme = false;
     const onThemeChange = () => {
+      if (!streamingRef.current) {
+        deferredTheme = true;
+        return;
+      }
+      deferredTheme = false;
       const next = getSettings();
       term.options.theme = themeFor(next);
       // Font and cursor used to apply only to newly opened terminals. That is
@@ -198,10 +280,10 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       term.options.cursorBlink = next.terminalCursorBlink;
       if (metricsChanged) syncNowRef.current?.();
     };
-    window.addEventListener(THEME_CHANGE_EVENT, onThemeChange);
-
     const fit = new FitAddon();
     term.loadAddon(fit);
+    const serializer = new SerializeAddon();
+    term.loadAddon(serializer);
     term.loadAddon(new Unicode11Addon());
     term.unicode.activeVersion = "11";
     // Links must go through the OS, not window.open(): WKWebView has no popup
@@ -242,7 +324,118 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       hover: (event) => linkHint.show(event),
       leave: () => linkHint.hide(),
     };
+    const fileLinkProvider = term.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        const text = term.buffer.active
+          .getLine(bufferLineNumber - 1)
+          ?.translateToString(true);
+        if (!text) return callback(undefined);
+        const links = terminalFileLinks(text).map((file) => ({
+          range: {
+            start: { x: file.start + 1, y: bufferLineNumber },
+            end: { x: file.end, y: bufferLineNumber },
+          },
+          text: file.path,
+          activate: (event: MouseEvent) => {
+            if (!opensLink(event, term.hasSelection())) return;
+            linkHint.hide();
+            openFileLink(file.path, file.line, cwd);
+          },
+          hover: (event: MouseEvent) => linkHint.show(event, "file"),
+          leave: () => linkHint.hide(),
+        }));
+        callback(links.length ? links : undefined);
+      },
+    });
     term.open(el);
+
+    // xterm does not expose trustworthy heap-byte accounting: cell strings,
+    // attributes, links and engine overhead are variable. Keep content-free,
+    // constant-size aggregate shape metrics instead, so a soak can correlate
+    // renderer growth with the number of retained rows/cells without copying
+    // the scrollback (which would itself become another retention path).
+    const retentionSample = () => ({
+      visible: streamingRef.current,
+      normalRows: term.buffer.normal.length,
+      alternateRows: term.buffer.alternate.length,
+      cols: term.cols,
+      viewportRows: term.rows,
+      configuredScrollbackRows: settings.scrollback,
+    });
+    const retention = terminalRetentionRegistry.track(retentionSample());
+    const updateRetention = () => retention.update(retentionSample());
+    const retentionSubs = [
+      term.onWriteParsed(() => {
+        updateRetention();
+      }),
+      term.onResize(updateRetention),
+      term.buffer.onBufferChange(updateRetention),
+    ];
+    // React publishes refs during render, before the passive effect below can
+    // call show()/hide(). Pressure may arrive in that gap, so compaction asks
+    // the current paint/focus truth directly rather than trusting its last
+    // effect-delivered state.
+    const compactionVisible = () =>
+      terminalCompactionProtected(activeRef.current, streamingRef.current);
+    let compactedViewportY: number | null = null;
+    const compaction = new TerminalCompactionController(
+      {
+        // An empty write is an xterm parser barrier: its callback runs only
+        // after every previously accepted PTY chunk has updated the buffer.
+        drain: (done) => term.write("", done),
+        serialize: () => {
+          compactedViewportY = term.buffer.active.viewportY;
+          return serializer.serialize({ scrollback: settings.scrollback });
+        },
+        clearCells: () => {
+          term.reset();
+          term.clear();
+          updateRetention();
+        },
+        restore: (snapshot, done) => {
+          // The controller does not resolve show() until this callback, so
+          // native replay can never overtake restoration of the older state.
+          term.write(snapshot, () => {
+            if (compactedViewportY != null) {
+              term.scrollToLine(
+                Math.min(compactedViewportY, term.buffer.active.baseY),
+              );
+              compactedViewportY = null;
+            }
+            updateRetention();
+            done();
+          });
+        },
+      },
+      {
+        isVisible: compactionVisible,
+        metrics: {
+          attempted: retention.compactionAttempted,
+          reserve: retention.reserveCompaction,
+          release: retention.releaseCompaction,
+          compacted: retention.compacted,
+          rejectedTooLarge: retention.compactionRejected,
+          rejectedGlobalBudget: retention.compactionBudgetRejected,
+          failed: retention.compactionFailed,
+          restored: retention.restored,
+        },
+      },
+    );
+    const unregisterPressureShedder = registerTerminalPressureShedder(() =>
+      !compactionVisible() && compaction.compactNow(),
+    );
+    releaseMemoryRef.current = () => {
+      if (!compactionVisible() && compaction.compactNow()) return "compacting";
+      // Compaction deliberately refuses a visible terminal: serializing and
+      // immediately restoring it saves nothing. Purge only scrollback there;
+      // the viewport and live PTY remain intact.
+      if (streamingRef.current) {
+        term.clear();
+        updateRetention();
+        return "purged";
+      }
+      return "unavailable";
+    };
 
     // No WebGL renderer. @xterm/addon-webgl 0.19.0 corrupts rendering on
     // WKWebView/macOS: a stale texture binding after an atlas page swap makes
@@ -436,21 +629,173 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     const onFocus = () => {
       if (activeRef.current) syncNowRef.current?.();
     };
-    window.addEventListener("focus", onFocus);
     let unlistenExit: (() => void) | undefined;
     const earlyExits = new Map<number, ipc.PtyExit>();
+    let streamGeneration: number | null = null;
+    const streamLedger = new TerminalStreamLedger();
+    let streamEpoch = 0;
+    let streamAttached = false;
+    let streamConnecting = false;
+    let attachRetryTimer: ReturnType<typeof setTimeout> | undefined;
+    let attachFailureCount = 0;
+    let hasBound = false;
+    let processExited = false;
+    let setResizeObservation = (_visible: boolean) => {};
+
+    const writeStream = (chunk: ipc.PtyChunk, epoch = streamEpoch) => {
+      const { bytes } = chunk;
+      if (disposed) return;
+      if (!streamLedger.accept(epoch, streamEpoch, chunk.end)) return;
+      el.dataset.streamEnd = String(chunk.end);
+      // xterm owns the bytes as soon as write() accepts them into its ordered
+      // parser queue. Advancing here (rather than in the completion callback)
+      // makes a hide/show between enqueue and parse resume after this chunk,
+      // instead of replaying and painting it twice.
+      if (chunk.gap) {
+        term.write("\r\n\x1b[33m[Canopy: earlier terminal output was truncated]\x1b[0m\r\n");
+      }
+      const parseStartedAt = performance.now();
+      term.write(bytes, () => {
+        if (epoch !== streamEpoch) return;
+        retention.parsedWrite(bytes.length, performance.now() - parseStartedAt);
+        if (streamGeneration != null && ptyIdRef.current != null) {
+          void ipc.ptyAck(ptyIdRef.current, streamGeneration, bytes.length);
+        } else {
+          // Spawn/attach can deliver output before its invoke resolves with the
+          // generation. Count only after xterm consumed it, then release that
+          // exact amount once the stream identity is known.
+          streamLedger.addPendingAck(epoch, bytes.length);
+        }
+      });
+    };
 
     // Once the pty (fresh or attached) is bound: adopt its grid and announce
     // the id. Exit listening is installed before either spawn path, so a
     // command that fails immediately cannot disappear between spawn and listen.
-    const bound = (id: number, geom: { cols: number; rows: number }) => {
+    const bound = (id: number, geom: { cols: number; rows: number; name?: string }) => {
       ptyIdRef.current = id;
+      el.dataset.ptyId = String(id);
       applyGeometry(geom);
-      onSpawned(id);
+      if (!hasBound) {
+        hasBound = true;
+        onSpawnedRef.current(id, geom.name);
+      }
       const early = earlyExits.get(id);
       if (early) {
         earlyExits.delete(id);
-        onExitedRef.current(early);
+        finishProcess(early);
+      }
+    };
+
+    const adoptStream = (
+      id: number,
+      geom: { cols: number; rows: number },
+      generation: number,
+      epoch: number,
+    ) => {
+      streamGeneration = generation;
+      streamAttached = true;
+      el.dataset.streamAttached = "true";
+      bound(id, geom);
+      const pending = streamLedger.takePendingAck(epoch);
+      if (pending > 0) {
+        void ipc.ptyAck(id, generation, pending);
+      }
+    };
+
+    const detachViewer = () => {
+      // An attach invoke can remain unresolved after this pane hides. Drop any
+      // early parser acknowledgements now rather than retaining one entry per
+      // hide/show epoch until each obsolete invoke eventually settles.
+      streamLedger.discard(streamEpoch);
+      streamEpoch += 1;
+      const id = ptyIdRef.current;
+      const generation = streamGeneration;
+      streamGeneration = null;
+      streamAttached = false;
+      el.dataset.streamAttached = "false";
+      streamConnecting = false;
+      clearTimeout(attachRetryTimer);
+      attachRetryTimer = undefined;
+      attachFailureCount = 0;
+      if (id != null && generation != null) {
+        void ipc.ptyDetachDesktop(id, generation);
+      }
+    };
+
+    const finishProcess = (event: ipc.PtyExit) => {
+      if (processExited) return;
+      processExited = true;
+      detachViewer();
+      if (!hasBound) {
+        hasBound = true;
+        onSpawnedRef.current(event.id);
+      }
+      onExitedRef.current(event);
+    };
+
+    const attachViewer = async () => {
+      const id = ptyIdRef.current;
+      if (disposed || processExited || id == null || streamAttached || streamConnecting) return;
+      streamConnecting = true;
+      const epoch = ++streamEpoch;
+      try {
+        const attached = await ipc.ptyAttachDesktop(
+          id,
+          streamLedger.replayAfter(),
+          (chunk) => writeStream(chunk, epoch),
+        );
+        if (disposed || epoch !== streamEpoch || !streamingRef.current) {
+          streamLedger.discard(epoch);
+          void ipc.ptyDetachDesktop(id, attached.generation);
+          return;
+        }
+        adoptStream(id, attached, attached.generation, epoch);
+        attachFailureCount = 0;
+      } catch (err) {
+        if (!disposed && epoch === streamEpoch && streamingRef.current) {
+          if (/no pty session \d+/.test(String(err))) {
+            finishProcess({ id, session_generation: ipc.rendererSessionGeneration(), exit_code: null, requested: false });
+            const output = await ipc.ptyOutput(id, 8000);
+            if (!disposed) {
+              if (output) { term.reset(); term.write(output); }
+              term.writeln("\r\n\x1b[33mThis process has ended. Restart the run to continue.\x1b[0m");
+            }
+            return;
+          }
+          attachFailureCount += 1;
+          if (attachFailureCount === 1) {
+            term.writeln(`\r\n\x1b[33mterminal stream interrupted; reconnecting: ${err}\x1b[0m`);
+          }
+          // A committed tab is not a receipt for a native stream. Retry this
+          // independent boundary forever with a bounded delay: the PTY remains
+          // alive and its native ring keeps draining while the bridge recovers.
+          // One timer + streamConnecting make the retry resource-bounded.
+          const retryMs = Math.min(100 * 2 ** (attachFailureCount - 1), 2_000);
+          clearTimeout(attachRetryTimer);
+          attachRetryTimer = setTimeout(() => {
+            attachRetryTimer = undefined;
+            if (!disposed && streamingRef.current) void attachViewer();
+          }, retryMs);
+        }
+      } finally {
+        if (epoch === streamEpoch) streamConnecting = false;
+      }
+    };
+
+    streamVisibilityRef.current = (visible) => {
+      setResizeObservation(visible);
+      updateRetention();
+      if (visible) {
+        if (deferredTheme) onThemeChange();
+        void (async () => {
+          await compaction.show();
+          if (!disposed && streamingRef.current) await attachViewer();
+        })();
+      } else {
+        linkHint.hide();
+        detachViewer();
+        compaction.hide();
       }
     };
 
@@ -458,7 +803,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       const off = await ipc.onPtyExit((event) => {
         const id = ptyIdRef.current;
         if (id == null) earlyExits.set(event.id, event);
-        else if (event.id === id) onExitedRef.current(event);
+        else if (event.id === id) finishProcess(event);
       });
       if (disposed) {
         off();
@@ -467,23 +812,17 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       unlistenExit = off;
 
       if (attachIdRef.current != null) {
-        // Attach path: mirror a headless PTY the portal spawned. No ack — a
-        // headless session fans out over a lossy broadcast and never applies
-        // WebView backpressure — and no initial command (the portal already sent
-        // it). The scrollback snapshot arrives first, then the live tail.
+        // Every desktop viewer gets one bounded, generation-scoped stream.
+        // Ownership changes only close behaviour: a restored desktop-owned PTY
+        // is killed on explicit close; a remote/micro-task viewer detaches.
         const id = attachIdRef.current;
-        try {
-          const geom = await ipc.ptyAttach(id, (bytes) => {
-            if (!disposed) term.write(bytes);
-          });
-          if (!disposed) bound(id, geom);
-        } catch (err) {
-          term.writeln(`\r\n\x1b[31mfailed to attach: ${err}\x1b[0m`);
-        }
+        ptyIdRef.current = id;
+        if (streamingRef.current) await attachViewer();
         return;
       }
 
       try {
+        const spawnEpoch = streamEpoch;
         const spawnOpts = {
             // 0 tells Rust to fall back to 80x24; the first resize once the tab is
             // visible corrects it.
@@ -495,18 +834,17 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             env,
             runId,
             attemptId,
+            projectId,
+            componentId,
+            runCommandId,
+            workspacePath,
           };
-        const onData = (bytes: Uint8Array) => {
-            // Feed xterm's own write buffer and ack once it has consumed the
-            // chunk — this drives the Rust-side backpressure window. Never
-            // accumulate output in JS. (Read the ref inside the callback: early
-            // chunks can arrive before the spawn promise resolves.)
-            term.write(bytes, () => {
-              if (ptyIdRef.current != null) {
-                void ipc.ptyAck(ptyIdRef.current, bytes.length);
-              }
-            });
-          };
+        const onData = (chunk: ipc.PtyChunk) => {
+          // Feed xterm's own write buffer and ack once it has consumed the
+          // chunk. The native generation makes a late callback from a prior
+          // page harmless.
+          writeStream(chunk, spawnEpoch);
+        };
         const result = runArgv?.length
           ? await ipc.ptySpawnAttachedArgv({ ...spawnOpts, argv: runArgv }, onData)
           : await ipc.ptySpawn(spawnOpts, onData);
@@ -517,14 +855,41 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         // Adopt whatever the pty opened at, including the 80x24 fallback when
         // we proposed nothing — better a grid that matches the shell than one
         // that looks right and wraps wrong.
-        bound(result.id, result);
+        if (result.generation == null) throw new Error("PTY spawned without a stream generation");
+        if (spawnEpoch !== streamEpoch || !streamingRef.current) {
+          // The pane became hidden while native spawn was in flight. Bind the
+          // id for later reattach, but never adopt its now-stale channel.
+          bound(result.id, result);
+          streamLedger.discard(spawnEpoch);
+          void ipc.ptyDetachDesktop(result.id, result.generation);
+        } else {
+          adoptStream(result.id, result, result.generation, spawnEpoch);
+        }
         // A run tab's command was handed to the shell at spawn (runCommand),
         // so it's already executing — only a typed initialCommand needs sending.
         if (initialCommand && !runCommand) {
-          void ipc.ptyWrite(result.id, `${initialCommand}\r`);
+          await beforeInitialCommand?.(result.id);
+          await ipc.ptyWrite(result.id, `${initialCommand}\r`);
         }
       } catch (err) {
         term.writeln(`\r\n\x1b[31mfailed to spawn shell: ${err}\x1b[0m`);
+        // A refused spawn produces no pty and therefore no pty:exit, which
+        // left run tabs reading as "running" forever (and Build's auto-start
+        // dedupe never retrying them). Send the failure down the same
+        // spawn->exit path a crashed process takes: announce a pty id no real
+        // session can own, then retire it. Interactive tabs stay out — their
+        // consumers close the tab on exit, which would take the error text
+        // above with it.
+        if (disposed || (!runCommand && !runArgv?.length)) return;
+        const id = nextSpawnFailureId--;
+        onSpawned(id);
+        onExitedRef.current({
+          id,
+          session_generation: ipc.rendererSessionGeneration(),
+          exit_code: 127,
+          requested: false,
+          spawnError: String(err),
+        });
       }
     };
     void start();
@@ -576,50 +941,39 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       }),
     ];
 
-    // OS file drops. Tauri intercepts these at the native layer (dragDropEnabled
-    // defaults on), so the HTML5 drop event never fires in the webview and the
-    // only way to receive a dropped file is this event. It is window-global —
-    // every Term hears every drop — so exactly one may act: the active one
-    // (there is one per app: visible project x active tab). Routed through
-    // term.paste(), which takes xterm's ordered input path (like the key
-    // handler above) and wraps the text in bracketed-paste markers, so zsh and
-    // TUIs treat it as pasted text rather than typed keystrokes.
-    //
-    // The WEBVIEW WINDOW, which is neither `getCurrentWindow()` nor
-    // `getCurrentWebview()` — and the difference is the whole bug. Tauri routes
-    // a drop by the main webview's `WebviewKind`, and `features = ["unstable"]`
-    // (which browser.rs needs for `add_child`) makes that kind `WindowChild`,
-    // so every drop is emitted to the `Webview` target. A `Window` listener
-    // does not match `Webview` (manager/mod.rs `filter_target`), which is why
-    // listening on the window silently killed drops everywhere. Only
-    // `WebviewWindow` is matched by all three routes Tauri can take —
-    // `emit_to_window`, `emit_to_webview` and `AnyLabel` — so it is correct
-    // however the app is built. Guarded by termDropTarget.test.ts.
-    let unlistenDrop: (() => void) | undefined;
-    void getCurrentWebviewWindow()
-      .onDragDropEvent((e) => {
-        if (e.payload.type !== "drop" || !activeRef.current) return;
-        const paths = e.payload.paths;
-        if (!paths.length) return;
-        term.paste(paths.map(shellQuote).join(" ") + " ");
+    // One renderer-global listener set routes native drops, dictation/clipboard
+    // insertion, focus and theme events to terminals. This terminal contributes
+    // only a small target record; hidden tabs do not each retain four global
+    // event closures and a Tauri drag/drop subscription.
+    const unregisterWindowEvents = registerTerminalWindowEvents({
+      active: () => activeRef.current,
+      containsPoint: (x, y) => {
+        const rect = el.getBoundingClientRect();
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          x >= rect.left &&
+          x <= rect.right &&
+          y >= rect.top &&
+          y <= rect.bottom
+        );
+      },
+      focus: () => onFocus(),
+      insertText: (text) => {
+        term.paste(text);
         term.focus();
-      })
-      .then((un) => {
-        if (disposed) un();
-        else unlistenDrop = un;
-      });
-
-    // Text inserted by a global surface (dictation, clipboard history). Same
-    // contract as the drop handler above: exactly one active Term may act, and
-    // term.paste() keeps bracketed-paste semantics.
-    const onInsertText = (e: Event) => {
-      if (!activeRef.current) return;
-      const text = (e as CustomEvent).detail as string;
-      if (!text) return;
-      term.paste(text);
-      term.focus();
-    };
-    window.addEventListener(INSERT_TEXT_EVENT, onInsertText);
+      },
+      dropPaths: (paths) => {
+        const paste = (ready: string[]) => {
+          if (disposed) return;
+          term.paste(ready.map(shellQuote).join(" ") + " ");
+          term.focus();
+        };
+        if (!cwd) return paste(paths);
+        void ipc.spotStageDropImages(cwd, paths).then(paste).catch(() => paste(paths));
+      },
+      themeChanged: onThemeChange,
+    });
 
     // Debounced resize: propose, let the pty apply it and SIGWINCH the child,
     // then match the grid to what it confirmed. A hidden tab proposes nothing
@@ -635,29 +989,42 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         if (next) pushGeometry(next);
       }, 50);
     });
-    observer.observe(el);
+    let observing = false;
+    setResizeObservation = (shouldObserve) => {
+      if (shouldObserve === observing) return;
+      if (shouldObserve) observer.observe(el);
+      else observer.disconnect();
+      observing = shouldObserve;
+    };
+    setResizeObservation(streamingRef.current);
 
     return () => {
       disposed = true;
       clearTimeout(resizeTimer);
+      clearTimeout(attachRetryTimer);
       observer.disconnect();
-      window.removeEventListener(THEME_CHANGE_EVENT, onThemeChange);
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener(INSERT_TEXT_EVENT, onInsertText);
+      unregisterWindowEvents();
+      fileLinkProvider.dispose();
       linkHint.dispose();
       dataSub.dispose();
       titleSub.dispose();
+      unregisterPressureShedder();
+      releaseMemoryRef.current = () => "unavailable";
+      compaction.dispose();
+      retentionSubs.forEach((s) => s.dispose());
+      retention.dispose();
       oscSubs.forEach((s) => s.dispose());
-      unlistenDrop?.();
       unlistenExit?.();
       // Attached tabs detach on close — the agent was spawned from the phone and
       // stays alive and controllable there. Only a tab that OWNS its pty kills it.
-      if (
-        (attachIdRef.current == null || killAttachedOnCloseRef.current) &&
-        ptyIdRef.current != null
-      ) {
-        void ipc.ptyKill(ptyIdRef.current);
+      if (ptyIdRef.current != null) {
+        if (attachIdRef.current == null || killAttachedOnCloseRef.current) {
+          void ipc.ptyKill(ptyIdRef.current);
+        } else if (streamGeneration != null) {
+          void ipc.ptyDetachDesktop(ptyIdRef.current, streamGeneration);
+        }
       }
+      streamVisibilityRef.current = null;
       syncNowRef.current = null;
       term.dispose();
       termRef.current = null;
@@ -666,12 +1033,16 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   }, []);
 
   useEffect(() => {
-    if (!active) return;
-    termRef.current?.focus();
+    streamVisibilityRef.current?.(streaming);
+    if (!streaming) return;
     // One frame so display:block has landed and the container measures; then
     // repaint the buffer that went blank while the tab was hidden.
     const raf = requestAnimationFrame(() => syncNowRef.current?.());
     return () => cancelAnimationFrame(raf);
+  }, [streaming]);
+
+  useEffect(() => {
+    if (active) termRef.current?.focus();
   }, [active]);
 
   return <div className="term-container" ref={containerRef} />;

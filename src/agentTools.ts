@@ -10,10 +10,11 @@
 // canopy_job_done is on by default like everything else, and disabling it here
 // only reaches ordinary sessions: inside a micro-task terminal the sidecar
 // ignores the disable list for it (env CANOPY_MICRO_TASK), because a stripped
-// completion tool would strand the ephemeral tab open forever. canopy_name_task
-// is exempted in the same place and for a smaller reason: every micro-task brief
-// tells the agent to call it, and a brief naming a tool that isn't there is a
-// brief that lies.
+// completion tool would strand the ephemeral tab open forever.
+// canopy_name_task is exempted for every MCP-capable coding session: it is the
+// live-status data source and part of the mesh contract, not an optional
+// affordance. Hooks-only clients still receive honest instructions saying that
+// they cannot publish status when no Canopy integration is present.
 export interface AgentToolGroup {
   id: string;
   label: string;
@@ -107,6 +108,11 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
     tools: [
       { name: "canopy_agents", label: "Agents", note: "What the other sessions are doing" },
       { name: "canopy_claim", label: "Claim files", note: "Advisory claim over paths" },
+      {
+        name: "canopy_spawn_agent",
+        label: "Spawn agent",
+        note: "Delegate a bounded brief to a new visible agent tab",
+      },
       {
         name: "canopy_message_agent",
         label: "Message agent",

@@ -10,6 +10,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type RefObject,
 } from "react";
 import {
@@ -20,6 +21,8 @@ import {
   THEMES,
   formatHotkey,
   modKeyLabel,
+  TERMINAL_SCROLLBACK_MAX_ROWS,
+  TERMINAL_SCROLLBACK_MIN_ROWS,
   DEFAULT_DICTATION_HOTKEY,
   DICTATION_WAVE_STYLES,
   type CursorStyle,
@@ -41,7 +44,6 @@ import {
 } from "../companion";
 import { clearCompanionView, clearRun } from "../companionSession";
 import { forgetAllMemories } from "../companionMemory";
-import { MODEL_SWITCH } from "../agentModels";
 import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Radio, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
 import { drawWave } from "../waveStyles";
@@ -61,6 +63,8 @@ import {
 import {
   AGENT_CLIS,
   AGENT_CLIS_CHANGED_EVENT,
+  agentCliFor,
+  agentModelSwitchFor,
   binName,
   BUILTIN_AGENT_CLIS,
   checkInstalledClis,
@@ -74,11 +78,12 @@ import {
   type AgentCliDef,
   type CustomAgentCli,
 } from "../projects";
-import { FLEET_REASON_LABELS } from "../fleetState";
 import {
   inspectFleetTable,
   type FleetRouteSnapshot,
 } from "../fleetSnapshot";
+import { FleetReadinessPanel } from "./FleetReadinessPanel";
+import { AgentMemorySettings } from "./AgentMemorySettings";
 import {
   loginCommand,
   supportsProfiles,
@@ -104,6 +109,11 @@ import {
   SHORTCUT_PROFILES,
   type ShortcutProfile,
 } from "../shortcuts";
+import {
+  SESSION_NAME_THEMES,
+  sessionNameThemeDef,
+  type SessionNameTheme,
+} from "../sessionNameThemes";
 
 export type SettingsTab =
   | "appearance"
@@ -328,7 +338,7 @@ function CompanionSettings({
   // The same resolver the session uses, so this row can never show one CLI
   // while the companion runs on another.
   const chosen = companionCli((bin) => Boolean(installed[bin]));
-  const models = chosen ? MODEL_SWITCH[chosen.id] : undefined;
+  const models = chosen ? agentModelSwitchFor(chosen.id) : undefined;
   const name = s.companionName.trim() || mascotDef(s.mascot).label;
   const authority = COMPANION_AUTHORITIES.find((a) => a.id === s.companionAuthority);
 
@@ -656,7 +666,7 @@ function AgentBinaries({
   return (
     <div className="cli-bins">
       {BUILTIN_AGENT_CLIS.map((def) => {
-        const resolved = AGENT_CLIS.find((c) => c.id === def.id);
+        const resolved = agentCliFor(def.id);
         const bin = resolved?.bin ?? def.bin;
         const state = found[bin];
         return (
@@ -709,7 +719,15 @@ function AgentBinaries({
   );
 }
 
-function AgentFleetReadout() {
+function AgentFleetReadout({
+  open,
+  trigger,
+  onOpenChange,
+}: {
+  open: boolean;
+  trigger: RefObject<HTMLButtonElement | null>;
+  onOpenChange: (open: boolean) => void;
+}) {
   const [rows, setRows] = useState<FleetRouteSnapshot[]>([]);
   const [profiles, setProfiles] = useState<ipc.AgentProfile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -764,56 +782,15 @@ function AgentFleetReadout() {
   }, [refresh]);
 
   return (
-    <div className="fleet-readout">
-      <table>
-        <thead>
-          <tr>
-            <th>Route</th>
-            <th>State</th>
-            <th>Reasons</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={`${row.cli.id}:${row.profile}`}>
-              <td>
-                <span className="fleet-route-name">
-                  <AgentIcon id={row.cli.id} size={14} />
-                  {row.cli.name}
-                </span>
-                <span className="fleet-route-profile">
-                  {profiles.find((profile) => profile.id === row.profile)?.label ??
-                    row.profile}
-                </span>
-              </td>
-              <td>
-                <span className={`fleet-state fleet-state-${row.state.kind}`}>
-                  {row.state.kind}
-                </span>
-              </td>
-              <td className="fleet-reasons">
-                {row.state.reasons.length
-                  ? row.state.reasons
-                      .map((reason) => FLEET_REASON_LABELS[reason])
-                      .join(" · ")
-                  : "all checks ready"}
-              </td>
-            </tr>
-          ))}
-          {!loading && rows.length === 0 && (
-            <tr>
-              <td colSpan={3}>No agent routes found.</td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-      {loading && <div className="fleet-readout-loading">Checking fleet…</div>}
-      {error && (
-        <div className="fleet-readout-error" role="alert">
-          Fleet check unavailable: {error}
-        </div>
-      )}
-    </div>
+    <FleetReadinessPanel
+      rows={rows}
+      profiles={profiles}
+      loading={loading}
+      error={error}
+      open={open}
+      trigger={trigger}
+      onOpenChange={onOpenChange}
+    />
   );
 }
 
@@ -1223,13 +1200,10 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
   // (Intel macOS). Default true so the tab doesn't flicker in on every supported
   // platform while the check resolves; only hide once we learn it's unavailable.
   const [dictationOk, setDictationOk] = useState(true);
-  // Whether this platform has the real embedded browser at all. Only macOS
-  // does so far; everywhere else the engine choice is decoration and the
-  // section says so instead of offering a switch that does nothing.
-  const [browserOk, setBrowserOk] = useState(false);
-  const [clearing, setClearing] = useState<null | "busy" | "done" | string>(null);
   const [skinPickerOpen, setSkinPickerOpen] = useState(false);
   const skinPickerTrigger = useRef<HTMLButtonElement>(null);
+  const [fleetReadoutOpen, setFleetReadoutOpen] = useState(false);
+  const fleetReadoutTrigger = useRef<HTMLButtonElement>(null);
   const fonts = availableMonoFonts();
 
   useEffect(() => {
@@ -1241,9 +1215,6 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
         if (!ok) setTab((t) => (t === "dictation" ? "appearance" : t));
       })
       .catch(() => {});
-  }, []);
-  useEffect(() => {
-    void ipc.browserSupported().then(setBrowserOk);
   }, []);
   // Memoised so the key handler below isn't rebound on every render.
   const visibleTabs = useMemo(
@@ -1309,6 +1280,9 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
     if (skinPickerOpen) {
       skinPickerTrigger.current?.focus();
       setSkinPickerOpen(false);
+    } else if (fleetReadoutOpen) {
+      fleetReadoutTrigger.current?.focus();
+      setFleetReadoutOpen(false);
     } else {
       onClose();
     }
@@ -1408,7 +1382,11 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                 )}
                 <button
                   className={`settings-nav-item ${tab === t.id ? "settings-nav-active" : ""}`}
-                  onClick={() => setTab(t.id)}
+                  onClick={() => {
+                    setSkinPickerOpen(false);
+                    setFleetReadoutOpen(false);
+                    setTab(t.id);
+                  }}
                 >
                   <span>{t.label}</span>
                   {i < shortcutTabs.length && (
@@ -1544,7 +1522,11 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   name="Fleet readiness"
                   desc="What can launch now, composed from install, account, plan, and integration signals."
                 >
-                  <AgentFleetReadout />
+                  <AgentFleetReadout
+                    open={fleetReadoutOpen}
+                    trigger={fleetReadoutTrigger}
+                    onOpenChange={setFleetReadoutOpen}
+                  />
                 </Item>
                 <Item
                   name="Ask for attention"
@@ -1555,6 +1537,57 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     onChange={(v) => patch({ agentAskForAttention: v })}
                     label="Let agents switch focus to files, previews, and run tabs"
                     hint="Off keeps their work in the background; questions and notices still appear."
+                  />
+                </Item>
+                <Item
+                  name="Agent delegation"
+                  desc="Control whether coding agents can create additional agent tabs."
+                >
+                  <Checkbox
+                    checked={s.agentsMaySpawn}
+                    onChange={(v) => patch({ agentsMaySpawn: v })}
+                    label="Agents may spawn new agent tabs"
+                    hint={
+                      s.agentsMaySpawn
+                        ? "Agents can delegate bounded work to a new tab."
+                        : "The spawn tool is hidden and existing clients are refused."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Memory monitoring prompts"
+                  desc="Choose whether terminal memory warnings and allowance decisions appear while you work."
+                >
+                  <Checkbox
+                    checked={s.terminalMemoryPromptsEnabled}
+                    onChange={(v) => patch({ terminalMemoryPromptsEnabled: v })}
+                    label="Show terminal memory prompts"
+                    hint={
+                      s.terminalMemoryPromptsEnabled
+                        ? "Warnings and memory decisions appear when an agent exceeds its allowance."
+                        : "Monitoring continues silently; no memory warning cards or notifications appear."
+                    }
+                  />
+                </Item>
+                <Item
+                  name="Memory allowance maximums"
+                  desc="Choose how far each agent's monitored allowance may be raised on this device."
+                >
+                  <AgentMemorySettings />
+                </Item>
+                <Item
+                  name="Notification pop-ups"
+                  desc="Choose whether agent and project notices interrupt your work or wait in the bell."
+                >
+                  <Checkbox
+                    checked={s.notificationPopupsEnabled}
+                    onChange={(v) => patch({ notificationPopupsEnabled: v })}
+                    label="Show notification pop-ups"
+                    hint={
+                      s.notificationPopupsEnabled
+                        ? "Shows corner cards, companion notices, and system banners."
+                        : "Off keeps every notice in the top-right bell."
+                    }
                   />
                 </Item>
                 <Item
@@ -1788,6 +1821,16 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item
+                  name="New agents get a workspace"
+                  desc="⌘N and the launch cards open each agent in its own worktree, so parallel agents can't trample each other. Off opens them in the current checkout, which is instant; ⇧↵ or the row's hover action always does the opposite once."
+                >
+                  <Checkbox
+                    checked={s.agentWorkspaces}
+                    onChange={(v) => patch({ agentWorkspaces: v })}
+                    label="Start new agents in their own workspace"
+                  />
+                </Item>
+                <Item
                   name="Set up new workspaces"
                   desc="Copy the gitignored config and install dependencies, so it builds right away."
                 >
@@ -1866,6 +1909,47 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
             {tab === "terminal" && (
               <>
                 <Item
+                  name="Automatic session names"
+                  tag="New terminals only"
+                  desc="Choose the callsign vocabulary Canopy uses before an agent publishes what it is working on."
+                >
+                  <div className="session-name-theme">
+                    <Select
+                      width="lg"
+                      aria-label="Automatic session names"
+                      value={s.sessionNameTheme}
+                      onChange={(e) =>
+                        patch({
+                          sessionNameTheme: e.target.value as SessionNameTheme,
+                        })
+                      }
+                    >
+                      {SESSION_NAME_THEMES.map((theme) => (
+                        <option key={theme.id} value={theme.id}>
+                          {theme.label} — {theme.note}
+                        </option>
+                      ))}
+                    </Select>
+                    <div className="session-name-preview" aria-live="polite">
+                      {sessionNameThemeDef(s.sessionNameTheme).preview.map(
+                        (name, index) => (
+                          <span
+                            className="session-name-chip"
+                            style={
+                              {
+                                "--name-opacity": String(1 - index * 0.14),
+                              } as CSSProperties
+                            }
+                            key={name}
+                          >
+                            {name}
+                          </span>
+                        ),
+                      )}
+                    </div>
+                  </div>
+                </Item>
+                <Item
                   name="Font and cursor"
                   tag="New terminals only"
                   desc="Monospace fonts found on this machine."
@@ -1885,13 +1969,20 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                     type="number"
                     width="sm"
                     aria-label="Scrollback"
-                    min={1000}
-                    max={100000}
+                    min={TERMINAL_SCROLLBACK_MIN_ROWS}
+                    max={TERMINAL_SCROLLBACK_MAX_ROWS}
                     step={1000}
                     value={s.scrollback}
                     onChange={(e) => {
                       const v = Number(e.target.value);
-                      if (Number.isFinite(v) && v >= 1000) patch({ scrollback: v });
+                      if (Number.isFinite(v)) {
+                        patch({
+                          scrollback: Math.min(
+                            TERMINAL_SCROLLBACK_MAX_ROWS,
+                            Math.max(TERMINAL_SCROLLBACK_MIN_ROWS, v),
+                          ),
+                        });
+                      }
                     }}
                   />
                 </Item>
@@ -1935,57 +2026,27 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
               <>
                 <Item
                   name="Engine"
-                  desc="How preview tabs show a page. The trade is logins against layering."
+                  desc="Choose where websites run and how their pages appear in Canopy."
                 >
-                  {browserOk ? (
                     <div className="set-checks">
                       <Radio
                         name="browser-engine"
                         checked={s.browserEngine === "proxy"}
                         onChange={() => patch({ browserEngine: "proxy" })}
-                        label="Loopback proxy"
-                        hint="Always visible and screenshot-able. One shared session."
+                        label="Embedded"
+                        hint="An iframe with a separate session for each project."
                       />
                       <Radio
                         name="browser-engine"
-                        checked={s.browserEngine === "webview"}
-                        onChange={() => patch({ browserEngine: "webview" })}
-                        label="Embedded browser"
-                        hint="Real logins, kept across restarts. Hidden while a panel covers it."
+                        checked={s.browserEngine === "chrome"}
+                        onChange={() => patch({ browserEngine: "chrome" })}
+                        label="Playwright"
+                        hint="Your Chrome logins, streamed into Canopy. Requires Chrome, the Playwright extension and Node.js 20+."
                       />
                       <p className="set-item-desc">
-                        Open tabs keep the engine they started on.
+                        Reopen preview tabs after changing engines. Chrome asks you to approve its connection.
                       </p>
                     </div>
-                  ) : (
-                    <p className="set-item-desc">
-                      Loopback proxy only — the embedded browser is macOS-only so far.
-                    </p>
-                  )}
-                </Item>
-                <Item
-                  name="Browsing data"
-                  desc="Every preview tab shares one profile. Clearing it signs you out of all of them."
-                >
-                  <div className="set-inline">
-                    <Button
-                      disabled={!browserOk || clearing === "busy"}
-                      onClick={() => {
-                        setClearing("busy");
-                        void ipc.browserClearData().then(
-                          () => setClearing("done"),
-                          (err) => setClearing(String(err)),
-                        );
-                      }}>
-                      {clearing === "busy" ? "Clearing…" : "Clear browsing data"}
-                    </Button>
-                    {clearing === "done" && (
-                      <span className="set-item-desc">Cleared. Reload any open page to see it.</span>
-                    )}
-                    {typeof clearing === "string" && clearing !== "busy" && clearing !== "done" && (
-                      <span className="set-item-desc">{clearing}</span>
-                    )}
-                  </div>
                 </Item>
                 {/* The vault is the browser's other half: it exists to fill
                     logins into these same preview tabs, and as its own tab it

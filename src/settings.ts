@@ -12,7 +12,12 @@ import type { BrowserEngine } from "./browserBounds";
 import type { MascotId } from "./mascots";
 import type { CaptureMode } from "./pageCapture";
 import { IS_MAC } from "./platform";
+import { DEFAULT_AGENT_CLI_ID } from "../shared/agentCliIdentity";
 import { SKINS, type SkinId } from "./skins/registry";
+import {
+  isSessionNameTheme,
+  type SessionNameTheme,
+} from "./sessionNameThemes";
 import {
   formatChord,
   isShortcutProfile,
@@ -93,6 +98,11 @@ export type CursorStyle = "block" | "underline" | "bar";
  * workspace, its PR, its preview, its files; see workItems.ts). Direct
  * Next/Previous Tab commands stay positional whichever mode is selected. */
 export type TabSwitchMode = "recent" | "order" | "items";
+
+/** The lens used when a project has not made its own choice yet. Once the
+ * user switches a project, `Project.vibe.enabled` remains the per-project
+ * source of truth. */
+export type DefaultProjectLens = "build" | "engineer";
 
 /** A dictation hotkey as captured from a keydown: the modifier flags plus the
  *  physical `KeyboardEvent.code` (layout-independent, so it survives non-US
@@ -222,9 +232,16 @@ export const EDITOR_FONT_DEFAULT =
 
 export interface Settings {
   scrollback: number;
+  /** Vocabulary used for Canopy's generated terminal/session callsigns. The
+   * native PTY manager owns generation so detached and Remote launches follow
+   * it too; the frontend publishes this preference on launch and on change. */
+  sessionNameTheme: SessionNameTheme;
   /** Workbench shortcut preset. Imported editor-specific customizations can be
    * layered above this later without changing the semantic command catalog. */
   keymapProfile: ShortcutProfile;
+  /** First-run persona chooses this default; individual projects still store
+   * and keep their own Build/Engineer switch. */
+  defaultProjectLens: DefaultProjectLens;
   /** Terminal font size — kept under its original name for backward compat
    *  with everyone who already has it in localStorage. */
   fontSize: number;
@@ -406,6 +423,20 @@ export interface Settings {
    * whatever the user is doing. Questions and notices still reach the shared
    * attention queue; this only controls automatic focus changes. */
   agentAskForAttention: boolean;
+  /** Allow coding agents to create child agent tabs through
+   *  `canopy_spawn_agent`. On by default; turning it off removes the tool from
+   *  the bridge contract and rejects calls from already-initialized clients. */
+  agentsMaySpawn: boolean;
+  /** Show attention items outside the notification centre: corner cards,
+   * companion notices, native banners, and the remote companion channel. Off
+   * is a presentation preference only — every item stays in the shared queue
+   * and remains available from the top-right bell. */
+  notificationPopupsEnabled: boolean;
+  /** Show the terminal memory warning flyout and governor decision card. The
+   *  governor continues measuring in the background when this is off; only its
+   *  user-facing prompts and attention items are suppressed. On by default so
+   *  the existing safety feature remains available after an upgrade. */
+  terminalMemoryPromptsEnabled: boolean;
   /** canopy_* MCP tools the user switched off (Settings → Agents). Stored as
    *  the exceptions, not the whole set, so a tool added in a later version is
    *  on by default rather than invisible to everyone who ever opened this
@@ -502,34 +533,10 @@ export interface Settings {
    *  Settings restores the whole choice, not just the running link. */
   remoteTunnelProvider: string;
 
-  // ---- Embedded browser ----
-  /** Which engine preview tabs run on.
-   *
-   *  "proxy" is an iframe on a loopback reverse proxy: ordinary DOM, so
-   *  panels and menus paint over it, screenshots see it, and nothing has to
-   *  be hidden for anything. The cost is that every site is served from one
-   *  origin, so sessions are shared and do not survive a restart.
-   *
-   *  "webview" is a real child webview at the page's real origin with a
-   *  persistent profile — log into a site once and stay logged in. It buys
-   *  that with two limits neither this app nor Tauri can lift:
-   *
-   *    * a child webview is composited ABOVE the whole window and there is no
-   *      z-order API for it (tauri-apps/tauri#9798; Electron's BrowserView is
-   *      the same), so anything drawn over it forces the page off screen;
-   *    * a hidden WKWebView does not render and cannot be made to — Apple
-   *      exposes no API for offscreen rendering — so a page that loads behind
-   *      a panel comes back blank until something forces a repaint.
-   *
-   *  Everything in browserHost.ts, browserFrame.ts and the freeze-frame
-   *  machinery exists to soften those two facts. The proxy needs none of it —
-   *  VS Code's Simple Browser is an iframe for exactly that reason — which is
-   *  what makes it the right fallback when a session does not matter.
-   *
-   *  The default, because a preview of your own app is usually a preview of
-   *  it logged in, and that is the only engine that can hold a session. The
-   *  compensation above is the price; opening a preview closes the panel that
-   *  would cover it, which is the case that actually bit. */
+  // ---- Browser ----
+  /** The browsing choice: "proxy" is Embedded (the project-scoped iframe),
+   *  and "chrome" is Playwright (the user's Chrome session streamed into an
+   *  iframe). Retired native-webview preferences migrate to Embedded. */
   browserEngine: BrowserEngine;
 
   /** What the preview's Screenshot button grabs when clicked without opening
@@ -550,6 +557,11 @@ export interface Settings {
    *  workspace, so it can build the moment it exists. Off means a bare
    *  `git worktree add`, which is what this used to do. */
   workspaceBootstrap: boolean;
+  /** A new agent (⌘N, the launch cards) opens in its own workspace — a fresh
+   *  worktree, so parallel agents can't trample each other's changes. Off
+   *  opens it in the current checkout instead, which is instant. Either way
+   *  the launcher's ⇧↵ / hover action does the opposite for one launch. */
+  agentWorkspaces: boolean;
 
   // ---- Crash reporting ----
   /** Opt-in, default off: when a panel crashes (or a native panic is found on
@@ -565,12 +577,14 @@ export interface Settings {
 // which is exactly why `webgl` is gone rather than defaulted to false.
 export const DEFAULTS: Settings = {
   scrollback: 5_000,
+  sessionNameTheme: "canopy",
   keymapProfile: "canopy",
+  defaultProjectLens: "engineer",
   fontSize: 13,
   runawayCpuPercent: 300,
   runawayMemBytes: 4 * 1024 * 1024 * 1024,
   ptyHighWater: 2 * 1024 * 1024,
-  defaultAgent: "claude",
+  defaultAgent: DEFAULT_AGENT_CLI_ID,
   dangerouslySkipPermissions: false,
   cliBins: {},
   activeProfile: "default",
@@ -585,6 +599,9 @@ export const DEFAULTS: Settings = {
   idleGroupDelaySeconds: 60,
   customMicroTasks: [],
   agentAskForAttention: false,
+  agentsMaySpawn: true,
+  notificationPopupsEnabled: true,
+  terminalMemoryPromptsEnabled: true,
   disabledTools: [],
   autoImportMarkdownResearch: true,
   trackerKeys: {},
@@ -639,12 +656,29 @@ export const DEFAULTS: Settings = {
   dictationMuteOutput: true,
   remoteReach: "local",
   remoteTunnelProvider: "cloudflare",
-  browserEngine: "webview",
+  browserEngine: "proxy",
   previewCaptureMode: "visible",
   workspaceBasePort: 5173,
   workspacePorts: {},
   workspaceBootstrap: true,
+  agentWorkspaces: true,
   crashReporting: false,
+};
+
+/** Hard renderer ownership boundary. The settings UI lets the user explicitly
+ * raise scrollback within this range, but persisted/hand-edited state must not
+ * turn xterm's row retention into an unbounded allocation. */
+export const TERMINAL_SCROLLBACK_MIN_ROWS = 1_000;
+export const TERMINAL_SCROLLBACK_MAX_ROWS = 100_000;
+
+const boundedScrollback = (value: unknown): number => {
+  const rows = typeof value === "number" && Number.isFinite(value)
+    ? Math.trunc(value)
+    : DEFAULTS.scrollback;
+  return Math.min(
+    TERMINAL_SCROLLBACK_MAX_ROWS,
+    Math.max(TERMINAL_SCROLLBACK_MIN_ROWS, rows),
+  );
 };
 
 const KEY = "canopy.settings";
@@ -663,6 +697,9 @@ export function getSettings(): Settings {
   try {
     const stored = JSON.parse(raw ?? "{}") as Partial<Settings>;
     value = { ...DEFAULTS, ...stored };
+    value.scrollback = boundedScrollback(stored.scrollback);
+    if (!isSessionNameTheme(value.sessionNameTheme))
+      value.sessionNameTheme = DEFAULTS.sessionNameTheme;
     if (stored.dictationTriggerRevision !== DICTATION_TRIGGER_REVISION) {
       // Full settings snapshots made the old combo look user-selected on every
       // existing install. Move only its unchanged default to the new gesture;
@@ -683,10 +720,10 @@ export function getSettings(): Settings {
     // The one stored value that can name something that no longer exists.
     value.theme = migrateTheme(value.theme);
     if (!isShortcutProfile(value.keymapProfile)) value.keymapProfile = "canopy";
-    // The chromium engine is gone; anyone who had it selected gets the
-    // default back rather than an unknown value every chooseEngine call
-    // would have to defend against.
-    if ((value.browserEngine as string) === "chromium") value.browserEngine = "webview";
+    // Retired native engines (and unknown values) become Embedded. Keep the
+    // established storage keys for the two remaining browsing options.
+    if (value.browserEngine !== "proxy" && value.browserEngine !== "chrome")
+      value.browserEngine = "proxy";
   } catch {
     value = { ...DEFAULTS };
   }
@@ -708,6 +745,7 @@ export function subscribeSettings(cb: () => void): () => void {
 
 export function updateSettings(patch: Partial<Settings>): Settings {
   const next = { ...getSettings(), ...patch };
+  next.scrollback = boundedScrollback(next.scrollback);
   localStorage.setItem(KEY, JSON.stringify(next));
   if (typeof window !== "undefined")
     window.dispatchEvent(new Event(SETTINGS_CHANGE_EVENT));

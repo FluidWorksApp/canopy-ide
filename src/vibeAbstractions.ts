@@ -132,6 +132,10 @@ function proposeLink(providerId: string, ctx: AbstractionContext): AbstractionPr
   // secret it has no business holding.
   const lines = plan.steps.map((step) => {
     switch (step.kind) {
+      case "use-linked-account":
+        return `Use the linked account over ${step.reach.toUpperCase()} — ${step.why}`;
+      case "link-account":
+        return `Link your ${step.accountLabel} account — ${step.why}`;
       case "install-cli":
       case "authenticate":
         return `${step.command} — ${step.why}`;
@@ -143,7 +147,7 @@ function proposeLink(providerId: string, ctx: AbstractionContext): AbstractionPr
   });
   const client = plan.provider.secrets
     .filter((s) => s.publishable)
-    .map((s) => clientVarName(plan.provider, s));
+    .map((s) => clientVarName(plan.provider, s, ctx.link.clientPrefix ?? ""));
   return {
     kind: "guide",
     title: plan.summary,

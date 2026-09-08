@@ -12,6 +12,8 @@ import {
 } from "@codingame/monaco-vscode-files-service-override";
 import { Emitter, type Uri } from "monaco-editor";
 import * as ipc from "../ipc";
+import { FileReadLimitError, readBoundedFile } from "../boundedFileRead";
+import { sizeLimitFor } from "../fileOpen";
 
 interface Stat {
   type: FileType;
@@ -56,7 +58,13 @@ class TauriFileSystemProvider {
         mtime: s.modified_ms ?? 0,
         size: s.size,
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof FileReadLimitError) {
+        throw FileSystemProviderError.create(
+          error.message,
+          FileSystemProviderErrorCode.FileTooLarge,
+        );
+      }
       throw notFound(resource.fsPath);
     }
   }
@@ -75,7 +83,13 @@ class TauriFileSystemProvider {
 
   async readFile(resource: Uri): Promise<Uint8Array> {
     try {
-      return await ipc.fsReadFile(resource.fsPath);
+      return await readBoundedFile(resource.fsPath, {
+        // The VS Code overlay does not carry Canopy's project id. Keeping all
+        // language-service reads under one scope is conservative: they still
+        // share the renderer-wide limit and cannot peak across projects.
+        scope: "lsp-files",
+        maxBytes: sizeLimitFor("code"),
+      });
     } catch {
       throw notFound(resource.fsPath);
     }

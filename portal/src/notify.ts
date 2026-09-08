@@ -18,7 +18,7 @@
 //     pair on the desktop, which is a separate build; it is not implied here.
 
 import type { PendingItem } from '@shared/notifications'
-import { agentMeta } from '@shared/model'
+import { agentMeta, type RemoteCli } from '@shared/model'
 
 const ENABLED_KEY = 'canopy-remote-notify'
 /** Where the portal is served from — the service worker's scope, and what a
@@ -88,8 +88,8 @@ export interface Alert {
 }
 
 /** What a pending card says when it has to fit on a lock screen. */
-export function alertFor(item: PendingItem): Alert {
-  const label = agentMeta(item.agent).label
+export function alertFor(item: PendingItem, clis: readonly RemoteCli[] = []): Alert {
+  const label = agentMeta(item.agent, clis).label
   const where = item.cwd.split('/').filter(Boolean).pop() ?? ''
   const title =
     item.kind === 'question'

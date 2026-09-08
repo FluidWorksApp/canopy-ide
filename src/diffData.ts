@@ -10,7 +10,17 @@
  *
  *  PrView solved this with a ref-keyed cache and the other three diff surfaces
  *  did not. This is that cache, in one place, so the next diff view inherits it
- *  instead of rediscovering the bug. */
+ *  instead of rediscovering the bug.
+ *
+ *  One rule if you write a richer variant — AgentWorkspaceView has one, keyed
+ *  per pane and holding whole-file before/after for its edits view: **do not
+ *  put a size cap on it.** That view capped at 128 entries evicted in insertion
+ *  order, and a session touching more files than that turned the cache into a
+ *  100% miss: one render inserts every file and evicts the earliest, the next
+ *  render misses on exactly those. It was slower than no cache at all, and it
+ *  presented as scroll jank rather than as anything cache-shaped. Bound the map
+ *  by pruning to the keys currently rendered, never by a number that could be
+ *  smaller than the number of files. */
 
 import { useRef } from "react";
 

@@ -8,8 +8,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Wire, auth, savedToken, clearToken, type Msg } from './wire'
-import { wsTransport } from './wsTransport'
-import { makeRpc, type Rpc } from './rpc'
+import type { Rpc } from './rpc'
+import { SocketHost } from '../../src/host/socket'
 import { useViewportFit, useWide } from './useMedia'
 import { alertFor, notifyState, registerWorker, showAlert, wantsNotifications } from './notify'
 import { CompactShell } from './shells/CompactShell'
@@ -146,13 +146,17 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
   useEffect(() => {
     const wire = new Wire(token)
     wireRef.current = wire
-    transportRef.current = wsTransport(wire)
-    rpcRef.current = makeRpc(wire)
+    const host = new SocketHost(wire)
+    transportRef.current = host.terminals
+    rpcRef.current = {
+      call: (action, args) => host.invoke(action, args),
+      onBusy: callback => host.onBusy(callback),
+      reset: () => {}, // SocketHost owns disconnect/reset handling.
+      dispose: () => host.dispose(),
+    }
     wire.onStatus = (ok) => {
       setUp(ok)
-      // A dropped socket means the server has forgotten every in-flight action
-      // id; leaving those promises hanging would wedge a panel until timeout.
-      if (!ok) rpcRef.current?.reset('connection lost')
+      // Host operations fail promptly on disconnect; mutations are not replayed automatically.
     }
     wire.onAuthFail = onLogout
     wire.on((m: Msg) => {
@@ -215,6 +219,7 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     const poll = setInterval(() => wire.send({ t: 'refresh' }), 4000)
     return () => {
       clearInterval(poll)
+      host.dispose()
       wire.close()
     }
   }, [token, onLogout, openTarget])
@@ -255,11 +260,11 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     for (const item of pending) {
       if (notified.current.has(item.key)) continue
       notified.current.add(item.key)
-      void showAlert(alertFor(item))
+      void showAlert(alertFor(item, clis))
     }
     // Keys are per-session-per-event, so the set would grow all day otherwise.
     if (notified.current.size > 500) notified.current = new Set(pending.map((p) => p.key))
-  }, [pending])
+  }, [pending, clis])
 
   // The same buzz for attention-channel questions — the ones that never touch
   // the hook stream (canopy_ask_user, a dialog raised in a background project).
@@ -307,8 +312,22 @@ function Console({ token, onLogout }: { token: string; onLogout: () => void }) {
     command?: string,
     options?: { agent?: string; profile?: string },
   ) => {
-    wireRef.current?.send({ t: 'spawn', cwd, command, ...options })
-  }, [])
+    const candidates = projects.flatMap((candidateProject) =>
+      candidateProject.components.map((component) => ({ candidateProject, component })),
+    )
+    const owner = candidates
+      .filter(({ component }) => cwd === component.path || cwd.startsWith(`${component.path}/`))
+      .sort((a, b) => b.component.path.length - a.component.path.length)[0]
+    wireRef.current?.send({
+      t: 'spawn',
+      cwd,
+      command,
+      ...options,
+      projectId: owner?.candidateProject.id ?? project?.id,
+      componentId: owner?.component.id,
+      workspacePath: owner?.component.path ?? cwd,
+    })
+  }, [project?.id, projects])
 
   const goHome = useCallback((id?: string) => {
     if (id) setProjectId(id)

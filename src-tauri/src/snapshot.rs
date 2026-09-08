@@ -36,6 +36,9 @@
 //! taking every capture of the app's UI with it, at exactly the moment an agent
 //! most wants to look at the screen. A snapshot only ever needed the webview.
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 use tauri::Manager;
 
 /// The label Tauri gives the app's own window, and so its webview: the window in
@@ -67,6 +70,243 @@ impl Encoding {
             Encoding::Jpeg => "image/jpeg",
         }
     }
+
+    fn max_encoded_bytes(self) -> usize {
+        match self {
+            Encoding::Png => 12 * 1024 * 1024,
+            Encoding::Jpeg => 4 * 1024 * 1024,
+        }
+    }
+}
+
+const MAX_CAPTURE_DIMENSION: f64 = 16_384.0;
+const MAX_CAPTURE_WIDTH: f64 = 2_400.0;
+const MAX_CONCURRENT_CAPTURES: usize = 2;
+
+/// Constant-size capture telemetry. No labels, URLs or per-capture history are
+/// retained: reporting on a memory safeguard must not become another retention
+/// path of its own.
+#[derive(Default)]
+struct CaptureMetricState {
+    attempts: u64,
+    successes: u64,
+    failures: u64,
+    encoded_bytes: u64,
+    active: u32,
+    active_high_water: u32,
+    retained_bytes: u64,
+    retained_high_water: u64,
+    latency_ms_total: u64,
+    latency_ms_last: u64,
+    latency_ms_max: u64,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotCaptureMetrics {
+    pub attempts: u64,
+    pub successes: u64,
+    pub failures: u64,
+    pub encoded_bytes: u64,
+    pub active: u32,
+    pub active_high_water: u32,
+    /// Base64 payload bytes currently owned by a capture future. The returned
+    /// IPC value moves beyond this module, so this intentionally does not claim
+    /// to measure WebView/JavaScript retention after command serialization.
+    pub retained_bytes: u64,
+    pub retained_high_water: u64,
+    pub latency_ms_average: u64,
+    pub latency_ms_last: u64,
+    pub latency_ms_max: u64,
+}
+
+impl CaptureMetricState {
+    fn report(&self) -> SnapshotCaptureMetrics {
+        SnapshotCaptureMetrics {
+            attempts: self.attempts,
+            successes: self.successes,
+            failures: self.failures,
+            encoded_bytes: self.encoded_bytes,
+            active: self.active,
+            active_high_water: self.active_high_water,
+            retained_bytes: self.retained_bytes,
+            retained_high_water: self.retained_high_water,
+            latency_ms_average: self
+                .latency_ms_total
+                .checked_div(self.successes.saturating_add(self.failures))
+                .unwrap_or(0),
+            latency_ms_last: self.latency_ms_last,
+            latency_ms_max: self.latency_ms_max,
+        }
+    }
+}
+
+fn capture_metric_state() -> &'static Mutex<CaptureMetricState> {
+    static METRICS: OnceLock<Mutex<CaptureMetricState>> = OnceLock::new();
+    METRICS.get_or_init(Default::default)
+}
+
+struct CaptureMeasurement<'a> {
+    state: &'a Mutex<CaptureMetricState>,
+    started: Instant,
+    retained_bytes: u64,
+    encoded_bytes: u64,
+    succeeded: bool,
+}
+
+impl<'a> CaptureMeasurement<'a> {
+    fn begin(state: &'a Mutex<CaptureMetricState>) -> Self {
+        let mut metrics = state.lock().unwrap();
+        metrics.attempts = metrics.attempts.saturating_add(1);
+        metrics.active = metrics.active.saturating_add(1);
+        metrics.active_high_water = metrics.active_high_water.max(metrics.active);
+        drop(metrics);
+        Self {
+            state,
+            started: Instant::now(),
+            retained_bytes: 0,
+            encoded_bytes: 0,
+            succeeded: false,
+        }
+    }
+
+    fn payload(&mut self, base64: &str) {
+        self.retained_bytes = base64.len() as u64;
+        self.encoded_bytes = decoded_base64_len(base64) as u64;
+        let mut metrics = self.state.lock().unwrap();
+        metrics.retained_bytes = metrics.retained_bytes.saturating_add(self.retained_bytes);
+        metrics.retained_high_water = metrics.retained_high_water.max(metrics.retained_bytes);
+    }
+
+    fn succeed(&mut self) {
+        self.succeeded = true;
+    }
+}
+
+impl Drop for CaptureMeasurement<'_> {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let mut metrics = self.state.lock().unwrap();
+        metrics.active = metrics.active.saturating_sub(1);
+        metrics.retained_bytes = metrics.retained_bytes.saturating_sub(self.retained_bytes);
+        metrics.encoded_bytes = metrics.encoded_bytes.saturating_add(self.encoded_bytes);
+        if self.succeeded {
+            metrics.successes = metrics.successes.saturating_add(1);
+        } else {
+            metrics.failures = metrics.failures.saturating_add(1);
+        }
+        metrics.latency_ms_total = metrics.latency_ms_total.saturating_add(elapsed);
+        metrics.latency_ms_last = elapsed;
+        metrics.latency_ms_max = metrics.latency_ms_max.max(elapsed);
+    }
+}
+
+fn decoded_base64_len(encoded: &str) -> usize {
+    let padding = encoded
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'=')
+        .count();
+    (encoded.len() / 4)
+        .saturating_mul(3)
+        .saturating_sub(padding)
+}
+
+/// Bounded, process-lifetime capture counters for diagnostics and soak tests.
+#[tauri::command]
+pub fn snapshot_capture_metrics() -> SnapshotCaptureMetrics {
+    capture_metric_state().lock().unwrap().report()
+}
+
+fn active_captures() -> &'static Mutex<HashSet<String>> {
+    static ACTIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    ACTIVE.get_or_init(Default::default)
+}
+
+fn capture_slots() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
+    static SLOTS: OnceLock<std::sync::Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    SLOTS.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CAPTURES)))
+}
+
+struct CaptureGuard {
+    label: String,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for CaptureGuard {
+    fn drop(&mut self) {
+        active_captures().lock().unwrap().remove(&self.label);
+    }
+}
+
+fn bounded_capture_args(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    max_width: f64,
+) -> Result<(f64, f64, f64, f64, f64), String> {
+    if ![x, y, width, height, max_width]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err("capture dimensions must be finite".into());
+    }
+    if width <= 0.0 || height <= 0.0 {
+        return Err("nothing to capture: the preview has no size on screen".into());
+    }
+    Ok((
+        x.clamp(0.0, MAX_CAPTURE_DIMENSION),
+        y.clamp(0.0, MAX_CAPTURE_DIMENSION),
+        width.min(MAX_CAPTURE_DIMENSION),
+        height.min(MAX_CAPTURE_DIMENSION),
+        max_width.clamp(1.0, MAX_CAPTURE_WIDTH),
+    ))
+}
+
+async fn capture(
+    view: tauri::webview::Webview,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    max_width: f64,
+    encoding: Encoding,
+) -> Result<String, String> {
+    let mut measurement = CaptureMeasurement::begin(capture_metric_state());
+    let (x, y, width, height, max_width) = bounded_capture_args(x, y, width, height, max_width)?;
+    let label = view.label().to_string();
+    {
+        let mut active = active_captures().lock().unwrap();
+        if !active.insert(label.clone()) {
+            return Err(format!("a capture is already in flight for {label}"));
+        }
+    }
+    let permit = match capture_slots().clone().acquire_owned().await {
+        Ok(permit) => permit,
+        Err(_) => {
+            active_captures().lock().unwrap().remove(&label);
+            return Err("snapshot capture queue is closed".into());
+        }
+    };
+    let _guard = CaptureGuard {
+        label,
+        _permit: permit,
+    };
+    let encoded = capture_platform(view, x, y, width, height, max_width, encoding).await?;
+    measurement.payload(&encoded);
+    // Base64 is 4/3 of the encoded bytes (plus padding). Refuse a payload that
+    // would retain or cross IPC beyond the format's budget.
+    let max_base64 = encoding.max_encoded_bytes().div_ceil(3) * 4;
+    if encoded.len() > max_base64 {
+        return Err(format!(
+            "snapshot is too large ({} encoded bytes maximum)",
+            encoding.max_encoded_bytes()
+        ));
+    }
+    measurement.succeed();
+    Ok(encoded)
 }
 
 /// PNG bytes of `rect` (CSS pixels, webview coordinates), base64-encoded.
@@ -184,7 +424,7 @@ pub async fn browser_frame(
 }
 
 #[cfg(target_os = "macos")]
-async fn capture(
+async fn capture_platform(
     view: tauri::webview::Webview,
     x: f64,
     y: f64,
@@ -311,7 +551,7 @@ enum Frame {
 }
 
 #[cfg(any(windows, target_os = "linux"))]
-async fn capture(
+async fn capture_platform(
     view: tauri::webview::Webview,
     x: f64,
     y: f64,
@@ -590,7 +830,7 @@ fn finish(
 // Mobile has no preview pane to photograph; a clear "not here" beats an agent
 // wondering why its picture is blank.
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
-async fn capture(
+async fn capture_platform(
     _view: tauri::webview::Webview,
     _x: f64,
     _y: f64,
@@ -618,6 +858,73 @@ mod tests {
             .build()
             .unwrap();
         app
+    }
+
+    #[test]
+    fn capture_dimensions_and_requested_width_are_bounded() {
+        let bounded = bounded_capture_args(
+            -10.0,
+            5.0,
+            MAX_CAPTURE_DIMENSION * 2.0,
+            MAX_CAPTURE_DIMENSION * 3.0,
+            MAX_CAPTURE_WIDTH * 10.0,
+        )
+        .unwrap();
+        assert_eq!(bounded.0, 0.0);
+        assert_eq!(bounded.1, 5.0);
+        assert_eq!(bounded.2, MAX_CAPTURE_DIMENSION);
+        assert_eq!(bounded.3, MAX_CAPTURE_DIMENSION);
+        assert_eq!(bounded.4, MAX_CAPTURE_WIDTH);
+        assert!(bounded_capture_args(0.0, 0.0, f64::NAN, 10.0, 100.0).is_err());
+        assert!(bounded_capture_args(0.0, 0.0, 10.0, 0.0, 100.0).is_err());
+    }
+
+    #[test]
+    fn capture_metrics_are_scalar_bounded_and_release_active_payloads() {
+        assert!(std::mem::size_of::<CaptureMetricState>() <= 128);
+        let state = Mutex::new(CaptureMetricState::default());
+        let mut first = CaptureMeasurement::begin(&state);
+        let mut second = CaptureMeasurement::begin(&state);
+        // Five and two encoded bytes, held as eight and four base64 bytes.
+        first.payload("aGVsbG8=");
+        second.payload("aGk=");
+
+        let live = state.lock().unwrap().report();
+        assert_eq!(live.attempts, 2);
+        assert_eq!(live.active, 2);
+        assert_eq!(live.active_high_water, 2);
+        assert_eq!(live.retained_bytes, 12);
+        assert_eq!(live.retained_high_water, 12);
+
+        first.succeed();
+        drop(first);
+        let one_left = state.lock().unwrap().report();
+        assert_eq!(one_left.successes, 1);
+        assert_eq!(one_left.failures, 0);
+        assert_eq!(one_left.encoded_bytes, 5);
+        assert_eq!(one_left.active, 1);
+        assert_eq!(one_left.retained_bytes, 4);
+
+        // Dropping without succeed records the rejected/failed attempt and
+        // releases its retained payload without keeping a sample history.
+        drop(second);
+        let done = state.lock().unwrap().report();
+        assert_eq!(done.successes, 1);
+        assert_eq!(done.failures, 1);
+        assert_eq!(done.encoded_bytes, 7);
+        assert_eq!(done.active, 0);
+        assert_eq!(done.retained_bytes, 0);
+        assert_eq!(done.retained_high_water, 12);
+        assert!(done.latency_ms_max >= done.latency_ms_last);
+    }
+
+    #[test]
+    fn encoded_size_is_recovered_exactly_from_standard_base64() {
+        assert_eq!(decoded_base64_len(""), 0);
+        assert_eq!(decoded_base64_len("YQ=="), 1);
+        assert_eq!(decoded_base64_len("YWI="), 2);
+        assert_eq!(decoded_base64_len("YWJj"), 3);
+        assert_eq!(decoded_base64_len("aGVsbG8="), 5);
     }
 
     /// And a preview tab open in it.

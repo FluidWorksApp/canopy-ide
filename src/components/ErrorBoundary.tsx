@@ -13,7 +13,7 @@
 // shown in full and editable first; the anonymous email path stays available
 // behind the settings opt-in for anyone who'd rather not be named.
 import { Component, type ErrorInfo, type ReactNode } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../host";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   crashReportingEnabled,

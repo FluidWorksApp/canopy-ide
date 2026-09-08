@@ -43,6 +43,10 @@ export interface AgentEventData {
   tool: string;
   /** Empty when the hook carried no agent stamp (a bare claude). */
   agent: string;
+  /** Human text that began this turn. Kept only on UserPromptSubmit so the
+   * owning tab can publish a baseline title/status without waiting for the
+   * model to voluntarily call a naming tool. */
+  prompt?: string;
   message?: string;
   notificationType?: string;
   /** What the installer classified this moment as, when it could — the same
@@ -63,6 +67,39 @@ export interface AgentEventEntry {
   ts: number;
   /** null: the line wasn't JSON. */
   data: AgentEventData | null;
+}
+
+/**
+ * Trim the event ring, never dropping the newest session-bearing entry for a
+ * pty.
+ *
+ * The cap exists for main-thread cost — several consumers scan this list on
+ * every render. But it is app-wide while one of its consumers is per-pty: the
+ * terminal→session bond is read off these stamps. Under load, one busy
+ * project's events evicted a quiet terminal's only stamp, that terminal went
+ * unbound, and with no session id there is no digest — so the life ladder fell
+ * past every hook rung to "the process tree is burning CPU", which re-stamps
+ * itself on each stats tick and never decays. A finished agent sat in WORKING
+ * indefinitely.
+ *
+ * `resolveSessions` now recovers that bond from the digest's recorded surface,
+ * so this is no longer the only thing standing between a tab and its session.
+ * It is still worth keeping: the retained set is bounded by the number of live
+ * terminals, which is small, and it is exactly the entry that matters.
+ */
+export function trimAgentEvents(
+  entries: AgentEventEntry[],
+  cap: number,
+): AgentEventEntry[] {
+  if (entries.length <= cap) return entries;
+  const newestByPty = new Map<number, AgentEventEntry>();
+  for (const e of entries) {
+    // Arrival order, so a later entry for the same pty replaces the earlier.
+    if (e.data?.pty != null && e.data.sessionId) newestByPty.set(e.data.pty, e);
+  }
+  const keep = new Set<AgentEventEntry>(newestByPty.values());
+  for (const e of entries.slice(-cap)) keep.add(e);
+  return entries.filter((e) => keep.has(e));
 }
 
 export interface PendingItem {
@@ -111,6 +148,8 @@ export function parseAgentEvent(raw: string): AgentEventData | null {
     agent: typeof parsed.agent === "string" ? parsed.agent : "",
   };
   if (parsed.message != null) data.message = String(parsed.message);
+  if (event === "UserPromptSubmit" && typeof parsed.prompt === "string")
+    data.prompt = parsed.prompt;
   if (typeof parsed.notification_type === "string")
     data.notificationType = parsed.notification_type;
   if (typeof parsed.canopy_signal === "string")

@@ -12,10 +12,8 @@
 //!   `PtyManager::write` / `::kill`.
 //!
 //! Off by default. A dedicated numeric PIN (NOT the team join code) gates
-//! `POST /remote/auth`, which mints a bearer token; the WebSocket requires that
-//! token. The token has no wall-clock expiry — it stays valid for the whole life
-//! of this enable session, dying only when the PIN owner disables the server or
-//! rotates the PIN. Wrong PINs are constant-time-compared and tarpitted.
+//! `POST /remote/auth` mints a bearer. The client exchanges it for a short-lived,
+//! one-use WebSocket ticket, keeping the durable credential out of URLs.
 //!
 //! Transport: plain HTTP on 6680 — fine on a trusted LAN, and a
 //! Tailscale/Cloudflare/ngrok tunnel (see tunnel.rs) adds real TLS for remote
@@ -35,10 +33,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, EventId, Listener, Manager};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, OwnedSemaphorePermit, Semaphore};
 
 use crate::pty::{PtyEvent, PtyManager};
 use crate::remote::verbs::{Answer, Begin, VerbRouter};
@@ -56,11 +55,67 @@ const AUTH_TARPIT: Duration = Duration::from_secs(2);
 /// App events we mirror to every connected portal client.
 const FORWARDED_EVENTS: [&str; 3] = ["pty:stats", "agent:events", "pty:exit"];
 
+/// A portal client is allowed a useful terminal catch-up, but never an
+/// unbounded number of arbitrarily large JSON strings. Count-only channels do
+/// not constrain memory: 512 multi-megabyte messages could otherwise sit
+/// behind a slow phone connection.
+const PORTAL_OUTBOUND_BYTES: usize = 8 * 1024 * 1024;
+const PORTAL_MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+const PORTAL_MAX_INBOUND_BYTES: usize = 1024 * 1024;
+
+struct OutboundMessage {
+    text: String,
+    // The byte reservation is released only after the socket writer consumes
+    // this queue entry (or the connection drops it).
+    _permit: OwnedSemaphorePermit,
+}
+
+#[derive(Clone)]
+struct PortalOut {
+    tx: mpsc::Sender<OutboundMessage>,
+    bytes: Arc<Semaphore>,
+}
+
+impl PortalOut {
+    fn channel() -> (Self, mpsc::Receiver<OutboundMessage>) {
+        let (tx, rx) = mpsc::channel(64);
+        (
+            Self {
+                tx,
+                bytes: Arc::new(Semaphore::new(PORTAL_OUTBOUND_BYTES)),
+            },
+            rx,
+        )
+    }
+
+    async fn send(&self, text: String) -> Result<(), ()> {
+        let len = text.len().max(1);
+        if len > PORTAL_MAX_MESSAGE_BYTES {
+            return Err(());
+        }
+        let permit = self
+            .bytes
+            .clone()
+            .acquire_many_owned(len as u32)
+            .await
+            .map_err(|_| ())?;
+        self.tx
+            .send(OutboundMessage {
+                text,
+                _permit: permit,
+            })
+            .await
+            .map_err(|_| ())
+    }
+}
+
 /// Live bearer tokens for the *current* enable session. The set is created fresh
 /// in `remote_enable` and dropped on disable/rotate, so a token is valid for
 /// exactly as long as this session lives — no wall-clock expiry. Re-auth is only
 /// ever forced by the PIN owner tearing the session down or rotating the PIN.
 type Tokens = Arc<Mutex<HashSet<String>>>;
+type Tickets = Arc<Mutex<HashMap<String, (Instant, String)>>>;
+const WS_TICKET_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Managed state: at most one running server. Enabling twice is a no-op that
 /// returns the current status.
@@ -90,6 +145,78 @@ pub struct RemoteManager {
     attention: Mutex<Value>,
     /// The session scope, cached — see `open_scope`.
     roots: RootsCache,
+    sockets: Arc<SocketMetrics>,
+}
+
+#[derive(Default)]
+struct SocketMetrics {
+    active: AtomicUsize,
+    high_water: AtomicUsize,
+    accepted_total: AtomicU64,
+    rejected_total: AtomicU64,
+}
+
+#[derive(Clone, Serialize)]
+pub struct RemoteSocketMetrics {
+    pub active: usize,
+    pub high_water: usize,
+    pub accepted_total: u64,
+    pub rejected_total: u64,
+}
+
+struct SocketOwnership(Arc<SocketMetrics>);
+const REMOTE_SOCKET_MAX: usize = 16;
+
+impl SocketOwnership {
+    fn try_acquire(metrics: Arc<SocketMetrics>) -> Option<Self> {
+        let mut active = metrics.active.load(Ordering::Relaxed);
+        loop {
+            if active >= REMOTE_SOCKET_MAX {
+                metrics.rejected_total.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+            match metrics.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => active = actual,
+            }
+        }
+        let active = active + 1;
+        metrics.accepted_total.fetch_add(1, Ordering::Relaxed);
+        let mut seen = metrics.high_water.load(Ordering::Relaxed);
+        while active > seen {
+            match metrics.high_water.compare_exchange_weak(
+                seen,
+                active,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => seen = actual,
+            }
+        }
+        Some(Self(metrics))
+    }
+}
+
+impl Drop for SocketOwnership {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[tauri::command]
+pub fn remote_socket_metrics(mgr: tauri::State<'_, RemoteManager>) -> RemoteSocketMetrics {
+    RemoteSocketMetrics {
+        active: mgr.sockets.active.load(Ordering::Relaxed),
+        high_water: mgr.sockets.high_water.load(Ordering::Relaxed),
+        accepted_total: mgr.sockets.accepted_total.load(Ordering::Relaxed),
+        rejected_total: mgr.sockets.rejected_total.load(Ordering::Relaxed),
+    }
 }
 
 #[derive(Clone, Default)]
@@ -141,6 +268,7 @@ struct Portal {
     app: AppHandle,
     pin: Arc<String>,
     tokens: Tokens,
+    tickets: Tickets,
     /// Fan-out of forwarded app events (as ready-to-send JSON) to all sockets.
     events: broadcast::Sender<String>,
     /// Shared handle to the desktop-pushed theme tokens (see RemoteManager).
@@ -153,6 +281,7 @@ struct Portal {
     /// across sockets on purpose: a phone that reconnects mid-action gets the
     /// first answer back rather than starting a second run.
     verbs: Arc<VerbRouter>,
+    sockets: Arc<SocketMetrics>,
 }
 
 /// What a PIN-minted token may do. Drive, not admin: it matches the surface
@@ -231,6 +360,7 @@ pub async fn remote_enable(
 
     let pin = gen_pin();
     let tokens: Tokens = Default::default();
+    let tickets: Tickets = Default::default();
     let (events_tx, _keep) = broadcast::channel::<String>(1024);
 
     // Tap the app event bus and re-broadcast as portal messages. Dropped on
@@ -250,15 +380,18 @@ pub async fn remote_enable(
         app: app.clone(),
         pin: Arc::new(pin.clone()),
         tokens,
+        tickets,
         events: events_tx,
         theme: mgr.theme.clone(),
         clis: mgr.clis.clone(),
         companion: mgr.companion.clone(),
         roots: mgr.roots.clone(),
         verbs: Arc::new(VerbRouter::default()),
+        sockets: mgr.sockets.clone(),
     };
     let router = Router::new()
         .route("/remote/auth", post(auth_handler))
+        .route("/remote/ws-ticket", post(ws_ticket_handler))
         .route("/remote/ws", get(ws_handler))
         .route("/remote/health", get(|| async { "ok" }))
         // Team relay ingress on the same server — the internet path, where the
@@ -452,7 +585,26 @@ async fn auth_handler(AxumState(p): AxumState<Portal>, Json(body): Json<AuthReq>
 
 #[derive(Deserialize)]
 struct WsQuery {
-    token: String,
+    ticket: String,
+}
+
+async fn ws_ticket_handler(
+    AxumState(p): AxumState<Portal>,
+    headers: header::HeaderMap,
+) -> Response {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let Some(token) = token.filter(|token| valid_token(&p.tokens, token)) else {
+        return (StatusCode::UNAUTHORIZED, "bad token").into_response();
+    };
+    let ticket = gen_token();
+    let expires = Instant::now() + WS_TICKET_TTL;
+    let mut tickets = p.tickets.lock().unwrap();
+    tickets.retain(|_, (expiry, _)| *expiry > Instant::now());
+    tickets.insert(ticket.clone(), (expires, token.to_string()));
+    Json(json!({ "ticket": ticket, "expiresIn": WS_TICKET_TTL.as_secs() })).into_response()
 }
 
 async fn ws_handler(
@@ -460,10 +612,13 @@ async fn ws_handler(
     Query(q): Query<WsQuery>,
     AxumState(p): AxumState<Portal>,
 ) -> Response {
-    if !valid_token(&p.tokens, &q.token) {
-        return (StatusCode::UNAUTHORIZED, "bad token").into_response();
-    }
-    ws.on_upgrade(move |socket| ws_conn(socket, p))
+    let Some(principal) = consume_ticket(&p.tickets, &q.ticket, Instant::now()) else {
+        return (StatusCode::UNAUTHORIZED, "bad ticket").into_response();
+    };
+    let Some(socket_owner) = SocketOwnership::try_acquire(p.sockets.clone()) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many remote sockets").into_response();
+    };
+    ws.on_upgrade(move |socket| ws_conn(socket, p, socket_owner, principal))
 }
 
 /// Team relay ingress on the shared server. Unlike `/remote/*`, this carries the
@@ -475,8 +630,11 @@ async fn team_ws_handler(ws: WebSocketUpgrade, AxumState(p): AxumState<Portal>) 
     if !crate::relay::is_hosting(&p.app) {
         return (StatusCode::FORBIDDEN, "team hosting is off").into_response();
     }
+    let Some(socket_owner) = SocketOwnership::try_acquire(p.sockets.clone()) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many remote sockets").into_response();
+    };
     let app = p.app.clone();
-    ws.on_upgrade(move |socket| crate::relay::accept_ws_peer(app, socket))
+    ws.on_upgrade(move |socket| crate::relay::accept_ws_peer(app, socket, socket_owner))
 }
 
 /// Serve the SPA: any path under `/remote` maps to a baked asset, with an
@@ -553,10 +711,16 @@ fn etag_of(bytes: &[u8]) -> String {
 
 // ---- WebSocket session ----------------------------------------------------
 
-async fn ws_conn(mut socket: WebSocket, p: Portal) {
+async fn ws_conn(
+    mut socket: WebSocket,
+    p: Portal,
+    _socket_owner: SocketOwnership,
+    principal: String,
+) {
     // Single writer: every outbound message (snapshot, forwarded events, pty
-    // chunks) funnels through this mpsc so we never contend on the socket.
-    let (out_tx, mut out_rx) = mpsc::channel::<String>(512);
+    // chunks) funnels through this byte-accounted queue so we never contend on
+    // the socket or retain unlimited strings behind a slow client.
+    let (out_tx, mut out_rx) = PortalOut::channel();
 
     // Initial snapshot.
     let theme0 = p.theme.lock().unwrap().clone();
@@ -591,7 +755,10 @@ async fn ws_conn(mut socket: WebSocket, p: Portal) {
             inbound = socket.recv() => {
                 match inbound {
                     Some(Ok(Message::Text(t))) => {
-                        handle_client_msg(&t, &p, &out_tx, &mut attaches);
+                        if t.len() > PORTAL_MAX_INBOUND_BYTES {
+                            break;
+                        }
+                        handle_client_msg(&t, &p, &out_tx, &mut attaches, &principal);
                     }
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     _ => {}
@@ -600,7 +767,7 @@ async fn ws_conn(mut socket: WebSocket, p: Portal) {
             outbound = out_rx.recv() => {
                 match outbound {
                     Some(msg) => {
-                        if socket.send(Message::Text(msg)).await.is_err() {
+                        if socket.send(Message::Text(msg.text.into())).await.is_err() {
                             break;
                         }
                     }
@@ -618,13 +785,29 @@ async fn ws_conn(mut socket: WebSocket, p: Portal) {
 fn handle_client_msg(
     text: &str,
     p: &Portal,
-    out: &mpsc::Sender<String>,
+    out: &PortalOut,
     attaches: &mut HashMap<u32, tokio::task::JoinHandle<()>>,
+    principal: &str,
 ) {
     let Ok(v) = serde_json::from_str::<Value>(text) else {
         return;
     };
     match v.get("t").and_then(|t| t.as_str()) {
+        Some("hello") => {
+            let app = p.app.clone();
+            let out = out.clone();
+            tokio::spawn(async move {
+                let environment = crate::execution::environment_identity(app.state());
+                let Ok(environment_id) = environment else { return };
+                let _ = out.send(json!({ "t": "hello", "host": {
+                    "protocol": crate::remote::HOST_PROTOCOL,
+                    "environmentId": environment_id,
+                    "commands": crate::remote::GRANTS.iter().filter(|(_, scope, _)| TOKEN_SCOPE.allows(*scope)).map(|(name, _, _)| *name).collect::<Vec<_>>(),
+                    "events": FORWARDED_EVENTS,
+                    "streams": crate::remote::streams::KINDS
+                }}).to_string()).await;
+            });
+        }
         Some("attach") => {
             if let Some(id) = v.get("pty").and_then(|x| x.as_u64()) {
                 let id = id as u32;
@@ -663,6 +846,12 @@ fn handle_client_msg(
             let command = v.get("command").and_then(|x| x.as_str()).map(String::from);
             let agent = v.get("agent").and_then(|x| x.as_str()).map(String::from);
             let profile = v.get("profile").and_then(|x| x.as_str()).map(String::from);
+            let project_id = v.get("projectId").and_then(|x| x.as_str()).map(String::from);
+            let component_id = v.get("componentId").and_then(|x| x.as_str()).map(String::from);
+            let workspace_path = v
+                .get("workspacePath")
+                .and_then(|x| x.as_str())
+                .map(String::from);
             let app = p.app.clone();
             let out = out.clone();
             tokio::spawn(async move {
@@ -684,7 +873,15 @@ fn handle_client_msg(
                 };
                 let msg = match account.and_then(|account| {
                     app.state::<PtyManager>()
-                        .spawn_headless(app.clone(), cwd, command, account)
+                        .spawn_headless_bound(
+                            app.clone(),
+                            cwd,
+                            command,
+                            account,
+                            project_id,
+                            component_id,
+                            workspace_path,
+                        )
                 }) {
                     Ok(id) => json!({ "t": "spawned", "pty": id }),
                     Err(e) => json!({ "t": "spawn-error", "message": e }),
@@ -692,7 +889,7 @@ fn handle_client_msg(
                 let _ = out.send(msg.to_string()).await;
             });
         }
-        Some("act") => act(&v, p, out),
+        Some("act") => act(&v, p, out, principal),
         Some("caps") => {
             let out = out.clone();
             let msg = json!({ "t": "caps", "caps": crate::remote::capabilities() }).to_string();
@@ -724,20 +921,32 @@ fn handle_client_msg(
 /// Every action goes through the router first, commands included. A phone
 /// retries on reconnect, and `pty_spawn_detached` replayed is a second agent
 /// nobody asked for.
-fn act(v: &Value, p: &Portal, out: &mpsc::Sender<String>) {
+fn act(v: &Value, p: &Portal, out: &PortalOut, principal: &str) {
     let (Some(id), Some(action)) = (
         v.get("id").and_then(|x| x.as_str()),
         v.get("action").and_then(|x| x.as_str()),
     ) else {
         return;
     };
-    let (id, action) = (id.to_string(), action.to_string());
+    if id.is_empty() || id.len() > 128 {
+        return;
+    }
+    let request_key = format!("{principal}:{id}");
+    let action = protocol_action(v.get("protocol"), action).map(str::to_string);
+    let id = id.to_string();
     let args = v.get("args").cloned().unwrap_or(Value::Null);
     let app = p.app.clone();
     let router = p.verbs.clone();
     let out = out.clone();
 
     tokio::spawn(async move {
+        let action = match action {
+            Ok(action) => action,
+            Err(error) => {
+                let _ = out.send(ack_err(&id, error.into())).await;
+                return;
+            }
+        };
         // A dotted name is a desktop-executed verb. None are registered yet —
         // every module shipped so far is backed by state Rust already holds —
         // so today this can only be an unknown action, and the hop to the
@@ -756,9 +965,9 @@ fn act(v: &Value, p: &Portal, out: &mpsc::Sender<String>) {
             crate::remote::guard_of(&action)
         };
 
-        match router.begin(&action, guard, &id) {
-            Begin::Replay(Answer::Ok) => {
-                let _ = out.send(ack_ok(&id)).await;
+        match router.begin_request(&action, guard, &request_key, &args) {
+            Begin::Replay(Answer::Ok(value)) => {
+                let _ = out.send(ack_ok(&id, value)).await;
                 return;
             }
             Begin::Replay(Answer::Err(why)) | Begin::Refused(why) => {
@@ -771,11 +980,11 @@ fn act(v: &Value, p: &Portal, out: &mpsc::Sender<String>) {
         let result = crate::remote::dispatch(&app, &action, &args, TOKEN_SCOPE).await;
         let msg = match &result {
             Ok(value) => {
-                router.finish(&id, Answer::Ok);
+                router.finish(&request_key, Answer::Ok(value.clone()));
                 json!({ "t": "act-ack", "id": id, "ok": true, "result": value }).to_string()
             }
             Err(why) => {
-                router.finish(&id, Answer::Err(why.clone()));
+                router.finish(&request_key, Answer::Err(why.clone()));
                 ack_err(&id, why.clone())
             }
         };
@@ -783,8 +992,19 @@ fn act(v: &Value, p: &Portal, out: &mpsc::Sender<String>) {
     });
 }
 
-fn ack_ok(id: &str) -> String {
-    json!({ "t": "act-ack", "id": id, "ok": true }).to_string()
+/// Preserve existing portal pages while keeping versioned IDE command results
+/// identical to native IPC. Unknown versions must never reach a mutation.
+fn protocol_action<'a>(protocol: Option<&Value>, action: &'a str) -> Result<&'a str, &'static str> {
+    match protocol {
+        None if action == "fs_read_file" => Ok("fs_read_text"),
+        None => Ok(action),
+        Some(version) if version.as_u64() == Some(u64::from(crate::remote::HOST_PROTOCOL)) => Ok(action),
+        _ => Err("incompatible host protocol; reload the client"),
+    }
+}
+
+fn ack_ok(id: &str, result: Value) -> String {
+    json!({ "t": "act-ack", "id": id, "ok": true, "result": result }).to_string()
 }
 
 fn ack_err(id: &str, error: String) -> String {
@@ -794,7 +1014,7 @@ fn ack_err(id: &str, error: String) -> String {
 /// Stream one PTY's output to the socket: a catch-up snapshot, then the live
 /// tail. On broadcast lag we re-attach for a fresh snapshot rather than let the
 /// terminal render torn output.
-async fn stream_pty(app: AppHandle, id: u32, out: mpsc::Sender<String>) {
+async fn stream_pty(app: AppHandle, id: u32, out: PortalOut) {
     loop {
         // Through the stream registry rather than PtyManager directly, so `pty`
         // is one provider among the kinds a future module can add rather than a
@@ -925,8 +1145,13 @@ async fn snapshot_msg(
         let a = mgr.attention.lock().unwrap().clone();
         (h, a)
     };
+    let environment_id = app
+        .state::<crate::execution::ExecutionRegistry>()
+        .environment_id()
+        .ok();
     json!({
         "t": "snapshot",
+        "environmentId": environment_id,
         "projects": projects,
         "sessions": sessions,
         "usage": usage,
@@ -1194,6 +1419,14 @@ fn valid_token(tokens: &Tokens, tok: &str) -> bool {
     tokens.lock().unwrap().contains(tok)
 }
 
+fn consume_ticket(tickets: &Tickets, ticket: &str, now: Instant) -> Option<String> {
+    tickets
+        .lock()
+        .unwrap()
+        .remove(ticket)
+        .and_then(|(expires, principal)| (expires > now).then_some(principal))
+}
+
 fn gen_pin() -> String {
     let mut b = [0u8; 4];
     let _ = getrandom::getrandom(&mut b);
@@ -1278,6 +1511,36 @@ fn local_ips() -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn portal_outbound_queue_is_bounded_by_bytes() {
+        let (out, mut rx) = PortalOut::channel();
+        out.send("a".repeat(PORTAL_MAX_MESSAGE_BYTES))
+            .await
+            .unwrap();
+        out.send("b".repeat(PORTAL_MAX_MESSAGE_BYTES))
+            .await
+            .unwrap();
+
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(10), out.send("c".to_string())).await;
+        assert!(blocked.is_err(), "a full byte budget must backpressure");
+
+        drop(rx.recv().await.unwrap());
+        tokio::time::timeout(Duration::from_millis(100), out.send("c".to_string()))
+            .await
+            .expect("releasing a queued message releases its bytes")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn portal_rejects_one_message_larger_than_its_wire_budget() {
+        let (out, _rx) = PortalOut::channel();
+        assert!(out
+            .send("x".repeat(PORTAL_MAX_MESSAGE_BYTES + 1))
+            .await
+            .is_err());
+    }
+
     #[test]
     fn ct_eq_accepts_equal_rejects_different_and_length() {
         assert!(ct_eq(b"481920", b"481920"));
@@ -1301,6 +1564,31 @@ mod tests {
         let tok = gen_token();
         assert_eq!(tok.len(), 32);
         assert!(tok.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn host_protocol_keeps_legacy_text_reads_and_rejects_unknown_versions() {
+        assert_eq!(protocol_action(None, "fs_read_file"), Ok("fs_read_text"));
+        assert_eq!(protocol_action(Some(&json!(1)), "fs_read_file"), Ok("fs_read_file"));
+        assert!(protocol_action(Some(&json!(2)), "pty_spawn_detached").is_err());
+        assert!(protocol_action(Some(&json!("1")), "pty_kill").is_err());
+    }
+
+    #[test]
+    fn websocket_tickets_are_one_use_and_expire() {
+        let tickets: Tickets = Default::default();
+        let now = Instant::now();
+        tickets
+            .lock()
+            .unwrap()
+            .insert("fresh".into(), (now + Duration::from_secs(1), "client".into()));
+        tickets
+            .lock()
+            .unwrap()
+            .insert("old".into(), (now - Duration::from_secs(1), "client".into()));
+        assert_eq!(consume_ticket(&tickets, "fresh", now), Some("client".into()));
+        assert!(consume_ticket(&tickets, "fresh", now).is_none());
+        assert!(consume_ticket(&tickets, "old", now).is_none());
     }
 
     #[test]
@@ -1510,5 +1798,32 @@ mod tests {
         let out = trimmed["prompts"].as_array().unwrap();
         assert_eq!(out.len(), MAX_PROMPTS);
         assert_eq!(out.last().unwrap(), "p39", "the newest prompt must survive");
+    }
+
+    #[test]
+    fn socket_ownership_releases_and_preserves_only_scalar_high_water() {
+        let metrics = Arc::new(SocketMetrics::default());
+        {
+            let _first = SocketOwnership::try_acquire(metrics.clone()).unwrap();
+            let _second = SocketOwnership::try_acquire(metrics.clone()).unwrap();
+            assert_eq!(metrics.active.load(Ordering::Relaxed), 2);
+            assert_eq!(metrics.high_water.load(Ordering::Relaxed), 2);
+            assert_eq!(metrics.accepted_total.load(Ordering::Relaxed), 2);
+        }
+        assert_eq!(metrics.active.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.high_water.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn remote_socket_admission_refuses_the_seventeenth_owner() {
+        let metrics = Arc::new(SocketMetrics::default());
+        let owners: Vec<_> = (0..REMOTE_SOCKET_MAX)
+            .map(|_| SocketOwnership::try_acquire(metrics.clone()).unwrap())
+            .collect();
+        assert!(SocketOwnership::try_acquire(metrics.clone()).is_none());
+        assert_eq!(metrics.active.load(Ordering::Relaxed), REMOTE_SOCKET_MAX);
+        assert_eq!(metrics.rejected_total.load(Ordering::Relaxed), 1);
+        drop(owners);
+        assert_eq!(metrics.active.load(Ordering::Relaxed), 0);
     }
 }

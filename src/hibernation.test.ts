@@ -19,7 +19,7 @@ const term = (over: Partial<Extract<SubTab, { type: "terminal" }>> = {}): SubTab
     id: over.id ?? "t1",
     type: "terminal",
     cwd: "/repo",
-    title: "shell",
+    launchTitle: "shell",
     ptyId: 7,
     ...over,
   }) as SubTab;
@@ -57,6 +57,31 @@ describe("snapshotTabs", () => {
         attachId: undefined,
       },
     ]);
+  });
+
+  it("captures a CLI typed into an ordinary shell from its live process", () => {
+    const snap = snapshotTabs(
+      [term({ command: undefined, ptyId: 7 })],
+      (pty) => (pty === 7 ? "sess-42" : undefined),
+      (pty) => (pty === 7 ? "codex" : undefined),
+    );
+    expect(snap).toMatchObject([
+      {
+        kind: "terminal",
+        command: undefined,
+        agentId: "codex",
+        sessionId: "sess-42",
+      },
+    ]);
+  });
+
+  it("prefers the live CLI over a stale launch command", () => {
+    const [snap] = snapshotTabs(
+      [term({ command: "claude", ptyId: 7 })],
+      () => "sess-42",
+      () => "codex",
+    );
+    expect(snap).toMatchObject({ agentId: "codex", sessionId: "sess-42" });
   });
 
   /** The resume command's session id only exists in one account's store. */
@@ -97,8 +122,30 @@ describe("snapshotTabs", () => {
   });
 
   it("prefers the user's own tab name over whatever the shell repainted", () => {
-    const [t] = snapshotTabs([term({ title: "zsh", customTitle: "api server" })]);
-    expect(t).toMatchObject({ title: "api server" });
+    const [t] = snapshotTabs([term({ oscTitle: "zsh", userName: "api server" })]);
+    expect(t).toMatchObject({ title: "api server", userName: "api server" });
+  });
+
+  it("carries the user's name in a slot of its own, and only theirs", () => {
+    // The name has to survive the pty that held it, and waking has to be able
+    // to tell it apart from a generated one — which is what a shared field plus
+    // a `renamed` flag kept getting wrong.
+    const [renamed] = snapshotTabs([
+      term({ oscTitle: "zsh", userName: "billing api", nativeName: "Lumen" }),
+    ]);
+    expect(renamed).toMatchObject({
+      title: "billing api",
+      userName: "billing api",
+    });
+
+    // A generated name is not a rename: re-asserting it on the new session
+    // would fight whatever that session names itself. `/bin/zsh` is not a name
+    // either, so the launch label is what is left.
+    const [generated] = snapshotTabs([
+      term({ oscTitle: "/bin/zsh", nativeName: "Lumen" }),
+    ]);
+    expect(generated).toMatchObject({ title: "shell" });
+    expect(generated).not.toHaveProperty("userName");
   });
 
   it("drops the tabs that must not come back", () => {
@@ -217,6 +264,13 @@ describe("terminalLaunch", () => {
     });
   });
 
+  it("starts a live-identified CLI whose shell had no launch command", () => {
+    expect(terminalLaunch(t({ agentId: "codex", command: undefined }))).toEqual({
+      command: "codex",
+      resumed: false,
+    });
+  });
+
   it("replays a plain command as it was", () => {
     expect(terminalLaunch(t({ command: "npm run dev", run: true }))).toEqual({
       command: "npm run dev",
@@ -229,7 +283,7 @@ describe("snapshotSummary + wakeSteps", () => {
   const snap = buildSnapshot({
     tabs: [
       term({ id: "a", command: "claude", ptyId: 7 }),
-      term({ id: "s", command: "npm run dev", run: true, title: "dev" }),
+      term({ id: "s", command: "npm run dev", run: true, launchTitle: "dev" }),
       fileTab("/repo/src/App.tsx"),
       { id: "p", type: "preview", url: "http://localhost:5173", annotations: [] },
     ],

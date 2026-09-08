@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { createLinkHint, opensLink, LINK_CHORD } from "./terminalLinks";
+import {
+  createLinkHint,
+  opensLink,
+  LINK_CHORD,
+  terminalFileLinks,
+} from "./terminalLinks";
 import { IS_MAC } from "./platform";
 
 /** A MouseEvent stand-in — only the button and modifier flags are read. */
@@ -53,6 +58,32 @@ describe("opensLink", () => {
   });
 });
 
+describe("terminalFileLinks", () => {
+  it("finds a quoted screenshot path containing spaces", () => {
+    const path =
+      "/var/folders/x/T/TemporaryItems/Screenshot 2026-08-18 at 6.28.15 PM.png";
+    expect(terminalFileLinks(`read '${path}'`)).toEqual([
+      { path, start: 6, end: 6 + path.length, line: undefined },
+    ]);
+  });
+
+  it("finds source locations and strips terminal punctuation", () => {
+    expect(terminalFileLinks("at /repo/src/main.ts:42:7)."))
+      .toEqual([
+        {
+          path: "/repo/src/main.ts",
+          start: 3,
+          end: 3 + "/repo/src/main.ts:42:7".length,
+          line: 42,
+        },
+      ]);
+  });
+
+  it("does not mistake a web URL for a local path", () => {
+    expect(terminalFileLinks("open https://example.com/image.png")).toEqual([]);
+  });
+});
+
 describe("createLinkHint", () => {
   let host: HTMLDivElement;
   const bubble = () => host.querySelector(".term-link-hint");
@@ -75,6 +106,15 @@ describe("createLinkHint", () => {
     vi.advanceTimersByTime(300);
     expect(bubble()?.textContent).toContain("Open in Canopy");
     expect(bubble()?.textContent).toContain(LINK_CHORD);
+    hint.dispose();
+  });
+
+  it("labels local paths as files", () => {
+    const hint = createLinkHint(host);
+    hint.show(click(), "file");
+    vi.advanceTimersByTime(300);
+    expect(bubble()?.textContent).toContain("Open file in Canopy");
+    expect(bubble()?.textContent).not.toContain("browser");
     hint.dispose();
   });
 

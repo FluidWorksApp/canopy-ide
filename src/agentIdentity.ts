@@ -18,8 +18,8 @@
 // heard of names itself the first time it reports a single event.
 
 import { POLICY, agentLife } from "../shared/agentLife";
-import type { AgentHint, SessionDigest } from "./ipc";
-import { AGENT_CLIS, agentForBin, agentForPkg, binName } from "./projects";
+import type { AgentHint, SessionDigest, SessionStats } from "./ipc";
+import { agentCliFor, agentForBin, agentForPkg, binName } from "./projects";
 
 export interface AgentIdentity {
   /** Registry id, or null when the terminal is running something we can see
@@ -44,7 +44,7 @@ const KNOWN_TUIS = new Set([
 
 /** Looked up per call rather than cached in a Map built at module load: the
  *  registry is re-resolved whenever a binary override is edited. */
-const cliById = (id: string) => AGENT_CLIS.find((c) => c.id === id);
+const cliById = (id: string) => agentCliFor(id);
 
 /** Learned binary -> agent id, keyed by canonical executable path.
  *
@@ -148,6 +148,32 @@ export function identifyAgent(
     return { id: null, label: hint.bin, via: "interactive" };
   }
   return null;
+}
+
+/** Keep the last positively identified CLI for each terminal that still
+ * exists. Foreground-process sampling is intentionally momentary: an agent can
+ * briefly hand the tty back to its shell or a child process between samples.
+ * UI ownership is not momentary — dropping it on one empty sample unmounts the
+ * agent workspace and destroys the interaction in progress.
+ *
+ * A later positive sample replaces the remembered id, so starting a different
+ * CLI in the same terminal still changes identity. Closing the terminal is the
+ * only negative evidence strong enough to forget it. */
+export function rememberAgentPtys(
+  memory: Map<number, string>,
+  livePtys: Iterable<number>,
+  samples: Iterable<Pick<SessionStats, "id" | "agent_hint">>,
+): Map<number, string> {
+  const live = new Set(livePtys);
+  for (const pty of memory.keys()) {
+    if (!live.has(pty)) memory.delete(pty);
+  }
+  for (const sample of samples) {
+    if (!live.has(sample.id)) continue;
+    const id = identifyAgent(sample.agent_hint)?.id;
+    if (id) memory.set(sample.id, id);
+  }
+  return memory;
 }
 
 /**

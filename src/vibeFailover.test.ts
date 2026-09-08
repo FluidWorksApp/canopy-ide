@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { failoverDecision, rankRoutes, type RouteCandidate } from "./vibeFailover";
+import {
+  failoverDecision,
+  rankRoutes,
+  type RouteCandidate,
+} from "./vibeFailover";
 import type { FleetState } from "./fleetState";
 import type { AttemptOutcome } from "./failureClassifier";
+import { routingAgentClis, streamsStructured } from "./projects";
 
 const state = (
   agent: string,
@@ -51,6 +56,16 @@ describe("route selection", () => {
     expect(ranked[1].caveat).toBeTruthy();
   });
 
+  it("uses the user's preferred agent first when routes are equally healthy", () => {
+    const ranked = rankRoutes([claude(), codex()], "build", "codex");
+    expect(ranked.map((route) => route.cli)).toEqual(["codex", "claude"]);
+  });
+
+  it("uses a healthier route when the preferred agent is degraded", () => {
+    const ranked = rankRoutes([claude(), codex("degraded")], "build", "codex");
+    expect(ranked.map((route) => route.cli)).toEqual(["claude", "codex"]);
+  });
+
   it("flags a served tier below the one the class asked for", () => {
     const haikuOnly: RouteCandidate = {
       ...claude(),
@@ -68,6 +83,21 @@ describe("route selection", () => {
       choices: [{ id: "some-internal-build", label: "?", hint: "" }],
     };
     expect(rankRoutes([unknownModels], "build")).toEqual([]);
+  });
+
+  it("never routes a CLI without a dated structured runner", () => {
+    const phantom: RouteCandidate = {
+      cli: "gemini",
+      profileId: "default",
+      family: "google",
+      state: state("gemini", "ready"),
+      choices: [{ id: "gemini-3.1-pro-preview", label: "Gemini", hint: "" }],
+    };
+    expect(rankRoutes([phantom], "build")).toEqual([]);
+    expect(routingAgentClis().some((cli) => cli.id === "gemini")).toBe(false);
+    for (const cli of routingAgentClis()) {
+      expect(streamsStructured(cli.id), cli.id).toBe(true);
+    }
   });
 });
 

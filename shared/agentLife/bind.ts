@@ -34,6 +34,14 @@ export interface BindSnapshot {
    *  terminal that closed from one we simply have no news about, and that
    *  distinction is the whole of the `gone` verdict. */
   livePtys: ReadonlySet<number>;
+  /** Bonds known from the launch command itself — a tab restored as
+   *  `codex resume <id>` names its session outright, and Canopy typed that
+   *  command into that pty. Weakest of the three, because a CLI may swap ids
+   *  once it starts, but it holds from the first frame: without it a resumed
+   *  CLI that emits no hook event until its next prompt (codex does exactly
+   *  this) is unbound after every restart, and the strip reads the resume
+   *  banner's paint burst as "working" while the digest on disk says idle. */
+  seeds?: ReadonlyMap<number, string>;
 }
 
 export interface Bound {
@@ -54,8 +62,12 @@ export interface Bound {
 }
 
 export function resolveSessions(snap: BindSnapshot): Bound {
-  // The event stamp first: latest event per pty wins. A pty id is only unique
-  // within one launch, and these events are from this one by construction.
+  // Three sources, weakest first, because a stronger one may correct it.
+  const sessionByPty = new Map<number, string>(snap.seeds ?? []);
+
+  // The event stamp: latest event per pty wins. A pty id is only unique within
+  // one launch, and these events are from this one by construction, so this
+  // beats the seed — it follows the session even if the CLI swaps ids.
   const latest = new Map<number, { sid: string; ts: number }>();
   for (const e of snap.events) {
     const d = e.data;
@@ -63,7 +75,6 @@ export function resolveSessions(snap: BindSnapshot): Bound {
     const prev = latest.get(d.pty);
     if (!prev || e.ts >= prev.ts) latest.set(d.pty, { sid: d.sessionId, ts: e.ts });
   }
-  const sessionByPty = new Map<number, string>();
   for (const [pty, v] of latest) sessionByPty.set(pty, v.sid);
 
   // Then the recorded surface, for sessions whose events have aged out of the
