@@ -231,3 +231,55 @@ describe("Term spawn failure", () => {
     expect(onExited).not.toHaveBeenCalled();
   });
 });
+
+describe("Term ended process recovery", () => {
+  it("settles a missing PTY and does not retry when the viewer is shown again", async () => {
+    const ipc = await import("../ipc");
+    const attach = vi.spyOn(ipc, "ptyAttachDesktop").mockRejectedValue(new Error("no pty session 12"));
+    vi.spyOn(ipc, "ptyOutput").mockResolvedValue("ERR_PNPM_OUTDATED_LOCKFILE");
+    vi.spyOn(ipc, "onPtyExit").mockResolvedValue(() => {});
+    const c = consumer(runTab());
+    const props = { cwd: "/w/site", active: true, attachId: 12, onSpawned: c.onSpawned, onExited: c.onExited };
+    const view = render(<Term {...props} streaming />);
+    await waitFor(() => expect(c.tab.exited).toBe(true));
+    expect(c.tab.exitCode).toBeNull();
+    view.rerender(<Term {...props} streaming={false} />);
+    view.rerender(<Term {...props} streaming />);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(attach).toHaveBeenCalledTimes(1);
+    view.unmount();
+    vi.restoreAllMocks();
+  });
+
+  it("does not reconnect an exited process after hide and show", async () => {
+    const ipc = await import("../ipc");
+    let exited!: (event: import("../ipc").PtyExit) => void;
+    vi.spyOn(ipc, "onPtyExit").mockImplementation(async (cb) => { exited = cb; return () => {}; });
+    const attach = vi.spyOn(ipc, "ptyAttachDesktop").mockResolvedValue({ generation: 1, cols: 80, rows: 24 } as Awaited<ReturnType<typeof ipc.ptyAttachDesktop>>);
+    vi.spyOn(ipc, "ptyDetachDesktop").mockResolvedValue(undefined);
+    const c = consumer(runTab());
+    const props = { cwd: "/w/site", active: true, attachId: 12, onSpawned: c.onSpawned, onExited: c.onExited };
+    const view = render(<Term {...props} streaming />);
+    await waitFor(() => expect(c.tab.ptyId).toBe(12));
+    exited({ id: 12, session_generation: 1, exit_code: 1, requested: false });
+    view.rerender(<Term {...props} streaming={false} />);
+    view.rerender(<Term {...props} streaming />);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(attach).toHaveBeenCalledTimes(1);
+    expect(c.tab.exitCode).toBe(1);
+    view.unmount();
+    vi.restoreAllMocks();
+  });
+
+  it("reads retained native output when the hidden viewer has no text", async () => {
+    const ipc = await import("../ipc");
+    vi.spyOn(ipc, "onPtyExit").mockResolvedValue(() => {});
+    vi.spyOn(ipc, "ptyOutput").mockResolvedValue("ERR_PNPM_OUTDATED_LOCKFILE");
+    const { createRef } = await import("react");
+    const ref = createRef<import("./Term").TermHandle>();
+    const view = render(<Term ref={ref} cwd="/w/site" active={false} streaming={false} attachId={12} onSpawned={() => {}} onExited={() => {}} />);
+    await waitFor(async () => expect(await ref.current!.captureTextSettled()).toBe("ERR_PNPM_OUTDATED_LOCKFILE"));
+    view.unmount();
+    vi.restoreAllMocks();
+  });
+});

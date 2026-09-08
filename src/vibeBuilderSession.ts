@@ -186,6 +186,8 @@ export interface BrowserInspection {
 }
 
 export interface VibeServerIncidentInput {
+  /** Re-run a failed setup after repair; readiness still requires a real exit. */
+  onRepaired?: () => void;
   key: string;
   componentId: string;
   runCommandId: string;
@@ -2116,7 +2118,13 @@ export class VibeBuilderSession implements BuilderSession {
       const repair = this.repairDependency();
       let result: VibeRepairTaskResult;
       try {
-        result = await repair({ problem });
+        result = await repair({ problem, onActivity: (doing) => {
+          if (this.stopped) return;
+          this.present({ kind: "incident" }, {
+            id: `vibe-process-${input.componentId}-${input.runCommandId}`,
+            kind: "notice", prompt: "I'm fixing the project setup.", detail: doing,
+          });
+        } });
       } catch {
         // A runner rejection is a failed repair, not an unhandled rejection
         // from this fire-and-forget path. Let the next crash try again.
@@ -2133,6 +2141,7 @@ export class VibeBuilderSession implements BuilderSession {
         this.serverIncidentOpen = false;
         this.incidentOpen = false;
         this.resolveServerIncident(input.key);
+        input.onRepaired?.();
         this.present(
           { kind: "idle" },
           {

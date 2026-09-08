@@ -947,6 +947,7 @@ describe("VibeBuilderSession", () => {
 
     await vi.waitFor(() => expect(repair).toHaveBeenCalled());
     expect(repair).toHaveBeenCalledWith({
+      onActivity: expect.any(Function),
       problem: expect.objectContaining({
         code: "server-start-failed",
         statement: expect.stringContaining("waiting for interactive input"),
@@ -983,7 +984,9 @@ describe("VibeBuilderSession", () => {
         }],
       });
 
+      const onRepaired = vi.fn();
       await h.session.reportManagedProcessFailure({
+        onRepaired,
         key: `api:${kind}:first-exit`,
         kind,
         componentId: "api",
@@ -1002,8 +1005,9 @@ describe("VibeBuilderSession", () => {
         },
       });
 
-      await vi.waitFor(() => expect(repair).toHaveBeenCalled());
+      await vi.waitFor(() => expect(onRepaired).toHaveBeenCalledTimes(1));
       expect(repair).toHaveBeenCalledWith({
+        onActivity: expect.any(Function),
         problem: expect.objectContaining({
           code,
           statement: expect.stringContaining(statement),

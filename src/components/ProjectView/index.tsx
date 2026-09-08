@@ -240,6 +240,7 @@ import {
   MANAGED_PROCESS_ENV,
   plainManagedOutput,
   unattendedManagedRunCommand,
+  unattendedManagedRunArgv,
 } from "../../managedProcessSupervisor";
 import { watchFailedRestore } from "../../restoreReap";
 import { followLink, type DeepLink } from "../../deepLinks";
@@ -10537,6 +10538,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           Promise.resolve("");
         void vibeSession.reportManagedProcessFailure({
           key: setupKey,
+          onRepaired: () => {
+            const current = tabsRef.current.find((tab) => tab.id === failedTab.id);
+            if (current?.type === "terminal" && current.exited) restartRun(current.id);
+          },
           kind: "setup",
           componentId: component.id,
           runCommandId: setup.id,
@@ -10572,7 +10577,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         { componentId: component.id, runCommandId: command.id },
       );
     }
-  }, [visible, vibe, vibeSession, vibeRequiredRuns, runTabs, projectStats, addTerminal, project.id, project.name, project.components, vibeVerifiedReadinessPtys]);
+  }, [visible, vibe, vibeSession, vibeRequiredRuns, runTabs, projectStats, addTerminal, project.id, project.name, project.components, vibeVerifiedReadinessPtys, restartRun]);
 
   // A live PTY is not proof that its command started. Package runners,
   // authentication flows, and project pickers can all wait forever while the
@@ -12649,10 +12654,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 }
                 runArgv={
                   tab.run && tab.componentId && tab.runCommandId
-                    ? componentsRef.current
-                        .find((component) => component.id === tab.componentId)
-                        ?.commands?.find((command) => command.id === tab.runCommandId)
-                        ?.argv
+                    ? unattendedManagedRunArgv(
+                        componentsRef.current
+                          .find((component) => component.id === tab.componentId)
+                          ?.commands?.find((command) => command.id === tab.runCommandId),
+                      )
                     : undefined
                 }
                 env={tab.env}

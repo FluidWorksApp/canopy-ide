@@ -267,6 +267,23 @@ const hasFlag = (command: string, flag: string) =>
     command,
   );
 
+/** Normalize the actual argv launch too: argv takes precedence over shell text. */
+export function unattendedManagedRunArgv(
+  command: Pick<RunCommand, "argv" | "purpose"> | undefined,
+): string[] | undefined {
+  if (!command?.argv) return undefined;
+  const next = [...command.argv];
+  if (next[0] === "npx" && !next.includes("--yes") && !next.includes("-y")) next.splice(1, 0, "--yes");
+  if (next[0] === "npm" && ["exec", "x"].includes(next[1]) && !next.includes("--yes") && !next.includes("-y")) next.splice(2, 0, "--yes");
+  const trigger = next.findIndex((arg) => /^trigger(?:\.dev)?(?:@[^\s]+)?$/.test(arg));
+  if (trigger >= 0 && next[trigger + 1] === "dev" && !next.includes("--skip-update-check")) next.splice(trigger + 2, 0, "--skip-update-check");
+  if (command.purpose === "setup" && next.length === 2 && ["install", "i"].includes(next[1])) {
+    if (next[0] === "pnpm") next.push("--force", "--no-frozen-lockfile");
+    if (next[0] === "npm") next.push("--yes");
+  }
+  return next;
+}
+
 /** Prevent known package-runner prompts before the PTY starts. These are
  * vendor-supported flags, not a blanket `yes` pipe; unrelated prompts remain
  * visible to the classifier and repair agent. */
@@ -289,7 +306,7 @@ export function unattendedManagedRunCommand(
     );
   }
   if (command.purpose === "setup" && /^pnpm\s+(?:install|i)\s*$/i.test(next)) {
-    return `${next} --force`;
+    return `${next} --force --no-frozen-lockfile`;
   }
   if (command.purpose === "setup" && /^npm\s+(?:install|i)\s*$/i.test(next)) {
     return `${next} --yes`;
