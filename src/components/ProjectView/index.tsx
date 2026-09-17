@@ -8615,7 +8615,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     async (
       cli: AgentCli,
       at?: string,
-      // Unnamed means "the user didn't say": the agentWorkspaces setting
+      // Unnamed means "the user didn't say": the agentWorkspaceByDefault setting
       // decides. Callers with an explicit gesture (⇧↵, the hover action, a
       // context-menu entry) still pass their own.
       where?: "workspace" | "current",
@@ -8623,8 +8623,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const cwd = at ?? activeContextRoot ?? componentsRef.current[0]?.path;
       if (!cwd) return;
       const target =
-        where ?? (getSettings().agentWorkspaces ? "workspace" : "current");
-      if (installed[cli.bin]) {
+        where ?? (getSettings().agentWorkspaceByDefault ? "workspace" : "current");
+      // `undefined` is a probe that hasn't answered, never "not installed".
+      // Ask now; if it still can't say, launch anyway: a missing binary fails
+      // visibly in its own terminal, while guessing "missing" would run the
+      // installer over a CLI the user already has.
+      let present = installed[cli.bin];
+      if (present === undefined) present = (await getInstalledForLaunch())[cli.bin];
+      if (present !== false) {
         let launchCwd = cwd;
         if (target === "workspace") {
           const repo =
@@ -8717,6 +8723,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [
       installed,
+      getInstalledForLaunch,
       addTerminal,
       completePendingSplit,
       onNotice,
@@ -8760,11 +8767,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       icon: <AgentIcon id={cli.id} size={15} />,
       // Informational: a context-menu row has one click target, and the ＋
       // menu carries the clickable badge. The account is the status bar's job.
-      hint: installed[cli.bin]
-        ? cliUpdates[cli.bin]?.hasUpdate
-          ? `⇡ ${cliUpdates[cli.bin]?.latest}`
-          : undefined
-        : "install",
+      hint:
+        installed[cli.bin] === false
+          ? "install"
+          : cliUpdates[cli.bin]?.hasUpdate
+            ? `⇡ ${cliUpdates[cli.bin]?.latest}`
+            : undefined,
       onClick: () => void launchCli(cli, cwd, "current"),
     })),
   ];
@@ -13004,7 +13012,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   className="launch-card"
                   onClick={() => launchCli(cli)}
                   title={
-                    installed[cli.bin]
+                    installed[cli.bin] !== false
                       ? cli.bin
                       : cli.install
                         ? `not installed — runs: ${cli.install}`
@@ -13016,7 +13024,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   {/* An entry with no installer can only say what's true: the
                       binary isn't there. Offering "install" would be a button
                       that cannot work. */}
-                  {!installed[cli.bin] && (
+                  {installed[cli.bin] === false && (
                     <span className="launch-install">
                       {cli.install ? "install" : "not found"}
                     </span>

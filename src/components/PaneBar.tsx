@@ -816,7 +816,7 @@ function PaneBarImpl({
                 </div>
               )}
               {AGENT_CLIS.map((cli) => (
-                // Unqualified click follows the agentWorkspaces setting; the
+                // Unqualified click follows the agentWorkspaceByDefault setting; the
                 // hover action below is always the other choice, same as the
                 // ⌘N palette.
                 <div key={cli.id} className="cli-item" onClick={() => { setCliMenuOpen(false); onLaunchCli(cli); }}>
@@ -828,7 +828,7 @@ function PaneBarImpl({
                       sign in
                     </span>
                   )}
-                  {!installed[cli.bin] && <span className="cli-install">install</span>}
+                  {installed[cli.bin] === false && <span className="cli-install">install</span>}
                   {installed[cli.bin] && cliUpdates[cli.bin]?.hasUpdate && (
                     <span
                       className="cli-update"
@@ -843,12 +843,12 @@ function PaneBarImpl({
                       type="button"
                       className="launch-current"
                       aria-label={
-                        getSettings().agentWorkspaces
+                        getSettings().agentWorkspaceByDefault
                           ? `Open ${cli.name} in the current checkout`
                           : `Open ${cli.name} in a new workspace`
                       }
                       title={
-                        getSettings().agentWorkspaces
+                        getSettings().agentWorkspaceByDefault
                           ? `Open ${cli.name} in the current checkout`
                           : `Open ${cli.name} in a new workspace`
                       }
@@ -857,11 +857,11 @@ function PaneBarImpl({
                         setCliMenuOpen(false);
                         onLaunchCli(
                           cli,
-                          getSettings().agentWorkspaces ? "current" : "workspace",
+                          getSettings().agentWorkspaceByDefault ? "current" : "workspace",
                         );
                       }}
                     >
-                      {getSettings().agentWorkspaces ? "here" : "workspace"}
+                      {getSettings().agentWorkspaceByDefault ? "here" : "workspace"}
                     </button>
                   )}
                 </div>

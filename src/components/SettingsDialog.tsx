@@ -1825,8 +1825,8 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   desc="⌘N and the launch cards open each agent in its own worktree, so parallel agents can't trample each other. Off opens them in the current checkout, which is instant; ⇧↵ or the row's hover action always does the opposite once."
                 >
                   <Checkbox
-                    checked={s.agentWorkspaces}
-                    onChange={(v) => patch({ agentWorkspaces: v })}
+                    checked={s.agentWorkspaceByDefault}
+                    onChange={(v) => patch({ agentWorkspaceByDefault: v })}
                     label="Start new agents in their own workspace"
                   />
                 </Item>

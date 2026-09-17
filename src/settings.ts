@@ -560,8 +560,10 @@ export interface Settings {
   /** A new agent (⌘N, the launch cards) opens in its own workspace — a fresh
    *  worktree, so parallel agents can't trample each other's changes. Off
    *  opens it in the current checkout instead, which is instant. Either way
-   *  the launcher's ⇧↵ / hover action does the opposite for one launch. */
-  agentWorkspaces: boolean;
+   *  the launcher's ⇧↵ / hover action does the opposite for one launch.
+   *  Off by default: ⌘N opens where you are. Renamed from `agentWorkspaces`
+   *  when that default flipped, because a stored key outlives its default. */
+  agentWorkspaceByDefault: boolean;
 
   // ---- Crash reporting ----
   /** Opt-in, default off: when a panel crashes (or a native panic is found on
@@ -661,7 +663,7 @@ export const DEFAULTS: Settings = {
   workspaceBasePort: 5173,
   workspacePorts: {},
   workspaceBootstrap: true,
-  agentWorkspaces: true,
+  agentWorkspaceByDefault: false,
   crashReporting: false,
 };
 
