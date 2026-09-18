@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { connectChrome, pageSession, WebSocketServer } from './playwright.mjs';
-import { FrameGate, viewportSize, websiteUrl } from './protocol.mjs';
+import { FRAME_POLL_MS, FrameGate, refreshBackoff, shouldRefreshStream, viewportSize, websiteUrl } from './protocol.mjs';
 
 export async function startBridge(config, connectBrowser = connectChrome) {
   const lines = createInterface({ input: process.stdin });
@@ -12,6 +12,9 @@ export async function startBridge(config, connectBrowser = connectChrome) {
   const picker = await readFile(new URL('./preview_picker.js', import.meta.url), 'utf8');
   const html = await readFile(new URL('./viewer.html', import.meta.url), 'utf8');
   const js = await readFile(new URL('./viewer.js', import.meta.url), 'utf8');
+  // The viewer imports the shared sizing and staleness rules from the same
+  // file this process uses, so the two halves cannot drift apart.
+  const protocol = await readFile(new URL('./protocol.mjs', import.meta.url), 'utf8');
   const token = randomBytes(32).toString('hex');
   let origin;
   let viewer;
@@ -23,6 +26,11 @@ export async function startBridge(config, connectBrowser = connectChrome) {
   let size = { width: 1280, height: 720 };
   let pendingUrl = initialUrl;
   let visible = true;
+  let lastFrameAt = 0;
+  let refreshing = false;
+  let nextRefreshAt = 0;
+  let refreshDelay = 0;
+  let sentData;
   const pages = new Map();
   const ownedPages = new Set();
   const gate = new FrameGate();
@@ -45,8 +53,40 @@ export async function startBridge(config, connectBrowser = connectChrome) {
   }
 
   async function startFrames(entry) {
+    // Chrome throttles a tab it considers backgrounded: frozen timers, and a
+    // renderer that may stop painting. Neither is wanted while its pixels are
+    // the preview, and both are best-effort — an older Chrome simply refuses.
+    await entry.session.send('Page.setWebLifecycleState', { state: 'active' }).catch(() => {});
+    await entry.session.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
     await entry.session.send('Page.startScreencast', { format: 'jpeg', quality: 75, maxWidth: 1920, maxHeight: 1200, everyNthFrame: 1 });
   }
+
+  /** Chrome delivers screencast frames only while it is compositing the tab,
+   *  so a Canopy window covering Chrome freezes the preview on its last frame
+   *  until the user clicks into Chrome. Restarting the screencast makes Chrome
+   *  produce a frame on the spot — measured to work for a background tab and
+   *  for a minimized window, where `Page.captureScreenshot` instead hangs. */
+  async function refreshStream() {
+    const attached = !!active && viewer?.readyState === 1 && viewer.bufferedAmount <= 2_000_000;
+    if (!shouldRefreshStream({ visible, attached, refreshing, lastFrameAt, nextRefreshAt }, Date.now())) return;
+    const entry = active;
+    refreshing = true;
+    // Ask again later even if this attempt yields nothing, and grow the wait
+    // while the picture keeps coming back unchanged.
+    refreshDelay = refreshBackoff(refreshDelay);
+    nextRefreshAt = Date.now() + refreshDelay;
+    try {
+      await entry.session.send('Page.stopScreencast');
+      if (entry !== active || !visible) return;
+      await startFrames(entry);
+    } catch {
+      // A restart races navigation and tab closure; the next tick retries.
+    } finally {
+      refreshing = false;
+    }
+  }
+  const frameTimer = setInterval(() => void refreshStream(), FRAME_POLL_MS);
+  frameTimer.unref?.();
 
   async function attach(page) {
     ownedPages.add(page);
@@ -64,6 +104,15 @@ export async function startBridge(config, connectBrowser = connectChrome) {
     entry.session.on('Page.screencastFrame', frame => {
       void entry.session.send('Page.screencastFrameAck', { sessionId: frame.sessionId }).catch(() => {});
       if (entry !== active || !visible || viewer?.readyState !== 1 || viewer.bufferedAmount > 2_000_000) return;
+      // Chrome answered, so the stream is alive as far as this tick knows.
+      lastFrameAt = Date.now();
+      // A restart re-sends the picture already on screen. Dropping an
+      // identical frame keeps an idle preview off the wire, and keeps the
+      // backoff growing until something actually changes.
+      if (frame.data === sentData) return;
+      sentData = frame.data;
+      refreshDelay = 0;
+      nextRefreshAt = 0;
       gate.offer(send, { type: 'frame', data: frame.data, width: frame.metadata.deviceWidth, height: frame.metadata.deviceHeight });
     });
     page.on('framenavigated', frame => {
@@ -132,6 +181,11 @@ export async function startBridge(config, connectBrowser = connectChrome) {
     }
     if (message.type === 'resize') {
       size = viewportSize(message.width, message.height);
+      // The picture is about to change shape, so the frame held back as a
+      // duplicate no longer describes what the viewer is showing.
+      sentData = undefined;
+      refreshDelay = 0;
+      nextRefreshAt = 0;
       if (active) await active.page.setViewportSize(size);
       return;
     }
@@ -196,10 +250,13 @@ export async function startBridge(config, connectBrowser = connectChrome) {
   const server = createServer((req, res) => {
     if (req.headers.host !== new URL(origin).host || req.method !== 'GET') { res.writeHead(403).end(); return; }
     const path = new URL(req.url, origin).pathname;
-    const body = path === `/${token}/` ? html : path === `/${token}/viewer.js` ? js : null;
+    const body = path === `/${token}/` ? html
+      : path === `/${token}/viewer.js` ? js
+      : path === `/${token}/protocol.mjs` ? protocol
+      : null;
     if (body === null) { res.writeHead(404).end(); return; }
     res.writeHead(200, {
-      'Content-Type': path.endsWith('.js') ? 'text/javascript' : 'text/html',
+      'Content-Type': /\.(js|mjs)$/.test(path) ? 'text/javascript' : 'text/html',
       'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff',
       'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src blob:; connect-src 'self'; base-uri 'none'; form-action 'none'",
     }).end(body);
@@ -247,6 +304,7 @@ export async function startBridge(config, connectBrowser = connectChrome) {
   async function shutdown() {
     if (closing) return;
     closing = true;
+    clearInterval(frameTimer);
     // Close only tabs this process created (including their popups), then detach
     // from Chrome. Never close the user's browser context or personal tabs.
     await Promise.race([

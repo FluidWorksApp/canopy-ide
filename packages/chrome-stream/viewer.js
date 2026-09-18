@@ -1,4 +1,5 @@
 /* The iframe contains only this viewer. Website HTML never enters the IDE. */
+import { fitContain } from './protocol.mjs';
 const $ = id => document.getElementById(id);
 const canvas = $('canvas');
 const context = canvas.getContext('2d', { alpha: false });
@@ -19,11 +20,24 @@ const post = message => { if (parentOrigin) parent.postMessage(message, parentOr
 const send = message => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message)); };
 function visibility() { send({ type: 'visible', visible: wanted && !document.hidden }); }
 function resize() {
+  layout();
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
     const r = $('screen').getBoundingClientRect();
     if (r.width > 1 && r.height > 1) send({ type: 'resize', width: r.width, height: r.height });
   }, 120);
+}
+/** Draw the frame at the pane's size rather than its own. Chrome's viewport
+ *  cannot always be made to match the pane — the extension relay cannot resize
+ *  the real window — so the frame that arrives may be smaller or a different
+ *  shape. Scaling here fills the pane either way, and keeps the canvas element
+ *  exactly the size of the picture, which is what the pointer maths measures. */
+function layout() {
+  const box = $('screen').getBoundingClientRect();
+  const fit = fitContain({ width: canvas.width, height: canvas.height }, box);
+  if (!fit.width || !fit.height) return;
+  canvas.style.width = `${fit.width}px`;
+  canvas.style.height = `${fit.height}px`;
 }
 function connect() {
   if (socket && socket.readyState < 2) { send({ type: 'connect' }); return; }
@@ -49,6 +63,7 @@ function connect() {
         canvas.dataset.viewportWidth = frameWidth;
         canvas.dataset.viewportHeight = frameHeight;
         canvas.hidden = false;
+        layout();
         $('welcome').hidden = true;
         connected = true;
       } finally {

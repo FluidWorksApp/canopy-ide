@@ -11,6 +11,16 @@ can cover any part of the iframe without hiding the website. Hidden preview
 tabs pause screencasting; this is a bandwidth optimization, not native-window
 occlusion choreography. The website and agent commands continue to run.
 
+Chrome emits screencast frames only while it composites the tab, so an IDE
+window covering Chrome can leave the preview on a stale frame. When frames stop
+arriving the bridge restarts the screencast, which makes Chrome produce one on
+the spot; a picture identical to the last is dropped and the retry backs off, so
+an idle preview costs almost nothing. `Page.captureScreenshot` is deliberately
+not used for this: it fails for a background tab and hangs outright for a
+minimized window. The viewer scales each frame to the pane, because the
+extension relay cannot resize the real Chrome window and the frame that arrives
+may be smaller or a different shape than the preview.
+
 The existing annotation picker runs in Chrome with a Playwright binding as its
 return channel. Screenshots come from the real Chrome page. Popups created by
 the project tab appear in the viewer's tab selector. Basic JavaScript dialogs
@@ -43,7 +53,10 @@ connection for unattended tests; it does not verify extension compatibility.
 - The two browser choices are **Embedded** (the default iframe) and
   **Playwright**. Saved native-webview preferences migrate to Embedded;
   existing iframe and Playwright choices are preserved. Playwright remains a
-  prototype pending background/minimized-window and platform validation.
+  prototype pending platform validation. The stream's own recovery is measured
+  against a background tab and a minimized window driven over a direct CDP
+  session; occlusion behaviour through the extension relay, on every platform,
+  is not yet covered by a test.
 - One Node bridge/extension connection per Canopy preview tab. No persistent
   extension token is stored by Canopy; reconnects may require approval.
 - `playwright.mjs` isolates the pinned internal extension factory and existing
