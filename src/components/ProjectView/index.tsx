@@ -148,7 +148,11 @@ import {
   inspectFleetRoute,
   type FleetRouteSnapshot,
 } from "../../fleetSnapshot";
-import { pickLaunchCli, startCommandParked } from "../../agentSeed";
+import {
+  pickLaunchCli,
+  startCommandParked,
+  unattendedContextFor,
+} from "../../agentSeed";
 import {
   placeSpawnedTab,
   agentWorkspaceBranch,
@@ -330,6 +334,7 @@ import {
   askedLine,
   hasIdentity,
   identityPatch,
+  mayAutoRename,
   promptTaskIdentity,
   shouldSeedPromptIdentity,
   taskDescription,
@@ -2502,10 +2507,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       .map((t) => ({
         cwd: t.cwd,
         command: t.command,
-        // Same reason as the hibernation snapshot: a rename is stored in native
-        // `name` and dies with the pty, so leaving it out is what made a
-        // reopened terminal come back under its generated name.
-        title: (t.renamed ? t.name : undefined) ?? t.customTitle ?? t.title,
+        // Same reason as the hibernation snapshot: a rename dies with the pty
+        // that held it, so leaving it out is what made a reopened terminal come
+        // back under its generated name. `customTitle` first: it is what the
+        // user typed, where native `name` may be its deduplicated answer.
+        title:
+          (t.renamed ? (t.customTitle ?? t.name) : undefined) ??
+          t.customTitle ??
+          t.title,
         renamed: t.renamed || undefined,
         icon: t.icon,
         run: t.run,
@@ -2560,10 +2569,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ? { componentId: t.componentId, runCommandId: t.runCommandId }
           : undefined,
       );
-      // A name the user chose outlives the pty that held it. Handing it back as
-      // a pending rename is what makes the spawn callback re-assert it, instead
-      // of the reopened terminal settling under a freshly generated name.
-      if (t.renamed && t.title) patchTabRaw(id, { customTitle: t.title });
+      // A name the user chose outlives the pty that held it. `renamed` comes
+      // back with it: without that flag the restored tab looks auto-named to
+      // every auto-namer, and the first canopy_name_task after a wake took the
+      // name away again.
+      if (t.renamed && t.title)
+        patchTabRaw(id, { customTitle: t.title, renamed: true } as Partial<SubTab>);
       return id;
     },
     [addTerminal, patchTabRaw],
@@ -3543,6 +3554,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const requestedDir = def.cwd(payload);
       let dir = requestedDir;
       let env: MicroTaskEnv | undefined;
+      /** The repo an isolated task's worktree belongs to, once the switch has
+       *  made one. Held so the sandbox grant below can name its git directory
+       *  outright rather than inferring it from the path. */
+      let isolatedFrom: string | undefined;
       if (def.isolation) {
         // Both isolation kinds want the same thing — this work, in a workspace
         // of its own — and differ only in what they start from: a PR's head, or
@@ -3572,12 +3587,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (r.kind !== "settled") return false;
         dir = r.path;
         env = r.created ? { cleanup: { repo, worktree: r.path } } : undefined;
+        if (r.path !== repo) isolatedFrom = repo;
       }
+      // What this run must be able to write outside its own directory — the git
+      // directory of the repo its worktree belongs to, and nothing else. Read off
+      // the path when the task was not isolated here, so a task launched in a
+      // workspace that already existed is granted it too.
+      const sandbox = unattendedContextFor(dir, isolatedFrom);
       const brief = def.buildContext(payload, userQuery, env);
       const seed = oneLine(
         `${brief} ${progressBrief(def, payload)} ${microTaskProtocol()}`,
       );
-      const start = await startCommandParked(agent, seed, dir, launchOptions);
+      const start = await startCommandParked(agent, seed, dir, launchOptions, sandbox);
       if (!start) {
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return false;
@@ -5306,7 +5327,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ...(description ? { description } : {}),
             // The generated session name (Moss, Juniper, …) is a fallback,
             // not the work's identity. Preserve an explicit user rename.
-            ...(named.title && !tab.renamed
+            ...(named.title && mayAutoRename(tab)
               ? { customTitle: named.title }
               : {}),
           });
@@ -5326,9 +5347,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
           );
         else if (tab)
           patchTabRaw(tab.id, {
-            customTitle: named.title
-              ? `${named.title} · task`
-              : tab.customTitle,
+            // Same rule as the ordinary branch above, and it has to be repeated
+            // here: a micro-task tab the user renamed was being re-titled on
+            // every canopy_name_task the agent made, which is as often as the
+            // work changes. An explicit rename outranks the agent's own idea of
+            // what the run is called, for the whole life of the tab.
+            customTitle:
+              named.title && mayAutoRename(tab)
+                ? `${named.title} · task`
+                : tab.customTitle,
             icon: named.icon ?? tab.icon,
           } as Partial<SubTab>);
         return;
@@ -7447,8 +7474,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
               : undefined,
           );
           // Waking spawns a new pty, which names itself. A name the user chose
-          // has to be re-asserted onto it or the wake silently renames the tab.
-          if (t.renamed && t.title) patchTabRaw(id, { customTitle: t.title });
+          // has to be re-asserted onto it — and re-flagged as chosen, or the
+          // first thing that auto-names this tab overwrites it.
+          if (t.renamed && t.title)
+            patchTabRaw(id, { customTitle: t.title, renamed: true } as Partial<SubTab>);
           return id;
         }
         case "file": {
@@ -7667,7 +7696,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           note: "No live agent to receive the comments — open its terminal first.",
         };
       }
-      const cmd = restoreCommand(agentId, sessionId);
+      // Unattended: this resume is Canopy's doing, not the user's — there is
+      // nobody at the keyboard to answer a permission prompt, and a session that
+      // reopens in its configured Manual mode reads the comments and then stops.
+      const cmd = restoreCommand(agentId, sessionId, { unattended: true });
       if (!cmd) {
         return {
           delivered: false,
@@ -8467,12 +8499,39 @@ const ProjectViewBody = memo(function ProjectViewBody({
             launchCwd = result.path;
             // Setup failure does not invalidate the new worktree.
             if (result.created && getSettings().workspaceBootstrap) {
-              await ipc.gitWorktreeBootstrap(repo, launchCwd).catch((error) =>
-                onNotice(
-                  `${cli.name}'s workspace is ready, but setup could not be copied: ${String(error)}`,
-                  "warn",
-                ),
-              );
+              // The config half only: a few small ignored files, and `.env` is
+              // among them, so the CLI must not start before they land.
+              await ipc
+                .gitWorktreeBootstrap(repo, launchCwd, "config")
+                .catch((error) =>
+                  onNotice(
+                    `${cli.name}'s workspace is ready, but its ignored config could not be copied: ${String(error)}`,
+                    "warn",
+                  ),
+                );
+              // The dependency clone runs behind the terminal. It is a hundred
+              // thousand files on a real repo — tens of seconds — and awaiting it
+              // here is the whole reason "new agent in a new workspace" felt like
+              // it had hung: nothing appeared on screen until node_modules had
+              // been cloned, for an agent that does not need it to come up. The
+              // notice lands when it finishes, or if it couldn't.
+              void ipc
+                .gitWorktreeBootstrap(repo, launchCwd, "deps")
+                .then((report) => {
+                  if (report.note)
+                    onNotice(
+                      report.install
+                        ? `${report.note} Run \`${report.install}\` in the new workspace.`
+                        : report.note,
+                      "warn",
+                    );
+                })
+                .catch((error) =>
+                  onNotice(
+                    `${cli.name}'s workspace is ready, but its dependencies could not be cloned: ${String(error)}`,
+                    "warn",
+                  ),
+                );
             }
           }
         }
@@ -8663,33 +8722,42 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const startRename = useCallback((tab: TermSubTab) => {
     setRenamingTabId(tab.id);
-    setRenameDraft(tab.name ?? tab.customTitle ?? tab.title);
+    setRenameDraft(tab.customTitle ?? tab.name ?? tab.title);
   }, []);
   // Native owns live session names. The tab mirrors the accepted value, while
   // the PTY id/token remains the authority for every operation.
+  //
+  // `customTitle` is the durable record of the user's choice and it is kept, not
+  // cleared. It used to be dropped the moment native accepted the name, on the
+  // theory that `name` now held it — but `name` is the *session's* name, and a
+  // session is not forever: a restart, a re-run or a wake spawns a new pty that
+  // names itself, and every one of those silently renamed the tab back. Worse,
+  // several surfaces fall back to the OSC `title` when there is no customTitle,
+  // so a renamed shell went back to being renamed by its own CLI on every
+  // repaint. One field, written only here, read first everywhere.
   const commitRename = useCallback(() => {
     if (renamingTabId) {
       const tab = tabsRef.current.find(
         (candidate): candidate is TermSubTab =>
           candidate.id === renamingTabId && candidate.type === "terminal",
       );
+      const chosen = renameDraft.trim() || undefined;
       if (tab?.ptyId != null) {
         void ipc
           .ptySetName(tab.ptyId, renameDraft)
           .then((name) =>
             patchTab(tab.id, {
               name,
-              customTitle: undefined,
-              // Clearing the draft leaves nothing saying this name was chosen
-              // rather than generated, and the snapshots need that to know
-              // which names to carry back.
-              renamed: renameDraft.trim().length > 0,
+              customTitle: chosen,
+              // Without this there is nothing saying the name was chosen rather
+              // than generated — which is what every auto-namer has to check
+              // before it writes, and what the snapshots carry back.
+              renamed: chosen != null,
             }),
           )
           .catch((error) => onNotice(String(error), "error"));
       } else if (tab) {
         // The spawn callback promotes this pending value into native state.
-        const chosen = renameDraft.trim() || undefined;
         patchTab(tab.id, { customTitle: chosen, renamed: chosen != null });
       }
     }
@@ -10698,7 +10766,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           .filter((t): t is TermSubTab => t.type === "terminal" && !!t.run)
           .map((t) => ({
             ptyId: t.ptyId,
-            title: t.name ?? t.customTitle ?? t.title,
+            title: t.customTitle ?? t.name ?? t.title,
             command: t.command ?? "",
             cwd: t.cwd,
             component:
@@ -12254,7 +12322,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   <button
                     type="button"
                     className="multiplex-pane-drag"
-                    aria-label={`Reposition ${tab.name ?? tab.customTitle ?? tab.title}`}
+                    aria-label={`Reposition ${tab.customTitle ?? tab.name ?? tab.title}`}
                     title="Drag onto another pane to swap positions"
                     onPointerDown={(event) =>
                       startPaneReposition(tab.id, event)
@@ -12306,7 +12374,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         startRename(tab);
                       }}
                     >
-                      {tab.name ?? tab.customTitle ?? tab.title}
+                      {tab.customTitle ?? tab.name ?? tab.title}
                     </span>
                   )}
                   <span className="multiplex-pane-path" title={tab.cwd}>
@@ -12430,17 +12498,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     exited: false,
                     exitCode: undefined,
                   });
+                  // Re-assert the user's name onto the new session. The pty it
+                  // was first set on is gone — a restart, a re-run, a wake — and
+                  // this one arrived with a generated name of its own, which the
+                  // patch above has just written. `customTitle` stays put: it is
+                  // what makes the name survive the *next* respawn too, and it
+                  // is what the strip displays while native catches up.
                   if (tab.customTitle) {
                     void ipc
                       .ptySetName(ptyId, tab.customTitle)
-                      .then((name) =>
-                        patchTab(tab.id, {
-                          name,
-                          customTitle: undefined,
-                          renamed: true,
-                        }),
-                      )
-                      .catch((error) => onNotice(String(error), "error"));
+                      .then((name) => patchTab(tab.id, { name, renamed: true }))
+                      // A name another live session already holds is the one
+                      // case native refuses. The tab keeps showing the user's
+                      // choice regardless; only session-name routing falls back
+                      // to the generated one, so this is not worth a toast on
+                      // every wake.
+                      .catch((error) =>
+                        void ipc.jsLog(
+                          "warn",
+                          `tab rename: could not re-assert "${tab.customTitle}" on pty ${ptyId}: ${String(error)}`,
+                        ),
+                      );
                   }
                   if (tab.micro?.runId) updateTaskRun(tab.micro.runId, { ptyId });
                   const prompt = pendingTerminalPrompts.current.get(tab.id);

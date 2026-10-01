@@ -355,13 +355,71 @@ describe("unattended working mode", () => {
     expect(startCommand("amp", "hi")).toEqual({ command: "amp", typePrompt: true });
   });
 
-  it("leaves the bare launcher and resumes alone — those are sessions someone opened", () => {
+  /** The mode as this CLI spells it, for a run that needs nothing outside its
+   *  own directory — codex's is a function of where the run lands. */
+  const modeOf = (cli: (typeof AGENT_CLIS)[number]) =>
+    typeof cli.unattended === "function" ? cli.unattended({}) : cli.unattended;
+
+  it("leaves the bare launcher and an ordinary resume alone — those are sessions someone opened", () => {
     for (const cli of AGENT_CLIS) {
-      if (!cli.unattended) continue;
-      expect(launchCommand(cli)).not.toContain(cli.unattended);
+      const mode = modeOf(cli);
+      if (!mode) continue;
+      expect(launchCommand(cli)).not.toContain(mode);
       const resumed = restoreCommand(cli.id, "SID42");
-      if (resumed) expect(resumed).not.toContain(cli.unattended);
+      if (resumed) expect(resumed).not.toContain(mode);
     }
+  });
+
+  /** The gap that made background work stall halfway. A task launches with its
+   *  working mode pinned; Canopy then resumes that same session on its own
+   *  account — to hand a finished review to the agent that raised the PR — and
+   *  the resume carried no mode at all, so the agent reopened in whatever its
+   *  config says (Manual, for a stock Claude Code) and stopped at the first
+   *  edit with nobody there to press a key. */
+  it("pins the mode on a resume nobody is sitting in front of", () => {
+    for (const cli of AGENT_CLIS) {
+      const mode = modeOf(cli);
+      const resumed = restoreCommand(cli.id, "SID42", { unattended: true });
+      if (!mode || !resumed) continue;
+      expect(resumed, `${cli.id} resume should carry its mode`).toContain(mode);
+    }
+    expect(restoreCommand("claude", "SID42", { unattended: true })).toBe(
+      "claude --resume SID42 --permission-mode auto",
+    );
+  });
+
+  /** The session id has to survive the extra flags, or the resumed run loses its
+   *  identity everywhere it is keyed by one: the attention axis, the PR
+   *  provenance trail, the "is this session already open" check that stops a
+   *  second process from being pointed at one transcript. */
+  it("still reads the session id back out of an unattended resume", () => {
+    for (const id of ["claude", "codex"]) {
+      const cmd = restoreCommand(id, "SID42", {
+        unattended: true,
+        ctx: { writableRoots: ["/repo/.git"] },
+      })!;
+      expect(resumeSessionId(cmd), `${id}: ${cmd}`).toBe("SID42");
+    }
+  });
+
+  /** A task Canopy isolates runs in a git worktree, whose index, refs and
+   *  objects live in the *repo's* `.git` — outside the cwd codex's
+   *  workspace-write sandbox grants. Every `git add` in the one place we
+   *  deliberately put agents came back as a sandbox denial. */
+  it("grants a sandboxed CLI the git directory its worktree writes through", () => {
+    const cmd = startCommand("codex", "hi", undefined, {
+      writableRoots: ["/repo/.git"],
+    })!.command;
+    expect(cmd).toContain(
+      `-c 'sandbox_workspace_write.writable_roots=["/repo/.git"]'`,
+    );
+    // And nothing extra for a task running in the checkout it was launched from.
+    expect(startCommand("codex", "hi")!.command).not.toContain("writable_roots");
+    // A CLI with no OS sandbox is unaffected by where the run lands.
+    expect(
+      startCommand("claude", "hi", undefined, { writableRoots: ["/repo/.git"] })!
+        .command,
+    ).toBe("claude 'hi' --permission-mode auto");
   });
 
   it("gives way to the skip-permissions rung rather than stacking with it", () => {
