@@ -45,6 +45,19 @@ describe("the vibe MVP wiring boundaries", () => {
     expect(projectView).toContain("{mainArea}");
   });
 
+  it("starts Build's runs only in Build mode", () => {
+    // resolveVibeTarget ignores `enabled`, so a project switched to Engineer
+    // still has a Build session; gating on the session alone restarted every
+    // Build run as a visible tab each time the project was reopened.
+    const projectView = read("src/components/ProjectView/index.tsx");
+    const autoStartAt = projectView.indexOf("const autoStartedVibeRuns");
+    const effect = projectView.slice(
+      projectView.indexOf("useEffect(", autoStartAt),
+      projectView.indexOf("for (const { component, command, identity } of vibeRequiredRuns)", autoStartAt),
+    );
+    expect(effect).toContain("if (!vibe || !vibeSession) return;");
+  });
+
   it("keeps raw run output mounted for Engineer but presents only the preview in Build", () => {
     const projectView = read("src/components/ProjectView/index.tsx");
     const autoStartAt = projectView.indexOf("const autoStartedVibeRuns");

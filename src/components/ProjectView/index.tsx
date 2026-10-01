@@ -10563,7 +10563,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const autoStartedVibeRuns = useRef(new Set<string>());
   const reportedVibeSetupFailures = useRef(new Set<string>());
   useEffect(() => {
-    if (!vibeSession) return;
+    // A configured Build setup outlives the switch to Engineer, and so does its
+    // session; only Build mode starts its runs.
+    if (!vibe || !vibeSession) return;
     for (const { component, command, identity } of vibeRequiredRuns) {
       const key = `${component.path}:${component.id}:${command.id}`;
       const running = runTabs.some((tab) => matchesVibeRun(tab, component, command));
