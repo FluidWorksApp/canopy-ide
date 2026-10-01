@@ -117,9 +117,7 @@ describe("WorkflowView", () => {
     expect(screen.queryByText("Completed tasks")).toBeNull();
   });
 
-  it("does not reload the catalog when the parent re-renders with equal roots", async () => {
-    // ProjectView rebuilds its roots array on every render. Reloading on that
-    // blinked the canvas to "Reading…" and dropped the selection, constantly.
+  it("does not reload the catalog when a parent re-render only changes array identity", async () => {
     const props = {
       projectId: "project-1",
       projectName: "Canopy",
@@ -131,7 +129,14 @@ describe("WorkflowView", () => {
       onSave: vi.fn(),
     };
     const { rerender } = render(<WorkflowView {...props} componentRoots={["/repo"]} />);
-    expect(await screen.findAllByText("Review the change")).toHaveLength(2);
+    expect(await screen.findByRole("button", { name: "Run" })).toBeInTheDocument();
+    expect(mocks.loadWorkflowDefinitions).toHaveBeenCalledTimes(1);
+
+    // A fresh array with the same contents — what every parent render passes.
+    rerender(<WorkflowView {...props} componentRoots={["/repo"]} />);
+    expect(await screen.findByRole("button", { name: "Run" })).toBeInTheDocument();
+    expect(mocks.loadWorkflowDefinitions).toHaveBeenCalledTimes(1);
+    // Repeatedly, as a busy parent does — and the canvas never blanks.
     for (let i = 0; i < 5; i++) rerender(<WorkflowView {...props} componentRoots={["/repo"]} />);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(mocks.loadWorkflowDefinitions).toHaveBeenCalledTimes(1);

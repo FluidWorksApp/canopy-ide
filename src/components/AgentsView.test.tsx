@@ -81,8 +81,8 @@ describe("the agents page", () => {
     page({
       stats: [session({ id: 7, name: "Ember" }), session({ id: 8, name: "Juniper" })],
       tabNames: new Map([
-        [7, { title: "canopy" }],
-        [8, { title: "canopy" }],
+        [7, { oscTitle: "canopy" }],
+        [8, { oscTitle: "canopy" }],
       ]),
     });
     expect(screen.getByText("Ember")).toBeTruthy();
@@ -92,7 +92,7 @@ describe("the agents page", () => {
   it("shows an agent-published live status instead of treating the initial prompt as current", () => {
     page({
       tabNames: new Map([
-        [7, { name: "Ember", description: "Reviewing the bridge capability gate" }],
+        [7, { nativeName: "Ember", description: "Reviewing the bridge capability gate" }],
       ]),
     });
     expect(screen.getByText("Reviewing the bridge capability gate")).toBeTruthy();
@@ -171,8 +171,8 @@ describe("the attention axis on the page", () => {
         session({ id: 8, name: "blocked one" }),
       ],
       tabNames: new Map([
-        [7, { title: "quiet one" }],
-        [8, { title: "blocked one" }],
+        [7, { oscTitle: "quiet one" }],
+        [8, { oscTitle: "blocked one" }],
       ]),
       attentionFor: (ptyId) => (ptyId === 8 ? BLOCKED : { kind: "none" }),
     });

@@ -69,29 +69,34 @@ export function WorkflowView({
     setActionError(null);
   }, []);
 
-  // The parent rebuilds `componentRoots` on every render, so the catalog keys
-  // on its contents. Keying on the array itself reloaded on each parent render:
-  // the canvas blinked to "Reading…" and the draft was re-cloned under the
-  // user, dropping whatever they had selected.
+  // Read through refs so reloadCatalog/refresh keep their identity across
+  // renders: they seed mount effects, and a per-render identity re-fired those
+  // effects on every parent render — each pass swapped the canvas for the
+  // loading state and re-cloned the draft, which read as the page flickering
+  // and dropping the selection. `rootsKey` (contents, not array identity)
+  // is what a root change actually looks like.
   const rootsKey = componentRoots.join("\n");
+  const componentRootsRef = useRef(componentRoots);
+  componentRootsRef.current = componentRoots;
   const editingIdRef = useRef(editingId);
   editingIdRef.current = editingId;
+  const selectedRunIdRef = useRef(selectedRunId);
+  selectedRunIdRef.current = selectedRunId;
+  // Only the first load blanks the canvas; a reload after a save swaps the
+  // result in place rather than unmounting what is on screen.
   const loadedOnce = useRef(false);
 
   const reloadCatalog = useCallback(async (preferId?: string) => {
-    // Only the first load blanks the canvas; a reload after a save swaps the
-    // result in place rather than unmounting what is on screen.
     if (!loadedOnce.current) setLoadingCatalog(true);
     const result = await loadWorkflowDefinitions(projectRoot, {
       projectRoot,
-      componentRoots: new Set(rootsKey ? rootsKey.split("\n") : []),
+      componentRoots: new Set(componentRootsRef.current),
     });
     if (result.ok) {
       setDefinitions(result.definitions);
       setCatalogErrors([]);
-      const next = result.definitions.find(
-        (definition) => definition.id === (preferId ?? editingIdRef.current),
-      ) ?? result.definitions[0];
+      const next = result.definitions.find((definition) => definition.id === (preferId ?? editingIdRef.current))
+        ?? result.definitions[0];
       if (next) selectDefinition(next);
       else { setDraft(null); setEditingId(null); }
     } else {
@@ -100,17 +105,19 @@ export function WorkflowView({
     }
     loadedOnce.current = true;
     setLoadingCatalog(false);
-  }, [rootsKey, projectRoot, selectDefinition]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- rootsKey stands in for componentRoots' contents
+  }, [projectRoot, rootsKey, selectDefinition]);
 
   const refresh = useCallback(async (changedRunId = "") => {
     const next = await refreshWorkflowRuns(projectId, changedRunId);
     setRuns(next);
-    const active = (selectedRunId ?? changedRunId) || next[0]?.runId;
+    const selected = selectedRunIdRef.current;
+    const active = (selected ?? changedRunId) || next[0]?.runId;
     if (active) {
-      if (!selectedRunId) setSelectedRunId(active);
+      if (!selected) setSelectedRunId(active);
       setDetail(await workflowGet(active));
     }
-  }, [projectId, selectedRunId]);
+  }, [projectId]);
 
   useEffect(() => { void reloadCatalog(); }, [reloadCatalog]);
   useEffect(() => {
@@ -170,7 +177,7 @@ export function WorkflowView({
         </div>
       </header>
 
-      {loadingCatalog ? (
+      {loadingCatalog && definitions.length === 0 ? (
         <div className="workflow-empty">Reading .canopy/workflows…</div>
       ) : catalogErrors.length > 0 ? (
         <div className="workflow-catalog-error" role="alert">

@@ -112,6 +112,9 @@ describe("overlaps", () => {
 });
 
 describe("chooseEngine", () => {
+  it("uses the Chrome iframe without requiring a native webview", () => {
+    expect(chooseEngine("chrome", { webview: false })).toBe("chrome");
+  });
   it("honours the setting where the platform can", () => {
     expect(chooseEngine("webview", { webview: true })).toBe("webview");
     expect(chooseEngine("proxy", { webview: true })).toBe("proxy");

@@ -16,6 +16,7 @@ const files: RemoteManifest = {
   commands: [
     { name: 'fs_read_dir', scope: 'view' },
     { name: 'fs_read_file', scope: 'view' },
+    { name: 'fs_read_text', scope: 'view' },
     { name: 'fs_list_files', scope: 'view' },
     { name: 'fs_search', scope: 'view' },
   ],

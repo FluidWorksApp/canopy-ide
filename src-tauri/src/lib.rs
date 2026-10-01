@@ -7,6 +7,7 @@ mod android;
 mod blocking;
 mod bounded_file;
 mod browser;
+mod chrome_stream;
 mod change;
 mod cleanup;
 mod cli;
@@ -452,6 +453,7 @@ pub fn run() {
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
         .manage(browser::BrowserManager::default())
+        .manage(chrome_stream::ChromeStreams::default())
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
         .manage(governor::TerminalGovernor::default())
@@ -556,6 +558,9 @@ pub fn run() {
             // one) is missing from a config set up by an older version. Off the
             // main thread: it shells out to find the CLIs.
             agents::heal_integrations(app.handle().clone());
+            // The login PATH every shell-less spawn needs, resolved before the
+            // first one asks for it.
+            procenv::warm();
             agents::start_monitor(app.handle().clone());
             agents::start_hook_bridge(app.handle().clone());
             maintenance::start(app.handle().clone());
@@ -786,6 +791,7 @@ pub fn run() {
             git::git_worktree_add_pr,
             git::git_worktree_bootstrap,
             git::git_worktree_remove,
+            git::git_worktree_realign,
             git::git_worktree_prune,
             git::gh_available,
             git::gh_auth,
@@ -825,6 +831,8 @@ pub fn run() {
             fsx::git_head_content,
             fsx::store_load,
             fsx::store_save,
+            fsx::build_operation_acquire,
+            fsx::build_operation_release,
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_stop,
@@ -883,6 +891,8 @@ pub fn run() {
             preview::preview_start,
             preview::preview_stop,
             browser::browser_supported,
+            chrome_stream::chrome_stream_open,
+            chrome_stream::chrome_stream_close,
             browser::browser_open,
             browser::browser_navigate,
             browser::browser_painted,
@@ -964,6 +974,7 @@ pub fn run() {
                 app.state::<preview::PreviewManager>().shutdown_all();
                 // ... and any embedded-browser views.
                 app.state::<browser::BrowserManager>().shutdown_all(app);
+                app.state::<chrome_stream::ChromeStreams>().shutdown_all();
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
                 // ... and stop polling GitHub for pull requests.

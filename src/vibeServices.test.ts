@@ -93,7 +93,7 @@ describe("link planning", () => {
     expect(plan.ok).toBe(true);
     if (!plan.ok) return;
     const asked = plan.steps.flatMap((s) => (s.kind === "collect-secret" ? [s.secret.name] : []));
-    expect(asked).toEqual(["SUPABASE_SERVICE_ROLE_KEY"]);
+    expect(asked).toEqual([]);
   });
 
   it("says nothing is needed when the project is already linked", () => {
@@ -147,4 +147,16 @@ describe("client exposure", () => {
       clientVarName(supabase, { ...anon, name: "NEXT_PUBLIC_SUPABASE_ANON_KEY" }),
     ).toBe("NEXT_PUBLIC_SUPABASE_ANON_KEY");
   });
+});
+
+it("requests elevated database credentials only when the server feature needs them", () => {
+  const plan = planLink("supabase", ctx({ requiredSecrets: ["SUPABASE_SERVICE_ROLE_KEY"], presentSecrets: ["SUPABASE_URL", "SUPABASE_ANON_KEY"] }));
+  expect(plan.ok && plan.steps.filter((step) => step.kind === "collect-secret").map((step) => step.secret.name)).toEqual(["SUPABASE_SERVICE_ROLE_KEY"]);
+});
+it("uses the framework prefix only for public configuration", () => {
+  const provider = providerById("supabase")!;
+  const publicKey = provider.secrets.find((secret) => secret.name === "SUPABASE_ANON_KEY")!;
+  const privateKey = provider.secrets.find((secret) => secret.name === "SUPABASE_SERVICE_ROLE_KEY")!;
+  expect(clientVarName(provider, publicKey, "VITE_")).toBe("VITE_SUPABASE_ANON_KEY");
+  expect(clientVarName(provider, privateKey, "VITE_")).toBe("SUPABASE_SERVICE_ROLE_KEY");
 });

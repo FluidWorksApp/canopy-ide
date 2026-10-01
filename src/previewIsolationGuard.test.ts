@@ -13,7 +13,8 @@ describe("Build previews a live page rather than a black rectangle", () => {
     // be painted over it. browserHost's only answer is to hide the whole view
     // when anything overlaps — so Build's floating island blanked the entire
     // preview, and the person saw black where their app should be.
-    expect(preview).toContain('buildMode && chosenEngine !== null ? "proxy" : chosenEngine');
+    // Chrome is also a DOM iframe; only the native engine needs substitution.
+    expect(preview).toContain('buildMode && chosenEngine === "webview" ? "proxy" : chosenEngine');
   });
 });
 

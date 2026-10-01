@@ -8,6 +8,7 @@ import type { TabStatus } from "../../tabGroups";
 import { getSettings } from "../../settings";
 import { claimLabel } from "../../claims";
 import { basename } from "../../paths";
+import { tabName, type TabNames } from "../../tabName";
 
 export type SideTab =
   | "files"
@@ -24,25 +25,13 @@ export type SideTab =
   | "team"
   | "tools";
 
-export interface TermSubTab {
+export interface TermSubTab extends TabNames {
   id: string;
   type: "terminal";
   cwd: string;
-  /** Auto title, tracked from the shell/OSC. Shown unless the user renamed. */
-  title: string;
-  /** Canopy-owned stable session name. Display-only; PTY id/token remain the
-   *  authority for every privileged operation. */
-  name?: string;
   /** Agent-published one-line description, updated through canopy_name_task
    *  whenever the work changes. */
   description?: string;
-  /** Legacy/prespawn rename. Live sessions move this into native `name`. */
-  customTitle?: string;
-  /** The name on this tab was chosen by the user, not generated. Native owns
-   *  the name but forgets it with the pty, and an auto title is not
-   *  distinguishable from a rename once both live in `name` — so restore needs
-   *  which names are worth re-asserting on the new session. */
-  renamed?: boolean;
   ptyId: number | null;
   /** When set, this tab attaches to an already-running headless PTY (spawned
    *  from the remote portal) instead of spawning its own. Closing it detaches;
@@ -503,7 +492,7 @@ export interface ProjectViewProps {
   /** Persist non-secret provider, resource and deployment observations. */
   onSaveIntegrations: (
     state: import("../../projectIntegrations").ProjectIntegrationState,
-  ) => void;
+  ) => void | Promise<void>;
   /** Persist an inferred Build target without opening or closing Engineer UI. */
   onPersistVibeTarget: (
     selection: import("../../vibeTargetInference").VibeTargetSelection,
@@ -585,6 +574,7 @@ export function vibeSetupGate(
   component: Pick<Component, "id" | "commands">,
   tabs: Pick<TermSubTab, "componentId" | "runCommandId" | "exited" | "exitCode">[],
   started: (setupId: string) => boolean,
+  completed: (setupId: string) => boolean = started,
 ): { ready: boolean; start: RunCommand[]; failed: RunCommand[] } {
   const start: RunCommand[] = [];
   const failed: RunCommand[] = [];
@@ -608,7 +598,12 @@ export function vibeSetupGate(
       ready = false;
       failed.push(setup);
       break;
-    } else if (!tab && !started(setup.id)) {
+    } else if (!tab && completed(setup.id)) {
+      continue;
+    } else if (!tab && started(setup.id)) {
+      ready = false;
+      break;
+    } else if (!tab) {
       ready = false;
       start.push(setup);
       // Setup order is declaration order. Starting install and migrate in the
@@ -623,13 +618,14 @@ export function vibeSetupGate(
  * makes `database -> API -> web` startup deterministic: a tab exists before
  * its child process has bound a port. */
 export function vibeRunReady(
-  tab: Pick<TermSubTab, "ptyId" | "exited"> | undefined,
+  tab: Pick<TermSubTab, "ptyId" | "exited" | "exitCode"> | undefined,
   command: Pick<RunCommand, "readiness">,
   stats: Pick<ipc.SessionStats, "id" | "ports">[],
   verifiedReadinessPtys: ReadonlySet<number>,
 ): boolean {
-  if (!tab || tab.exited || tab.ptyId == null) return false;
   const readiness = command.readiness?.kind ?? "process-alive";
+  if (readiness === "one-shot") return Boolean(tab?.exited && tab.exitCode === 0);
+  if (!tab || tab.exited || tab.ptyId == null) return false;
   if (readiness === "port") {
     return Boolean(stats.find((sample) => sample.id === tab.ptyId)?.ports.length);
   }
@@ -654,7 +650,7 @@ export function describeTab(tab: SubTab | undefined) {
     case "terminal":
       return {
         kind: tab.run ? "run" : "terminal",
-        label: tab.name ?? tab.customTitle ?? tab.title,
+        label: tabName(tab),
         cwd: tab.cwd,
         ptyId: tab.ptyId,
       };
@@ -726,7 +722,7 @@ export const tabId = () =>
 export function tabDisplayLabel(t: SubTab): string {
   switch (t.type) {
     case "terminal":
-      return t.multiplexTitle ?? t.name ?? t.customTitle ?? t.title;
+      return t.multiplexTitle ?? tabName(t);
     case "file":
       return t.file.name;
     case "pr":

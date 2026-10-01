@@ -147,7 +147,7 @@ function proposeLink(providerId: string, ctx: AbstractionContext): AbstractionPr
   });
   const client = plan.provider.secrets
     .filter((s) => s.publishable)
-    .map((s) => clientVarName(plan.provider, s));
+    .map((s) => clientVarName(plan.provider, s, ctx.link.clientPrefix ?? ""));
   return {
     kind: "guide",
     title: plan.summary,

@@ -112,6 +112,25 @@ describe("procenv is the one place that answers this", () => {
     expect(procenv).toContain("fn login_path");
   });
 
+  it("gives a shell-less PTY run the user's PATH too", () => {
+    // The scan above only sees `Command::new("literal")`. A run command
+    // configured with `argv` reaches portable_pty's CommandBuilder from a
+    // variable, so nothing here could have named it — and it is the same bug:
+    // no shell means no profile means no `pnpm`, and every managed Build
+    // process is argv. The preflight made it worse rather than catching it,
+    // because `which_check` answers on the login PATH while the spawn did not.
+    const pty = readFileSync(join(RUST, "pty.rs"), "utf8");
+    const start = pty.indexOf("Some(RunSpec::Argv(argv)) => {");
+    const argvArm = pty.slice(
+      start,
+      pty.indexOf("Some(RunSpec::Shell(command)) => {", start),
+    );
+    expect(argvArm.length).toBeGreaterThan(0);
+    expect(argvArm, "the argv arm must set PATH from procenv").toContain(
+      "procenv::child_path()",
+    );
+  });
+
   it("is used by the spawns that need it", () => {
     for (const file of ["companion.rs"]) {
       const text = readFileSync(join(RUST, file), "utf8");

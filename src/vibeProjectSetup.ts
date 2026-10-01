@@ -61,9 +61,9 @@ export interface VibeSetupCommandProposal {
    * must be false for operations against a managed database. */
   automatic: boolean;
   readiness:
-    | { kind: "http"; path: string }
-    | { kind: "port" }
-    | { kind: "process-alive" }
+    | { kind: "http"; path: string; timeoutMs?: number }
+    | { kind: "port"; timeoutMs?: number }
+    | { kind: "process-alive"; timeoutMs?: number }
     | { kind: "one-shot"; timeoutMs: number };
 }
 
@@ -253,7 +253,8 @@ export function validateVibeSetupProposal(
       if (typeof command.automatic !== "boolean") errors.push(`${cat}.automatic is invalid`);
       const readiness = record(command.readiness);
       if (!readiness || !["http", "port", "process-alive", "one-shot"].includes(String(readiness.kind))) errors.push(`${cat}.readiness is invalid`);
-      if (readiness?.kind === "one-shot" && (typeof readiness.timeoutMs !== "number" || readiness.timeoutMs < 1_000 || readiness.timeoutMs > 30 * 60_000)) errors.push(`${cat}.readiness timeout is out of bounds`);
+      if (readiness?.kind === "one-shot" && readiness.timeoutMs === undefined) errors.push(`${cat}.readiness timeout is out of bounds`);
+      if (readiness?.timeoutMs !== undefined && (typeof readiness.timeoutMs !== "number" || readiness.timeoutMs < 1_000 || readiness.timeoutMs > 30 * 60_000)) errors.push(`${cat}.readiness timeout is out of bounds`);
       if (readiness?.kind === "http" && (!text(readiness.path) || !String(readiness.path).startsWith("/"))) errors.push(`${cat}.readiness HTTP path is invalid`);
     });
   });

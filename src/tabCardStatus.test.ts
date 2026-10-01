@@ -6,7 +6,7 @@ const term = (extra: Partial<Extract<SubTab, { type: "terminal" }>> = {}): SubTa
   id: "t1",
   type: "terminal",
   cwd: "/w",
-  title: "t1",
+  launchTitle: "t1",
   ptyId: 1,
   command: "claude",
   ...extra,

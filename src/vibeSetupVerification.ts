@@ -48,7 +48,7 @@ export interface VibeSetupVerificationDeps {
   proveReadiness(
     target: VibeSetupVerificationTarget,
     signal?: AbortSignal,
-  ): Promise<{ ok: true } | { ok: false; context: string }>;
+  ): Promise<{ ok: true; release?: () => Promise<void> } | { ok: false; context: string }>;
 }
 
 const LOCKFILES: ReadonlyArray<readonly [string, PackageManager]> = [
@@ -190,23 +190,59 @@ export async function verifyVibeSetupBeforePersist(
     }
   }
 
-  for (const target of requiredTargets(project, proposedArgv)) {
-    if (signal?.aborted) throw new DOMException("Setup verification was cancelled", "AbortError");
-    const proof = await deps.proveReadiness(target, signal);
-    if (!proof.ok) {
-      return {
-        ok: false,
-        failure: {
-          code: "readiness-failed",
-          statement: `${target.component.label} did not become ready from its proposed start command.`,
-          target,
-          missingExecutables: [],
-          context: proof.context,
-        },
-      };
+  const releases: Array<() => Promise<void>> = [];
+  const completed = new Set<string>();
+  const visiting = new Set<string>();
+  const ordered: VibeSetupVerificationTarget[] = [];
+  const keyOf = (target: VibeSetupVerificationTarget) => `${target.component.id}:${target.command.id}`;
+  const visit = (target: VibeSetupVerificationTarget) => {
+    const key = keyOf(target);
+    if (completed.has(key)) return;
+    if (visiting.has(key)) throw new Error(`Cyclic process dependency: ${key}`);
+    visiting.add(key);
+    const identity = project.vibe?.requiredProcesses?.find((item) => `${item.componentId}:${item.runCommandId}` === key);
+    for (const dependency of identity?.dependsOn ?? []) {
+      const next = targets.find((candidate) => keyOf(candidate) === `${dependency.componentId}:${dependency.runCommandId}`);
+      if (!next) throw new Error(`Missing process dependency: ${dependency.componentId}:${dependency.runCommandId}`);
+      visit(next);
     }
+    for (const setup of targets.filter((candidate) => candidate.component.id === target.component.id && candidate.command.purpose === "setup")) {
+      if (setup !== target && !completed.has(keyOf(setup))) {
+        ordered.push(setup);
+        completed.add(keyOf(setup));
+      }
+    }
+    if (!completed.has(key)) ordered.push(target);
+    completed.add(key);
+    visiting.delete(key);
+  };
+  for (const target of requiredTargets(project, proposedArgv)) visit(target);
+  for (const target of targets) if (!completed.has(keyOf(target))) visit(target);
+
+  try {
+    for (const target of ordered) {
+      if (signal?.aborted) throw new DOMException("Setup verification was cancelled", "AbortError");
+      const proof = await deps.proveReadiness(target, signal);
+      if (proof.ok && proof.release) releases.push(proof.release);
+      if (!proof.ok) {
+        return {
+          ok: false,
+          failure: {
+            code: "readiness-failed",
+            statement: `${target.component.label} did not become ready from its proposed start command.`,
+            target,
+            missingExecutables: [],
+            context: proof.context,
+          },
+        };
+      }
+    }
+    return { ok: true };
+  } finally {
+    // Keep DB/API dependencies alive through the entire proof, then unwind in
+    // reverse startup order. Never stop processes outside this verification.
+    for (const release of releases.reverse()) await release().catch(() => {});
   }
-  return { ok: true };
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => globalThis.setTimeout(resolve, ms));
@@ -214,12 +250,13 @@ const sleep = (ms: number) => new Promise<void>((resolve) => globalThis.setTimeo
 async function proveReadinessWithManagedProcess(
   target: VibeSetupVerificationTarget,
   signal?: AbortSignal,
-): Promise<{ ok: true } | { ok: false; context: string }> {
+): Promise<{ ok: true; release?: () => Promise<void> } | { ok: false; context: string }> {
   const { component, command } = target;
   const startedAt = Date.now();
   let targetId: number | null = null;
   let exited: ipc.PtyExit | null = null;
   const early: ipc.PtyExit[] = [];
+  let retained = false;
   const unlisten = await ipc.onPtyExit((event) => {
     if (targetId == null) early.push(event);
     else if (event.id === targetId) exited = event;
@@ -237,22 +274,36 @@ async function proveReadinessWithManagedProcess(
       const now = Date.now();
       const stats = (await ipc.ptyStats()).find((sample) => sample.id === targetId);
       const rawOutput = (await ipc.ptyOutput(targetId, 16 * 1024)) ?? "";
+      const httpReady = command.readiness?.kind === "http"
+        ? (await Promise.all((stats?.ports ?? []).map((port) => ipc.probeHttpReadiness(port, command.readiness!.kind === "http" ? command.readiness!.path : "/").catch(() => false)))).some(Boolean)
+        : false;
       const classification: ManagedProcessClassification = classifyManagedProcess({
+        kind: command.purpose,
         now,
         spawnedAt: startedAt,
         outputBytes: stats?.output_bytes ?? 0,
         quietMs: stats?.quiet_ms ?? now - startedAt,
         ports: stats?.ports ?? [],
         readinessKind: command.readiness?.kind,
+        readinessTimeoutMs: command.readiness?.timeoutMs,
+        httpReady,
         rawOutput,
         exited: exited !== null,
         exitCode: exited?.exit_code ?? null,
         safePromptHandledAt: handledPromptAt,
       });
       if (classification.exit === "auto-answer" && classification.prompt?.kind === "safe-confirmation") {
-        handledPromptAt = now;
-        await ipc.ptyWrite(targetId, classification.prompt.response);
+        if (handledPromptAt == null) {
+          handledPromptAt = now;
+          await ipc.ptyWrite(targetId, classification.prompt.response);
+        }
       } else if (classification.state === "ready") {
+        retained = true;
+        return { ok: true, release: async () => {
+          unlisten();
+          if (targetId != null && exited == null) await ipc.ptyKill(targetId);
+        } };
+      } else if (classification.state === "exited-ok") {
         return { ok: true };
       } else if (classification.exit === "repair") {
         return {
@@ -270,8 +321,10 @@ async function proveReadinessWithManagedProcess(
     }
     throw new DOMException("Setup verification was cancelled", "AbortError");
   } finally {
-    unlisten();
-    if (targetId != null && exited == null) await ipc.ptyKill(targetId);
+    if (!retained) {
+      unlisten();
+      if (targetId != null && exited == null) await ipc.ptyKill(targetId);
+    }
   }
 }
 

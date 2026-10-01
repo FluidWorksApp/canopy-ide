@@ -2,6 +2,7 @@ import type { RunCommand } from "./projects";
 
 export const MANAGED_PROCESS_ALIVE_SETTLE_MS = 2_500;
 export const MANAGED_PROCESS_STALL_MS = 45_000;
+export const MANAGED_PROCESS_STARTUP_MS = 180_000;
 export const MANAGED_PROMPT_RESPONSE_TIMEOUT_MS = 10_000;
 
 export type ManagedProcessKind = NonNullable<RunCommand["purpose"]>;
@@ -208,7 +209,7 @@ export function classifyManagedProcess(
 ): ManagedProcessClassification {
   const kind = observation.kind ?? "serve";
   if (observation.exited) {
-    return observation.exitCode === 0
+    return observation.exitCode === 0 && (kind === "setup" || kind === "check" || observation.readinessKind === "one-shot")
       ? classification(kind, "exited-ok", "complete", null, null)
       : classification(kind, "failed", "repair", observation.now, null);
   }
@@ -235,7 +236,6 @@ export function classifyManagedProcess(
 
   const readiness = observation.readinessKind ?? "process-alive";
   const aliveLongEnough =
-    observation.outputBytes > 0 &&
     observation.now - observation.spawnedAt >= MANAGED_PROCESS_ALIVE_SETTLE_MS;
   if (
     (readiness === "port" && observation.ports.length > 0) ||
@@ -246,9 +246,9 @@ export function classifyManagedProcess(
   }
 
   const readinessTimeoutMs =
-    readiness === "one-shot" && observation.readinessTimeoutMs != null
+    observation.readinessTimeoutMs != null
       ? observation.readinessTimeoutMs
-      : MANAGED_PROCESS_STALL_MS;
+      : MANAGED_PROCESS_STARTUP_MS;
   const deadlineAt = observation.spawnedAt + readinessTimeoutMs;
   if (observation.now >= deadlineAt) {
     return classification(kind, "hung", "repair", deadlineAt, null);
@@ -266,6 +266,23 @@ const hasFlag = (command: string, flag: string) =>
   new RegExp(`(?:^|\\s)${flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`).test(
     command,
   );
+
+/** Normalize the actual argv launch too: argv takes precedence over shell text. */
+export function unattendedManagedRunArgv(
+  command: Pick<RunCommand, "argv" | "purpose"> | undefined,
+): string[] | undefined {
+  if (!command?.argv) return undefined;
+  const next = [...command.argv];
+  if (next[0] === "npx" && !next.includes("--yes") && !next.includes("-y")) next.splice(1, 0, "--yes");
+  if (next[0] === "npm" && ["exec", "x"].includes(next[1]) && !next.includes("--yes") && !next.includes("-y")) next.splice(2, 0, "--yes");
+  const trigger = next.findIndex((arg) => /^trigger(?:\.dev)?(?:@[^\s]+)?$/.test(arg));
+  if (trigger >= 0 && next[trigger + 1] === "dev" && !next.includes("--skip-update-check")) next.splice(trigger + 2, 0, "--skip-update-check");
+  if (command.purpose === "setup" && next.length === 2 && ["install", "i"].includes(next[1])) {
+    if (next[0] === "pnpm") next.push("--force", "--no-frozen-lockfile");
+    if (next[0] === "npm") next.push("--yes");
+  }
+  return next;
+}
 
 /** Prevent known package-runner prompts before the PTY starts. These are
  * vendor-supported flags, not a blanket `yes` pipe; unrelated prompts remain
@@ -289,7 +306,7 @@ export function unattendedManagedRunCommand(
     );
   }
   if (command.purpose === "setup" && /^pnpm\s+(?:install|i)\s*$/i.test(next)) {
-    return `${next} --force`;
+    return `${next} --force --no-frozen-lockfile`;
   }
   if (command.purpose === "setup" && /^npm\s+(?:install|i)\s*$/i.test(next)) {
     return `${next} --yes`;

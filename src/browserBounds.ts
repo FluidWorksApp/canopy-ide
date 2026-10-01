@@ -75,7 +75,7 @@ export function overlaps(a: RectLike, b: RectLike): boolean {
   );
 }
 
-export type BrowserEngine = "webview" | "proxy";
+export type BrowserEngine = "webview" | "proxy" | "chrome";
 
 /** What this machine can actually run, as opposed to what is configured. */
 export interface EngineSupport {
@@ -90,6 +90,7 @@ export interface EngineSupport {
  *  degrade to a working pane, because the alternative is a blank rectangle that
  *  looks like a bug in the page being previewed. */
 export function chooseEngine(setting: BrowserEngine, support: EngineSupport): BrowserEngine {
+  if (setting === "chrome") return "chrome";
   if (setting === "webview" && support.webview) return "webview";
   return "proxy";
 }

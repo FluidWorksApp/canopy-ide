@@ -21,6 +21,47 @@ pub struct WorkspaceManager {
     watchers: Mutex<HashMap<PathBuf, RecommendedWatcher>>,
 }
 
+// Shared by every renderer window. A renderer disappearing cannot let another
+// window repeat an operation whose CLI may still be executing.
+static BUILD_OPERATIONS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+#[tauri::command]
+pub fn build_operation_acquire(key: String) -> Result<String, String> {
+    if key.is_empty()
+        || key.len() > 512
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ":-_.".contains(c))
+    {
+        return Err("Invalid build operation identity".into());
+    }
+    let mut held = BUILD_OPERATIONS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|e| e.to_string())?;
+    if held.contains_key(&key) {
+        return Err("An operation is already running for this resource".into());
+    }
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|e| e.to_string())?;
+    let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    held.insert(key, token.clone());
+    Ok(token)
+}
+
+#[tauri::command]
+pub fn build_operation_release(key: String, token: String) -> Result<(), String> {
+    let mut held = BUILD_OPERATIONS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|e| e.to_string())?;
+    if held.get(&key) != Some(&token) {
+        return Err("Build operation ownership changed".into());
+    }
+    held.remove(&key);
+    Ok(())
+}
+
 #[derive(Serialize, Clone)]
 pub struct DirEntry {
     pub name: String,
@@ -467,6 +508,19 @@ pub async fn fs_read_file(
     path: String,
     max_bytes: Option<u64>,
 ) -> Result<tauri::ipc::Response, String> {
+    read_file_bytes(state, path, max_bytes)
+        .await
+        .map(tauri::ipc::Response::new)
+}
+
+/// Shared bounded file reader for native IPC and the remote host adapter.
+/// Transport encoding belongs to the caller; authorization and stable-handle
+/// checks must be identical for both paths.
+pub async fn read_file_bytes(
+    state: State<'_, WorkspaceManager>,
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<Vec<u8>, String> {
     let file = check_scope(&state, Path::new(&path))?;
     let source = std::fs::File::open(&file).map_err(|e| e.to_string())?;
     let opened_identity =
@@ -482,7 +536,7 @@ pub async fn fs_read_file(
         return Err("file changed while opening; retry the read".into());
     }
     let bytes = read_file_capped(source, max_bytes)?;
-    Ok(tauri::ipc::Response::new(bytes))
+    Ok(bytes)
 }
 
 #[tauri::command]
@@ -1565,5 +1619,21 @@ mod tests {
         assert_ne!(opened, current);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod build_operation_tests {
+    use super::*;
+    #[test]
+    fn resource_operation_requires_exclusive_ownership() {
+        let key = "test:database:local".to_string();
+        let token = build_operation_acquire(key.clone()).unwrap();
+        assert!(build_operation_acquire(key.clone()).is_err());
+        assert!(build_operation_release(key.clone(), "wrong".into()).is_err());
+        assert!(build_operation_acquire(key.clone()).is_err());
+        build_operation_release(key.clone(), token).unwrap();
+        let next = build_operation_acquire(key.clone()).unwrap();
+        build_operation_release(key, next).unwrap();
     }
 }

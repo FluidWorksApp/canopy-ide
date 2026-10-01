@@ -277,8 +277,36 @@ export function openAge(created: string, now = Date.now()): string {
   return `${Math.floor(days / 7)}w open`;
 }
 
-export const sessionLabel = (edges: readonly ipc.ProvenanceEdge[] | undefined): string => {
-  if (!edges?.length) return "session unknown";
+/** Same buckets as openAge, phrased for recency: "3h ago", "2d ago". */
+export function agoLabel(iso: string, now = Date.now()): string {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "unknown";
+  const hours = Math.max(0, Math.floor((now - then) / 3_600_000));
+  if (hours < 1) return "<1h ago";
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 14) return `${days}d ago`;
+  return `${Math.floor(days / 7)}w ago`;
+}
+
+/** The exact moment, for tooltips: relative buckets answer "how stale", this
+ *  answers "when precisely" without making every row that wide. */
+export function exactTime(iso: string): string {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "unknown";
+  return new Date(then).toLocaleString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** Null when nothing is known — the caller renders nothing. "session unknown"
+ *  on almost every row was noise wearing a label. */
+export const sessionLabel = (edges: readonly ipc.ProvenanceEdge[] | undefined): string | null => {
+  if (!edges?.length) return null;
   const edge = [...edges].sort((a, b) => b.at - a.at || a.session_id.localeCompare(b.session_id))[0];
   return edge.agent ? `${edge.agent} · ${edge.session_id.slice(0, 8)}` : edge.session_id.slice(0, 8);
 };

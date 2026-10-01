@@ -4,11 +4,12 @@ import {
   detectManagedProcessPrompt,
   MANAGED_PROCESS_ENV,
   MANAGED_PROCESS_KINDS,
-  MANAGED_PROCESS_STALL_MS,
+  MANAGED_PROCESS_STARTUP_MS,
   MANAGED_PROCESS_STATES,
   MANAGED_PROMPT_RESPONSE_TIMEOUT_MS,
   plainManagedOutput,
   unattendedManagedRunCommand,
+  unattendedManagedRunArgv,
   type ManagedProcessObservation,
 } from "./managedProcessSupervisor";
 
@@ -35,11 +36,20 @@ describe("unattended managed run commands", () => {
 
   it("only forces a bare pnpm setup install", () => {
     expect(unattendedManagedRunCommand({ command: "pnpm install", purpose: "setup" }))
-      .toBe("pnpm install --force");
+      .toBe("pnpm install --force --no-frozen-lockfile");
     expect(unattendedManagedRunCommand({ command: "pnpm install react", purpose: "setup" }))
       .toBe("pnpm install react");
     expect(unattendedManagedRunCommand({ command: "pnpm install", purpose: "serve" }))
       .toBe("pnpm install");
+  });
+
+  it("normalizes argv without changing arguments or explicit lockfile policies", () => {
+    const argv = ["pnpm", "install"];
+    expect(unattendedManagedRunArgv({ argv, purpose: "setup" })).toEqual(["pnpm", "install", "--force", "--no-frozen-lockfile"]);
+    expect(argv).toEqual(["pnpm", "install"]);
+    expect(unattendedManagedRunArgv({ argv: [...argv, "--frozen-lockfile"], purpose: "setup" })).toEqual([...argv, "--frozen-lockfile"]);
+    expect(unattendedManagedRunArgv({ argv: ["npx", "trigger.dev@latest", "dev"], purpose: "worker" })).toEqual(["npx", "--yes", "trigger.dev@latest", "dev", "--skip-update-check"]);
+    expect(unattendedManagedRunArgv({ argv: ["npm", "run", "dev", "a b;$HOME"], purpose: "serve" })).toEqual(["npm", "run", "dev", "a b;$HOME"]);
   });
 
   it("uses npm's documented yes configuration for a setup install", () => {
@@ -103,7 +113,7 @@ describe("managed process exit matrix", () => {
     },
     "exited-ok": { ...base, exited: true, exitCode: 0 },
     failed: { ...base, exited: true, exitCode: 1 },
-    hung: { ...base, spawnedAt: at - MANAGED_PROCESS_STALL_MS },
+    hung: { ...base, readinessKind: "http", spawnedAt: at - MANAGED_PROCESS_STARTUP_MS },
   } satisfies Record<(typeof MANAGED_PROCESS_STATES)[number], ManagedProcessObservation>;
   const expectedExit = {
     spawning: "observe",
@@ -121,7 +131,8 @@ describe("managed process exit matrix", () => {
 
   it.each(matrix)("maps $kind × $state to a bounded agent/chat exit", ({ kind, state }) => {
     const result = classifyManagedProcess({ ...samples[state], kind });
-    expect(result).toMatchObject({ kind, state, exit: expectedExit[state] });
+    const stoppedServer = state === "exited-ok" && (kind === "serve" || kind === "worker");
+    expect(result).toMatchObject({ kind, state: stoppedServer ? "failed" : state, exit: stoppedServer ? "repair" : expectedExit[state] });
     expect(["agent-exit", "chat-card-exit"]).toContain(result.surface);
     if (state !== "ready" && state !== "exited-ok") {
       expect(result.deadlineAt).not.toBeNull();
@@ -146,7 +157,7 @@ describe("managed process exit matrix", () => {
   it("anchors readiness deadlines to spawn even while output keeps changing", () => {
     const before = classifyManagedProcess({
       ...base,
-      spawnedAt: at - MANAGED_PROCESS_STALL_MS + 1,
+      spawnedAt: at - MANAGED_PROCESS_STARTUP_MS + 1,
       outputBytes: 500,
       quietMs: 0,
       readinessKind: "http",
@@ -155,7 +166,7 @@ describe("managed process exit matrix", () => {
     expect(before).toMatchObject({ state: "working", deadlineAt: at + 1 });
     expect(classifyManagedProcess({
       ...base,
-      spawnedAt: at - MANAGED_PROCESS_STALL_MS,
+      spawnedAt: at - MANAGED_PROCESS_STARTUP_MS,
       outputBytes: 600,
       quietMs: 0,
       readinessKind: "http",

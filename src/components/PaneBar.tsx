@@ -20,6 +20,7 @@ import {
 } from "./icons";
 import type { AgentCli } from "../projects";
 import { AGENT_CLIS } from "../projects";
+import { getSettings } from "../settings";
 import type { TabDrag } from "../tabDrag";
 import {
   ANCHOR_ATTR,
@@ -35,6 +36,7 @@ import type {
 } from "./ProjectView";
 import { tabDisplayLabel, previewLabel, deviceLabel } from "./ProjectView";
 import { claimOwnerName } from "../claims";
+import { tabName } from "../tabName";
 import { Button } from "./ui";
 import { nextTickMs, PREVIEW_TICK_MS } from "../tabPreview";
 import {
@@ -150,10 +152,7 @@ function tabTitle(tab: SubTab): string {
 function tabText(tab: SubTab, showAssignedName = false): string {
   switch (tab.type) {
     case "terminal":
-      return tab.multiplexTitle ??
-        tab.customTitle ??
-        (showAssignedName ? tab.name : undefined) ??
-        tab.title;
+      return tab.multiplexTitle ?? tabName(tab, { agent: showAssignedName });
     case "pr": return `#${tab.pr.number} ${tab.pr.title}`;
     case "ticket": return `${tab.ticket.id} ${tab.ticket.title}`;
     case "research": return tabDisplayLabel(tab);
@@ -818,7 +817,10 @@ function PaneBarImpl({
                 </div>
               )}
               {AGENT_CLIS.map((cli) => (
-                <div key={cli.id} className="cli-item" onClick={() => { setCliMenuOpen(false); onLaunchCli(cli, "current"); }}>
+                // Unqualified click follows the agentWorkspaceByDefault setting; the
+                // hover action below is always the other choice, same as the
+                // ⌘N palette.
+                <div key={cli.id} className="cli-item" onClick={() => { setCliMenuOpen(false); onLaunchCli(cli); }}>
                   <span><AgentIcon id={cli.id} size={15} className="cli-icon" /> {cli.name}</span>
                   {/* This account has no login for that CLI yet. Still
                       launchable — that is how you sign in. */}
@@ -827,7 +829,7 @@ function PaneBarImpl({
                       sign in
                     </span>
                   )}
-                  {!installed[cli.bin] && <span className="cli-install">install</span>}
+                  {installed[cli.bin] === false && <span className="cli-install">install</span>}
                   {installed[cli.bin] && cliUpdates[cli.bin]?.hasUpdate && (
                     <span
                       className="cli-update"
@@ -841,15 +843,26 @@ function PaneBarImpl({
                     <button
                       type="button"
                       className="launch-current"
-                      aria-label={`Open ${cli.name} in a new workspace`}
-                      title={`Open ${cli.name} in a new workspace (${format("new-agent-workspace")})`}
+                      aria-label={
+                        getSettings().agentWorkspaceByDefault
+                          ? `Open ${cli.name} in the current checkout`
+                          : `Open ${cli.name} in a new workspace`
+                      }
+                      title={
+                        getSettings().agentWorkspaceByDefault
+                          ? `Open ${cli.name} in the current checkout`
+                          : `Open ${cli.name} in a new workspace (${format("new-agent-workspace")})`
+                      }
                       onClick={(e) => {
                         e.stopPropagation();
                         setCliMenuOpen(false);
-                        onLaunchCli(cli, "workspace");
+                        onLaunchCli(
+                          cli,
+                          getSettings().agentWorkspaceByDefault ? "current" : "workspace",
+                        );
                       }}
                     >
-                      workspace
+                      {getSettings().agentWorkspaceByDefault ? "here" : "workspace"}
                     </button>
                   )}
                 </div>

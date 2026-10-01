@@ -99,7 +99,7 @@ describe("setup verification before persistence", () => {
       new Set(["/repo/pnpm-lock.yaml"]),
       run,
     )).resolves.toEqual({ ok: true });
-    expect(run.proveReadiness).toHaveBeenCalledTimes(1);
+    expect(run.proveReadiness).toHaveBeenCalledTimes(2);
   });
 
   it("verifies survey argv without overwriting a person's persisted command spelling", async () => {
@@ -168,9 +168,9 @@ describe("setup verification before persistence", () => {
     )).resolves.toEqual({ ok: true });
 
     expect(run.which).toHaveBeenCalledWith(["npm", "node"]);
-    expect(run.proveReadiness).toHaveBeenCalledTimes(2);
+    expect(run.proveReadiness).toHaveBeenCalledTimes(3);
     expect(vi.mocked(run.proveReadiness).mock.calls.map(([target]) => target.command.id))
-      .toEqual(["web", "jobs"]);
+      .toEqual(["install", "web", "jobs"]);
   });
 
   it("stops at the first process that cannot demonstrate readiness", async () => {
@@ -191,4 +191,21 @@ describe("setup verification before persistence", () => {
       },
     });
   });
+});
+
+it("installs dependencies in graph order and retains them until all dependent proofs finish", async () => {
+  const p = project([command("install", ["npm", "install"], "setup"), command("serve", ["npm", "run", "dev"], "serve")]);
+  p.components.push({ id: "api", label: "API", path: "/repo/api", commands: [command("install", ["npm", "install"], "setup"), command("serve", ["npm", "run", "dev"], "serve")] });
+  p.vibe!.requiredProcesses = [
+    { componentId: "web", runCommandId: "serve", requiredFor: "project", dependsOn: [{ componentId: "api", runCommandId: "serve" }] },
+    { componentId: "api", runCommandId: "serve", requiredFor: "project" },
+  ];
+  const events: string[] = [];
+  const d = deps();
+  d.proveReadiness = async ({ component, command }) => {
+    events.push(`${component.id}:${command.id}`);
+    return { ok: true, ...(command.purpose === "serve" ? { release: async () => { events.push(`stop:${component.id}`); } } : {}) };
+  };
+  expect(await verifyVibeSetupBeforePersist(p, new Set(), d)).toEqual({ ok: true });
+  expect(events).toEqual(["api:install", "api:serve", "web:install", "web:serve", "stop:web", "stop:api"]);
 });

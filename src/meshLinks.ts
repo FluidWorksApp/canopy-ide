@@ -237,14 +237,11 @@ export function isSevered(
   );
 }
 
-/** Fold nested and sibling agent worktrees to their main checkout. */
-export function checkoutKey(cwd: string): string {
-  const at = cwd.indexOf("/.claude/worktrees/");
-  const nested = at >= 0 ? cwd.slice(0, at) : cwd;
-  const sibling = /^(.*)-wt-[^/]+(?:\/.*)?$/.exec(nested);
-  const folded = sibling?.[1] ?? nested;
-  return folded.replace(/\/+$/, "") || "/";
-}
+// `checkoutKey` moved to paths.ts, beside the other pure path readings, once a
+// third surface needed it and could not import this module without dragging a
+// store registration along with it. Re-exported so existing callers still
+// resolve.
+export { checkoutKey } from "./paths";
 
 /** What the panel knows an agent session as. `name` is reserved for the
  *  normalized human-friendly name the agents substrate will grow (research
