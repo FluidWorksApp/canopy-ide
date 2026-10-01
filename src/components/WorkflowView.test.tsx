@@ -117,6 +117,27 @@ describe("WorkflowView", () => {
     expect(screen.queryByText("Completed tasks")).toBeNull();
   });
 
+  it("does not reload the catalog when the parent re-renders with equal roots", async () => {
+    // ProjectView rebuilds its roots array on every render. Reloading on that
+    // blinked the canvas to "Reading…" and dropped the selection, constantly.
+    const props = {
+      projectId: "project-1",
+      projectName: "Canopy",
+      projectRoot: "/repo",
+      onRun: vi.fn(),
+      onAnswer: vi.fn(),
+      onResume: vi.fn(),
+      onCreateStarter: vi.fn(),
+      onSave: vi.fn(),
+    };
+    const { rerender } = render(<WorkflowView {...props} componentRoots={["/repo"]} />);
+    expect(await screen.findAllByText("Review the change")).toHaveLength(2);
+    for (let i = 0; i < 5; i++) rerender(<WorkflowView {...props} componentRoots={["/repo"]} />);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(mocks.loadWorkflowDefinitions).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Reading .canopy/workflows…")).toBeNull();
+  });
+
   it("turns the empty catalog into a starter workflow without leaving the page", async () => {
     mocks.loadWorkflowDefinitions
       .mockReset()

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Select } from "./ui";
 import {
   loadWorkflowDefinitions,
@@ -69,25 +69,38 @@ export function WorkflowView({
     setActionError(null);
   }, []);
 
+  // The parent rebuilds `componentRoots` on every render, so the catalog keys
+  // on its contents. Keying on the array itself reloaded on each parent render:
+  // the canvas blinked to "Reading…" and the draft was re-cloned under the
+  // user, dropping whatever they had selected.
+  const rootsKey = componentRoots.join("\n");
+  const editingIdRef = useRef(editingId);
+  editingIdRef.current = editingId;
+  const loadedOnce = useRef(false);
+
   const reloadCatalog = useCallback(async (preferId?: string) => {
-    setLoadingCatalog(true);
+    // Only the first load blanks the canvas; a reload after a save swaps the
+    // result in place rather than unmounting what is on screen.
+    if (!loadedOnce.current) setLoadingCatalog(true);
     const result = await loadWorkflowDefinitions(projectRoot, {
       projectRoot,
-      componentRoots: new Set(componentRoots),
+      componentRoots: new Set(rootsKey ? rootsKey.split("\n") : []),
     });
     if (result.ok) {
       setDefinitions(result.definitions);
       setCatalogErrors([]);
-      const next = result.definitions.find((definition) => definition.id === (preferId ?? editingId))
-        ?? result.definitions[0];
+      const next = result.definitions.find(
+        (definition) => definition.id === (preferId ?? editingIdRef.current),
+      ) ?? result.definitions[0];
       if (next) selectDefinition(next);
       else { setDraft(null); setEditingId(null); }
     } else {
       setDefinitions([]);
       setCatalogErrors(result.errors);
     }
+    loadedOnce.current = true;
     setLoadingCatalog(false);
-  }, [componentRoots, editingId, projectRoot, selectDefinition]);
+  }, [rootsKey, projectRoot, selectDefinition]);
 
   const refresh = useCallback(async (changedRunId = "") => {
     const next = await refreshWorkflowRuns(projectId, changedRunId);
