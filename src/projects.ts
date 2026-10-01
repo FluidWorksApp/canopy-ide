@@ -964,18 +964,20 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // confirmation prompts and execute commands without sandboxing`, and
     // `codex resume --help` lists the same flag, so resumes carry it too.
     skipPermissions: "--dangerously-bypass-approvals-and-sandbox",
-    // Verified: `-a, --ask-for-approval <APPROVAL_POLICY>` takes `never`
-    // ("Never ask for user approval. Execution failures are immediately
-    // returned to the model"), and `-s, --sandbox <SANDBOX_MODE>` takes
-    // `workspace-write`. Two flags because codex splits the question in two —
-    // when it asks, and what a command may touch — and only the pair says
-    // "keep going, inside this workspace".
+    // Verified against codex-cli 0.159.1 --help on 2026-10-01:
+    // `--approve-for-me  Route approval requests through automatic review using
+    // the workspace-write sandbox` — the TUI's "Approve for me" preset, i.e.
+    // on-request approvals with approvals_reviewer=auto_review. Codex's auto
+    // mode: routine work proceeds, an escalation is reviewed, and what review
+    // won't pass is reported back for a human instead of silently failing.
+    // `codex resume --help` lists it too, and it parses alongside `-c`.
     //
-    // NOT `--full-auto`, which every guide still names: it is gone from codex
-    // 0.147.0's --help, and a flag clap doesn't know refuses to launch at all.
-    // Codex disables network access in workspace-write unless it is explicit.
-    unattended:
-      "--ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true",
+    // NOT `--ask-for-approval never --sandbox workspace-write`, which this used
+    // to be: under `never` the model is told escalations "will be rejected", so
+    // a task could never get a permission it needed and nobody was told. And
+    // not combined with `-a`/`-s`: clap accepts the mix but declares no
+    // precedence. Network stays explicit — workspace-write disables it.
+    unattended: "--approve-for-me -c sandbox_workspace_write.network_access=true",
     execution: {
       fields: [
         modelField(["openai"]),
@@ -1044,10 +1046,11 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // halves against one installed release.
     // Verified: `--yes-always  Always say yes to every confirmation`.
     skipPermissions: "--yes-always",
-    // No `unattended`, and not for want of looking: aider's help offers
-    // nothing between "confirm everything" and `--yes-always`. There is no mode
-    // to pin, so a task launches it exactly as a person would and it asks —
-    // rather than being handed the skip-permissions rung it was never granted.
+    // No `unattended`, and not for want of looking: aider has no mode,
+    // allowlist or classifier. `--yes-always` is not even a clean bypass — it
+    // auto-*declines* shell commands (asked with explicit_yes_required) while
+    // auto-accepting everything else, pip installs included — so it is no auto
+    // rung either. A task launches it as a person would, and it asks.
     execution: {
       fields: [
         providerField(),
@@ -1212,6 +1215,14 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     resume: (id, bin) => `${bin} --resume ${id}`,
     prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
     skipPermissions: "--force",
+    // Verified against cursor-agent 2026.08.31 --help on 2026-10-01:
+    // `--auto-review  Use Auto-review (Smart Auto): a server classifier
+    // auto-runs safe tool calls and prompts for the rest`. Parses with
+    // `--resume`. Where the account can't use it, cursor falls back to its
+    // allowlist rather than failing. It refuses to combine with --force, which
+    // withUnattendedMode already guarantees. Known gap: cursor fires no hook
+    // while a prompt waits, so a blocked task is not yet raised to the user.
+    unattended: "--auto-review",
     execution: {
       fields: [modelField(undefined, "model")],
       launchArgs: (config) => option("--model", config.model),
@@ -1232,6 +1243,13 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     resume: (id, bin) => `${bin} --resume ${id}`,
     prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
     skipPermissions: "--always-approve",
+    // Verified against grok 1.0.13 --help on 2026-10-01: `--permission-mode
+    // <MODE>  [possible values: default, acceptEdits, auto, dontAsk,
+    // bypassPermissions, plan]`. Its docs: auto runs what the safety check
+    // allows and "surfaces a permission prompt" for the rest, and the
+    // dangerous-command list (rm, git push, …) still prompts. That prompt fires
+    // the permission_prompt Notification Canopy's hook already maps.
+    unattended: "--permission-mode auto",
     execution: {
       fields: [modelField(undefined, "model")],
       launchArgs: (config) => option("--model", config.model),
@@ -1854,12 +1872,21 @@ export function startCommand(
       };
 }
 
-export function restoreCommand(agentId: string, sessionId: string): string | null {
+export function restoreCommand(
+  agentId: string,
+  sessionId: string,
+  // A task picked back up is still a task: nobody is watching it any more
+  // than when it started, so it resumes in the same unattended mode rather
+  // than whatever the CLI is configured for (Manual, plan, or omp's yolo).
+  opts?: { task?: boolean },
+): string | null {
   const id = sessionId.trim();
   if (!id) return null;
   const cli = agentCliFor(agentId);
   const cmd = cli?.resume?.(id);
-  return cmd ? withSkipPermissions(cmd, cli) : null;
+  if (!cmd || !cli) return null;
+  const resumed = withSkipPermissions(cmd, cli);
+  return opts?.task ? withUnattendedMode(resumed, cli) : resumed;
 }
 
 /** The session id a terminal's command carries when it was launched to resume a
@@ -1887,7 +1914,14 @@ export function resumeSessionId(command: string | null | undefined): string | nu
       // setting is on: a command remembered from a skip-permissions launch
       // must still yield its session id after the setting is switched off,
       // or every such session stops being resumable the moment it's disabled.
-      return tmpl && d.skipPermissions ? [tmpl, `${tmpl} ${d.skipPermissions}`] : [tmpl];
+      // Likewise the unattended spelling a resumed task carries.
+      return tmpl
+        ? [
+            tmpl,
+            ...(d.skipPermissions ? [`${tmpl} ${d.skipPermissions}`] : []),
+            ...(d.unattended ? [`${tmpl} ${d.unattended}`] : []),
+          ]
+        : [tmpl];
     });
   });
   for (const tmpl of templates) {

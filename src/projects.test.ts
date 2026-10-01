@@ -139,6 +139,22 @@ describe("restoreCommand", () => {
     expect(restoreCommand("grok", "grok-1")).toBe("grok --resume grok-1");
   });
 
+  it("resumes a task in the same unattended mode it was launched in", () => {
+    expect(restoreCommand("claude", "abc123", { task: true })).toBe(
+      "claude --resume abc123 --permission-mode auto",
+    );
+    expect(restoreCommand("codex", "s-1", { task: true })).toBe(
+      "codex resume s-1 --approve-for-me -c sandbox_workspace_write.network_access=true",
+    );
+    expect(restoreCommand("grok", "g-1", { task: true })).toBe(
+      "grok --resume g-1 --permission-mode auto",
+    );
+    // A session opened by hand keeps the mode its owner chose.
+    expect(restoreCommand("claude", "abc123")).toBe("claude --resume abc123");
+    // ...and the session id still reads back out of the task spelling.
+    expect(resumeSessionId("claude --resume abc123 --permission-mode auto")).toBe("abc123");
+  });
+
   it("returns null for an empty/whitespace session id (never a bare continue)", () => {
     expect(restoreCommand("claude", "")).toBeNull();
     expect(restoreCommand("claude", "   ")).toBeNull();
@@ -261,7 +277,7 @@ describe("dangerouslySkipPermissions", () => {
     expect(startCommand("claude", "review", { model: "opus", effort: "high" })?.command)
       .toBe("claude 'review' --permission-mode auto --model 'opus' --effort 'high'");
     expect(startCommand("codex", "build", { model: "gpt-5.6-sol", effort: "xhigh" })?.command)
-      .toBe("codex 'build' --ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true -m 'gpt-5.6-sol' -c 'model_reasoning_effort=\"xhigh\"'");
+      .toBe("codex 'build' --approve-for-me -c sandbox_workspace_write.network_access=true -m 'gpt-5.6-sol' -c 'model_reasoning_effort=\"xhigh\"'");
     expect(startCommand("opencode", "build", { provider: "anthropic", model: "claude-opus-5" }))
       .toEqual({ command: "opencode --agent build --model 'anthropic/claude-opus-5'", typePrompt: true });
     expect(startCommand("agy", "build", { model: "gemini-3.1-pro-preview", effort: "high" })?.command)
@@ -271,9 +287,9 @@ describe("dangerouslySkipPermissions", () => {
     expect(startCommand("omp", "build", { provider: "anthropic", model: "opus", effort: "max" })?.command)
       .toBe("omp --approval-mode=write --model 'opus' --provider 'anthropic' --thinking 'max'");
     expect(startCommand("cursor", "build", { model: "composer-1" })?.command)
-      .toBe("cursor-agent 'build' --model 'composer-1'");
+      .toBe("cursor-agent 'build' --auto-review --model 'composer-1'");
     expect(startCommand("grok", "build", { model: "grok-4.5" })?.command)
-      .toBe("grok 'build' --model 'grok-4.5'");
+      .toBe("grok 'build' --permission-mode auto --model 'grok-4.5'");
   });
 
   it("leaves custom CLIs alone — we know nothing about their flags", () => {
@@ -330,7 +346,7 @@ describe("unattended working mode", () => {
     // Each of these is read off that CLI's own --help; see the entry comments.
     expect(startCommand("claude", "hi")?.command).toBe("claude 'hi' --permission-mode auto");
     expect(startCommand("codex", "hi")?.command).toBe(
-      "codex 'hi' --ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true",
+      "codex 'hi' --approve-for-me -c sandbox_workspace_write.network_access=true",
     );
     // No prompt builder: the mode still reaches the bare launch that gets the
     // brief typed into it.
@@ -346,6 +362,8 @@ describe("unattended working mode", () => {
       command: "omp --approval-mode=write",
       typePrompt: true,
     });
+    expect(startCommand("grok", "hi")?.command).toBe("grok 'hi' --permission-mode auto");
+    expect(startCommand("cursor", "hi")?.command).toBe("cursor-agent 'hi' --auto-review");
   });
 
   it("names no mode where the CLI has no rung below skip-permissions", () => {
@@ -355,7 +373,7 @@ describe("unattended working mode", () => {
     expect(startCommand("amp", "hi")).toEqual({ command: "amp", typePrompt: true });
   });
 
-  it("leaves the bare launcher and resumes alone — those are sessions someone opened", () => {
+  it("leaves the bare launcher and hand-opened resumes alone — those are sessions someone opened", () => {
     for (const cli of AGENT_CLIS) {
       if (!cli.unattended) continue;
       expect(launchCommand(cli)).not.toContain(cli.unattended);

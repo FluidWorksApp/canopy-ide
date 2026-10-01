@@ -4393,7 +4393,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
         return;
       }
-      const cmd = restoreCommand(run.agent, run.sessionId);
+      const cmd = restoreCommand(run.agent, run.sessionId, { task: true });
       if (!cmd) {
         onNotice(`${run.agent} can't reopen a past conversation.`);
         return;
