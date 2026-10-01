@@ -24,7 +24,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast;
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
@@ -1540,6 +1540,10 @@ impl PtyManager {
                 queue.pop_front();
             }
             drop(queue);
+            // Desktop pages pull the queue above and register no JS listener,
+            // so this evaluates nothing in a WebView. Native subscribers (the
+            // Remote portal and socket-hosted IDEs) still need the event.
+            let _ = app.emit("pty:spawned", event);
         }
         Ok(res.id)
     }
@@ -2095,6 +2099,9 @@ impl PtyManager {
                         queue.pop_front();
                     }
                     drop(queue);
+                    // Desktop pages pull the queue above and register no JS
+                    // listener; the portal forwards this event to remote hosts.
+                    let _ = app.emit("pty:exit", event);
                 })
                 .expect("spawn pty flusher thread");
         }

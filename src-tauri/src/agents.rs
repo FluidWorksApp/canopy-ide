@@ -441,7 +441,11 @@ pub fn start_monitor(app: AppHandle) {
                 // which looks like a live resource after its PTY is gone.
                 if sessions.is_empty() {
                     let cache = app.try_state::<StatsCache>();
-                    clear_stale_stats(cache.as_deref(), &mut last_ports);
+                    if clear_stale_stats(cache.as_deref(), &mut last_ports) {
+                        // Native subscribers only (the Remote portal); desktop
+                        // pages poll the cache and register no JS listener.
+                        let _ = app.emit("pty:stats", Vec::<SessionStats>::new());
+                    }
                 }
                 // With no terminals there is nothing hot to watch — only the
                 // app-footprint number in the status bar, which nobody needs at
@@ -642,6 +646,7 @@ pub fn start_monitor(app: AppHandle) {
                 if let Some(cache) = app.try_state::<StatsCache>() {
                     *cache.0.lock().unwrap() = stats.clone();
                 }
+                let _ = app.emit("pty:stats", &stats);
             }
         })
         .expect("spawn pty monitor thread");
