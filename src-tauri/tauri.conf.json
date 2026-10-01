@@ -46,7 +46,8 @@
       "binaries/canopy-hook"
     ],
     "resources": [
-      "onnxruntime/*"
+      "onnxruntime/*",
+      "chrome-stream/**/*"
     ],
     "publisher": "Cause Connect Pte Ltd",
     "copyright": "Copyright 2026 Cause Connect Pte Ltd. MIT licensed.",

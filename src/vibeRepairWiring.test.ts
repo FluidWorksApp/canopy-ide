@@ -160,6 +160,7 @@ describe("crash-loop repair wiring", () => {
     await vi.waitFor(() => expect(repair).toHaveBeenCalledTimes(1));
 
     expect(repair).toHaveBeenCalledWith({
+      onActivity: expect.any(Function),
       problem: expect.objectContaining({
         code: "server-crash-loop",
         component: {

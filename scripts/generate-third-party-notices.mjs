@@ -334,6 +334,9 @@ function collectNpm() {
   }
 
   const out = [];
+  // The Chrome bridge is shipped as a Node resource, outside Vite's root
+  // dependency graph. Its runtime dependencies need the same attribution.
+  walk("packages/chrome-stream");
   for (const path of seen) {
     const entry = pkgs[path];
     const name = path.slice(path.lastIndexOf("node_modules/") + "node_modules/".length);

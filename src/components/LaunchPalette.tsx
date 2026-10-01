@@ -73,7 +73,7 @@ export function LaunchPalette({
   // The setting names the default; ⇧↵ and the row's hover action are always
   // the other one. Read at render: the palette is remounted per open, so a
   // change in Settings is picked up the next time it appears.
-  const workspaceDefault = getSettings().agentWorkspaces;
+  const workspaceDefault = getSettings().agentWorkspaceByDefault;
   const defaultWhere = workspaceDefault ? "workspace" : "current";
   const altWhere = workspaceDefault ? "current" : "workspace";
 
@@ -112,7 +112,10 @@ export function LaunchPalette({
           {rows.length === 0 && <div className="palette-empty">No match</div>}
           {rows.map((r, i) => {
             const up = r.kind === "cli" ? cliUpdates[r.cli.bin] : undefined;
-            const missing = r.kind === "cli" && !installed[r.cli.bin];
+            // Only a probe that answered "no" means missing. An absent answer
+            // is a probe that hasn't finished or failed; badging that as
+            // "install" is how an installed CLI came to look uninstalled.
+            const missing = r.kind === "cli" && installed[r.cli.bin] === false;
             return (
               <div
                 key={rowKey(r)}

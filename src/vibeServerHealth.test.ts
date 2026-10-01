@@ -41,17 +41,21 @@ describe("vibe server crash policy", () => {
     expect(later.state.failures).toEqual([1_000 + VIBE_SERVER_CRASH_WINDOW_MS]);
   });
 
-  it("ignores and resets requested or successful exits", () => {
+  it("ignores and resets requested exits", () => {
     const failed = fail().state;
     for (const sample of [
       { at: 2_000, exitCode: 1, requested: true },
-      { at: 2_000, exitCode: 0, requested: false },
+      { at: 2_000, exitCode: 0, requested: true },
     ]) {
       expect(judgeVibeServerExit(failed, TARGET, sample)).toEqual({
         state: resetVibeServerHealth(TARGET),
         action: "ignore",
       });
     }
+  });
+
+  it("repairs unexpected clean exits of required servers", () => {
+    expect(judgeVibeServerExit(INITIAL_VIBE_SERVER_HEALTH, TARGET, { at: 1, exitCode: 0, requested: false }).action).toBe("repair");
   });
 
   it("starts a new episode when target, checkout, or command fingerprint changes", () => {

@@ -492,7 +492,7 @@ export interface ProjectViewProps {
   /** Persist non-secret provider, resource and deployment observations. */
   onSaveIntegrations: (
     state: import("../../projectIntegrations").ProjectIntegrationState,
-  ) => void;
+  ) => void | Promise<void>;
   /** Persist an inferred Build target without opening or closing Engineer UI. */
   onPersistVibeTarget: (
     selection: import("../../vibeTargetInference").VibeTargetSelection,
@@ -574,6 +574,7 @@ export function vibeSetupGate(
   component: Pick<Component, "id" | "commands">,
   tabs: Pick<TermSubTab, "componentId" | "runCommandId" | "exited" | "exitCode">[],
   started: (setupId: string) => boolean,
+  completed: (setupId: string) => boolean = started,
 ): { ready: boolean; start: RunCommand[]; failed: RunCommand[] } {
   const start: RunCommand[] = [];
   const failed: RunCommand[] = [];
@@ -597,7 +598,12 @@ export function vibeSetupGate(
       ready = false;
       failed.push(setup);
       break;
-    } else if (!tab && !started(setup.id)) {
+    } else if (!tab && completed(setup.id)) {
+      continue;
+    } else if (!tab && started(setup.id)) {
+      ready = false;
+      break;
+    } else if (!tab) {
       ready = false;
       start.push(setup);
       // Setup order is declaration order. Starting install and migrate in the
@@ -612,13 +618,14 @@ export function vibeSetupGate(
  * makes `database -> API -> web` startup deterministic: a tab exists before
  * its child process has bound a port. */
 export function vibeRunReady(
-  tab: Pick<TermSubTab, "ptyId" | "exited"> | undefined,
+  tab: Pick<TermSubTab, "ptyId" | "exited" | "exitCode"> | undefined,
   command: Pick<RunCommand, "readiness">,
   stats: Pick<ipc.SessionStats, "id" | "ports">[],
   verifiedReadinessPtys: ReadonlySet<number>,
 ): boolean {
-  if (!tab || tab.exited || tab.ptyId == null) return false;
   const readiness = command.readiness?.kind ?? "process-alive";
+  if (readiness === "one-shot") return Boolean(tab?.exited && tab.exitCode === 0);
+  if (!tab || tab.exited || tab.ptyId == null) return false;
   if (readiness === "port") {
     return Boolean(stats.find((sample) => sample.id === tab.ptyId)?.ports.length);
   }

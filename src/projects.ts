@@ -2,7 +2,7 @@
 // or more labeled component directories (frontend, backend, ...). The whole
 // workspace (projects, which are open, which is active) persists via the Rust
 // core to ~/.canopy/projects.json.
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
 import { checkoutKey } from "./paths";
@@ -40,9 +40,9 @@ export interface RunCommand {
    * because the project was opened. */
   automatic?: boolean;
   readiness?:
-    | { kind: "http"; path: string }
-    | { kind: "port" }
-    | { kind: "process-alive" }
+    | { kind: "http"; path: string; timeoutMs?: number }
+    | { kind: "port"; timeoutMs?: number }
+    | { kind: "process-alive"; timeoutMs?: number }
     | { kind: "one-shot"; timeoutMs: number };
 }
 
@@ -1569,12 +1569,21 @@ export function agentForPkg(pkg: string): string | undefined {
 export const SHELL_PATTERN = /^-?(zsh|bash|sh|fish|dash|tcsh|csh|ksh|nu|pwsh|powershell|cmd)$/i;
 
 export async function checkInstalledClis(): Promise<Record<string, boolean>> {
+  return (await probeInstalledClis()) ?? {};
+}
+
+/** The same probe, but `null` when it could not answer (the login shell never
+ *  ran, or was refused under load). Surfaces that badge "install" need the
+ *  difference: an unanswered probe is not a missing CLI. */
+export async function probeInstalledClis(): Promise<Record<string, boolean> | null> {
+  return probeCommands(AGENT_CLIS.map((c) => c.bin));
+}
+
+async function probeCommands(commands: string[]): Promise<Record<string, boolean> | null> {
   try {
-    return await invoke<Record<string, boolean>>("which_check", {
-      commands: AGENT_CLIS.map((c) => c.bin),
-    });
+    return await invoke<Record<string, boolean>>("which_check", { commands });
   } catch {
-    return {};
+    return null;
   }
 }
 
@@ -1627,15 +1636,10 @@ export const PREREQS: Prereq[] = [
   },
 ];
 
-/** Which prerequisites are present on PATH — same probe as the CLIs. */
-export async function checkInstalledPrereqs(): Promise<Record<string, boolean>> {
-  try {
-    return await invoke<Record<string, boolean>>("which_check", {
-      commands: PREREQS.map((p) => p.bin),
-    });
-  } catch {
-    return {};
-  }
+/** Which prerequisites are present on PATH — same probe as the CLIs. `null`
+ *  when the probe could not answer, which must never read as "missing". */
+export async function checkInstalledPrereqs(): Promise<Record<string, boolean> | null> {
+  return probeCommands(PREREQS.map((p) => p.bin));
 }
 
 // ---------- CLI update detection ----------

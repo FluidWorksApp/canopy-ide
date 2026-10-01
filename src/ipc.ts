@@ -1,13 +1,8 @@
-// Typed wrappers around the Tauri command surface. All native work (PTYs, LSP
-// servers, fs, watchers) lives in the Rust core; this file is the only place the
-// frontend touches IPC.
-import { Channel, invoke } from "@tauri-apps/api/core";
-import {
-  listen as nativeListen,
-  type Event as TauriEvent,
-  type Options as TauriListenOptions,
-  type UnlistenFn,
-} from "@tauri-apps/api/event";
+// Typed feature API shared by IDE clients. Host adapters carry commands,
+// events and channels; native work (PTYs, LSP, files) remains in the Rust core.
+import { createChannel, invoke } from "./host";
+import { isRemoteHost, listen as hostListen, type UnlistenFn } from "./host";
+import type { HostEvent } from "./host/contract";
 import type { ShortcutProfile } from "./shortcuts";
 import type {
   TaskAttempt,
@@ -37,10 +32,9 @@ let rendererReplacementPreparing = false;
 
 const listen = <T>(
   event: string,
-  handler: (event: TauriEvent<T>) => void,
-  options?: TauriListenOptions,
+  handler: (event: HostEvent<T>) => void,
 ): Promise<UnlistenFn> => {
-  const registration = nativeListen<T>(event, handler, options).then(async (nativeUnlisten) => {
+  const registration = hostListen<T>(event, handler).then(async (nativeUnlisten) => {
     let active = true;
     const release = async () => {
       if (!active) return;
@@ -75,6 +69,11 @@ const releaseRendererListeners = () => {
 };
 
 // ---------- App shell ----------
+
+export const chromeStreamOpen = (sessionId: string, url: string) =>
+  invoke<string>("chrome_stream_open", { sessionId, url });
+export const chromeStreamClose = (sessionId: string) =>
+  invoke<void>("chrome_stream_close", { sessionId });
 
 /** Rebuild the native menu so its accelerators match the live webview profile. */
 export const setShortcutProfile = (profile: ShortcutProfile) =>
@@ -276,7 +275,7 @@ export async function ptySpawn(
   },
   onData: (chunk: PtyChunk) => void,
 ): Promise<SpawnResult> {
-  const channel = new Channel<ArrayBuffer | number[]>();
+  const channel = createChannel<ArrayBuffer | number[]>();
   // Raw channel payloads arrive as ArrayBuffer for large chunks but as plain
   // number[] below Tauri's internal direct-execute threshold — handle both.
   channel.onmessage = (data) => onData(decodePtyChunk(data));
@@ -351,7 +350,7 @@ export async function ptySpawnAttachedArgv(
   },
   onData: (chunk: PtyChunk) => void,
 ): Promise<SpawnResult> {
-  const channel = new Channel<ArrayBuffer | number[]>();
+  const channel = createChannel<ArrayBuffer | number[]>();
   channel.onmessage = (data) => onData(decodePtyChunk(data));
   return invoke<SpawnResult>("pty_spawn_attached_argv", {
     ...opts,
@@ -519,6 +518,9 @@ const stopPtyEventPollingIfIdle = () => {
 };
 
 export const onPtyExit = async (cb: (e: PtyExit) => void): Promise<UnlistenFn> => {
+  // A socket host has no renderer generation to pull against; it forwards the
+  // native lifecycle event instead (portal FORWARDED_EVENTS).
+  if (isRemoteHost()) return listen<PtyExit>("pty:exit", (event) => cb(event.payload));
   // Subscribe before starting the puller so live events cannot land in a gap.
   // Replay only the history that predates this subscriber; anything newer was
   // already delivered by the fan-out above.
@@ -560,6 +562,7 @@ export const onPtySpawned = (
     selftestPtyListenerFailuresRemaining -= 1;
     return Promise.reject(new Error("selftest injected pty:spawned listener failure"));
   }
+  if (isRemoteHost()) return listen<PtySpawned>("pty:spawned", (event) => cb(event.payload));
   const replayThrough = ptySpawnSequence;
   ptySpawnSubscribers.add(cb);
   ensurePtyEventPolling();
@@ -2540,7 +2543,7 @@ export async function lspStart(
   root: string,
   onMessage: (message: string) => void,
 ): Promise<number> {
-  const channel = new Channel<string>();
+  const channel = createChannel<string>();
   channel.onmessage = onMessage;
   return invoke("lsp_start", { command, args, root, onMessage: channel });
 }
@@ -2622,6 +2625,9 @@ export const ptyStats = (): Promise<SessionStats[]> => invoke<SessionStats[]>("p
 export const probeHttpReadiness = (port: number, path: string): Promise<boolean> =>
   invoke<boolean>("probe_http_readiness", { port, path });
 
+export const buildOperationAcquire = (key: string) => invoke<string>("build_operation_acquire", { key });
+export const buildOperationRelease = (key: string, token: string) => invoke<void>("build_operation_release", { key, token });
+
 const ptyStatsSubscribers = new Set<(stats: SessionStats[]) => void>();
 const appStatsSubscribers = new Set<(stats: AppStats) => void>();
 let resourceStatsPolling = false;
@@ -2670,6 +2676,7 @@ const stopResourceStatsPollingIfIdle = () => {
 };
 
 export const onPtyStats = (cb: (stats: SessionStats[]) => void): Promise<UnlistenFn> => {
+  if (isRemoteHost()) return listen<SessionStats[]>("pty:stats", (event) => cb(event.payload));
   ptyStatsSubscribers.add(cb);
   if (latestPtyStats) cb(latestPtyStats);
   ensureResourceStatsPolling();
@@ -2862,6 +2869,7 @@ export interface AppStats {
 /** Native process-tree footprint, sampled every 2s. `includes_webviews` says
  * whether that tree is also a whole-app footprint on the current platform. */
 export const onAppStats = (cb: (stats: AppStats) => void): Promise<UnlistenFn> => {
+  if (isRemoteHost()) return listen<AppStats>("app:stats", (event) => cb(event.payload));
   appStatsSubscribers.add(cb);
   if (latestAppStats) cb(latestAppStats);
   ensureResourceStatsPolling();
@@ -4615,7 +4623,7 @@ export async function structuredRunnerSpawn(
   onData: (out: StructuredRunnerOut) => void,
 ): Promise<void> {
   if (!opts.cwd) throw new Error("A project runner requires a cwd");
-  const channel = new Channel<StructuredRunnerOut>();
+  const channel = createChannel<StructuredRunnerOut>();
   channel.onmessage = onData;
   return invoke("structured_runner_spawn", {
     attemptId,
@@ -4666,7 +4674,7 @@ export async function companionSpawn(
   },
   onData: (out: CompanionOut) => void,
 ): Promise<void> {
-  const channel = new Channel<CompanionOut>();
+  const channel = createChannel<CompanionOut>();
   channel.onmessage = onData;
   return invoke("companion_spawn", { ...opts, onData: channel });
 }

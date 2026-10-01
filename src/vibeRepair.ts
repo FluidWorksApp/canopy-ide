@@ -3,6 +3,7 @@ import type { ComponentRole, RunCommand, VibeConfig } from "./projects";
 export type RepairProblemCode =
   | "server-crash-loop"
   | "server-start-failed"
+  | "server-health-regression"
   | "setup-failed"
   | "environment-missing"
   | "runtime-error";

@@ -12,6 +12,8 @@ import {
 import type { ServerState } from "../servers";
 import { ChevronIcon, GlobeIcon, PlayIcon, RestartIcon, StopIcon } from "./icons";
 import { Button } from "./ui";
+import { DatabaseConnection } from "./DatabaseConnection";
+import type { DatabaseProvider } from "../buildProviders";
 
 export interface LocalIntegrationService {
   id: string;
@@ -28,7 +30,7 @@ interface IntegrationsPanelProps {
   title?: string;
   state: ProjectIntegrationState;
   localServices: LocalIntegrationService[];
-  onChange: (state: ProjectIntegrationState) => void;
+  onChange: (state: ProjectIntegrationState) => void | Promise<void>;
   /** Starts an agent with the provider-specific account/resource brief. The
    * agent uses an enabled API/MCP route first and a provider CLI as fallback. */
   onAutomate: (providerId: IntegrationProviderId) => void;
@@ -41,8 +43,7 @@ interface IntegrationsPanelProps {
 type Environment = "local" | "preview" | "production";
 
 const ENVIRONMENTS: Array<{ id: Environment; label: string }> = [
-  { id: "local", label: "Local" },
-  { id: "preview", label: "Preview" },
+  { id: "local", label: "Local preview" },
   { id: "production", label: "Production" },
 ];
 
@@ -107,8 +108,15 @@ export function IntegrationsPanel({
   onOpenLocal,
   onOpenRemote,
 }: IntegrationsPanelProps) {
+  const [databaseComponent, setDatabaseComponent] = useState(project.components[0]?.id ?? "");
+  const databaseRoot = project.components.find((component) => component.id === databaseComponent) ?? project.components[0];
   const [environment, setEnvironment] = useState<Environment>("local");
   const [catalogOpen, setCatalogOpen] = useState(false);
+  const [database, setDatabase] = useState<DatabaseProvider | null>(null);
+  const configure = (providerId: IntegrationProviderId) => {
+    if (providerId === "supabase" || providerId === "firebase") { setDatabase(providerId); setCatalogOpen(false); }
+    else onAutomate(providerId);
+  };
   const connected = state.connections.filter((item) => item.status === "connected");
   const readyLocal = localServices.filter((item) => item.state === "running").length;
   const discoveredStores = useMemo(
@@ -202,7 +210,7 @@ export function IntegrationsPanel({
                     <Button
                       size="sm"
                       variant={connection?.status === "connected" ? undefined : "accent"}
-                      onClick={() => onAutomate(provider.id)}
+                      onClick={() => configure(provider.id)}
                     >
                       {connection?.status === "connected" ? "Manage" : "Set up"}
                     </Button>
@@ -236,6 +244,9 @@ export function IntegrationsPanel({
           </button>
         ))}
       </nav>
+
+      {database && project.components.length > 1 && <label>Database configuration component <select value={databaseComponent} onChange={(event) => setDatabaseComponent(event.target.value)}>{project.components.map((component) => <option key={component.id} value={component.id}>{component.label}</option>)}</select></label>}
+      {database && databaseRoot && <DatabaseConnection key={`${database}:${environment}:${databaseRoot.path}`} provider={database} cwd={databaseRoot.path} componentId={databaseRoot.id} environment={environment === "production" ? "production" : "local"} state={state} onChange={onChange} onConfigure={() => onAutomate(database)} onClose={() => setDatabase(null)} />}
 
       {environment === "local" ? (
         <>
@@ -295,7 +306,7 @@ export function IntegrationsPanel({
                   </span>
                 </span>
                 {store.providerId && isIntegrationProviderId(store.providerId) && (
-                  <Button size="sm" onClick={() => onAutomate(store.providerId as IntegrationProviderId)}>
+                  <Button size="sm" onClick={() => configure(store.providerId as IntegrationProviderId)}>
                     {providerActionLabel(store.providerId)}
                   </Button>
                 )}
@@ -407,7 +418,7 @@ export function IntegrationsPanel({
               </span>
               {connection.message && <span className="integration-row-message">{connection.message}</span>}
             </span>
-            <Button icon size="sm" title={`Manage ${providerName(connection.providerId)}`} onClick={() => onAutomate(connection.providerId)}>
+            <Button icon size="sm" title={`Manage ${providerName(connection.providerId)}`} onClick={() => configure(connection.providerId)}>
               <RestartIcon size={12} />
             </Button>
             <button className="integration-text-action" onClick={() => disconnect(connection.providerId)}>Remove</button>

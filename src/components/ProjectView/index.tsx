@@ -240,6 +240,7 @@ import {
   MANAGED_PROCESS_ENV,
   plainManagedOutput,
   unattendedManagedRunCommand,
+  unattendedManagedRunArgv,
 } from "../../managedProcessSupervisor";
 import { watchFailedRestore } from "../../restoreReap";
 import { followLink, type DeepLink } from "../../deepLinks";
@@ -315,6 +316,7 @@ import {
 import type { TaskReservation, TaskRouteSnapshot } from "../../taskEnvelope";
 import {
   answerWorkflowHuman,
+  deliverWorkflowEvent,
   continueWorkflow,
   DEFAULT_WORKFLOW_STORE_DEPS,
   startWorkflow,
@@ -329,6 +331,7 @@ import {
   type WorkflowTriggerProvenance,
 } from "../../workflowDefinition";
 import { workflowGet } from "../../workflowRuns";
+import { executeWorkflowGitOp } from "../../workflowGitOps";
 import { waitForWorkflowAttempt } from "../../workflowAttempt";
 import { record as recordProvenance } from "../../provenance";
 import { resolveAgentForPr, type PrAgent } from "../../agentForPr";
@@ -519,6 +522,7 @@ import {
 } from "../../vibeProjectSetup";
 import { loadVibePackageFacts } from "../../vibePackageScripts";
 import { inferVibeCheck } from "../../vibeCheckInference";
+import { emptyBuildProject } from "../../vibeBootstrap";
 import { TabSwitcher } from "../TabSwitcher";
 import { switchRowKey, tabKind } from "../../tabKind";
 import {
@@ -849,6 +853,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const vibePackageKey = project.components
     .map((component) => `${component.id}:${component.path}`)
     .join("|");
+  const bootstrapComponents = useRef(project.components);
+  bootstrapComponents.current = project.components;
+  const [bootstrapState, setBootstrapState] = useState<{ key: string; empty: boolean } | null>(null);
+  useEffect(() => {
+    if (!vibe || vibeTarget.kind !== "needs-setup") return;
+    let cancelled = false;
+    void emptyBuildProject(bootstrapComponents.current).catch(() => false).then((empty) => {
+      if (!cancelled) setBootstrapState({ key: vibePackageKey, empty });
+    });
+    return () => { cancelled = true; };
+  }, [vibe, vibeTarget.kind, vibePackageKey]);
   const [vibePackageState, setVibePackageState] = useState<{
     key: string;
     facts: VibePackageFacts;
@@ -870,7 +885,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     ReturnType<typeof createVibeProjectSetupSession> | null
   >(null);
   useEffect(() => {
-    if (!vibe || vibeTarget.kind !== "needs-setup") {
+    if (!vibe || vibeTarget.kind !== "needs-setup" || bootstrapState?.key !== vibePackageKey || bootstrapState.empty) {
       setVibeProjectSetupSession(null);
       return;
     }
@@ -884,7 +899,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return () => {
       void session.stop();
     };
-  }, [vibe, vibeTarget.kind, project, onPersistVibeSetup, vibeSetupAttempt]);
+  }, [vibe, vibeTarget.kind, project, onPersistVibeSetup, vibeSetupAttempt, bootstrapState, vibePackageKey]);
   const requestVibeProjectDiscovery = useCallback(async () => {
     // Clear the saved target only after the workspace write succeeds. The
     // explicit retry token is consumed by the setup session created from the
@@ -1272,6 +1287,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [vibeVerifiedReadinessPtys, setVibeVerifiedReadinessPtys] = useState<Set<number>>(
     () => new Set(),
   );
+  const completedVibeOneShots = useRef(new Set<string>());
   const vibeRunSupervision = useRef(new Map<number, {
     startedAt: number;
     lastChangedAt: number;
@@ -1279,6 +1295,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     handledPrompt: string | null;
     handledPromptAt: number | null;
     readinessVerified: boolean;
+    unhealthySince: number | null;
     reported: boolean;
   }>());
   const vibeServerWatch = useRef<Array<{
@@ -4245,13 +4262,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
           return waitForWorkflowAttempt(reservation.attempt.attemptId);
         },
-        // Native open-PR/update-branch execution needs structured parameters
-        // that schema v1 does not carry. Fail closed instead of guessing a
-        // repository, branch or pull request from ambient UI state.
-        runGitOp: async (step) => {
-          onNotice(`Workflow step “${step.name}” needs git-operation parameters before it can run.`, "error");
-          return { ok: false };
-        },
+        runGitOp: (step) => executeWorkflowGitOp(step, worktreePath),
       };
       return {
         context: { projectId: project.id, componentId: component.id, worktreePath },
@@ -4260,7 +4271,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [
       getInstalledForLaunch,
-      onNotice,
       project.components,
       project.id,
       roots,
@@ -4323,6 +4333,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       const projectRoot = roots[0] ?? project.components[0]?.path;
       if (!projectRoot) return;
+      // Deliver to pinned waiting runs even if the editable catalog changed.
+      const waiting = await ipc.workflowRunList(project.id);
+      for (const summary of waiting.filter((run) => run.status === "waiting")) {
+        try {
+          const run = await workflowGet(summary.runId);
+          if (!run) continue;
+          const runtime = await workflowRuntime(run.definition);
+          await deliverWorkflowEvent(run.runId, event, runtime.context, runtime.deps);
+        } catch (error) { onNotice(`Workflow event could not resume its waiting run: ${String(error)}`, "error"); }
+      }
       const catalog = await loadWorkflowDefinitions(projectRoot, {
         projectRoot,
         componentRoots: new Set(roots),
@@ -4344,7 +4364,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }
       }));
     },
-    [onNotice, project.components, roots, workflowRuntime],
+    [onNotice, project.id, project.components, roots, workflowRuntime],
   );
 
   const answerWorkflowDecision = useCallback(
@@ -8617,7 +8637,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     async (
       cli: AgentCli,
       at?: string,
-      // Unnamed means "the user didn't say": the agentWorkspaces setting
+      // Unnamed means "the user didn't say": the agentWorkspaceByDefault setting
       // decides. Callers with an explicit gesture (⇧↵, the hover action, a
       // context-menu entry) still pass their own.
       where?: "workspace" | "current",
@@ -8625,8 +8645,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const cwd = at ?? activeContextRoot ?? componentsRef.current[0]?.path;
       if (!cwd) return;
       const target =
-        where ?? (getSettings().agentWorkspaces ? "workspace" : "current");
-      if (installed[cli.bin]) {
+        where ?? (getSettings().agentWorkspaceByDefault ? "workspace" : "current");
+      // `undefined` is a probe that hasn't answered, never "not installed".
+      // Ask now; if it still can't say, launch anyway: a missing binary fails
+      // visibly in its own terminal, while guessing "missing" would run the
+      // installer over a CLI the user already has.
+      let present = installed[cli.bin];
+      if (present === undefined) present = (await getInstalledForLaunch())[cli.bin];
+      if (present !== false) {
         let launchCwd = cwd;
         if (target === "workspace") {
           const repo =
@@ -8719,6 +8745,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [
       installed,
+      getInstalledForLaunch,
       addTerminal,
       completePendingSplit,
       onNotice,
@@ -8762,11 +8789,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       icon: <AgentIcon id={cli.id} size={15} />,
       // Informational: a context-menu row has one click target, and the ＋
       // menu carries the clickable badge. The account is the status bar's job.
-      hint: installed[cli.bin]
-        ? cliUpdates[cli.bin]?.hasUpdate
-          ? `⇡ ${cliUpdates[cli.bin]?.latest}`
-          : undefined
-        : "install",
+      hint:
+        installed[cli.bin] === false
+          ? "install"
+          : cliUpdates[cli.bin]?.hasUpdate
+            ? `⇡ ${cliUpdates[cli.bin]?.latest}`
+            : undefined,
       onClick: () => void launchCli(cli, cwd, "current"),
     })),
   ];
@@ -10009,11 +10037,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         `Use an already-enabled ${provider.label} API or MCP integration first. If the account must be linked, ask the user to complete the provider's OAuth/account-link step. Use ${provider.cliBin ? `the ${provider.cliBin} CLI` : "the provider API"} only as a fallback.`,
         "Inspect every component and their data flow before deciding what must be provisioned or deployed:",
         topology,
+        `Verified provider bindings: ${JSON.stringify(project.integrations?.resources ?? [])}. Use the recorded resource ID for production; local preview must use the project's local database or emulator. Verify account access before changing configuration.`,
         "Keep local services usable while remote setup is pending. Never print or persist credentials. Do not apply a managed database migration or production deployment without the user's explicit confirmation. Report the safe provider resource IDs, environments, public endpoints, migration snapshot, and deployment ID/time when finished.",
       ].join("\n\n");
       void startAgentInDir(dir, undefined, seed, `${provider.label} setup`);
     },
-    [project.components, project.name, startAgentInDir],
+    [project.components, project.name, project.integrations, startAgentInDir],
   );
 
   // ⌘K's context, memoised. A fresh object literal here re-ran every instant
@@ -10247,10 +10276,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
       recoverVibeRoute,
     ],
   );
-  vibeSessionRef.current = vibeSession;
+  const bootstrapDiscovery = useRef(requestVibeProjectDiscovery);
+  bootstrapDiscovery.current = requestVibeProjectDiscovery;
+  const bootstrapSession = useMemo(() => {
+    const components = bootstrapComponents.current;
+    const component = components[0];
+    if (!vibe || vibeTarget.kind !== "needs-setup" || !bootstrapState?.empty || !component) return null;
+    return createVibeBuilderSession({
+      projectId: project.id, projectName: project.name, componentId: component.id, componentPath: component.path,
+      cliId: getSettings().defaultAgent, cliBin: getSettings().defaultAgent,
+      projectComponents: components, siblingPaths: components.slice(1).map((item) => item.path),
+      previewTabId: () => null, recoverRoute: recoverVibeRoute,
+      onBootstrapReady: async () => {
+        setBootstrapState({ key: vibePackageKey, empty: false });
+        await bootstrapDiscovery.current();
+      },
+    });
+  }, [vibe, vibeTarget.kind, bootstrapState?.empty, project.id, project.name, vibePackageKey, recoverVibeRoute]);
+  useEffect(() => () => { void bootstrapSession?.stop(); }, [bootstrapSession]);
+  vibeSessionRef.current = vibeSession ?? bootstrapSession;
   useEffect(() => () => void vibeSession?.stop(), [vibeSession]);
   vibeServerWatch.current =
-    vibe && vibeSession
+    vibeSession
       ? vibeRequiredRuns
           .filter(({ command }) => command.purpose !== "setup" && command.purpose !== "check")
           .map(({ component, command }) => ({
@@ -10280,6 +10327,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
         candidate.type === "terminal" && candidate.id === tabId,
     );
     if (!tab) return;
+    const owner = componentsRef.current.find((component) => component.id === tab.componentId);
+    const command = owner?.commands?.find((candidate) => candidate.id === tab.runCommandId);
+    if (owner && command && (command.purpose === "setup" || command.readiness?.kind === "one-shot")) {
+      const key = `${owner.path}:${owner.id}:${command.id}:${command.command}`;
+      if (event.exit_code === 0 && !event.requested) completedVibeOneShots.current.add(key);
+      else completedVibeOneShots.current.delete(key);
+    }
     const watched = vibeServerWatch.current.find(
       (candidate) =>
         tab.cwd === candidate.path &&
@@ -10436,7 +10490,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const autoStartedVibeRuns = useRef(new Set<string>());
   const reportedVibeSetupFailures = useRef(new Set<string>());
   useEffect(() => {
-    if (!visible || !vibe || !vibeSession) return;
+    if (!vibeSession) return;
     for (const { component, command, identity } of vibeRequiredRuns) {
       const key = `${component.path}:${component.id}:${command.id}`;
       const running = runTabs.some((tab) => matchesVibeRun(tab, component, command));
@@ -10449,6 +10503,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           (candidate) => candidate.id === dependency.runCommandId,
         );
         if (!dependencyComponent || !dependencyCommand) return false;
+        if (completedVibeOneShots.current.has(`${dependencyComponent.path}:${dependencyComponent.id}:${dependencyCommand.id}:${dependencyCommand.command}`)) return true;
         const dependencyTab = runTabs.find((tab) =>
           matchesVibeRun(tab, dependencyComponent, dependencyCommand),
         );
@@ -10462,8 +10517,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!dependenciesReady) continue;
       // Setup commands the survey found (`purpose: "setup"`) run to completion
       // before the server does — see vibeSetupGate for the rules.
-      const gate = vibeSetupGate(command, component, runTabs, (setupId) =>
-        autoStartedVibeRuns.current.has(`${component.path}:${component.id}:${setupId}`),
+      const gate = vibeSetupGate(command, component, runTabs,
+        (setupId) => autoStartedVibeRuns.current.has(`${component.path}:${component.id}:${setupId}`),
+        (setupId) => completedVibeOneShots.current.has(`${component.path}:${component.id}:${setupId}:${component.commands?.find((item) => item.id === setupId)?.command}`),
       );
       for (const setup of gate.start) {
         autoStartedVibeRuns.current.add(`${component.path}:${component.id}:${setup.id}`);
@@ -10512,6 +10568,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           Promise.resolve("");
         void vibeSession.reportManagedProcessFailure({
           key: setupKey,
+          onRepaired: () => {
+            const current = tabsRef.current.find((tab) => tab.id === failedTab.id);
+            if (current?.type === "terminal" && current.exited) restartRun(current.id);
+          },
           kind: "setup",
           componentId: component.id,
           runCommandId: setup.id,
@@ -10547,7 +10607,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         { componentId: component.id, runCommandId: command.id },
       );
     }
-  }, [visible, vibe, vibeSession, vibeRequiredRuns, runTabs, projectStats, addTerminal, project.id, project.name, project.components, vibeVerifiedReadinessPtys]);
+  }, [visible, vibe, vibeSession, vibeRequiredRuns, runTabs, projectStats, addTerminal, project.id, project.name, project.components, vibeVerifiedReadinessPtys, restartRun]);
 
   // A live PTY is not proof that its command started. Package runners,
   // authentication flows, and project pickers can all wait forever while the
@@ -10556,7 +10616,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // exact command Build already authorized are answered automatically; every
   // other prompt goes to the repair agent with the terminal tail.
   useEffect(() => {
-    if (!visible || !vibe || !vibeSession) {
+    if (!vibeSession) {
       vibeRunSupervision.current.clear();
       setVibeVerifiedReadinessPtys((current) =>
         current.size === 0 ? current : new Set(),
@@ -10617,6 +10677,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               handledPrompt: null,
               handledPromptAt: null,
               readinessVerified: false,
+              unhealthySince: null,
               reported: false,
             };
             vibeRunSupervision.current.set(ptyId, observed);
@@ -10633,7 +10694,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // Readiness releases dependency startup once. Runtime regressions
           // belong to browser/server health evidence, not a second startup
           // incident wearing the wrong label.
-          if (observed.readinessVerified) {
+          if (observed.readinessVerified && readiness !== "http") {
             verify(ptyId);
             return;
           }
@@ -10649,6 +10710,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 )).some(Boolean)
               : false;
           if (disposed) return;
+          if (observed.readinessVerified && readiness === "http") {
+            if (httpReady) { observed.unhealthySince = null; verify(ptyId); return; }
+            observed.unhealthySince ??= now;
+            if (now - observed.unhealthySince < 10_000) return;
+          }
           const classification = classifyManagedProcess({
             kind: command.purpose ?? "serve",
             now,
@@ -10658,10 +10724,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ports,
             readinessKind: readiness,
             httpReady,
-            readinessTimeoutMs:
-              command.readiness?.kind === "one-shot"
-                ? command.readiness.timeoutMs
-                : undefined,
+            readinessTimeoutMs: observed.readinessVerified ? 1 : command.readiness?.timeoutMs,
             rawOutput: raw,
             safePromptHandledAt: observed.handledPromptAt,
           });
@@ -10726,7 +10789,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               key,
               componentId: component.id,
               runCommandId: command.id,
-              reason: "readiness-timeout",
+              reason: observed.readinessVerified ? "health-regression" : "readiness-timeout",
               ports: stat?.ports ?? [],
               outputBytes: stat?.output_bytes ?? null,
               totalCpu: stat?.total_cpu ?? null,
@@ -10761,6 +10824,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const vibeRuntimeReady =
     vibeRequiredRuns.length > 0 &&
     vibeRequiredRuns.every(({ component, command }) => {
+      if (completedVibeOneShots.current.has(`${component.path}:${component.id}:${command.id}:${command.command}`)) return true;
       const tab = runTabs.find((candidate) =>
         matchesVibeRun(candidate, component, command),
       );
@@ -12620,10 +12684,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 }
                 runArgv={
                   tab.run && tab.componentId && tab.runCommandId
-                    ? componentsRef.current
-                        .find((component) => component.id === tab.componentId)
-                        ?.commands?.find((command) => command.id === tab.runCommandId)
-                        ?.argv
+                    ? unattendedManagedRunArgv(
+                        componentsRef.current
+                          .find((component) => component.id === tab.componentId)
+                          ?.commands?.find((command) => command.id === tab.runCommandId),
+                      )
                     : undefined
                 }
                 env={tab.env}
@@ -12969,7 +13034,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   className="launch-card"
                   onClick={() => launchCli(cli)}
                   title={
-                    installed[cli.bin]
+                    installed[cli.bin] !== false
                       ? cli.bin
                       : cli.install
                         ? `not installed — runs: ${cli.install}`
@@ -12981,7 +13046,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   {/* An entry with no installer can only say what's true: the
                       binary isn't there. Offering "install" would be a button
                       that cannot work. */}
-                  {!installed[cli.bin] && (
+                  {installed[cli.bin] === false && (
                     <span className="launch-install">
                       {cli.install ? "install" : "not found"}
                     </span>
@@ -13995,7 +14060,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <VibeBuilderPane
             project={project}
             phase={
-              vibeSession
+              bootstrapSession ? "build" : vibeSession
                 ? vibeInputUnlock.current.unlocked
                   ? "build"
                   : "waiting"
@@ -14004,7 +14069,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   : "waiting"
             }
             session={
-              vibeSession ??
+              bootstrapSession ?? vibeSession ??
               vibeProjectSetupSession ??
               vibeWaitingSession
             }
