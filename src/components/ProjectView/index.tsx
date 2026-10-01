@@ -150,7 +150,11 @@ import {
   inspectFleetRoute,
   type FleetRouteSnapshot,
 } from "../../fleetSnapshot";
-import { pickLaunchCli, startCommandParked } from "../../agentSeed";
+import {
+  pickLaunchCli,
+  startCommandParked,
+  unattendedContextFor,
+} from "../../agentSeed";
 import {
   placeSpawnedTab,
   agentWorkspaceBranch,
@@ -249,6 +253,8 @@ import {
   adhocLabel,
   ADHOC_TASK_ID,
   adhocTaskDef,
+  syncMergeTask,
+  type SyncMergePayload,
   customTaskDef,
   fixCiTask,
   implementResearchTask,
@@ -371,6 +377,7 @@ import { askDialog } from "../../branchSwitch";
 import { useTabDragGroups, applyOrder } from "../../tabDrag";
 import {
   agentIdForCommand,
+  unattendedEnvFor,
   identifyAgent,
   rememberAgentPtys,
 } from "../../agentIdentity";
@@ -1148,6 +1155,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   /** The ⌘N launcher — the ＋ menu as a type-and-Enter list. */
   const [launcherOpen, setLauncherOpen] = useState(false);
+  // ⌘⇧N asks for a workspace for this one opening; ⌘N leaves ↵ to the
+  // agentWorkspaceByDefault setting. ⇧↵ and the row's side action are always
+  // the other choice.
+  const [launcherWhere, setLauncherWhere] = useState<"workspace" | undefined>(undefined);
   const [pendingSplit, setPendingSplit] = useState<{
     sourceTabId: string;
     axis: SplitAxis;
@@ -1798,7 +1809,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         (launchedCli && accountEnv.length ? launchProfile(launchedCli) : undefined) ??
         undefined;
       const managedEnv = runIdentity ? [...MANAGED_PROCESS_ENV] : [];
-      const env = [...portEnv(portForPath(cwd)), ...managedEnv, ...accountEnv];
+      // A task's unattended mode, where its CLI needs environment as well as a
+      // flag for it (opencode's permission pin, omp's approval overlay).
+      const env = [
+        ...portEnv(portForPath(cwd)),
+        ...managedEnv,
+        ...accountEnv,
+        ...unattendedEnvFor(command),
+      ];
       setTabs((prev) => [
         ...prev,
         {
@@ -3650,6 +3668,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const requestedDir = def.cwd(payload);
       let dir = requestedDir;
       let env: MicroTaskEnv | undefined;
+      /** The repo an isolated task's worktree belongs to, once the switch has
+       *  made one. Held so the sandbox grant below can name its git directory
+       *  outright rather than inferring it from the path. */
+      let isolatedFrom: string | undefined;
       if (def.isolation) {
         // Both isolation kinds want the same thing — this work, in a workspace
         // of its own — and differ only in what they start from: a PR's head, or
@@ -3679,12 +3701,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (r.kind !== "settled") return false;
         dir = r.path;
         env = r.created ? { cleanup: { repo, worktree: r.path } } : undefined;
+        if (r.path !== repo) isolatedFrom = repo;
       }
+      // What this run must be able to write outside its own directory — the git
+      // directory of the repo its worktree belongs to, and nothing else. Read off
+      // the path when the task was not isolated here, so a task launched in a
+      // workspace that already existed is granted it too.
+      const sandbox = unattendedContextFor(dir, isolatedFrom);
       const brief = def.buildContext(payload, userQuery, env);
       const seed = oneLine(
         `${brief} ${progressBrief(def, payload)} ${microTaskProtocol()}`,
       );
-      const start = await startCommandParked(agent, seed, dir, launchOptions);
+      const start = await startCommandParked(agent, seed, dir, launchOptions, sandbox);
       if (!start) {
         onNotice(`No agent CLI installed to run "${def.label}".`);
         return false;
@@ -4158,6 +4186,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [roots, startMicroTask, project.id, onNotice],
   );
 
+  /** The status bar's "Resolve & merge": the base moved and the one-click
+   *  merge can't finish on its own, so an agent does it in that checkout. */
+  const resolveBranchMerge = useCallback(
+    (payload: SyncMergePayload) => startMicroTask(syncMergeTask, payload, ""),
+    [startMicroTask],
+  );
+
   /** Run a brief that was composed on the spot (a diff surface's "ask about
    *  this" box, the Tasks panel's one-off composer) as a one-shot task — same
    *  lifecycle as a saved one, no entry in the registry. The context builder
@@ -4491,7 +4526,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
         return;
       }
-      const cmd = restoreCommand(run.agent, run.sessionId);
+      const cmd = restoreCommand(run.agent, run.sessionId, { task: true });
       if (!cmd) {
         onNotice(`${run.agent} can't reopen a past conversation.`);
         return;
@@ -4951,11 +4986,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // ⌘N: the ＋ menu without the mouse. Re-probe on open for the same reason
     // the ＋ menu does — a stale "install" hint sends you to an installer for a
     // CLI you already have.
-    const newLauncher = () => {
+    const newLauncher = (where?: "workspace") => {
       refreshInstalled();
       refreshUpdates();
+      setLauncherWhere(where);
       setLauncherOpen(true);
     };
+    const newLauncherHere = () => newLauncher();
+    // ⌘⇧N: the same list, but an agent picked from it gets its own workspace.
+    const newLauncherWorkspace = () => newLauncher("workspace");
     const activateVisualTab = (id: string) => {
       const tab = tabsRef.current.find((t) => t.id === id);
       const group =
@@ -5234,7 +5273,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     window.addEventListener("menu:quick-open", quickOpen);
     window.addEventListener("menu:find-in-files", findInFiles);
     window.addEventListener("menu:spot-search", spotSearch);
-    window.addEventListener("menu:new-launcher", newLauncher);
+    window.addEventListener("menu:new-launcher", newLauncherHere);
+    window.addEventListener("menu:new-agent-workspace", newLauncherWorkspace);
     return () => {
       window.removeEventListener("canopy:run-command", runCommand);
       window.removeEventListener("menu:close-tab", closeTabHandler);
@@ -5246,7 +5286,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       window.removeEventListener("menu:quick-open", quickOpen);
       window.removeEventListener("menu:find-in-files", findInFiles);
       window.removeEventListener("menu:spot-search", spotSearch);
-      window.removeEventListener("menu:new-launcher", newLauncher);
+      window.removeEventListener("menu:new-launcher", newLauncherHere);
+      window.removeEventListener("menu:new-agent-workspace", newLauncherWorkspace);
     };
   }, [visible, project.components, addTerminal, refreshInstalled, refreshUpdates]);
 
@@ -6604,6 +6645,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const pending = { sourceTabId: active.id, axis };
       pendingSplitRef.current = pending;
       setPendingSplit(pending);
+      setLauncherWhere(undefined);
       setLauncherOpen(true);
     },
     [],
@@ -7870,7 +7912,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           note: "No live agent to receive the comments — open its terminal first.",
         };
       }
-      const cmd = restoreCommand(agentId, sessionId);
+      // Unattended: this resume is Canopy's doing, not the user's — there is
+      // nobody at the keyboard to answer a permission prompt, and a session that
+      // reopens in its configured Manual mode reads the comments and then stops.
+      const cmd = restoreCommand(agentId, sessionId, { unattended: true });
       if (!cmd) {
         return {
           delivered: false,
@@ -8679,7 +8724,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               launchCwd = reused;
             } else {
               const branch = agentWorkspaceBranch(cli.id);
-              // The worktree checkout plus setup copy below take seconds on a
+              // The worktree checkout plus config copy below take seconds on a
               // big repo, and nothing is on screen until they finish — without
               // this the launch reads as the app hanging.
               onNotice(`Preparing an isolated workspace for ${cli.name}…`, "info");
@@ -8690,14 +8735,42 @@ const ProjectViewBody = memo(function ProjectViewBody({
               );
               if (result.kind !== "settled") return;
               launchCwd = result.path;
+              const created = result.path;
               // Setup failure does not invalidate the new worktree.
               if (result.created && getSettings().workspaceBootstrap) {
-                await ipc.gitWorktreeBootstrap(repo, launchCwd).catch((error) =>
-                  onNotice(
-                    `${cli.name}'s workspace is ready, but setup could not be copied: ${String(error)}`,
-                    "warn",
-                  ),
-                );
+                // The config half only: a few small ignored files, and `.env` is
+                // among them, so the CLI must not start before they land.
+                await ipc
+                  .gitWorktreeBootstrap(repo, created, "config")
+                  .catch((error) =>
+                    onNotice(
+                      `${cli.name}'s workspace is ready, but its ignored config could not be copied: ${String(error)}`,
+                      "warn",
+                    ),
+                  );
+                // The dependency clone runs behind the terminal. It is a hundred
+                // thousand files on a real repo — tens of seconds — and awaiting
+                // it here kept anything from appearing on screen until
+                // node_modules had been cloned, for an agent that does not need
+                // it to come up. The notice lands when it finishes, or if it
+                // couldn't.
+                void ipc
+                  .gitWorktreeBootstrap(repo, created, "deps")
+                  .then((report) => {
+                    if (report.note)
+                      onNotice(
+                        report.install
+                          ? `${report.note} Run \`${report.install}\` in the new workspace.`
+                          : report.note,
+                        "warn",
+                      );
+                  })
+                  .catch((error) =>
+                    onNotice(
+                      `${cli.name}'s workspace is ready, but its dependencies could not be cloned: ${String(error)}`,
+                      "warn",
+                    ),
+                  );
               }
             }
           }
@@ -14126,6 +14199,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         agentLabel={modelTarget?.label}
         agentId={activeAgentId}
         agentProfile={activeAgent.profile}
+        onResolveMerge={resolveBranchMerge}
         activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
         activeSessionId={
           activeTab?.type === "terminal" && activeTab.ptyId != null
@@ -14187,6 +14261,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         <LaunchPalette
           installed={installed}
           cliUpdates={cliUpdates}
+          defaultWhere={pendingSplit ? "current" : launcherWhere}
           targetLabel={
             pendingSplit
               ? "new split pane"

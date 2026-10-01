@@ -590,6 +590,20 @@ export const newRunCommandId = () =>
 
 // ---------- Agent CLI launcher registry ----------
 
+/** Where an unattended run lands, for the CLIs whose working mode depends on it.
+ *
+ *  Empty for a task that runs in the checkout it was launched from: there is
+ *  nothing outside the cwd it needs. */
+export interface UnattendedContext {
+  /** Directories the run must be able to write to besides its own cwd. Today
+   *  this is the git common directory of a worktree — `<repo>/.git`, which holds
+   *  the index, the refs and the objects of every linked worktree — because a
+   *  task that cannot write there cannot stage, commit or branch. Not the repo's
+   *  working files: isolating the task from those is the reason it is in a
+   *  worktree at all. */
+  writableRoots?: readonly string[];
+}
+
 export interface AgentCli {
   id: string;
   /** Historical registry ids accepted when reading durable state. Display-name
@@ -725,8 +739,26 @@ export interface AgentCli {
    *
    * Same verification rule as the fields above: only syntax read off the CLI's
    * own --help goes in here.
+   *
+   * A function when the mode depends on where the run lands. Codex's sandbox is
+   * the case: `workspace-write` grants the cwd and nothing else, and a task
+   * Canopy isolates runs in a git worktree whose `.git` is a pointer *out* of
+   * that cwd — so `git add` in the one place we deliberately put agents was
+   * denied by the sandbox, with the CLI reporting it as a sandbox error rather
+   * than as anything the agent could fix. The launcher knows the repo; the
+   * registry entry says what to do with it.
    */
-  unattended?: string;
+  unattended?: string | ((ctx: UnattendedContext) => string);
+
+  /**
+   * Environment a task terminal also needs for `unattended` to mean "auto",
+   * where a flag alone cannot say it. Attached by addTerminal only when the
+   * command carries this CLI's `unattended` flag — i.e. only to task launches
+   * and task resumes, never to a session someone opened by hand. Kept out of
+   * the command line on purpose: the first token is how a terminal's agent is
+   * recognised, and an `X=… cli` prefix would hide it.
+   */
+  unattendedEnv?: [string, string][];
 
   /**
    * Workflow-facing capabilities for this agent type. The canvas, schema
@@ -965,18 +997,36 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // confirmation prompts and execute commands without sandboxing`, and
     // `codex resume --help` lists the same flag, so resumes carry it too.
     skipPermissions: "--dangerously-bypass-approvals-and-sandbox",
-    // Verified: `-a, --ask-for-approval <APPROVAL_POLICY>` takes `never`
-    // ("Never ask for user approval. Execution failures are immediately
-    // returned to the model"), and `-s, --sandbox <SANDBOX_MODE>` takes
-    // `workspace-write`. Two flags because codex splits the question in two —
-    // when it asks, and what a command may touch — and only the pair says
-    // "keep going, inside this workspace".
+    // Verified against codex-cli 0.159.1 --help on 2026-10-01:
+    // `--approve-for-me  Route approval requests through automatic review using
+    // the workspace-write sandbox` — the TUI's "Approve for me" preset, i.e.
+    // on-request approvals with approvals_reviewer=auto_review. Codex's auto
+    // mode: routine work proceeds, an escalation is reviewed, and what review
+    // won't pass is reported back for a human instead of silently failing.
+    // `codex resume --help` lists it too, and it parses alongside `-c`.
     //
-    // NOT `--full-auto`, which every guide still names: it is gone from codex
-    // 0.147.0's --help, and a flag clap doesn't know refuses to launch at all.
-    // Codex disables network access in workspace-write unless it is explicit.
-    unattended:
-      "--ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true",
+    // NOT `--ask-for-approval never --sandbox workspace-write`, which this used
+    // to be: under `never` the model is told escalations "will be rejected", so
+    // a task could never get a permission it needed and nobody was told. And
+    // not combined with `-a`/`-s`: clap accepts the mix but declares no
+    // precedence. Network stays explicit — workspace-write disables it.
+    //
+    // `writable_roots` on top, when the launcher names one: workspace-write
+    // grants the cwd and $TMPDIR, and a task Canopy isolates runs in a git
+    // worktree whose `.git` is a *file* pointing at `<repo>/.git/worktrees/
+    // <name>` — outside the cwd, so every `git add` would otherwise have to go
+    // through review as an escalation.
+    unattended: ({ writableRoots }: UnattendedContext) =>
+      [
+        "--approve-for-me -c sandbox_workspace_write.network_access=true",
+        ...(writableRoots?.length
+          ? [
+              `-c ${shellQuote(
+                `sandbox_workspace_write.writable_roots=${JSON.stringify([...writableRoots])}`,
+              )}`,
+            ]
+          : []),
+      ].join(" "),
     execution: {
       fields: [
         modelField(["openai"]),
@@ -1045,10 +1095,11 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // halves against one installed release.
     // Verified: `--yes-always  Always say yes to every confirmation`.
     skipPermissions: "--yes-always",
-    // No `unattended`, and not for want of looking: aider's help offers
-    // nothing between "confirm everything" and `--yes-always`. There is no mode
-    // to pin, so a task launches it exactly as a person would and it asks —
-    // rather than being handed the skip-permissions rung it was never granted.
+    // No `unattended`, and not for want of looking: aider has no mode,
+    // allowlist or classifier. `--yes-always` is not even a clean bypass — it
+    // auto-*declines* shell commands (asked with explicit_yes_required) while
+    // auto-accepting everything else, pip installs included — so it is no auto
+    // rung either. A task launches it as a person would, and it asks.
     execution: {
       fields: [
         providerField(),
@@ -1143,6 +1194,29 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // is all opencode allows short of `--auto`: its only other control is that
     // per-tool permission table, and `--auto` is the skip-permissions rung.
     unattended: "--agent build",
+    // That table is the catch: a repo's own opencode.json (`"bash": "ask"`) is
+    // merged over build's defaults and stalls the task. OPENCODE_PERMISSION is
+    // merged last of all, so it pins the task's rules. Verified against
+    // opencode 1.18.32 with `opencode debug agent build` (no session): under a
+    // repo asking for bash and edit, this yields bash/edit allow plus the four
+    // ask rules below. Build's own asks (external directories, .env reads,
+    // doom loops) are untouched, and each ask raises permission.asked, which
+    // Canopy's plugin maps to needs-human-permission.
+    unattendedEnv: [
+      [
+        "OPENCODE_PERMISSION",
+        JSON.stringify({
+          bash: {
+            "*": "allow",
+            "rm -rf *": "ask",
+            "sudo *": "ask",
+            "git push --force*": "ask",
+            "git push -f*": "ask",
+          },
+          edit: "allow",
+        }),
+      ],
+    ],
     execution: {
       fields: [
         providerField(),
@@ -1184,6 +1258,13 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // `always-ask` is a configurable default, and a task that inherits it stops
     // on its first edit.
     unattended: "--approval-mode=write",
+    // `write` still prompts for every bash/eval/task call. The marker asks the
+    // PTY layer to add Canopy's overlay (~/.canopy/omp-task-approval.yml)
+    // through PI_CONFIG_FILES, which allows those tools while omp's own
+    // critical-pattern list keeps prompting (tool_approval_requested → Canopy's
+    // extension → needs-human-permission). A marker, not a path, because a
+    // missing overlay is a hard startup error and only Rust can check it exists.
+    unattendedEnv: [["CANOPY_OMP_TASK_OVERLAY", "1"]],
     execution: {
       fields: [
         providerField(),
@@ -1213,6 +1294,14 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     resume: (id, bin) => `${bin} --resume ${id}`,
     prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
     skipPermissions: "--force",
+    // Verified against cursor-agent 2026.08.31 --help on 2026-10-01:
+    // `--auto-review  Use Auto-review (Smart Auto): a server classifier
+    // auto-runs safe tool calls and prompts for the rest`. Parses with
+    // `--resume`. Where the account can't use it, cursor falls back to its
+    // allowlist rather than failing. It refuses to combine with --force, which
+    // withUnattendedMode already guarantees. Known gap: cursor fires no hook
+    // while a prompt waits, so a blocked task is not yet raised to the user.
+    unattended: "--auto-review",
     execution: {
       fields: [modelField(undefined, "model")],
       launchArgs: (config) => option("--model", config.model),
@@ -1233,6 +1322,13 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     resume: (id, bin) => `${bin} --resume ${id}`,
     prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
     skipPermissions: "--always-approve",
+    // Verified against grok 1.0.13 --help on 2026-10-01: `--permission-mode
+    // <MODE>  [possible values: default, acceptEdits, auto, dontAsk,
+    // bypassPermissions, plan]`. Its docs: auto runs what the safety check
+    // allows and "surfaces a permission prompt" for the rest, and the
+    // dangerous-command list (rm, git push, …) still prompts. That prompt fires
+    // the permission_prompt Notification Canopy's hook already maps.
+    unattended: "--permission-mode auto",
     execution: {
       fields: [modelField(undefined, "model")],
       launchArgs: (config) => option("--model", config.model),
@@ -1817,10 +1913,18 @@ export function launchCommand(cli: AgentCli): string {
  *  flag for it, because that flag is strictly more autonomous than anything
  *  here — and two mode flags on one line is a question about precedence that
  *  every CLI answers differently. One rung or the other, never both. */
-function withUnattendedMode(command: string, cli: AgentCli): string {
+function withUnattendedMode(
+  command: string,
+  cli: AgentCli,
+  ctx: UnattendedContext = {},
+): string {
   if (cli.skipPermissions && getSettings().dangerouslySkipPermissions) return command;
-  return cli.unattended ? `${command} ${cli.unattended}` : command;
+  if (!cli.unattended) return command;
+  const mode =
+    typeof cli.unattended === "function" ? cli.unattended(ctx) : cli.unattended;
+  return mode ? `${command} ${mode}` : command;
 }
+
 
 /** Apply only arguments declared by the selected agent type's manifest.
  * Values are shell-quoted independently, so committed agent configuration
@@ -1841,30 +1945,54 @@ export function startCommand(
   agentId: string,
   text: string,
   options?: AgentLaunchOptions,
+  /** Where this run lands — see UnattendedContext. Omitted by a caller whose
+   *  task runs in the checkout it was launched from. */
+  ctx?: UnattendedContext,
 ): { command: string; typePrompt: boolean } | null {
   const cli = agentCliFor(agentId);
   if (!cli) return null;
   return cli.prompt
     ? {
         command: withAgentLaunchOptions(
-          withUnattendedMode(withSkipPermissions(cli.prompt(text), cli), cli),
+          withUnattendedMode(withSkipPermissions(cli.prompt(text), cli), cli, ctx),
           cli,
           options,
         ),
         typePrompt: false,
       }
     : {
-        command: withAgentLaunchOptions(withUnattendedMode(launchCommand(cli), cli), cli, options),
+        command: withAgentLaunchOptions(
+          withUnattendedMode(launchCommand(cli), cli, ctx),
+          cli,
+          options,
+        ),
         typePrompt: true,
       };
 }
 
-export function restoreCommand(agentId: string, sessionId: string): string | null {
+/** How to reopen a conversation by id.
+ *
+ *  A session a person picks off the restore list is theirs, in the mode their
+ *  CLI is configured for. A task picked back up is still a task, and a resume
+ *  Canopy makes on its own account — handing a finished review's comments to
+ *  the agent that raised the PR — has nobody in front of it either: both resume
+ *  in the same unattended mode the launch had (withUnattendedMode) rather than
+ *  whatever the CLI is configured for (Manual, plan, or omp's yolo). `task` and
+ *  `unattended` are the two callers' names for that one request. */
+export function restoreCommand(
+  agentId: string,
+  sessionId: string,
+  opts: { task?: boolean; unattended?: boolean; ctx?: UnattendedContext } = {},
+): string | null {
   const id = sessionId.trim();
   if (!id) return null;
   const cli = agentCliFor(agentId);
   const cmd = cli?.resume?.(id);
-  return cmd ? withSkipPermissions(cmd, cli) : null;
+  if (!cmd || !cli) return null;
+  const resumed = withSkipPermissions(cmd, cli);
+  return opts.task || opts.unattended
+    ? withUnattendedMode(resumed, cli, opts.ctx)
+    : resumed;
 }
 
 /** The session id a terminal's command carries when it was launched to resume a
@@ -1892,7 +2020,14 @@ export function resumeSessionId(command: string | null | undefined): string | nu
       // setting is on: a command remembered from a skip-permissions launch
       // must still yield its session id after the setting is switched off,
       // or every such session stops being resumable the moment it's disabled.
-      return tmpl && d.skipPermissions ? [tmpl, `${tmpl} ${d.skipPermissions}`] : [tmpl];
+      // Likewise the unattended spelling a resumed task carries.
+      return tmpl
+        ? [
+            tmpl,
+            ...(d.skipPermissions ? [`${tmpl} ${d.skipPermissions}`] : []),
+            ...(d.unattended ? [`${tmpl} ${d.unattended}`] : []),
+          ]
+        : [tmpl];
     });
   });
   for (const tmpl of templates) {
@@ -1902,10 +2037,17 @@ export function resumeSessionId(command: string | null | undefined): string | nu
     const prefix = tmpl.slice(0, at);
     const suffix = tmpl.slice(at + SENTINEL.length);
     if (!cmd.startsWith(prefix) || !cmd.endsWith(suffix)) continue;
-    const id = cmd.slice(prefix.length, cmd.length - suffix.length).trim();
-    // A genuine id is one non-empty token — this rejects a command that merely
-    // shares the prefix (e.g. a bare `claude`) but isn't a resume.
-    if (id && !/\s/.test(id)) return id;
+    const rest = cmd.slice(prefix.length, cmd.length - suffix.length).trim();
+    // The id is the first token. Anything after it has to open with a flag: an
+    // unattended resume carries its working mode there (`--permission-mode
+    // auto`, codex's three sandbox flags and their values), and requiring the
+    // whole remainder to be one token meant every such command reported no
+    // session at all — which cost the resumed run its identity on the attention
+    // axis and in the PR provenance trail. A trailing *word* still rejects the
+    // command, which is what keeps this from matching something that merely
+    // shares the prefix (a bare `claude`, a `codex resume` with a stray arg).
+    const [id, ...trailing] = rest.split(/\s+/);
+    if (id && (trailing.length === 0 || trailing[0].startsWith("-"))) return id;
   }
   return null;
 }

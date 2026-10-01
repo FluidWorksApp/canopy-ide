@@ -1,5 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type React from "react";
+import { format } from "../shortcuts";
 import type { LifeState } from "../../shared/agentLife";
 import {
   AgentIcon,
@@ -850,7 +851,7 @@ function PaneBarImpl({
                       title={
                         getSettings().agentWorkspaceByDefault
                           ? `Open ${cli.name} in the current checkout`
-                          : `Open ${cli.name} in a new workspace`
+                          : `Open ${cli.name} in a new workspace (${format("new-agent-workspace")})`
                       }
                       onClick={(e) => {
                         e.stopPropagation();

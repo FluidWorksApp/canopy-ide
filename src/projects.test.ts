@@ -140,6 +140,22 @@ describe("restoreCommand", () => {
     expect(restoreCommand("grok", "grok-1")).toBe("grok --resume grok-1");
   });
 
+  it("resumes a task in the same unattended mode it was launched in", () => {
+    expect(restoreCommand("claude", "abc123", { task: true })).toBe(
+      "claude --resume abc123 --permission-mode auto",
+    );
+    expect(restoreCommand("codex", "s-1", { task: true })).toBe(
+      "codex resume s-1 --approve-for-me -c sandbox_workspace_write.network_access=true",
+    );
+    expect(restoreCommand("grok", "g-1", { task: true })).toBe(
+      "grok --resume g-1 --permission-mode auto",
+    );
+    // A session opened by hand keeps the mode its owner chose.
+    expect(restoreCommand("claude", "abc123")).toBe("claude --resume abc123");
+    // ...and the session id still reads back out of the task spelling.
+    expect(resumeSessionId("claude --resume abc123 --permission-mode auto")).toBe("abc123");
+  });
+
   it("returns null for an empty/whitespace session id (never a bare continue)", () => {
     expect(restoreCommand("claude", "")).toBeNull();
     expect(restoreCommand("claude", "   ")).toBeNull();
@@ -262,7 +278,7 @@ describe("dangerouslySkipPermissions", () => {
     expect(startCommand("claude", "review", { model: "opus", effort: "high" })?.command)
       .toBe("claude 'review' --permission-mode auto --model 'opus' --effort 'high'");
     expect(startCommand("codex", "build", { model: "gpt-5.6-sol", effort: "xhigh" })?.command)
-      .toBe("codex 'build' --ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true -m 'gpt-5.6-sol' -c 'model_reasoning_effort=\"xhigh\"'");
+      .toBe("codex 'build' --approve-for-me -c sandbox_workspace_write.network_access=true -m 'gpt-5.6-sol' -c 'model_reasoning_effort=\"xhigh\"'");
     expect(startCommand("opencode", "build", { provider: "anthropic", model: "claude-opus-5" }))
       .toEqual({ command: "opencode --agent build --model 'anthropic/claude-opus-5'", typePrompt: true });
     expect(startCommand("agy", "build", { model: "gemini-3.1-pro-preview", effort: "high" })?.command)
@@ -272,9 +288,9 @@ describe("dangerouslySkipPermissions", () => {
     expect(startCommand("omp", "build", { provider: "anthropic", model: "opus", effort: "max" })?.command)
       .toBe("omp --approval-mode=write --model 'opus' --provider 'anthropic' --thinking 'max'");
     expect(startCommand("cursor", "build", { model: "composer-1" })?.command)
-      .toBe("cursor-agent 'build' --model 'composer-1'");
+      .toBe("cursor-agent 'build' --auto-review --model 'composer-1'");
     expect(startCommand("grok", "build", { model: "grok-4.5" })?.command)
-      .toBe("grok 'build' --model 'grok-4.5'");
+      .toBe("grok 'build' --permission-mode auto --model 'grok-4.5'");
   });
 
   it("leaves custom CLIs alone — we know nothing about their flags", () => {
@@ -331,7 +347,7 @@ describe("unattended working mode", () => {
     // Each of these is read off that CLI's own --help; see the entry comments.
     expect(startCommand("claude", "hi")?.command).toBe("claude 'hi' --permission-mode auto");
     expect(startCommand("codex", "hi")?.command).toBe(
-      "codex 'hi' --ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true",
+      "codex 'hi' --approve-for-me -c sandbox_workspace_write.network_access=true",
     );
     // No prompt builder: the mode still reaches the bare launch that gets the
     // brief typed into it.
@@ -347,6 +363,8 @@ describe("unattended working mode", () => {
       command: "omp --approval-mode=write",
       typePrompt: true,
     });
+    expect(startCommand("grok", "hi")?.command).toBe("grok 'hi' --permission-mode auto");
+    expect(startCommand("cursor", "hi")?.command).toBe("cursor-agent 'hi' --auto-review");
   });
 
   it("names no mode where the CLI has no rung below skip-permissions", () => {
@@ -356,13 +374,71 @@ describe("unattended working mode", () => {
     expect(startCommand("amp", "hi")).toEqual({ command: "amp", typePrompt: true });
   });
 
-  it("leaves the bare launcher and resumes alone — those are sessions someone opened", () => {
+  /** The mode as this CLI spells it, for a run that needs nothing outside its
+   *  own directory — codex's is a function of where the run lands. */
+  const modeOf = (cli: (typeof AGENT_CLIS)[number]) =>
+    typeof cli.unattended === "function" ? cli.unattended({}) : cli.unattended;
+
+  it("leaves the bare launcher and hand-opened resumes alone — those are sessions someone opened", () => {
     for (const cli of AGENT_CLIS) {
-      if (!cli.unattended) continue;
-      expect(launchCommand(cli)).not.toContain(cli.unattended);
+      const mode = modeOf(cli);
+      if (!mode) continue;
+      expect(launchCommand(cli)).not.toContain(mode);
       const resumed = restoreCommand(cli.id, "SID42");
-      if (resumed) expect(resumed).not.toContain(cli.unattended);
+      if (resumed) expect(resumed).not.toContain(mode);
     }
+  });
+
+  /** The gap that made background work stall halfway. A task launches with its
+   *  working mode pinned; Canopy then resumes that same session on its own
+   *  account — to hand a finished review to the agent that raised the PR — and
+   *  the resume carried no mode at all, so the agent reopened in whatever its
+   *  config says (Manual, for a stock Claude Code) and stopped at the first
+   *  edit with nobody there to press a key. */
+  it("pins the mode on a resume nobody is sitting in front of", () => {
+    for (const cli of AGENT_CLIS) {
+      const mode = modeOf(cli);
+      const resumed = restoreCommand(cli.id, "SID42", { unattended: true });
+      if (!mode || !resumed) continue;
+      expect(resumed, `${cli.id} resume should carry its mode`).toContain(mode);
+    }
+    expect(restoreCommand("claude", "SID42", { unattended: true })).toBe(
+      "claude --resume SID42 --permission-mode auto",
+    );
+  });
+
+  /** The session id has to survive the extra flags, or the resumed run loses its
+   *  identity everywhere it is keyed by one: the attention axis, the PR
+   *  provenance trail, the "is this session already open" check that stops a
+   *  second process from being pointed at one transcript. */
+  it("still reads the session id back out of an unattended resume", () => {
+    for (const id of ["claude", "codex"]) {
+      const cmd = restoreCommand(id, "SID42", {
+        unattended: true,
+        ctx: { writableRoots: ["/repo/.git"] },
+      })!;
+      expect(resumeSessionId(cmd), `${id}: ${cmd}`).toBe("SID42");
+    }
+  });
+
+  /** A task Canopy isolates runs in a git worktree, whose index, refs and
+   *  objects live in the *repo's* `.git` — outside the cwd codex's
+   *  workspace-write sandbox grants. Every `git add` in the one place we
+   *  deliberately put agents came back as a sandbox denial. */
+  it("grants a sandboxed CLI the git directory its worktree writes through", () => {
+    const cmd = startCommand("codex", "hi", undefined, {
+      writableRoots: ["/repo/.git"],
+    })!.command;
+    expect(cmd).toContain(
+      `-c 'sandbox_workspace_write.writable_roots=["/repo/.git"]'`,
+    );
+    // And nothing extra for a task running in the checkout it was launched from.
+    expect(startCommand("codex", "hi")!.command).not.toContain("writable_roots");
+    // A CLI with no OS sandbox is unaffected by where the run lands.
+    expect(
+      startCommand("claude", "hi", undefined, { writableRoots: ["/repo/.git"] })!
+        .command,
+    ).toBe("claude 'hi' --permission-mode auto");
   });
 
   it("gives way to the skip-permissions rung rather than stacking with it", () => {

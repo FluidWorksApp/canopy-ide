@@ -3645,9 +3645,20 @@ export interface BootstrapReport {
   note: string | null;
 }
 /** Give a just-created workspace the two things `git worktree add` leaves out:
- *  the gitignored config, and the dependencies. */
-export const gitWorktreeBootstrap = (repo: string, path: string) =>
-  invoke<BootstrapReport>("git_worktree_bootstrap", { repo, path });
+ *  the gitignored config, and the dependencies.
+ *
+ *  `phase` splits them, because they cost nothing alike. `config` copies a
+ *  handful of small ignored files and is over in milliseconds — and it has to
+ *  finish before an agent starts, because `.env` is in it. `deps` clones
+ *  `node_modules`, which on a real repo is a hundred thousand files; a caller
+ *  that has a terminal to put on screen runs it behind that terminal instead of
+ *  making the user watch. Omitted means both, which is what an explicit "create a
+ *  workspace" is asking for. */
+export const gitWorktreeBootstrap = (
+  repo: string,
+  path: string,
+  phase?: "config" | "deps",
+) => invoke<BootstrapReport>("git_worktree_bootstrap", { repo, path, phase });
 /** `force` counts rather than toggles: 1 drops uncommitted work, 2 also clears
  *  a locked workspace — git needs `remove -f -f` for that and says so. */
 export const gitWorktreeRemove = (repo: string, path: string, force: 0 | 1 | 2) =>

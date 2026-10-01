@@ -61,7 +61,10 @@ describe("every other path that resumes applies it too", () => {
    *  grows, the refusal has to happen inside this window — after it, the
    *  terminal already exists and the damage is done. */
   const resumeArm = (): string => {
-    const from = source.indexOf("const cmd = restoreCommand(agentId, sessionId);");
+    // Anchored on the call, not on its full argument list: the arm also pins the
+    // working mode for this resume (nobody is at the keyboard for it), and the
+    // guard is about where the refusal happens, not about what else it passes.
+    const from = source.indexOf("const cmd = restoreCommand(agentId, sessionId");
     expect(from, "messageAgent's resume arm has moved or been renamed").toBeGreaterThan(-1);
     const to = source.indexOf("addTerminal(", from);
     expect(to, "messageAgent no longer spawns a terminal to resume into").toBeGreaterThan(from);

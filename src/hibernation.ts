@@ -403,7 +403,10 @@ export function terminalLaunch(t: TerminalSnapshot): {
   resumed: boolean;
 } {
   if (t.agentId && t.sessionId) {
-    const resume = restoreCommand(t.agentId, t.sessionId);
+    // A task tab's command carries the env marker its launch prefixed; waking
+    // it must keep the task's unattended mode, not fall back to the CLI's own.
+    const task = (t.command ?? "").includes("CANOPY_MICRO_TASK=");
+    const resume = restoreCommand(t.agentId, t.sessionId, { task });
     if (resume) return { command: resume, resumed: true };
   }
   // A CLI started by hand in an ordinary shell has no recorded command. Its

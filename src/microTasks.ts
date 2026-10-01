@@ -770,6 +770,84 @@ export const resolveConflictsTask: MicroTaskDef<ReviewPrPayload> = {
   },
 };
 
+export interface SyncMergePayload {
+  /** The checkout the status bar is showing — the merge lands here. */
+  repo: string;
+  branch: string | null;
+  /** The ref to bring in, e.g. "origin/main". */
+  base: string;
+  /** Uncommitted files the incoming commits also touch. */
+  overlap: string[];
+  /** Files the merge itself would conflict in. */
+  conflicts: string[];
+}
+
+/** The status bar's "Resolve & merge": the base has moved, and the one-click
+ *  merge can't finish on its own — uncommitted edits are in the way, or the
+ *  merge would stop on conflicts. The same job as Resolve conflicts, minus the
+ *  PR: bring the base in and settle what's in the way.
+ *
+ *  Unlike every other task that edits code, this one runs in the checkout it
+ *  was clicked from rather than a worktree of its own. That is the point of it:
+ *  the branch to update, and the uncommitted work in the way, both live there.
+ *  So the brief is strict about that work — it stays uncommitted, it stays the
+ *  user's — and nothing is pushed. Not in MICRO_TASKS for the same reason: the
+ *  Tasks panel's grouping promises "edits code ⇒ own worktree ⇒ pushes", and
+ *  this is the one honest exception, launched only from its chip. */
+export const syncMergeTask: MicroTaskDef<SyncMergePayload> = {
+  id: "branch-sync-merge",
+  label: "Resolve & merge",
+  icon: "⑂",
+  runLabel: (p) =>
+    `Merge ${p.base.replace(/^[^/]+\//, "")} into ${p.branch ?? "this branch"}`,
+  placeholder: "Anything to watch for in the merge…",
+  blurb: "Brings the base in, keeping your uncommitted work and settling conflicts.",
+  effect: "pushes",
+  surfaceNote: "on the base-branch chip in the status bar",
+  cwd: (p) => p.repo,
+  buildContext(p, userQuery) {
+    const query = oneLine(userQuery);
+    const branch = p.branch ?? "the current branch";
+    const tag = `canopy-sync-${p.base.replace(/[^\w.-]+/g, "-")}`;
+    const overlap = p.overlap.length
+      ? `There are uncommitted changes in files the incoming commits also touch ` +
+        `(${p.overlap.join(", ")}), so git will refuse to start the merge. These are the user's ` +
+        `work in progress: they must end up uncommitted, as they are now — not committed, ` +
+        `not discarded. Set them aside with \`git stash push -u -m "${tag}"\` — the stash stack is ` +
+        `shared with other sessions, so never use bare \`git stash pop\`: record your entry's SHA ` +
+        `from \`git stash list --format='%H %gs'\`, and later restore it with \`git stash apply <sha>\` ` +
+        `and drop it by finding its current \`stash@{n}\` by that message. `
+      : "";
+    const conflicts = p.conflicts.length
+      ? `The merge is expected to conflict in ${p.conflicts.join(", ")}. `
+      : "";
+    return oneLine(
+      `The branch ${branch} in this checkout is behind ${p.base}, and the one-click merge in ` +
+        `Canopy could not do it alone. Bring ${p.base} in with a real merge — \`git fetch\` then ` +
+        `\`git merge ${p.base}\` — onto ${branch} in this checkout. If a merge is already in ` +
+        `progress here (MERGE_HEAD exists), continue that one rather than starting another. ` +
+        overlap +
+        conflicts +
+        `Resolve every conflict by editing the files and removing the markers. Preserve the intent ` +
+        `of BOTH sides rather than picking one: read enough surrounding code, and the base's side ` +
+        `(\`git log -p ${branch}..${p.base} -- <file>\`), to know what each change was for. Where ` +
+        `the two genuinely cannot both stand, keep the base's and say so in your summary. ` +
+        `Run the project's build and tests, then commit the merge. ` +
+        (p.overlap.length
+          ? `Only after the merge commit, re-apply the stashed work and settle any conflicts between ` +
+            `it and the merged code the same way — keeping the user's intent — leaving the result ` +
+            `uncommitted in the working tree, then drop the stash entry. `
+          : "") +
+        `Do not push, do not rebase, do not force anything, do not switch branches, and do not ` +
+        `touch files unrelated to the merge — other agents may be working in this checkout. If a ` +
+        `conflict needs a decision only the author can make, stop and report blocked with the file ` +
+        `and both sides described, leaving any stash entry in place and naming its SHA. Make the ` +
+        `canopy_job_done summary the number of files resolved plus any choice you had to make.` +
+        (query ? ` The user adds: "${query}".` : ""),
+    );
+  },
+};
+
 export interface ApplySuggestionPayload extends ReviewPrPayload {
   path: string;
   line: number;

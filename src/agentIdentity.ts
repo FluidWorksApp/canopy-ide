@@ -197,6 +197,30 @@ export function agentIdForCommand(command?: string | null): string | null {
 }
 
 /**
+ * The extra environment a task terminal needs for its CLI's unattended mode
+ * (AgentCli.unattendedEnv), or none.
+ *
+ * Keyed on the unattended flag being in the command, which only task launches
+ * and task resumes carry — so a CLI opened by hand never gets it. Leading
+ * `K='v'` assignments (a micro-task's CANOPY_MICRO_TASK prefix) are skipped
+ * before the agent is identified.
+ */
+export function unattendedEnvFor(command?: string | null): [string, string][] {
+  const line = (command ?? "").replace(
+    /^(?:\s*[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)\s+)+/,
+    "",
+  );
+  const id = agentIdForCommand(line);
+  const cli = id ? agentCliFor(id) : undefined;
+  if (!cli?.unattended || !cli.unattendedEnv) return [];
+  // A mode that depends on where the run lands only ever appends to its bare
+  // form, so the bare form is what every such command carries.
+  const mode =
+    typeof cli.unattended === "function" ? cli.unattended({}) : cli.unattended;
+  return line.includes(mode) ? cli.unattendedEnv : [];
+}
+
+/**
  * Learn from what the hook stream says about terminals whose binary we could
  * not otherwise name — the enterprise wrapper case, resolved without a prompt.
  *

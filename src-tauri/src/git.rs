@@ -3586,12 +3586,49 @@ fn install_command(top: &Path) -> Option<String> {
 /// Ignored entries come from git itself (`ls-files --others --ignored
 /// --directory`), so a monorepo's nested `node_modules` are found without this
 /// having to know anything about the project's layout.
+///
+/// `phase` splits the two halves, because they cost wildly different amounts and
+/// only one of them is worth waiting for. `Config` is a handful of small file
+/// copies — milliseconds — and it has to land before a CLI starts, since that is
+/// where `.env` is. `Deps` clones `node_modules`, which on a real repo is a
+/// hundred thousand files and the reason opening an agent in a new workspace felt
+/// like it had hung; the caller runs it behind the terminal it has already put on
+/// screen. `All` (the default, and what an explicit "create a workspace" button
+/// still wants) does both in one call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BootstrapPhase {
+    All,
+    Config,
+    Deps,
+}
+
+impl BootstrapPhase {
+    /// Unknown values are the whole job rather than an error: this is a hint
+    /// about pacing, and a caller from an older renderer that sends nothing at
+    /// all must keep getting the complete bootstrap.
+    fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some("config") => Self::Config,
+            Some("deps") => Self::Deps,
+            _ => Self::All,
+        }
+    }
+    fn wants_config(self) -> bool {
+        self != Self::Deps
+    }
+    fn wants_deps(self) -> bool {
+        self != Self::Config
+    }
+}
+
 #[tauri::command]
 pub async fn git_worktree_bootstrap(
     state: State<'_, WorkspaceManager>,
     repo: String,
     path: String,
+    phase: Option<String>,
 ) -> Result<BootstrapReport, String> {
+    let phase = BootstrapPhase::parse(phase.as_deref());
     let top = repo_path(&state, &repo)?;
     let dst_root = PathBuf::from(&path);
     if !dst_root.is_dir() {
@@ -3627,6 +3664,9 @@ pub async fn git_worktree_bootstrap(
 
         if is_dir && name == "node_modules" {
             wanted_deps = true;
+            if !phase.wants_deps() {
+                continue;
+            }
             if let Some(parent) = dst.parent() {
                 if std::fs::create_dir_all(parent).is_err() {
                     continue;
@@ -3640,7 +3680,7 @@ pub async fn git_worktree_bootstrap(
                     let _ = std::fs::remove_dir_all(&dst);
                 }
             }
-        } else if !is_dir && is_carryable(rel) {
+        } else if !is_dir && phase.wants_config() && is_carryable(rel) {
             // A secret this size is a mistake, not a config file. Skipping it
             // beats silently duplicating something large into a throwaway dir.
             let too_big = std::fs::metadata(&src)
@@ -3663,7 +3703,11 @@ pub async fn git_worktree_bootstrap(
     // The install is offered when cloning produced nothing usable — either it
     // failed, or the main checkout had no dependencies to clone in the first
     // place. A worktree that cloned everything needs no install at all.
-    if report.cloned.is_empty() {
+    //
+    // Not on the config pass: it did not try to clone anything, so it has no
+    // verdict on the dependencies and must not report one. The deps pass that
+    // follows is the half that can answer.
+    if phase.wants_deps() && report.cloned.is_empty() {
         report.install = install_command(&top);
         report.note = match (&clone_failure, wanted_deps) {
             (Some(err), _) => Some(format!("Couldn't clone dependencies: {err}")),
@@ -5510,6 +5554,27 @@ pub async fn linear_issues(api_key: String) -> Result<Vec<TicketInfo>, String> {
 
 #[cfg(test)]
 mod tests {
+    /// The split exists so the slow half can run behind a terminal that is
+    /// already on screen. Getting the membership wrong either makes the fast
+    /// path slow again or leaves `.env` missing when the agent starts.
+    #[test]
+    fn bootstrap_phases_divide_the_work_without_dropping_any() {
+        use super::BootstrapPhase as P;
+        // Config is the half worth waiting for; deps is the half that isn't.
+        assert!(P::Config.wants_config() && !P::Config.wants_deps());
+        assert!(P::Deps.wants_deps() && !P::Deps.wants_config());
+        // One call still does everything, for a caller that wants a finished
+        // workspace rather than a fast one.
+        assert!(P::All.wants_config() && P::All.wants_deps());
+        // A renderer that sends nothing, or something we don't know, gets the
+        // whole bootstrap — the phase is a hint about pacing, never a filter
+        // that can silently skip setup.
+        assert!(P::parse(None) == P::All);
+        assert!(P::parse(Some("everything")) == P::All);
+        assert!(P::parse(Some("config")) == P::Config);
+        assert!(P::parse(Some("deps")) == P::Deps);
+    }
+
     use super::*;
 
     #[test]
