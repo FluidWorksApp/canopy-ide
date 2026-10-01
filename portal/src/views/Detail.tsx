@@ -17,7 +17,7 @@ import type { PanelCtx, Target } from '../panels/types'
 import { DiffText } from './Diff'
 import { MarkdownBody, isMarkdownPath } from './MarkdownView'
 
-/** `fs_read_file`'s remote projection — text, capped, and honest about it. */
+/** `fs_read_text`'s remote projection — text, capped, and honest about it. */
 interface FileText {
   binary: boolean
   bytes: number
@@ -254,7 +254,7 @@ function FileDetail({
   onBack: () => void
   showBack: boolean
 }) {
-  const state = useAsync<FileText>(() => ctx.rpc.call<FileText>('fs_read_file', { path }), [path])
+  const state = useAsync<FileText>(() => ctx.rpc.call<FileText>('fs_read_text', { path }), [path])
   return (
     <Frame title={basename(path)} subtitle={path} onBack={onBack} showBack={showBack}>
       <AsyncBody state={state} empty="Empty file.">

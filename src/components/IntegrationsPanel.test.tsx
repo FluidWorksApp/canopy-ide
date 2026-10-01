@@ -113,7 +113,7 @@ const setup = () => {
 describe("IntegrationsPanel", () => {
   it("opens on a focused local environment and keeps local controls usable", () => {
     const actions = setup();
-    expect(screen.getByRole("button", { name: "Local" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Local preview" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByText("1 of 2 services running")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Open :4173" }));
@@ -151,17 +151,18 @@ describe("IntegrationsPanel", () => {
     const supabaseRow = screen.getByText("Supabase").closest(".integration-provider-row");
     expect(supabaseRow?.textContent).toContain("needed");
     fireEvent.click(supabaseRow?.querySelector("button") as HTMLButtonElement);
+    expect(screen.getByRole("region", { name: "supabase connection" })).toBeTruthy();
+    expect(actions.onAutomate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Configure app connection" }));
     expect(actions.onAutomate).toHaveBeenCalledWith("supabase");
   });
 
-  it("keeps preview empty state distinct from production history", () => {
-    const actions = setup();
-    fireEvent.click(screen.getByRole("button", { name: "Preview" }));
-
-    expect(screen.getByText("Nothing has been deployed to this environment.")).toBeTruthy();
-    expect(screen.queryByText("Backend")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Set up Vercel" }));
-    expect(actions.onAutomate).toHaveBeenCalledWith("vercel");
+  it("offers only local preview and production environments", () => {
+    setup();
+    const navigation = screen.getByRole("navigation", { name: "Environment" });
+    expect(navigation.textContent).toBe("Local previewProduction");
+    expect(screen.queryByRole("button", { name: "Preview" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Set up Vercel" })).toBeNull();
   });
 
   it("never renders a credential field or secret value", () => {

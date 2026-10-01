@@ -28,7 +28,7 @@ import {
 } from "./projects";
 import type { AgentEventEntry, NoticeKind, Notify, RelayHandle } from "./types";
 import type { CustomMicroTask } from "./microTasks";
-import type { ProjectIntegrationState } from "./projectIntegrations";
+import { mergeIntegrationOperations, type ProjectIntegrationState } from "./projectIntegrations";
 import { shedRendererPressure } from "./rendererPressureRelief";
 import { bindMemoryPressure } from "./memoryPressureBinding";
 import {
@@ -44,6 +44,7 @@ import {
   derivePending,
   parseAgentEvent,
   pendingForRoots,
+  trimAgentEvents,
 } from "./notifications";
 import {
   formatDeepLink,
@@ -965,10 +966,13 @@ export default function App() {
         // one setState per line — the bridge batches each 500ms window.
         const ts = Date.now();
         setAgentEvents((prev) =>
-          [
-            ...prev,
-            ...raws.map((raw) => ({ ts, data: parseAgentEvent(raw) })),
-          ].slice(-200),
+          // Not a bare slice: the cap is app-wide and one of this list's
+          // consumers is per-pty, so a busy project used to evict a quiet
+          // terminal's only session stamp.
+          trimAgentEvents(
+            [...prev, ...raws.map((raw) => ({ ts, data: parseAgentEvent(raw) }))],
+            200,
+          ),
         );
       }),
       ipc.onRelayState(setRelayStatus),
@@ -1153,7 +1157,7 @@ export default function App() {
       }),
       // Native menu accelerators (Cmd+W etc.) → scoped in-app actions. The
       // visible ProjectView handles tab-level ones; close-project is ours.
-      import("@tauri-apps/api/event").then(({ listen }) =>
+      import("./host").then(({ listen }) =>
         listen<string>("menu", (e) => {
           if (e.payload === "close-project") {
             const active = wsRef.current.activeId;
@@ -1188,7 +1192,7 @@ export default function App() {
               })
               .catch((err) => notify(`Update check failed: ${err}`, "error"));
           } else if (e.payload === "install-cli") {
-            void import("@tauri-apps/api/core").then(({ invoke }) =>
+            void import("./host").then(({ invoke }) =>
               invoke<string>("cli_install_shim")
                 .then((m) => notify(m, "success"))
                 .catch((err) => notify(String(err), "error")),
@@ -1455,13 +1459,13 @@ export default function App() {
   // plugin.
   useEffect(() => {
     if (!loaded) return;
-    void import("@tauri-apps/api/core").then(({ invoke }) =>
+    void import("./host").then(({ invoke }) =>
       invoke<string | null>("cli_take_pending_open")
         .then((dir) => (dir ? openDirAsProject(dir) : undefined))
         .catch(() => {}),
     );
     let unlisten: (() => void) | undefined;
-    void import("@tauri-apps/api/event").then(({ listen }) =>
+    void import("./host").then(({ listen }) =>
       listen<string>("cli-open", (e) => void openDirAsProject(e.payload)).then(
         (fn) => {
           unlisten = fn;
@@ -2016,6 +2020,7 @@ export default function App() {
         runCommandId: e.run_command_id ?? undefined,
         // Recovery must not steal focus or manufacture attention.
         activate: restored ? false : getSettings().agentAskForAttention,
+        recovered: restored,
         // Desktop-owned sessions were previously killed by their tab.
         killOnClose: "kind" in e && e.kind === "desktop",
       });
@@ -2068,6 +2073,13 @@ export default function App() {
         if (spawn && exit) {
           unSpawn = spawn;
           unExit = exit;
+          // Replay the boot snapshot once more after both listeners are live.
+          // Queue identity makes overlap with the eager replay below harmless,
+          // while this closes a tab-preparation window that may have outlived
+          // the initial generation.
+          for (const session of ipc.rendererPtySessions()) {
+            if (session.kind !== "detached") void routePty(session, true);
+          }
           reconcile();
           return;
         }
@@ -2085,6 +2097,15 @@ export default function App() {
         }
       });
     };
+    // Registration captured the exact survivors before React mounted. Replay
+    // it synchronously instead of making recovery depend on any later IPC
+    // promise settling: WebKit can leave listener registration or a live
+    // snapshot unresolved during a stressed reload. install() still takes
+    // listener-then-snapshot ownership of anything created in this window.
+    for (const session of ipc.rendererPtySessions()) {
+      if (session.kind !== "detached") void routePty(session, true);
+    }
+    reconcile();
     install();
     return () => {
       cancelled = true;
@@ -2122,6 +2143,12 @@ export default function App() {
       const hinted = Boolean(link.projectId || link.path);
       const projectId =
         projectForLink(link, state.projects) ??
+        // The cwd-shaped hints (a resources row, an agent's terminal) are
+        // routinely worktree paths that sit beside the component root rather
+        // than under it; the terminal resolver knows how to fold those.
+        (link.path
+          ? projectForTerminalCwd(state.projects, link.path)
+          : undefined) ??
         // An agent running in a worktree has a cwd (`<repo>-wt-…`) under no
         // component root, so a *path*-hinted link can still fail to resolve.
         // With exactly one project open there is only one place it could mean —
@@ -2193,7 +2220,7 @@ export default function App() {
   // the project would race the workspace it resolves against.
   useEffect(() => {
     if (!loaded) return;
-    void import("@tauri-apps/api/core").then(({ invoke }) =>
+    void import("./host").then(({ invoke }) =>
       invoke<string | null>("cli_take_pending_link")
         .then((raw) => (raw ? followDeepLink(parseDeepLink(raw)) : undefined))
         .catch(() => {}),
@@ -3327,7 +3354,7 @@ export default function App() {
         onEdit: () => void;
         onShareContext: (on: boolean) => void;
         onSaveCustomTasks: (tasks: CustomMicroTask[]) => void;
-        onSaveIntegrations: (state: ProjectIntegrationState) => void;
+        onSaveIntegrations: (state: ProjectIntegrationState) => Promise<void>;
         onPersistVibeTarget: (selection: VibeTargetSelection) => Promise<boolean>;
         onPersistVibeSetup: (project: Project) => Promise<boolean>;
       }
@@ -3353,9 +3380,20 @@ export default function App() {
           const p = find();
           if (p) void saveProject({ ...p, customTasks: tasks });
         },
-        onSaveIntegrations: (integrations) => {
-          const p = find();
-          if (p) void saveProject({ ...p, integrations });
+        onSaveIntegrations: async (integrations) => {
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            const state = wsRef.current;
+            const current = state.projects.find((candidate) => candidate.id === id);
+            if (!current) throw new Error("The project is no longer open.");
+            const projects = state.projects.map((candidate) => candidate.id === id ? { ...current, integrations: mergeIntegrationOperations(current.integrations, integrations) } : candidate);
+            const candidate = { ...state, projects };
+            await saveWorkspaceStrict(candidate);
+            if (wsRef.current !== state) continue;
+            wsRef.current = candidate;
+            update({ projects });
+            return;
+          }
+          throw new Error("The project changed while saving its integrations. Try again.");
         },
         onPersistVibeTarget: async (selection) => {
           // Re-read after every awaited write. A teammate/project event may

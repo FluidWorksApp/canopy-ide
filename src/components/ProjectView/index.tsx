@@ -81,8 +81,10 @@ import {
   POLICY,
   bucketFor,
   declaredQuiet,
+  resolveSessions,
   ringFor,
   type Attention,
+  type BindableDigest,
   type Life,
   type LifeState,
 } from "../../../shared/agentLife";
@@ -160,6 +162,11 @@ import {
   type AgentSpawnPlacement,
 } from "../../agentSpawn";
 import {
+  agentWorkspaceRoot,
+  reapDecision,
+  reuseAgentWorkspace,
+} from "../../agentWorkspaceLifecycle";
+import {
   AGENT_CLIS,
   agentCliFor,
   agentModelSwitchFor,
@@ -170,6 +177,7 @@ import {
   PREREQS,
   restoreCommand,
   resumeSessionId,
+  componentForPath,
   launchCommand,
   shellBin,
   type AgentLaunchOptions,
@@ -236,6 +244,7 @@ import {
   MANAGED_PROCESS_ENV,
   plainManagedOutput,
   unattendedManagedRunCommand,
+  unattendedManagedRunArgv,
 } from "../../managedProcessSupervisor";
 import { watchFailedRestore } from "../../restoreReap";
 import { followLink, type DeepLink } from "../../deepLinks";
@@ -311,6 +320,7 @@ import {
 import type { TaskReservation, TaskRouteSnapshot } from "../../taskEnvelope";
 import {
   answerWorkflowHuman,
+  deliverWorkflowEvent,
   continueWorkflow,
   DEFAULT_WORKFLOW_STORE_DEPS,
   startWorkflow,
@@ -325,6 +335,7 @@ import {
   type WorkflowTriggerProvenance,
 } from "../../workflowDefinition";
 import { workflowGet } from "../../workflowRuns";
+import { executeWorkflowGitOp } from "../../workflowGitOps";
 import { waitForWorkflowAttempt } from "../../workflowAttempt";
 import { record as recordProvenance } from "../../provenance";
 import { resolveAgentForPr, type PrAgent } from "../../agentForPr";
@@ -334,9 +345,7 @@ import {
   askedLine,
   hasIdentity,
   identityPatch,
-  mayAutoRename,
   promptTaskIdentity,
-  shouldSeedPromptIdentity,
   taskDescription,
   taskIdentity,
 } from "../../taskIdentity";
@@ -372,8 +381,16 @@ import {
 import {
   agentDisplayName,
   tabNamesByPty,
-  shellTitle,
 } from "../../agentDisplayName";
+import {
+  tabName,
+  namePatch,
+  sessionAddress,
+  snapshotNames,
+  adoptSnapshotNames,
+  isUserNamed,
+} from "../../tabName";
+import { renameSession, onSessionRenamed } from "../../sessionRename";
 import {
   modelCommandLine,
   type ModelChoice,
@@ -509,6 +526,7 @@ import {
 } from "../../vibeProjectSetup";
 import { loadVibePackageFacts } from "../../vibePackageScripts";
 import { inferVibeCheck } from "../../vibeCheckInference";
+import { emptyBuildProject } from "../../vibeBootstrap";
 import { TabSwitcher } from "../TabSwitcher";
 import { switchRowKey, tabKind } from "../../tabKind";
 import {
@@ -839,6 +857,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const vibePackageKey = project.components
     .map((component) => `${component.id}:${component.path}`)
     .join("|");
+  const bootstrapComponents = useRef(project.components);
+  bootstrapComponents.current = project.components;
+  const [bootstrapState, setBootstrapState] = useState<{ key: string; empty: boolean } | null>(null);
+  useEffect(() => {
+    if (!vibe || vibeTarget.kind !== "needs-setup") return;
+    let cancelled = false;
+    void emptyBuildProject(bootstrapComponents.current).catch(() => false).then((empty) => {
+      if (!cancelled) setBootstrapState({ key: vibePackageKey, empty });
+    });
+    return () => { cancelled = true; };
+  }, [vibe, vibeTarget.kind, vibePackageKey]);
   const [vibePackageState, setVibePackageState] = useState<{
     key: string;
     facts: VibePackageFacts;
@@ -860,7 +889,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     ReturnType<typeof createVibeProjectSetupSession> | null
   >(null);
   useEffect(() => {
-    if (!vibe || vibeTarget.kind !== "needs-setup") {
+    if (!vibe || vibeTarget.kind !== "needs-setup" || bootstrapState?.key !== vibePackageKey || bootstrapState.empty) {
       setVibeProjectSetupSession(null);
       return;
     }
@@ -874,7 +903,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return () => {
       void session.stop();
     };
-  }, [vibe, vibeTarget.kind, project, onPersistVibeSetup, vibeSetupAttempt]);
+  }, [vibe, vibeTarget.kind, project, onPersistVibeSetup, vibeSetupAttempt, bootstrapState, vibePackageKey]);
   const requestVibeProjectDiscovery = useCallback(async () => {
     // Clear the saved target only after the workspace write succeeds. The
     // explicit retry token is consumed by the setup session created from the
@@ -1262,6 +1291,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [vibeVerifiedReadinessPtys, setVibeVerifiedReadinessPtys] = useState<Set<number>>(
     () => new Set(),
   );
+  const completedVibeOneShots = useRef(new Set<string>());
   const vibeRunSupervision = useRef(new Map<number, {
     startedAt: number;
     lastChangedAt: number;
@@ -1269,6 +1299,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     handledPrompt: string | null;
     handledPromptAt: number | null;
     readinessVerified: boolean;
+    unhealthySince: number | null;
     reported: boolean;
   }>());
   const vibeServerWatch = useRef<Array<{
@@ -1349,6 +1380,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+  const activatedRecoveredTerminalRef = useRef(false);
   /** Committed activity, newest first. This is session memory rather than a
    *  workspace preference: after a restart there is no honest "previous tab"
    *  until the user has moved between two of them. */
@@ -1483,10 +1515,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         let changed = false;
         const next = current.map((tab) => {
           if (tab.type !== "terminal" || tab.ptyId == null) return tab;
-          const name = names.get(tab.ptyId);
-          if (!name || name === tab.name) return tab;
+          // The generated label only. A rename made from the Agents page is a
+          // user's choice and reaches the tab through onSessionRenamed, not
+          // through this mirror — which cannot tell the two apart and would
+          // file both under the same slot.
+          const patch = namePatch(tab, "native", names.get(tab.ptyId));
+          if (!patch) return tab;
           changed = true;
-          return { ...tab, name };
+          return { ...tab, ...patch };
         });
         return changed ? next : current;
       });
@@ -1591,7 +1627,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }),
     [project.components, worktreeEnv],
   );
-  const roots = components.map((c) => c.path);
+  const roots = useMemo(() => components.map((c) => c.path), [components]);
   const rootsKey = roots.join("\n");
   // Cmd+T's listener is registered once; without this it closes over the
   // components from mount and opens shells in the main checkout even after a
@@ -1773,7 +1809,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           id,
           type: "terminal",
           cwd,
-          title: title ?? "shell",
+          ...(title ? { launchTitle: title } : {}),
           ptyId: null,
           command,
           icon,
@@ -1839,8 +1875,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           id,
           type: "terminal",
           cwd,
-          name,
-          title: configured?.name || title || "agent",
+          // Two different facts: what native calls the session it handed us,
+          // and what the launcher called the thing running in it.
+          nativeName: name,
+          launchTitle: configured?.name || title || undefined,
           ptyId,
           attachId: ptyId,
           killAttachedOnClose: killOnClose || undefined,
@@ -1864,12 +1902,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // subscribing flushes recovery that waited while this view was closed/asleep.
   useEffect(() => {
     return terminalAttachmentQueue.subscribe(project.id, (d) => {
+      // Recovery must not replace a user's existing selection, but a fresh or
+      // remounted view has no selection to protect. Activate one recovered tab
+      // so its viewer actually resumes instead of leaving every live stream
+      // mounted behind the empty launcher.
+      const activate =
+        d.activate !== false ||
+        (d.recovered && !activatedRecoveredTerminalRef.current);
+      if (d.recovered && activate) activatedRecoveredTerminalRef.current = true;
       attachTerminal(
         d.ptyId,
         d.cwd,
         d.title,
         d.killOnClose ? "⌨" : "📱",
-        d.activate !== false,
+        activate,
         d.killOnClose === true,
         d.name,
         d,
@@ -1885,6 +1931,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         terminalAttachmentQueue.acknowledge(project.id, tab.attachId);
       }
     }
+    terminalAttachmentQueue.reconcile(
+      project.id,
+      tabs.flatMap((tab) =>
+        tab.type === "terminal" && tab.attachId != null ? [tab.attachId] : [],
+      ),
+    );
   }, [project.id, tabs]);
 
   /** Open a pull request as its own tab, reusing one already open for it. */
@@ -1954,6 +2006,27 @@ const ProjectViewBody = memo(function ProjectViewBody({
       prev.map((t) => (t.id === id ? ({ ...t, ...patch } as SubTab) : t)),
     );
   }, []);
+
+  /** Record a user rename, whichever surface it came from — the inline tab
+   *  rename, a pane header, or the Agents page editor, which addresses a
+   *  session by pty and knows nothing about tabs. One subscription, so the
+   *  choice lands in the user's slot exactly once and no caller has to
+   *  remember to flag it. */
+  useEffect(
+    () =>
+      onSessionRenamed(({ ptyId, accepted, cleared }) => {
+        setTabs((prev) =>
+          prev.map((t) => {
+            if (t.type !== "terminal" || t.ptyId !== ptyId) return t;
+            // Clearing the field asks for the generated label back: forget the
+            // user's name rather than adopting native's fallback as a choice.
+            const patch = namePatch(t, "user", cleared ? undefined : accepted);
+            return patch ? { ...t, ...patch, nativeName: accepted } : t;
+          }),
+        );
+      }),
+    [],
+  );
 
   /** Open an embedded-browser preview tab. With no URL the tab opens on the
    *  pick-a-server form; a URL (a run rail's detected server, a reopened tab)
@@ -2507,15 +2580,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       .map((t) => ({
         cwd: t.cwd,
         command: t.command,
-        // Same reason as the hibernation snapshot: a rename dies with the pty
-        // that held it, so leaving it out is what made a reopened terminal come
-        // back under its generated name. `customTitle` first: it is what the
-        // user typed, where native `name` may be its deduplicated answer.
-        title:
-          (t.renamed ? (t.customTitle ?? t.name) : undefined) ??
-          t.customTitle ??
-          t.title,
-        renamed: t.renamed || undefined,
+        // `title` is the display name for an older build reading this store;
+        // `userName` is what a restore re-asserts on the new session.
+        ...snapshotNames(t, { agent: isAgentTabRef.current(t) }),
         icon: t.icon,
         run: t.run,
         componentId: t.componentId,
@@ -2569,12 +2636,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ? { componentId: t.componentId, runCommandId: t.runCommandId }
           : undefined,
       );
-      // A name the user chose outlives the pty that held it. `renamed` comes
-      // back with it: without that flag the restored tab looks auto-named to
-      // every auto-namer, and the first canopy_name_task after a wake took the
-      // name away again.
-      if (t.renamed && t.title)
-        patchTabRaw(id, { customTitle: t.title, renamed: true } as Partial<SubTab>);
+      // A name the user chose outlives the pty that held it: it comes back in
+      // its own slot, and the spawn callback re-asserts it on the new session.
+      patchTabRaw(id, adoptSnapshotNames(t));
       return id;
     },
     [addTerminal, patchTabRaw],
@@ -2989,14 +3053,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
             (c) => [c.label, c.path] as [string, string],
           ),
         );
-        const cwd = p.cwd;
-        repo =
-          repos.find((r) => cwd === r.path || cwd.startsWith(`${r.path}/`))
-            ?.path ??
-          // Sibling worktrees follow the `<repo>-wt-<branch>` convention.
-          repos.find((r) => cwd.startsWith(`${r.path}-wt-`))?.path ??
-          repos[0]?.path ??
-          null;
+        // Same resolver the overlay uses, so both surfaces answer alike. The
+        // last resort stays: this path has always preferred *some* repo to
+        // none, and changing that is a separate decision from making the two
+        // agree.
+        repo = componentForPath(repos, p.cwd) ?? repos[0]?.path ?? null;
       } catch {
         repo = null;
       }
@@ -3347,7 +3408,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!cli) throw new Error(`Unknown agent "${a.agent}".`);
       const fleet = await gateManagedLaunch(cli, installed);
       if (!fleet.allowed) throw new Error("Canopy's fleet gate refused this agent launch");
-      const start = await startCommandParked(cli.id, a.text, a.route);
+      // autoClose = the micro-task contract, reused whole: the env below
+      // exposes canopy_job_done to the child, and the protocol line tells it
+      // to report and stop — after which the same teardown a Tasks run gets
+      // (wait for its turn to end, kill, forget, close the pane) applies.
+      const oneShot = Boolean(a.autoClose);
+      const seed = oneShot ? `${a.text} ${microTaskProtocol()}` : a.text;
+      const start = await startCommandParked(cli.id, seed, a.route);
       if (!start) throw new Error(`Agent CLI "${cli.id}" cannot be launched`);
       const component = [...project.components]
         .filter(
@@ -3395,15 +3462,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const activate = spawnedAgentTakesFocus(
         getSettings().agentAskForAttention,
       );
+      const spawnEnv: [string, string][] = oneShot
+        ? [...fleet.env, ["CANOPY_MICRO_TASK", "1"]]
+        : fleet.env;
+      // `activate` rides in the activate slot, nowhere else: it used to be
+      // passed as the `run` flag with activate hard-coded true, which is why
+      // a spawned child stole focus whatever the attention setting said.
       const id = addTerminal(
         a.route,
         start.command,
         `${title} · ${cli.name}`,
         cli.icon,
-        activate,
-        fleet.env,
+        false,
+        spawnEnv,
         fleet.route.profile === DEFAULT_PROFILE ? undefined : fleet.route.profile,
-        true,
+        activate,
         undefined,
         undefined,
         spawnedTask,
@@ -3442,20 +3515,47 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }).catch(() => {});
         throw error;
       }
+      if (oneShot) {
+        // The same durable row a Tasks-launched run gets, adopted from the
+        // reservation already made above — so job_done's recordTaskEnd finds
+        // it, settles the attempt as completed, and the run shows in history
+        // instead of vanishing with the pane.
+        const appInstance = await ipc.instanceId().catch(() => undefined);
+        adoptTaskReservation(reservation, {
+          taskId: "agent-delegation",
+          label: title,
+          icon: cli.icon,
+          agent: cli.id,
+          cwd: a.route,
+          projectId: project.id,
+          projectName: project.name,
+          brief: a.brief,
+          ...(appInstance ? { appInstance } : {}),
+        });
+        patchTabRaw(id, {
+          micro: {
+            taskId: "agent-delegation",
+            runId: spawnedTask.runId,
+            attemptId: spawnedTask.attemptId,
+          },
+        } as Partial<SubTab>);
+      }
       pendingAgentSpawnOps.current.set(id, {
         opId: a.opId,
         runId: spawnedTask.runId,
         attemptId: spawnedTask.attemptId,
         cwd: a.route,
       });
-      if (start.typePrompt) pendingTerminalPrompts.current.set(id, a.text);
+      if (start.typePrompt) pendingTerminalPrompts.current.set(id, seed);
     },
     [
       addTerminal,
       gateManagedLaunch,
       getInstalledForLaunch,
+      patchTabRaw,
       project.components,
       project.id,
+      project.name,
     ],
   );
 
@@ -4176,13 +4276,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }
           return waitForWorkflowAttempt(reservation.attempt.attemptId);
         },
-        // Native open-PR/update-branch execution needs structured parameters
-        // that schema v1 does not carry. Fail closed instead of guessing a
-        // repository, branch or pull request from ambient UI state.
-        runGitOp: async (step) => {
-          onNotice(`Workflow step “${step.name}” needs git-operation parameters before it can run.`, "error");
-          return { ok: false };
-        },
+        runGitOp: (step) => executeWorkflowGitOp(step, worktreePath),
       };
       return {
         context: { projectId: project.id, componentId: component.id, worktreePath },
@@ -4191,7 +4285,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [
       getInstalledForLaunch,
-      onNotice,
       project.components,
       project.id,
       roots,
@@ -4254,6 +4347,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       const projectRoot = roots[0] ?? project.components[0]?.path;
       if (!projectRoot) return;
+      // Deliver to pinned waiting runs even if the editable catalog changed.
+      const waiting = await ipc.workflowRunList(project.id);
+      for (const summary of waiting.filter((run) => run.status === "waiting")) {
+        try {
+          const run = await workflowGet(summary.runId);
+          if (!run) continue;
+          const runtime = await workflowRuntime(run.definition);
+          await deliverWorkflowEvent(run.runId, event, runtime.context, runtime.deps);
+        } catch (error) { onNotice(`Workflow event could not resume its waiting run: ${String(error)}`, "error"); }
+      }
       const catalog = await loadWorkflowDefinitions(projectRoot, {
         projectRoot,
         componentRoots: new Set(roots),
@@ -4275,7 +4378,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         }
       }));
     },
-    [onNotice, project.components, roots, workflowRuntime],
+    [onNotice, project.id, project.components, roots, workflowRuntime],
   );
 
   const answerWorkflowDecision = useCallback(
@@ -4759,7 +4862,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
               ...(nextConfigured
                 ? {
                     command: nextConfigured.command,
-                    title: nextConfigured.name,
+                    // The configured name only. A restart used to write over
+                    // whatever the tab was called, which is how a renamed
+                    // server came back as something else.
+                    launchTitle: nextConfigured.name,
                     componentId: nextConfigured.componentId ?? undefined,
                     runCommandId: nextConfigured.runCommandId ?? undefined,
                   }
@@ -5325,11 +5431,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (tab)
           patchTabRaw(tab.id, {
             ...(description ? { description } : {}),
-            // The generated session name (Moss, Juniper, …) is a fallback,
-            // not the work's identity. Preserve an explicit user rename.
-            ...(named.title && mayAutoRename(tab)
-              ? { customTitle: named.title }
-              : {}),
+            // The agent's own name for its run. It outranks the CLI's label and
+            // the generated session name — a codex tab reading "codex" says
+            // nothing the icon does not — and is outranked in turn by a name
+            // the user typed, without either side having to check a flag.
+            ...(namePatch(tab, "agent", named.title) ?? {}),
           });
 
         // Ordinary sessions have no task-history row to update, but their tab
@@ -5347,15 +5453,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
           );
         else if (tab)
           patchTabRaw(tab.id, {
-            // Same rule as the ordinary branch above, and it has to be repeated
-            // here: a micro-task tab the user renamed was being re-titled on
-            // every canopy_name_task the agent made, which is as often as the
-            // work changes. An explicit rename outranks the agent's own idea of
-            // what the run is called, for the whole life of the tab.
-            customTitle:
-              named.title && mayAutoRename(tab)
-                ? `${named.title} · task`
-                : tab.customTitle,
+            ...(namePatch(
+              tab,
+              "agent",
+              named.title ? `${named.title} · task` : undefined,
+            ) ?? {}),
             icon: named.icon ?? tab.icon,
           } as Partial<SubTab>);
         return;
@@ -6066,6 +6168,67 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [commitPendingAgentCloses],
   );
 
+  /** Closing the last tab in an agent workspace decides the workspace's fate:
+   *  nothing only-here → removed quietly (with its branch, when the branch too
+   *  holds nothing); uncommitted or unpushed work → one question, with keeping
+   *  it as the safe answer. Fired from finalizeTabClose after a beat so the
+   *  tab's PTY is gone before git touches the folder; every failure is a
+   *  silent keep — a workspace left behind is recoverable, a wrong delete is
+   *  not. */
+  const maybeReapAgentWorkspace = useCallback(
+    async (cwd: string, closedTabId: string) => {
+      const ws = agentWorkspaceRoot(cwd, repoPaths);
+      if (!ws) return;
+      // Splits, extra shells, another agent: any surviving tab in the same
+      // workspace means it is still in use.
+      const inUse = tabsRef.current.some(
+        (t) =>
+          t.id !== closedTabId &&
+          t.type === "terminal" &&
+          (t.cwd === ws.root || t.cwd.startsWith(`${ws.root}/`)),
+      );
+      if (inUse) return;
+      const [worktrees, audit] = await Promise.all([
+        ipc.gitWorktrees(ws.repo),
+        ipc.gitWorkAudit(ws.repo),
+      ]);
+      const worktree = worktrees.find((w) => w.path === ws.root);
+      const decision = reapDecision(
+        worktree,
+        audit.items.find((item) => item.branch === worktree?.branch),
+      );
+      if (decision.kind === "keep") return;
+      if (decision.kind === "remove") {
+        await ipc.gitWorktreeRemove(ws.repo, ws.root, 0);
+        if (decision.deleteBranch)
+          await ipc.gitBranchDelete(ws.repo, decision.branch).catch(() => {});
+        return;
+      }
+      const held = [
+        decision.dirty > 0 &&
+          `${decision.dirty} uncommitted file${decision.dirty === 1 ? "" : "s"}`,
+        decision.unpushed > 0 &&
+          `${decision.unpushed} unpushed commit${decision.unpushed === 1 ? "" : "s"}`,
+      ].filter(Boolean);
+      const action = await ask(
+        askDialog({
+          title: "This agent left work behind",
+          body: `${basename(ws.root)} still holds ${held.join(" and ")} that exist nowhere else. The tab is closed either way — this is only about the folder.`,
+          detail: ws.root,
+          choices: [
+            { action: "cancel", label: "Keep the workspace", recommended: true },
+            { action: "cleanup", label: "Remove it and lose the work" },
+          ],
+        }),
+      );
+      if (action !== "cleanup") return;
+      await ipc.gitWorktreeRemove(ws.repo, ws.root, 1);
+    },
+    [repoPaths, ask],
+  );
+  const maybeReapAgentWorkspaceRef = useRef(maybeReapAgentWorkspace);
+  maybeReapAgentWorkspaceRef.current = maybeReapAgentWorkspace;
+
   const finalizeTabClose = useCallback((
     id: string,
     origin: "automatic" | "user" = "automatic",
@@ -6091,6 +6254,25 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // once here covers a finished task and an abandoned one alike. recordTaskEnd
     // ignores a run that already settled, so "stopped" can't clobber "done".
     const closingTab = tabsRef.current.find((t) => t.id === id);
+    if (closingTab?.type === "terminal" && closingTab.cwd) {
+      const closingCwd = closingTab.cwd;
+      // After the unmount's PTY kill, not during it: git won't remove a
+      // folder a live process still holds open.
+      setTimeout(
+        () =>
+          void maybeReapAgentWorkspaceRef
+            .current(closingCwd, id)
+            .catch(() => {}),
+        1500,
+      );
+    }
+    if (
+      origin === "user" &&
+      closingTab?.type === "terminal" &&
+      closingTab.attachId != null
+    ) {
+      terminalAttachmentQueue.forget(project.id, closingTab.attachId);
+    }
     if (closingTab?.type === "preview") forgetBrowserTarget(id);
     if (
       origin === "user" &&
@@ -6357,7 +6539,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const first = closingTabs[0];
       const baseTitle =
         first.type === "terminal"
-          ? first.customTitle ?? first.title
+          ? tabName(first, { agent: isAgentTabRef.current(first) })
           : "Agent";
       const close: PendingAgentClose = {
         id,
@@ -7194,33 +7376,43 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // across a restart/restore. This is the authoritative terminal→session bond:
   // it can never bind a tab to an unrelated session whose recycled pty number
   // happens to collide. Latest event per pty wins.
-  const liveSessionByPty = useMemo(() => {
-    // Seeded from each terminal's own launch command first: a tab restored as
-    // `codex resume <id>` names its session outright, and Canopy typed that
-    // command into that pty, so the bond holds from the first frame. Without
-    // the seed, a resumed CLI that emits no hook event until its next prompt
-    // (codex does exactly this) leaves its tab unbound after every restart —
-    // the digest it wrote sits on disk saying "idle" while the strip, seeing
-    // no digest at all, reads the resume banner's paint burst as "working".
-    const m = new Map<number, string>();
-    for (const t of tabs) {
-      if (t.type !== "terminal" || t.ptyId == null) continue;
-      const sid = resumeSessionId(t.command);
-      if (sid) m.set(t.ptyId, sid);
-    }
-    const latest = new Map<number, { sid: string; ts: number }>();
-    for (const e of projectEvents) {
-      const d = e.data;
-      if (!d || d.pty == null || !d.sessionId) continue;
-      const prev = latest.get(d.pty);
-      if (!prev || e.ts >= prev.ts)
-        latest.set(d.pty, { sid: d.sessionId, ts: e.ts });
-    }
-    // The event stamp wins where both speak: it is from this launch by
-    // construction and follows the session even if the CLI swaps ids.
-    for (const [pty, v] of latest) m.set(pty, v.sid);
-    return m;
-  }, [projectEvents, tabs]);
+  //
+  // Through `resolveSessions`, which is the one answer to this: the launch
+  // command's seed, corrected by the event stamp, and — for a session whose
+  // events have aged out of App's capped ring — the digest's recorded surface.
+  // That third source is the one this used to be missing, and its absence was
+  // not cosmetic: with no session id there is no digest, and with no digest the
+  // life ladder falls past every hook rung to "the process tree is burning
+  // CPU", which re-stamps itself on every stats tick and never decays. An agent
+  // that finished an hour ago sat in WORKING forever, while the Agents panel —
+  // which already resolved by surface — showed the same session as Idle.
+  const bound = useMemo(
+    () =>
+      resolveSessions({
+        digests: wsDigests as unknown as BindableDigest[],
+        events: projectEvents.map((e) => ({
+          ts: e.ts,
+          data: e.data
+            ? { pty: e.data.pty, sessionId: e.data.sessionId }
+            : null,
+        })),
+        instance: thisInstance,
+        livePtys: new Set(
+          tabs.flatMap((t) =>
+            t.type === "terminal" && t.ptyId != null ? [t.ptyId] : [],
+          ),
+        ),
+        seeds: new Map(
+          tabs.flatMap((t) => {
+            if (t.type !== "terminal" || t.ptyId == null) return [];
+            const sid = resumeSessionId(t.command);
+            return sid ? [[t.ptyId, sid] as [number, string]] : [];
+          }),
+        ),
+      }),
+    [projectEvents, tabs, wsDigests, thisInstance],
+  );
+  const liveSessionByPty = bound.sessionByPty;
   liveSessionIdsRef.current = liveSessionIds;
   const liveSessionByPtyRef = useRef(liveSessionByPty);
   liveSessionByPtyRef.current = liveSessionByPty;
@@ -7254,21 +7446,19 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
       if (tab && d.event === "UserPromptSubmit" && d.prompt) {
         const baseline = promptTaskIdentity(d.prompt);
-        // The first substantive prompt is a useful temporary label while the
-        // model starts. Follow-ups are conversation, not identity: once this
-        // baseline or canopy_name_task has named the work, raw user messages
-        // must not overwrite the model's title/current-focus summary.
-        if (
-          (baseline.title || baseline.description) &&
-          shouldSeedPromptIdentity(tab)
-        )
-          patchTabRaw(tab.id, {
-            ...(baseline.description ? { description: baseline.description } : {}),
-            // Managed micro-tasks already have a durable launch label. For an
-            // ordinary conversation, the human's request is a better identity
-            // than the generated fallback until the agent refines it.
-            ...(baseline.title ? { customTitle: baseline.title } : {}),
-          });
+        // The opening request, as a stand-in until the agent names the work
+        // itself. Only the first one ever lands: namePatch keeps later messages
+        // out of the slot, and a micro-task's durable launch label out of
+        // reach. Nothing here can touch a name the user typed — that is a
+        // different slot, and this caller has no way to reach it.
+        const name = namePatch(tab, "prompt", baseline.title);
+        // The focus line follows the same rule, yielding to the agent's own
+        // description as soon as canopy_name_task publishes one.
+        const description =
+          baseline.description && !tab.agentName && !tab.micro
+            ? { description: baseline.description }
+            : undefined;
+        if (name || description) patchTabRaw(tab.id, { ...description, ...name });
       }
       if (tab && tab.id === activeTabIdRef.current && visibleRef.current)
         attentionRef.current(d.pty, { t: "focus", at: e.ts, visible: true }, cli);
@@ -7443,7 +7633,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               id: tabId(),
               type: "terminal",
               cwd: t.cwd,
-              title: t.title,
+              ...adoptSnapshotNames(t),
               ptyId: t.attachId,
               attachId: t.attachId,
               icon: t.icon ?? "📱",
@@ -7474,10 +7664,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
               : undefined,
           );
           // Waking spawns a new pty, which names itself. A name the user chose
-          // has to be re-asserted onto it — and re-flagged as chosen, or the
-          // first thing that auto-names this tab overwrites it.
-          if (t.renamed && t.title)
-            patchTabRaw(id, { customTitle: t.title, renamed: true } as Partial<SubTab>);
+          // has to be re-asserted onto it or the wake silently renames the tab.
+          patchTabRaw(id, adoptSnapshotNames(t));
           return id;
         }
         case "file": {
@@ -8466,13 +8654,24 @@ const ProjectViewBody = memo(function ProjectViewBody({
     async (
       cli: AgentCli,
       at?: string,
-      where: "workspace" | "current" = "workspace",
+      // Unnamed means "the user didn't say": the agentWorkspaceByDefault setting
+      // decides. Callers with an explicit gesture (⇧↵, the hover action, a
+      // context-menu entry) still pass their own.
+      where?: "workspace" | "current",
     ) => {
       const cwd = at ?? activeContextRoot ?? componentsRef.current[0]?.path;
       if (!cwd) return;
-      if (installed[cli.bin]) {
+      const target =
+        where ?? (getSettings().agentWorkspaceByDefault ? "workspace" : "current");
+      // `undefined` is a probe that hasn't answered, never "not installed".
+      // Ask now; if it still can't say, launch anyway: a missing binary fails
+      // visibly in its own terminal, while guessing "missing" would run the
+      // installer over a CLI the user already has.
+      let present = installed[cli.bin];
+      if (present === undefined) present = (await getInstalledForLaunch())[cli.bin];
+      if (present !== false) {
         let launchCwd = cwd;
-        if (where === "workspace") {
+        if (target === "workspace") {
           const repo =
             [...repoPaths]
               .sort((a, b) => b.length - a.length)
@@ -8489,49 +8688,62 @@ const ProjectViewBody = memo(function ProjectViewBody({
               "info",
             );
           } else {
-            const branch = agentWorkspaceBranch(cli.id);
-            const result = await switchTo(
-              repo,
-              { kind: "workspace", branch, create: true },
-              { because: `the new ${cli.name} agent` },
-            );
-            if (result.kind !== "settled") return;
-            launchCwd = result.path;
-            // Setup failure does not invalidate the new worktree.
-            if (result.created && getSettings().workspaceBootstrap) {
-              // The config half only: a few small ignored files, and `.env` is
-              // among them, so the CLI must not start before they land.
-              await ipc
-                .gitWorktreeBootstrap(repo, launchCwd, "config")
-                .catch((error) =>
-                  onNotice(
-                    `${cli.name}'s workspace is ready, but its ignored config could not be copied: ${String(error)}`,
-                    "warn",
-                  ),
-                );
-              // The dependency clone runs behind the terminal. It is a hundred
-              // thousand files on a real repo — tens of seconds — and awaiting it
-              // here is the whole reason "new agent in a new workspace" felt like
-              // it had hung: nothing appeared on screen until node_modules had
-              // been cloned, for an agent that does not need it to come up. The
-              // notice lands when it finishes, or if it couldn't.
-              void ipc
-                .gitWorktreeBootstrap(repo, launchCwd, "deps")
-                .then((report) => {
-                  if (report.note)
+            // A pristine leftover workspace for this CLI beats a fresh one:
+            // already checked out, already bootstrapped, fast-forwarded to
+            // today's HEAD — the launch is instant instead of a worktree add.
+            const reused = await reuseAgentWorkspace(repo, cli.id);
+            if (reused) {
+              launchCwd = reused;
+            } else {
+              const branch = agentWorkspaceBranch(cli.id);
+              // The worktree checkout plus config copy below take seconds on a
+              // big repo, and nothing is on screen until they finish — without
+              // this the launch reads as the app hanging.
+              onNotice(`Preparing an isolated workspace for ${cli.name}…`, "info");
+              const result = await switchTo(
+                repo,
+                { kind: "workspace", branch, create: true },
+                { because: `the new ${cli.name} agent` },
+              );
+              if (result.kind !== "settled") return;
+              launchCwd = result.path;
+              const created = result.path;
+              // Setup failure does not invalidate the new worktree.
+              if (result.created && getSettings().workspaceBootstrap) {
+                // The config half only: a few small ignored files, and `.env` is
+                // among them, so the CLI must not start before they land.
+                await ipc
+                  .gitWorktreeBootstrap(repo, created, "config")
+                  .catch((error) =>
                     onNotice(
-                      report.install
-                        ? `${report.note} Run \`${report.install}\` in the new workspace.`
-                        : report.note,
+                      `${cli.name}'s workspace is ready, but its ignored config could not be copied: ${String(error)}`,
                       "warn",
-                    );
-                })
-                .catch((error) =>
-                  onNotice(
-                    `${cli.name}'s workspace is ready, but its dependencies could not be cloned: ${String(error)}`,
-                    "warn",
-                  ),
-                );
+                    ),
+                  );
+                // The dependency clone runs behind the terminal. It is a hundred
+                // thousand files on a real repo — tens of seconds — and awaiting
+                // it here kept anything from appearing on screen until
+                // node_modules had been cloned, for an agent that does not need
+                // it to come up. The notice lands when it finishes, or if it
+                // couldn't.
+                void ipc
+                  .gitWorktreeBootstrap(repo, created, "deps")
+                  .then((report) => {
+                    if (report.note)
+                      onNotice(
+                        report.install
+                          ? `${report.note} Run \`${report.install}\` in the new workspace.`
+                          : report.note,
+                        "warn",
+                      );
+                  })
+                  .catch((error) =>
+                    onNotice(
+                      `${cli.name}'s workspace is ready, but its dependencies could not be cloned: ${String(error)}`,
+                      "warn",
+                    ),
+                  );
+              }
             }
           }
         }
@@ -8578,6 +8790,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     [
       installed,
+      getInstalledForLaunch,
       addTerminal,
       completePendingSplit,
       onNotice,
@@ -8621,11 +8834,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
       icon: <AgentIcon id={cli.id} size={15} />,
       // Informational: a context-menu row has one click target, and the ＋
       // menu carries the clickable badge. The account is the status bar's job.
-      hint: installed[cli.bin]
-        ? cliUpdates[cli.bin]?.hasUpdate
-          ? `⇡ ${cliUpdates[cli.bin]?.latest}`
-          : undefined
-        : "install",
+      hint:
+        installed[cli.bin] === false
+          ? "install"
+          : cliUpdates[cli.bin]?.hasUpdate
+            ? `⇡ ${cliUpdates[cli.bin]?.latest}`
+            : undefined,
       onClick: () => void launchCli(cli, cwd, "current"),
     })),
   ];
@@ -8720,45 +8934,30 @@ const ProjectViewBody = memo(function ProjectViewBody({
     }
   };
 
-  const startRename = useCallback((tab: TermSubTab) => {
-    setRenamingTabId(tab.id);
-    setRenameDraft(tab.customTitle ?? tab.name ?? tab.title);
-  }, []);
-  // Native owns live session names. The tab mirrors the accepted value, while
-  // the PTY id/token remains the authority for every operation.
-  //
-  // `customTitle` is the durable record of the user's choice and it is kept, not
-  // cleared. It used to be dropped the moment native accepted the name, on the
-  // theory that `name` now held it — but `name` is the *session's* name, and a
-  // session is not forever: a restart, a re-run or a wake spawns a new pty that
-  // names itself, and every one of those silently renamed the tab back. Worse,
-  // several surfaces fall back to the OSC `title` when there is no customTitle,
-  // so a renamed shell went back to being renamed by its own CLI on every
-  // repaint. One field, written only here, read first everywhere.
+  const startRename = useCallback(
+    (tab: TermSubTab) => {
+      setRenamingTabId(tab.id);
+      setRenameDraft(tabName(tab, { agent: isAgentTabRef.current(tab) }));
+    },
+    [],
+  );
+  // A live session is renamed through the one door, which announces the result
+  // and lets the subscription above file it in the user's slot. A tab with no
+  // pty yet has nothing to announce, so it writes that slot directly and the
+  // spawn callback pushes it to native once there is a session to name.
   const commitRename = useCallback(() => {
     if (renamingTabId) {
       const tab = tabsRef.current.find(
         (candidate): candidate is TermSubTab =>
           candidate.id === renamingTabId && candidate.type === "terminal",
       );
-      const chosen = renameDraft.trim() || undefined;
       if (tab?.ptyId != null) {
-        void ipc
-          .ptySetName(tab.ptyId, renameDraft)
-          .then((name) =>
-            patchTab(tab.id, {
-              name,
-              customTitle: chosen,
-              // Without this there is nothing saying the name was chosen rather
-              // than generated — which is what every auto-namer has to check
-              // before it writes, and what the snapshots carry back.
-              renamed: chosen != null,
-            }),
-          )
-          .catch((error) => onNotice(String(error), "error"));
+        void renameSession(tab.ptyId, renameDraft).catch((error) =>
+          onNotice(String(error), "error"),
+        );
       } else if (tab) {
-        // The spawn callback promotes this pending value into native state.
-        patchTab(tab.id, { customTitle: chosen, renamed: chosen != null });
+        const patch = namePatch(tab, "user", renameDraft.trim() || undefined);
+        if (patch) patchTab(tab.id, patch);
       }
     }
     setRenamingTabId(null);
@@ -8844,9 +9043,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     (ptyId: number | null | undefined): Life => {
       const stats = ptyId != null ? statsByPty.get(ptyId) : undefined;
       const sid = ptyId != null ? liveSessionByPty.get(ptyId) : undefined;
-      const digest = sid
-        ? wsDigests.find((d) => d.session_id === sid)
-        : undefined;
+      // From the bound index rather than a scan: this runs per agent tab per
+      // stats tick, and `digestBySession` already keeps the newest per session.
+      const digest = sid ? bound.digestBySession.get(sid) : undefined;
       return lifeFor({
         digest: (digest ?? null) as never,
         stats,
@@ -8854,7 +9053,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         now: lifeClock / 1000,
       });
     },
-    [statsByPty, liveSessionByPty, wsDigests, firstSeen, lifeClock],
+    [statsByPty, liveSessionByPty, bound, firstSeen, lifeClock],
   );
   const watchdogViews = useStableViews(() => {
     const views: AgentLifeView[] = [];
@@ -8906,13 +9105,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
   const tabLife = useCallback(
     (t: TermSubTab): Life => {
+      // Agent panes only. A plain shell split into the same group has no
+      // digest, paints constantly and burns CPU, so the ladder calls it
+      // "working" — and a `npm run dev` sharing the pane would then pin its
+      // neighbour's agent tab under WORKING whatever the agent was doing.
       const members = t.paneGroup
         ? tabs.filter(
             (member): member is TermSubTab =>
-              member.type === "terminal" && member.paneGroup === t.paneGroup,
+              member.type === "terminal" &&
+              member.paneGroup === t.paneGroup &&
+              isAgentTabRef.current(member),
           )
         : [t];
-      const lives = members.map((member) => lifeForPty(member.ptyId));
+      const lives = (members.length ? members : [t]).map((member) =>
+        lifeForPty(member.ptyId),
+      );
       const order: LifeState[] = [
         "waiting",
         "working",
@@ -8966,7 +9173,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         )
         .map((t) => ({
           tabId: t.id,
-          title: t.customTitle || t.title,
+          title: tabName(t),
           state: tabState(t),
           icon: t.icon,
         })),
@@ -9005,9 +9212,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       out.push({
         ...tab,
         multiplexCount: ids.length,
-        multiplexTitle: tab.customTitle
-          ? `${tab.customTitle} · ${ids.length}`
-          : `${focused.customTitle ?? focused.title} +${ids.length - 1}`,
+        multiplexTitle: tab.userName
+          ? `${tab.userName} · ${ids.length}`
+          : `${tabName(focused, { agent: isAgentTabRef.current(focused) })} +${ids.length - 1}`,
       });
     }
     return out;
@@ -9069,12 +9276,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // unable to leave Working while its own dot said idle — see declaredQuiet.
     const provenIds = new Set<string>();
     for (const t of agentTabs) {
-      const members = t.paneGroup
+      // Agent panes only, for the same reason as tabLife above: a shell sharing
+      // the group is not evidence about this agent.
+      const grouped = t.paneGroup
         ? tabs.filter(
             (member): member is TermSubTab =>
-              member.type === "terminal" && member.paneGroup === t.paneGroup,
+              member.type === "terminal" &&
+              member.paneGroup === t.paneGroup &&
+              isAgentTabRef.current(member),
           )
-        : [t];
+        : [];
+      const members = grouped.length ? grouped : [t];
       const verdicts = members.map((member) => {
         const life = lifeForPty(member.ptyId);
         return {
@@ -9435,7 +9647,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         active: tab.id === activeVisualTabId,
         className: terminalMemoryWarning(tab) ? "run-chip-memory-warning" : undefined,
         dot: <TerminalIcon size={11} className="run-chip-shell-dot" />,
-        title: tab.multiplexTitle ?? tab.customTitle ?? tab.title,
+        title: tab.multiplexTitle ?? tabName(tab),
         tooltip: `${tab.command ?? "shell"} — ${tab.cwd}`,
         onSelect: () => {
           const group = tab.paneGroup
@@ -9469,7 +9681,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           ) : (
             <FailIcon size={11} className="run-chip-fail" />
           ),
-          title: tab.title,
+          title: tabName(tab),
           tooltip: tab.exited
             ? `${ok ? "finished" : `exited ${tab.exitCode ?? "?"}`} — ${tab.command ?? ""}`
             : `running — ${tab.command ?? ""}`,
@@ -9642,11 +9854,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
       );
       return {
         tabId: t.id,
-        name:
-          t.name ??
-          projectStats.find((session) => session.id === t.ptyId)?.name ??
-          t.customTitle,
-        title: t.customTitle ?? t.title,
+        // What the mesh routes on, rather than what the tab is called — two
+        // different questions, and substituting one for the other silently is
+        // how they used to drift apart.
+        name: sessionAddress(
+          t,
+          projectStats.find((session) => session.id === t.ptyId)?.name,
+        ),
+        title: tabName(t, { agent: true }),
         description: t.description,
         ptyId: t.ptyId as number,
         agentId: (byProc ?? byCommand)?.id ?? "agent",
@@ -9695,7 +9910,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         url: `http://localhost:${p}`,
         port: p,
         ptyId: t.ptyId as number,
-        title: t.customTitle ?? t.title,
+        title: tabName(t),
         command: t.command,
         cwd: t.cwd,
         componentLabel: comp?.label ?? null,
@@ -9867,11 +10082,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
         `Use an already-enabled ${provider.label} API or MCP integration first. If the account must be linked, ask the user to complete the provider's OAuth/account-link step. Use ${provider.cliBin ? `the ${provider.cliBin} CLI` : "the provider API"} only as a fallback.`,
         "Inspect every component and their data flow before deciding what must be provisioned or deployed:",
         topology,
+        `Verified provider bindings: ${JSON.stringify(project.integrations?.resources ?? [])}. Use the recorded resource ID for production; local preview must use the project's local database or emulator. Verify account access before changing configuration.`,
         "Keep local services usable while remote setup is pending. Never print or persist credentials. Do not apply a managed database migration or production deployment without the user's explicit confirmation. Report the safe provider resource IDs, environments, public endpoints, migration snapshot, and deployment ID/time when finished.",
       ].join("\n\n");
       void startAgentInDir(dir, undefined, seed, `${provider.label} setup`);
     },
-    [project.components, project.name, startAgentInDir],
+    [project.components, project.name, project.integrations, startAgentInDir],
   );
 
   // ⌘K's context, memoised. A fresh object literal here re-ran every instant
@@ -10105,10 +10321,28 @@ const ProjectViewBody = memo(function ProjectViewBody({
       recoverVibeRoute,
     ],
   );
-  vibeSessionRef.current = vibeSession;
+  const bootstrapDiscovery = useRef(requestVibeProjectDiscovery);
+  bootstrapDiscovery.current = requestVibeProjectDiscovery;
+  const bootstrapSession = useMemo(() => {
+    const components = bootstrapComponents.current;
+    const component = components[0];
+    if (!vibe || vibeTarget.kind !== "needs-setup" || !bootstrapState?.empty || !component) return null;
+    return createVibeBuilderSession({
+      projectId: project.id, projectName: project.name, componentId: component.id, componentPath: component.path,
+      cliId: getSettings().defaultAgent, cliBin: getSettings().defaultAgent,
+      projectComponents: components, siblingPaths: components.slice(1).map((item) => item.path),
+      previewTabId: () => null, recoverRoute: recoverVibeRoute,
+      onBootstrapReady: async () => {
+        setBootstrapState({ key: vibePackageKey, empty: false });
+        await bootstrapDiscovery.current();
+      },
+    });
+  }, [vibe, vibeTarget.kind, bootstrapState?.empty, project.id, project.name, vibePackageKey, recoverVibeRoute]);
+  useEffect(() => () => { void bootstrapSession?.stop(); }, [bootstrapSession]);
+  vibeSessionRef.current = vibeSession ?? bootstrapSession;
   useEffect(() => () => void vibeSession?.stop(), [vibeSession]);
   vibeServerWatch.current =
-    vibe && vibeSession
+    vibeSession
       ? vibeRequiredRuns
           .filter(({ command }) => command.purpose !== "setup" && command.purpose !== "check")
           .map(({ component, command }) => ({
@@ -10138,6 +10372,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
         candidate.type === "terminal" && candidate.id === tabId,
     );
     if (!tab) return;
+    const owner = componentsRef.current.find((component) => component.id === tab.componentId);
+    const command = owner?.commands?.find((candidate) => candidate.id === tab.runCommandId);
+    if (owner && command && (command.purpose === "setup" || command.readiness?.kind === "one-shot")) {
+      const key = `${owner.path}:${owner.id}:${command.id}:${command.command}`;
+      if (event.exit_code === 0 && !event.requested) completedVibeOneShots.current.add(key);
+      else completedVibeOneShots.current.delete(key);
+    }
     const watched = vibeServerWatch.current.find(
       (candidate) =>
         tab.cwd === candidate.path &&
@@ -10294,7 +10535,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const autoStartedVibeRuns = useRef(new Set<string>());
   const reportedVibeSetupFailures = useRef(new Set<string>());
   useEffect(() => {
-    if (!visible || !vibe || !vibeSession) return;
+    if (!vibeSession) return;
     for (const { component, command, identity } of vibeRequiredRuns) {
       const key = `${component.path}:${component.id}:${command.id}`;
       const running = runTabs.some((tab) => matchesVibeRun(tab, component, command));
@@ -10307,6 +10548,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           (candidate) => candidate.id === dependency.runCommandId,
         );
         if (!dependencyComponent || !dependencyCommand) return false;
+        if (completedVibeOneShots.current.has(`${dependencyComponent.path}:${dependencyComponent.id}:${dependencyCommand.id}:${dependencyCommand.command}`)) return true;
         const dependencyTab = runTabs.find((tab) =>
           matchesVibeRun(tab, dependencyComponent, dependencyCommand),
         );
@@ -10320,8 +10562,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (!dependenciesReady) continue;
       // Setup commands the survey found (`purpose: "setup"`) run to completion
       // before the server does — see vibeSetupGate for the rules.
-      const gate = vibeSetupGate(command, component, runTabs, (setupId) =>
-        autoStartedVibeRuns.current.has(`${component.path}:${component.id}:${setupId}`),
+      const gate = vibeSetupGate(command, component, runTabs,
+        (setupId) => autoStartedVibeRuns.current.has(`${component.path}:${component.id}:${setupId}`),
+        (setupId) => completedVibeOneShots.current.has(`${component.path}:${component.id}:${setupId}:${component.commands?.find((item) => item.id === setupId)?.command}`),
       );
       for (const setup of gate.start) {
         autoStartedVibeRuns.current.add(`${component.path}:${component.id}:${setup.id}`);
@@ -10370,6 +10613,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
           Promise.resolve("");
         void vibeSession.reportManagedProcessFailure({
           key: setupKey,
+          onRepaired: () => {
+            const current = tabsRef.current.find((tab) => tab.id === failedTab.id);
+            if (current?.type === "terminal" && current.exited) restartRun(current.id);
+          },
           kind: "setup",
           componentId: component.id,
           runCommandId: setup.id,
@@ -10405,7 +10652,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         { componentId: component.id, runCommandId: command.id },
       );
     }
-  }, [visible, vibe, vibeSession, vibeRequiredRuns, runTabs, projectStats, addTerminal, project.id, project.name, project.components, vibeVerifiedReadinessPtys]);
+  }, [visible, vibe, vibeSession, vibeRequiredRuns, runTabs, projectStats, addTerminal, project.id, project.name, project.components, vibeVerifiedReadinessPtys, restartRun]);
 
   // A live PTY is not proof that its command started. Package runners,
   // authentication flows, and project pickers can all wait forever while the
@@ -10414,7 +10661,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // exact command Build already authorized are answered automatically; every
   // other prompt goes to the repair agent with the terminal tail.
   useEffect(() => {
-    if (!visible || !vibe || !vibeSession) {
+    if (!vibeSession) {
       vibeRunSupervision.current.clear();
       setVibeVerifiedReadinessPtys((current) =>
         current.size === 0 ? current : new Set(),
@@ -10475,6 +10722,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               handledPrompt: null,
               handledPromptAt: null,
               readinessVerified: false,
+              unhealthySince: null,
               reported: false,
             };
             vibeRunSupervision.current.set(ptyId, observed);
@@ -10491,7 +10739,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // Readiness releases dependency startup once. Runtime regressions
           // belong to browser/server health evidence, not a second startup
           // incident wearing the wrong label.
-          if (observed.readinessVerified) {
+          if (observed.readinessVerified && readiness !== "http") {
             verify(ptyId);
             return;
           }
@@ -10507,6 +10755,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 )).some(Boolean)
               : false;
           if (disposed) return;
+          if (observed.readinessVerified && readiness === "http") {
+            if (httpReady) { observed.unhealthySince = null; verify(ptyId); return; }
+            observed.unhealthySince ??= now;
+            if (now - observed.unhealthySince < 10_000) return;
+          }
           const classification = classifyManagedProcess({
             kind: command.purpose ?? "serve",
             now,
@@ -10516,10 +10769,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             ports,
             readinessKind: readiness,
             httpReady,
-            readinessTimeoutMs:
-              command.readiness?.kind === "one-shot"
-                ? command.readiness.timeoutMs
-                : undefined,
+            readinessTimeoutMs: observed.readinessVerified ? 1 : command.readiness?.timeoutMs,
             rawOutput: raw,
             safePromptHandledAt: observed.handledPromptAt,
           });
@@ -10584,7 +10834,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               key,
               componentId: component.id,
               runCommandId: command.id,
-              reason: "readiness-timeout",
+              reason: observed.readinessVerified ? "health-regression" : "readiness-timeout",
               ports: stat?.ports ?? [],
               outputBytes: stat?.output_bytes ?? null,
               totalCpu: stat?.total_cpu ?? null,
@@ -10619,6 +10869,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const vibeRuntimeReady =
     vibeRequiredRuns.length > 0 &&
     vibeRequiredRuns.every(({ component, command }) => {
+      if (completedVibeOneShots.current.has(`${component.path}:${component.id}:${command.id}:${command.command}`)) return true;
       const tab = runTabs.find((candidate) =>
         matchesVibeRun(candidate, component, command),
       );
@@ -10766,7 +11017,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           .filter((t): t is TermSubTab => t.type === "terminal" && !!t.run)
           .map((t) => ({
             ptyId: t.ptyId,
-            title: t.customTitle ?? t.name ?? t.title,
+            title: tabName(t),
             command: t.command ?? "",
             cwd: t.cwd,
             component:
@@ -10905,10 +11156,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
           // The live session cwd — the same source the Agents panel keys off,
           // so the overlay and a panel-opened tab resolve the same workspace.
           const cwd = stat?.cwd || activeTab.cwd || "";
-          const repo =
-            components.find(
-              (c) => cwd === c.path || cwd.startsWith(c.path + "/"),
-            )?.path ?? null;
+          // Through the shared resolver, which folds worktrees. Containment
+          // alone cannot see a sibling `<repo>-wt-<branch>`, so an agent in one
+          // resolved to no repository and this overlay showed the digest-only
+          // fallback — for a session whose pinned tab showed the real diff.
+          const repo = componentForPath(components, cwd);
           // Bind to the session actually running in this terminal by identity,
           // never by the digest's `surface` (the pty from whenever the hook last
           // wrote — stale across a restart, which is what stapled a dead session
@@ -11233,7 +11485,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (cwd) addTerminal(cwd);
   }, [activeContextRoot, addTerminal, completePendingSplit]);
   const onLaunchCli = useCallback(
-    (cli: AgentCli, where: "workspace" | "current" = "workspace") =>
+    (cli: AgentCli, where?: "workspace" | "current") =>
       launchCli(cli, undefined, where),
     [launchCli],
   );
@@ -11499,6 +11751,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         return (
           <AgentWorkspaceView
             repo={tab.repo}
+            life={lifeForPty(tab.ptyId)}
             agent={tab.agent}
             cwd={tab.cwd}
             sessionId={tab.sessionId}
@@ -11801,7 +12054,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
       case "prs-list":
         return (
-          <PrsPanel page localRepos={repoPaths} projectFor={(repo) => repoPaths.includes(repo) ? project.name : undefined} onOpen={(repo, pr) => openPr(repo, pr)} onQuickTask={startPrQuickTask} relay={relay} onNotice={onNotice} onOpenChat={openChat} />
+          <PrsPanel page localRepos={repoPaths} onOpen={(repo, pr) => openPr(repo, pr)} onQuickTask={startPrQuickTask} relay={relay} onNotice={onNotice} onOpenChat={openChat} />
         );
       case "issues-list":
         return (
@@ -12322,7 +12575,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   <button
                     type="button"
                     className="multiplex-pane-drag"
-                    aria-label={`Reposition ${tab.customTitle ?? tab.name ?? tab.title}`}
+                    aria-label={`Reposition ${tabName(tab, { agent: !!paneAgent?.id })}`}
                     title="Drag onto another pane to swap positions"
                     onPointerDown={(event) =>
                       startPaneReposition(tab.id, event)
@@ -12374,7 +12627,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                         startRename(tab);
                       }}
                     >
-                      {tab.customTitle ?? tab.name ?? tab.title}
+                      {tabName(tab, { agent: !!paneAgent?.id })}
                     </span>
                   )}
                   <span className="multiplex-pane-path" title={tab.cwd}>
@@ -12476,10 +12729,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 }
                 runArgv={
                   tab.run && tab.componentId && tab.runCommandId
-                    ? componentsRef.current
-                        .find((component) => component.id === tab.componentId)
-                        ?.commands?.find((command) => command.id === tab.runCommandId)
-                        ?.argv
+                    ? unattendedManagedRunArgv(
+                        componentsRef.current
+                          .find((component) => component.id === tab.componentId)
+                          ?.commands?.find((command) => command.id === tab.runCommandId),
+                      )
                     : undefined
                 }
                 env={tab.env}
@@ -12494,32 +12748,22 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   // process is the one now running (a red ✕ on a live server).
                   patchTab(tab.id, {
                     ptyId,
-                    name: assignedName,
+                    // The generated label, into its own slot. A restart used to
+                    // write it over whatever the tab was called, so a renamed
+                    // server came back as "Moss"; now it cannot reach the
+                    // user's slot, and a refused spawn — which reports no name
+                    // at all — no longer erases one either.
+                    ...(namePatch(tab, "native", assignedName) ?? {}),
                     exited: false,
                     exitCode: undefined,
                   });
-                  // Re-assert the user's name onto the new session. The pty it
-                  // was first set on is gone — a restart, a re-run, a wake — and
-                  // this one arrived with a generated name of its own, which the
-                  // patch above has just written. `customTitle` stays put: it is
-                  // what makes the name survive the *next* respawn too, and it
-                  // is what the strip displays while native catches up.
-                  if (tab.customTitle) {
-                    void ipc
-                      .ptySetName(ptyId, tab.customTitle)
-                      .then((name) => patchTab(tab.id, { name, renamed: true }))
-                      // A name another live session already holds is the one
-                      // case native refuses. The tab keeps showing the user's
-                      // choice regardless; only session-name routing falls back
-                      // to the generated one, so this is not worth a toast on
-                      // every wake.
-                      .catch((error) =>
-                        void ipc.jsLog(
-                          "warn",
-                          `tab rename: could not re-assert "${tab.customTitle}" on pty ${ptyId}: ${String(error)}`,
-                        ),
-                      );
-                  }
+                  // A name the user chose outlives the pty that held it, so the
+                  // new session is told about it rather than the other way
+                  // round. Native is where the mesh and the Agents page look.
+                  if (isUserNamed(tab) && tab.userName)
+                    void renameSession(ptyId, tab.userName).catch((error) =>
+                      onNotice(String(error), "error"),
+                    );
                   if (tab.micro?.runId) updateTaskRun(tab.micro.runId, { ptyId });
                   const prompt = pendingTerminalPrompts.current.get(tab.id);
                   const spawn = pendingAgentSpawnOps.current.get(tab.id);
@@ -12617,13 +12861,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     vibeServerExit.current(tab.id, event);
                   } else closeTab(tab.id);
                 }}
-                onTitle={(title) =>
-                  patchTab(tab.id, {
-                    // cmd.exe titles itself with its own full path, which every
-                    // chip then truncates to "C:\\Windows\\syste…".
-                    title: shellTitle(title || tab.command || "shell"),
-                  })
-                }
+                onTitle={(title) => {
+                  // Raw, into the OSC slot. Deciding whether it says anything —
+                  // `/bin/zsh` does not — and shortening cmd.exe's full path
+                  // belong to tabName, not to every writer of this field.
+                  const patch = namePatch(tab, "osc", title);
+                  if (patch) patchTab(tab.id, patch);
+                }}
                 onNotify={(notice) => {
                   // Only a ring if you aren't already looking at it — a ring on
                   // the tab you're watching is noise. The notice itself is
@@ -12720,7 +12964,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               return {
                 status,
                 session: {
-                  name: session?.name ?? tab?.name,
+                  name: sessionAddress(tab, session?.name),
                   agent:
                     identifyAgent(session?.agent_hint) != null ||
                     (tab ? isAgentTab(tab) : false),
@@ -12835,7 +13079,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   className="launch-card"
                   onClick={() => launchCli(cli)}
                   title={
-                    installed[cli.bin]
+                    installed[cli.bin] !== false
                       ? cli.bin
                       : cli.install
                         ? `not installed — runs: ${cli.install}`
@@ -12847,7 +13091,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   {/* An entry with no installer can only say what's true: the
                       binary isn't there. Offering "install" would be a button
                       that cannot work. */}
-                  {!installed[cli.bin] && (
+                  {installed[cli.bin] === false && (
                     <span className="launch-install">
                       {cli.install ? "install" : "not found"}
                     </span>
@@ -13021,6 +13265,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                       <AgentWorkspaceView
                         key={agentTermWs.ptyId}
                         repo={agentTermWs.repo}
+                        life={lifeForPty(agentTermWs.ptyId)}
                         agent={agentTermWs.agent}
                         cwd={agentTermWs.cwd}
                         sessionId={agentTermWs.sessionId}
@@ -13571,9 +13816,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
       {sidePane("prs", () => (
         <PrsPanel
           localRepos={repoPaths}
-          projectFor={(repo) =>
-            repoPaths.includes(repo) ? project.name : undefined
-          }
           onOpen={(repo, pr) => openPr(repo, pr)}
           onOpenAll={() => openCollectionPage("prs-list")}
           onQuickTask={startPrQuickTask}
@@ -13863,7 +14105,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           <VibeBuilderPane
             project={project}
             phase={
-              vibeSession
+              bootstrapSession ? "build" : vibeSession
                 ? vibeInputUnlock.current.unlocked
                   ? "build"
                   : "waiting"
@@ -13872,7 +14114,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   : "waiting"
             }
             session={
-              vibeSession ??
+              bootstrapSession ?? vibeSession ??
               vibeProjectSetupSession ??
               vibeWaitingSession
             }

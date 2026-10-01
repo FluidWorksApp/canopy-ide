@@ -329,7 +329,7 @@ async function startLanguageServer(
     restartAttempts.delete(key);
     failures.delete(key);
     console.info(`LSP started: ${spec.id} for ${serverRoot} (server #${serverId})`);
-    const { invoke } = await import("@tauri-apps/api/core");
+    const { invoke } = await import("../host");
     void invoke("js_log", {
       level: "info",
       message: `LSP started: ${spec.id} for ${serverRoot}`,
@@ -363,7 +363,7 @@ async function startLanguageServer(
     const reason = serverUnavailableMessage(spec, failure);
     failures.set(key, reason);
     console.warn(`LSP unavailable for ${spec.id} (${serverRoot}):`, err);
-    const { invoke } = await import("@tauri-apps/api/core");
+    const { invoke } = await import("../host");
     void invoke("js_log", {
       level: "warn",
       message: `LSP unavailable for ${spec.id} (${serverRoot}): ${reason}`,

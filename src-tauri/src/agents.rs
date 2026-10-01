@@ -205,11 +205,13 @@ fn candidate_pid(
     kids.next().is_none().then_some(only)
 }
 
-/// The most recent `pty:stats` reading, kept so the context bridge can serve
-/// live CPU/memory to agents (canopy_resources) without re-deriving it — the
-/// monitor loop already pays for the sysinfo walk once per tick.
+/// The most recent PTY resource reading, kept so renderer and context-bridge
+/// pulls can share the monitor's one sysinfo walk per tick.
 #[derive(Default)]
 pub struct StatsCache(pub std::sync::Mutex<Vec<SessionStats>>);
+
+#[derive(Default)]
+pub struct AppStatsCache(pub std::sync::Mutex<Option<AppStats>>);
 
 fn clear_stale_stats(cache: Option<&StatsCache>, last_ports: &mut HashMap<u32, Vec<u16>>) -> bool {
     let mut changed = !last_ports.is_empty();
@@ -224,20 +226,23 @@ fn clear_stale_stats(cache: Option<&StatsCache>, last_ports: &mut HashMap<u32, V
 
 /// The latest process reading for every live terminal, on demand.
 ///
-/// The monitor emits `pty:stats` every 2s, which serves anything already
-/// mounted and subscribed. This is for a caller that needs one reading *now*
-/// and has no subscription — the companion, which answers "what are my agents
-/// doing" from session digests and, without this, could only report what a
-/// digest last claimed. A digest written by a session that died mid-turn keeps
-/// claiming "working" indefinitely, so Ash would say an agent was working on
-/// something it stopped days ago. Reads the cache the monitor already fills:
-/// no refresh, no syscall.
+/// The renderer polls this cache every 2s while it has subscribers. The
+/// companion also reads it on demand when answering from session digests. A
+/// digest written by a session that died mid-turn otherwise keeps claiming
+/// "working" indefinitely. No refresh or syscall occurs in this command.
 #[tauri::command]
 pub fn pty_stats(app: tauri::AppHandle) -> Vec<SessionStats> {
     use tauri::Manager;
     app.try_state::<StatsCache>()
         .map(|c| c.0.lock().unwrap().clone())
         .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn app_stats(app: tauri::AppHandle) -> Option<AppStats> {
+    use tauri::Manager;
+    app.try_state::<AppStatsCache>()
+        .and_then(|cache| cache.0.lock().unwrap().clone())
 }
 
 fn http_readiness_url(port: u16, path: &str) -> Result<String, String> {
@@ -431,13 +436,14 @@ pub fn start_monitor(app: AppHandle) {
                         delivery: s.desktop_delivery_metrics(),
                     })
                     .collect();
-                // Publish the transition to zero once. Otherwise the final
-                // terminal remains in StatsCache and every frontend subscriber
-                // indefinitely, which looks like a live resource after its PTY
-                // and process are already gone.
+                // Store the transition to zero. Otherwise the final terminal
+                // remains in StatsCache and every frontend poll indefinitely,
+                // which looks like a live resource after its PTY is gone.
                 if sessions.is_empty() {
                     let cache = app.try_state::<StatsCache>();
                     if clear_stale_stats(cache.as_deref(), &mut last_ports) {
+                        // Native subscribers only (the Remote portal); desktop
+                        // pages poll the cache and register no JS listener.
                         let _ = app.emit("pty:stats", Vec::<SessionStats>::new());
                     }
                 }
@@ -499,15 +505,15 @@ pub fn start_monitor(app: AppHandle) {
                         queue.extend(kids);
                     }
                 }
-                let _ = app.emit(
-                    "app:stats",
-                    AppStats {
-                        cpu: app_cpu,
-                        mem_bytes: app_mem,
-                        procs: app_procs,
-                        includes_webviews: !cfg!(target_os = "macos"),
-                    },
-                );
+                let app_stats = AppStats {
+                    cpu: app_cpu,
+                    mem_bytes: app_mem,
+                    procs: app_procs,
+                    includes_webviews: !cfg!(target_os = "macos"),
+                };
+                if let Some(cache) = app.try_state::<AppStatsCache>() {
+                    *cache.0.lock().unwrap() = Some(app_stats);
+                }
 
                 // Session stats are only interesting when terminals exist, but
                 // app stats above must keep flowing regardless — a project with
@@ -1105,9 +1111,7 @@ fn setup_grok_hooks(cfg: &str, home: &str) -> Result<String, String> {
             sh_quote(&helper.to_string_lossy())
         )
     };
-    let handler = |signal: &str| {
-        serde_json::json!({ "type": "command", "command": command(signal), "timeout": 10 })
-    };
+    let handler = |signal: &str| serde_json::json!({ "type": "command", "command": command(signal), "timeout": 10 });
     let group = |signal: &str| serde_json::json!({ "hooks": [handler(signal)] });
     let config = serde_json::json!({
         "hooks": {
@@ -2950,8 +2954,8 @@ fn mcp_state(agent: &str, cfg: &str, home: &str) -> &'static str {
             ".grok/config.toml"
         };
         let state = match std::fs::read_to_string(std::path::PathBuf::from(cfg).join(rel)) {
-                Ok(raw) => codex_mcp_state_for(&raw, Some(&expected)),
-                Err(_) => "missing",
+            Ok(raw) => codex_mcp_state_for(&raw, Some(&expected)),
+            Err(_) => "missing",
         };
         return if state == "ours" && !helper.exists() {
             "stale"
@@ -3011,7 +3015,10 @@ pub async fn agent_integration_health() -> Result<Vec<IntegrationHealth>, String
     let bins: Vec<String> = crate::agent_cli::integrated_clis()
         .map(|cli| cli.bin.into())
         .collect();
-    Ok(integration_health(&home, &home, &which_installed(&bins)))
+    let installed = tokio::task::spawn_blocking(move || which_installed(&bins))
+        .await
+        .map_err(|error| format!("install probe task failed: {error}"))??;
+    Ok(integration_health(&home, &home, &installed))
 }
 
 /// What a launch did about the integrations it found.
@@ -3052,7 +3059,10 @@ pub fn heal_integrations(app: AppHandle) {
             let bins: Vec<String> = crate::agent_cli::integrated_clis()
                 .map(|cli| cli.bin.into())
                 .collect();
-            let installed = which_installed(&bins);
+            // A failed probe (already logged) keeps the old conservative
+            // answer: nothing counts as installed, so no config is written.
+            let installed = which_installed(&bins)
+                .unwrap_or_else(|_| bins.iter().map(|bin| (bin.clone(), false)).collect());
             let report = heal_integrations_in(&home, env!("CARGO_PKG_VERSION"), &installed);
             for line in &report.repaired {
                 log::info!("agent integration: {line}");
@@ -4364,13 +4374,52 @@ fn probe_target(raw: &str) -> Option<String> {
 /// PATH. `command -v` answers for both: given a path it reports it when it is
 /// executable, and fails when it is not.
 #[tauri::command]
-pub async fn which_check(commands: Vec<String>) -> HashMap<String, bool> {
-    which_installed(&commands)
+pub async fn which_check(commands: Vec<String>) -> Result<HashMap<String, bool>, String> {
+    // A login shell is a blocking child; keep it off the async runtime's
+    // workers, which also serve every other command the webview is awaiting.
+    tokio::task::spawn_blocking(move || which_installed(&commands))
+        .await
+        .map_err(|error| format!("install probe task failed: {error}"))?
 }
+
+/// Printed after every probe line. A probe that never reached it did not run
+/// to completion, and its silence must not read as "nothing is installed".
+/// It contains spaces and no slash, so no probed name can equal it:
+/// `probe_target` refuses a bare name with whitespace.
+const PROBE_DONE: &str = "canopy probe complete";
+
+/// Backoff between attempts when the probe could not run at all. Admission is
+/// refused only while the capture queue is full, which is a startup burst
+/// (restored terminals, version probes); it drains in well under a second.
+const PROBE_RETRY_DELAYS_MS: [u64; 3] = [150, 400, 1000];
 
 /// The sync core: spawning a login shell is slow enough that the startup health
 /// check wants to do it once, off the main thread, rather than per agent.
-fn which_installed(commands: &[String]) -> HashMap<String, bool> {
+///
+/// `Err` means the probe could not answer, not that the commands are missing.
+/// Folding a failed probe into "all false" is what made installed tools show
+/// install badges and a missing-Git banner whenever the capture queue was busy.
+fn which_installed(commands: &[String]) -> Result<HashMap<String, bool>, String> {
+    let mut attempt = 0;
+    loop {
+        match which_installed_once(commands) {
+            Ok(result) => return Ok(result),
+            Err(error) if attempt < PROBE_RETRY_DELAYS_MS.len() => {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    PROBE_RETRY_DELAYS_MS[attempt],
+                ));
+                attempt += 1;
+                log::debug!("install probe retry {attempt}: {error}");
+            }
+            Err(error) => {
+                log::warn!("install probe failed for {commands:?}: {error}");
+                return Err(error);
+            }
+        }
+    }
+}
+
+fn which_installed_once(commands: &[String]) -> Result<HashMap<String, bool>, String> {
     let mut result: HashMap<String, bool> = commands.iter().map(|c| (c.clone(), false)).collect();
     #[cfg(unix)]
     {
@@ -4387,15 +4436,32 @@ fn which_installed(commands: &[String]) -> HashMap<String, bool> {
                     sh_quote(orig)
                 )
             })
+            .chain(std::iter::once(format!(
+                "printf '%s\\n' {}",
+                sh_quote(PROBE_DONE)
+            )))
             .collect::<Vec<_>>()
             .join("; ");
         let mut command = std::process::Command::new(shell);
         command.args(["-lc", &script]);
-        if let Ok(out) = crate::process_capture::output(&mut command, 1024 * 1024) {
-            for line in String::from_utf8_lossy(&out.stdout).lines() {
-                if let Some(found) = result.get_mut(line.trim()) {
-                    *found = true;
-                }
+        let out = crate::process_capture::output(&mut command, 1024 * 1024)?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // A profile that exits early, a shell killed mid-run, or a truncated
+        // capture all end before the sentinel.
+        if out.stdout_truncated || !stdout.lines().any(|line| line.trim() == PROBE_DONE) {
+            return Err(format!(
+                "login shell ended before the probe finished ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        for line in stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| *line != PROBE_DONE)
+        {
+            if let Some(found) = result.get_mut(line) {
+                *found = true;
             }
         }
     }
@@ -4425,16 +4491,18 @@ fn which_installed(commands: &[String]) -> HashMap<String, bool> {
             } else {
                 let mut command = std::process::Command::new("where");
                 command.no_console_window().arg(&target);
-                crate::process_capture::output(&mut command, 1024 * 1024)
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
+                // A capture that could not run is no answer; only `where`'s
+                // own exit status says whether the command exists.
+                crate::process_capture::output(&mut command, 1024 * 1024)?
+                    .status
+                    .success()
             };
             if let Some(found) = result.get_mut(c) {
                 *found = ok;
             }
         }
     }
-    result
+    Ok(result)
 }
 
 /// The donor CLIs whose model catalogue Canopy is allowed to read, and the
@@ -6687,6 +6755,24 @@ mod tests {
     fn bucket_encoding_is_lossy() {
         assert_eq!(claude_bucket("/a/b-c"), claude_bucket("/a/b_c"));
         assert_eq!(claude_bucket("/a/b.c"), claude_bucket("/a/b-c"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn which_installed_answers_for_present_and_absent_commands() {
+        let installed = super::which_installed(&[
+            "sh".to_string(),
+            "definitely-not-a-real-binary-xyzzy".to_string(),
+            super::PROBE_DONE.to_string(),
+        ])
+        .expect("a login shell is available in tests");
+        assert_eq!(installed.get("sh"), Some(&true));
+        assert_eq!(
+            installed.get("definitely-not-a-real-binary-xyzzy"),
+            Some(&false)
+        );
+        // The sentinel is not a command, even when someone names one after it.
+        assert_eq!(installed.get(super::PROBE_DONE), Some(&false));
     }
 
     #[test]

@@ -16,7 +16,7 @@ const term = (id: string): TermSubTab => ({
   id,
   type: "terminal",
   cwd: "/repo",
-  title: id,
+  launchTitle: id,
   ptyId: 1,
 });
 

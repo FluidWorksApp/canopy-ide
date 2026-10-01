@@ -139,7 +139,9 @@ export {
   AntigravityIcon,
   ClaudeIcon,
   CodexIcon,
+  CursorIcon,
   GeminiIcon,
+  GrokIcon,
   OmpIcon,
   OpenCodeIcon,
 } from "../../shared/agentGlyphs";
@@ -149,7 +151,9 @@ import {
   AntigravityIcon as Antigravity,
   ClaudeIcon as Claude,
   CodexIcon as Codex,
+  CursorIcon as Cursor,
   GeminiIcon as Gemini,
+  GrokIcon as Grok,
   OmpIcon as Omp,
   OpenCodeIcon as OpenCode,
 } from "../../shared/agentGlyphs";
@@ -163,6 +167,8 @@ export const BRAND_ICONS: Record<string, (p: IconProps) => ReactElement> = {
   opencode: OpenCode,
   omp: Omp,
   agy: Antigravity,
+  cursor: Cursor,
+  grok: Grok,
 };
 
 // ---------- sidebar rail ----------

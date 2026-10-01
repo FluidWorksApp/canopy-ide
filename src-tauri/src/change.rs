@@ -20,7 +20,8 @@
 //! never speaks at all while an agent appends in a loop, which is the failure
 //! this module exists to prevent.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -106,6 +107,56 @@ pub struct StoreChange {
     pub id: String,
 }
 
+#[derive(Clone, serde::Serialize)]
+pub struct StoreChangeEntry {
+    sequence: u64,
+    change: StoreChange,
+}
+
+#[derive(serde::Serialize)]
+pub struct StoreChangeBatch {
+    cursor: u64,
+    changes: Vec<StoreChangeEntry>,
+}
+
+const CHANGE_HISTORY_LIMIT: usize = 1_024;
+static CHANGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static CHANGE_HISTORY: OnceLock<Mutex<VecDeque<StoreChangeEntry>>> = OnceLock::new();
+
+fn record(change: StoreChange) {
+    let sequence = CHANGE_SEQUENCE.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut history = CHANGE_HISTORY
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .unwrap();
+    history.push_back(StoreChangeEntry { sequence, change });
+    while history.len() > CHANGE_HISTORY_LIMIT {
+        history.pop_front();
+    }
+}
+
+#[tauri::command]
+pub fn store_changes(after: Option<u64>) -> StoreChangeBatch {
+    changes_after(after)
+}
+
+fn changes_after(after: Option<u64>) -> StoreChangeBatch {
+    let cursor = CHANGE_SEQUENCE.load(Ordering::SeqCst);
+    let changes = after
+        .map(|after| {
+            CHANGE_HISTORY
+                .get_or_init(|| Mutex::new(VecDeque::new()))
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.sequence > after)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    StoreChangeBatch { cursor, changes }
+}
+
 static APP: OnceLock<AppHandle> = OnceLock::new();
 
 struct Slot {
@@ -175,14 +226,13 @@ pub fn pulse(store: Store, scope: &str, id: &str) {
                         slot.waiting = false;
                     }
                 }
-                let _ = app.emit(
-                    "store:change",
-                    StoreChange {
-                        store: key.0.as_str(),
-                        scope: key.1.clone(),
-                        id,
-                    },
-                );
+                let change = StoreChange {
+                    store: key.0.as_str(),
+                    scope: key.1.clone(),
+                    id,
+                };
+                record(change.clone());
+                let _ = app.emit("store:change", change);
                 return;
             }
             seen = current;
@@ -215,5 +265,27 @@ mod tests {
     fn settle_is_below_human_perception_and_max_wait_bounds_it() {
         assert!(Store::Notes.settle() < Duration::from_millis(100));
         assert!(Store::Notes.max_wait() >= Store::Notes.settle());
+    }
+
+    #[test]
+    fn change_feed_handshakes_then_returns_ordered_changes() {
+        let initial = changes_after(None);
+        assert!(initial.changes.is_empty());
+        record(StoreChange {
+            store: "notes",
+            scope: "project".into(),
+            id: "first".into(),
+        });
+        record(StoreChange {
+            store: "tasks",
+            scope: "project".into(),
+            id: "second".into(),
+        });
+
+        let batch = changes_after(Some(initial.cursor));
+        assert_eq!(batch.changes.len(), 2);
+        assert_eq!(batch.changes[0].change.id, "first");
+        assert_eq!(batch.changes[1].change.id, "second");
+        assert!(batch.changes[0].sequence < batch.changes[1].sequence);
     }
 }

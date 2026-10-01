@@ -82,7 +82,9 @@ IDE the user is watching, and their results stay inspectable:\n\
   what you've sent and received, or a message id someone gave you -> \
   canopy_mesh\n\
 - If available, delegating a bounded, independent slice -> canopy_spawn_agent with a complete \
-  brief. The child has no memory of this conversation; use canopy_agents first \
+  brief. The child has no memory of this conversation; it opens as a pane beside \
+  you, and autoClose: true makes it a one-shot that reports and closes itself. \
+  Use canopy_agents first \
   and prefer messaging an existing owner when the work is already in flight.\n\
 \n\
 - Investigating anything worth writing down (how does X work, which approach, \

@@ -76,7 +76,7 @@ const panel = (over: Partial<React.ComponentProps<typeof AgentsPanel>> = {}) =>
 
 describe("what a running agent is called", () => {
   it("takes the stable Canopy name over the title the CLI gave its tab", () => {
-    panel({ tabNames: new Map([[7, { title: "✳ Fix browser screenshots" }]]) });
+    panel({ tabNames: new Map([[7, { oscTitle: "✳ Fix browser screenshots" }]]) });
     expect(screen.getByText("Ember")).toBeTruthy();
     expect(screen.queryByText("✳ Fix browser screenshots")).toBeNull();
     expect(screen.queryByText("claude")).toBeNull();
@@ -84,7 +84,7 @@ describe("what a running agent is called", () => {
 
   it("takes the user's accepted session rename over the CLI's title", () => {
     panel({
-      tabNames: new Map([[7, { title: "✳ Fix browser screenshots", name: "Screenshots" }]]),
+      tabNames: new Map([[7, { oscTitle: "✳ Fix browser screenshots", userName: "Screenshots" }]]),
     });
     expect(screen.getByText("Screenshots")).toBeTruthy();
   });
@@ -92,7 +92,7 @@ describe("what a running agent is called", () => {
   it("falls back to the cwd for an old session with only an untitled shell", () => {
     panel({
       stats: [session({ name: undefined })],
-      tabNames: new Map([[7, { title: "shell" }]]),
+      tabNames: new Map([[7, { oscTitle: "shell" }]]),
     });
     expect(screen.getAllByText("repo").length).toBeGreaterThan(0);
   });
@@ -107,8 +107,8 @@ describe("what a running agent is called", () => {
     panel({
       stats: [session({ id: 7, name: "Ember" }), session({ id: 8, name: "Juniper" })],
       tabNames: new Map([
-        [7, { title: "canopy" }],
-        [8, { title: "canopy" }],
+        [7, { oscTitle: "canopy" }],
+        [8, { oscTitle: "canopy" }],
       ]),
     });
     expect(screen.getByText("Ember")).toBeTruthy();

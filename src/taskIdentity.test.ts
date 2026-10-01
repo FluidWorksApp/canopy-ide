@@ -3,10 +3,8 @@ import {
   askedLine,
   hasIdentity,
   identityPatch,
-  mayAutoRename,
   MAX_TAGS,
   promptTaskIdentity,
-  shouldSeedPromptIdentity,
   taskGlyph,
   taskDescription,
   taskIdentity,
@@ -31,12 +29,8 @@ describe("promptTaskIdentity", () => {
       .toEqual({});
   });
 
-  it("only seeds an unnamed ordinary session", () => {
-    expect(shouldSeedPromptIdentity({})).toBe(true);
-    expect(shouldSeedPromptIdentity({ customTitle: "Review agent restore" })).toBe(false);
-    expect(shouldSeedPromptIdentity({ renamed: true })).toBe(false);
-    expect(shouldSeedPromptIdentity({ micro: { taskId: "review" } })).toBe(false);
-  });
+  // "may this prompt name the tab?" is no longer a question a caller can get
+  // wrong: the prompt writes its own slot, and tabName.test.ts owns the rule.
 });
 
 describe("taskDescription", () => {
@@ -188,23 +182,5 @@ describe("identityPatch", () => {
     // `icon` on a run is what the task was launched with; the agent's pick is
     // recorded beside it so both survive.
     expect(identityPatch({ icon: "◈" }).agentIcon).toBe("◈");
-  });
-});
-
-describe("mayAutoRename", () => {
-  it("lets an auto-namer name a tab nobody has renamed", () => {
-    expect(mayAutoRename({})).toBe(true);
-    expect(mayAutoRename({ renamed: false })).toBe(true);
-  });
-
-  /** The whole complaint this exists for: a tab the user renamed was being
-   *  renamed back by canopy_name_task, by the prompt baseline, and by the next
-   *  pty's generated name. One predicate, asked by every namer. */
-  it("refuses every auto-namer once the user has renamed the tab", () => {
-    expect(mayAutoRename({ renamed: true })).toBe(false);
-    expect(shouldSeedPromptIdentity({ renamed: true })).toBe(false);
-    expect(
-      shouldSeedPromptIdentity({ renamed: true, customTitle: "Payments" }),
-    ).toBe(false);
   });
 });

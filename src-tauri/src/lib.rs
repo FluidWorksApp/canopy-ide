@@ -8,6 +8,7 @@ mod blocking;
 mod bounded_file;
 mod browser;
 mod change;
+mod chrome_stream;
 mod cleanup;
 mod cli;
 mod clipboard;
@@ -15,9 +16,9 @@ mod companion;
 mod containment;
 mod context;
 mod crash;
-mod execution;
 #[cfg(feature = "dictation")]
 mod dictation;
+mod execution;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
 // keeps the command surface identical so the rest of this file is unchanged.
 #[cfg(not(feature = "dictation"))]
@@ -421,6 +422,13 @@ pub fn run() {
         cli::open_forwarded(app, argv, cwd);
     }));
     builder
+        // The selftest's renderer replacement needs to know whether a reload
+        // actually started before it decides to issue another one.
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" {
+                selftest::main_page_load(payload.event());
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         // Self-update (see plugins.updater in tauri.conf.json) and the restart
         // that has to follow an install.
@@ -440,8 +448,10 @@ pub fn run() {
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
         .manage(browser::BrowserManager::default())
+        .manage(chrome_stream::ChromeStreams::default())
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
+        .manage(agents::AppStatsCache::default())
         .manage(governor::TerminalGovernor::default())
         .manage(containment::ContainmentManager::default())
         .manage(tunnel::TunnelManager::default())
@@ -544,6 +554,9 @@ pub fn run() {
             // one) is missing from a config set up by an older version. Off the
             // main thread: it shells out to find the CLIs.
             agents::heal_integrations(app.handle().clone());
+            // The login PATH every shell-less spawn needs, resolved before the
+            // first one asks for it.
+            procenv::warm();
             agents::start_monitor(app.handle().clone());
             agents::start_hook_bridge(app.handle().clone());
             maintenance::start(app.handle().clone());
@@ -562,6 +575,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             js_log,
             set_shortcut_profile,
+            change::store_changes,
             crash::report_crash,
             crash::send_crash,
             crash::take_pending_crash,
@@ -620,9 +634,11 @@ pub fn run() {
             pty::pty_spawn_attached_argv,
             pty::pty_output,
             pty::pty_attach_desktop,
+            pty::pty_read_desktop,
             pty::pty_detach_desktop,
             pty::pty_renderer_register,
             pty::pty_renderer_sessions,
+            pty::pty_renderer_events,
             pty::pty_write,
             pty::pty_ack,
             pty::pty_resize,
@@ -774,6 +790,7 @@ pub fn run() {
             git::git_worktree_add_pr,
             git::git_worktree_bootstrap,
             git::git_worktree_remove,
+            git::git_worktree_realign,
             git::git_worktree_prune,
             git::gh_available,
             git::gh_auth,
@@ -813,6 +830,8 @@ pub fn run() {
             fsx::git_head_content,
             fsx::store_load,
             fsx::store_save,
+            fsx::build_operation_acquire,
+            fsx::build_operation_release,
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_stop,
@@ -841,6 +860,7 @@ pub fn run() {
             agents::set_context_scopes,
             agents::session_digests,
             agents::pty_stats,
+            agents::app_stats,
             agents::probe_http_readiness,
             governor::terminal_governor_status,
             governor::terminal_governor_incidents,
@@ -871,6 +891,8 @@ pub fn run() {
             preview::preview_start,
             preview::preview_stop,
             browser::browser_supported,
+            chrome_stream::chrome_stream_open,
+            chrome_stream::chrome_stream_close,
             browser::browser_open,
             browser::browser_navigate,
             browser::browser_painted,
@@ -952,6 +974,7 @@ pub fn run() {
                 app.state::<preview::PreviewManager>().shutdown_all();
                 // ... and any embedded-browser views.
                 app.state::<browser::BrowserManager>().shutdown_all(app);
+                app.state::<chrome_stream::ChromeStreams>().shutdown_all();
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
                 // ... and stop polling GitHub for pull requests.

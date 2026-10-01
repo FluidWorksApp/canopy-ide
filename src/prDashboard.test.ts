@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type * as ipc from "./ipc";
 import {
+  agoLabel,
   categoryOf,
   dashboardGroups,
   indexProbes,
@@ -108,6 +109,20 @@ describe("merge recommendation", () => {
 });
 
 describe("dashboard labels", () => {
+  it("buckets recency the same way openAge buckets age", () => {
+    const now = Date.parse("2026-08-09T12:00:00Z");
+    expect(agoLabel("2026-08-09T11:30:00Z", now)).toBe("<1h ago");
+    expect(agoLabel("2026-08-09T03:00:00Z", now)).toBe("9h ago");
+    expect(agoLabel("2026-08-01T00:00:00Z", now)).toBe("8d ago");
+    expect(agoLabel("2026-06-01T00:00:00Z", now)).toBe("9w ago");
+    expect(agoLabel("not a date", now)).toBe("unknown");
+  });
+
+  it("says nothing rather than 'session unknown' when provenance is empty", () => {
+    expect(sessionLabel(undefined)).toBeNull();
+    expect(sessionLabel([])).toBeNull();
+  });
+
   it("formats age without a timer and selects the newest provenance edge", () => {
     expect(openAge("2026-08-01T00:00:00Z", Date.parse("2026-08-09T00:00:00Z"))).toBe("8d open");
     expect(sessionLabel([

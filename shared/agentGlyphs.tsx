@@ -13,6 +13,8 @@
 //   Aider    — lettermark in brand green (#14b014); it has no vector mark
 //   oh-my-pi — omp.sh/favicon.svg, pink→purple→cyan gradient
 //   Antigravity — lobe-icons `antigravity`, in Google's four brand colours
+//   Cursor   — lobe-icons `cursor` (currentColor; the brand is black-on-white)
+//   Grok     — lobe-icons `grok` (currentColor, same reason)
 //   others   — a terminal glyph (matches the app's Shell row)
 
 import type { ReactElement } from 'react'
@@ -137,6 +139,22 @@ export function AntigravityIcon({ size = 14, className }: P) {
   )
 }
 
+export function CursorIcon({ size = 14, className }: P) {
+  return (
+    <svg {...brand(size, className, '0 0 24 24')} fill="currentColor" fillRule="evenodd">
+      <path d="M22.106 5.68L12.5.135a.998.998 0 00-.998 0L1.893 5.68a.84.84 0 00-.419.726v11.186c0 .3.16.577.42.727l9.607 5.547a.999.999 0 00.998 0l9.608-5.547a.84.84 0 00.42-.727V6.407a.84.84 0 00-.42-.726zm-.603 1.176L12.228 22.92c-.063.108-.228.064-.228-.061V12.34a.59.59 0 00-.295-.51l-9.11-5.26c-.107-.062-.063-.228.062-.228h18.55c.264 0 .428.286.296.514z" />
+    </svg>
+  )
+}
+
+export function GrokIcon({ size = 14, className }: P) {
+  return (
+    <svg {...brand(size, className, '0 0 24 24')} fill="currentColor" fillRule="evenodd">
+      <path d="M9.27 15.29l7.978-5.897c.391-.29.95-.177 1.137.272.98 2.369.542 5.215-1.41 7.169-1.951 1.954-4.667 2.382-7.149 1.406l-2.711 1.257c3.889 2.661 8.611 2.003 11.562-.953 2.341-2.344 3.066-5.539 2.388-8.42l.006.007c-.983-4.232.242-5.924 2.75-9.383.06-.082.12-.164.179-.248l-3.301 3.305v-.01L9.267 15.292M7.623 16.723c-2.792-2.67-2.31-6.801.071-9.184 1.761-1.763 4.647-2.483 7.166-1.425l2.705-1.25a7.808 7.808 0 00-1.829-1A8.975 8.975 0 005.984 5.83c-2.533 2.536-3.33 6.436-1.962 9.764 1.022 2.487-.653 4.246-2.34 6.022-.599.63-1.199 1.259-1.682 1.925l7.62-6.815" />
+    </svg>
+  )
+}
+
 /** Terminal glyph — the app's fallback for CLIs with no brand mark (Shell),
  *  and for anything unknown. The set's shell, at the set's weight; it was a
  *  bare chevron and underscore at a weight of its own. */
@@ -153,6 +171,8 @@ const BRAND: Record<string, (p: P) => ReactElement> = {
   opencode: OpenCodeIcon,
   omp: OmpIcon,
   agy: AntigravityIcon,
+  cursor: CursorIcon,
+  grok: GrokIcon,
 }
 
 /** The hue each mark is drawn in, as data.

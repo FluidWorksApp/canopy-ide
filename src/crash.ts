@@ -9,7 +9,7 @@
 //     always previewed and never gated on a stored preference;
 //   * the anonymous email collector, gated on the `crashReporting` opt-in
 //     (default off) — that toggle governs this path and only this path.
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 import { getSettings } from "./settings";
 import * as ipc from "./ipc";
 
