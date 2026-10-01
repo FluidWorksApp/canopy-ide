@@ -45,6 +45,7 @@ import type { AgentEventEntry } from "../types";
 import { modelCommandLine, type ModelSwitch } from "../agentModels";
 import { agentCliFor } from "../projects";
 import { useBranchSwitch } from "../useBranchSwitch";
+import type { SyncMergePayload } from "../microTasks";
 
 /** How many branches the tray's menu shows before you type. It is a shortcut to
  *  the handful you are actually moving between — `for-each-ref` hands them back
@@ -131,6 +132,9 @@ interface StatusBarProps {
    *  snapshots per rollout, so this prevents another Codex tab's newer file
    *  from lending its percentage to the terminal in front. */
   activeSessionId?: string | null;
+  /** Hand a merge the one-click button can't finish — uncommitted work in the
+   *  way, or conflicts — to an agent task. Resolves whether one started. */
+  onResolveMerge?: (payload: SyncMergePayload) => Promise<boolean>;
 }
 
 /** How many agent names the tray spells out before it starts counting.
@@ -161,6 +165,7 @@ export const StatusBar = memo(function StatusBar({
   agentProfile,
   activePtyId,
   activeSessionId,
+  onResolveMerge,
 }: StatusBarProps) {
   const repo = contextRoot || roots[0];
   const [branch, setBranch] = useState<string | null>(null);
@@ -565,6 +570,25 @@ export const StatusBar = memo(function StatusBar({
     }
   };
 
+  /** "Resolve & merge": the agent does the merge in this checkout. The panel
+   *  closes once it has started — the run is in Tasks from here on. */
+  const resolveWithAgent = async (conflicts: string[]) => {
+    if (!sync || !repo || !onResolveMerge) return;
+    setSyncBusy(true);
+    try {
+      const started = await onResolveMerge({
+        repo,
+        branch: sync.branch,
+        base: sync.base,
+        overlap: sync.overlap,
+        conflicts,
+      });
+      if (started) closeSync();
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
   const undoMerge = async () => {
     if (!repo) return;
     setSyncBusy(true);
@@ -829,25 +853,58 @@ export const StatusBar = memo(function StatusBar({
                         >
                           Undo the merge
                         </button>
-                        <button className="btn btn-accent" onClick={closeSync}>
+                        <button
+                          className={onResolveMerge ? "btn-mini" : "btn btn-accent"}
+                          onClick={closeSync}
+                        >
                           Resolve in Changes
                         </button>
+                        {onResolveMerge && (
+                          <button
+                            className="btn btn-accent"
+                            disabled={syncBusy}
+                            title="An agent settles the conflicts, runs the tests and commits the merge"
+                            onClick={() => void resolveWithAgent(syncResult.conflicts)}
+                          >
+                            {syncBusy ? "Starting…" : "Resolve with agent"}
+                          </button>
+                        )}
                       </>
                     ) : (
                       <>
                         <button className="btn-mini" onClick={closeSync}>
                           Keep working
                         </button>
-                        <button
-                          className="btn btn-accent"
-                          disabled={
-                            !d.canMerge || syncBusy || (syncResult?.ok ?? false)
-                          }
-                          title={d.blockedReason ?? `git merge ${sync.base}`}
-                          onClick={() => void runMerge()}
-                        >
-                          {syncBusy ? "Merging…" : d.mergeLabel}
-                        </button>
+                        {/* Blocked outright with an agent on offer: a dead
+                            button beside the live one is just noise. */}
+                        {!(d.canResolve && onResolveMerge && !d.canMerge) && (
+                          <button
+                            className={
+                              d.canResolve && onResolveMerge ? "btn-mini" : "btn btn-accent"
+                            }
+                            disabled={
+                              !d.canMerge || syncBusy || (syncResult?.ok ?? false)
+                            }
+                            title={d.blockedReason ?? `git merge ${sync.base}`}
+                            onClick={() => void runMerge()}
+                          >
+                            {syncBusy ? "Merging…" : d.mergeLabel}
+                          </button>
+                        )}
+                        {d.canResolve && onResolveMerge && (
+                          <button
+                            className="btn btn-accent"
+                            disabled={syncBusy}
+                            title={
+                              sync.overlap.length > 0
+                                ? "An agent sets your edits aside, merges, then puts them back uncommitted"
+                                : "An agent merges, settles the conflicts, runs the tests and commits"
+                            }
+                            onClick={() => void resolveWithAgent(sync.conflicts)}
+                          >
+                            {syncBusy ? "Starting…" : "Resolve & merge"}
+                          </button>
+                        )}
                       </>
                     )}
                   </div>

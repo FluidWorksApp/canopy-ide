@@ -240,6 +240,8 @@ import {
   adhocLabel,
   ADHOC_TASK_ID,
   adhocTaskDef,
+  syncMergeTask,
+  type SyncMergePayload,
   customTaskDef,
   fixCiTask,
   implementResearchTask,
@@ -4052,6 +4054,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
     },
     [roots, startMicroTask, project.id, onNotice],
+  );
+
+  /** The status bar's "Resolve & merge": the base moved and the one-click
+   *  merge can't finish on its own, so an agent does it in that checkout. */
+  const resolveBranchMerge = useCallback(
+    (payload: SyncMergePayload) => startMicroTask(syncMergeTask, payload, ""),
+    [startMicroTask],
   );
 
   /** Run a brief that was composed on the spot (a diff surface's "ask about
@@ -13864,6 +13873,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         agentLabel={modelTarget?.label}
         agentId={activeAgentId}
         agentProfile={activeAgent.profile}
+        onResolveMerge={resolveBranchMerge}
         activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
         activeSessionId={
           activeTab?.type === "terminal" && activeTab.ptyId != null

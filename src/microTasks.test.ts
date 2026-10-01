@@ -24,6 +24,7 @@ import {
   runItReviewTask,
   stepsDone,
   MICRO_TASKS,
+  syncMergeTask,
   PR_REVIEW_STEPS,
   type MicroTaskDef,
   type RaisePrPayload,
@@ -925,5 +926,41 @@ describe("isStopFor", () => {
     expect(isStopFor({ ts: 0, data: parseAgentEvent("not json") }, 7)).toBe(
       false,
     );
+  });
+});
+
+describe("syncMergeTask", () => {
+  const payload = {
+    repo: "/repo",
+    branch: "develop",
+    base: "origin/main",
+    overlap: ["src/a.ts"],
+    conflicts: [],
+  };
+
+  it("keeps the user's uncommitted work uncommitted, and never pushes", () => {
+    const brief = syncMergeTask.buildContext(payload, "");
+    expect(brief).toContain("git merge origin/main");
+    expect(brief).toContain("src/a.ts");
+    expect(brief).toContain("leaving the result uncommitted");
+    // The stash stack is shared: a bare pop could take another session's entry.
+    expect(brief).toContain("never use bare `git stash pop`");
+    expect(brief).toContain("Do not push");
+    expect(brief).not.toContain("\n");
+  });
+
+  it("skips the stash dance when nothing is in the way", () => {
+    const brief = syncMergeTask.buildContext(
+      { ...payload, overlap: [], conflicts: ["src/b.ts"] },
+      "",
+    );
+    expect(brief).not.toContain("git stash");
+    expect(brief).toContain("expected to conflict in src/b.ts");
+  });
+
+  it("runs where it was clicked, and names the run by its branches", () => {
+    expect(syncMergeTask.isolation).toBeUndefined();
+    expect(syncMergeTask.cwd(payload)).toBe("/repo");
+    expect(runLabelFor(syncMergeTask, payload, "")).toBe("Merge main into develop");
   });
 });
