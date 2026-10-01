@@ -82,6 +82,17 @@ export const PixelRunsIcon = pixelIcon([
   [6, 5, 1, 1],
 ]);
 
+/** Local machine on the left, linked cloud resources on the right, joined by
+ * the same spine the Integrations panel uses. */
+export const PixelIntegrationsIcon = pixelIcon([
+  [0, 1, 3, 3],
+  [5, 0, 3, 3],
+  [5, 5, 3, 3],
+  [3, 2, 2, 1],
+  [4, 2, 1, 5],
+  [4, 6, 1, 1],
+]);
+
 export const PixelChangesIcon = pixelIcon([
   [0, 1, 3, 1],
   [1, 0, 1, 3],

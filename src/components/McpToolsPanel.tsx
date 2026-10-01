@@ -10,7 +10,13 @@
 // the credentials in them are stripped before anything crosses into the webview.
 // This file has no values to leak because it is never given any.
 import { useCallback, useEffect, useState } from "react";
-import { mcpServers, type McpServer, type McpSource } from "../ipc";
+import {
+  mcpServers,
+  mcpUpdateSources,
+  type McpServer,
+  type McpSource,
+  type McpSourceChange,
+} from "../ipc";
 import { ChevronIcon, PlugIcon, RestartIcon } from "./icons";
 import { Button } from "./ui";
 
@@ -62,21 +68,68 @@ function launchLine(server: McpServer): string {
   return [server.command ?? "", ...server.args].join(" ").trim();
 }
 
+function isManagedCanopyBridge(server: McpServer): boolean {
+  return Boolean(server.command?.includes("canopy-hook") && server.args.includes("--mcp"));
+}
+
 const STATUS_TITLE: Record<McpSource["status"], string> = {
   enabled: "enabled",
   disabled: "switched off here",
   pending: "waiting for approval — this CLI has not been told whether to trust it",
 };
 
-function SourceRow({ source }: { source: McpSource }) {
+function sourceKey(source: McpSource): string {
+  return [source.agent, source.config_path, source.scope, source.project_dir ?? "", source.name].join("\0");
+}
+
+function SourceRow({
+  source,
+  selected,
+  changed,
+  disabled,
+  managed,
+  onChange,
+}: {
+  source: McpSource;
+  selected: boolean;
+  changed: boolean;
+  disabled: boolean;
+  managed: boolean;
+  onChange: (selected: boolean) => void;
+}) {
+  const pending = source.status === "pending";
+  const status = pending
+    ? "pending"
+    : changed
+      ? selected ? "will enable" : "will remove"
+      : selected ? "" : "off";
   return (
     <div className={`mcp-source mcp-source-${source.status}`} title={source.config_path}>
+      <label
+        className={`mcp-source-switch ${changed ? "mcp-source-switch-changed" : ""}`}
+        title={managed
+          ? "Canopy's context bridge is managed from Settings → Agents"
+          : pending
+            ? "Approve or reject this project server from Claude Code"
+            : selected
+              ? `Remove ${source.name} from ${source.label}`
+              : `Enable ${source.name} in ${source.label}`}
+      >
+        <input
+          type="checkbox"
+          checked={selected}
+          disabled={disabled || pending || managed}
+          aria-label={`${selected ? "Remove" : "Enable"} ${source.name} ${source.label}`}
+          onChange={(event) => onChange(event.target.checked)}
+        />
+        <span aria-hidden="true" />
+      </label>
       <span className="mcp-source-label">{source.label}</span>
       {/* The name only earns a place when it differs from the row's — which is
           often, and is the thing that makes two rows look like one server. */}
       <span className="mcp-source-name">{source.name}</span>
       <span className="mcp-source-status" title={STATUS_TITLE[source.status]}>
-        {source.status === "enabled" ? "" : source.status}
+        {status}
       </span>
     </div>
   );
@@ -86,16 +139,26 @@ export function McpToolsPanel({ rootsKey, visible, onOpen }: McpToolsPanelProps)
   const [servers, setServers] = useState<McpServer[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [selectedSources, setSelectedSources] = useState<Map<string, boolean>>(new Map());
+  const [saving, setSaving] = useState(false);
+
+  const acceptServers = useCallback((list: McpServer[]) => {
+    setServers(list);
+    setSelectedSources(new Map(
+      list.flatMap((server) => server.sources.map((source) => [
+        sourceKey(source),
+        source.status === "enabled",
+      ] as const)),
+    ));
+    setError(null);
+  }, []);
 
   const load = useCallback(() => {
     mcpServers(rootsKey ? rootsKey.split("\n") : []).then(
-      (list) => {
-        setServers(list);
-        setError(null);
-      },
+      acceptServers,
       (e) => setError(String(e)),
     );
-  }, [rootsKey]);
+  }, [rootsKey, acceptServers]);
 
   // On the way in and on project change, never on a timer: these are files a
   // human edits, so a poll would spend a read a second to catch an event that
@@ -112,6 +175,37 @@ export function McpToolsPanel({ rootsKey, visible, onOpen }: McpToolsPanelProps)
     });
 
   const reachable = servers?.filter((s) => s.enabled).length ?? 0;
+  const changes: McpSourceChange[] = (servers ?? []).flatMap((server) =>
+    server.sources.flatMap((source) => {
+      if (source.status === "pending") return [];
+      const enabled = selectedSources.get(sourceKey(source)) ?? source.status === "enabled";
+      if (enabled === (source.status === "enabled")) return [];
+      return [{
+        agent: source.agent,
+        name: source.name,
+        configPath: source.config_path,
+        scope: source.scope,
+        projectDir: source.project_dir,
+        enabled,
+      }];
+    }),
+  );
+
+  const applyChanges = async () => {
+    const removals = changes.filter((change) => !change.enabled).length;
+    if (removals > 0 && !window.confirm(
+      `Remove ${removals} MCP ${removals === 1 ? "registration" : "registrations"} from the selected clients? Existing agent sessions keep their current tools until restarted.`,
+    )) return;
+    setSaving(true);
+    try {
+      const list = await mcpUpdateSources(rootsKey ? rootsKey.split("\n") : [], changes);
+      acceptServers(list);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="mcp-panel">
@@ -198,7 +292,19 @@ export function McpToolsPanel({ rootsKey, visible, onOpen }: McpToolsPanelProps)
                   </div>
                 )}
                 {server.sources.map((s) => (
-                  <SourceRow key={`${s.agent}:${s.config_path}:${s.name}`} source={s} />
+                  <SourceRow
+                    key={sourceKey(s)}
+                    source={s}
+                    selected={selectedSources.get(sourceKey(s)) ?? s.status === "enabled"}
+                    changed={(selectedSources.get(sourceKey(s)) ?? s.status === "enabled") !== (s.status === "enabled")}
+                    disabled={saving}
+                    managed={isManagedCanopyBridge(server)}
+                    onChange={(selected) => setSelectedSources((previous) => {
+                      const next = new Map(previous);
+                      next.set(sourceKey(s), selected);
+                      return next;
+                    })}
+                  />
                 ))}
               </div>
             )}
@@ -212,6 +318,22 @@ export function McpToolsPanel({ rootsKey, visible, onOpen }: McpToolsPanelProps)
         <div className="mcp-pending-note">
           Open a server to see the tools it exposes. That means starting it —
           nothing here runs until you do.
+        </div>
+      )}
+
+      {changes.length > 0 && (
+        <div className="mcp-client-apply">
+          <span>{changes.length} client {changes.length === 1 ? "change" : "changes"}</span>
+          <Button
+            size="sm"
+            onClick={() => acceptServers(servers ?? [])}
+            disabled={saving}
+          >
+            Revert
+          </Button>
+          <Button size="sm" variant="accent" onClick={() => void applyChanges()} disabled={saving}>
+            {saving ? "Applying…" : "Apply"}
+          </Button>
         </div>
       )}
     </div>

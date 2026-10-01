@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   redactionMarker,
-  describeSecretFindings,
   entropy,
   redactSecrets,
   scanDiffForSecrets,
@@ -53,7 +52,6 @@ describe("credential formats", () => {
     const secret = join("sk", "_live_", "z".repeat(24));
     const result = scanDiffForSecrets(diff(`+const key = "${secret}"`));
     expect(JSON.stringify(result)).not.toContain(secret);
-    expect(describeSecretFindings(result.findings)).not.toContain(secret);
   });
 });
 
@@ -143,7 +141,6 @@ describe("locating a finding", () => {
       ].join("\n"),
     );
     expect(result.findings[0]).toMatchObject({ file: "src/env.ts", line: 12 });
-    expect(describeSecretFindings(result.findings)).toContain("src/env.ts:12");
   });
 
   it("is honest about what it covers", () => {

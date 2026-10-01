@@ -194,10 +194,9 @@ fn cli_or_err(sdk: &Sdk) -> Result<&str, String> {
 }
 
 fn run(cmd: &mut Command) -> Result<String, String> {
-    let out = cmd
-        .no_console_window()
-        .output()
-        .map_err(|e| e.to_string())?;
+    cmd.no_console_window();
+    let out = crate::process_capture::output(cmd, crate::process_capture::DEFAULT_STREAM_MAX)?;
+    crate::process_capture::reject_truncated(&out, "Android command")?;
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).to_string());
     }
@@ -455,18 +454,18 @@ pub async fn screencap_bytes(
 ) -> Result<Vec<u8>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let sdk = sdk_or_err(project_dir.as_deref())?;
-        let out = adb(&sdk, Some(&serial))
-            .args(["exec-out", "screencap", "-p"])
-            .no_console_window()
-            .output()
-            .map_err(|e| e.to_string())?;
+        let mut command = adb(&sdk, Some(&serial));
+        command.args(["exec-out", "screencap", "-p"]);
+        command.no_console_window();
+        let mut out = crate::process_capture::output(&mut command, 32 * 1024 * 1024)?;
+        crate::process_capture::reject_truncated(&out, "Android screenshot")?;
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
         }
         if out.stdout.is_empty() {
             return Err("the device returned an empty screenshot".to_string());
         }
-        Ok(out.stdout)
+        Ok(out.take_stdout())
     })
     .await
     .map_err(|e| e.to_string())?

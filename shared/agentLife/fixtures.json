@@ -35,6 +35,13 @@
     "expect": { "state": "waiting", "via": "structured-block", "confidence": "proven" }
   },
   {
+    "name": "a transient codex PermissionRequest remains working during dwell",
+    "digest": { "state": "waiting", "state_via": "structured-block", "agent": "codex", "updated": 1800000000 },
+    "pty": { "kind": "live", "hint": true, "cpu": 0, "quietForMs": 200 },
+    "now": 1800000000,
+    "expect": { "state": "working", "via": "output", "confidence": "inferred" }
+  },
+  {
     "name": "opencode permission.asked is a proven block",
     "digest": { "state": "waiting", "state_via": "declared-block", "agent": "opencode", "updated": 1799999990 },
     "pty": null,

@@ -35,7 +35,11 @@ const detail = {
   }],
 };
 
-const view = (commands: Record<string, unknown> = {}, onResearch = vi.fn()) => {
+const view = (
+  commands: Record<string, unknown> = {},
+  onResearch = vi.fn(),
+  onWorkflowEvent = vi.fn(),
+) => {
   mockCommands({ gh_issue_detail: detail, ...commands });
   return render(
     <TicketView
@@ -49,6 +53,7 @@ const view = (commands: Record<string, unknown> = {}, onResearch = vi.fn()) => {
       onStartTask={vi.fn()}
       onResearch={onResearch}
       onSendToAgent={vi.fn()}
+      onWorkflowEvent={onWorkflowEvent}
     />,
   );
 };
@@ -73,7 +78,8 @@ describe("TicketView", () => {
   it("closes an issue and posts a comment", async () => {
     const setState = vi.fn();
     const post = vi.fn();
-    view({ gh_issue_set_state: setState, gh_issue_comment: post });
+    const onWorkflowEvent = vi.fn();
+    view({ gh_issue_set_state: setState, gh_issue_comment: post }, vi.fn(), onWorkflowEvent);
     await screen.findByText("opened by octocat");
 
     await userEvent.click(screen.getByRole("button", { name: "Close issue" }));
@@ -89,6 +95,14 @@ describe("TicketView", () => {
       repo: "/work/app",
       number: 42,
       body: "Looks good",
+    }));
+    expect(onWorkflowEvent).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "issue.closed",
+      payload: expect.objectContaining({ source: "github", issueId: "#42" }),
+    }));
+    expect(onWorkflowEvent).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "issue.comment",
+      payload: expect.objectContaining({ body: "Looks good", repo: "/work/app" }),
     }));
   });
 

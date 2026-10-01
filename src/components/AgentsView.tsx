@@ -20,12 +20,19 @@ import { LIFE_META, NO_ATTENTION, bucketFor, reclaimable, silenceLabel } from ".
 import type { Attention, LifeState } from "../../shared/agentLife";
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
-import { lastHumanPrompt, useAgentSessions, type SessionRow } from "../agentSessions";
+import {
+  lastHumanPrompt,
+  useAgentSessions,
+  workingOnNow,
+  type SessionRow,
+} from "../agentSessions";
 import { claimOwnerName } from "../claims";
 import { IntegrationsList, useIntegrations } from "./AgentIntegrations";
+import { AgentControlPanel, type ControlPanelMode } from "./AgentControlPanel";
 import { PendingCard } from "./PendingCard";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
+import { AgentNameEditor } from "./AgentNameEditor";
 import { sessionCost } from "../pricing";
 import { fmtTokens } from "../format";
 import {
@@ -76,6 +83,9 @@ export interface AgentsViewProps {
   active: boolean;
   projectName: string;
   roots: string[];
+  /** Every open project — the control-panel modes (graph, table) are
+   *  app-wide, so they must see past this project's roots. */
+  allProjects?: { name: string; roots: string[] }[];
   stats: ipc.SessionStats[];
   hookPath: string | null;
   pending?: PendingItem[];
@@ -169,6 +179,7 @@ export function AgentsView({
   active,
   projectName,
   roots,
+  allProjects,
   stats,
   hookPath,
   pending = [],
@@ -249,6 +260,10 @@ export function AgentsView({
   const urgent = pending.filter((i) => i.kind !== "idle");
   const finished = pending.filter((i) => i.kind === "idle");
 
+  // Cards is this page as it has always been; graph and table are the control
+  // panel — two views of one app-wide dataset (see AgentControlPanel).
+  const [mode, setMode] = useState<"cards" | ControlPanelMode>("cards");
+
   // The archive is the one list here long enough to need finding things in.
   const [query, setQuery] = useState("");
   const matches = useMemo(() => {
@@ -283,11 +298,13 @@ export function AgentsView({
     // Only reclaim an agent that has *provably* finished — never one mid-turn,
     // never one blocked, and never one we have merely lost track of.
     const canHibernate = reclaimable(life, attention);
-    const task = lastHumanPrompt(digest?.prompts);
+    const task = workingOnNow(row, tabNames);
     const name = agentDisplayName({
       tab: tabNames?.get(s.id),
-      agentLabel: agent?.label,
+      sessionName: s.name,
       sessionTitle: s.title,
+      cwd: s.cwd,
+      agentLabel: agent?.label,
     });
     const u = digest?.session_id ? usageById.get(digest.session_id) : undefined;
     const cost = u ? sessionCost(u) : null;
@@ -308,7 +325,7 @@ export function AgentsView({
               ) : (
                 <TerminalIcon size={13} className="agv-card-mark" />
               )}
-              {name}
+              <AgentNameEditor ptyId={s.id} name={s.name ?? name} />
             </span>
             <span className={`agv-card-state ${st.cls}`} title={stTitle}>
               {st.label}
@@ -452,7 +469,31 @@ export function AgentsView({
       <header className="agv-head">
         <div className="agv-title">
           <h1>Agents</h1>
-          <span className="agv-project">{projectName}</span>
+          <span className="agv-project">
+            {mode === "cards" ? projectName : "every project"}
+          </span>
+          <span
+            className="agv-modes"
+            role="group"
+            aria-label="How to show the agents"
+          >
+            {(["cards", "graph", "table"] as const).map((m) => (
+              <button
+                key={m}
+                className={`agv-mode ${mode === m ? "agv-mode-on" : ""}`}
+                title={
+                  m === "cards"
+                    ? "This project's agents, as cards"
+                    : m === "graph"
+                      ? "Every agent in Canopy as a live graph — who talks to whom"
+                      : "Every agent in Canopy as a table"
+                }
+                onClick={() => setMode(m)}
+              >
+                {m}
+              </button>
+            ))}
+          </span>
           <span className="agv-spacer" />
           <Button
             size="sm"
@@ -479,6 +520,7 @@ export function AgentsView({
           </span>
         </div>
 
+        {mode === "cards" && (
         <div className="agv-stats">
           <Stat label="running" value={cards.length} tone={cards.length ? "active" : undefined} />
           <Stat label="working" value={working} />
@@ -499,8 +541,20 @@ export function AgentsView({
             />
           )}
         </div>
+        )}
       </header>
 
+      {mode !== "cards" ? (
+        <div className="agv-body acp-body">
+          <AgentControlPanel
+            active={active}
+            mode={mode}
+            allProjects={allProjects ?? [{ name: projectName, roots }]}
+            onJumpToPty={onJumpToPty}
+            tabNames={tabNames}
+          />
+        </div>
+      ) : (
       <div className="agv-body">
         {urgent.length > 0 && (
           <Section title="Needs your input" count={urgent.length}>
@@ -745,6 +799,7 @@ export function AgentsView({
           )}
         </Section>
       </div>
+      )}
     </div>
   );
 }

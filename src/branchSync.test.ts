@@ -82,6 +82,8 @@ suite("what it says", () => {
     expect(d.willConflict).toBe(false);
     expect(d.mergeLabel).toBe("Merge main in");
     expect(d.detail).toContain("Your commits stay as they are");
+    // Nothing for an agent to do on a merge that goes through by itself.
+    expect(d.canResolve).toBe(false);
   });
 
   it("names the conflicting files and says nothing has changed yet", () => {
@@ -95,6 +97,7 @@ suite("what it says", () => {
     // Still offered — resolving now is the user's call to make.
     expect(d.canMerge).toBe(true);
     expect(d.mergeLabel).toBe("Merge and resolve now");
+    expect(d.canResolve).toBe(true);
   });
 
   it("refuses the merge when uncommitted work is in the way, and says which files", () => {
@@ -103,6 +106,8 @@ suite("what it says", () => {
     expect(d.blockedReason).toBe("uncommitted changes are in the way");
     expect(d.files).toEqual(["src/a.ts"]);
     expect(d.detail).toContain("Commit or stash it");
+    // …but not a dead end: an agent can merge around the edits.
+    expect(d.canResolve).toBe(true);
   });
 
   it("admits when it could not check, rather than implying clean", () => {

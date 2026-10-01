@@ -76,11 +76,45 @@ describe("restorableFrom", () => {
   it("hides explicitly closed sessions by default without hiding other dead sessions", () => {
     markUserClosed("closed");
     const rows = restorableFrom(
-      [digest({ session_id: "closed" }), digest({ session_id: "interrupted" })],
+      [
+        digest({ session_id: "closed" }),
+        digest({ session_id: "interrupted", cwd: "/other", resume_cwd: "/other" }),
+      ],
       [],
       [],
     );
     expect(rows.map((r) => r.digest.session_id)).toEqual(["interrupted"]);
+  });
+
+  it("does not promote an older session when the newest one is closed by hand", () => {
+    // The close gesture is about the directory's current work, not about one
+    // conversation id. Suppressing only the closed session hands the row to
+    // whatever is behind it, so closing the agent you were talking to made a
+    // conversation from days ago appear in its place.
+    markUserClosed("newest");
+    expect(
+      restorableFrom(
+        [
+          digest({ session_id: "newest", updated: 300 }),
+          digest({ session_id: "older", updated: 200 }),
+        ],
+        [],
+        [],
+      ),
+    ).toHaveLength(0);
+    // A closed directory is not a forgotten one: newer work there leads the
+    // group and the offer comes back.
+    expect(
+      restorableFrom(
+        [
+          digest({ session_id: "fresh", updated: 400 }),
+          digest({ session_id: "newest", updated: 300 }),
+          digest({ session_id: "older", updated: 200 }),
+        ],
+        [],
+        [],
+      ).map((r) => r.digest.session_id),
+    ).toEqual(["fresh"]);
   });
 
   it("offers explicitly closed sessions when the setting opts in", () => {

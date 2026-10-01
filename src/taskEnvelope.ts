@@ -20,7 +20,9 @@ export interface TaskRouteSnapshot {
   cliVersion?: string | null;
   executableFingerprint?: string | null;
   profileId: string;
+  requestedProvider?: string | null;
   requestedModel?: string | null;
+  requestedEffort?: string | null;
   observedModel?: string | null;
   harnessVersion: string;
   promptVersion: string;

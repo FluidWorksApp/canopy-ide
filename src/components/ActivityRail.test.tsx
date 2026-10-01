@@ -37,8 +37,8 @@ describe("ActivityRail", () => {
     expect(labels).toEqual([
       "Project — Components & files",
       "Project — Servers — every component you can run, start and manage",
-      "Source control & Review — Session changes",
-      "Source control & Review — Git — branches, commits, worktrees, PRs",
+      "Project — Integrations — local services, linked accounts and deployments",
+      "Source control & Review — Source control — session changes, branches, commits and worktrees",
       "Source control & Review — Pull requests — every open project, one list",
       "Source control & Review — Issues — GitHub, Linear, …",
       "Agents — Agents",

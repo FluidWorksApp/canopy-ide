@@ -901,15 +901,65 @@ pub async fn spot_save_context_image(
     base64_png: String,
 ) -> Result<String, String> {
     use base64::Engine;
+    const MAX_BYTES: usize = 12 * 1024 * 1024;
+    const MAX_BASE64_CHARS: usize = ((MAX_BYTES + 2) / 3) * 4;
     let target = PathBuf::from(&dir).join(".canopy/spot");
     check_scope(&ws, &target)?;
+    let encoded = base64_png.trim();
+    if encoded.len() > MAX_BASE64_CHARS {
+        return Err("context images are limited to 12 MB each".into());
+    }
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(base64_png.trim())
+        .decode(encoded)
         .map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_BYTES {
+        return Err("context images are limited to 12 MB each".into());
+    }
     std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
     let path = free_path(&target, now_secs(), "ctx", "png");
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn spot_stage_drop_images(
+    ws: State<'_, WorkspaceManager>,
+    dir: String,
+    paths: Vec<String>,
+) -> Result<Vec<String>, String> {
+    const MAX_FILES: usize = 16;
+    const MAX_BYTES: u64 = 25 * 1024 * 1024;
+    if paths.len() > MAX_FILES {
+        return Err(format!("a drop is limited to {MAX_FILES} files"));
+    }
+    let target = PathBuf::from(&dir).join(".canopy/spot");
+    check_scope(&ws, &target)?;
+    std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+
+    let image_exts = ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "svg"];
+    let mut staged = Vec::with_capacity(paths.len());
+    for path in paths {
+        let source = PathBuf::from(&path);
+        let ext = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase);
+        let Some(ext) = ext.filter(|value| image_exts.contains(&value.as_str())) else {
+            staged.push(path);
+            continue;
+        };
+        let copy = source
+            .metadata()
+            .ok()
+            .filter(|meta| meta.is_file() && meta.len() <= MAX_BYTES)
+            .and_then(|_| {
+                let destination = free_path(&target, now_secs(), "drop", &ext);
+                std::fs::copy(&source, &destination).ok()?;
+                Some(destination.to_string_lossy().to_string())
+            });
+        staged.push(copy.unwrap_or(path));
+    }
+    Ok(staged)
 }
 
 /// Write a brief too long to type at a shell prompt, and return its path.

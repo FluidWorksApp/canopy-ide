@@ -4,7 +4,12 @@ import { describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { PaneBar } from "./PaneBar";
 import { ANCHOR_ATTR } from "../tabSticky";
-import type { StripGroup, SubTab, TermSubTab } from "./ProjectView/helpers";
+import type {
+  RailChip,
+  StripGroup,
+  SubTab,
+  TermSubTab,
+} from "./ProjectView/helpers";
 
 // The bar's own module graph, not ProjectView's: PaneBar only needs two label
 // helpers from there, and importing the real index would drag the whole view
@@ -28,7 +33,7 @@ const term = (id: string, title: string): TermSubTab => ({
   id,
   type: "terminal",
   cwd: "/repo",
-  title,
+  launchTitle: title,
   ptyId: 1,
 });
 
@@ -69,6 +74,7 @@ function paneBar(over: Partial<React.ComponentProps<typeof PaneBar>> = {}) {
       shellChips={[]}
       runChips={[]}
       runSummary={null}
+      showRunRail={true}
       shellMenuOpen={false}
       setShellMenuOpen={noop}
       runMenuOpen={false}
@@ -112,6 +118,38 @@ function paneBar(over: Partial<React.ComponentProps<typeof PaneBar>> = {}) {
 }
 
 const renameInput = () => document.querySelector<HTMLInputElement>(".tab-rename-input")!;
+
+const railChip = (id: string, active = false): RailChip => ({
+  id,
+  active,
+  dot: null,
+  title: id,
+  tooltip: id,
+  onSelect: noop,
+  onClose: noop,
+});
+
+describe("PaneBar run-terminal visibility", () => {
+  it("hides the run rail in Build without dimming the remaining tab surface", () => {
+    const runChips = [railChip("dev server", true)];
+    const { rerender } = render(
+      paneBar({ runChips, activeSection: "runs", showRunRail: false }),
+    );
+
+    expect(document.querySelector('[data-rail="RUNS"]')).toBeNull();
+    expect(document.querySelector(".pane-bar")).toHaveClass(
+      "pane-bar-focus-tabs",
+    );
+    expect(document.querySelector(".tabs")).not.toHaveClass("pane-section-dim");
+
+    rerender(paneBar({ runChips, activeSection: "runs", showRunRail: true }));
+
+    expect(document.querySelector('[data-rail="RUNS"]')).not.toBeNull();
+    expect(document.querySelector(".pane-bar")).toHaveClass(
+      "pane-bar-focus-runs",
+    );
+  });
+});
 
 describe("PaneBar tab rename", () => {
   it("focuses the input and selects the whole name when a rename starts", () => {
@@ -160,6 +198,36 @@ describe("PaneBar tab rename", () => {
     render(paneBar({ tabGroups: [run("all", [term("t1", "zsh")])] }));
     expect(screen.getByText("zsh")).toHaveClass("tab-title");
   });
+
+  it("shows the stable assigned name ahead of the CLI title", () => {
+    const tab = { ...term("t1", "canopy"), nativeName: "Juniper" };
+    render(paneBar({ tabGroups: [run("all", [tab])] }));
+    expect(screen.getByText("Juniper")).toHaveClass("tab-title");
+    expect(screen.queryByText("canopy")).toBeNull();
+  });
+
+  it("shows an agent-published task title ahead of its generated name", () => {
+    const tab = {
+      ...term("t1", "codex"),
+      nativeName: "Moss",
+      agentName: "Fix Codex task status",
+    };
+    render(paneBar({ tabGroups: [run("all", [tab])] }));
+    expect(screen.getByText("Fix Codex task status")).toHaveClass("tab-title");
+    expect(screen.queryByText("Moss")).toBeNull();
+  });
+
+  it("keeps a non-agent run's command title", () => {
+    const tab = { ...term("t1", "npm run dev"), nativeName: "Juniper" };
+    render(
+      paneBar({
+        tabGroups: [run("all", [tab])],
+        isAgentTab: (_tab): _tab is TermSubTab => false,
+      }),
+    );
+    expect(screen.getByText("npm run dev")).toHaveClass("tab-title");
+    expect(screen.queryByText("Juniper")).toBeNull();
+  });
 });
 
 describe("multiplexed terminal tab", () => {
@@ -174,6 +242,22 @@ describe("multiplexed terminal tab", () => {
     expect(screen.getByTitle("3 panes")).toHaveTextContent("3");
     expect(document.querySelector(".tab-multiplex-icon")).not.toBeNull();
     expect(document.querySelector(".tab")).toHaveClass("tab-multiplexed");
+  });
+});
+
+describe("terminal memory warning", () => {
+  it("accents only tabs selected by the governor-backed predicate", () => {
+    const warned = term("warned", "claude");
+    const normal = term("normal", "codex");
+    render(
+      paneBar({
+        tabGroups: [run("all", [warned, normal])],
+        tabMemoryWarning: (tab) => tab.id === warned.id,
+      }),
+    );
+
+    expect(screen.getByText("claude").closest(".tab")).toHaveClass("tab-memory-warning");
+    expect(screen.getByText("codex").closest(".tab")).not.toHaveClass("tab-memory-warning");
   });
 });
 

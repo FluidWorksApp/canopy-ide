@@ -12,7 +12,7 @@ describe("personaBinding", () => {
   it("gives Build mode one persona without dropping attention", () => {
     expect(personaBinding(true, true)).toEqual({
       companionVisible: false,
-      attentionFallbackVisible: true,
+      attentionFallbackVisible: false,
     });
   });
 

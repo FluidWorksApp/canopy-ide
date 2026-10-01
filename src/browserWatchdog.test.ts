@@ -7,8 +7,8 @@ import {
   type Violation,
 } from "./browserWatchdog";
 
-/** A view doing nothing wrong: on screen, nothing over it, a frame in hand, a
- *  capture a moment ago, bounds where its placeholder is. */
+/** A view doing nothing wrong: on screen, nothing over it, a frame in hand,
+ *  bounds where its placeholder is. */
 const healthy = (o: Partial<Sample> = {}): Sample => ({
   at: 100_000,
   tabId: "tab-1",
@@ -167,17 +167,20 @@ describe("I4 — bounds drift", () => {
   });
 });
 
-// I5 — the capture path being dead. This is the one that would have caught the
-// gate that latched shut, within ten seconds of the build that broke it.
+// I5 — the initial capture path being dead. This catches the gate that latched
+// shut without requiring a healthy quiet page to keep taking screenshots.
 describe("I5 — no frame captured from a settled page", () => {
-  it("stays quiet while captures keep landing", () => {
-    const samples = held(healthy(), 30_000).map((s) => ({ ...s, lastCaptureOkAt: s.at - 900 }));
-    expect(run(samples).opened).toEqual([]);
+  it("stays quiet indefinitely once a frame is held", () => {
+    const at = 100_000;
+    expect(run(held(healthy({ at, lastCaptureOkAt: at }), 30_000)).opened).toEqual([]);
   });
 
-  it("fires when nothing has been captured for ten seconds", () => {
+  it("fires when no first frame arrives for ten seconds", () => {
     const at = 100_000;
-    const samples = held(healthy({ at, lastCaptureOkAt: at }), 11_000);
+    const samples = held(
+      healthy({ at, hasFrame: false, lastCaptureOkAt: 0, capturableSince: at }),
+      11_000,
+    );
     expect(run(samples).codes).toEqual(["I5"]);
   });
 
@@ -202,9 +205,14 @@ describe("I5 — no frame captured from a settled page", () => {
     expect(run(held(back, 5_000)).opened).toEqual([]);
   });
 
-  it("still fires if nothing arrives once it is back", () => {
+  it("still fires if it comes back without a frame and none arrives", () => {
     const at = 100_000;
-    const back = healthy({ at, lastCaptureOkAt: at - 26_000, capturableSince: at });
+    const back = healthy({
+      at,
+      hasFrame: false,
+      lastCaptureOkAt: at - 26_000,
+      capturableSince: at,
+    });
     expect(run(held(back, 11_000)).codes).toEqual(["I5"]);
   });
 
@@ -214,7 +222,12 @@ describe("I5 — no frame captured from a settled page", () => {
     // budget begins at the moment it became photographable.
     const loading = held(healthy({ at, lastCaptureOkAt: at, settled: false }), 20_000);
     const settled = held(
-      healthy({ at: at + 20_050, lastCaptureOkAt: at, capturableSince: at + 20_050 }),
+      healthy({
+        at: at + 20_050,
+        hasFrame: false,
+        lastCaptureOkAt: at,
+        capturableSince: at + 20_050,
+      }),
       5_000,
     );
     expect(run([...loading, ...settled]).opened).toEqual([]);

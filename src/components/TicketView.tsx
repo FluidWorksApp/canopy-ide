@@ -14,6 +14,8 @@ import { Markdown } from "./Markdown";
 import { TrackerIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 import { Button, Select } from "./ui";
+import { issueWorkflowEvent } from "../issueWorkflowEvents";
+import type { WorkflowTriggerProvenance } from "../workflowDefinition";
 
 interface TicketViewProps {
   ticket: ipc.TicketInfo;
@@ -43,6 +45,8 @@ interface TicketViewProps {
   /** Forward the ticket to research — an entry and an agent on the question. */
   onResearch: () => void;
   onSendToAgent: (target: AgentTarget) => void;
+  /** Dispatch provider mutations as first-class workflow events. */
+  onWorkflowEvent?: (event: WorkflowTriggerProvenance) => void | Promise<void>;
 }
 
 export function TicketView({
@@ -58,6 +62,7 @@ export function TicketView({
   onShowTasks,
   onResearch,
   onSendToAgent,
+  onWorkflowEvent,
 }: TicketViewProps) {
   const trackerName = TRACKERS.find((t) => t.id === source)?.name ?? source;
   const { openThere } = useBranchSwitch();
@@ -69,6 +74,14 @@ export function TicketView({
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const emit = (kind: "issue.updated" | "issue.closed" | "issue.reopened" | "issue.comment", extra: Record<string, unknown> = {}) => {
+    if (!onWorkflowEvent) return;
+    void Promise.resolve(onWorkflowEvent(issueWorkflowEvent(
+      kind,
+      { source, repo: repo ?? "", ticket },
+      extra,
+    ))).catch(() => {});
+  };
   // Submitting a task means a worktree switch and a spawn — seconds during
   // which a stateless button reads as a dead click.
   const [startingTask, setStartingTask] = useState(false);
@@ -106,6 +119,11 @@ export function TicketView({
     try {
       await ipc.ghIssueSetState(repo, number, open);
       setDetail((prev) => prev && { ...prev, state: open ? "open" : "closed" });
+      emit(open ? "issue.reopened" : "issue.closed", {
+        previousState: detail?.state ?? ticket.state,
+        state: open ? "open" : "closed",
+        stateType: open ? "open" : "closed",
+      });
       window.dispatchEvent(new CustomEvent("canopy:trackers-changed"));
     } catch (err) {
       setError(String(err));
@@ -122,6 +140,14 @@ export function TicketView({
     try {
       await ipc.linearIssueSetState(linearKey, detail.internal_id, stateId);
       setDetail({ ...detail, state_id: stateId, state: next?.name ?? detail.state });
+      const nextName = next?.name ?? detail.state;
+      const wasClosed = /^(?:done|closed|completed|cancell?ed)$/i.test(detail.state);
+      const isClosed = /^(?:done|closed|completed|cancell?ed)$/i.test(nextName);
+      emit(isClosed ? "issue.closed" : wasClosed ? "issue.reopened" : "issue.updated", {
+        previousState: detail.state,
+        state: nextName,
+        stateId,
+      });
       window.dispatchEvent(new CustomEvent("canopy:trackers-changed"));
     } catch (err) {
       setError(String(err));
@@ -135,8 +161,10 @@ export function TicketView({
     setBusy(true);
     setError("");
     try {
-      if (github && repo) await ipc.ghIssueComment(repo, number, comment.trim());
-      else await ipc.linearIssueComment(linearKey, detail.internal_id, comment.trim());
+      const body = comment.trim();
+      if (github && repo) await ipc.ghIssueComment(repo, number, body);
+      else await ipc.linearIssueComment(linearKey, detail.internal_id, body);
+      emit("issue.comment", { body });
       setComment("");
       await loadDetail();
     } catch (err) {

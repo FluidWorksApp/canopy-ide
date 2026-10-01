@@ -46,9 +46,10 @@ use tauri::{AppHandle, Emitter, State};
 /// Repositories per GraphQL document. Aliases make this one request; too many
 /// and a single slow repo delays every other one's rows.
 const BATCH: usize = 8;
-/// Open PRs per repo. An inbox is for triage — past this, the list is the
-/// problem, not the refresh rate.
-const PRS_PER_REPO: usize = 20;
+/// GitHub's maximum connection page. Most repositories finish in the batched
+/// first request; the rare larger one continues by cursor so the dashboard's
+/// "all open" claim never quietly means "the latest twenty".
+const PRS_PER_PAGE: usize = 100;
 
 const FOCUSED: Duration = Duration::from_secs(90);
 const IDLE: Duration = Duration::from_secs(600);
@@ -70,6 +71,10 @@ pub struct PrRow {
     pub url: String,
     pub branch: String,
     pub base: String,
+    /// Immutable commit identities used by the dashboard's merge-tree cache.
+    /// Branch names can stay still while their contents move; these cannot.
+    pub head_sha: String,
+    pub base_sha: String,
     pub draft: bool,
     pub created: String,
     pub updated: String,
@@ -170,21 +175,53 @@ fn safe_nwo(nwo: &str) -> bool {
 
 /// The per-repository selection. `first: 1` on the two counted connections is
 /// the whole point: `totalCount` is free, nodes are not.
-fn repo_selection(alias: &str, owner: &str, name: &str) -> String {
+fn repo_selection(alias: &str, owner: &str, name: &str, after: Option<&str>) -> String {
+    // A cursor is opaque and returned by GitHub. JSON quoting is also valid
+    // GraphQL string quoting and prevents it from becoming query syntax.
+    let after = after
+        .and_then(|cursor| serde_json::to_string(cursor).ok())
+        .map(|cursor| format!(",after:{cursor}"))
+        .unwrap_or_default();
     format!(
         r#"{alias}: repository(owner:"{owner}",name:"{name}"){{
              nameWithOwner
-             pullRequests(states:OPEN,first:{PRS_PER_REPO},orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{
+             pullRequests(states:OPEN,first:{PRS_PER_PAGE}{after},orderBy:{{field:UPDATED_AT,direction:DESC}}){{
+               pageInfo{{hasNextPage endCursor}}
+               nodes{{
                number title url isDraft createdAt updatedAt
-               author{{login}} headRefName baseRefName additions deletions
+               author{{login}} headRefName baseRefName headRefOid baseRefOid additions deletions
                mergeable reviewDecision
                comments(first:1){{totalCount}}
                reviewThreads(first:1){{totalCount}}
                reviewRequests(first:5){{nodes{{requestedReviewer{{__typename ... on User{{login}} ... on Team{{slug}}}}}}}}
                commits(last:1){{nodes{{commit{{statusCheckRollup{{state}}}}}}}}
-             }}}}
+               }}
+             }}
            }}"#
     )
+}
+
+fn next_cursor(node: &Value) -> Option<String> {
+    node["pullRequests"]["pageInfo"]["hasNextPage"]
+        .as_bool()
+        .unwrap_or(false)
+        .then(|| {
+            node["pullRequests"]["pageInfo"]["endCursor"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        })
+        .filter(|cursor| !cursor.is_empty())
+}
+
+fn absorb_rate(tick: &mut PrTick, data: &Value) {
+    tick.cost += data["rateLimit"]["cost"].as_i64().unwrap_or(0);
+    tick.remaining = data["rateLimit"]["remaining"]
+        .as_i64()
+        .unwrap_or(tick.remaining);
+    if let Some(reset) = data["rateLimit"]["resetAt"].as_str() {
+        tick.reset_at = reset.to_string();
+    }
 }
 
 fn parse_rows(repo: &str, viewer: &str, node: &Value) -> Vec<PrRow> {
@@ -225,6 +262,8 @@ fn parse_rows(repo: &str, viewer: &str, node: &Value) -> Vec<PrRow> {
                         url: p["url"].as_str().unwrap_or("").to_string(),
                         branch: p["headRefName"].as_str().unwrap_or("").to_string(),
                         base: p["baseRefName"].as_str().unwrap_or("").to_string(),
+                        head_sha: p["headRefOid"].as_str().unwrap_or("").to_string(),
+                        base_sha: p["baseRefOid"].as_str().unwrap_or("").to_string(),
                         draft: p["isDraft"].as_bool().unwrap_or(false),
                         created: p["createdAt"].as_str().unwrap_or("").to_string(),
                         updated: p["updatedAt"].as_str().unwrap_or("").to_string(),
@@ -383,7 +422,7 @@ async fn pass(app: &AppHandle, inner: &Arc<Mutex<Watch>>, repos: &[String]) -> P
         let mut doc = String::from("query{ viewer{login} rateLimit{cost remaining resetAt}\n");
         for (i, (_, nwo)) in chunk.iter().enumerate() {
             let (owner, name) = nwo.split_once('/').unwrap_or((nwo.as_str(), ""));
-            doc.push_str(&repo_selection(&format!("r{i}"), owner, name));
+            doc.push_str(&repo_selection(&format!("r{i}"), owner, name, None));
             doc.push('\n');
         }
         doc.push('}');
@@ -406,13 +445,7 @@ async fn pass(app: &AppHandle, inner: &Arc<Mutex<Watch>>, repos: &[String]) -> P
             }
         };
         let viewer = data["viewer"]["login"].as_str().unwrap_or("").to_string();
-        tick.cost += data["rateLimit"]["cost"].as_i64().unwrap_or(0);
-        tick.remaining = data["rateLimit"]["remaining"]
-            .as_i64()
-            .unwrap_or(tick.remaining);
-        if let Some(r) = data["rateLimit"]["resetAt"].as_str() {
-            tick.reset_at = r.to_string();
-        }
+        absorb_rate(&mut tick, &data);
 
         for (i, (repo, nwo)) in chunk.iter().enumerate() {
             let node = &data[format!("r{i}")];
@@ -423,7 +456,49 @@ async fn pass(app: &AppHandle, inner: &Arc<Mutex<Watch>>, repos: &[String]) -> P
                 );
                 continue;
             }
-            let rows = parse_rows(repo, &viewer, node);
+            let mut rows = parse_rows(repo, &viewer, node);
+            let mut cursor = next_cursor(node);
+            let mut seen = std::collections::HashSet::new();
+            let mut complete = true;
+            while let Some(after) = cursor {
+                // A repeated cursor is a broken server response. Stop rather
+                // than loop forever and call the partial list complete.
+                if !seen.insert(after.clone()) {
+                    tick.errors
+                        .insert(repo.clone(), "GitHub repeated a PR page cursor".into());
+                    complete = false;
+                    ok = false;
+                    break;
+                }
+                let (owner, name) = nwo.split_once('/').unwrap_or((nwo.as_str(), ""));
+                let page_doc = format!(
+                    "query{{ rateLimit{{cost remaining resetAt}} {} }}",
+                    repo_selection("r0", owner, name, Some(&after)),
+                );
+                tick.requests += 1;
+                let page = tauri::async_runtime::spawn_blocking(move || {
+                    crate::git::gh_graphql_anywhere(&page_doc)
+                })
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|result| result);
+                let page = match page {
+                    Ok(page) => page,
+                    Err(error) => {
+                        tick.errors.insert(repo.clone(), error);
+                        complete = false;
+                        ok = false;
+                        break;
+                    }
+                };
+                absorb_rate(&mut tick, &page);
+                let page_node = &page["r0"];
+                rows.extend(parse_rows(repo, &viewer, page_node));
+                cursor = next_cursor(page_node);
+            }
+            if !complete {
+                continue;
+            }
             let hash = hash_rows(&rows);
             let unchanged = {
                 let mut w = inner.lock().unwrap();
@@ -492,13 +567,20 @@ mod tests {
 
     #[test]
     fn repo_selection_asks_for_counts_not_nodes() {
-        let q = repo_selection("r0", "o", "n");
+        let q = repo_selection("r0", "o", "n", None);
         assert!(q.contains("r0: repository(owner:\"o\",name:\"n\")"));
         // Cost control: counted connections must never pull their nodes.
         assert!(q.contains("comments(first:1){totalCount}"));
         assert!(q.contains("reviewThreads(first:1){totalCount}"));
         assert!(q.contains("states:OPEN"));
-        assert!(q.contains("first:20"));
+        assert!(q.contains("first:100"));
+        assert!(q.contains("pageInfo{hasNextPage endCursor}"));
+    }
+
+    #[test]
+    fn repo_selection_quotes_pagination_cursors_as_data() {
+        let q = repo_selection("r0", "o", "n", Some("cursor\"} query{viewer{login}}"));
+        assert!(q.contains("after:\"cursor\\\"} query{viewer{login}}\""));
     }
 
     fn one_pr() -> Value {
@@ -508,6 +590,8 @@ mod tests {
             "number": 3, "title": "Fix it", "url": "https://github.com/o/r/pull/3",
             "isDraft": false, "createdAt": "2026-07-01T09:00:00Z", "updatedAt": "2026-07-02T09:00:00Z",
             "author": { "login": "alice" }, "headRefName": "fix", "baseRefName": "main",
+            "headRefOid": "1111111111111111111111111111111111111111",
+            "baseRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "additions": 12, "deletions": 3, "mergeable": "MERGEABLE",
             "reviewDecision": "REVIEW_REQUIRED",
             "comments": { "totalCount": 2 },
@@ -529,6 +613,8 @@ mod tests {
         assert_eq!(r.repo, "/repo");
         assert_eq!(r.nwo, "o/r");
         assert_eq!(r.number, 3);
+        assert_eq!(r.head_sha, "1111111111111111111111111111111111111111");
+        assert_eq!(r.base_sha, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert_eq!(r.checks, "FAIL");
         assert_eq!(r.comments, 2);
         assert_eq!(r.threads, 5);

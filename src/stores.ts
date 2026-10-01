@@ -13,6 +13,7 @@
 
 import * as ipc from "./ipc";
 import { taskStoreChanged } from "./taskEnvelopes";
+import { workflowStoreChanged } from "./workflowRuns";
 
 type Handler = (e: ipc.StoreChange) => void;
 
@@ -80,3 +81,4 @@ export function resetForTests(): void {
 // router owns its module-scope registration until a permanent task surface
 // imports the projection directly.
 registerStore("tasks", taskStoreChanged);
+registerStore("workflows", workflowStoreChanged);

@@ -133,8 +133,12 @@ const MESH_TOP_N = 8;
 
 /** One end of a message's route: the CLI's name when the hook captured it,
  *  else the bare terminal id. */
-const meshEnd = (pty: number | null | undefined, agent?: string | null) =>
-  pty == null ? "companion" : agent ? `${agent} ${pty}` : `terminal ${pty}`;
+const meshEnd = (
+  pty: number | null | undefined,
+  name?: string | null,
+  agent?: string | null,
+) =>
+  pty == null ? "companion" : name || (agent ? `${agent} ${pty}` : `terminal ${pty}`);
 
 /** Compact relative age; the panel is narrow and "3h" beats a timestamp. */
 const ago = (secs?: number) => {
@@ -534,8 +538,10 @@ export function AgentsPanel({
     // is naming the same sessions apart.
     const name = agentDisplayName({
       tab: tabNames?.get(s.id),
-      agentLabel: agent?.label,
+      sessionName: s.name,
       sessionTitle: s.title,
+      cwd: s.cwd,
+      agentLabel: agent?.label,
     });
     return (
       <div
@@ -1029,9 +1035,9 @@ export function AgentsPanel({
                   .join("\n")}
               >
                 <span className="mesh-msg-route">
-                  {meshEnd(m.from_pty_id, m.from_agent)}
+                  {meshEnd(m.from_pty_id, m.from_name, m.from_agent)}
                   {" → "}
-                  {meshEnd(m.to_pty_id, m.to_agent)}
+                  {meshEnd(m.to_pty_id, m.to_name, m.to_agent)}
                 </span>
                 <span className="mesh-msg-text">{m.text}</span>
                 {!m.submitted && (

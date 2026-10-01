@@ -6,6 +6,7 @@
 
 import type { AgentProfile } from "./ipc";
 import * as ipc from "./ipc";
+import { agentCliFor, agentClisWith } from "./projects";
 import { getSettings, updateSettings } from "./settings";
 
 /** The implicit profile: the login the machine already had. */
@@ -104,12 +105,12 @@ export function launchProfile(cliId: string): string | null {
   return launchEnvSync(cliId).length ? activeProfile() : null;
 }
 
-/** Mirrors PROFILE_AGENTS in profiles.rs (pinned by a test). A property of the
- *  CLI's design, not of this machine. */
-export const PROFILE_CAPABLE = ["claude", "codex", "opencode", "amp"] as const;
+/** Derived from first-class CLI manifests. Native profile commands resolve
+ * the same capability defensively in their own runtime. */
+export const PROFILE_CAPABLE = agentClisWith("profiles").map((cli) => cli.id);
 
 export function supportsProfiles(cliId: string): boolean {
-  return (PROFILE_CAPABLE as readonly string[]).includes(cliId);
+  return agentCliFor(cliId)?.capabilities?.profiles === true;
 }
 
 /** Logging in is just running the CLI: each opens its own browser flow in an

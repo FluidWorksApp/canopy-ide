@@ -4,6 +4,37 @@ Use this playbook to expose an existing Canopy capability to the embedded Remote
 browser application. Remote is a separate, restricted trust boundary; desktop
 availability never implies Remote availability.
 
+## Shared host connection
+
+Feature code uses the typed functions in `src/ipc.ts`, which call the host
+interface in `src/host`. The desktop adapter wraps Tauri invoke, events and
+channels. `SocketHost` uses the authenticated connection in `shared/host`;
+the existing portal now uses that adapter too. Keep transport code out of
+feature components, and reuse Rust service functions for both dispatch paths.
+
+The socket negotiates protocol version, environment identity, commands, events
+and streams before accepting IDE requests. A reconnect to a different host
+requires a reload: models and process IDs must not silently move between hosts.
+The server remains the authority for command grants and workspace scopes.
+
+Requests carry unique client-prefixed IDs. The backend scopes replay keys to
+the authenticated principal and verifies the command and arguments before
+returning a cached result. A disconnect or timeout leaves mutation outcomes
+uncertain; refresh operation state instead of automatically repeating the call.
+The replay cache is bounded and is not a durable exactly-once operation log.
+
+Protocol 1 `fs_read_file` returns bytes, matching the desktop API, and fails
+when the remote read limit is exceeded. `fs_read_text` is the portal's capped
+text projection. Unversioned portal requests retain their old text behavior.
+Do not give different response types the same name in the host contract.
+
+The UI migration is not complete: the portal still mounts its existing shell,
+native channel commands remain unavailable through `SocketHost`, and the full
+IDE bootstrap still owns desktop renderer registration. Before mounting the
+shared app remotely, complete client-scoped streams, Build runtime ownership,
+revisioned workspace writes and authenticated preview routing. Do not expose
+`pty_renderer_register` remotely: it detaches the desktop's terminal streams.
+
 ## Authorization and rendering flow
 
 ```mermaid

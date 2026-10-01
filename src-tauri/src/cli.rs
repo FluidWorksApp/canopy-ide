@@ -133,10 +133,13 @@ pub fn cli_install_shim() -> Result<String, String> {
             "do shell script \"{}\" with administrator privileges",
             sh.replace('\\', "\\\\").replace('"', "\\\"")
         );
-        let out = std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .output()
-            .map_err(|e| e.to_string())?;
+        let mut command = std::process::Command::new("osascript");
+        command.args(["-e", &script]);
+        let out = crate::process_capture::output(
+            &mut command,
+            crate::process_capture::DEFAULT_STREAM_MAX,
+        )?;
+        crate::process_capture::reject_truncated(&out, "osascript")?;
         let _ = std::fs::remove_file(&tmp);
         if out.status.success() {
             Ok("Installed `canopy` — run `canopy <dir>` from any terminal.".into())

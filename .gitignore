@@ -40,6 +40,11 @@ portal/dist/*
 
 # Sidecar binaries staged by scripts/prepare-sidecar.mjs (built artifacts)
 /src-tauri/binaries/
+# Chrome streaming bridge staged by scripts/prepare-chrome-stream.mjs. Keep a
+# committed placeholder so tauri.conf.json's `chrome-stream/**/*` resource glob
+# matches on a fresh checkout (cargo test/check in CI never stages it).
+/src-tauri/chrome-stream/*
+!/src-tauri/chrome-stream/.gitkeep
 
 # design-sync: staged scripts, build output, and all sync state/inputs
 /.ds-sync/

@@ -11,7 +11,7 @@ const browser: RemoteManifest = {
   capability: {
     level: 'none',
     reason:
-      'The in-app browser is a native view the compositor draws over the window — there is no picture of it to send.',
+      'Remote preview forwarding is not connected yet. Embedded and Playwright previews currently use host-local addresses.',
   },
   kinds: ['page'],
 }

@@ -54,6 +54,11 @@ export function reduceAttention(
         case "needs-human":
           return { kind: "blocked", since: input.at, why: "question" };
         case "needs-human-permission":
+          // A CLI whose structural block rung has a dwell must not bypass it
+          // through this event-stream fast lane. If the request persists, the
+          // lifecycle clock promotes it; an auto-approved flash disappears
+          // before any surface is told that the user is needed.
+          if (fidelityFor(cli).dwellStructuredBlock) return prev;
           return { kind: "blocked", since: input.at, why: "permission" };
         case "needs-human-ambiguous":
           return { kind: "blocked", since: input.at, why: "ambiguous-notice" };

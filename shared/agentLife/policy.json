@@ -13,6 +13,12 @@
   "$comment_hook": "How long a hook event's claim that a turn is in flight stands on its own. Generous on purpose: a long build or test run is a normal reason for silence, and the events that bracket a tool call are that far apart by definition.",
   "hookTrustSecs": 300,
 
+  "$comment_block_dwell": "Codex auto mode can emit and resolve PermissionRequest during one approval cycle. A structural block whose fidelity row opts into dwell must survive this long before it becomes waiting or enters the attention queue.",
+  "structuredBlockDwellMs": 2000,
+
+  "$comment_permission_cooldown": "A persistent permission request is real, but repeated identical requests from the same session should reuse its existing attention identity rather than create another toast and OS banner.",
+  "permissionNoticeCooldownMs": 15000,
+
   "$comment_startup": "A process is here but nothing has spoken for it yet. Long enough for a CLI to boot and fire SessionStart.",
   "startupGraceSecs": 20,
 

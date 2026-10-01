@@ -27,19 +27,29 @@ use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 use crate::relay::secure::{BoxRead, BoxWrite};
 
-/// The sync side of the send half: whatever the relay writes is queued onto an
-/// unbounded channel the pump drains. Unbounded + a sync `send` means the
-/// blocking caller never awaits.
-struct ChanWrite(UnboundedSender<Vec<u8>>);
+/// Secure relay frames are capped at 2 MiB. Eight queued frames per direction
+/// leaves burst room while putting a hard ~16 MiB ceiling on either bridge.
+const QUEUE_FRAMES: usize = 8;
+const MAX_WS_MESSAGE: usize = 2 * 1024 * 1024 + 1024;
+
+/// The sync relay runs on a blocking thread, so bounded `blocking_send` applies
+/// real backpressure without ever parking Tauri's async runtime.
+struct ChanWrite(Sender<Vec<u8>>);
 
 impl Write for ChanWrite {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.len() > MAX_WS_MESSAGE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "relay websocket message exceeds the bridge limit",
+            ));
+        }
         self.0
-            .send(buf.to_vec())
+            .blocking_send(buf.to_vec())
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "ws send closed"))?;
         Ok(buf.len())
     }
@@ -95,7 +105,7 @@ impl WsCloser {
 /// Wire the two sync halves onto a freshly-spawned pump `JoinHandle`. Shared by
 /// both directions; the caller supplies the already-spawned pump.
 fn halves(
-    out_tx: UnboundedSender<Vec<u8>>,
+    out_tx: Sender<Vec<u8>>,
     in_rx: std_mpsc::Receiver<Vec<u8>>,
     abort: tokio::task::AbortHandle,
 ) -> (BoxWrite, BoxRead, WsCloser) {
@@ -115,8 +125,8 @@ fn halves(
 /// only through the returned halves.
 pub fn server_halves(ws: axum::extract::ws::WebSocket) -> (BoxWrite, BoxRead, WsCloser) {
     use axum::extract::ws::Message;
-    let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
-    let (in_tx, in_rx) = std_mpsc::channel::<Vec<u8>>();
+    let (out_tx, mut out_rx) = channel::<Vec<u8>>(QUEUE_FRAMES);
+    let (in_tx, in_rx) = std_mpsc::sync_channel::<Vec<u8>>(QUEUE_FRAMES);
     let handle = tokio::spawn(async move {
         let mut ws = ws;
         loop {
@@ -135,7 +145,7 @@ pub fn server_halves(ws: axum::extract::ws::WebSocket) -> (BoxWrite, BoxRead, Ws
                 },
                 inbound = ws.next() => match inbound {
                     Some(Ok(Message::Binary(b))) => {
-                        if in_tx.send(b).is_err() {
+                        if b.len() > MAX_WS_MESSAGE || in_tx.try_send(b).is_err() {
                             break;
                         }
                     }
@@ -189,8 +199,8 @@ pub fn connect(url: &str, timeout: Duration) -> Result<(BoxWrite, BoxRead, WsClo
                         return;
                     }
                 };
-                let (out_tx, out_rx) = unbounded_channel::<Vec<u8>>();
-                let (in_tx, in_rx) = std_mpsc::channel::<Vec<u8>>();
+                let (out_tx, out_rx) = channel::<Vec<u8>>(QUEUE_FRAMES);
+                let (in_tx, in_rx) = std_mpsc::sync_channel::<Vec<u8>>(QUEUE_FRAMES);
                 let handle = tokio::spawn(pump_client(ws, out_rx, in_tx));
                 let abort = handle.abort_handle();
                 let (w, r, closer) = halves(out_tx, in_rx, abort);
@@ -213,8 +223,8 @@ async fn pump_client(
     ws: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
-    mut out_rx: UnboundedReceiver<Vec<u8>>,
-    in_tx: std_mpsc::Sender<Vec<u8>>,
+    mut out_rx: Receiver<Vec<u8>>,
+    in_tx: std_mpsc::SyncSender<Vec<u8>>,
 ) {
     use tokio_tungstenite::tungstenite::Message;
     let mut ws = ws;
@@ -233,7 +243,7 @@ async fn pump_client(
             },
             inbound = ws.next() => match inbound {
                 Some(Ok(Message::Binary(b))) => {
-                    if in_tx.send(b.to_vec()).is_err() {
+                    if b.len() > MAX_WS_MESSAGE || in_tx.try_send(b.to_vec()).is_err() {
                         break;
                     }
                 }

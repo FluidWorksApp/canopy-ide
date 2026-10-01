@@ -3,7 +3,8 @@
 // the PR raised from that branch. Same split as BranchView: metadata paints
 // first (one backend join, no patch bytes), each patch loads per pane, and
 // commit rows hand off to the commit tab rather than a second renderer.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { HIGHLIGHT_MAX, patchStats } from "../patchBudget";
 import { DiffView, DiffModeEnum, SplitSide } from "@git-diff-view/react";
 import "@git-diff-view/react/styles/diff-view.css";
 import { createTwoFilesPatch } from "diff";
@@ -17,7 +18,7 @@ import { lastHumanPrompt } from "../agentSessions";
 import { ashFor } from "../ash";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
-import { LIFE_META, agentLife } from "../../shared/agentLife";
+import { LIFE_META, agentLife, type Life } from "../../shared/agentLife";
 import { AgentIcon, GitBranchIcon, RestartIcon } from "./icons";
 import { sessionCost } from "../pricing";
 import {
@@ -36,6 +37,8 @@ import { Button } from "./ui";
 import { format, matches } from "../shortcuts";
 import { PROVENANCE_EVENT } from "../provenance";
 import { agentGitTrail } from "../agentGitTrail";
+import { sizeLimitFor } from "../fileOpen";
+import { type IoBudget, rendererIoBudget } from "../ioBudget";
 
 const fmtCost = (n: number) =>
   n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
@@ -46,6 +49,15 @@ const sentTokens = (u: ipc.AgentSessionUsage) =>
 interface AgentWorkspaceViewProps {
   /** Repo the agent's cwd resolved to; null renders the digest-only view. */
   repo: string | null;
+  /** The verdict for the terminal this session runs in, from the one place
+   *  that has the process evidence to reach it.
+   *
+   *  Without it this view can only decay a digest on silence, and the digest it
+   *  holds is frozen at mount — so any session busy for longer than
+   *  `hookTrustSecs` read "no signal — may have stopped" while the tab strip,
+   *  looking at the same session's CPU and output, had it under WORKING.
+   *  Optional: a session with no terminal here still falls back below. */
+  life?: Life;
   /** Authoritative agent id, from the live process tree — never a stale digest
    *  a reused PTY might still carry. Drives the header mark and label. */
   agent: string;
@@ -294,6 +306,114 @@ export const sameJson = (a: unknown, b: unknown) =>
 export const sameMap = (a: Map<string, string>, b: Map<string, string>) =>
   a.size === b.size && [...b].every(([k, v]) => a.get(k) === v);
 
+/** Reading every journaled file at once made one review tab a filesystem and
+ * renderer-memory fan-out. Keep the familiar editor per-file ceiling, then add
+ * a much smaller aggregate budget for this derived view: Monaco remains the
+ * place to open a large file deliberately. */
+export const AGENT_FILE_READ_CONCURRENCY = 3;
+export const AGENT_FILE_MAX_BYTES = sizeLimitFor("code");
+export const AGENT_FILE_TOTAL_BYTES = 16 * 1024 * 1024;
+
+interface AgentFileReadLimits {
+  concurrency: number;
+  perFileBytes: number;
+  totalBytes: number;
+  scope?: string;
+  signal?: AbortSignal;
+  budget?: IoBudget;
+}
+
+interface AgentFileReader {
+  stat: (path: string) => Promise<{ is_dir: boolean; size: number }>;
+  statMany?: (
+    paths: string[],
+  ) => Promise<Array<{ path: string; is_dir: boolean; size: number }>>;
+  readText: (path: string, maxBytes?: number) => Promise<string>;
+}
+
+/** A bounded, supersedable loader split out for a real concurrency test. The
+ * native invoke cannot currently be aborted once it starts, but `current`
+ * prevents a superseded generation from starting more work or retaining what
+ * finishes late. */
+export async function loadAgentFileContents(
+  paths: string[],
+  absolute: (path: string) => string,
+  reader: AgentFileReader = {
+    stat: ipc.fsStat,
+    statMany: ipc.fsStatMany,
+    readText: ipc.fsReadText,
+  },
+  current: () => boolean = () => true,
+  limits: AgentFileReadLimits = {
+    concurrency: AGENT_FILE_READ_CONCURRENCY,
+    perFileBytes: AGENT_FILE_MAX_BYTES,
+    totalBytes: AGENT_FILE_TOTAL_BYTES,
+  },
+): Promise<Map<string, string>> {
+  const unique = [...new Set(paths)];
+  const out = new Map<string, string>();
+  const resolved = new Map(unique.map((path) => [path, absolute(path)]));
+  const prefetched = new Map<string, { is_dir: boolean; size: number }>();
+  let cursor = 0;
+  let reservedBytes = 0;
+  const alive = () => current() && !limits.signal?.aborted;
+
+  if (reader.statMany && unique.length > 1 && alive()) {
+    try {
+      for (const stat of await reader.statMany([...resolved.values()])) {
+        prefetched.set(stat.path, stat);
+      }
+    } catch {
+      // Compatibility with an older native core: individual stat calls below
+      // retain the same bounded behaviour.
+    }
+  }
+
+  const worker = async () => {
+    while (alive()) {
+      const at = cursor++;
+      const path = unique[at];
+      if (path == null) return;
+      const absolutePath = resolved.get(path)!;
+      try {
+        const stat =
+          prefetched.get(absolutePath) ?? (await reader.stat(absolutePath));
+        if (!alive()) return;
+        if (
+          stat.is_dir ||
+          stat.size > limits.perFileBytes ||
+          reservedBytes + stat.size > limits.totalBytes
+        ) {
+          continue;
+        }
+        // Reserve before the await. JavaScript runs this section atomically, so
+        // sibling workers cannot all admit themselves against the same budget.
+        reservedBytes += stat.size;
+        const text = await (limits.budget ?? rendererIoBudget).run(
+          {
+            scope: limits.scope ?? "agent-workspace",
+            bytes: stat.size,
+            signal: limits.signal,
+          },
+          () => reader.readText(absolutePath, limits.perFileBytes),
+        );
+        if (!alive()) return;
+        out.set(path, text);
+      } catch {
+        // A file can disappear or be mid-write while the journal is settling.
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(Math.max(1, limits.concurrency), unique.length) },
+      () => worker(),
+    ),
+  );
+  return alive() ? out : new Map();
+}
+
 /** The digest as this view hands it to the lifecycle ladder: the workspace
  *  join's fresher copy of each field over the digest the panel opened the tab
  *  with. `store` and `foreign` must ride along — the ladder keys
@@ -404,6 +524,7 @@ function CommentCard({
 
 export function AgentWorkspaceView({
   repo,
+  life: passedLife,
   agent,
   cwd,
   sessionId,
@@ -558,6 +679,7 @@ export function AgentWorkspaceView({
   );
   useEffect(() => {
     let live = true;
+    const controller = new AbortController();
     const paths = [
       ...new Set(edits.filter((e) => e.present).map((e) => e.path)),
     ];
@@ -566,23 +688,20 @@ export function AgentWorkspaceView({
       return;
     }
     const abs = (p: string) =>
-      p.startsWith("/") ? p : repo ? `${repo}/${p}` : p;
-    void Promise.all(
-      paths.map(async (p) => {
-        try {
-          return [p, await ipc.fsReadText(abs(p))] as const;
-        } catch {
-          return [p, null] as const;
-        }
-      }),
-    ).then((pairs) => {
+      /^(?:[A-Za-z]:[\\/]|\/)/.test(p) ? p : repo ? `${repo}/${p}` : p;
+    void loadAgentFileContents(paths, abs, undefined, () => live, {
+      concurrency: AGENT_FILE_READ_CONCURRENCY,
+      perFileBytes: AGENT_FILE_MAX_BYTES,
+      totalBytes: AGENT_FILE_TOTAL_BYTES,
+      scope: repo ?? "agent-workspace",
+      signal: controller.signal,
+    }).then((next) => {
       if (!live) return;
-      const m = new Map<string, string>();
-      for (const [p, c] of pairs) if (c != null) m.set(p, c);
-      setFileContents((prev) => (sameMap(prev, m) ? prev : m));
+      setFileContents((prev) => (sameMap(prev, next) ? prev : next));
     });
     return () => {
       live = false;
+      controller.abort();
     };
   }, [edits, repo]);
 
@@ -613,7 +732,10 @@ export function AgentWorkspaceView({
       .agentWorkspaceAt(repo, cwd, agent, sessionId)
       .then((w) => {
         if (!live) return;
-        setWs(w);
+        // Only when it actually changed. An unconditional set hands down a new
+        // object on every poll, and this one is above the file list — so a poll
+        // that learnt nothing still rebuilt every diff below it.
+        setWs((prev) => (sameJson(prev, w) ? prev : w));
       })
       .catch((e) => live && setWsErr(String(e)));
     return () => {
@@ -739,14 +861,21 @@ export function AgentWorkspaceView({
   // `cpu: 0` hard-coded, so the same header could show a green "working" chip
   // twelve pixels from a stopped stopwatch and both were doing what they were
   // told.
-  const life = agentLife({
-    digest: workspaceLifeDigest(ws, digest) as never,
-    // No process evidence reaches this view, so a working claim decays on
-    // silence alone. That is the conservative half of the rule the Agents panel
-    // applies with the process tree to hand: it under-reports a busy agent
-    // rather than pulsing green for one that died.
-    now: Date.now() / 1000,
-  });
+  //
+  // The caller's verdict when there is one: it is computed from the same
+  // ladder but with the pty's stats to hand, so the output and CPU rungs are
+  // reachable and it re-runs on the stats tick instead of being pinned to
+  // whatever the digest said at mount.
+  const life =
+    passedLife ??
+    agentLife({
+      digest: workspaceLifeDigest(ws, digest) as never,
+      // No process evidence for a session with no terminal in this window, so
+      // a working claim decays on silence alone. That is the conservative half
+      // of the rule the Agents panel applies with the process tree to hand: it
+      // under-reports a busy agent rather than pulsing green for one that died.
+      now: Date.now() / 1000,
+    });
   const lifecycle = life.state;
   const st = LIFE_META[lifecycle];
   const task = lastHumanPrompt(digest?.prompts);
@@ -979,8 +1108,36 @@ export function AgentWorkspaceView({
   // drops any open composer — whenever `data` changes identity, so we hand back
   // the same object until the hunk actually changes.
   const dataCache = useRef(
-    new Map<string, { sig: string; data: DiffViewData }>(),
+    new Map<
+      string,
+      {
+        hunk: string;
+        before?: string;
+        after?: string;
+        data: DiffViewData;
+      }
+    >(),
   );
+  // Only the currently rendered pane owns diff-view data. Keeping prior panes'
+  // whole-file before/after strings made switching panes an append-only cache.
+  useEffect(() => {
+    const live = new Set<string>();
+    if (pane === "edits") {
+      for (const group of editsByFile) {
+        if (mergedEdits.get(group.path) && fileContents.has(group.path)) {
+          live.add(`edits:${group.path}`);
+        } else {
+          group.items.forEach((_, index) => live.add(`edits:${group.path}:${index}`));
+        }
+      }
+    } else if (pane === "uncommitted" || pane === "diff") {
+      for (const file of mine) live.add(`${pane}:${file.path}`);
+    }
+    for (const key of dataCache.current.keys()) {
+      if (!live.has(key)) dataCache.current.delete(key);
+    }
+  }, [pane, editsByFile, mergedEdits, fileContents, mine]);
+
   const dataFor = (
     key: string,
     path: string,
@@ -988,32 +1145,59 @@ export function AgentWorkspaceView({
     before?: string,
     after?: string,
   ): DiffViewData => {
-    const sig = `${hunk}\0${before?.length ?? -1}\0${after?.length ?? -1}`;
     const hit = dataCache.current.get(key);
-    if (hit && hit.sig === sig) return hit.data;
+    // Compare the strings directly. The old signature interpolated the entire
+    // hunk into a second retained string and only compared baseline lengths,
+    // which both doubled large patches and could return stale equal-size text.
+    if (
+      hit &&
+      hit.hunk === hunk &&
+      hit.before === before &&
+      hit.after === after
+    ) {
+      return hit.data;
+    }
     const data: DiffViewData = {
       hunks: [hunk],
       oldFile: { fileName: path, content: before },
       newFile: { fileName: path, content: after },
     };
-    dataCache.current.set(key, { sig, data });
+    dataCache.current.set(key, { hunk, before, after, data });
+    // No size cap here. It was 128 entries evicted in insertion order, which on
+    // a session touching more files than that is not a cache at all: one render
+    // inserts every file and evicts the earliest, the next render misses on
+    // exactly those, and round it goes at a 100% miss rate. Every miss hands
+    // DiffView a new `data` identity, which re-parses the patch, re-runs
+    // lowlight synchronously on the main thread and remounts the whole table —
+    // for every file, on every stats tick, which is what the scrolling felt
+    // like. The effect above is the only reaper needed: it prunes to exactly
+    // the keys the current pane renders, so the map is bounded by what is on
+    // screen rather than by a number that could be smaller than it.
     return data;
   };
+
+  // Stable, so React does not detach and reattach every file's ref on each
+  // render. A fresh closure here means the old ref is called with null and the
+  // new one with the element, for every card, on every tick.
+  const onFileRef = useCallback((path: string, el: HTMLDivElement | null) => {
+    if (el) fileRefs.current.set(path, el);
+    else fileRefs.current.delete(path);
+  }, []);
 
   const renderFile = (f: { path: string; patch: string }) => (
     <div
       key={f.path}
       className={`pr-file ${flashPath === f.path ? "pr-file-flash" : ""}`}
-      ref={(el) => {
-        if (el) fileRefs.current.set(f.path, el);
-        else fileRefs.current.delete(f.path);
-      }}
+      ref={(el) => onFileRef(f.path, el)}
     >
       <FileName path={f.path} />
       <DiffView
         data={dataFor(`${pane}:${f.path}`, f.path, f.patch)}
         diffViewMode={split ? DiffModeEnum.Split : DiffModeEnum.Unified}
-        diffViewHighlight
+        // Highlighting is lowlight running synchronously on the main thread,
+        // per line, at mount. The same budget the commit and PR views use —
+        // a generated lockfile is not worth a frame drop to colourise.
+        diffViewHighlight={patchStats(f.patch).changed <= HIGHLIGHT_MAX}
         diffViewTheme="dark"
         diffViewWrap
         diffViewFontSize={12}

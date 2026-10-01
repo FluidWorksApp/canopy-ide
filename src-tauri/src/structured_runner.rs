@@ -5,13 +5,50 @@ use std::process::Stdio;
 
 use tauri::ipc::Channel;
 use tauri::Manager;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex;
 
 use crate::winproc::NoConsoleWindow;
 
 const STDERR_KEEP: usize = 8 * 1024;
+const STDOUT_LINE_MAX: usize = 1024 * 1024;
+
+/// Drain one line completely while retaining at most `max` bytes. Stopping at
+/// the cap would leave the pipe full and deadlock the child, so oversize input
+/// is consumed and represented by an explicit marker.
+async fn capped_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max: usize,
+) -> std::io::Result<Option<(Vec<u8>, bool)>> {
+    let mut out = Vec::with_capacity(max.min(8 * 1024));
+    let mut truncated = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return if out.is_empty() && !truncated {
+                Ok(None)
+            } else {
+                Ok(Some((out, truncated)))
+            };
+        }
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(available.len());
+        if !truncated {
+            let keep = take.min(max.saturating_sub(out.len()));
+            out.extend_from_slice(&available[..keep]);
+            truncated = keep < take;
+        }
+        let done = available.get(take.saturating_sub(1)) == Some(&b'\n');
+        reader.consume(take);
+        if done {
+            return Ok(Some((out, truncated)));
+        }
+    }
+}
 
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -22,7 +59,9 @@ pub enum StructuredRunnerOut {
 }
 
 struct Running {
-    stdin: ChildStdin,
+    /// None for a one-shot CLI, whose stdin was closed at spawn — see
+    /// `keep_stdin` on the spawn command.
+    stdin: Option<ChildStdin>,
     child: Child,
     process_group: Option<u32>,
     control_token: String,
@@ -59,6 +98,18 @@ fn valid_attempt_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
+/// Start one attempt's CLI on plain pipes.
+///
+/// `keep_stdin` is whether the child keeps a writable stdin for the whole
+/// session. True for a streaming CLI, whose next message is a line written to
+/// it. False for a one-shot CLI, and that is not a tidiness preference — it is
+/// the difference between the turn running and the turn hanging forever.
+/// `codex exec` reads stdin whenever stdin is a pipe, *even when the prompt was
+/// given as an argument* ("Reading additional input from stdin..."), and blocks
+/// until EOF. Held open it never gets one: verified against codex-cli 0.146.1
+/// on 2026-08-07,
+/// which produced no output at all and was still running after two minutes on a
+/// prompt that answers in under ten seconds.
 #[tauri::command]
 pub async fn structured_runner_spawn(
     app: tauri::AppHandle,
@@ -70,6 +121,7 @@ pub async fn structured_runner_spawn(
     args: Vec<String>,
     cwd: String,
     env: Option<Vec<(String, String)>>,
+    keep_stdin: Option<bool>,
     on_data: Channel<StructuredRunnerOut>,
 ) -> Result<(), String> {
     if !valid_attempt_id(&attempt_id) {
@@ -145,6 +197,14 @@ pub async fn structured_runner_spawn(
         let _ = crate::context::release_claims_for_attempt(&app, &attempt_id, "launch-failed");
         return Err("the structured runner has no stdin".into());
     };
+    // Dropping the handle is what sends EOF. Closing it here rather than
+    // spawning with Stdio::null() keeps one spawn path for both tiers.
+    let stdin = if keep_stdin.unwrap_or(true) {
+        Some(stdin)
+    } else {
+        drop(stdin);
+        None
+    };
     let Some(stdout) = child.stdout.take() else {
         let _ = child.start_kill();
         let _ = crate::context::release_claims_for_attempt(&app, &attempt_id, "launch-failed");
@@ -156,8 +216,13 @@ pub async fn structured_runner_spawn(
     {
         let sink = on_data.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(text)) = lines.next_line().await {
+            let mut reader = BufReader::new(stdout);
+            while let Ok(Some((bytes, truncated))) = capped_line(&mut reader, STDOUT_LINE_MAX).await
+            {
+                let mut text = String::from_utf8_lossy(&bytes).trim_end().to_string();
+                if truncated {
+                    text.push_str("\n[Canopy: runner line truncated after 1 MiB]");
+                }
                 if !text.trim().is_empty() && sink.send(StructuredRunnerOut::Line { text }).is_err()
                 {
                     return;
@@ -168,10 +233,14 @@ pub async fn structured_runner_spawn(
     if let Some(stderr) = stderr {
         let sink = on_data.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
+            let mut reader = BufReader::new(stderr);
             let mut kept = 0usize;
-            while let Ok(Some(text)) = lines.next_line().await {
-                kept += text.len();
+            while let Ok(Some((bytes, truncated))) = capped_line(&mut reader, STDERR_KEEP).await {
+                let mut text = String::from_utf8_lossy(&bytes).trim_end().to_string();
+                if truncated {
+                    text.push_str("\n[Canopy: stderr line truncated]");
+                }
+                kept = kept.saturating_add(text.len());
                 if kept <= STDERR_KEEP && sink.send(StructuredRunnerOut::Stderr { text }).is_err() {
                     return;
                 }
@@ -239,13 +308,18 @@ pub async fn structured_runner_write(
     }
     let mut body = line;
     body.push('\n');
-    running
-        .stdin
+    // A one-shot runner has no stdin to write to: its next message is a new
+    // process, not a line. Said plainly, because the alternative is a write that
+    // silently goes nowhere and a turn that waits for a reply to a question the
+    // CLI was never asked.
+    let stdin = running.stdin.as_mut().ok_or_else(|| {
+        format!("structured runner {attempt_id} takes its prompt at launch, not on stdin")
+    })?;
+    stdin
         .write_all(body.as_bytes())
         .await
         .map_err(|error| format!("could not reach structured runner {attempt_id}: {error}"))?;
-    running
-        .stdin
+    stdin
         .flush()
         .await
         .map_err(|error| format!("could not reach structured runner {attempt_id}: {error}"))

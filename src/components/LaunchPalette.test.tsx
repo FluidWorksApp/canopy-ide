@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LaunchPalette } from "./LaunchPalette";
 import { AGENT_CLIS } from "../projects";
+import { updateSettings } from "../settings";
 
 const open = (over: Partial<Parameters<typeof LaunchPalette>[0]> = {}) => {
   const props = {
@@ -20,6 +21,8 @@ const open = (over: Partial<Parameters<typeof LaunchPalette>[0]> = {}) => {
 const claude = () => AGENT_CLIS.find((c) => c.id === "claude")!;
 
 describe("LaunchPalette", () => {
+  afterEach(() => localStorage.clear());
+
   it("lists the shell and every agent CLI", () => {
     open();
     expect(screen.getByText("Shell")).toBeInTheDocument();
@@ -41,15 +44,89 @@ describe("LaunchPalette", () => {
     await userEvent.keyboard(claude().name);
     expect(screen.queryByText("Shell")).not.toBeInTheDocument();
     await userEvent.keyboard("{Enter}");
+    // ⌘N opens here: instant, where a workspace costs a worktree first.
     expect(onLaunchCli).toHaveBeenCalledWith(
       expect.objectContaining({ id: "claude" }),
+      "current",
     );
   });
 
   it("moves the selection with the arrow keys", async () => {
     const { onLaunchCli } = open();
     await userEvent.keyboard("{ArrowDown}{Enter}");
-    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0]);
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "current");
+  });
+
+  it("offers an explicit new-workspace launch", async () => {
+    const cli = claude();
+    const { onLaunchCli } = open({ installed: { [cli.bin]: true } });
+    await userEvent.click(
+      screen.getByRole("button", { name: `Open ${cli.name} in a new workspace` }),
+    );
+    expect(onLaunchCli).toHaveBeenCalledWith(cli, "workspace");
+  });
+
+  it("uses Shift+Enter for a new workspace", async () => {
+    const { onLaunchCli } = open();
+    await userEvent.keyboard("{ArrowDown}{Shift>}{Enter}{/Shift}");
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "workspace");
+  });
+
+  it("opens in the current checkout on a plain click", async () => {
+    const cli = claude();
+    const { onLaunchCli } = open({ installed: { [cli.bin]: true } });
+    await userEvent.click(screen.getByText(cli.name));
+    expect(onLaunchCli).toHaveBeenCalledWith(cli, "current");
+  });
+
+  it("badges install only when the probe said the CLI is missing", () => {
+    open({ installed: {} });
+    expect(screen.queryByText("install")).not.toBeInTheDocument();
+  });
+
+  it("defaults to a new workspace when the setting says so", async () => {
+    updateSettings({ agentWorkspaceByDefault: true });
+    const { onLaunchCli } = open();
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "workspace");
+    await userEvent.keyboard("{Shift>}{Enter}{/Shift}");
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "current");
+  });
+
+  it("offers a current-checkout launch from the hover action when the default is a workspace", async () => {
+    updateSettings({ agentWorkspaceByDefault: true });
+    const cli = claude();
+    const { onLaunchCli } = open({ installed: { [cli.bin]: true } });
+    await userEvent.click(
+      screen.getByRole("button", { name: `Open ${cli.name} in the current checkout` }),
+    );
+    expect(onLaunchCli).toHaveBeenCalledWith(cli, "current");
+  });
+
+  it("ignores the retired agentWorkspaces key that saved the old default", async () => {
+    // Every settings save wrote the old default back; it must not keep ⌘N
+    // opening workspaces for people who never chose that.
+    localStorage.setItem(
+      "canopy.settings",
+      JSON.stringify({ ...JSON.parse(localStorage.getItem("canopy.settings") ?? "{}"), agentWorkspaces: true }),
+    );
+    const { onLaunchCli } = open();
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "current");
+  });
+
+  it("overrides the default for one opening (⌘⇧N)", async () => {
+    const cli = claude();
+    const { onLaunchCli } = open({
+      installed: { [cli.bin]: true },
+      defaultWhere: "workspace",
+    });
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+    expect(onLaunchCli).toHaveBeenLastCalledWith(AGENT_CLIS[0], "workspace");
+    await userEvent.click(
+      screen.getByRole("button", { name: `Open ${cli.name} in the current checkout` }),
+    );
+    expect(onLaunchCli).toHaveBeenLastCalledWith(cli, "current");
   });
 
   it("does not run off the end of the list", async () => {
@@ -61,7 +138,9 @@ describe("LaunchPalette", () => {
   });
 
   it("marks a CLI that isn't on PATH as an install", () => {
-    open({ installed: { [claude().bin]: true } });
+    const installed = Object.fromEntries(AGENT_CLIS.map((c) => [c.bin, false]));
+    installed[claude().bin] = true;
+    open({ installed });
     // Every other CLI is missing, so the badge count is one per absent CLI.
     expect(screen.getAllByText("install")).toHaveLength(AGENT_CLIS.length - 1);
   });

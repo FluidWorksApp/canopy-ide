@@ -5,9 +5,38 @@ import {
   missingRequired,
   needsConfirm,
   renderContent,
+  schemaSafety,
   toArguments,
   toolBadges,
 } from "./mcpForm";
+
+describe("schema boundaries", () => {
+  it("accepts Draft 2020-12 composition and local references", () => {
+    expect(
+      schemaSafety({
+        $schema: "https://json-schema.org/draft/2020-12/schema",
+        $defs: { id: { type: "string" } },
+        properties: { id: { $ref: "#/$defs/id" } },
+        unevaluatedProperties: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("rejects references that would fetch outside the schema", () => {
+    const schema = {
+      type: "object",
+      properties: { token: { $ref: "https://host.invalid/schema.json" } },
+    };
+    expect(schemaSafety(schema)).toBe("external $ref is not allowed");
+    expect(fieldsOf(schema)).toEqual([]);
+  });
+
+  it("bounds deeply nested server-authored schemas", () => {
+    let schema: Record<string, unknown> = { type: "string" };
+    for (let index = 0; index < 70; index += 1) schema = { allOf: [schema] };
+    expect(schemaSafety(schema)).toBe("schema is too deep");
+  });
+});
 
 // A tool's schema is arbitrary JSON written by someone else, and the form has to
 // make a call out of it that the server accepts. These cover the decisions in

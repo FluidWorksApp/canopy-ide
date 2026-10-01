@@ -10,6 +10,7 @@ import {
   removeLeaf,
   splitLeaf,
   swapLeaves,
+  terminalCompactionProtected,
   updateSplitRatio,
   type TerminalSplitNode,
 } from "./terminalGroups";
@@ -116,6 +117,20 @@ describe("terminal split trees", () => {
       { tabId: "b", left: 0, width: 0.5 },
       { tabId: "a", left: 0.5, width: 0.5 },
     ]);
+  });
+});
+
+describe("terminal compaction visibility", () => {
+  it("protects every painted pane, not only the pane that owns focus", () => {
+    // Brand-new, non-multiplexed terminal.
+    expect(terminalCompactionProtected(true, true)).toBe(true);
+    // Focused and unfocused leaves of one visible split both stream.
+    expect(terminalCompactionProtected(true, true)).toBe(true);
+    expect(terminalCompactionProtected(false, true)).toBe(true);
+    // A focus/visibility publication mismatch fails closed.
+    expect(terminalCompactionProtected(true, false)).toBe(true);
+    // Only a genuinely hidden and inactive surface may compact.
+    expect(terminalCompactionProtected(false, false)).toBe(false);
   });
 });
 

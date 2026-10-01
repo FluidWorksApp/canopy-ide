@@ -2,11 +2,28 @@
 // or more labeled component directories (frontend, backend, ...). The whole
 // workspace (projects, which are open, which is active) persists via the Rust
 // core to ~/.canopy/projects.json.
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 import type { CustomMicroTask } from "./microTasks";
 import { getSettings, updateSettings } from "./settings";
+import { checkoutKey } from "./paths";
 import { currentPlatform, type Platform } from "./shortcuts";
 import { SESSION_ID_TOKEN, type RemoteCli } from "../shared/model";
+import { DEFAULT_AGENT_CLI_ID } from "../shared/agentCliIdentity";
+import {
+  normalizeProjectIntegrationState,
+  type ProjectIntegrationState,
+} from "./projectIntegrations";
+import {
+  CLAUDE_RUNNER,
+  CODEX_RUNNER,
+  CURSOR_RUNNER,
+  type StructuredRunner,
+} from "./structuredRunners";
+import {
+  MODEL_SWITCH,
+  modelSwitchFor as legacyModelSwitchFor,
+  type ModelSwitch,
+} from "./agentModels";
 
 export interface RunCommand {
   id: string;
@@ -17,7 +34,25 @@ export interface RunCommand {
   argv?: string[];
   cwd?: string;
   purpose?: "serve" | "check" | "worker" | "setup";
+  /** Setup discovered by Build is automatic only when it is local and
+   * reversible (installing declared dependencies, applying a local migration).
+   * A managed database migration is deliberately recorded but never run just
+   * because the project was opened. */
+  automatic?: boolean;
+  readiness?:
+    | { kind: "http"; path: string; timeoutMs?: number }
+    | { kind: "port"; timeoutMs?: number }
+    | { kind: "process-alive"; timeoutMs?: number }
+    | { kind: "one-shot"; timeoutMs: number };
 }
+
+/** What a component is, as established by project setup rather than guessed
+ *  from its directory name. Optional because most projects predate setup and
+ *  because a person may add a component by hand; absent means unknown, which
+ *  callers must treat as "say nothing", never as "web". */
+export type ComponentRole =
+  | "web" | "api" | "worker" | "database" | "mobile"
+  | "library" | "tooling" | "other";
 
 export interface Component {
   id: string;
@@ -25,15 +60,52 @@ export interface Component {
   path: string;
   /** Named run commands (dev server, worker, ...) launched in this dir. */
   commands?: RunCommand[];
+  role?: ComponentRole;
 }
 
 export interface VibeConfig {
   version: 1;
   enabled: boolean;
+  /** A discovery that finished without a persistable setup. This is durable
+   *  because failure is still an outcome: reopening the app must not launch
+   *  another billed repository survey unless the person explicitly retries. */
+  discovery?: {
+    status: "failed" | "stale";
+    attemptedAt: number;
+    message: string;
+  };
   componentId?: string;
   runCommandId?: string;
   setupRevision?: string;
-  requiredProcesses?: Array<{ componentId: string; runCommandId: string }>;
+  requiredProcesses?: Array<{
+    componentId: string;
+    runCommandId: string;
+    /** Other long-lived runs that must be ready before this one starts. */
+    dependsOn?: Array<{ componentId: string; runCommandId: string }>;
+    reason?: string;
+    requiredFor?: "preview" | "project";
+  }>;
+  /** Observed runtime/data flow. This is evidence for Build and repair, not a
+   * permission to edit the other component. */
+  componentLinks?: Array<{
+    fromComponentId: string;
+    toComponentId: string;
+    kind: "http" | "queue" | "database" | "library" | "other";
+    description: string;
+  }>;
+  dataStores?: Array<{
+    id: string;
+    label: string;
+    engine: "postgresql" | "mysql" | "sqlite" | "other";
+    mode: "local" | "managed";
+    providerId: string | null;
+    componentIds: string[];
+    schemaPaths: string[];
+    migrationPaths: string[];
+    latestMigration: string | null;
+    migrate?: { componentId: string; runCommandId: string };
+    status?: { componentId: string; runCommandId: string };
+  }>;
   externalServices?: Array<{
     id: string;
     providerId: string | null;
@@ -61,6 +133,28 @@ export interface Project {
   customTasks?: CustomMicroTask[];
   /** Portable, non-secret configuration for the project's Build lens. */
   vibe?: VibeConfig;
+  /** Durable operational facts for linked providers and environments. Secrets
+   * stay in the provider/credential store; only safe identifiers, endpoints,
+   * observations and deployment history travel with the project. */
+  integrations?: ProjectIntegrationState;
+}
+
+/** Record only the discovery outcome on the freshest project value. Survey
+ * failures can arrive many minutes after they started; replacing the whole
+ * captured project here would erase components or settings edited meanwhile. */
+export function recordVibeDiscoveryFailure(
+  project: Project,
+  message: string,
+  attemptedAt: number = Date.now(),
+): Project {
+  return {
+    ...project,
+    vibe: {
+      version: 1,
+      enabled: project.vibe?.enabled === true,
+      discovery: { status: "failed", attemptedAt, message },
+    },
+  };
 }
 
 export interface WorkspaceState {
@@ -132,6 +226,14 @@ export function normalizeProjectStructure(project: Project): Project {
   const reservedComponentIds = new Set(componentCounts.keys());
   const reservedCommandIds = new Set(commandCounts.keys());
   let changed = false;
+
+  const integrations = project.integrations == null
+    ? undefined
+    : normalizeProjectIntegrationState(project.integrations);
+  if (
+    project.integrations != null &&
+    JSON.stringify(integrations) !== JSON.stringify(project.integrations)
+  ) changed = true;
 
   const components = rawComponents.map((component, componentIndex) => {
     const existingComponentId = nonBlankId(component.id);
@@ -238,6 +340,31 @@ export function normalizeProjectStructure(project: Project): Project {
   // and every project/component/run command intact. App persists this
   // normalization before rendering the workspace.
   if (vibe) {
+    const required = Array.isArray(vibe.requiredProcesses)
+      ? vibe.requiredProcesses
+      : [];
+    const runnableComponents = components.filter((component) =>
+      component.commands?.some(
+        (command) => command.purpose === "serve" || command.purpose === "worker",
+      ),
+    );
+    const completeRuntime = runnableComponents.every((component) =>
+      required.some((process) => process.componentId === component.id),
+    ) && required.every((process) => {
+      const component = components.find((candidate) => candidate.id === process.componentId);
+      const command = component?.commands?.find(
+        (candidate) => candidate.id === process.runCommandId,
+      );
+      if (!component || !command) return false;
+      return (process.dependsOn ?? []).every((dependency) => {
+        const dependencyComponent = components.find(
+          (candidate) => candidate.id === dependency.componentId,
+        );
+        return dependencyComponent?.commands?.some(
+          (candidate) => candidate.id === dependency.runCommandId,
+        ) === true;
+      });
+    });
     const complete =
       vibe.version === 1 &&
       Boolean(nonBlankId(vibe.setupRevision)) &&
@@ -245,29 +372,70 @@ export function normalizeProjectStructure(project: Project): Project {
       Boolean(nonBlankId(vibe.runCommandId)) &&
       Array.isArray(vibe.requiredProcesses) &&
       vibe.requiredProcesses.length > 0 &&
+      completeRuntime &&
+      Array.isArray(vibe.componentLinks) &&
+      Array.isArray(vibe.dataStores) &&
       Array.isArray(vibe.externalServices);
     if (!complete) {
-      const reset: VibeConfig = { version: 1, enabled: vibe.enabled === true };
+      const discovery = vibe.discovery;
+      const recordedDiscovery =
+        (discovery?.status === "failed" || discovery?.status === "stale") &&
+        Number.isFinite(discovery.attemptedAt) &&
+        discovery.attemptedAt > 0 &&
+        typeof discovery.message === "string" &&
+        discovery.message.trim()
+          ? discovery
+          : nonBlankId(vibe.setupRevision)
+            ? {
+                status: "stale" as const,
+                attemptedAt: 1,
+                message: "The saved project setup needs a refresh. Retry discovery when you want Canopy to inspect it again.",
+              }
+            : undefined;
+      const reset: VibeConfig = {
+        version: 1,
+        enabled: vibe.enabled === true,
+        ...(recordedDiscovery ? { discovery: recordedDiscovery } : {}),
+      };
       if (
-        vibe.version !== reset.version ||
-        vibe.enabled !== reset.enabled ||
-        Object.keys(vibe).length !== 2
+        JSON.stringify(vibe) !== JSON.stringify(reset)
       ) {
         vibe = reset;
         changed = true;
       }
+    } else if (vibe.discovery) {
+      // A complete setup supersedes the last failed attempt. Keeping both
+      // makes a successful project look failed to any surface that reads the
+      // durable outcome directly.
+      const { discovery: _discovery, ...ready } = vibe;
+      vibe = ready;
+      changed = true;
     }
   }
 
-  return changed ? { ...project, components, vibe } : project;
+  return changed ? { ...project, components, vibe, integrations } : project;
 }
 
-/** State-level migration seam, mirroring adoptLegacyCustomTasks: unchanged
- * workspaces keep identity; a legacy workspace is saved once by App. */
+/** A missing lens means this project predates the per-project switch. Adopt
+ * the onboarding choice once, then persist it with the project so later global
+ * changes never override an individual project's selection. */
+export function adoptDefaultProjectLens(project: Project): Project {
+  if (project.vibe) return project;
+  return {
+    ...project,
+    vibe: {
+      version: 1,
+      enabled: getSettings().defaultProjectLens === "build",
+    },
+  };
+}
+
+/** State-level migration seam, mirroring adoptLegacyCustomTasks: stable
+ * structure IDs and an initial lens are both adopted once and saved by App. */
 export function adoptProjectStructureIds(state: WorkspaceState): WorkspaceState {
   let changed = false;
   const projects = state.projects.map((project) => {
-    const normalized = normalizeProjectStructure(project);
+    const normalized = adoptDefaultProjectLens(normalizeProjectStructure(project));
     if (normalized !== project) changed = true;
     return normalized;
   });
@@ -275,20 +443,17 @@ export function adoptProjectStructureIds(state: WorkspaceState): WorkspaceState 
 }
 
 export async function loadWorkspace(): Promise<WorkspaceState> {
-  try {
-    const raw = await invoke<string>("store_load");
-    const parsed = JSON.parse(raw);
-    if (parsed && Array.isArray(parsed.projects)) {
-      return {
-        projects: parsed.projects,
-        openIds: Array.isArray(parsed.openIds) ? parsed.openIds : [],
-        activeId: parsed.activeId ?? null,
-      };
-    }
-  } catch (err) {
-    console.warn("workspace load failed", err);
+  const raw = await invoke<string>("store_load");
+  const parsed = JSON.parse(raw);
+  if (parsed == null) return emptyWorkspace;
+  if (!Array.isArray(parsed.projects)) {
+    throw new Error("saved workspace has no projects array");
   }
-  return emptyWorkspace;
+  return {
+    projects: parsed.projects,
+    openIds: Array.isArray(parsed.openIds) ? parsed.openIds : [],
+    activeId: parsed.activeId ?? null,
+  };
 }
 
 /** Custom tasks used to be app-wide, kept in settings. They're a project's
@@ -400,12 +565,14 @@ export async function importFile(
     openIds?: string[];
   };
   if (obj?.kind === "canopy.project" && obj.project) {
-    const project = normalizeProjectStructure(obj.project);
+    const project = adoptDefaultProjectLens(normalizeProjectStructure(obj.project));
     return { projects: [project], openIds: [project.id] };
   }
   if (obj?.kind === "canopy.workspace" && Array.isArray(obj.projects)) {
     return {
-      projects: obj.projects.map(normalizeProjectStructure),
+      projects: obj.projects.map((project) =>
+        adoptDefaultProjectLens(normalizeProjectStructure(project)),
+      ),
       openIds: Array.isArray(obj.openIds) ? obj.openIds : [],
     };
   }
@@ -423,8 +590,25 @@ export const newRunCommandId = () =>
 
 // ---------- Agent CLI launcher registry ----------
 
+/** Where an unattended run lands, for the CLIs whose working mode depends on it.
+ *
+ *  Empty for a task that runs in the checkout it was launched from: there is
+ *  nothing outside the cwd it needs. */
+export interface UnattendedContext {
+  /** Directories the run must be able to write to besides its own cwd. Today
+   *  this is the git common directory of a worktree — `<repo>/.git`, which holds
+   *  the index, the refs and the objects of every linked worktree — because a
+   *  task that cannot write there cannot stage, commit or branch. Not the repo's
+   *  working files: isolating the task from those is the reason it is in a
+   *  worktree at all. */
+  writableRoots?: readonly string[];
+}
+
 export interface AgentCli {
   id: string;
+  /** Historical registry ids accepted when reading durable state. Display-name
+   * changes never belong here; `name` can change without a migration. */
+  aliases?: readonly string[];
   name: string;
   /**
    * The executable to run. This is the *resolved* binary: an entry the user has
@@ -437,6 +621,8 @@ export interface AgentCli {
   /** Fallback glyph for the terminal tab strip; the menu uses the brand SVG
    *  registered under the same `id` in components/icons.tsx. */
   icon: string;
+  /** Optional brand accent projected to remote surfaces. */
+  brandColor?: string;
   /**
    * One-click install command, when there is a package Canopy knows how to
    * fetch. Absent for an entry the user added themselves: nothing here knows
@@ -553,9 +739,104 @@ export interface AgentCli {
    *
    * Same verification rule as the fields above: only syntax read off the CLI's
    * own --help goes in here.
+   *
+   * A function when the mode depends on where the run lands. Codex's sandbox is
+   * the case: `workspace-write` grants the cwd and nothing else, and a task
+   * Canopy isolates runs in a git worktree whose `.git` is a pointer *out* of
+   * that cwd — so `git add` in the one place we deliberately put agents was
+   * denied by the sandbox, with the CLI reporting it as a sandbox error rather
+   * than as anything the agent could fix. The launcher knows the repo; the
+   * registry entry says what to do with it.
    */
-  unattended?: string;
+  unattended?: string | ((ctx: UnattendedContext) => string);
+
+  /**
+   * Environment a task terminal also needs for `unattended` to mean "auto",
+   * where a flag alone cannot say it. Attached by addTerminal only when the
+   * command carries this CLI's `unattended` flag — i.e. only to task launches
+   * and task resumes, never to a session someone opened by hand. Kept out of
+   * the command line on purpose: the first token is how a terminal's agent is
+   * recognised, and an `X=… cli` prefix would hide it.
+   */
+  unattendedEnv?: [string, string][];
+
+  /**
+   * Workflow-facing capabilities for this agent type. The canvas, schema
+   * validator and launcher all read this same descriptor, so supporting a new
+   * configurable CLI is one registry change rather than a switch in every
+   * consumer. An absent descriptor still permits the CLI as a reusable agent,
+   * but exposes no launch-time configuration Canopy cannot verify.
+   */
+  execution?: AgentExecutionSpec;
+
+  /** Product behavior declared by the CLI adapter. Consumers ask for a
+   * capability and never infer it from the vendor id. */
+  capabilities?: AgentCliCapabilities;
+
+  /** Verified non-interactive transport, owned by this CLI's adapter. */
+  structuredRunner?: StructuredRunner;
+
+  /** Verified interactive model control, when this CLI exposes one. */
+  modelSwitch?: ModelSwitch;
 }
+
+export interface AgentCliCapabilities {
+  profiles?: true;
+  managedIntegration?: true;
+  approvalInput?: "keystroke";
+  terminalMinimumContrast?: number;
+  eventSessionLookup?: true;
+  /** Usage snapshots belong to one conversation and must not fall back to the
+   *  newest machine-wide store entry when no active session is known. */
+  planUsageRequiresSession?: true;
+  /** Conversation history is not safely restorable without a human prompt. */
+  restoreRequiresHumanPrompt?: true;
+  /** A locally unobservable subscription limit worth disclosing beside usage. */
+  usageLimitNote?: {
+    text: string;
+    command?: string;
+  };
+  routingModelFamily?: "anthropic" | "openai" | "google";
+  /** Family whose launch-time menu may be refined from a donor catalogue. */
+  refreshModelCatalog?: "anthropic" | "openai" | "google";
+  /** Other instruction namespaces implied when this CLI is installed. */
+  instructionCompanions?: readonly string[];
+  conversationStore?: {
+    path: string;
+    note?: string;
+    open: "session" | "file";
+  };
+}
+
+export interface AgentConfigChoice {
+  value: string;
+  label: string;
+  hint?: string;
+}
+
+export interface AgentConfigField {
+  key: string;
+  label: string;
+  control: "text" | "select" | "model" | "profile";
+  placeholder?: string;
+  choices?: readonly AgentConfigChoice[];
+  /** Model families are resolved through the live/seed catalogue by the UI. */
+  modelFamilies?: readonly ("anthropic" | "openai" | "google")[];
+}
+
+export interface AgentLaunchArgument {
+  flag: string;
+  value: string;
+}
+
+export interface AgentExecutionSpec {
+  fields: readonly AgentConfigField[];
+  /** Convert declarative agent configuration into verified CLI arguments. */
+  launchArgs: (config: AgentLaunchOptions) => readonly AgentLaunchArgument[];
+}
+
+/** Arbitrary manifest-declared configuration, persisted on a reusable agent. */
+export type AgentLaunchOptions = Readonly<Record<string, string | undefined>>;
 
 /**
  * A registry entry as authored, before the user's binary override is applied.
@@ -588,18 +869,61 @@ export function shellBin(bin: string): string {
   return currentPlatform() === "windows" ? `"${bin}"` : shellQuote(bin);
 }
 
+const modelField = (
+  modelFamilies: AgentConfigField["modelFamilies"],
+  placeholder?: string,
+): AgentConfigField => ({ key: "model", label: "Model", control: "model", modelFamilies, placeholder });
+const providerField = (placeholder = "anthropic, openai…"): AgentConfigField => ({
+  key: "provider", label: "Provider", control: "text", placeholder,
+});
+const effortField = (values: readonly string[]): AgentConfigField => ({
+  key: "effort",
+  label: "Effort",
+  control: "select",
+  choices: values.map((value) => ({ value, label: value })),
+});
+const profileField: AgentConfigField = {
+  key: "profileId", label: "Account", control: "profile",
+};
+const option = (flag: string, value?: string): AgentLaunchArgument[] =>
+  value?.trim() ? [{ flag, value: value.trim() }] : [];
+const qualifiedModel = (config: AgentLaunchOptions) => {
+  const model = config.model?.trim();
+  const provider = config.provider?.trim();
+  return model && provider && !model.includes("/") ? `${provider}/${model}` : model;
+};
+
 /** The CLIs Canopy ships knowledge of, under the names their vendors use.
  *  Never read this directly to launch or probe anything — read AGENT_CLIS,
  *  which is this list with the user's overrides applied. */
 export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
   {
-    id: "claude",
+    id: DEFAULT_AGENT_CLI_ID,
     name: "Claude Code",
     bin: "claude",
     icon: "✳",
+    brandColor: "#d97757",
+    capabilities: {
+      profiles: true,
+      managedIntegration: true,
+      approvalInput: "keystroke",
+      routingModelFamily: "anthropic",
+      refreshModelCatalog: "anthropic",
+      restoreRequiresHumanPrompt: true,
+      usageLimitNote: {
+        text: "Claude also caps some models individually each week; that limit isn't exposed locally",
+        command: "/usage",
+      },
+      conversationStore: { path: "~/.claude/projects/**/*.jsonl", open: "session" },
+    },
+    structuredRunner: CLAUDE_RUNNER,
+    modelSwitch: MODEL_SWITCH.claude,
     install: "npm install -g @anthropic-ai/claude-code",
     pkgs: ["npm:@anthropic-ai/claude-code"],
     latestUrl: "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
+    // Registry argv re-verified against Claude Code 2.1.226 local --help on
+    // 2026-08-09. This stamps syntax only; Build's security caveat lives with
+    // the structured runner that consumes the flags.
     // Verified: `claude update` self-updates both the npm and native installs.
     update: "claude update",
     // Verified: `-r, --resume [value]  Resume a conversation by session ID`.
@@ -629,15 +953,40 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // against an unsupported model, the session starts and falls back to the
     // configured mode.
     unattended: "--permission-mode auto",
+    execution: {
+      fields: [
+        modelField(["anthropic"]),
+        effortField(["low", "medium", "high", "xhigh", "max"]),
+        profileField,
+      ],
+      launchArgs: (config) => [
+        ...option("--model", config.model),
+        ...option("--effort", config.effort),
+      ],
+    },
   },
   {
     id: "codex",
     name: "Codex CLI",
     bin: "codex",
     icon: "⌬",
+    brandColor: "#7a9dff",
+    capabilities: {
+      profiles: true,
+      managedIntegration: true,
+      approvalInput: "keystroke",
+      planUsageRequiresSession: true,
+      terminalMinimumContrast: 4.5,
+      routingModelFamily: "openai",
+      conversationStore: { path: "~/.codex/sessions/**/rollout-*.jsonl", open: "session" },
+    },
+    structuredRunner: CODEX_RUNNER,
+    modelSwitch: MODEL_SWITCH.codex,
     install: "npm install -g @openai/codex",
     pkgs: ["npm:@openai/codex"],
     latestUrl: "https://registry.npmjs.org/@openai/codex/latest",
+    // Registry argv re-verified against codex-cli 0.147.0 local help on
+    // 2026-08-09 (`codex --help`, `exec --help`, and `exec resume --help`).
     // Verified: `codex resume <SESSION_ID>` — subcommand, id is positional and
     // takes a UUID or a session name.
     resume: (id, bin) => `${bin} resume ${id}`,
@@ -648,22 +997,60 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // confirmation prompts and execute commands without sandboxing`, and
     // `codex resume --help` lists the same flag, so resumes carry it too.
     skipPermissions: "--dangerously-bypass-approvals-and-sandbox",
-    // Verified: `-a, --ask-for-approval <APPROVAL_POLICY>` takes `never`
-    // ("Never ask for user approval. Execution failures are immediately
-    // returned to the model"), and `-s, --sandbox <SANDBOX_MODE>` takes
-    // `workspace-write`. Two flags because codex splits the question in two —
-    // when it asks, and what a command may touch — and only the pair says
-    // "keep going, inside this workspace".
+    // Verified against codex-cli 0.159.1 --help on 2026-10-01:
+    // `--approve-for-me  Route approval requests through automatic review using
+    // the workspace-write sandbox` — the TUI's "Approve for me" preset, i.e.
+    // on-request approvals with approvals_reviewer=auto_review. Codex's auto
+    // mode: routine work proceeds, an escalation is reviewed, and what review
+    // won't pass is reported back for a human instead of silently failing.
+    // `codex resume --help` lists it too, and it parses alongside `-c`.
     //
-    // NOT `--full-auto`, which every guide still names: it is gone from codex
-    // 0.146's --help, and a flag clap doesn't know refuses to launch at all.
-    unattended: "--ask-for-approval never --sandbox workspace-write",
+    // NOT `--ask-for-approval never --sandbox workspace-write`, which this used
+    // to be: under `never` the model is told escalations "will be rejected", so
+    // a task could never get a permission it needed and nobody was told. And
+    // not combined with `-a`/`-s`: clap accepts the mix but declares no
+    // precedence. Network stays explicit — workspace-write disables it.
+    //
+    // `writable_roots` on top, when the launcher names one: workspace-write
+    // grants the cwd and $TMPDIR, and a task Canopy isolates runs in a git
+    // worktree whose `.git` is a *file* pointing at `<repo>/.git/worktrees/
+    // <name>` — outside the cwd, so every `git add` would otherwise have to go
+    // through review as an escalation.
+    unattended: ({ writableRoots }: UnattendedContext) =>
+      [
+        "--approve-for-me -c sandbox_workspace_write.network_access=true",
+        ...(writableRoots?.length
+          ? [
+              `-c ${shellQuote(
+                `sandbox_workspace_write.writable_roots=${JSON.stringify([...writableRoots])}`,
+              )}`,
+            ]
+          : []),
+      ].join(" "),
+    execution: {
+      fields: [
+        modelField(["openai"]),
+        effortField(["low", "medium", "high", "xhigh", "max", "ultra"]),
+        profileField,
+      ],
+      launchArgs: (config) => [
+        ...option("-m", config.model),
+        ...option(
+          "-c",
+          config.effort
+            ? `model_reasoning_effort=${JSON.stringify(config.effort)}`
+            : undefined,
+        ),
+      ],
+    },
   },
   {
     id: "amp",
     name: "Amp",
     bin: "amp",
     icon: "⚡",
+    brandColor: "#f34e3f",
+    capabilities: { profiles: true, managedIntegration: true },
     install: "npm install -g @ampcode/cli",
     // @sourcegraph/amp remains as the compatibility-package identity.
     pkgs: ["npm:@ampcode/cli", "npm:@sourcegraph/amp"],
@@ -678,12 +1065,23 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // and a removed flag would refuse to launch. No `unattended` either, for
     // the same reason and with the happier consequence: a CLI that does not
     // stop to ask is already in the mode a task needs.
+    execution: { fields: [profileField], launchArgs: () => [] },
   },
   {
     id: "aider",
     name: "Aider",
     bin: "aider",
     icon: "a",
+    brandColor: "#14b014",
+    capabilities: {
+      managedIntegration: true,
+      conversationStore: {
+        path: "<project>/.aider.chat.history.md",
+        note: "No session ids: a hit opens the history file itself.",
+        open: "file",
+      },
+    },
+    modelSwitch: MODEL_SWITCH.aider,
     // `-U` makes this the update command too; only-if-needed keeps a global
     // env's shared deps unbumped (the form aider's own docs use, 2026-08-06).
     install: "python3 -m pip install -U --upgrade-strategy only-if-needed aider-chat",
@@ -691,12 +1089,28 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // distribution name, which nothing on disk states.
     pkgs: ["py:aider"],
     latestUrl: "https://pypi.org/pypi/aider-chat/json",
+    // Registry flags (`--read`, `--restore-chat-history`, `--yes-always`, and
+    // `--notifications-command`) re-verified together against aider 0.86.2
+    // local --help on 2026-08-09. This reconciles the launcher and notification
+    // halves against one installed release.
     // Verified: `--yes-always  Always say yes to every confirmation`.
     skipPermissions: "--yes-always",
-    // No `unattended`, and not for want of looking: aider's help offers
-    // nothing between "confirm everything" and `--yes-always`. There is no mode
-    // to pin, so a task launches it exactly as a person would and it asks —
-    // rather than being handed the skip-permissions rung it was never granted.
+    // No `unattended`, and not for want of looking: aider has no mode,
+    // allowlist or classifier. `--yes-always` is not even a clean bypass — it
+    // auto-*declines* shell commands (asked with explicit_yes_required) while
+    // auto-accepting everything else, pip installs included — so it is no auto
+    // rung either. A task launches it as a person would, and it asks.
+    execution: {
+      fields: [
+        providerField(),
+        modelField(["anthropic", "openai", "google"], "provider/model"),
+        effortField(["low", "medium", "high"]),
+      ],
+      launchArgs: (config) => [
+        ...option("--model", qualifiedModel(config)),
+        ...option("--reasoning-effort", config.effort),
+      ],
+    },
   },
   // Gemini CLI is gone from this list on purpose: Google killed its "Login
   // with Google" path for individuals (2026-06-18, "migrate to the Antigravity
@@ -712,7 +1126,20 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     name: "Antigravity",
     bin: "agy",
     icon: "◇",
+    capabilities: {
+      managedIntegration: true,
+      instructionCompanions: ["gemini"],
+      conversationStore: {
+        path: "~/.gemini/antigravity-cli/conversations/*.db",
+        note: "Stored as protobuf; snippets may read roughly.",
+        open: "session",
+      },
+    },
+    modelSwitch: MODEL_SWITCH.agy,
     install: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+    // Registry flags re-verified against Antigravity 1.1.11 local --help on
+    // 2026-08-09 (`--conversation`, permission bypass, mode, model, add-dir,
+    // sandbox, and stream-json output).
     // Verified: `--conversation <uuid>` resumes by id (`-c` takes the most
     // recent). It is NOT `--resume`.
     resume: (id, bin) => `${bin} --conversation ${id}`,
@@ -725,12 +1152,29 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // exists for. Antigravity keeps asking about commands either way; that is
     // its safety net and this leaves it alone.
     unattended: "--mode accept-edits",
+    execution: {
+      fields: [
+        modelField(["google"]),
+        effortField(["low", "medium", "high"]),
+      ],
+      launchArgs: (config) => [
+        ...option("--model", config.model),
+        ...option("--effort", config.effort),
+      ],
+    },
   },
   {
     id: "opencode",
     name: "OpenCode",
     bin: "opencode",
     icon: "▣",
+    capabilities: {
+      profiles: true,
+      managedIntegration: true,
+      eventSessionLookup: true,
+      conversationStore: { path: "~/.local/share/opencode/opencode.db", open: "session" },
+    },
+    modelSwitch: MODEL_SWITCH.opencode,
     install: "npm install -g opencode-ai",
     pkgs: ["npm:opencode-ai"],
     latestUrl: "https://registry.npmjs.org/opencode-ai/latest",
@@ -750,6 +1194,37 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // is all opencode allows short of `--auto`: its only other control is that
     // per-tool permission table, and `--auto` is the skip-permissions rung.
     unattended: "--agent build",
+    // That table is the catch: a repo's own opencode.json (`"bash": "ask"`) is
+    // merged over build's defaults and stalls the task. OPENCODE_PERMISSION is
+    // merged last of all, so it pins the task's rules. Verified against
+    // opencode 1.18.32 with `opencode debug agent build` (no session): under a
+    // repo asking for bash and edit, this yields bash/edit allow plus the four
+    // ask rules below. Build's own asks (external directories, .env reads,
+    // doom loops) are untouched, and each ask raises permission.asked, which
+    // Canopy's plugin maps to needs-human-permission.
+    unattendedEnv: [
+      [
+        "OPENCODE_PERMISSION",
+        JSON.stringify({
+          bash: {
+            "*": "allow",
+            "rm -rf *": "ask",
+            "sudo *": "ask",
+            "git push --force*": "ask",
+            "git push -f*": "ask",
+          },
+          edit: "allow",
+        }),
+      ],
+    ],
+    execution: {
+      fields: [
+        providerField(),
+        modelField(undefined, "provider/model"),
+        profileField,
+      ],
+      launchArgs: (config) => option("--model", qualifiedModel(config)),
+    },
   },
   // oh-my-pi. NB: the bare `omp` npm package is an unrelated squat — the
   // official installer is the omp.sh script.
@@ -758,6 +1233,15 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     name: "oh-my-pi",
     bin: "omp",
     icon: "π",
+    capabilities: {
+      managedIntegration: true,
+      conversationStore: {
+        path: "~/.omp/agent/sessions/**/*.jsonl",
+        note: "Sub-agent transcripts are indexed under their parent conversation.",
+        open: "session",
+      },
+    },
+    modelSwitch: MODEL_SWITCH.omp,
     install: "curl -fsSL https://omp.sh/install | sh",
     // Also published as a Homebrew formula (can1357/tap) and scoped npm CLI.
     pkgs: ["brew:omp", "npm:@oh-my-pi/pi-coding-agent"],
@@ -774,12 +1258,87 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // `always-ask` is a configurable default, and a task that inherits it stops
     // on its first edit.
     unattended: "--approval-mode=write",
+    // `write` still prompts for every bash/eval/task call. The marker asks the
+    // PTY layer to add Canopy's overlay (~/.canopy/omp-task-approval.yml)
+    // through PI_CONFIG_FILES, which allows those tools while omp's own
+    // critical-pattern list keeps prompting (tool_approval_requested → Canopy's
+    // extension → needs-human-permission). A marker, not a path, because a
+    // missing overlay is a hard startup error and only Rust can check it exists.
+    unattendedEnv: [["CANOPY_OMP_TASK_OVERLAY", "1"]],
+    execution: {
+      fields: [
+        providerField(),
+        modelField(["anthropic", "openai", "google"]),
+        effortField(["off", "minimal", "low", "medium", "high", "xhigh", "max", "auto"]),
+      ],
+      launchArgs: (config) => [
+        ...option("--model", config.model),
+        ...option("--provider", config.provider),
+        ...option("--thinking", config.effort),
+      ],
+    },
+  },
+  {
+    id: "cursor",
+    name: "Cursor Agent",
+    bin: "cursor-agent",
+    icon: "⌁",
+    brandColor: "#ffffff",
+    capabilities: {
+      managedIntegration: true,
+    },
+    structuredRunner: CURSOR_RUNNER,
+    modelSwitch: MODEL_SWITCH.cursor,
+    install: "curl https://cursor.com/install -fsS | bash",
+    update: "cursor-agent update",
+    resume: (id, bin) => `${bin} --resume ${id}`,
+    prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
+    skipPermissions: "--force",
+    // Verified against cursor-agent 2026.08.31 --help on 2026-10-01:
+    // `--auto-review  Use Auto-review (Smart Auto): a server classifier
+    // auto-runs safe tool calls and prompts for the rest`. Parses with
+    // `--resume`. Where the account can't use it, cursor falls back to its
+    // allowlist rather than failing. It refuses to combine with --force, which
+    // withUnattendedMode already guarantees. Known gap: cursor fires no hook
+    // while a prompt waits, so a blocked task is not yet raised to the user.
+    unattended: "--auto-review",
+    execution: {
+      fields: [modelField(undefined, "model")],
+      launchArgs: (config) => option("--model", config.model),
+    },
+  },
+  {
+    id: "grok",
+    name: "Grok Build",
+    bin: "grok",
+    icon: "𝕏",
+    brandColor: "#ffffff",
+    capabilities: {
+      managedIntegration: true,
+    },
+    modelSwitch: MODEL_SWITCH.grok,
+    install: "curl -fsSL https://x.ai/cli/install.sh | bash",
+    update: "grok update",
+    resume: (id, bin) => `${bin} --resume ${id}`,
+    prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
+    skipPermissions: "--always-approve",
+    // Verified against grok 1.0.13 --help on 2026-10-01: `--permission-mode
+    // <MODE>  [possible values: default, acceptEdits, auto, dontAsk,
+    // bypassPermissions, plan]`. Its docs: auto runs what the safety check
+    // allows and "surfaces a permission prompt" for the rest, and the
+    // dangerous-command list (rm, git push, …) still prompts. That prompt fires
+    // the permission_prompt Notification Canopy's hook already maps.
+    unattended: "--permission-mode auto",
+    execution: {
+      fields: [modelField(undefined, "model")],
+      launchArgs: (config) => option("--model", config.model),
+    },
   },
 ];
 
 /** Agents users run by hand that we don't ship a launcher entry for. Their id
  *  is their bin: enough to name a row and pick an icon where one exists. */
-const EXTRA_AGENT_BINS = ["gemini", "goose", "copilot", "cursor-agent", "qwen", "droid"];
+const EXTRA_AGENT_BINS = ["gemini", "goose", "copilot", "qwen", "droid"];
 
 /** Last path segment of a command, folded the same way the process resolver
  *  folds what it observes (case, `.exe`), so an override written as a full path
@@ -975,6 +1534,45 @@ function bindCli(def: AgentCliDef, bin: string): AgentCli {
  */
 export const AGENT_CLIS: AgentCli[] = [];
 
+/** Resolve durable identity through the registry. `name` is deliberately not
+ * consulted: vendors may rename products without changing saved workflows,
+ * tasks, profiles, or hooks. Historical ids are explicit aliases. */
+export function agentCliFor(id?: string | null): AgentCli | undefined {
+  if (!id) return undefined;
+  return AGENT_CLIS.find((cli) => cli.id === id || cli.aliases?.includes(id));
+}
+
+export function canonicalAgentCliId(id?: string | null): string | null {
+  return agentCliFor(id)?.id ?? null;
+}
+
+export function agentClisWith(
+  capability: keyof AgentCliCapabilities,
+): AgentCli[] {
+  return AGENT_CLIS.filter((cli) => cli.capabilities?.[capability] !== undefined);
+}
+
+export function structuredRunnerFor(id?: string | null): StructuredRunner | undefined {
+  return agentCliFor(id)?.structuredRunner;
+}
+
+export function agentModelSwitchFor(id?: string | null): ModelSwitch | null {
+  return agentCliFor(id)?.modelSwitch ?? legacyModelSwitchFor(id);
+}
+
+export function streamsStructured(id?: string | null): boolean {
+  const runner = structuredRunnerFor(id);
+  return Boolean(runner?.verification.cliVersion && runner.verification.checkedOn);
+}
+
+export function routingAgentClis(): Array<AgentCli & {
+  capabilities: AgentCliCapabilities & { routingModelFamily: "anthropic" | "openai" | "google" };
+}> {
+  return AGENT_CLIS.filter((cli) => cli.capabilities?.routingModelFamily) as Array<AgentCli & {
+    capabilities: AgentCliCapabilities & { routingModelFamily: "anthropic" | "openai" | "google" };
+  }>;
+}
+
 /** Browser-safe projection of the resolved launcher registry. Remote receives
  * commands, availability and verified resume syntax, never installers. */
 export function remoteCliMetadata(installed: Record<string, boolean>): RemoteCli[] {
@@ -985,9 +1583,12 @@ export function remoteCliMetadata(installed: Record<string, boolean>): RemoteCli
     // remote portal honours the skip-permissions setting like a local one —
     // re-sent on each metadata push, which is when the setting is re-read.
     command: launchCommand(cli),
+    icon: cli.icon,
+    brandColor: cli.brandColor,
     resumeTemplate: cli.resume && withSkipPermissions(cli.resume(SESSION_ID_TOKEN), cli),
     available: !!installed[cli.bin],
     custom: cli.custom,
+    restoreRequiresHumanPrompt: cli.capabilities?.restoreRequiresHumanPrompt,
   }));
 }
 
@@ -1064,12 +1665,21 @@ export function agentForPkg(pkg: string): string | undefined {
 export const SHELL_PATTERN = /^-?(zsh|bash|sh|fish|dash|tcsh|csh|ksh|nu|pwsh|powershell|cmd)$/i;
 
 export async function checkInstalledClis(): Promise<Record<string, boolean>> {
+  return (await probeInstalledClis()) ?? {};
+}
+
+/** The same probe, but `null` when it could not answer (the login shell never
+ *  ran, or was refused under load). Surfaces that badge "install" need the
+ *  difference: an unanswered probe is not a missing CLI. */
+export async function probeInstalledClis(): Promise<Record<string, boolean> | null> {
+  return probeCommands(AGENT_CLIS.map((c) => c.bin));
+}
+
+async function probeCommands(commands: string[]): Promise<Record<string, boolean> | null> {
   try {
-    return await invoke<Record<string, boolean>>("which_check", {
-      commands: AGENT_CLIS.map((c) => c.bin),
-    });
+    return await invoke<Record<string, boolean>>("which_check", { commands });
   } catch {
-    return {};
+    return null;
   }
 }
 
@@ -1122,15 +1732,10 @@ export const PREREQS: Prereq[] = [
   },
 ];
 
-/** Which prerequisites are present on PATH — same probe as the CLIs. */
-export async function checkInstalledPrereqs(): Promise<Record<string, boolean>> {
-  try {
-    return await invoke<Record<string, boolean>>("which_check", {
-      commands: PREREQS.map((p) => p.bin),
-    });
-  } catch {
-    return {};
-  }
+/** Which prerequisites are present on PATH — same probe as the CLIs. `null`
+ *  when the probe could not answer, which must never read as "missing". */
+export async function checkInstalledPrereqs(): Promise<Record<string, boolean> | null> {
+  return probeCommands(PREREQS.map((p) => p.bin));
 }
 
 // ---------- CLI update detection ----------
@@ -1308,31 +1913,86 @@ export function launchCommand(cli: AgentCli): string {
  *  flag for it, because that flag is strictly more autonomous than anything
  *  here — and two mode flags on one line is a question about precedence that
  *  every CLI answers differently. One rung or the other, never both. */
-function withUnattendedMode(command: string, cli: AgentCli): string {
+function withUnattendedMode(
+  command: string,
+  cli: AgentCli,
+  ctx: UnattendedContext = {},
+): string {
   if (cli.skipPermissions && getSettings().dangerouslySkipPermissions) return command;
-  return cli.unattended ? `${command} ${cli.unattended}` : command;
+  if (!cli.unattended) return command;
+  const mode =
+    typeof cli.unattended === "function" ? cli.unattended(ctx) : cli.unattended;
+  return mode ? `${command} ${mode}` : command;
+}
+
+
+/** Apply only arguments declared by the selected agent type's manifest.
+ * Values are shell-quoted independently, so committed agent configuration
+ * cannot become another shell command. Unknown fields never reach argv: the
+ * adapter returns the complete argument list it understands. */
+function withAgentLaunchOptions(
+  command: string,
+  cli: AgentCli,
+  options?: AgentLaunchOptions,
+): string {
+  if (!options || !cli.execution) return command;
+  const args = cli.execution.launchArgs(options).flatMap(({ flag, value }) =>
+    flag.trim() && value.trim() ? [flag.trim(), shellQuote(value.trim())] : []);
+  return args.length > 0 ? `${command} ${args.join(" ")}` : command;
 }
 
 export function startCommand(
   agentId: string,
   text: string,
+  options?: AgentLaunchOptions,
+  /** Where this run lands — see UnattendedContext. Omitted by a caller whose
+   *  task runs in the checkout it was launched from. */
+  ctx?: UnattendedContext,
 ): { command: string; typePrompt: boolean } | null {
-  const cli = AGENT_CLIS.find((c) => c.id === agentId);
+  const cli = agentCliFor(agentId);
   if (!cli) return null;
   return cli.prompt
     ? {
-        command: withUnattendedMode(withSkipPermissions(cli.prompt(text), cli), cli),
+        command: withAgentLaunchOptions(
+          withUnattendedMode(withSkipPermissions(cli.prompt(text), cli), cli, ctx),
+          cli,
+          options,
+        ),
         typePrompt: false,
       }
-    : { command: withUnattendedMode(launchCommand(cli), cli), typePrompt: true };
+    : {
+        command: withAgentLaunchOptions(
+          withUnattendedMode(launchCommand(cli), cli, ctx),
+          cli,
+          options,
+        ),
+        typePrompt: true,
+      };
 }
 
-export function restoreCommand(agentId: string, sessionId: string): string | null {
+/** How to reopen a conversation by id.
+ *
+ *  A session a person picks off the restore list is theirs, in the mode their
+ *  CLI is configured for. A task picked back up is still a task, and a resume
+ *  Canopy makes on its own account — handing a finished review's comments to
+ *  the agent that raised the PR — has nobody in front of it either: both resume
+ *  in the same unattended mode the launch had (withUnattendedMode) rather than
+ *  whatever the CLI is configured for (Manual, plan, or omp's yolo). `task` and
+ *  `unattended` are the two callers' names for that one request. */
+export function restoreCommand(
+  agentId: string,
+  sessionId: string,
+  opts: { task?: boolean; unattended?: boolean; ctx?: UnattendedContext } = {},
+): string | null {
   const id = sessionId.trim();
   if (!id) return null;
-  const cli = AGENT_CLIS.find((c) => c.id === agentId);
+  const cli = agentCliFor(agentId);
   const cmd = cli?.resume?.(id);
-  return cmd ? withSkipPermissions(cmd, cli) : null;
+  if (!cmd || !cli) return null;
+  const resumed = withSkipPermissions(cmd, cli);
+  return opts.task || opts.unattended
+    ? withUnattendedMode(resumed, cli, opts.ctx)
+    : resumed;
 }
 
 /** The session id a terminal's command carries when it was launched to resume a
@@ -1350,7 +2010,7 @@ export function resumeSessionId(command: string | null | undefined): string | nu
   if (!cmd) return null;
   const SENTINEL = "__CANOPY_SID__";
   const templates = agentCliDefs().flatMap((d) => {
-    const bins = new Set([AGENT_CLIS.find((c) => c.id === d.id)?.bin ?? d.bin, d.bin]);
+    const bins = new Set([agentCliFor(d.id)?.bin ?? d.bin, d.bin]);
     // Each spelling as written *and* as quoted: a path with a space in it goes
     // to the shell quoted, so that is the form a remembered resume command
     // carries — while an id from before the override is still bare.
@@ -1360,7 +2020,14 @@ export function resumeSessionId(command: string | null | undefined): string | nu
       // setting is on: a command remembered from a skip-permissions launch
       // must still yield its session id after the setting is switched off,
       // or every such session stops being resumable the moment it's disabled.
-      return tmpl && d.skipPermissions ? [tmpl, `${tmpl} ${d.skipPermissions}`] : [tmpl];
+      // Likewise the unattended spelling a resumed task carries.
+      return tmpl
+        ? [
+            tmpl,
+            ...(d.skipPermissions ? [`${tmpl} ${d.skipPermissions}`] : []),
+            ...(d.unattended ? [`${tmpl} ${d.unattended}`] : []),
+          ]
+        : [tmpl];
     });
   });
   for (const tmpl of templates) {
@@ -1370,10 +2037,49 @@ export function resumeSessionId(command: string | null | undefined): string | nu
     const prefix = tmpl.slice(0, at);
     const suffix = tmpl.slice(at + SENTINEL.length);
     if (!cmd.startsWith(prefix) || !cmd.endsWith(suffix)) continue;
-    const id = cmd.slice(prefix.length, cmd.length - suffix.length).trim();
-    // A genuine id is one non-empty token — this rejects a command that merely
-    // shares the prefix (e.g. a bare `claude`) but isn't a resume.
-    if (id && !/\s/.test(id)) return id;
+    const rest = cmd.slice(prefix.length, cmd.length - suffix.length).trim();
+    // The id is the first token. Anything after it has to open with a flag: an
+    // unattended resume carries its working mode there (`--permission-mode
+    // auto`, codex's three sandbox flags and their values), and requiring the
+    // whole remainder to be one token meant every such command reported no
+    // session at all — which cost the resumed run its identity on the attention
+    // axis and in the PR provenance trail. A trailing *word* still rejects the
+    // command, which is what keeps this from matching something that merely
+    // shares the prefix (a bare `claude`, a `codex resume` with a stray arg).
+    const [id, ...trailing] = rest.split(/\s+/);
+    if (id && (trailing.length === 0 || trailing[0].startsWith("-"))) return id;
   }
   return null;
+}
+
+/**
+ * Which of these paths owns a directory — the one question every surface that
+ * joins an agent to a repository has to answer, asked in one place.
+ *
+ * Two rules, both learnt the hard way:
+ *
+ * 1. **Fold worktrees.** A linked worktree is a sibling of its checkout, so
+ *    containment alone cannot see it. The agent-workspace overlay tested
+ *    containment only, so a session working in `<repo>-wt-<branch>` resolved to
+ *    no repository at all and the view fell back to "showing what the agent
+ *    reported" — while the same session, opened from the Agents panel, showed
+ *    its real diff. Two surfaces, two answers, one session.
+ * 2. **Longest match wins.** With `/repo` and `/repo/packages/app` both
+ *    registered, the first containing path is not necessarily the right one;
+ *    the most specific is. The Rust resolver has always done this.
+ *
+ * Returns null when nothing owns it — deliberately, rather than falling back to
+ * the first candidate. Attributing an unrelated directory to some repository is
+ * a worse answer than admitting there isn't one, and it is unfalsifiable from
+ * the UI.
+ */
+export function componentForPath(
+  candidates: readonly { path: string }[],
+  cwd: string,
+): string | null {
+  const owns = (path: string) =>
+    candidates
+      .filter((c) => path === c.path || path.startsWith(`${c.path}/`))
+      .sort((a, b) => b.path.length - a.path.length)[0]?.path ?? null;
+  return owns(cwd) ?? owns(checkoutKey(cwd));
 }

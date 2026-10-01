@@ -1,20 +1,5 @@
-// Deployment — the third managed abstraction, and the only one whose mistakes
-// are visible to strangers.
-//
-// Everything else Build mode does is reversible: a bad install is uninstalled,
-// a bad edit is a checkpoint away from undone. A production deploy is seen by
-// users before anyone can react, so the rules here are stricter than anywhere
-// else in the program and deliberately asymmetric:
-//
-//   - Preview deploys are cheap and disposable, so unverified work may go to a
-//     preview URL. Saying "I couldn't verify this" alongside a link is honest.
-//   - Production requires a verified turn AND a clean tree AND explicit intent.
-//     Not one of the three — all of them. Nothing about a chat message is
-//     sufficient consent to publish.
-//   - "verified" here means the same thing it means everywhere else in this
-//     program: independently observed evidence, never the agent's word. An
-//     incomplete verification is not a soft pass.
-
+// Preview runs on local managed servers. Only an explicitly confirmed,
+// freshly verified production publication may invoke a deployment CLI.
 export type DeployTarget = "preview" | "production";
 
 export interface DeployProvider {
@@ -25,7 +10,7 @@ export interface DeployProvider {
   /** Files whose presence means this project already uses the provider. */
   markers: string[];
   /** Argv after the binary, per target. */
-  args: Record<DeployTarget, string[]>;
+  args: { production: string[] };
   docs: string;
 }
 
@@ -36,7 +21,7 @@ export const DEPLOY_PROVIDERS: readonly DeployProvider[] = [
     bin: "vercel",
     install: "npm install -g vercel",
     markers: ["vercel.json", ".vercel"],
-    args: { preview: [], production: ["--prod"] },
+    args: { production: ["--prod"] },
     docs: "https://vercel.com/docs/cli",
   },
   {
@@ -45,7 +30,7 @@ export const DEPLOY_PROVIDERS: readonly DeployProvider[] = [
     bin: "netlify",
     install: "npm install -g netlify-cli",
     markers: ["netlify.toml", ".netlify"],
-    args: { preview: ["deploy"], production: ["deploy", "--prod"] },
+    args: { production: ["deploy", "--prod"] },
     docs: "https://docs.netlify.com/cli/get-started/",
   },
   {
@@ -54,7 +39,7 @@ export const DEPLOY_PROVIDERS: readonly DeployProvider[] = [
     bin: "wrangler",
     install: "npm install -g wrangler",
     markers: ["wrangler.toml", "wrangler.jsonc", "wrangler.json"],
-    args: { preview: ["pages", "deploy"], production: ["pages", "deploy", "--branch", "main"] },
+    args: { production: ["pages", "deploy", "--branch", "main"] },
     docs: "https://developers.cloudflare.com/workers/wrangler/",
   },
   {
@@ -63,7 +48,7 @@ export const DEPLOY_PROVIDERS: readonly DeployProvider[] = [
     bin: "flyctl",
     install: "brew install flyctl",
     markers: ["fly.toml"],
-    args: { preview: ["deploy", "--strategy", "immediate"], production: ["deploy"] },
+    args: { production: ["deploy"] },
     docs: "https://fly.io/docs/flyctl/",
   },
 ];
@@ -91,6 +76,8 @@ export interface DeployContext {
   cliInstalled: boolean;
   /** Whether the user said the exact confirmation phrase this turn. */
   confirmed: boolean;
+  /** Commit plus deployment configuration fingerprint, observed on disk. */
+  revision?: string | null;
 }
 
 export type DeployPlan =
@@ -108,6 +95,7 @@ export type DeployPlan =
   | { ok: false; refusal: DeployRefusal; why: string; needs?: string };
 
 export type DeployRefusal =
+  | "local-preview"
   | "no-provider"
   | "cli-missing"
   | "not-verified"
@@ -121,6 +109,9 @@ export function planDeploy(
   context: DeployContext,
   cwd: string,
 ): DeployPlan {
+  if (target === "preview") {
+    return { ok: false, refusal: "local-preview", why: "Preview runs locally in the project browser. Deployment publishes to production." };
+  }
   if (!provider) {
     return {
       ok: false,
@@ -171,21 +162,13 @@ export function planDeploy(
     }
   }
 
-  const caveat =
-    target === "preview" && context.verification === "incomplete"
-      ? "I couldn't fully verify this, so treat the preview as a draft."
-      : null;
-
   return {
     ok: true,
     provider,
     target,
     argv: [provider.bin, ...provider.args[target]],
     cwd,
-    caveat,
-    summary:
-      target === "production"
-        ? `Publishing to production on ${provider.label}.`
-        : `Putting a preview on ${provider.label}.`,
+    caveat: null,
+    summary: `Publishing to production on ${provider.label}.`,
   };
 }

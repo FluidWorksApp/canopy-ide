@@ -33,6 +33,12 @@ export const SERVERS: ServerSpec[] = [
     extensions: ["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"],
     command: "typescript-language-server",
     args: ["--stdio"],
+    // A Canopy project can be a folder of independent JS/TS packages. Starting
+    // at the outer folder makes typescript-language-server miss the TypeScript
+    // installation pinned by the package that actually owns the file. Resolve
+    // to the nearest package/config so launch selection and project discovery
+    // use that package's toolchain.
+    rootMarkers: ["tsconfig.json", "jsconfig.json", "package.json"],
     install: "install with: npm i -g typescript-language-server typescript",
   },
   {
@@ -73,8 +79,7 @@ const dirOf = (path: string) => path.slice(0, path.lastIndexOf("/"));
 
 /** The directory this server should treat as its workspace: the nearest
  *  ancestor of the file holding one of the spec's markers, never above the
- *  project root Canopy passed. Falls back to that root, which is what a spec
- *  with no markers (TypeScript) always gets. */
+ *  project root Canopy passed. Falls back to that root. */
 export async function resolveServerRoot(
   filePath: string,
   root: string,
@@ -146,24 +151,28 @@ export async function resolveTypescriptLaunch(
   root: string,
   wrapperCommand: string,
   exists: (path: string) => Promise<boolean>,
+  projectRoot: string = root,
 ): Promise<ServerLaunch> {
-  const tsserver = `${root}/node_modules/typescript/lib/tsserver.js`;
-  if (await exists(tsserver)) {
-    return {
-      command: wrapperCommand,
-      args: spec.args,
-      initializationOptions: { tsserver: { path: tsserver } },
-    };
-  }
-  const native = await resolveNativeTsc(root, exists);
-  if (native) return { command: native, args: ["--lsp", "--stdio"] };
-  // pnpm keeps the platform package beside `typescript` in its virtual store,
-  // so it is intentionally not visible at root/node_modules/@typescript. The
-  // package's portable launcher resolves that nested binary correctly. Run it
-  // through Node rather than relying on shebang handling on every platform.
-  const launcher = `${root}/node_modules/typescript/bin/tsc`;
-  if (await exists(launcher)) {
-    return { command: "node", args: [launcher, "--lsp", "--stdio"] };
+  const roots = root === projectRoot ? [root] : [root, projectRoot];
+  for (const toolchainRoot of roots) {
+    const tsserver = `${toolchainRoot}/node_modules/typescript/lib/tsserver.js`;
+    if (await exists(tsserver)) {
+      return {
+        command: wrapperCommand,
+        args: spec.args,
+        initializationOptions: { tsserver: { path: tsserver } },
+      };
+    }
+    const native = await resolveNativeTsc(toolchainRoot, exists);
+    if (native) return { command: native, args: ["--lsp", "--stdio"] };
+    // pnpm keeps the platform package beside `typescript` in its virtual store,
+    // so it is intentionally not visible at root/node_modules/@typescript. The
+    // package's portable launcher resolves that nested binary correctly. Run it
+    // through Node rather than relying on shebang handling on every platform.
+    const launcher = `${toolchainRoot}/node_modules/typescript/bin/tsc`;
+    if (await exists(launcher)) {
+      return { command: "node", args: [launcher, "--lsp", "--stdio"] };
+    }
   }
   return {
     command: wrapperCommand,

@@ -6,20 +6,15 @@
 // in the other is exactly the confusion this replaces.
 import { useEffect, useState } from "react";
 import * as ipc from "../ipc";
+import { agentClisWith } from "../projects";
 import { AgentIcon } from "./icons";
 import { Button } from "./ui";
 
-/** Every CLI with an auto-setup arm, in the order the integrations list shows
- *  them. Mirrors SUPPORTED_AGENTS in agents.rs. */
-export const AGENT_LABELS = [
-  { id: "claude", label: "Claude Code" },
-  { id: "codex", label: "Codex" },
-  { id: "agy", label: "Antigravity" },
-  { id: "aider", label: "Aider" },
-  { id: "opencode", label: "OpenCode" },
-  { id: "omp", label: "oh-my-pi" },
-  { id: "amp", label: "Amp" },
-];
+/** Every CLI whose manifest owns an automatic integration adapter. */
+export const AGENT_LABELS = agentClisWith("managedIntegration").map((cli) => ({
+  id: cli.id,
+  label: cli.name,
+}));
 
 const HEALTH_TONE: Record<string, string> = {
   ours: "hs-ok",

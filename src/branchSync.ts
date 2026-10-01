@@ -54,6 +54,9 @@ export interface SyncPrompt {
   /** Conflicts ahead: the UI leans on this for colour and for warning that
    *  the merge will stop partway. */
   willConflict: boolean;
+  /** The one-click merge can't finish alone — uncommitted work is in the way,
+   *  or it would stop on conflicts — so an agent is offered to do it. */
+  canResolve: boolean;
 }
 
 /** The words for a probe. Kept here rather than in the component so the
@@ -72,12 +75,14 @@ export function describe(p: SyncProbe): SyncPrompt {
       headline,
       detail:
         `You have uncommitted changes in ${plural(p.overlap.length, "file")} the incoming ` +
-        `commits also touch. Commit or stash ${p.overlap.length === 1 ? "it" : "them"} and this can merge.`,
+        `commits also touch. Commit or stash ${p.overlap.length === 1 ? "it" : "them"} and this can merge — ` +
+        `or have an agent merge around ${p.overlap.length === 1 ? "it" : "them"}, leaving your edits uncommitted.`,
       files: p.overlap,
       canMerge: false,
       blockedReason: "uncommitted changes are in the way",
       mergeLabel: `Merge ${base}`,
       willConflict: p.state === "conflict",
+      canResolve: true,
     };
   }
 
@@ -93,6 +98,7 @@ export function describe(p: SyncProbe): SyncPrompt {
       blockedReason: null,
       mergeLabel: "Merge and resolve now",
       willConflict: true,
+      canResolve: true,
     };
   }
 
@@ -107,6 +113,7 @@ export function describe(p: SyncProbe): SyncPrompt {
       blockedReason: null,
       mergeLabel: `Merge ${base} in`,
       willConflict: false,
+      canResolve: false,
     };
   }
 
@@ -118,6 +125,7 @@ export function describe(p: SyncProbe): SyncPrompt {
     blockedReason: null,
     mergeLabel: `Merge ${base} in`,
     willConflict: false,
+    canResolve: false,
   };
 }
 

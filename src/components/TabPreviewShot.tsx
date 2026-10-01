@@ -62,6 +62,8 @@ export function tabPreviewIcon(tab: SubTab, size = 12) {
       return <ResearchIcon size={size} />;
     case "task-history":
       return <IssueIcon size={size} />;
+    case "workflows":
+      return <GitBranchIcon size={size} />;
     default:
       return <DocumentIcon size={size} />;
   }
@@ -88,7 +90,6 @@ export function TabPreviewShot({
   height = TAB_PREVIEW_H,
 }: TabPreviewShotProps) {
   const boxRef = useRef<HTMLDivElement>(null);
-  const [lines, setLines] = useState<string[] | null>(null);
   const [scale, setScale] = useState(0);
   const [pane, setPane] = useState<{ w: number; h: number } | null>(null);
   const [blank, setBlank] = useState(false);
@@ -103,10 +104,7 @@ export function TabPreviewShot({
   }, [paneRef, width]);
 
   useEffect(() => {
-    if (tab.type === "terminal") {
-      setLines(tailLines(termText(tab.id) ?? "", TERM_ROWS));
-      return;
-    }
+    if (tab.type === "terminal") return;
     const box = boxRef.current;
     if (!box) return;
     const host =
@@ -120,9 +118,30 @@ export function TabPreviewShot({
   }, [tab, tick, paneRef, termText]);
 
   if (tab.type === "terminal") {
+    // A multiplex is one visual tab but several independently painted xterms.
+    // Capturing one representative is both misleading and the source of the
+    // permanently blank mux thumbnail. A stable layout tile costs no hidden
+    // terminal paints and says exactly what the card opens.
+    if ((tab.multiplexCount ?? 0) > 1) {
+      return (
+        <div className="tsw-multiplex" aria-hidden>
+          <span className="tsw-multiplex-glyph">▦</span>
+          <strong>{tab.multiplexCount} panes</strong>
+          <span>Multiplexed terminal layout</span>
+        </div>
+      );
+    }
+    const lines = tailLines(termText(tab.id) ?? "", TERM_ROWS);
+    if (!lines.some((line) => line.trim().length > 0)) {
+      return (
+        <div className="tsw-blank tsw-terminal-blank" aria-hidden>
+          {icon}
+        </div>
+      );
+    }
     return (
       <pre className="tsw-term" aria-hidden>
-        {lines?.join("\n") ?? ""}
+        {lines.join("\n")}
       </pre>
     );
   }

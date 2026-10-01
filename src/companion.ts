@@ -19,13 +19,15 @@
 // The live session lives in companionSession.ts, the drawing in
 // components/Companion.tsx.
 
-import { AGENT_CLIS, type AgentCli } from "./projects";
+import {
+  AGENT_CLIS,
+  agentModelSwitchFor,
+  structuredRunnerFor,
+  type AgentCli,
+} from "./projects";
 import { mascotDef } from "./mascots";
 import { getSettings, updateSettings } from "./settings";
-import {
-  STRUCTURED_RUNNERS,
-  type StructuredRunnerLaunch,
-} from "./structuredRunners";
+import type { StructuredRunnerLaunch } from "./structuredRunners";
 
 /** What the companion may do on its own.
  *
@@ -148,7 +150,7 @@ export function companionRunnerLaunch(
 }
 
 export function tierFor(cliId: string): CompanionTier {
-  return STRUCTURED_RUNNERS[cliId]?.tier ?? "terminal";
+  return structuredRunnerFor(cliId)?.tier ?? "terminal";
 }
 
 /** One line for the settings row, so the choice is made with its consequence
@@ -162,6 +164,17 @@ export function tierNote(cliId: string): string {
     default:
       return "Replies arrive whole, not streamed.";
   }
+}
+
+/** A stored companion model is valid only for CLIs whose verified launch
+ * contract accepts one of Canopy's inline choices. Picker-based CLIs such as
+ * Codex own their account-specific catalogue, so passing a stale value like
+ * Claude's `default` would override the CLI with a model that does not exist. */
+export function companionModelForCli(cliId: string, stored: string): string {
+  const model = stored.trim();
+  const sw = agentModelSwitchFor(cliId);
+  if (!model || sw?.kind !== "inline") return "";
+  return sw.choices.some((choice) => choice.id === model) ? model : "";
 }
 
 /** Which CLI the companion runs on. The only answer to that question — the

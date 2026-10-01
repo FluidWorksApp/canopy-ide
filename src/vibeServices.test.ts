@@ -4,6 +4,7 @@ import {
   clientVarName,
   planLink,
   providerById,
+  providerMcpToolAllowances,
   type LinkContext,
 } from "./vibeServices";
 
@@ -33,6 +34,33 @@ describe("the provider registry", () => {
 });
 
 describe("link planning", () => {
+  it("prefers a linked account API route over CLI authentication", () => {
+    const plan = planLink("supabase", ctx({
+      cliInstalled: false,
+      authenticated: false,
+      linkedReaches: ["mcp"],
+      toolAllowances: ["mcp__supabase"],
+      accountLinkAvailable: true,
+    }));
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.steps[0]).toMatchObject({ kind: "use-linked-account", reach: "mcp" });
+    expect(plan.steps.some((step) => step.kind === "install-cli")).toBe(false);
+    expect(plan.steps.some((step) => step.kind === "authenticate")).toBe(false);
+  });
+
+  it("asks for an account link before falling back to the CLI", () => {
+    const plan = planLink("firebase", ctx({
+      cliInstalled: false,
+      authenticated: false,
+      accountLinkAvailable: true,
+    }));
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) return;
+    expect(plan.steps[0]).toMatchObject({ kind: "link-account", accountLabel: "Google" });
+    expect(plan.steps[0].why).toMatch(/firebase.*fallback/i);
+  });
+
   it("refuses a provider with no verified headless path", () => {
     const plan = planLink("some-saas", ctx());
     expect(plan.ok).toBe(false);
@@ -65,7 +93,7 @@ describe("link planning", () => {
     expect(plan.ok).toBe(true);
     if (!plan.ok) return;
     const asked = plan.steps.flatMap((s) => (s.kind === "collect-secret" ? [s.secret.name] : []));
-    expect(asked).toEqual(["SUPABASE_SERVICE_ROLE_KEY"]);
+    expect(asked).toEqual([]);
   });
 
   it("says nothing is needed when the project is already linked", () => {
@@ -84,6 +112,30 @@ describe("link planning", () => {
   });
 });
 
+describe("provider MCP access", () => {
+  it("admits only enabled provider-owned account tools", () => {
+    const servers = [
+      {
+        name: "Supabase",
+        url: "https://mcp.supabase.com/mcp",
+        enabled: true,
+        sources: [
+          { name: "supabase", status: "enabled" as const },
+          { name: "supabase-old", status: "disabled" as const },
+        ],
+      },
+      {
+        name: "Google Drive",
+        url: "https://google.example/mcp",
+        enabled: true,
+        sources: [{ name: "google-drive", status: "enabled" as const }],
+      },
+    ];
+    expect(providerMcpToolAllowances("supabase", servers)).toEqual(["mcp__supabase"]);
+    expect(providerMcpToolAllowances("firebase", servers)).toEqual([]);
+  });
+});
+
 describe("client exposure", () => {
   it("prefixes only publishable keys, and never twice", () => {
     const supabase = providerById("supabase")!;
@@ -95,4 +147,16 @@ describe("client exposure", () => {
       clientVarName(supabase, { ...anon, name: "NEXT_PUBLIC_SUPABASE_ANON_KEY" }),
     ).toBe("NEXT_PUBLIC_SUPABASE_ANON_KEY");
   });
+});
+
+it("requests elevated database credentials only when the server feature needs them", () => {
+  const plan = planLink("supabase", ctx({ requiredSecrets: ["SUPABASE_SERVICE_ROLE_KEY"], presentSecrets: ["SUPABASE_URL", "SUPABASE_ANON_KEY"] }));
+  expect(plan.ok && plan.steps.filter((step) => step.kind === "collect-secret").map((step) => step.secret.name)).toEqual(["SUPABASE_SERVICE_ROLE_KEY"]);
+});
+it("uses the framework prefix only for public configuration", () => {
+  const provider = providerById("supabase")!;
+  const publicKey = provider.secrets.find((secret) => secret.name === "SUPABASE_ANON_KEY")!;
+  const privateKey = provider.secrets.find((secret) => secret.name === "SUPABASE_SERVICE_ROLE_KEY")!;
+  expect(clientVarName(provider, publicKey, "VITE_")).toBe("VITE_SUPABASE_ANON_KEY");
+  expect(clientVarName(provider, privateKey, "VITE_")).toBe("SUPABASE_SERVICE_ROLE_KEY");
 });

@@ -80,7 +80,7 @@ export function NewAgentSheet({
         <label>Agent</label>
         <div className="cli-grid">
           {[...clis.map((item) => item.id), 'shell'].map((c) => {
-            const m = agentMeta(c)
+            const m = agentMeta(c, clis)
             const item = clis.find((candidate) => candidate.id === c)
             return (
               <button
@@ -90,7 +90,7 @@ export function NewAgentSheet({
                 onClick={() => setCli(c)}
                 disabled={item ? !item.available : false}
               >
-                <AgentBadge agent={c} sz={26} />
+                <AgentBadge agent={c} sz={26} clis={clis} />
                 <span>{item?.name ?? m.label}</span>
               </button>
             )
@@ -102,7 +102,7 @@ export function NewAgentSheet({
             Cancel
           </button>
           <button className="primary" onClick={launch} disabled={!path}>
-            Launch {agentMeta(cli).label}
+            Launch {agentMeta(cli, clis).label}
           </button>
         </div>
       </div>

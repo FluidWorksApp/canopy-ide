@@ -57,6 +57,9 @@ const AIDER_MODELS: ModelChoice[] = [
 /**
  * Keyed by agent id — the same ids identifyAgent() reports, which includes the
  * bare binaries in EXTRA_AGENT_BINS (gemini) as well as registry entries.
+ * Terminal model control is not Build eligibility: Gemini stays here for an
+ * already-running legacy terminal, while FAMILY_FOR_CLI deliberately excludes
+ * it until a dated structured runner exists.
  */
 export const MODEL_SWITCH: Record<string, ModelSwitch> = {
   // Verified: `/model <alias>` is documented by `claude --help`'s slash command
@@ -87,6 +90,8 @@ export const MODEL_SWITCH: Record<string, ModelSwitch> = {
   // Verified against omp 17.x's extension/lifecycle docs and interactive
   // command: `/model` opens the active account's model selector.
   omp: { kind: "picker", command: "/model" },
+  cursor: { kind: "picker", command: "/model" },
+  grok: { kind: "picker", command: "/model" },
   // Deliberately absent — nothing here could be verified:
   //   amp: its only "/model" string is a `provider/model` format error.
 };

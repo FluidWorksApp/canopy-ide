@@ -105,6 +105,22 @@ const MAX_SECONDS: u32 = 600;
 // trade for saving the next one-time load.
 const MODEL_IDLE_EVICT_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
+// A release build normally loads the bundled runtime and model in a few
+// seconds. Debug builds can be dramatically slower, especially on the first
+// load, so give them substantially more room without turning a dead runtime
+// initializer back into an unbounded state.
+#[cfg(debug_assertions)]
+const ENGINE_INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+#[cfg(not(debug_assertions))]
+const ENGINE_INIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+const RUNTIME_UNAVAILABLE_MESSAGE: &str =
+    "Dictation can't load its speech model — the speech runtime wasn't found. Restart Canopy and try again.";
+const ENGINE_INIT_TIMEOUT_MESSAGE: &str =
+    "Dictation can't load its speech model — startup took too long. Restart Canopy and try again.";
+const ENGINE_INIT_FAILED_MESSAGE: &str =
+    "Dictation can't load its speech model — the speech runtime couldn't start. Restart Canopy and try again.";
+
 // How far either side of a chunk boundary to hunt for the quietest frame, so
 // splits land in a pause rather than mid-word.
 const CHUNK_SEARCH_SECS: f32 = 3.0;
@@ -143,6 +159,10 @@ type SharedEngine = Arc<Mutex<Option<Box<dyn SpeechModel>>>>;
 struct Inner {
     engine: SharedEngine,
     loaded_model: Option<String>,
+    /// Present only while a cold model load is in flight. The guard below
+    /// clears it on every return path (including cancellation/panic), so a
+    /// failed first use can always be retried.
+    loading: Option<String>,
     recording: Option<Recording>,
     downloading: Option<String>,
     streaming: Option<StreamHandle>,
@@ -235,6 +255,124 @@ fn model_ready(id: &str) -> bool {
     model_dir(id)
         .map(|d| d.join(".complete").exists())
         .unwrap_or(false)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum EngineInitFailure {
+    RuntimeUnavailable(String),
+    TimedOut,
+    Failed(String),
+}
+
+impl EngineInitFailure {
+    fn user_message(&self) -> &'static str {
+        match self {
+            Self::RuntimeUnavailable(_) => RUNTIME_UNAVAILABLE_MESSAGE,
+            Self::TimedOut => ENGINE_INIT_TIMEOUT_MESSAGE,
+            Self::Failed(_) => ENGINE_INIT_FAILED_MESSAGE,
+        }
+    }
+
+    fn log(&self, model: &str) {
+        match self {
+            Self::RuntimeUnavailable(detail) => log::error!(
+                "dictation: speech runtime unavailable while loading {model}: {detail}. \
+                 Bare dev launches must set ORT_DYLIB_PATH to the staged ONNX Runtime library"
+            ),
+            Self::TimedOut => log::error!(
+                "dictation: engine initialization for {model} exceeded {:?}. \
+                 Check ORT_DYLIB_PATH and the ONNX Runtime version in a bare dev launch",
+                ENGINE_INIT_TIMEOUT
+            ),
+            Self::Failed(detail) => log::error!(
+                "dictation: engine initialization failed for {model}: {detail}. \
+                 Check ORT_DYLIB_PATH in a bare dev launch"
+            ),
+        }
+    }
+}
+
+/// `ort` falls back to a platform library name when ORT_DYLIB_PATH is absent.
+/// In load-dynamic builds, a failure in that lookup is particularly dangerous:
+/// ort rc.12 constructs its error while its global API OnceLock is initializing,
+/// which can re-enter the same lock and deadlock before our outer timeout gets
+/// a useful error. Canopy has one supported runtime source — the path set from
+/// the app bundle in production, or explicitly by a bare dev launch — so prove
+/// that source exists before entering ort at all.
+fn speech_runtime_path(value: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
+    let value = value
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "ORT_DYLIB_PATH is not set".to_string())?;
+    let path = PathBuf::from(value);
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| format!("{} cannot be opened: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    Ok(path)
+}
+
+/// Covers both the runtime preflight and the potentially expensive model load.
+/// Keeping the future injectable makes the dead-runtime behaviour testable
+/// without asking ort's process-global OnceLock to deadlock the test process.
+async fn bounded_engine_init<T, F, Fut>(
+    runtime_path: Option<std::ffi::OsString>,
+    deadline: std::time::Duration,
+    init: F,
+) -> Result<T, EngineInitFailure>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let work = async move {
+        let path =
+            speech_runtime_path(runtime_path).map_err(EngineInitFailure::RuntimeUnavailable)?;
+        init(path).await.map_err(EngineInitFailure::Failed)
+    };
+    tokio::time::timeout(deadline, work)
+        .await
+        .map_err(|_| EngineInitFailure::TimedOut)?
+}
+
+/// Loading is state, so it gets an exit like recording and downloading do.
+/// Dropping this guard clears only the attempt it owns; a later retry cannot be
+/// erased by an older future unwinding.
+struct EngineLoadAttempt {
+    state: DictationManager,
+    model: String,
+}
+
+impl EngineLoadAttempt {
+    fn begin(state: &DictationManager, model: &str) -> Result<Option<Self>, String> {
+        let mut inner = state.0.lock().unwrap();
+        if inner.loaded_model.as_deref() == Some(model) {
+            return Ok(None);
+        }
+        if inner.loading.is_some() {
+            return Err("Dictation is already loading its speech model".into());
+        }
+        inner.loading = Some(model.to_string());
+        Ok(Some(Self {
+            state: state.clone(),
+            model: model.to_string(),
+        }))
+    }
+
+    fn install(self, engine: Box<dyn SpeechModel>) {
+        let mut inner = self.state.0.lock().unwrap();
+        *inner.engine.lock().unwrap() = Some(engine);
+        inner.loaded_model = Some(self.model.clone());
+        inner.loading = None;
+    }
+}
+
+impl Drop for EngineLoadAttempt {
+    fn drop(&mut self) {
+        let mut inner = self.state.0.lock().unwrap();
+        if inner.loading.as_deref() == Some(self.model.as_str()) {
+            inner.loading = None;
+        }
+    }
 }
 
 /// The tarball may extract its files directly into the model directory or into
@@ -807,45 +945,45 @@ pub async fn dictation_start(
         spawn_download(app, &state, def);
         return Ok("downloading".into());
     }
-    begin_model_use(&state);
     // Load (or switch) the model off the main thread, then keep it warm until
-    // the idle eviction scheduled by stop/cancel.
-    let need_load = {
-        let inner = state.0.lock().unwrap();
-        inner.loaded_model.as_deref() != Some(def.id)
-    };
-    if need_load {
+    // the idle eviction scheduled by stop/cancel. The attempt guard owns the
+    // loading state, so an error, timeout, or cancelled command all return the
+    // manager to a retryable state.
+    let load_attempt = EngineLoadAttempt::begin(&state, def.id)?;
+    begin_model_use(&state);
+    if let Some(attempt) = load_attempt {
         // Loading a multi-hundred-MB ONNX model is the one genuinely slow step
-        // on the start path, and — unlike the mic, which is capped at 10s — it
-        // had no time bound. A wedged load (corrupt files that still passed the
-        // .complete check, an ONNX session init that never returns) therefore
-        // left the UI stuck on "Starting dictation…" forever, with no way out.
-        // Announce the load so the pill can say so on first use, and cap the
-        // wait so a stuck load surfaces as an error instead of hanging.
+        // on the start path. Announce it so the pill distinguishes slow work
+        // from a dead state; preflight the runtime before ort's re-entrant
+        // error path, then retain a generous hard deadline for deeper init.
         emit_progress(&app, def.id, "load", 0.0, None);
-        let load = tauri::async_runtime::spawn_blocking(move || load_engine(def));
-        let loaded = match tokio::time::timeout(std::time::Duration::from_secs(90), load).await {
-            Ok(joined) => joined.map_err(|e| e.to_string()).and_then(|result| result),
-            // The blocking load can't be cancelled, so it runs on to completion
-            // and is dropped; the user gets an actionable error either way.
-            Err(_) => Err(
-                "Loading the voice model timed out — the model files may be corrupt. \
-                     Remove and re-download the model in Settings → Dictation."
-                    .into(),
-            ),
-        };
+        let runtime_path = std::env::var_os("ORT_DYLIB_PATH");
+        let loaded = bounded_engine_init(
+            runtime_path,
+            ENGINE_INIT_TIMEOUT,
+            move |runtime_path| async move {
+                log::info!(
+                    "dictation: initializing {} with speech runtime {}",
+                    def.id,
+                    runtime_path.display()
+                );
+                tauri::async_runtime::spawn_blocking(move || load_engine(def))
+                    .await
+                    .map_err(|error| error.to_string())?
+            },
+        )
+        .await;
         let engine = match loaded {
             Ok(engine) => engine,
-            Err(error) => {
+            Err(failure) => {
+                failure.log(def.id);
                 // `begin_model_use` invalidated the preceding idle timer. If a
                 // model switch failed, the prior engine can still be resident.
                 schedule_idle_model_evict(&state);
-                return Err(error);
+                return Err(failure.user_message().to_string());
             }
         };
-        let mut inner = state.0.lock().unwrap();
-        *inner.engine.lock().unwrap() = Some(engine);
-        inner.loaded_model = Some(def.id.to_string());
+        attempt.install(engine);
     }
     // Only after the model is resident: muting during a 30s first-use download
     // would leave the speakers off for the whole wait.
@@ -1077,6 +1215,86 @@ pub fn dictation_supported() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_failed_load_is_idle_and_retryable(state: &DictationManager, model: &str) {
+        let inner = state.0.lock().unwrap();
+        assert!(
+            inner.loading.is_none(),
+            "loading state survived the failure"
+        );
+        assert!(inner.recording.is_none(), "failure opened the microphone");
+        assert!(
+            inner.loaded_model.is_none(),
+            "failed model was marked loaded"
+        );
+        drop(inner);
+
+        let retry = EngineLoadAttempt::begin(state, model)
+            .expect("retry should not be rejected")
+            .expect("retry should begin a fresh load");
+        drop(retry);
+    }
+
+    /// This is the live failure path from research 0123: a bare dev launch did
+    /// not export ORT_DYLIB_PATH. The loader must never be entered (ort rc.12
+    /// can deadlock while constructing that error), the user copy must stay
+    /// free of launch internals, and dropping the attempt must restore idle.
+    #[tokio::test]
+    async fn missing_runtime_fails_fast_and_leaves_dictation_retryable() {
+        let state = DictationManager::default();
+        let attempt = EngineLoadAttempt::begin(&state, "parakeet-v3")
+            .unwrap()
+            .unwrap();
+        let loader_called = Arc::new(AtomicBool::new(false));
+        let called = loader_called.clone();
+        let started = std::time::Instant::now();
+        let result = bounded_engine_init(None, std::time::Duration::from_millis(50), move |_| {
+            called.store(true, Ordering::SeqCst);
+            async { Ok(()) }
+        })
+        .await;
+
+        assert!(matches!(
+            &result,
+            Err(EngineInitFailure::RuntimeUnavailable(_))
+        ));
+        assert!(!loader_called.load(Ordering::SeqCst));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let message = result.unwrap_err().user_message();
+        assert_eq!(message, RUNTIME_UNAVAILABLE_MESSAGE);
+        assert!(!message.contains("ORT_DYLIB_PATH"));
+
+        drop(attempt);
+        assert_failed_load_is_idle_and_retryable(&state, "parakeet-v3");
+    }
+
+    /// An existing but unusable runtime can get farther than the filesystem
+    /// preflight and wedge during dynamic initialization. Model that with a
+    /// never-resolving loader: the deadline still wins and state still exits.
+    #[tokio::test]
+    async fn broken_runtime_init_is_bounded_and_leaves_dictation_retryable() {
+        let state = DictationManager::default();
+        let attempt = EngineLoadAttempt::begin(&state, "parakeet-v3")
+            .unwrap()
+            .unwrap();
+        let runtime = std::env::current_exe().unwrap().into_os_string();
+        let started = std::time::Instant::now();
+        let result = bounded_engine_init(
+            Some(runtime),
+            std::time::Duration::from_millis(20),
+            |_| async { std::future::pending::<Result<(), String>>().await },
+        )
+        .await;
+
+        assert_eq!(result, Err(EngineInitFailure::TimedOut));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let message = result.unwrap_err().user_message();
+        assert_eq!(message, ENGINE_INIT_TIMEOUT_MESSAGE);
+        assert!(!message.contains("ORT_DYLIB_PATH"));
+
+        drop(attempt);
+        assert_failed_load_is_idle_and_retryable(&state, "parakeet-v3");
+    }
 
     #[test]
     fn idle_model_evict_requires_the_same_inactive_use_epoch() {

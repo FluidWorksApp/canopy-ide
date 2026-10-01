@@ -34,7 +34,32 @@ export interface TrackerProvider {
 export const trackerKey = (id: string): string =>
   getSettings().trackerKeys[id] ?? "";
 
+let trackerConfigGeneration = 0;
+const fetches = new Map<string, Promise<ipc.TicketInfo[]>>();
+let fetchHighWater = 0;
+
+function sharedFetch(
+  key: string,
+  load: () => Promise<ipc.TicketInfo[]>,
+): Promise<ipc.TicketInfo[]> {
+  const active = fetches.get(key);
+  if (active) return active;
+  const next = load().finally(() => {
+    if (fetches.get(key) === next) fetches.delete(key);
+  });
+  fetches.set(key, next);
+  fetchHighWater = Math.max(fetchHighWater, fetches.size);
+  return next;
+}
+
+/** Scalar-only diagnostics; provider ids, repository paths, and keys stay out. */
+export const trackerIoSnapshot = () => ({
+  activeFetches: fetches.size,
+  fetchHighWater,
+});
+
 export const setTrackerKey = (id: string, key: string) => {
+  trackerConfigGeneration++;
   updateSettings({ trackerKeys: { ...getSettings().trackerKeys, [id]: key } });
   // The Issues panel refreshes itself on this — connecting a tracker in
   // Settings shows its issues without a manual reload.
@@ -54,7 +79,7 @@ const github: TrackerProvider = {
           reason:
             "Needs the GitHub CLI: brew install gh, then gh auth login in a terminal.",
         },
-  fetch: (repo) => ipc.ghIssueList(repo),
+  fetch: (repo) => sharedFetch(`github\0${repo}`, () => ipc.ghIssueList(repo)),
 };
 
 const linear: TrackerProvider = {
@@ -65,7 +90,10 @@ const linear: TrackerProvider = {
     trackerKey("linear")
       ? { ok: true }
       : { ok: false, reason: "connect" },
-  fetch: () => ipc.linearIssues(trackerKey("linear")),
+  fetch: () =>
+    sharedFetch(`linear\0${trackerConfigGeneration}`, () =>
+      ipc.linearIssues(trackerKey("linear")),
+    ),
   config: {
     label: "Personal API key",
     placeholder: "lin_api_…",

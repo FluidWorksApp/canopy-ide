@@ -11,7 +11,7 @@ import { Pill, Row, SubHead } from './ui'
 import type { PanelCtx, PanelDef } from './types'
 
 function agentRow(ctx: PanelCtx, r: AgentRow, key: string) {
-  const m = agentMeta(r.agent)
+  const m = agentMeta(r.agent, ctx.clis)
   const live = r.live && r.ptyId !== undefined
   // Only a live, *working* row keeps counting past its last hook event — see
   // agentDuration.ts. A stopped agent must freeze, not drift upward.
@@ -24,7 +24,7 @@ function agentRow(ctx: PanelCtx, r: AgentRow, key: string) {
     <Row
       key={key}
       on={ctx.openKey === (live ? `terminal:${r.ptyId}` : `history:${r.key}`)}
-      icon={<AgentBadge agent={r.agent} sz={26} />}
+      icon={<AgentBadge agent={r.agent} sz={26} clis={ctx.clis} />}
       title={
         <>
           {r.title ?? (r.terminal ? 'Terminal' : m.label)}

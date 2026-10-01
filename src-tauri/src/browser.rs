@@ -26,17 +26,130 @@
 //!    hook below cancels and turns into a drain.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 use tauri::{Emitter, Manager};
 
 /// Everything a native browser view needs from the app that owns it.
-#[derive(Default)]
 pub struct BrowserManager {
     views: Mutex<HashMap<String, ViewState>>,
+    /// Creation is synchronous inside an async command. A tab can close while
+    /// `add_child` is still on the platform thread, before there is a ViewState
+    /// for `browser_close` to find. Tokens turn that close into cancellation:
+    /// the late creator closes its child instead of publishing an ownerless one.
+    opening: Mutex<HashMap<String, (u64, u64)>>,
+    next_open: AtomicU64,
+    /// Native-issued identity of the only JavaScript page allowed to mutate
+    /// browser children. A delayed command from a predecessor is rejected.
+    renderer_generation: AtomicU64,
+    /// A child whose close failed must remain nameable even when it never made
+    /// it into `views`. This is also the bounded pending-close queue: one
+    /// native retry worker drains these labels even when the renderer stays
+    /// alive and no later renderer-registration sweep occurs.
+    orphans: Mutex<HashMap<String, String>>,
+    close_retry_running: AtomicBool,
+    close_retry_attempts: AtomicU64,
+    close_retry_successes: AtomicU64,
+    close_retry_failures: AtomicU64,
+    pressure_reload_enabled: bool,
+    pressure_reload_metrics: Mutex<PressureReloadMetricState>,
+}
+
+const DISABLE_PRESSURE_RELOAD_ENV: &str = "CANOPY_DISABLE_PREVIEW_PRESSURE_RELOAD";
+
+fn env_switch_disabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|raw| {
+        matches!(
+            raw.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+impl Default for BrowserManager {
+    fn default() -> Self {
+        Self {
+            views: Mutex::new(HashMap::new()),
+            opening: Mutex::new(HashMap::new()),
+            next_open: AtomicU64::new(0),
+            renderer_generation: AtomicU64::new(0),
+            orphans: Mutex::new(HashMap::new()),
+            close_retry_running: AtomicBool::new(false),
+            close_retry_attempts: AtomicU64::new(0),
+            close_retry_successes: AtomicU64::new(0),
+            close_retry_failures: AtomicU64::new(0),
+            pressure_reload_enabled: !env_switch_disabled(
+                std::env::var_os(DISABLE_PRESSURE_RELOAD_ENV).as_deref(),
+            ),
+            pressure_reload_metrics: Mutex::new(PressureReloadMetricState::default()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserCloseMetrics {
+    pending: usize,
+    retry_running: bool,
+    attempts: u64,
+    successes: u64,
+    failures: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserPressureReloadMetrics {
+    enabled: bool,
+    decisions: u64,
+    targets: u64,
+    attempts: u64,
+    successes: u64,
+    failures: u64,
+    missing_views: u64,
+    suppressed_targets: u64,
+    dispatch_latency_ms_total: u64,
+    dispatch_latency_ms_last: u64,
+    dispatch_latency_ms_max: u64,
+}
+
+#[derive(Default)]
+struct PressureReloadMetricState {
+    decisions: u64,
+    targets: u64,
+    attempts: u64,
+    successes: u64,
+    failures: u64,
+    missing_views: u64,
+    suppressed_targets: u64,
+    dispatch_latency_ms_total: u64,
+    dispatch_latency_ms_last: u64,
+    dispatch_latency_ms_max: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PressureReloadOutcome {
+    Reloaded,
+    Failed,
+    Missing,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CloseSweep {
+    attempted: u64,
+    closed: u64,
+    remaining: usize,
+}
+
+enum OpenDecision {
+    Existing,
+    Pending,
+    Create(u64),
 }
 
 struct ViewState {
     label: String,
+    renderer_generation: u64,
     visible: bool,
     /// Where the frontend last said this view goes, in window points — the
     /// rect a blank view is nudged away from and back to.
@@ -64,6 +177,16 @@ const DRAIN_SCHEME: &str = "canopy-drain";
 /// page's own op deadline (frontend side) is much longer; this only guards
 /// against a webview that never calls the completion handler at all.
 const EVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A single worker retries transient WebKit close failures. The delay reaches
+/// a low-frequency ceiling rather than creating an unbounded task/timer set.
+const CLOSE_RETRY_DELAYS: [std::time::Duration; 5] = [
+    std::time::Duration::from_millis(100),
+    std::time::Duration::from_millis(500),
+    std::time::Duration::from_secs(2),
+    std::time::Duration::from_secs(10),
+    std::time::Duration::from_secs(30),
+];
 
 /// Whether this build can host a native browser view at all. The child-webview
 /// API is desktop-only, and only macOS has been through the overlap, snapshot
@@ -97,6 +220,159 @@ pub fn previewable(url: &str) -> bool {
 }
 
 impl BrowserManager {
+    fn require_renderer(&self, generation: u64) -> Result<(), String> {
+        let current = self.renderer_generation.load(Ordering::SeqCst);
+        if generation == 0 || generation != current {
+            return Err(format!(
+                "browser renderer generation {generation} is stale (current {current})"
+            ));
+        }
+        Ok(())
+    }
+
+    fn begin_open(&self, tab_id: &str, renderer_generation: u64) -> Result<OpenDecision, String> {
+        self.require_renderer(renderer_generation)?;
+        // One lock order everywhere: opening -> views. This makes publish and
+        // close mutually exclusive without holding either lock around WebKit.
+        let mut opening = self.opening.lock().unwrap();
+        if self.views.lock().unwrap().contains_key(tab_id) {
+            return Ok(OpenDecision::Existing);
+        }
+        if opening.contains_key(tab_id) {
+            return Ok(OpenDecision::Pending);
+        }
+        let token = self.next_open.fetch_add(1, Ordering::SeqCst) + 1;
+        opening.insert(tab_id.to_string(), (token, renderer_generation));
+        Ok(OpenDecision::Create(token))
+    }
+
+    /// Publish a child only if no close/replacement invalidated its creation.
+    fn publish_open(&self, tab_id: String, token: u64, state: ViewState) -> bool {
+        let mut opening = self.opening.lock().unwrap();
+        if self.renderer_generation.load(Ordering::SeqCst) != state.renderer_generation
+            || opening.get(&tab_id).copied() != Some((token, state.renderer_generation))
+        {
+            return false;
+        }
+        self.views.lock().unwrap().insert(tab_id.clone(), state);
+        opening.remove(&tab_id);
+        true
+    }
+
+    fn finish_failed_open(&self, tab_id: &str, token: u64) {
+        let mut opening = self.opening.lock().unwrap();
+        if opening
+            .get(tab_id)
+            .is_some_and(|(candidate, _)| *candidate == token)
+        {
+            opening.remove(tab_id);
+        }
+    }
+
+    fn cancel_open(&self, tab_id: &str, renderer_generation: u64) {
+        let mut opening = self.opening.lock().unwrap();
+        if opening
+            .get(tab_id)
+            .is_some_and(|(_, owner)| *owner == renderer_generation)
+        {
+            opening.remove(tab_id);
+        }
+    }
+
+    fn remember_orphan(&self, tab_id: &str, label: &str) {
+        self.orphans
+            .lock()
+            .unwrap()
+            .insert(label.to_string(), tab_id.to_string());
+    }
+
+    fn close_metrics(&self) -> BrowserCloseMetrics {
+        BrowserCloseMetrics {
+            pending: self.orphans.lock().unwrap().len(),
+            retry_running: self.close_retry_running.load(Ordering::SeqCst),
+            attempts: self.close_retry_attempts.load(Ordering::Relaxed),
+            successes: self.close_retry_successes.load(Ordering::Relaxed),
+            failures: self.close_retry_failures.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Apply one close attempt per queued label. Keeping the close operation
+    /// injectable makes the fail-then-success lifecycle test deterministic;
+    /// native WebKit lookup/close is supplied by `retry_pending_closes`.
+    fn sweep_pending_with(&self, mut close: impl FnMut(&str) -> bool) -> CloseSweep {
+        let targets = self
+            .orphans
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(label, tab_id)| (label.clone(), tab_id.clone()))
+            .collect::<Vec<_>>();
+        let mut sweep = CloseSweep::default();
+        for (label, tab_id) in targets {
+            sweep.attempted += 1;
+            self.close_retry_attempts.fetch_add(1, Ordering::Relaxed);
+            if !close(&label) {
+                self.close_retry_failures.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            sweep.closed += 1;
+            self.close_retry_successes.fetch_add(1, Ordering::Relaxed);
+            let mut views = self.views.lock().unwrap();
+            if views.get(&tab_id).is_some_and(|state| state.label == label) {
+                views.remove(&tab_id);
+            }
+            drop(views);
+            let mut orphans = self.orphans.lock().unwrap();
+            if orphans.get(&label).is_some_and(|owner| owner == &tab_id) {
+                orphans.remove(&label);
+            }
+        }
+        sweep.remaining = self.orphans.lock().unwrap().len();
+        sweep
+    }
+
+    fn retry_pending_closes<R: tauri::Runtime>(&self, app: &tauri::AppHandle<R>) -> CloseSweep {
+        self.sweep_pending_with(|label| match app.get_webview(label) {
+            Some(view) => view.close().is_ok(),
+            None => true,
+        })
+    }
+
+    fn schedule_close_retry<R: tauri::Runtime>(&self, app: tauri::AppHandle<R>) {
+        if self.close_retry_running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tauri::async_runtime::spawn(async move {
+            let mut delay = 0usize;
+            loop {
+                tokio::time::sleep(CLOSE_RETRY_DELAYS[delay]).await;
+                let manager = app.state::<BrowserManager>();
+                let sweep = manager.retry_pending_closes(&app);
+                if sweep.remaining == 0 {
+                    manager.close_retry_running.store(false, Ordering::SeqCst);
+                    // Close can race the transition above. If it queued work
+                    // while this worker still looked active, start exactly one
+                    // replacement worker after releasing the flag.
+                    if !manager.orphans.lock().unwrap().is_empty() {
+                        manager.schedule_close_retry(app.clone());
+                    }
+                    break;
+                }
+                delay = (delay + 1).min(CLOSE_RETRY_DELAYS.len() - 1);
+            }
+        });
+    }
+
+    fn queue_close_retry<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        tab_id: &str,
+        label: &str,
+    ) {
+        self.remember_orphan(tab_id, label);
+        self.schedule_close_retry(app.clone());
+    }
+
     fn label(&self, tab_id: &str) -> Option<String> {
         self.views
             .lock()
@@ -107,12 +383,19 @@ impl BrowserManager {
 
     /// Labels of every live view, for teardown.
     pub fn labels(&self) -> Vec<String> {
-        self.views
+        let mut labels = self
+            .views
             .lock()
             .unwrap()
             .values()
             .map(|v| v.label.clone())
-            .collect()
+            .collect::<Vec<_>>();
+        for label in self.orphans.lock().unwrap().keys() {
+            if !labels.contains(label) {
+                labels.push(label.clone());
+            }
+        }
+        labels
     }
 
     pub fn shutdown_all(&self, app: &tauri::AppHandle) {
@@ -122,6 +405,160 @@ impl BrowserManager {
             }
         }
         self.views.lock().unwrap().clear();
+        self.orphans.lock().unwrap().clear();
+        self.opening.lock().unwrap().clear();
+        self.close_retry_running.store(false, Ordering::SeqCst);
+    }
+
+    /// A JavaScript page owns every child browser view through a React
+    /// component. Reload/crash skips those components' cleanup while the native
+    /// manager survives, leaving WebKit content processes alive with no tab.
+    /// A newly registered page therefore closes all predecessor-owned views.
+    /// Failed closes remain registered and the singleton retry worker keeps
+    /// trying even if the replacement renderer never registers again.
+    pub fn close_renderer_orphans<R: tauri::Runtime>(&self, app: &tauri::AppHandle<R>) {
+        // A predecessor may still be blocked inside add_child and have no view
+        // to enumerate yet. Invalidate every creation token first; when that
+        // call returns, publish_open refuses it and the creator closes the late
+        // child itself.
+        self.opening.lock().unwrap().clear();
+        let mut targets = self
+            .views
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(tab_id, state)| (tab_id.clone(), state.label.clone()))
+            .collect::<Vec<_>>();
+        for (label, tab_id) in self.orphans.lock().unwrap().iter() {
+            if !targets.iter().any(|(_, existing)| existing == label) {
+                targets.push((tab_id.clone(), label.clone()));
+            }
+        }
+        for (tab_id, label) in targets {
+            self.remember_orphan(&tab_id, &label);
+        }
+        let sweep = self.retry_pending_closes(app);
+        if sweep.remaining > 0 {
+            log::warn!(
+                "renderer recovery: {} browser view close(s) remain queued after the initial sweep",
+                sweep.remaining
+            );
+            self.schedule_close_retry(app.clone());
+        }
+    }
+
+    /// Transfer browser-child authority to the replacement JavaScript page,
+    /// then sweep every child (including half-created children) of the prior one.
+    pub fn renderer_registered<R: tauri::Runtime>(
+        &self,
+        app: &tauri::AppHandle<R>,
+        generation: u64,
+    ) {
+        self.renderer_generation.store(generation, Ordering::SeqCst);
+        self.close_renderer_orphans(app);
+    }
+
+    fn memory_pressure_targets(&self, include_visible: bool) -> Vec<(String, String)> {
+        self.views
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, state)| include_visible || !state.visible)
+            .map(|(tab_id, state)| (tab_id.clone(), state.label.clone()))
+            .collect()
+    }
+
+    fn pressure_reload_metrics(&self) -> BrowserPressureReloadMetrics {
+        let metrics = self.pressure_reload_metrics.lock().unwrap();
+        BrowserPressureReloadMetrics {
+            enabled: self.pressure_reload_enabled,
+            decisions: metrics.decisions,
+            targets: metrics.targets,
+            attempts: metrics.attempts,
+            successes: metrics.successes,
+            failures: metrics.failures,
+            missing_views: metrics.missing_views,
+            suppressed_targets: metrics.suppressed_targets,
+            dispatch_latency_ms_total: metrics.dispatch_latency_ms_total,
+            dispatch_latency_ms_last: metrics.dispatch_latency_ms_last,
+            dispatch_latency_ms_max: metrics.dispatch_latency_ms_max,
+        }
+    }
+
+    fn reload_pressure_with<F>(&self, include_visible: bool, mut reload: F) -> Vec<String>
+    where
+        F: FnMut(&str, &str) -> PressureReloadOutcome,
+    {
+        let targets = self.memory_pressure_targets(include_visible);
+        {
+            let mut metrics = self.pressure_reload_metrics.lock().unwrap();
+            metrics.decisions = metrics.decisions.saturating_add(1);
+            metrics.targets = metrics.targets.saturating_add(targets.len() as u64);
+            if !self.pressure_reload_enabled {
+                metrics.suppressed_targets = metrics
+                    .suppressed_targets
+                    .saturating_add(targets.len() as u64);
+                return Vec::new();
+            }
+        }
+
+        let mut reloaded = Vec::new();
+        for (tab_id, label) in targets {
+            let started = Instant::now();
+            let outcome = reload(&tab_id, &label);
+            let elapsed = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            let mut metrics = self.pressure_reload_metrics.lock().unwrap();
+            metrics.dispatch_latency_ms_last = elapsed;
+            metrics.dispatch_latency_ms_max = metrics.dispatch_latency_ms_max.max(elapsed);
+            metrics.dispatch_latency_ms_total =
+                metrics.dispatch_latency_ms_total.saturating_add(elapsed);
+            match outcome {
+                PressureReloadOutcome::Reloaded => {
+                    metrics.attempts = metrics.attempts.saturating_add(1);
+                    metrics.successes = metrics.successes.saturating_add(1);
+                    reloaded.push(tab_id);
+                }
+                PressureReloadOutcome::Failed => {
+                    metrics.attempts = metrics.attempts.saturating_add(1);
+                    metrics.failures = metrics.failures.saturating_add(1);
+                }
+                PressureReloadOutcome::Missing => {
+                    metrics.missing_views = metrics.missing_views.saturating_add(1);
+                }
+            }
+        }
+        reloaded
+    }
+
+    /// Tear down the JavaScript heaps in preview renderers while the machine
+    /// is running out of memory. At warning pressure only hidden previews are
+    /// touched; at critical pressure the visible preview is refreshed too.
+    /// Reloading preserves the URL, cookies and the native view handle, so the
+    /// frontend does not end up pointing at a child view that was closed under
+    /// it. The page can lose ephemeral in-document state, but only after the
+    /// alternative has become WebKit terminating Canopy's main renderer.
+    pub fn reload_for_memory_pressure(
+        &self,
+        app: &tauri::AppHandle,
+        include_visible: bool,
+    ) -> Vec<String> {
+        // Do not hold the state mutex while dispatching work to WebKit's main
+        // thread. Besides needless contention, callbacks from a reload can
+        // immediately re-enter BrowserManager through the navigation hook.
+        self.reload_pressure_with(include_visible, |tab_id, label| {
+            let Some(view) = app.get_webview(label) else {
+                return PressureReloadOutcome::Missing;
+            };
+            match view.reload() {
+                Ok(()) => PressureReloadOutcome::Reloaded,
+                Err(error) => {
+                    log::warn!(
+                        "memory-watchdog: couldn't reload preview {tab_id} ({label}): {error}"
+                    );
+                    PressureReloadOutcome::Failed
+                }
+            }
+        })
     }
 }
 
@@ -231,6 +668,7 @@ pub async fn browser_open(
     // A PiP-owned browser starts behind the user's current tab. Creating it
     // hidden avoids one frame of the full native view flashing over their work.
     visible: bool,
+    renderer_generation: u64,
 ) -> Result<(), String> {
     if !SUPPORTED {
         return Err("the embedded browser needs macOS on this build".into());
@@ -240,12 +678,35 @@ pub async fn browser_open(
             "{url} isn't an http:// or https:// URL — the browser opens web pages"
         ));
     }
-    if app.state::<BrowserManager>().label(&tab_id).is_some() {
-        return browser_navigate(app, tab_id, Some(url), None).await;
+    let manager = app.state::<BrowserManager>();
+    match manager.begin_open(&tab_id, renderer_generation)? {
+        OpenDecision::Existing => {
+            browser_navigate(app, tab_id, Some(url), None, renderer_generation).await
+        }
+        // Idempotent while the first platform creation is still in flight.
+        OpenDecision::Pending => Ok(()),
+        OpenDecision::Create(token) => {
+            let result = create(
+                app.clone(),
+                window,
+                tab_id.clone(),
+                token,
+                url,
+                x,
+                y,
+                width,
+                height,
+                background,
+                visible,
+                renderer_generation,
+            );
+            if result.is_err() {
+                app.state::<BrowserManager>()
+                    .finish_failed_open(&tab_id, token);
+            }
+            result
+        }
     }
-    create(
-        app, window, tab_id, url, x, y, width, height, background, visible,
-    )
 }
 
 /// Paint the webview's own empty space in the app's colour.
@@ -279,6 +740,7 @@ fn create(
     app: tauri::AppHandle,
     window: tauri::Window,
     tab_id: String,
+    open_token: u64,
     url: String,
     x: f64,
     y: f64,
@@ -286,6 +748,7 @@ fn create(
     height: f64,
     background: Option<Vec<u8>>,
     visible: bool,
+    renderer_generation: u64,
 ) -> Result<(), String> {
     use tauri::utils::config::BackgroundThrottlingPolicy;
     use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
@@ -359,31 +822,58 @@ fn create(
         )
         .map_err(|e| format!("couldn't open the browser view: {e}"))?;
 
-    if let Some(rgb) = background.as_deref() {
-        if let [r, g, b, ..] = *rgb {
-            tint(&view, [r, g, b]);
-        }
-    }
-    if !visible {
-        view.hide()
-            .map_err(|e| format!("couldn't hide the browser view: {e}"))?;
-    }
-
     let initial = Rect {
         x,
         y,
         width,
         height,
     };
-    app.state::<BrowserManager>().views.lock().unwrap().insert(
-        tab_id,
+    let manager = app.state::<BrowserManager>();
+    if !manager.publish_open(
+        tab_id.clone(),
+        open_token,
         ViewState {
             bounds: initial,
             repaint_tried: false,
-            label,
-            visible,
+            label: label.clone(),
+            renderer_generation,
+            // Until the requested hide succeeds, native reality is visible.
+            visible: true,
         },
-    );
+    ) {
+        // The tab closed while add_child was running. A successful close leaves
+        // nothing to publish; a failed close is retained for the next recovery
+        // sweep, so it can never become an unnameable WebContent process.
+        if let Err(error) = view.close() {
+            manager.queue_close_retry(&app, &tab_id, &label);
+            log::warn!("browser creation cancellation: couldn't close {tab_id} ({label}): {error}");
+        }
+        return Ok(());
+    }
+
+    if let Some(rgb) = background.as_deref() {
+        if let [r, g, b, ..] = *rgb {
+            tint(&view, [r, g, b]);
+        }
+    }
+    if !visible {
+        if let Err(error) = view.hide() {
+            // It is already registered, so browser_close either releases it or
+            // deliberately keeps the entry for renderer recovery to retry.
+            let close_error = browser_close(app.clone(), tab_id.clone(), renderer_generation).err();
+            return Err(match close_error {
+                Some(close) => {
+                    format!("couldn't hide the browser view: {error}; close also failed: {close}")
+                }
+                None => format!("couldn't hide the browser view: {error}"),
+            });
+        }
+        if let Some(state) = manager.views.lock().unwrap().get_mut(&tab_id) {
+            if state.label == label {
+                state.visible = false;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -392,6 +882,7 @@ fn create(
     _app: tauri::AppHandle,
     _window: tauri::Window,
     _tab_id: String,
+    _open_token: u64,
     _url: String,
     _x: f64,
     _y: f64,
@@ -399,6 +890,7 @@ fn create(
     _height: f64,
     _background: Option<Vec<u8>>,
     _visible: bool,
+    _renderer_generation: u64,
 ) -> Result<(), String> {
     Err("the embedded browser needs macOS on this build".into())
 }
@@ -409,7 +901,10 @@ pub async fn browser_navigate(
     tab_id: String,
     url: Option<String>,
     action: Option<String>,
+    renderer_generation: u64,
 ) -> Result<(), String> {
+    app.state::<BrowserManager>()
+        .require_renderer(renderer_generation)?;
     let wv = webview(&app, &tab_id)?;
     match (url, action.as_deref()) {
         (Some(u), _) => {
@@ -522,7 +1017,10 @@ pub fn browser_set_bounds(
     y: f64,
     width: f64,
     height: f64,
+    renderer_generation: u64,
 ) -> Result<(), String> {
+    app.state::<BrowserManager>()
+        .require_renderer(renderer_generation)?;
     let wv = webview(&app, &tab_id)?;
     let rect = Rect {
         x,
@@ -549,7 +1047,10 @@ pub fn browser_set_visible(
     app: tauri::AppHandle,
     tab_id: String,
     visible: bool,
+    renderer_generation: u64,
 ) -> Result<(), String> {
+    app.state::<BrowserManager>()
+        .require_renderer(renderer_generation)?;
     let wv = webview(&app, &tab_id)?;
     {
         let mgr = app.state::<BrowserManager>();
@@ -569,18 +1070,74 @@ pub fn browser_set_visible(
 }
 
 #[tauri::command]
-pub fn browser_close(app: tauri::AppHandle, tab_id: String) -> Result<(), String> {
-    let removed = app
-        .state::<BrowserManager>()
+pub fn browser_close(
+    app: tauri::AppHandle,
+    tab_id: String,
+    renderer_generation: u64,
+) -> Result<(), String> {
+    let manager = app.state::<BrowserManager>();
+    manager.require_renderer(renderer_generation)?;
+    // If add_child has not returned yet, this invalidates its token. The creator
+    // will close the late child before publishing it.
+    manager.cancel_open(&tab_id, renderer_generation);
+    let label = manager
         .views
         .lock()
         .unwrap()
-        .remove(&tab_id);
-    let Some(state) = removed else { return Ok(()) };
-    if let Some(wv) = app.get_webview(&state.label) {
-        wv.close().map_err(|e| e.to_string())?;
+        .get(&tab_id)
+        .map(|state| state.label.clone());
+    let orphan_labels = manager
+        .orphans
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(label, owner)| (owner == &tab_id).then_some(label.clone()))
+        .collect::<Vec<_>>();
+    let Some(label) = label else {
+        if orphan_labels.is_empty() {
+            return Ok(());
+        }
+        let sweep = manager.retry_pending_closes(&app);
+        if orphan_labels
+            .iter()
+            .any(|orphan| manager.orphans.lock().unwrap().contains_key(orphan))
+        {
+            manager.schedule_close_retry(app.clone());
+            return Err(format!(
+                "{} browser view close(s) remain queued after a failed close",
+                sweep.remaining
+            ));
+        }
+        return Ok(());
+    };
+    if let Some(wv) = app.get_webview(&label) {
+        if let Err(error) = wv.close() {
+            manager.queue_close_retry(&app, &tab_id, &label);
+            return Err(error.to_string());
+        }
     }
+    // Remove only after close succeeds. If WebKit refuses the close, retaining
+    // the handle lets renderer recovery retry instead of losing the only name
+    // by which the leaked process can be reached.
+    let mut views = manager.views.lock().unwrap();
+    if views.get(&tab_id).is_some_and(|state| state.label == label) {
+        views.remove(&tab_id);
+    }
+    manager.orphans.lock().unwrap().remove(&label);
     Ok(())
+}
+
+#[tauri::command]
+pub fn browser_close_metrics(app: tauri::AppHandle) -> BrowserCloseMetrics {
+    app.state::<BrowserManager>().close_metrics()
+}
+
+/// Constant-size pressure-reload counters and the startup kill-switch state.
+/// Together with `browser_close_metrics`, disposable-runner experiments can
+/// compare lifecycle actions without retaining tab ids, labels or URLs.
+#[tauri::command]
+pub fn browser_pressure_reload_metrics(app: tauri::AppHandle) -> BrowserPressureReloadMetrics {
+    app.state::<BrowserManager>().pressure_reload_metrics()
 }
 
 /// Run one browser op (`canopy_browser_*`) against the page. Read-only ops
@@ -591,7 +1148,10 @@ pub async fn browser_run_op(
     app: tauri::AppHandle,
     tab_id: String,
     op: serde_json::Value,
+    renderer_generation: u64,
 ) -> Result<serde_json::Value, String> {
+    app.state::<BrowserManager>()
+        .require_renderer(renderer_generation)?;
     let code = format!(
         "window.__canopyBrowser ? window.__canopyBrowser.run({}) : null",
         serde_json::to_string(&op).map_err(|e| e.to_string())?
@@ -611,7 +1171,10 @@ pub async fn browser_command(
     app: tauri::AppHandle,
     tab_id: String,
     message: serde_json::Value,
+    renderer_generation: u64,
 ) -> Result<(), String> {
+    app.state::<BrowserManager>()
+        .require_renderer(renderer_generation)?;
     let code = format!(
         "window.__canopyBrowser && window.__canopyBrowser.cmd({})",
         serde_json::to_string(&message).map_err(|e| e.to_string())?
@@ -629,7 +1192,13 @@ pub async fn browser_command(
 /// snapshot would force the very render it is trying to detect — which is why
 /// this bug survived a suite that takes pictures.
 #[tauri::command]
-pub async fn browser_painted(app: tauri::AppHandle, tab_id: String) -> Result<bool, String> {
+pub async fn browser_painted(
+    app: tauri::AppHandle,
+    tab_id: String,
+    renderer_generation: u64,
+) -> Result<bool, String> {
+    app.state::<BrowserManager>()
+        .require_renderer(renderer_generation)?;
     Ok(has_painted(&app, &tab_id).await)
 }
 
@@ -639,7 +1208,10 @@ pub async fn browser_painted(app: tauri::AppHandle, tab_id: String) -> Result<bo
 pub async fn browser_here(
     app: tauri::AppHandle,
     tab_id: String,
+    renderer_generation: u64,
 ) -> Result<serde_json::Value, String> {
+    app.state::<BrowserManager>()
+        .require_renderer(renderer_generation)?;
     eval_json(
         &app,
         &tab_id,
@@ -652,7 +1224,9 @@ pub async fn browser_here(
 /// shared by every tab on purpose (that is what keeps you logged in), so this
 /// is all-or-nothing, exactly like a browser's "clear browsing data".
 #[tauri::command]
-pub fn browser_clear_data(app: tauri::AppHandle) -> Result<(), String> {
+pub fn browser_clear_data(app: tauri::AppHandle, renderer_generation: u64) -> Result<(), String> {
+    app.state::<BrowserManager>()
+        .require_renderer(renderer_generation)?;
     if !SUPPORTED {
         return Err(
             "There is no embedded-browser profile on this platform yet — the preview runs \
@@ -674,6 +1248,113 @@ pub fn browser_clear_data(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state(label: &str, renderer_generation: u64) -> ViewState {
+        ViewState {
+            label: label.into(),
+            renderer_generation,
+            visible: false,
+            bounds: Rect::default(),
+            repaint_tried: false,
+        }
+    }
+
+    #[test]
+    fn close_cancels_an_inflight_child_before_it_can_publish() {
+        let manager = BrowserManager::default();
+        manager.renderer_generation.store(1, Ordering::SeqCst);
+        let OpenDecision::Create(token) = manager.begin_open("tab", 1).unwrap() else {
+            panic!("first open should create");
+        };
+        manager.cancel_open("tab", 1);
+        assert!(!manager.publish_open("tab".into(), token, state("late", 1)));
+        assert!(manager.views.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_creator_cannot_overwrite_a_reopened_tab() {
+        let manager = BrowserManager::default();
+        manager.renderer_generation.store(1, Ordering::SeqCst);
+        let OpenDecision::Create(old) = manager.begin_open("tab", 1).unwrap() else {
+            panic!("first open should create");
+        };
+        manager.cancel_open("tab", 1);
+        manager.renderer_generation.store(2, Ordering::SeqCst);
+        let OpenDecision::Create(current) = manager.begin_open("tab", 2).unwrap() else {
+            panic!("replacement open should create");
+        };
+        assert!(!manager.publish_open("tab".into(), old, state("old", 1)));
+        assert!(manager.publish_open("tab".into(), current, state("current", 2)));
+        assert_eq!(manager.label("tab").as_deref(), Some("current"));
+    }
+
+    #[test]
+    fn failed_close_of_an_unpublished_child_stays_recoverable() {
+        let manager = BrowserManager::default();
+        manager.remember_orphan("tab", "orphan-label");
+        assert_eq!(manager.labels(), vec!["orphan-label".to_string()]);
+    }
+
+    #[test]
+    fn pending_close_retries_fail_then_succeed_without_losing_the_handle() {
+        let manager = BrowserManager::default();
+        manager
+            .views
+            .lock()
+            .unwrap()
+            .insert("tab".into(), state("view-label", 1));
+        manager.remember_orphan("tab", "view-label");
+
+        let first = manager.sweep_pending_with(|_| false);
+        assert_eq!(
+            first,
+            CloseSweep {
+                attempted: 1,
+                closed: 0,
+                remaining: 1,
+            }
+        );
+        assert_eq!(manager.label("tab").as_deref(), Some("view-label"));
+        assert_eq!(manager.close_metrics().pending, 1);
+
+        let second = manager.sweep_pending_with(|_| true);
+        assert_eq!(
+            second,
+            CloseSweep {
+                attempted: 1,
+                closed: 1,
+                remaining: 0,
+            }
+        );
+        assert!(manager.views.lock().unwrap().is_empty());
+        assert!(manager.orphans.lock().unwrap().is_empty());
+        let metrics = manager.close_metrics();
+        assert_eq!(
+            (metrics.attempts, metrics.successes, metrics.failures),
+            (2, 1, 1)
+        );
+    }
+
+    #[test]
+    fn renderer_recovery_invalidates_a_predecessor_creation() {
+        use tauri::WebviewUrl;
+
+        let app = tauri::test::mock_app();
+        let manager = BrowserManager::default();
+        manager.renderer_generation.store(1, Ordering::SeqCst);
+        let OpenDecision::Create(token) = manager.begin_open("old-page-tab", 1).unwrap() else {
+            panic!("first open should create");
+        };
+        tauri::WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .build()
+            .unwrap();
+        manager.renderer_registered(app.handle(), 2);
+        assert!(!manager.publish_open(
+            "old-page-tab".into(),
+            token,
+            state("late-old-page-view", 1),
+        ));
+    }
 
     #[test]
     fn a_label_survives_any_tab_id() {
@@ -742,6 +1423,7 @@ mod tests {
             "tab-1".into(),
             ViewState {
                 label: label.clone(),
+                renderer_generation: 1,
                 visible: true,
                 bounds: Rect::default(),
                 repaint_tried: false,
@@ -749,6 +1431,47 @@ mod tests {
         );
 
         assert_eq!(webview(app.handle(), "tab-1").unwrap().label(), label);
+    }
+
+    #[test]
+    fn renderer_recovery_closes_and_forgets_predecessor_browser_views() {
+        use tauri::{LogicalPosition, LogicalSize, WebviewUrl};
+
+        let app = tauri::test::mock_app();
+        app.handle().manage(BrowserManager::default());
+        tauri::WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .build()
+            .unwrap();
+        let label = label_for("old-tab");
+        app.get_window("main")
+            .unwrap()
+            .add_child(
+                tauri::webview::WebviewBuilder::new(&label, WebviewUrl::default()),
+                LogicalPosition::new(0.0, 0.0),
+                LogicalSize::new(100.0, 100.0),
+            )
+            .unwrap();
+        app.state::<BrowserManager>().views.lock().unwrap().insert(
+            "old-tab".into(),
+            ViewState {
+                label: label.clone(),
+                renderer_generation: 1,
+                visible: false,
+                bounds: Rect::default(),
+                repaint_tried: false,
+            },
+        );
+
+        app.state::<BrowserManager>()
+            .close_renderer_orphans(app.handle());
+
+        assert!(app
+            .state::<BrowserManager>()
+            .views
+            .lock()
+            .unwrap()
+            .is_empty());
+        assert!(app.get_webview(&label).is_none());
     }
 
     /// A refusal has to name the tab it failed on. An agent handed a bare
@@ -760,5 +1483,124 @@ mod tests {
         app.handle().manage(BrowserManager::default());
         let err = webview(app.handle(), "tab-gone").unwrap_err();
         assert!(err.contains("tab-gone"), "{err}");
+    }
+
+    #[test]
+    fn memory_pressure_spares_the_visible_preview_until_critical() {
+        let manager = BrowserManager::default();
+        let mut views = manager.views.lock().unwrap();
+        for (tab_id, visible) in [("visible", true), ("hidden-a", false), ("hidden-b", false)] {
+            views.insert(
+                tab_id.into(),
+                ViewState {
+                    label: label_for(tab_id),
+                    renderer_generation: 1,
+                    visible,
+                    bounds: Rect::default(),
+                    repaint_tried: false,
+                },
+            );
+        }
+        drop(views);
+
+        let mut warning: Vec<String> = manager
+            .memory_pressure_targets(false)
+            .into_iter()
+            .map(|(tab_id, _)| tab_id)
+            .collect();
+        warning.sort();
+        assert_eq!(warning, ["hidden-a", "hidden-b"]);
+
+        let mut critical: Vec<String> = manager
+            .memory_pressure_targets(true)
+            .into_iter()
+            .map(|(tab_id, _)| tab_id)
+            .collect();
+        critical.sort();
+        assert_eq!(critical, ["hidden-a", "hidden-b", "visible"]);
+    }
+
+    #[test]
+    fn pressure_reload_kill_switch_values_are_explicit() {
+        for enabled in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(env_switch_disabled(Some(std::ffi::OsStr::new(enabled))));
+        }
+        for enabled in ["", "0", "false", "off", "unexpected"] {
+            assert!(!env_switch_disabled(Some(std::ffi::OsStr::new(enabled))));
+        }
+        assert!(!env_switch_disabled(None));
+    }
+
+    #[test]
+    fn pressure_reload_metrics_stay_constant_size_through_many_replacements() {
+        let manager = BrowserManager {
+            pressure_reload_enabled: true,
+            ..BrowserManager::default()
+        };
+        manager.views.lock().unwrap().insert(
+            "hidden".into(),
+            ViewState {
+                label: label_for("hidden"),
+                renderer_generation: 1,
+                visible: false,
+                bounds: Rect::default(),
+                repaint_tried: false,
+            },
+        );
+
+        for cycle in 0..10_000 {
+            let result = manager.reload_pressure_with(false, |_, _| match cycle % 3 {
+                0 => PressureReloadOutcome::Reloaded,
+                1 => PressureReloadOutcome::Failed,
+                _ => PressureReloadOutcome::Missing,
+            });
+            assert_eq!(result.len(), usize::from(cycle % 3 == 0));
+        }
+
+        let metrics = manager.pressure_reload_metrics();
+        assert_eq!(metrics.decisions, 10_000);
+        assert_eq!(metrics.targets, 10_000);
+        assert_eq!(metrics.attempts, 6_667);
+        assert_eq!(metrics.successes, 3_334);
+        assert_eq!(metrics.failures, 3_333);
+        assert_eq!(metrics.missing_views, 3_333);
+        assert_eq!(metrics.suppressed_targets, 0);
+        assert!(metrics.enabled);
+    }
+
+    #[test]
+    fn pressure_reload_kill_switch_retains_decision_measurement_without_reloading() {
+        let manager = BrowserManager {
+            pressure_reload_enabled: false,
+            ..BrowserManager::default()
+        };
+        manager.views.lock().unwrap().insert(
+            "hidden".into(),
+            ViewState {
+                label: label_for("hidden"),
+                renderer_generation: 1,
+                visible: false,
+                bounds: Rect::default(),
+                repaint_tried: false,
+            },
+        );
+        let mut called = false;
+        let reloaded = manager.reload_pressure_with(false, |_, _| {
+            called = true;
+            PressureReloadOutcome::Reloaded
+        });
+
+        assert!(!called);
+        assert!(reloaded.is_empty());
+        assert_eq!(
+            manager.pressure_reload_metrics(),
+            BrowserPressureReloadMetrics {
+                enabled: false,
+                decisions: 1,
+                targets: 1,
+                suppressed_targets: 1,
+                ..BrowserPressureReloadMetrics::default()
+            }
+        );
     }
 }

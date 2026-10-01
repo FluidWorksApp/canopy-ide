@@ -164,12 +164,6 @@ const JUSTIFYING_FUNCTIONS = [
     enabled: true,
     cost: "the checkpoint gate reads a hardcoded secretScanClean instead of a real scan, so auto-checkpoint is dead code that looks alive",
   },
-  {
-    module: "vibeSecretScan.ts",
-    symbol: "describeSecretFindings",
-    enabled: true,
-    cost: "the sentence explaining that a secret is why a turn was not saved is never said, so the refusal has no reason attached",
-  },
   // The `reconcileCheckpoint` entry that stood here is gone with the function.
   // It was the one case this table could not decide, because the missing piece
   // was not a caller but the whole two-phase protocol; the design call was to
@@ -203,6 +197,46 @@ const JUSTIFYING_FUNCTIONS = [
     symbol: "detectDeployProvider",
     enabled: true,
     cost: "the deploy provider is never detected, because nothing calls the detector",
+  },
+  // The read chain, guarded link by link to the surface. `taskEvents` having a
+  // consumer proves only that taskEvidence.ts exists; unmounting the panel from
+  // TaskHistoryView would leave every guard above green while the ledger went
+  // back to being write-only.
+  {
+    module: "taskEvidence.ts",
+    symbol: "loadTaskEvidence",
+    enabled: true,
+    cost: "the evidence projection exists but no surface mounts it, so the ledger is readable in principle and read by nothing",
+  },
+  {
+    module: "taskEvidence.ts",
+    symbol: "readEvidenceArtifact",
+    enabled: true,
+    cost: "stored artifacts — turn diffs, screenshots, log tails — can never be opened, so kept evidence is kept from everyone",
+  },
+  {
+    module: "components/TaskEvidence.tsx",
+    symbol: "TaskEvidenceFold",
+    enabled: true,
+    cost: "the evidence panel is built but hangs under no row, so nothing a person can click reaches the record",
+  },
+  {
+    module: "workflowRuns.ts",
+    symbol: "refreshWorkflowRuns",
+    enabled: true,
+    cost: "durable workflow runs are never listed, so the workflow store is write-only",
+  },
+  {
+    module: "workflowRuns.ts",
+    symbol: "workflowGet",
+    enabled: true,
+    cost: "workflow step states are durable but no surface can read one run",
+  },
+  {
+    module: "components/WorkflowView.tsx",
+    symbol: "WorkflowView",
+    enabled: true,
+    cost: "the workflow catalog and run projection exist but are mounted by no user-facing surface",
   },
 ] as const;
 
@@ -239,6 +273,11 @@ const READ_APIS = [
     module: "taskTranscript.ts",
     symbol: "listTranscript",
     cost: "the durable transcript is written and never read, so a turn's history dies with its session",
+  },
+  {
+    module: "taskEnvelopes.ts",
+    symbol: "taskGetForAttempt",
+    cost: "workflow gates cannot dereference their attempt evidence, so a recorded step can never make a gate pass",
   },
 ] as const;
 

@@ -100,6 +100,29 @@ export const RESEARCH_EVENT = "canopy:research-changed";
 
 const announce = () => window.dispatchEvent(new CustomEvent(RESEARCH_EVENT));
 
+const QUESTION_MAX = 600;
+// Leave room for the entry's generated heading inside Rust's 24 KiB cap.
+const INITIAL_BODY_MAX = 24 * 1024 - 256;
+
+const clipChars = (value: string, max: number): string => {
+  const chars = Array.from(value);
+  if (chars.length <= max) return value;
+  return `${chars.slice(0, Math.max(0, max - 1)).join("").trimEnd()}…`;
+};
+
+/** Shape free-form UI input for the research store's two prose tiers. The
+ * question remains a concise statement of what is being investigated; any
+ * long request is preserved in the body where the researcher can read it. */
+export function researchRequestDraft(raw: string): { question: string; body?: string } {
+  const request = raw.trim();
+  if (Array.from(request).length <= QUESTION_MAX) return { question: request };
+  const lead = request.split(/\n\s*\n/, 1)[0].replace(/\s+/g, " ").trim();
+  return {
+    question: clipChars(lead || request, QUESTION_MAX),
+    body: clipChars(`## Original request\n\n${request}`, INITIAL_BODY_MAX),
+  };
+}
+
 // ---------- the cache ----------
 //
 // Per project, last answer only. Never consulted for a decision — the store is

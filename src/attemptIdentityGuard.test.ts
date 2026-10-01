@@ -33,13 +33,17 @@ describe("managed attempt identity propagation", () => {
     const finish = rustFn(pty, "finish_task_spawn");
     expect(finish).toContain("mark_launch_failed");
     expect(finish).toContain("mark_spawned");
-    const spawn = rustFn(pty, "spawn");
-    expect(spawn.indexOf("child.kill()")).toBeGreaterThan(
-      spawn.indexOf("try_clone_reader()"),
-    );
-    expect(spawn.indexOf("child.wait()")).toBeGreaterThan(
-      spawn.indexOf("try_clone_reader()"),
-    );
+    const spawn = rustFn(pty, "spawn_bound");
+    const readerClone = spawn.indexOf("try_clone_reader()");
+    const readerFailureCleanup = spawn.slice(readerClone);
+    expect(readerClone).toBeGreaterThanOrEqual(0);
+    expect(readerFailureCleanup.indexOf("child.kill()")).toBeGreaterThan(0);
+    expect(readerFailureCleanup.indexOf("child.wait()")).toBeGreaterThan(0);
+    // A containment-gate failure is intentionally earlier: no user code has
+    // been released, but the helper still has to be killed and reaped before
+    // its lease can be removed. Do not make the reader-order guard prohibit
+    // that race-closing cleanup.
+    expect(spawn.indexOf("containment.activate")).toBeGreaterThanOrEqual(0);
 
     const tasks = read("src-tauri/src/tasks.rs");
     expect(rustFn(tasks, "spawn_binding")).toContain("a.state = 'reserved'");
@@ -48,7 +52,7 @@ describe("managed attempt identity propagation", () => {
   });
 
   it("stamps only the store-proven identity after caller env", () => {
-    const spawn = rustFn(read("src-tauri/src/pty.rs"), "spawn");
+    const spawn = rustFn(read("src-tauri/src/pty.rs"), "spawn_bound");
     const callerEnv = spawn.indexOf("extra_env.unwrap_or_default()");
     const runStamp = spawn.indexOf('cmd.env("CANOPY_RUN_ID"');
     const attemptStamp = spawn.indexOf('cmd.env("CANOPY_ATTEMPT_ID"');

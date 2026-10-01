@@ -19,9 +19,16 @@
 /** Asked of whichever project view is in front. Cancelling it means "I have
  *  taken this URL"; nobody cancelling means there was no view to take it. */
 export const OPEN_URL_EVENT = "canopy:open-url";
+export const OPEN_FILE_EVENT = "canopy:open-file";
 
 export interface OpenUrlDetail {
   url: string;
+}
+
+export interface OpenFileDetail {
+  path: string;
+  line?: number;
+  cwd?: string;
 }
 
 function toOsBrowser(url: string) {
@@ -42,6 +49,17 @@ export function openLink(href: string, external = false) {
     if (claimed) return;
   }
   toOsBrowser(href);
+}
+
+/** Ask the visible project to open an absolute terminal path. */
+export function openFileLink(path: string, line?: number, cwd?: string) {
+  if (!/^(?:\/|[A-Za-z]:[\\/])/.test(path)) return;
+  window.dispatchEvent(
+    new CustomEvent<OpenFileDetail>(OPEN_FILE_EVENT, {
+      detail: { path, line, cwd },
+      cancelable: true,
+    }),
+  );
 }
 
 /** For the controls that promise to leave — Support, Open on GitHub, filing an

@@ -32,7 +32,9 @@ interface ResearchPanelProps {
   /** Open an entry as a tab — every row leads somewhere native. */
   onOpen: (entry: ipc.ResearchSummary) => void;
   /** Start a fresh research run on a question the user types here. */
-  onStart: (question: string) => void;
+  onStart: (
+    question: string,
+  ) => boolean | void | Promise<boolean | void>;
   /** Whether an agent CLI is available to run one. */
   canStart: boolean;
   /** Full-page mode is uncapped and searchable. The default side-panel mode is
@@ -53,6 +55,7 @@ export function ResearchPanel({
 }: ResearchPanelProps) {
   const [rows, setRows] = useState<ipc.ResearchSummary[]>(() => cached(projectId));
   const [question, setQuestion] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const [showClosed, setShowClosed] = useState(page);
   const [query, setQuery] = useState("");
 
@@ -96,11 +99,16 @@ export function ResearchPanel({
     entries: visible.filter((r) => r.status === status),
   })).filter((g) => g.entries.length > 0);
 
-  const submit = () => {
+  const submit = async () => {
     const q = question.trim();
-    if (!q || !canStart) return;
-    onStart(q);
-    setQuestion("");
+    if (!q || !canStart || submitting) return;
+    setSubmitting(true);
+    try {
+      const accepted = await onStart(q);
+      if (accepted !== false) setQuestion("");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -138,19 +146,21 @@ export function ResearchPanel({
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") submit();
+            if (e.key !== "Enter") return;
+            e.preventDefault();
+            void submit();
           }}
         />
         <Button
-          disabled={!question.trim() || !canStart}
-          onClick={submit}
+          disabled={!question.trim() || !canStart || submitting}
+          onClick={() => void submit()}
           title={
             canStart
               ? "Start an agent on this question. It records the finding and changes no code."
               : "No agent CLI installed"
           }
           size="sm">
-          Research
+          {submitting ? "Starting…" : "Research"}
         </Button>
       </div>
 
