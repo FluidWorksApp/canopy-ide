@@ -39,6 +39,25 @@ const NO_EXIT_CODE: i32 = -1;
 static EXIT_CODE: AtomicI32 = AtomicI32::new(NO_EXIT_CODE);
 static REGISTER_FAILURES_REMAINING: std::sync::OnceLock<AtomicU32> = std::sync::OnceLock::new();
 static ATTACH_FAILURES_REMAINING: std::sync::OnceLock<AtomicU32> = std::sync::OnceLock::new();
+/// Main-frame navigations the main WebView has committed. A reload that WebKit
+/// accepted and actually started commits once its document arrives; one that
+/// it dropped never does.
+static MAIN_PAGE_COMMITS: AtomicU64 = AtomicU64::new(0);
+/// A reload that has not committed by now was dropped and is dispatched again.
+/// Committing needs only the small HTML document, not the script bundles.
+const RELOAD_COMMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// A committed page that has not registered by now is wedged and reloaded.
+/// This must stay far above a slow page load: re-dispatching aborts the load
+/// in flight and starts it over (see `selftest_reload_renderer`).
+const RELOAD_BOOT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+const RELOAD_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Record a page-load event for the main WebView (wired in `lib.rs`).
+pub fn main_page_load(event: tauri::webview::PageLoadEvent) {
+    if matches!(event, tauri::webview::PageLoadEvent::Started) {
+        MAIN_PAGE_COMMITS.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 /// What the frontend needs to run a scenario.
 #[derive(Clone, serde::Serialize)]
@@ -423,6 +442,21 @@ fn replacement_registered(initial: u64, attempts: u64, current: u64) -> bool {
     current > initial.saturating_add(attempts)
 }
 
+/// Whether the reload loop should call `reload()` again. Only a reload with no
+/// sign of life is retried: once a navigation has committed, another reload
+/// would abort the page that is loading and start it over.
+fn reload_should_redispatch(
+    since_attempt: std::time::Duration,
+    committed_since_attempt: bool,
+    since_last_commit: std::time::Duration,
+) -> bool {
+    if committed_since_attempt {
+        since_last_commit >= RELOAD_BOOT_WAIT
+    } else {
+        since_attempt >= RELOAD_COMMIT_WAIT
+    }
+}
+
 #[tauri::command]
 pub fn selftest_reload_renderer(
     app: tauri::AppHandle,
@@ -446,6 +480,13 @@ pub fn selftest_reload_renderer(
     // generation invalidation caused by an accepted attempt, and stop only
     // after renderer registration advances the generation once more. This is
     // an observed replacement boot, not merely an `Ok(())` from WebKit.
+    //
+    // Re-dispatch only a reload that never committed. A committed page is
+    // loading: a debug build serves its multi-megabyte bundles through brotli
+    // decompression on the blocking pool, which takes over a second on a slow
+    // runner. Reloading it again aborted that load, left its decompression
+    // running, and started another one; under load every retry was slower than
+    // the retry interval, so the replacement never booted at all.
     let initial_generation = main
         .try_state::<crate::pty::PtyManager>()
         .map(|ptys| ptys.current_renderer_generation())
@@ -453,45 +494,84 @@ pub fn selftest_reload_renderer(
     let attempts = Arc::new(AtomicU64::new(0));
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        for _ in 0..DEADLINE.as_secs() {
+        let started = std::time::Instant::now();
+        let mut dispatches = 0_u32;
+        let mut attempt_at: Option<(std::time::Instant, u64)> = None;
+        let mut last_commit = (
+            std::time::Instant::now(),
+            MAIN_PAGE_COMMITS.load(Ordering::SeqCst),
+        );
+        while started.elapsed() < DEADLINE {
             if let Some(ptys) = main.try_state::<crate::pty::PtyManager>() {
                 if replacement_registered(
                     initial_generation,
                     attempts.load(Ordering::SeqCst),
                     ptys.current_renderer_generation(),
                 ) {
+                    if dispatches > 1 {
+                        log::info!(
+                            "selftest renderer replaced after {dispatches} reload dispatches"
+                        );
+                    }
                     return;
                 }
             }
-            let candidate_attempts = Arc::clone(&attempts);
-            let candidate_main = main.clone();
-            if let Err(error) = app.run_on_main_thread(move || {
-                let result =
-                    if let Some(ptys) = candidate_main.try_state::<crate::pty::PtyManager>() {
-                        if replacement_registered(
-                            initial_generation,
-                            candidate_attempts.load(Ordering::SeqCst),
-                            ptys.current_renderer_generation(),
-                        ) {
-                            return;
-                        }
-                        match ptys.reload_renderer(|| candidate_main.reload()) {
-                            Ok(result) => {
-                                candidate_attempts.fetch_add(1, Ordering::SeqCst);
-                                result
-                            }
-                            Err(_) => return,
-                        }
-                    } else {
-                        candidate_main.reload()
-                    };
-                if let Err(error) = result {
-                    log::error!("selftest renderer reload failed: {error}");
-                }
-            }) {
-                log::error!("selftest renderer reload dispatch failed: {error}");
+            let commits = MAIN_PAGE_COMMITS.load(Ordering::SeqCst);
+            if commits != last_commit.1 {
+                last_commit = (std::time::Instant::now(), commits);
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let redispatch = match attempt_at {
+                None => true,
+                Some((at, commits_at_attempt)) => reload_should_redispatch(
+                    at.elapsed(),
+                    commits != commits_at_attempt,
+                    last_commit.0.elapsed(),
+                ),
+            };
+            if redispatch {
+                if dispatches > 0 {
+                    log::warn!(
+                        "selftest renderer reload re-dispatched (attempt {}): {}",
+                        dispatches + 1,
+                        if attempt_at.is_some_and(|(_, c)| c != commits) {
+                            "committed page never registered"
+                        } else {
+                            "no navigation committed"
+                        },
+                    );
+                }
+                dispatches += 1;
+                attempt_at = Some((std::time::Instant::now(), commits));
+                let candidate_attempts = Arc::clone(&attempts);
+                let candidate_main = main.clone();
+                if let Err(error) = app.run_on_main_thread(move || {
+                    let result =
+                        if let Some(ptys) = candidate_main.try_state::<crate::pty::PtyManager>() {
+                            if replacement_registered(
+                                initial_generation,
+                                candidate_attempts.load(Ordering::SeqCst),
+                                ptys.current_renderer_generation(),
+                            ) {
+                                return;
+                            }
+                            match ptys.reload_renderer(|| candidate_main.reload()) {
+                                Ok(result) => {
+                                    candidate_attempts.fetch_add(1, Ordering::SeqCst);
+                                    result
+                                }
+                                Err(_) => return,
+                            }
+                        } else {
+                            candidate_main.reload()
+                        };
+                    if let Err(error) = result {
+                        log::error!("selftest renderer reload failed: {error}");
+                    }
+                }) {
+                    log::error!("selftest renderer reload dispatch failed: {error}");
+                }
+            }
+            tokio::time::sleep(RELOAD_POLL).await;
         }
     });
     Ok(())
@@ -641,6 +721,34 @@ mod tests {
         assert_eq!(decrement_if_positive(&counter), Ok(1));
         assert_eq!(decrement_if_positive(&counter), Err(0));
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn reload_retries_only_a_navigation_that_never_committed() {
+        use std::time::Duration;
+        // Dropped by WebKit: nothing committed, so try again after the wait.
+        assert!(!reload_should_redispatch(
+            Duration::from_millis(1_900),
+            false,
+            Duration::ZERO
+        ));
+        assert!(reload_should_redispatch(
+            RELOAD_COMMIT_WAIT,
+            false,
+            Duration::ZERO
+        ));
+        // Loading: a slow page must not be aborted and restarted.
+        assert!(!reload_should_redispatch(
+            Duration::from_secs(10),
+            true,
+            Duration::from_secs(9)
+        ));
+        // Committed but wedged for far longer than any load.
+        assert!(reload_should_redispatch(
+            Duration::from_secs(40),
+            true,
+            RELOAD_BOOT_WAIT
+        ));
     }
 
     #[test]

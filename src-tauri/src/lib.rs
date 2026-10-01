@@ -422,6 +422,13 @@ pub fn run() {
         cli::open_forwarded(app, argv, cwd);
     }));
     builder
+        // The selftest's renderer replacement needs to know whether a reload
+        // actually started before it decides to issue another one.
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" {
+                selftest::main_page_load(payload.event());
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         // Self-update (see plugins.updater in tauri.conf.json) and the restart
         // that has to follow an install.
