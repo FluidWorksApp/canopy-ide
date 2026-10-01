@@ -1,5 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type React from "react";
+import { format } from "../shortcuts";
 import type { LifeState } from "../../shared/agentLife";
 import {
   AgentIcon,
@@ -817,7 +818,7 @@ function PaneBarImpl({
                 </div>
               )}
               {AGENT_CLIS.map((cli) => (
-                <div key={cli.id} className="cli-item" onClick={() => { setCliMenuOpen(false); onLaunchCli(cli, "workspace"); }}>
+                <div key={cli.id} className="cli-item" onClick={() => { setCliMenuOpen(false); onLaunchCli(cli, "current"); }}>
                   <span><AgentIcon id={cli.id} size={15} className="cli-icon" /> {cli.name}</span>
                   {/* This account has no login for that CLI yet. Still
                       launchable — that is how you sign in. */}
@@ -840,15 +841,15 @@ function PaneBarImpl({
                     <button
                       type="button"
                       className="launch-current"
-                      aria-label={`Open ${cli.name} in the current checkout`}
-                      title={`Open ${cli.name} in the current checkout`}
+                      aria-label={`Open ${cli.name} in a new workspace`}
+                      title={`Open ${cli.name} in a new workspace (${format("new-agent-workspace")})`}
                       onClick={(e) => {
                         e.stopPropagation();
                         setCliMenuOpen(false);
-                        onLaunchCli(cli, "current");
+                        onLaunchCli(cli, "workspace");
                       }}
                     >
-                      here
+                      workspace
                     </button>
                   )}
                 </div>

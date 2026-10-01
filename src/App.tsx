@@ -1200,6 +1200,9 @@ export default function App() {
             if (wsRef.current.activeId)
               window.dispatchEvent(new CustomEvent("menu:new-launcher"));
             else setDialog({ mode: "new" });
+          } else if (e.payload === "new-agent-workspace") {
+            if (wsRef.current.activeId)
+              window.dispatchEvent(new CustomEvent("menu:new-agent-workspace"));
           } else if (e.payload === "new-project") {
             setDialog({ mode: "new" });
           } else if (e.payload === "open-project") {

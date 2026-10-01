@@ -408,7 +408,8 @@ describe("Rust parity", () => {
     expect(accelerator("settings", "macos")).toBe("CmdOrCtrl+,");
     expect(accelerator("spot-search", "macos")).toBe("CmdOrCtrl+K");
     expect(accelerator("new-launcher", "windows")).toBe("CmdOrCtrl+N");
-    expect(accelerator("new-project", "windows")).toBe("CmdOrCtrl+Shift+N");
+    expect(accelerator("new-agent-workspace", "windows")).toBe("CmdOrCtrl+Shift+N");
+    expect(accelerator("new-project", "windows")).toBe("CmdOrCtrl+Alt+Shift+N");
     expect(accelerator("quick-open", "macos")).toBe("CmdOrCtrl+P");
     expect(accelerator("find-in-files", "windows")).toBe("CmdOrCtrl+Shift+F");
     expect(accelerator("next-tab", "macos")).toBe("Control+CmdOrCtrl+Right");

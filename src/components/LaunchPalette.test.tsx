@@ -41,31 +41,46 @@ describe("LaunchPalette", () => {
     await userEvent.keyboard(claude().name);
     expect(screen.queryByText("Shell")).not.toBeInTheDocument();
     await userEvent.keyboard("{Enter}");
+    // ⌘N opens here: instant, where a workspace costs a worktree first.
     expect(onLaunchCli).toHaveBeenCalledWith(
       expect.objectContaining({ id: "claude" }),
-      "workspace",
+      "current",
     );
   });
 
   it("moves the selection with the arrow keys", async () => {
     const { onLaunchCli } = open();
     await userEvent.keyboard("{ArrowDown}{Enter}");
-    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "workspace");
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "current");
   });
 
-  it("offers an explicit current-checkout launch", async () => {
+  it("offers an explicit new-workspace launch", async () => {
     const cli = claude();
     const { onLaunchCli } = open({ installed: { [cli.bin]: true } });
     await userEvent.click(
-      screen.getByRole("button", { name: `Open ${cli.name} in the current checkout` }),
+      screen.getByRole("button", { name: `Open ${cli.name} in a new workspace` }),
     );
-    expect(onLaunchCli).toHaveBeenCalledWith(cli, "current");
+    expect(onLaunchCli).toHaveBeenCalledWith(cli, "workspace");
   });
 
-  it("uses Shift+Enter for the current checkout", async () => {
+  it("uses Shift+Enter for a new workspace", async () => {
     const { onLaunchCli } = open();
     await userEvent.keyboard("{ArrowDown}{Shift>}{Enter}{/Shift}");
-    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "current");
+    expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "workspace");
+  });
+
+  it("flips both ways when opened for a workspace (⌘⇧N)", async () => {
+    const cli = claude();
+    const { onLaunchCli } = open({
+      installed: { [cli.bin]: true },
+      defaultWhere: "workspace",
+    });
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+    expect(onLaunchCli).toHaveBeenLastCalledWith(AGENT_CLIS[0], "workspace");
+    await userEvent.click(
+      screen.getByRole("button", { name: `Open ${cli.name} in the current checkout` }),
+    );
+    expect(onLaunchCli).toHaveBeenLastCalledWith(cli, "current");
   });
 
   it("does not run off the end of the list", async () => {

@@ -23,6 +23,9 @@ interface LaunchPaletteProps {
   targetLabel?: string;
   onShell: () => void;
   onLaunchCli: (cli: AgentCli, where: "workspace" | "current") => void;
+  /** Where ↵ puts an agent: here for ⌘N, a new workspace for ⌘⇧N. ⇧↵ and
+   *  the row's side action are always the other one. */
+  defaultWhere?: "workspace" | "current";
   /** Escape/backdrop cancellation only. A committed row uses its own callback. */
   onCancel: () => void;
 }
@@ -38,7 +41,9 @@ export function LaunchPalette({
   onShell,
   onLaunchCli,
   onCancel,
+  defaultWhere = "current",
 }: LaunchPaletteProps) {
+  const altWhere = defaultWhere === "current" ? "workspace" : "current";
   // Escape is the palette's own, all the way down to the panel behind it.
   useEscapeLayer();
   const [query, setQuery] = useState("");
@@ -69,7 +74,11 @@ export function LaunchPalette({
       ?.scrollIntoView({ block: "nearest" });
   }, [sel]);
 
-  const commit = (row: Row | undefined, where: "workspace" | "current" = "workspace") => {
+  const altLabel = (name: string) =>
+    altWhere === "current"
+      ? `Open ${name} in the current checkout`
+      : `Open ${name} in a new workspace`;
+  const commit = (row: Row | undefined, where: "workspace" | "current" = defaultWhere) => {
     if (!row) return;
     if (row.kind === "shell") onShell();
     else onLaunchCli(row.cli, where);
@@ -96,7 +105,7 @@ export function LaunchPalette({
               setSel((i) => Math.max(i - 1, 0));
             } else if (e.key === "Enter") {
               e.preventDefault();
-              commit(rows[sel], e.shiftKey ? "current" : "workspace");
+              commit(rows[sel], e.shiftKey ? altWhere : defaultWhere);
             }
           }}
         />
@@ -120,7 +129,7 @@ export function LaunchPalette({
                   )}
                 </span>
                 <span className="palette-name">{rowLabel(r)}</span>
-                {r.kind === "cli" && !missing && (
+                {r.kind === "cli" && !missing && defaultWhere === "workspace" && (
                   <span className="launch-workspace-hint">new workspace</span>
                 )}
                 {missing && <span className="cli-install">install</span>}
@@ -133,14 +142,14 @@ export function LaunchPalette({
                   <button
                     type="button"
                     className="launch-current"
-                    aria-label={`Open ${r.cli.name} in the current checkout`}
-                    title={`Open ${r.cli.name} in the current checkout`}
+                    aria-label={altLabel(r.cli.name)}
+                    title={altLabel(r.cli.name)}
                     onClick={(event) => {
                       event.stopPropagation();
-                      commit(r, "current");
+                      commit(r, altWhere);
                     }}
                   >
-                    here
+                    {altWhere === "current" ? "here" : "workspace"}
                   </button>
                 )}
               </div>
@@ -149,7 +158,10 @@ export function LaunchPalette({
         </div>
         <div className="palette-foot">
           <span>New{targetLabel ? ` · ${targetLabel}` : ""}</span>
-          <span>↑↓ navigate · ↵ new workspace · ⇧↵ here · esc close</span>
+          <span>
+            ↑↓ navigate · ↵ {defaultWhere === "current" ? "here" : "new workspace"} · ⇧↵{" "}
+            {altWhere === "current" ? "here" : "new workspace"} · esc close
+          </span>
         </div>
       </div>
     </div>

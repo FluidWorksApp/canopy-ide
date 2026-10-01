@@ -1118,6 +1118,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   /** The ⌘N launcher — the ＋ menu as a type-and-Enter list. */
   const [launcherOpen, setLauncherOpen] = useState(false);
+  // What ↵ does to an agent row: ⌘N opens it here (instant), ⌘⇧N in a fresh
+  // worktree (seconds). ⇧↵ and the row's side action are always the other.
+  const [launcherWhere, setLauncherWhere] = useState<"current" | "workspace">("current");
   const [pendingSplit, setPendingSplit] = useState<{
     sourceTabId: string;
     axis: SplitAxis;
@@ -4838,11 +4841,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // ⌘N: the ＋ menu without the mouse. Re-probe on open for the same reason
     // the ＋ menu does — a stale "install" hint sends you to an installer for a
     // CLI you already have.
-    const newLauncher = () => {
+    const newLauncher = (where: "current" | "workspace" = "current") => {
       refreshInstalled();
       refreshUpdates();
+      setLauncherWhere(where);
       setLauncherOpen(true);
     };
+    const newLauncherHere = () => newLauncher("current");
+    // ⌘⇧N: the same list, but an agent picked from it gets its own workspace.
+    const newLauncherWorkspace = () => newLauncher("workspace");
     const activateVisualTab = (id: string) => {
       const tab = tabsRef.current.find((t) => t.id === id);
       const group =
@@ -5121,7 +5128,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     window.addEventListener("menu:quick-open", quickOpen);
     window.addEventListener("menu:find-in-files", findInFiles);
     window.addEventListener("menu:spot-search", spotSearch);
-    window.addEventListener("menu:new-launcher", newLauncher);
+    window.addEventListener("menu:new-launcher", newLauncherHere);
+    window.addEventListener("menu:new-agent-workspace", newLauncherWorkspace);
     return () => {
       window.removeEventListener("canopy:run-command", runCommand);
       window.removeEventListener("menu:close-tab", closeTabHandler);
@@ -5133,7 +5141,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       window.removeEventListener("menu:quick-open", quickOpen);
       window.removeEventListener("menu:find-in-files", findInFiles);
       window.removeEventListener("menu:spot-search", spotSearch);
-      window.removeEventListener("menu:new-launcher", newLauncher);
+      window.removeEventListener("menu:new-launcher", newLauncherHere);
+      window.removeEventListener("menu:new-agent-workspace", newLauncherWorkspace);
     };
   }, [visible, project.components, addTerminal, refreshInstalled, refreshUpdates]);
 
@@ -6409,6 +6418,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const pending = { sourceTabId: active.id, axis };
       pendingSplitRef.current = pending;
       setPendingSplit(pending);
+      setLauncherWhere("current");
       setLauncherOpen(true);
     },
     [],
@@ -8434,7 +8444,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
     async (
       cli: AgentCli,
       at?: string,
-      where: "workspace" | "current" = "workspace",
+      // Here by default: opening in the current checkout is instant, while a
+      // workspace costs a worktree (and its setup) first. ⌘⇧N, ⇧↵ and the
+      // "workspace" row action ask for one explicitly.
+      where: "workspace" | "current" = "current",
     ) => {
       const cwd = at ?? activeContextRoot ?? componentsRef.current[0]?.path;
       if (!cwd) return;
@@ -11165,7 +11178,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (cwd) addTerminal(cwd);
   }, [activeContextRoot, addTerminal, completePendingSplit]);
   const onLaunchCli = useCallback(
-    (cli: AgentCli, where: "workspace" | "current" = "workspace") =>
+    (cli: AgentCli, where: "workspace" | "current" = "current") =>
       launchCli(cli, undefined, where),
     [launchCli],
   );
@@ -13912,6 +13925,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         <LaunchPalette
           installed={installed}
           cliUpdates={cliUpdates}
+          defaultWhere={pendingSplit ? "current" : launcherWhere}
           targetLabel={
             pendingSplit
               ? "new split pane"
