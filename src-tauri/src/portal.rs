@@ -798,7 +798,9 @@ fn handle_client_msg(
             let out = out.clone();
             tokio::spawn(async move {
                 let environment = crate::execution::environment_identity(app.state());
-                let Ok(environment_id) = environment else { return };
+                let Ok(environment_id) = environment else {
+                    return;
+                };
                 let _ = out.send(json!({ "t": "hello", "host": {
                     "protocol": crate::remote::HOST_PROTOCOL,
                     "environmentId": environment_id,
@@ -846,8 +848,14 @@ fn handle_client_msg(
             let command = v.get("command").and_then(|x| x.as_str()).map(String::from);
             let agent = v.get("agent").and_then(|x| x.as_str()).map(String::from);
             let profile = v.get("profile").and_then(|x| x.as_str()).map(String::from);
-            let project_id = v.get("projectId").and_then(|x| x.as_str()).map(String::from);
-            let component_id = v.get("componentId").and_then(|x| x.as_str()).map(String::from);
+            let project_id = v
+                .get("projectId")
+                .and_then(|x| x.as_str())
+                .map(String::from);
+            let component_id = v
+                .get("componentId")
+                .and_then(|x| x.as_str())
+                .map(String::from);
             let workspace_path = v
                 .get("workspacePath")
                 .and_then(|x| x.as_str())
@@ -872,16 +880,15 @@ fn handle_client_msg(
                     _ => Err("a restored profile requires its agent id".into()),
                 };
                 let msg = match account.and_then(|account| {
-                    app.state::<PtyManager>()
-                        .spawn_headless_bound(
-                            app.clone(),
-                            cwd,
-                            command,
-                            account,
-                            project_id,
-                            component_id,
-                            workspace_path,
-                        )
+                    app.state::<PtyManager>().spawn_headless_bound(
+                        app.clone(),
+                        cwd,
+                        command,
+                        account,
+                        project_id,
+                        component_id,
+                        workspace_path,
+                    )
                 }) {
                     Ok(id) => json!({ "t": "spawned", "pty": id }),
                     Err(e) => json!({ "t": "spawn-error", "message": e }),
@@ -998,7 +1005,9 @@ fn protocol_action<'a>(protocol: Option<&Value>, action: &'a str) -> Result<&'a 
     match protocol {
         None if action == "fs_read_file" => Ok("fs_read_text"),
         None => Ok(action),
-        Some(version) if version.as_u64() == Some(u64::from(crate::remote::HOST_PROTOCOL)) => Ok(action),
+        Some(version) if version.as_u64() == Some(u64::from(crate::remote::HOST_PROTOCOL)) => {
+            Ok(action)
+        }
         _ => Err("incompatible host protocol; reload the client"),
     }
 }
@@ -1569,7 +1578,10 @@ mod tests {
     #[test]
     fn host_protocol_keeps_legacy_text_reads_and_rejects_unknown_versions() {
         assert_eq!(protocol_action(None, "fs_read_file"), Ok("fs_read_text"));
-        assert_eq!(protocol_action(Some(&json!(1)), "fs_read_file"), Ok("fs_read_file"));
+        assert_eq!(
+            protocol_action(Some(&json!(1)), "fs_read_file"),
+            Ok("fs_read_file")
+        );
         assert!(protocol_action(Some(&json!(2)), "pty_spawn_detached").is_err());
         assert!(protocol_action(Some(&json!("1")), "pty_kill").is_err());
     }
@@ -1578,15 +1590,18 @@ mod tests {
     fn websocket_tickets_are_one_use_and_expire() {
         let tickets: Tickets = Default::default();
         let now = Instant::now();
-        tickets
-            .lock()
-            .unwrap()
-            .insert("fresh".into(), (now + Duration::from_secs(1), "client".into()));
-        tickets
-            .lock()
-            .unwrap()
-            .insert("old".into(), (now - Duration::from_secs(1), "client".into()));
-        assert_eq!(consume_ticket(&tickets, "fresh", now), Some("client".into()));
+        tickets.lock().unwrap().insert(
+            "fresh".into(),
+            (now + Duration::from_secs(1), "client".into()),
+        );
+        tickets.lock().unwrap().insert(
+            "old".into(),
+            (now - Duration::from_secs(1), "client".into()),
+        );
+        assert_eq!(
+            consume_ticket(&tickets, "fresh", now),
+            Some("client".into())
+        );
         assert!(consume_ticket(&tickets, "fresh", now).is_none());
         assert!(consume_ticket(&tickets, "old", now).is_none());
     }

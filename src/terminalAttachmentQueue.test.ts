@@ -16,11 +16,12 @@ const attachment = (
   title: `terminal ${ptyId}`,
   run: false,
   activate: false,
+  recovered: true,
   killOnClose: true,
 });
 
 describe("TerminalAttachmentQueue", () => {
-  it("holds recovery until a slow ProjectView mounts, then delivers exactly once", () => {
+  it("holds recovery until a slow ProjectView mounts and reoffers after that owner unmounts", () => {
     const queue = new TerminalAttachmentQueue();
     const consume = vi.fn();
 
@@ -35,9 +36,16 @@ describe("TerminalAttachmentQueue", () => {
     queue.acknowledge("project-a", 7);
     expect(queue.pendingIdentities()).toEqual([]);
 
-    unsubscribe();
-    queue.subscribe("project-a", consume);
+    // A repeated native snapshot while the same owner is mounted refreshes
+    // metadata without manufacturing a second tab.
+    queue.enqueue({ ...attachment(7), title: "refreshed title" });
     expect(consume).toHaveBeenCalledOnce();
+
+    unsubscribe();
+    const replacement = vi.fn();
+    queue.subscribe("project-a", replacement);
+    expect(replacement).toHaveBeenCalledOnce();
+    expect(replacement.mock.calls[0][0].title).toBe("refreshed title");
   });
 
   it("routes concurrent projects independently and coalesces snapshot/event duplicates", () => {
@@ -76,6 +84,21 @@ describe("TerminalAttachmentQueue", () => {
     expect(queue.pendingIdentities()).toEqual(["9:109"]);
   });
 
+  it("records ownership when a consumer acknowledges synchronously", () => {
+    const queue = new TerminalAttachmentQueue();
+    const consume = vi.fn((item: TerminalAttachment) => {
+      queue.acknowledge(item.projectId, item.ptyId);
+    });
+    const unsubscribe = queue.subscribe("project-a", consume);
+    queue.enqueue(attachment(15));
+    expect(queue.pendingIdentities()).toEqual([]);
+
+    unsubscribe();
+    const replacement = vi.fn();
+    queue.subscribe("project-a", replacement);
+    expect(replacement).toHaveBeenCalledWith(attachment(15));
+  });
+
   it("reoffers an uncommitted lifetime after its consumer unmounts", () => {
     const queue = new TerminalAttachmentQueue();
     const interrupted = vi.fn();
@@ -88,6 +111,31 @@ describe("TerminalAttachmentQueue", () => {
     queue.subscribe("project-a", replacement);
     expect(replacement).toHaveBeenCalledOnce();
     expect(replacement).toHaveBeenCalledWith(attachment(10));
+  });
+
+  it("reoffers an acknowledged lifetime when its committed tab vanishes", () => {
+    const queue = new TerminalAttachmentQueue();
+    const consume = vi.fn();
+    queue.subscribe("project-a", consume);
+    queue.enqueue(attachment(13));
+    queue.acknowledge("project-a", 13);
+
+    queue.reconcile("project-a", []);
+    expect(consume).toHaveBeenCalledTimes(2);
+    expect(queue.pendingIdentities()).toEqual(["13:113"]);
+  });
+
+  it("does not reoffer an intentionally forgotten attachment", () => {
+    const queue = new TerminalAttachmentQueue();
+    const consume = vi.fn();
+    queue.subscribe("project-a", consume);
+    queue.enqueue(attachment(14));
+    queue.acknowledge("project-a", 14);
+
+    queue.forget("project-a", 14);
+    queue.reconcile("project-a", []);
+    expect(consume).toHaveBeenCalledOnce();
+    expect(queue.pendingIdentities()).toEqual([]);
   });
 
   it("discards a PTY that exits before its project commits the tab", () => {

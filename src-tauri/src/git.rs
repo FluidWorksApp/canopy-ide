@@ -3724,10 +3724,15 @@ pub async fn git_worktree_realign(
         return Err("workspace is locked".into());
     }
     let wt = Path::new(&path);
-    if !run(git(wt).args(["status", "--porcelain"]))?.trim().is_empty() {
+    if !run(git(wt).args(["status", "--porcelain"]))?
+        .trim()
+        .is_empty()
+    {
         return Err("workspace has uncommitted changes".into());
     }
-    let target = run(git(&top).args(["rev-parse", "HEAD"]))?.trim().to_string();
+    let target = run(git(&top).args(["rev-parse", "HEAD"]))?
+        .trim()
+        .to_string();
     let head = run(git(wt).args(["rev-parse", "HEAD"]))?.trim().to_string();
     if head == target {
         return Ok("Workspace already current".into());

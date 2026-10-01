@@ -4282,15 +4282,18 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
             text(ctx_request_with_timeout(
                 "POST",
                 "/ctx/action",
-                Some(serde_json::json!({
-                    "kind": "spawn_agent",
-                    "cwd": cwd(),
-                    "text": brief,
-                    "title": args.get("title").and_then(|value| value.as_str()),
-                    "agent": args.get("agent").and_then(|value| value.as_str()),
-                    "direction": args.get("direction").and_then(|value| value.as_str()),
-                    "autoClose": args.get("autoClose").and_then(|value| value.as_bool()),
-                }).to_string()),
+                Some(
+                    serde_json::json!({
+                        "kind": "spawn_agent",
+                        "cwd": cwd(),
+                        "text": brief,
+                        "title": args.get("title").and_then(|value| value.as_str()),
+                        "agent": args.get("agent").and_then(|value| value.as_str()),
+                        "direction": args.get("direction").and_then(|value| value.as_str()),
+                        "autoClose": args.get("autoClose").and_then(|value| value.as_bool()),
+                    })
+                    .to_string(),
+                ),
                 std::time::Duration::from_secs(80),
             ))
         }

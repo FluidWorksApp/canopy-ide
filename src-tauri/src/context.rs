@@ -3771,10 +3771,7 @@ async fn action(
                         if data.get("cold").and_then(|v| v.as_bool()) == Some(true) {
                             let route = data.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
                             if !mesh_enabled_between(&app, &who, route) {
-                                return (
-                                    StatusCode::FORBIDDEN,
-                                    mesh_refusal(&app, &who, route),
-                                );
+                                return (StatusCode::FORBIDDEN, mesh_refusal(&app, &who, route));
                             }
                             // Cold PRs become durable task-store runs, not a
                             // PTY write. Start only after the bridge authorizes
@@ -3835,10 +3832,7 @@ async fn action(
                             );
                         };
                         if !mesh_enabled_between(&app, &who, &target.cwd) {
-                            return (
-                                StatusCode::FORBIDDEN,
-                                mesh_refusal(&app, &who, &target.cwd),
-                            );
+                            return (StatusCode::FORBIDDEN, mesh_refusal(&app, &who, &target.cwd));
                         }
                         if let Err(e) =
                             may_message_terminal(target_id, terminal_role(&app, target_id))

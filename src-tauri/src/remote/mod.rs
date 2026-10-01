@@ -170,7 +170,9 @@ pub async fn dispatch(
                 None,
                 None,
                 None,
-                args.get("projectId").and_then(Value::as_str).map(str::to_string),
+                args.get("projectId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 args.get("componentId")
                     .and_then(Value::as_str)
                     .map(str::to_string),
@@ -193,10 +195,12 @@ pub async fn dispatch(
         "fs_read_file" => crate::fsx::read_file_bytes(
             app.state(),
             str_arg(args, "path")?,
-            Some(args.get("maxBytes")
-                .and_then(Value::as_u64)
-                .unwrap_or(512 * 1024)
-                .min(512 * 1024)),
+            Some(
+                args.get("maxBytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(512 * 1024)
+                    .min(512 * 1024),
+            ),
         )
         .await
         .and_then(to_value),
