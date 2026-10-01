@@ -751,6 +751,16 @@ export interface AgentCli {
   unattended?: string | ((ctx: UnattendedContext) => string);
 
   /**
+   * Environment a task terminal also needs for `unattended` to mean "auto",
+   * where a flag alone cannot say it. Attached by addTerminal only when the
+   * command carries this CLI's `unattended` flag — i.e. only to task launches
+   * and task resumes, never to a session someone opened by hand. Kept out of
+   * the command line on purpose: the first token is how a terminal's agent is
+   * recognised, and an `X=… cli` prefix would hide it.
+   */
+  unattendedEnv?: [string, string][];
+
+  /**
    * Workflow-facing capabilities for this agent type. The canvas, schema
    * validator and launcher all read this same descriptor, so supporting a new
    * configurable CLI is one registry change rather than a switch in every
@@ -987,33 +997,28 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // confirmation prompts and execute commands without sandboxing`, and
     // `codex resume --help` lists the same flag, so resumes carry it too.
     skipPermissions: "--dangerously-bypass-approvals-and-sandbox",
-    // Verified: `-a, --ask-for-approval <APPROVAL_POLICY>` takes `never`
-    // ("Never ask for user approval. Execution failures are immediately
-    // returned to the model"), and `-s, --sandbox <SANDBOX_MODE>` takes
-    // `workspace-write`. Two flags because codex splits the question in two —
-    // when it asks, and what a command may touch — and only the pair says
-    // "keep going, inside this workspace".
+    // Verified against codex-cli 0.159.1 --help on 2026-10-01:
+    // `--approve-for-me  Route approval requests through automatic review using
+    // the workspace-write sandbox` — the TUI's "Approve for me" preset, i.e.
+    // on-request approvals with approvals_reviewer=auto_review. Codex's auto
+    // mode: routine work proceeds, an escalation is reviewed, and what review
+    // won't pass is reported back for a human instead of silently failing.
+    // `codex resume --help` lists it too, and it parses alongside `-c`.
     //
-    // NOT `--full-auto`, which every guide still names: it is gone from codex
-    // 0.147.0's --help, and a flag clap doesn't know refuses to launch at all.
+    // NOT `--ask-for-approval never --sandbox workspace-write`, which this used
+    // to be: under `never` the model is told escalations "will be rejected", so
+    // a task could never get a permission it needed and nobody was told. And
+    // not combined with `-a`/`-s`: clap accepts the mix but declares no
+    // precedence. Network stays explicit — workspace-write disables it.
     //
-    // Two `-c` overrides on top, both of them things `workspace-write` denies by
-    // default and a task cannot do its job without. Verified against the same
-    // 0.147.0 help and `codex --help`'s `-c, --config <key=value>`:
-    //
-    //  * `network_access` — off in workspace-write, which is why a PR review
-    //    reported "blocked on network" before it had read anything: no `gh`, no
-    //    fetch, no package metadata.
-    //  * `writable_roots` — workspace-write grants the cwd and $TMPDIR. A task
-    //    Canopy isolates runs in a git worktree, and a worktree's `.git` is a
-    //    *file* pointing at `<repo>/.git/worktrees/<name>`: outside the cwd, so
-    //    the index, the refs and the objects were all read-only and every `git
-    //    add` failed as a sandbox denial. Granted only when the launcher names a
-    //    root — a task running in its own checkout needs none.
+    // `writable_roots` on top, when the launcher names one: workspace-write
+    // grants the cwd and $TMPDIR, and a task Canopy isolates runs in a git
+    // worktree whose `.git` is a *file* pointing at `<repo>/.git/worktrees/
+    // <name>` — outside the cwd, so every `git add` would otherwise have to go
+    // through review as an escalation.
     unattended: ({ writableRoots }: UnattendedContext) =>
       [
-        "--ask-for-approval never --sandbox workspace-write",
-        "-c sandbox_workspace_write.network_access=true",
+        "--approve-for-me -c sandbox_workspace_write.network_access=true",
         ...(writableRoots?.length
           ? [
               `-c ${shellQuote(
@@ -1090,10 +1095,11 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // halves against one installed release.
     // Verified: `--yes-always  Always say yes to every confirmation`.
     skipPermissions: "--yes-always",
-    // No `unattended`, and not for want of looking: aider's help offers
-    // nothing between "confirm everything" and `--yes-always`. There is no mode
-    // to pin, so a task launches it exactly as a person would and it asks —
-    // rather than being handed the skip-permissions rung it was never granted.
+    // No `unattended`, and not for want of looking: aider has no mode,
+    // allowlist or classifier. `--yes-always` is not even a clean bypass — it
+    // auto-*declines* shell commands (asked with explicit_yes_required) while
+    // auto-accepting everything else, pip installs included — so it is no auto
+    // rung either. A task launches it as a person would, and it asks.
     execution: {
       fields: [
         providerField(),
@@ -1188,6 +1194,29 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // is all opencode allows short of `--auto`: its only other control is that
     // per-tool permission table, and `--auto` is the skip-permissions rung.
     unattended: "--agent build",
+    // That table is the catch: a repo's own opencode.json (`"bash": "ask"`) is
+    // merged over build's defaults and stalls the task. OPENCODE_PERMISSION is
+    // merged last of all, so it pins the task's rules. Verified against
+    // opencode 1.18.32 with `opencode debug agent build` (no session): under a
+    // repo asking for bash and edit, this yields bash/edit allow plus the four
+    // ask rules below. Build's own asks (external directories, .env reads,
+    // doom loops) are untouched, and each ask raises permission.asked, which
+    // Canopy's plugin maps to needs-human-permission.
+    unattendedEnv: [
+      [
+        "OPENCODE_PERMISSION",
+        JSON.stringify({
+          bash: {
+            "*": "allow",
+            "rm -rf *": "ask",
+            "sudo *": "ask",
+            "git push --force*": "ask",
+            "git push -f*": "ask",
+          },
+          edit: "allow",
+        }),
+      ],
+    ],
     execution: {
       fields: [
         providerField(),
@@ -1229,6 +1258,13 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // `always-ask` is a configurable default, and a task that inherits it stops
     // on its first edit.
     unattended: "--approval-mode=write",
+    // `write` still prompts for every bash/eval/task call. The marker asks the
+    // PTY layer to add Canopy's overlay (~/.canopy/omp-task-approval.yml)
+    // through PI_CONFIG_FILES, which allows those tools while omp's own
+    // critical-pattern list keeps prompting (tool_approval_requested → Canopy's
+    // extension → needs-human-permission). A marker, not a path, because a
+    // missing overlay is a hard startup error and only Rust can check it exists.
+    unattendedEnv: [["CANOPY_OMP_TASK_OVERLAY", "1"]],
     execution: {
       fields: [
         providerField(),
@@ -1258,6 +1294,14 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     resume: (id, bin) => `${bin} --resume ${id}`,
     prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
     skipPermissions: "--force",
+    // Verified against cursor-agent 2026.08.31 --help on 2026-10-01:
+    // `--auto-review  Use Auto-review (Smart Auto): a server classifier
+    // auto-runs safe tool calls and prompts for the rest`. Parses with
+    // `--resume`. Where the account can't use it, cursor falls back to its
+    // allowlist rather than failing. It refuses to combine with --force, which
+    // withUnattendedMode already guarantees. Known gap: cursor fires no hook
+    // while a prompt waits, so a blocked task is not yet raised to the user.
+    unattended: "--auto-review",
     execution: {
       fields: [modelField(undefined, "model")],
       launchArgs: (config) => option("--model", config.model),
@@ -1278,6 +1322,13 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     resume: (id, bin) => `${bin} --resume ${id}`,
     prompt: (text, bin) => `${bin} ${shellQuote(text)}`,
     skipPermissions: "--always-approve",
+    // Verified against grok 1.0.13 --help on 2026-10-01: `--permission-mode
+    // <MODE>  [possible values: default, acceptEdits, auto, dontAsk,
+    // bypassPermissions, plan]`. Its docs: auto runs what the safety check
+    // allows and "surfaces a permission prompt" for the rest, and the
+    // dangerous-command list (rm, git push, …) still prompts. That prompt fires
+    // the permission_prompt Notification Canopy's hook already maps.
+    unattended: "--permission-mode auto",
     execution: {
       fields: [modelField(undefined, "model")],
       launchArgs: (config) => option("--model", config.model),
@@ -1921,26 +1972,27 @@ export function startCommand(
 
 /** How to reopen a conversation by id.
  *
- *  `unattended` is for the resumes nobody is sitting in front of. A session a
- *  person picks off the restore list is theirs, in the mode their CLI is
- *  configured for — but Canopy also resumes sessions on its own account, to hand
- *  a finished review's comments to the agent that raised the PR, and one of those
- *  reopened in Manual mode stops at the first edit with nobody there to press a
- *  key. Same flag as the launch that started it (withUnattendedMode); the launch
- *  had it and the resume did not, which is why a background task would do half
- *  its work and then go quiet. */
+ *  A session a person picks off the restore list is theirs, in the mode their
+ *  CLI is configured for. A task picked back up is still a task, and a resume
+ *  Canopy makes on its own account — handing a finished review's comments to
+ *  the agent that raised the PR — has nobody in front of it either: both resume
+ *  in the same unattended mode the launch had (withUnattendedMode) rather than
+ *  whatever the CLI is configured for (Manual, plan, or omp's yolo). `task` and
+ *  `unattended` are the two callers' names for that one request. */
 export function restoreCommand(
   agentId: string,
   sessionId: string,
-  opts: { unattended?: boolean; ctx?: UnattendedContext } = {},
+  opts: { task?: boolean; unattended?: boolean; ctx?: UnattendedContext } = {},
 ): string | null {
   const id = sessionId.trim();
   if (!id) return null;
   const cli = agentCliFor(agentId);
   const cmd = cli?.resume?.(id);
   if (!cmd || !cli) return null;
-  const flagged = withSkipPermissions(cmd, cli);
-  return opts.unattended ? withUnattendedMode(flagged, cli, opts.ctx) : flagged;
+  const resumed = withSkipPermissions(cmd, cli);
+  return opts.task || opts.unattended
+    ? withUnattendedMode(resumed, cli, opts.ctx)
+    : resumed;
 }
 
 /** The session id a terminal's command carries when it was launched to resume a
@@ -1968,7 +2020,14 @@ export function resumeSessionId(command: string | null | undefined): string | nu
       // setting is on: a command remembered from a skip-permissions launch
       // must still yield its session id after the setting is switched off,
       // or every such session stops being resumable the moment it's disabled.
-      return tmpl && d.skipPermissions ? [tmpl, `${tmpl} ${d.skipPermissions}`] : [tmpl];
+      // Likewise the unattended spelling a resumed task carries.
+      return tmpl
+        ? [
+            tmpl,
+            ...(d.skipPermissions ? [`${tmpl} ${d.skipPermissions}`] : []),
+            ...(d.unattended ? [`${tmpl} ${d.unattended}`] : []),
+          ]
+        : [tmpl];
     });
   });
   for (const tmpl of templates) {

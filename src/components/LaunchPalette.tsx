@@ -24,6 +24,9 @@ interface LaunchPaletteProps {
   targetLabel?: string;
   onShell: () => void;
   onLaunchCli: (cli: AgentCli, where: "workspace" | "current") => void;
+  /** Overrides where ↵ puts an agent for this opening — ⌘⇧N passes
+   *  "workspace". Absent, the agentWorkspaceByDefault setting decides. */
+  defaultWhere?: "workspace" | "current";
   /** Escape/backdrop cancellation only. A committed row uses its own callback. */
   onCancel: () => void;
 }
@@ -39,6 +42,7 @@ export function LaunchPalette({
   onShell,
   onLaunchCli,
   onCancel,
+  defaultWhere: requestedWhere,
 }: LaunchPaletteProps) {
   // Escape is the palette's own, all the way down to the panel behind it.
   useEscapeLayer();
@@ -70,12 +74,17 @@ export function LaunchPalette({
       ?.scrollIntoView({ block: "nearest" });
   }, [sel]);
 
-  // The setting names the default; ⇧↵ and the row's hover action are always
-  // the other one. Read at render: the palette is remounted per open, so a
-  // change in Settings is picked up the next time it appears.
-  const workspaceDefault = getSettings().agentWorkspaceByDefault;
-  const defaultWhere = workspaceDefault ? "workspace" : "current";
-  const altWhere = workspaceDefault ? "current" : "workspace";
+  // The setting names the default; ⌘⇧N overrides it for one opening. ⇧↵
+  // and the row's side action are always the other one. Read at render: the
+  // palette is remounted per open, so a change in Settings is picked up the
+  // next time it appears.
+  const settingWhere = getSettings().agentWorkspaceByDefault ? "workspace" : "current";
+  const defaultWhere: "workspace" | "current" = requestedWhere ?? settingWhere;
+  const altWhere = defaultWhere === "workspace" ? "current" : "workspace";
+  const altLabel = (name: string) =>
+    altWhere === "current"
+      ? `Open ${name} in the current checkout`
+      : `Open ${name} in a new workspace`;
 
   const commit = (row: Row | undefined, where: "workspace" | "current" = defaultWhere) => {
     if (!row) return;
@@ -133,7 +142,7 @@ export function LaunchPalette({
                 <span className="palette-name">{rowLabel(r)}</span>
                 {r.kind === "cli" && !missing && (
                   <span className="launch-workspace-hint">
-                    {workspaceDefault ? "new workspace" : "here"}
+                    {defaultWhere === "workspace" ? "new workspace" : "here"}
                   </span>
                 )}
                 {missing && <span className="cli-install">install</span>}
@@ -146,22 +155,14 @@ export function LaunchPalette({
                   <button
                     type="button"
                     className="launch-current"
-                    aria-label={
-                      workspaceDefault
-                        ? `Open ${r.cli.name} in the current checkout`
-                        : `Open ${r.cli.name} in a new workspace`
-                    }
-                    title={
-                      workspaceDefault
-                        ? `Open ${r.cli.name} in the current checkout`
-                        : `Open ${r.cli.name} in a new workspace`
-                    }
+                    aria-label={altLabel(r.cli.name)}
+                    title={altLabel(r.cli.name)}
                     onClick={(event) => {
                       event.stopPropagation();
                       commit(r, altWhere);
                     }}
                   >
-                    {workspaceDefault ? "here" : "workspace"}
+                    {altWhere === "current" ? "here" : "workspace"}
                   </button>
                 )}
               </div>
@@ -171,9 +172,8 @@ export function LaunchPalette({
         <div className="palette-foot">
           <span>New{targetLabel ? ` · ${targetLabel}` : ""}</span>
           <span>
-            {workspaceDefault
-              ? "↑↓ navigate · ↵ new workspace · ⇧↵ here · esc close"
-              : "↑↓ navigate · ↵ here · ⇧↵ new workspace · esc close"}
+            ↑↓ navigate · ↵ {defaultWhere === "current" ? "here" : "new workspace"} · ⇧↵{" "}
+            {altWhere === "current" ? "here" : "new workspace"} · esc close
           </span>
         </div>
       </div>

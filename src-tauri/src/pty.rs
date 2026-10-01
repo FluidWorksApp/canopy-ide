@@ -1710,8 +1710,12 @@ impl PtyManager {
         // still gets exactly what it requested when the loop below reapplies it.
         clear_inherited_no_color(&mut cmd, &extra_env);
         let caller_set_aider_read = extra_env.iter().any(|(k, _)| k == "AIDER_READ");
+        let marks_omp_task = extra_env.iter().any(|(k, _)| k == OMP_TASK_MARKER);
         for (k, v) in extra_env {
-            if matches!(k.as_str(), "CANOPY_RUN_ID" | "CANOPY_ATTEMPT_ID") {
+            if matches!(
+                k.as_str(),
+                "CANOPY_RUN_ID" | "CANOPY_ATTEMPT_ID" | OMP_TASK_MARKER
+            ) {
                 continue;
             }
             cmd.env(k, v);
@@ -1739,6 +1743,24 @@ impl PtyManager {
             home.as_deref(),
         ) {
             cmd.env("AIDER_READ", path);
+        }
+        // An omp task asks for Canopy's approval overlay by marker rather than
+        // by path, so the frontend never names a file that may not exist: a
+        // missing overlay stops omp from starting at all. Appended to any
+        // PI_CONFIG_FILES the caller or the user already set.
+        if marks_omp_task {
+            if let Some(path) = canopy_omp_task_overlay(home.as_deref()) {
+                let joined = match std::env::var_os("PI_CONFIG_FILES") {
+                    Some(prev) if !prev.is_empty() => {
+                        let mut v = prev;
+                        v.push(":");
+                        v.push(path.as_os_str());
+                        v
+                    }
+                    _ => path.into_os_string(),
+                };
+                cmd.env("PI_CONFIG_FILES", joined);
+            }
         }
         if let Some(task) = &task_identity {
             // Reserved identity is stamped after caller env, alongside the
@@ -2644,9 +2666,34 @@ fn canopy_aider_context(
     path.is_file().then_some(path)
 }
 
+/// Env key the frontend sets on an omp task terminal (see projects.ts
+/// `unattendedEnv`). Consumed here, never passed through to the shell.
+const OMP_TASK_MARKER: &str = "CANOPY_OMP_TASK_OVERLAY";
+
+/// Canopy's omp task overlay, only when it is actually on disk.
+fn canopy_omp_task_overlay(home: Option<&str>) -> Option<std::path::PathBuf> {
+    let path = crate::agent_instructions::omp_task_overlay_path(home?);
+    path.is_file().then_some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omp_task_overlay_is_named_only_once_it_exists() {
+        let home = std::env::temp_dir().join(format!("canopy-omp-overlay-{}", std::process::id()));
+        let home_text = home.to_string_lossy().to_string();
+        assert_eq!(canopy_omp_task_overlay(Some(&home_text)), None);
+        let path = crate::agent_instructions::install_omp_task_overlay(&home).unwrap();
+        assert_eq!(
+            canopy_omp_task_overlay(Some(&home_text)),
+            Some(path.clone())
+        );
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("bash: allow"));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn generated_session_names_are_human_readable_and_unique() {

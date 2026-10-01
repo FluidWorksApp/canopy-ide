@@ -76,6 +76,7 @@ use tauri::{Emitter, Manager};
 pub(crate) const MENU_SHORTCUT_IDS: &[&str] = &[
     "settings",
     "new-launcher",
+    "new-agent-workspace",
     "new-terminal",
     "close-tab",
     "next-tab",
@@ -166,6 +167,16 @@ fn build_menu(app: &tauri::AppHandle, profile: &str) -> tauri::Result<Menu<tauri
                 true,
                 accel("new-launcher").as_deref(),
             )?,
+            // The same launcher, but a new agent lands in a worktree of its
+            // own. Not the default: making one costs seconds, opening here
+            // costs nothing, so the slower one takes the Shift.
+            &MenuItem::with_id(
+                app,
+                "new-agent-workspace",
+                "New Agent in Workspace…",
+                true,
+                accel("new-agent-workspace").as_deref(),
+            )?,
             &MenuItem::with_id(
                 app,
                 "new-terminal",
@@ -250,8 +261,9 @@ fn build_menu(app: &tauri::AppHandle, profile: &str) -> tauri::Result<Menu<tauri
                 "new-project",
                 "New Project…",
                 true,
-                // Cmd/Ctrl+N is the new-tab launcher (Tabs menu); a whole new
-                // project is the rarer, bigger thing, so it takes the Shift.
+                // Cmd/Ctrl+N is the new-tab launcher and Cmd/Ctrl+Shift+N the
+                // same in a new workspace (Tabs menu); a whole new project is
+                // the rarer, bigger thing, so it takes the extra modifier.
                 accel("new-project").as_deref(),
             )?,
             &MenuItem::with_id(
@@ -539,8 +551,11 @@ pub fn run() {
             // It lives in Canopy's own state, never in the repository, so a CLI
             // opened outside this IDE does not inherit IDE-specific rules.
             if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-                if let Err(e) = agent_instructions::install_context(home) {
+                if let Err(e) = agent_instructions::install_context(&home) {
                     log::warn!("agent context not installed: {e}");
+                }
+                if let Err(e) = agent_instructions::install_omp_task_overlay(&home) {
+                    log::warn!("omp task overlay not installed: {e}");
                 }
             }
             // Install the hook helper before hooks are (re)written, so the

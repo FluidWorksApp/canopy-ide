@@ -136,6 +136,11 @@ describe("WorkflowView", () => {
     rerender(<WorkflowView {...props} componentRoots={["/repo"]} />);
     expect(await screen.findByRole("button", { name: "Run" })).toBeInTheDocument();
     expect(mocks.loadWorkflowDefinitions).toHaveBeenCalledTimes(1);
+    // Repeatedly, as a busy parent does — and the canvas never blanks.
+    for (let i = 0; i < 5; i++) rerender(<WorkflowView {...props} componentRoots={["/repo"]} />);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(mocks.loadWorkflowDefinitions).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Reading .canopy/workflows…")).toBeNull();
   });
 
   it("turns the empty catalog into a starter workflow without leaving the page", async () => {

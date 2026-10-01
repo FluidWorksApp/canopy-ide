@@ -253,6 +253,8 @@ import {
   adhocLabel,
   ADHOC_TASK_ID,
   adhocTaskDef,
+  syncMergeTask,
+  type SyncMergePayload,
   customTaskDef,
   fixCiTask,
   implementResearchTask,
@@ -375,6 +377,7 @@ import { askDialog } from "../../branchSwitch";
 import { useTabDragGroups, applyOrder } from "../../tabDrag";
 import {
   agentIdForCommand,
+  unattendedEnvFor,
   identifyAgent,
   rememberAgentPtys,
 } from "../../agentIdentity";
@@ -1152,6 +1155,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const [palette, setPalette] = useState<PaletteMode | null>(null);
   /** The ⌘N launcher — the ＋ menu as a type-and-Enter list. */
   const [launcherOpen, setLauncherOpen] = useState(false);
+  // ⌘⇧N asks for a workspace for this one opening; ⌘N leaves ↵ to the
+  // agentWorkspaceByDefault setting. ⇧↵ and the row's side action are always
+  // the other choice.
+  const [launcherWhere, setLauncherWhere] = useState<"workspace" | undefined>(undefined);
   const [pendingSplit, setPendingSplit] = useState<{
     sourceTabId: string;
     axis: SplitAxis;
@@ -1802,7 +1809,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         (launchedCli && accountEnv.length ? launchProfile(launchedCli) : undefined) ??
         undefined;
       const managedEnv = runIdentity ? [...MANAGED_PROCESS_ENV] : [];
-      const env = [...portEnv(portForPath(cwd)), ...managedEnv, ...accountEnv];
+      // A task's unattended mode, where its CLI needs environment as well as a
+      // flag for it (opencode's permission pin, omp's approval overlay).
+      const env = [
+        ...portEnv(portForPath(cwd)),
+        ...managedEnv,
+        ...accountEnv,
+        ...unattendedEnvFor(command),
+      ];
       setTabs((prev) => [
         ...prev,
         {
@@ -4172,6 +4186,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
     [roots, startMicroTask, project.id, onNotice],
   );
 
+  /** The status bar's "Resolve & merge": the base moved and the one-click
+   *  merge can't finish on its own, so an agent does it in that checkout. */
+  const resolveBranchMerge = useCallback(
+    (payload: SyncMergePayload) => startMicroTask(syncMergeTask, payload, ""),
+    [startMicroTask],
+  );
+
   /** Run a brief that was composed on the spot (a diff surface's "ask about
    *  this" box, the Tasks panel's one-off composer) as a one-shot task — same
    *  lifecycle as a saved one, no entry in the registry. The context builder
@@ -4505,7 +4526,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         );
         return;
       }
-      const cmd = restoreCommand(run.agent, run.sessionId);
+      const cmd = restoreCommand(run.agent, run.sessionId, { task: true });
       if (!cmd) {
         onNotice(`${run.agent} can't reopen a past conversation.`);
         return;
@@ -4965,11 +4986,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
     // ⌘N: the ＋ menu without the mouse. Re-probe on open for the same reason
     // the ＋ menu does — a stale "install" hint sends you to an installer for a
     // CLI you already have.
-    const newLauncher = () => {
+    const newLauncher = (where?: "workspace") => {
       refreshInstalled();
       refreshUpdates();
+      setLauncherWhere(where);
       setLauncherOpen(true);
     };
+    const newLauncherHere = () => newLauncher();
+    // ⌘⇧N: the same list, but an agent picked from it gets its own workspace.
+    const newLauncherWorkspace = () => newLauncher("workspace");
     const activateVisualTab = (id: string) => {
       const tab = tabsRef.current.find((t) => t.id === id);
       const group =
@@ -5248,7 +5273,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     window.addEventListener("menu:quick-open", quickOpen);
     window.addEventListener("menu:find-in-files", findInFiles);
     window.addEventListener("menu:spot-search", spotSearch);
-    window.addEventListener("menu:new-launcher", newLauncher);
+    window.addEventListener("menu:new-launcher", newLauncherHere);
+    window.addEventListener("menu:new-agent-workspace", newLauncherWorkspace);
     return () => {
       window.removeEventListener("canopy:run-command", runCommand);
       window.removeEventListener("menu:close-tab", closeTabHandler);
@@ -5260,7 +5286,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
       window.removeEventListener("menu:quick-open", quickOpen);
       window.removeEventListener("menu:find-in-files", findInFiles);
       window.removeEventListener("menu:spot-search", spotSearch);
-      window.removeEventListener("menu:new-launcher", newLauncher);
+      window.removeEventListener("menu:new-launcher", newLauncherHere);
+      window.removeEventListener("menu:new-agent-workspace", newLauncherWorkspace);
     };
   }, [visible, project.components, addTerminal, refreshInstalled, refreshUpdates]);
 
@@ -6618,6 +6645,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const pending = { sourceTabId: active.id, axis };
       pendingSplitRef.current = pending;
       setPendingSplit(pending);
+      setLauncherWhere(undefined);
       setLauncherOpen(true);
     },
     [],
@@ -14171,6 +14199,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         agentLabel={modelTarget?.label}
         agentId={activeAgentId}
         agentProfile={activeAgent.profile}
+        onResolveMerge={resolveBranchMerge}
         activePtyId={activeTab?.type === "terminal" ? activeTab.ptyId : null}
         activeSessionId={
           activeTab?.type === "terminal" && activeTab.ptyId != null
@@ -14232,6 +14261,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         <LaunchPalette
           installed={installed}
           cliUpdates={cliUpdates}
+          defaultWhere={pendingSplit ? "current" : launcherWhere}
           targetLabel={
             pendingSplit
               ? "new split pane"

@@ -44,6 +44,7 @@ describe("LaunchPalette", () => {
     await userEvent.keyboard(claude().name);
     expect(screen.queryByText("Shell")).not.toBeInTheDocument();
     await userEvent.keyboard("{Enter}");
+    // ⌘N opens here: instant, where a workspace costs a worktree first.
     expect(onLaunchCli).toHaveBeenCalledWith(
       expect.objectContaining({ id: "claude" }),
       "current",
@@ -112,6 +113,20 @@ describe("LaunchPalette", () => {
     const { onLaunchCli } = open();
     await userEvent.keyboard("{ArrowDown}{Enter}");
     expect(onLaunchCli).toHaveBeenCalledWith(AGENT_CLIS[0], "current");
+  });
+
+  it("overrides the default for one opening (⌘⇧N)", async () => {
+    const cli = claude();
+    const { onLaunchCli } = open({
+      installed: { [cli.bin]: true },
+      defaultWhere: "workspace",
+    });
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+    expect(onLaunchCli).toHaveBeenLastCalledWith(AGENT_CLIS[0], "workspace");
+    await userEvent.click(
+      screen.getByRole("button", { name: `Open ${cli.name} in the current checkout` }),
+    );
+    expect(onLaunchCli).toHaveBeenLastCalledWith(cli, "current");
   });
 
   it("does not run off the end of the list", async () => {

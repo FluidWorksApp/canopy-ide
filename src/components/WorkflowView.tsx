@@ -82,9 +82,12 @@ export function WorkflowView({
   editingIdRef.current = editingId;
   const selectedRunIdRef = useRef(selectedRunId);
   selectedRunIdRef.current = selectedRunId;
+  // Only the first load blanks the canvas; a reload after a save swaps the
+  // result in place rather than unmounting what is on screen.
+  const loadedOnce = useRef(false);
 
   const reloadCatalog = useCallback(async (preferId?: string) => {
-    setLoadingCatalog(true);
+    if (!loadedOnce.current) setLoadingCatalog(true);
     const result = await loadWorkflowDefinitions(projectRoot, {
       projectRoot,
       componentRoots: new Set(componentRootsRef.current),
@@ -100,6 +103,7 @@ export function WorkflowView({
       setDefinitions([]);
       setCatalogErrors(result.errors);
     }
+    loadedOnce.current = true;
     setLoadingCatalog(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- rootsKey stands in for componentRoots' contents
   }, [projectRoot, rootsKey, selectDefinition]);

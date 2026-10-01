@@ -175,6 +175,49 @@ describe("the tray's base-branch chip", () => {
     expect(screen.getByText(/Commit or stash it/)).toBeTruthy();
   });
 
+  it("hands a merge blocked by uncommitted work to an agent", async () => {
+    vi.mocked(ipc.gitSyncProbe).mockResolvedValue({
+      ...behind,
+      dirty: 2,
+      overlap: ["src/a.ts"],
+    } as never);
+    const onResolveMerge = vi.fn().mockResolvedValue(true);
+    render(<StatusBar {...base} events={[]} onResolveMerge={onResolveMerge} />);
+
+    fireEvent.click(await screen.findByText("Resolve & merge"));
+    // The dead "Merge main" button gives way to the live one.
+    expect(screen.queryByText("Merge main")).toBeNull();
+    await vi.waitFor(() =>
+      expect(onResolveMerge).toHaveBeenCalledWith({
+        repo: "/repo",
+        branch: "fix/login",
+        base: "origin/main",
+        overlap: ["src/a.ts"],
+        conflicts: [],
+      }),
+    );
+    expect(ipc.gitSyncApply).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(screen.queryByText("main has 4 new commits")).toBeNull());
+  });
+
+  it("offers the agent beside a manual merge that would conflict", async () => {
+    vi.mocked(ipc.gitSyncProbe).mockResolvedValue({
+      ...behind,
+      state: "conflict",
+      conflicts: ["src/a.ts"],
+    } as never);
+    const onResolveMerge = vi.fn().mockResolvedValue(true);
+    render(<StatusBar {...base} events={[]} onResolveMerge={onResolveMerge} />);
+
+    expect(await screen.findByText("Merge and resolve now")).toBeTruthy();
+    fireEvent.click(screen.getByText("Resolve & merge"));
+    await vi.waitFor(() =>
+      expect(onResolveMerge).toHaveBeenCalledWith(
+        expect.objectContaining({ conflicts: ["src/a.ts"] }),
+      ),
+    );
+  });
+
   it("takes 'keep working' for an answer until the base moves again", async () => {
     vi.mocked(ipc.gitSyncProbe).mockResolvedValue(behind as never);
     const { rerender } = render(<StatusBar {...base} events={[]} />);
