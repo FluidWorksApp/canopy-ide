@@ -373,6 +373,7 @@ import { askDialog } from "../../branchSwitch";
 import { useTabDragGroups, applyOrder } from "../../tabDrag";
 import {
   agentIdForCommand,
+  unattendedEnvFor,
   identifyAgent,
   rememberAgentPtys,
 } from "../../agentIdentity";
@@ -1803,7 +1804,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         (launchedCli && accountEnv.length ? launchProfile(launchedCli) : undefined) ??
         undefined;
       const managedEnv = runIdentity ? [...MANAGED_PROCESS_ENV] : [];
-      const env = [...portEnv(portForPath(cwd)), ...managedEnv, ...accountEnv];
+      // A task's unattended mode, where its CLI needs environment as well as a
+      // flag for it (opencode's permission pin, omp's approval overlay).
+      const env = [
+        ...portEnv(portForPath(cwd)),
+        ...managedEnv,
+        ...accountEnv,
+        ...unattendedEnvFor(command),
+      ];
       setTabs((prev) => [
         ...prev,
         {

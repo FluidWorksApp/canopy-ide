@@ -729,6 +729,16 @@ export interface AgentCli {
   unattended?: string;
 
   /**
+   * Environment a task terminal also needs for `unattended` to mean "auto",
+   * where a flag alone cannot say it. Attached by addTerminal only when the
+   * command carries this CLI's `unattended` flag — i.e. only to task launches
+   * and task resumes, never to a session someone opened by hand. Kept out of
+   * the command line on purpose: the first token is how a terminal's agent is
+   * recognised, and an `X=… cli` prefix would hide it.
+   */
+  unattendedEnv?: [string, string][];
+
+  /**
    * Workflow-facing capabilities for this agent type. The canvas, schema
    * validator and launcher all read this same descriptor, so supporting a new
    * configurable CLI is one registry change rather than a switch in every
@@ -1146,6 +1156,29 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // is all opencode allows short of `--auto`: its only other control is that
     // per-tool permission table, and `--auto` is the skip-permissions rung.
     unattended: "--agent build",
+    // That table is the catch: a repo's own opencode.json (`"bash": "ask"`) is
+    // merged over build's defaults and stalls the task. OPENCODE_PERMISSION is
+    // merged last of all, so it pins the task's rules. Verified against
+    // opencode 1.18.32 with `opencode debug agent build` (no session): under a
+    // repo asking for bash and edit, this yields bash/edit allow plus the four
+    // ask rules below. Build's own asks (external directories, .env reads,
+    // doom loops) are untouched, and each ask raises permission.asked, which
+    // Canopy's plugin maps to needs-human-permission.
+    unattendedEnv: [
+      [
+        "OPENCODE_PERMISSION",
+        JSON.stringify({
+          bash: {
+            "*": "allow",
+            "rm -rf *": "ask",
+            "sudo *": "ask",
+            "git push --force*": "ask",
+            "git push -f*": "ask",
+          },
+          edit: "allow",
+        }),
+      ],
+    ],
     execution: {
       fields: [
         providerField(),
@@ -1187,6 +1220,13 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // `always-ask` is a configurable default, and a task that inherits it stops
     // on its first edit.
     unattended: "--approval-mode=write",
+    // `write` still prompts for every bash/eval/task call. The marker asks the
+    // PTY layer to add Canopy's overlay (~/.canopy/omp-task-approval.yml)
+    // through PI_CONFIG_FILES, which allows those tools while omp's own
+    // critical-pattern list keeps prompting (tool_approval_requested → Canopy's
+    // extension → needs-human-permission). A marker, not a path, because a
+    // missing overlay is a hard startup error and only Rust can check it exists.
+    unattendedEnv: [["CANOPY_OMP_TASK_OVERLAY", "1"]],
     execution: {
       fields: [
         providerField(),

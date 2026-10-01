@@ -543,8 +543,11 @@ pub fn run() {
             // It lives in Canopy's own state, never in the repository, so a CLI
             // opened outside this IDE does not inherit IDE-specific rules.
             if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-                if let Err(e) = agent_instructions::install_context(home) {
+                if let Err(e) = agent_instructions::install_context(&home) {
                     log::warn!("agent context not installed: {e}");
+                }
+                if let Err(e) = agent_instructions::install_omp_task_overlay(&home) {
+                    log::warn!("omp task overlay not installed: {e}");
                 }
             }
             // Install the hook helper before hooks are (re)written, so the
