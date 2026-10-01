@@ -160,10 +160,15 @@ export function snapshotTabs(
           kind: "terminal",
           cwd: t.cwd,
           command,
-          // A rename lands in native `name`, which dies with the pty. Reading
-          // only `customTitle` here put the generated name into the snapshot,
-          // so every wake undid the rename.
-          title: (t.renamed ? t.name : undefined) ?? t.customTitle ?? t.title,
+          // A rename also lands in native `name`, which dies with the pty.
+          // Reading only `customTitle` here once put the generated name into the
+          // snapshot, so every wake undid the rename; `customTitle` leads now
+          // because it holds what the user actually typed, where `name` may be
+          // native's deduplicated answer to it.
+          title:
+            (t.renamed ? (t.customTitle ?? t.name) : undefined) ??
+            t.customTitle ??
+            t.title,
           renamed: t.renamed || undefined,
           icon: t.icon,
           run: t.run,

@@ -654,7 +654,7 @@ export function describeTab(tab: SubTab | undefined) {
     case "terminal":
       return {
         kind: tab.run ? "run" : "terminal",
-        label: tab.name ?? tab.customTitle ?? tab.title,
+        label: tab.customTitle ?? tab.name ?? tab.title,
         cwd: tab.cwd,
         ptyId: tab.ptyId,
       };
@@ -726,7 +726,7 @@ export const tabId = () =>
 export function tabDisplayLabel(t: SubTab): string {
   switch (t.type) {
     case "terminal":
-      return t.multiplexTitle ?? t.name ?? t.customTitle ?? t.title;
+      return t.multiplexTitle ?? t.customTitle ?? t.name ?? t.title;
     case "file":
       return t.file.name;
     case "pr":

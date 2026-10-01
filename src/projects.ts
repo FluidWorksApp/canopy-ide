@@ -589,6 +589,20 @@ export const newRunCommandId = () =>
 
 // ---------- Agent CLI launcher registry ----------
 
+/** Where an unattended run lands, for the CLIs whose working mode depends on it.
+ *
+ *  Empty for a task that runs in the checkout it was launched from: there is
+ *  nothing outside the cwd it needs. */
+export interface UnattendedContext {
+  /** Directories the run must be able to write to besides its own cwd. Today
+   *  this is the git common directory of a worktree — `<repo>/.git`, which holds
+   *  the index, the refs and the objects of every linked worktree — because a
+   *  task that cannot write there cannot stage, commit or branch. Not the repo's
+   *  working files: isolating the task from those is the reason it is in a
+   *  worktree at all. */
+  writableRoots?: readonly string[];
+}
+
 export interface AgentCli {
   id: string;
   /** Historical registry ids accepted when reading durable state. Display-name
@@ -724,8 +738,16 @@ export interface AgentCli {
    *
    * Same verification rule as the fields above: only syntax read off the CLI's
    * own --help goes in here.
+   *
+   * A function when the mode depends on where the run lands. Codex's sandbox is
+   * the case: `workspace-write` grants the cwd and nothing else, and a task
+   * Canopy isolates runs in a git worktree whose `.git` is a pointer *out* of
+   * that cwd — so `git add` in the one place we deliberately put agents was
+   * denied by the sandbox, with the CLI reporting it as a sandbox error rather
+   * than as anything the agent could fix. The launcher knows the repo; the
+   * registry entry says what to do with it.
    */
-  unattended?: string;
+  unattended?: string | ((ctx: UnattendedContext) => string);
 
   /**
    * Workflow-facing capabilities for this agent type. The canvas, schema
@@ -973,9 +995,32 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     //
     // NOT `--full-auto`, which every guide still names: it is gone from codex
     // 0.147.0's --help, and a flag clap doesn't know refuses to launch at all.
-    // Codex disables network access in workspace-write unless it is explicit.
-    unattended:
-      "--ask-for-approval never --sandbox workspace-write -c sandbox_workspace_write.network_access=true",
+    //
+    // Two `-c` overrides on top, both of them things `workspace-write` denies by
+    // default and a task cannot do its job without. Verified against the same
+    // 0.147.0 help and `codex --help`'s `-c, --config <key=value>`:
+    //
+    //  * `network_access` — off in workspace-write, which is why a PR review
+    //    reported "blocked on network" before it had read anything: no `gh`, no
+    //    fetch, no package metadata.
+    //  * `writable_roots` — workspace-write grants the cwd and $TMPDIR. A task
+    //    Canopy isolates runs in a git worktree, and a worktree's `.git` is a
+    //    *file* pointing at `<repo>/.git/worktrees/<name>`: outside the cwd, so
+    //    the index, the refs and the objects were all read-only and every `git
+    //    add` failed as a sandbox denial. Granted only when the launcher names a
+    //    root — a task running in its own checkout needs none.
+    unattended: ({ writableRoots }: UnattendedContext) =>
+      [
+        "--ask-for-approval never --sandbox workspace-write",
+        "-c sandbox_workspace_write.network_access=true",
+        ...(writableRoots?.length
+          ? [
+              `-c ${shellQuote(
+                `sandbox_workspace_write.writable_roots=${JSON.stringify([...writableRoots])}`,
+              )}`,
+            ]
+          : []),
+      ].join(" "),
     execution: {
       fields: [
         modelField(["openai"]),
@@ -1812,10 +1857,18 @@ export function launchCommand(cli: AgentCli): string {
  *  flag for it, because that flag is strictly more autonomous than anything
  *  here — and two mode flags on one line is a question about precedence that
  *  every CLI answers differently. One rung or the other, never both. */
-function withUnattendedMode(command: string, cli: AgentCli): string {
+function withUnattendedMode(
+  command: string,
+  cli: AgentCli,
+  ctx: UnattendedContext = {},
+): string {
   if (cli.skipPermissions && getSettings().dangerouslySkipPermissions) return command;
-  return cli.unattended ? `${command} ${cli.unattended}` : command;
+  if (!cli.unattended) return command;
+  const mode =
+    typeof cli.unattended === "function" ? cli.unattended(ctx) : cli.unattended;
+  return mode ? `${command} ${mode}` : command;
 }
+
 
 /** Apply only arguments declared by the selected agent type's manifest.
  * Values are shell-quoted independently, so committed agent configuration
@@ -1836,30 +1889,53 @@ export function startCommand(
   agentId: string,
   text: string,
   options?: AgentLaunchOptions,
+  /** Where this run lands — see UnattendedContext. Omitted by a caller whose
+   *  task runs in the checkout it was launched from. */
+  ctx?: UnattendedContext,
 ): { command: string; typePrompt: boolean } | null {
   const cli = agentCliFor(agentId);
   if (!cli) return null;
   return cli.prompt
     ? {
         command: withAgentLaunchOptions(
-          withUnattendedMode(withSkipPermissions(cli.prompt(text), cli), cli),
+          withUnattendedMode(withSkipPermissions(cli.prompt(text), cli), cli, ctx),
           cli,
           options,
         ),
         typePrompt: false,
       }
     : {
-        command: withAgentLaunchOptions(withUnattendedMode(launchCommand(cli), cli), cli, options),
+        command: withAgentLaunchOptions(
+          withUnattendedMode(launchCommand(cli), cli, ctx),
+          cli,
+          options,
+        ),
         typePrompt: true,
       };
 }
 
-export function restoreCommand(agentId: string, sessionId: string): string | null {
+/** How to reopen a conversation by id.
+ *
+ *  `unattended` is for the resumes nobody is sitting in front of. A session a
+ *  person picks off the restore list is theirs, in the mode their CLI is
+ *  configured for — but Canopy also resumes sessions on its own account, to hand
+ *  a finished review's comments to the agent that raised the PR, and one of those
+ *  reopened in Manual mode stops at the first edit with nobody there to press a
+ *  key. Same flag as the launch that started it (withUnattendedMode); the launch
+ *  had it and the resume did not, which is why a background task would do half
+ *  its work and then go quiet. */
+export function restoreCommand(
+  agentId: string,
+  sessionId: string,
+  opts: { unattended?: boolean; ctx?: UnattendedContext } = {},
+): string | null {
   const id = sessionId.trim();
   if (!id) return null;
   const cli = agentCliFor(agentId);
   const cmd = cli?.resume?.(id);
-  return cmd ? withSkipPermissions(cmd, cli) : null;
+  if (!cmd || !cli) return null;
+  const flagged = withSkipPermissions(cmd, cli);
+  return opts.unattended ? withUnattendedMode(flagged, cli, opts.ctx) : flagged;
 }
 
 /** The session id a terminal's command carries when it was launched to resume a
@@ -1897,10 +1973,17 @@ export function resumeSessionId(command: string | null | undefined): string | nu
     const prefix = tmpl.slice(0, at);
     const suffix = tmpl.slice(at + SENTINEL.length);
     if (!cmd.startsWith(prefix) || !cmd.endsWith(suffix)) continue;
-    const id = cmd.slice(prefix.length, cmd.length - suffix.length).trim();
-    // A genuine id is one non-empty token — this rejects a command that merely
-    // shares the prefix (e.g. a bare `claude`) but isn't a resume.
-    if (id && !/\s/.test(id)) return id;
+    const rest = cmd.slice(prefix.length, cmd.length - suffix.length).trim();
+    // The id is the first token. Anything after it has to open with a flag: an
+    // unattended resume carries its working mode there (`--permission-mode
+    // auto`, codex's three sandbox flags and their values), and requiring the
+    // whole remainder to be one token meant every such command reported no
+    // session at all — which cost the resumed run its identity on the attention
+    // axis and in the PR provenance trail. A trailing *word* still rejects the
+    // command, which is what keeps this from matching something that merely
+    // shares the prefix (a bare `claude`, a `codex resume` with a stray arg).
+    const [id, ...trailing] = rest.split(/\s+/);
+    if (id && (trailing.length === 0 || trailing[0].startsWith("-"))) return id;
   }
   return null;
 }

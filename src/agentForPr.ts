@@ -62,7 +62,10 @@ const canResume = (
   ctx.resumeWith
     ? ctx.resumeWith(agent, sessionId)
     : agent
-      ? restoreCommand(agent, sessionId)
+      // Nobody asked for this session to reopen: it is being resumed so a
+      // finished review can be handed to the agent that raised the PR. Same
+      // working mode the launch had, or it stops at the first edit.
+      ? restoreCommand(agent, sessionId, { unattended: true })
       : null;
 
 const of = (edge: ProvenanceEdge, rest: Partial<PrAgent> & { kind: PrAgentKind; why: string }): PrAgent => ({

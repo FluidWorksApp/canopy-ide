@@ -30,6 +30,7 @@ import {
   startCommand,
   type AgentCli,
   type AgentLaunchOptions,
+  type UnattendedContext,
 } from "./projects";
 import { getSettings } from "./settings";
 
@@ -106,6 +107,36 @@ export function briefPointer(path: string): string {
   );
 }
 
+/** The git directory a checkout writes through. A plain checkout keeps its own;
+ *  a worktree's `.git` is a *file* pointing into this one, which is where its
+ *  index, its refs and its objects actually live. */
+const gitDirOf = (repo: string): string =>
+  `${repo.replace(/[\\/]+$/, "")}/.git`;
+
+/** Where an unattended run lands, for the CLIs whose working mode depends on it.
+ *
+ *  A sandboxed CLI in `workspace-write` is granted its own directory and nothing
+ *  else. Canopy puts agents in a git worktree — `<repo>-wt-<name>`, beside the
+ *  repo — precisely so they cannot disturb the shared checkout, and a worktree's
+ *  index, refs and objects live in the repo's `.git`. So the sandbox let a task
+ *  read the code and change it and then refused every `git add`, reported as a
+ *  sandbox error the agent has no way to diagnose from inside. The one directory
+ *  outside the worktree it has to be able to write is granted; the repo's working
+ *  files are not, because keeping the task out of those is the point of the
+ *  worktree.
+ *
+ *  `repo` when the caller knows it outright (it just created the worktree).
+ *  Otherwise it is read off the sibling-workspace path convention, which is what
+ *  catches a task launched in a workspace someone else made. */
+export function unattendedContextFor(
+  dir: string,
+  repo?: string,
+): UnattendedContext {
+  if (repo) return { writableRoots: [gitDirOf(repo)] };
+  const sibling = /^(.*)-wt-[^/\\]+$/.exec(dir.replace(/[\\/]+$/, ""));
+  return sibling ? { writableRoots: [gitDirOf(sibling[1])] } : {};
+}
+
 /** How to start `agentId` on `seed`, with a brief too long to type parked in a
  *  file first.
  *
@@ -127,15 +158,19 @@ export async function startCommandParked(
   seed: string,
   dir: string,
   options?: AgentLaunchOptions,
+  /** Where the run lands, for the CLIs whose unattended mode depends on it —
+   *  a codex task in a worktree has to be granted the repo's git directory or
+   *  its sandbox denies every `git add`. See UnattendedContext. */
+  ctx?: UnattendedContext,
 ): Promise<{ command: string; typePrompt: boolean } | null> {
-  const start = startCommand(agentId, seed, options);
+  const start = startCommand(agentId, seed, options, ctx);
   // typePrompt means the CLI takes no prompt argument: it launches bare and the
   // text is typed into its TUI once it is up, which is raw mode and has no such
   // limit. Only a prompt that has to survive the SHELL is at risk here.
   if (!start || start.typePrompt || fitsOnOneLine(start.command)) return start;
   try {
     const path = await ipc.spotSaveContextText(dir, seed);
-    return startCommand(agentId, briefPointer(path), options) ?? start;
+    return startCommand(agentId, briefPointer(path), options, ctx) ?? start;
   } catch (err) {
     void ipc.jsLog("warn", `agent: could not park a ${byteLength(seed)}-byte brief: ${String(err)}`);
     return start;

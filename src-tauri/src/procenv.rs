@@ -120,7 +120,11 @@ pub(crate) fn resolve_command(cmd: &str) -> String {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
         let mut command = std::process::Command::new(shell);
         command
-            .args(["-lc", &format!("command -v {cmd}")])
+            // The name reaches the shell as a positional argument, never as
+            // program text. Run commands are user-configurable, and a value
+            // such as `tool; something` must remain one (invalid) executable
+            // name rather than becoming a second shell command.
+            .args(["-lc", "command -v -- \"$1\"", "canopy-resolve", cmd])
             .no_console_window();
         if let Ok(out) = crate::process_capture::output(&mut command, 64 * 1024) {
             if out.status.success() {
@@ -161,6 +165,12 @@ mod tests {
             resolve_command("definitely-not-a-real-binary-xyzzy"),
             "definitely-not-a-real-binary-xyzzy"
         );
+    }
+
+    #[test]
+    fn resolving_a_name_never_evaluates_it_as_shell_code() {
+        let suspicious = "definitely-not-a-real-binary-xyzzy; printf injected";
+        assert_eq!(resolve_command(suspicious), suspicious);
     }
 
     #[test]

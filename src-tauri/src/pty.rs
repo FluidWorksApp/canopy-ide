@@ -1522,7 +1522,14 @@ impl PtyManager {
                     .split_first()
                     .filter(|(p, _)| !p.trim().is_empty())
                     .ok_or_else(|| "argv must name a program".to_string())?;
-                let mut cmd = CommandBuilder::new(program);
+                // Runs configured as argv deliberately bypass a shell so their
+                // arguments stay literal. That also means they miss the login
+                // shell's PATH recovery: a Finder-launched macOS app otherwise
+                // sees only /usr/bin:/bin:/usr/sbin:/sbin and cannot start npm,
+                // pnpm, or a version-manager shim. Resolve only the program;
+                // the arguments remain exactly as supplied.
+                let resolved = crate::procenv::resolve_command(program);
+                let mut cmd = CommandBuilder::new(&resolved);
                 for a in rest {
                     cmd.arg(a);
                 }
@@ -1552,6 +1559,12 @@ impl PtyManager {
         // The caller's own variables go on first, so Canopy's identity vars below
         // always win however a caller spells them.
         let extra_env = extra_env.unwrap_or_default();
+        // `RunSpec::Argv` has no login shell to reconstruct PATH. Apply the same
+        // merged login PATH used by direct process launches before caller env so
+        // an explicit PATH on the configured run remains authoritative.
+        if let Some(path) = crate::procenv::child_path() {
+            cmd.env("PATH", path);
+        }
         // Canopy is frequently launched from an agent/tool process whose own
         // output is deliberately machine-friendly. `NO_COLOR` belongs to that
         // host process; blindly inheriting it turns every interactive CLI in a

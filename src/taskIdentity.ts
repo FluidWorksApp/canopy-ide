@@ -141,6 +141,17 @@ export function promptTaskIdentity(raw: unknown): {
   };
 }
 
+/** Whether anything that names a run on its own — canopy_name_task, the prompt
+ *  baseline, a future namer nobody has written yet — may write this tab's title.
+ *
+ *  The one question every auto-namer has to ask, which is why it is a named
+ *  function rather than an inline `!tab.renamed` at each call site: the sites
+ *  that forgot it are exactly the tabs that renamed themselves back. A name the
+ *  user typed is not a suggestion to be improved on. It is cleared only by the
+ *  user, by renaming the tab to nothing. */
+export const mayAutoRename = (tab: { renamed?: boolean }): boolean =>
+  !tab.renamed;
+
 /** A human prompt is only the session's temporary identity before anything has
  * named the work. Once a baseline or canopy_name_task title exists, later
  * follow-up messages are conversation — never a reason to rename the tab or
@@ -150,7 +161,7 @@ export function shouldSeedPromptIdentity(tab: {
   renamed?: boolean;
   micro?: unknown;
 }): boolean {
-  return !tab.micro && !tab.renamed && !tab.customTitle?.trim();
+  return !tab.micro && mayAutoRename(tab) && !tab.customTitle?.trim();
 }
 
 /** Everything an agent may say about its own run, cleaned. */

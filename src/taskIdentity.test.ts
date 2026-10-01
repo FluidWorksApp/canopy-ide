@@ -3,6 +3,7 @@ import {
   askedLine,
   hasIdentity,
   identityPatch,
+  mayAutoRename,
   MAX_TAGS,
   promptTaskIdentity,
   shouldSeedPromptIdentity,
@@ -187,5 +188,23 @@ describe("identityPatch", () => {
     // `icon` on a run is what the task was launched with; the agent's pick is
     // recorded beside it so both survive.
     expect(identityPatch({ icon: "◈" }).agentIcon).toBe("◈");
+  });
+});
+
+describe("mayAutoRename", () => {
+  it("lets an auto-namer name a tab nobody has renamed", () => {
+    expect(mayAutoRename({})).toBe(true);
+    expect(mayAutoRename({ renamed: false })).toBe(true);
+  });
+
+  /** The whole complaint this exists for: a tab the user renamed was being
+   *  renamed back by canopy_name_task, by the prompt baseline, and by the next
+   *  pty's generated name. One predicate, asked by every namer. */
+  it("refuses every auto-namer once the user has renamed the tab", () => {
+    expect(mayAutoRename({ renamed: true })).toBe(false);
+    expect(shouldSeedPromptIdentity({ renamed: true })).toBe(false);
+    expect(
+      shouldSeedPromptIdentity({ renamed: true, customTitle: "Payments" }),
+    ).toBe(false);
   });
 });
