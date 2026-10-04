@@ -4,7 +4,7 @@ COPY hook-build/ ./
 RUN cargo build --locked --release --manifest-path packages/agent-hook/Cargo.toml
 
 FROM node:22-bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ git openssh-client bash ca-certificates xvfb x11vnc openbox xterm chromium xfce4 xfce4-terminal thunar dbus-x11 adwaita-icon-theme hicolor-icon-theme tango-icon-theme librsvg2-common && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ git ripgrep openssh-client bash ca-certificates xvfb x11vnc openbox xterm chromium xfce4 xfce4-terminal thunar dbus-x11 adwaita-icon-theme hicolor-icon-theme tango-icon-theme librsvg2-common && rm -rf /var/lib/apt/lists/*
 COPY --from=hook-builder /build/packages/agent-hook/target/release/canopy-hook /usr/local/bin/canopy-hook
 WORKDIR /opt/canopy
 COPY package.json package-lock.json ./

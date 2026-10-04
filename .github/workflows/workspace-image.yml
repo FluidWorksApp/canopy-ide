@@ -46,6 +46,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm ci --prefix packages/remote-host --workspaces=false --ignore-scripts
       - run: node --test packages/remote-host/*.test.mjs
       - run: node packages/remote-host/prepare-hook-build.mjs
