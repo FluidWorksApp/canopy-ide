@@ -1,0 +1,12 @@
+**
+!Dockerfile
+!package.json
+!package-lock.json
+!agents.lock.json
+!install-agents.sh
+!install-native-build.sh
+!*.mjs
+*.test.mjs
+
+!hook-build/
+!hook-build/**

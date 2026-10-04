@@ -1,0 +1,125 @@
+name: Workspace image
+
+on:
+  push:
+    branches: [main, runtime/prebuilt-workspace-images]
+    paths:
+      - 'packages/remote-host/**'
+      - 'packages/agent-hook/**'
+      - 'src-tauri/src/bin/canopy_hook.rs'
+      - 'src-tauri/src/agent_instructions.rs'
+      - 'src-tauri/src/agent_life.rs'
+      - 'shared/agentLife/**'
+      - '.github/workflows/workspace-image.yml'
+  workflow_dispatch:
+    inputs:
+      promote:
+        description: 'Make this tested image the stable workspace release'
+        type: boolean
+        default: true
+
+concurrency:
+  group: workspace-image-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and publish (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --prefix packages/remote-host --workspaces=false --ignore-scripts
+      - run: node --test packages/remote-host/*.test.mjs
+      - run: node packages/remote-host/prepare-hook-build.mjs
+      - uses: docker/setup-buildx-action@v3
+      - name: Build candidate locally
+        uses: docker/build-push-action@v6
+        with:
+          context: packages/remote-host
+          load: true
+          tags: canopy-workspace:0.1.0
+          cache-from: type=gha,scope=workspace-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=workspace-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Verify actual candidate runtime and integrations
+        run: |
+          node packages/remote-host/smoke-linux.mjs
+          node packages/remote-host/smoke-agent-integrations.mjs canopy-workspace:0.1.0
+          bash packages/remote-host/smoke-isolation.sh canopy-workspace:0.1.0
+          node packages/remote-host/smoke-image-upgrade.mjs canopy-workspace:0.1.0
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish tested architecture
+        env:
+          ARCH: ${{ matrix.arch }}
+          REVISION: ${{ github.sha }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/canopy-workspace"
+          docker tag canopy-workspace:0.1.0 "$image:sha-$REVISION-$ARCH"
+          docker push "$image:sha-$REVISION-$ARCH"
+
+  release:
+    name: Publish multi-platform release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assemble release and promote only after both platforms pass
+        env:
+          REVISION: ${{ github.sha }}
+          PROMOTE: ${{ github.event_name == 'push' || inputs.promote }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/canopy-workspace"
+          tags=(--tag "$image:sha-$REVISION")
+          if [[ "$PROMOTE" == true && "$GITHUB_REF" == refs/heads/main ]]; then
+            tags+=(--tag "$image:stable")
+          fi
+          docker buildx imagetools create "${tags[@]}" "$image:sha-$REVISION-amd64" "$image:sha-$REVISION-arm64"
+          docker buildx imagetools inspect "$image:sha-$REVISION" --format '{{json .Manifest}}' > image-manifest.json
+          IMAGE="$image" node --input-type=module -e 'import fs from "node:fs";const m=JSON.parse(fs.readFileSync("image-manifest.json"));if(!/^sha256:[a-f0-9]{64}$/.test(m.digest))throw Error("Missing image digest");fs.writeFileSync("workspace-release.json",JSON.stringify({revision:process.env.REVISION,image:process.env.IMAGE+"@"+m.digest,channel:process.env.IMAGE+":stable",platforms:["linux/amd64","linux/arm64"]},null,2));'
+          cat workspace-release.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Package matching trusted host runtime
+        run: |
+          bash packages/remote-host/package-host-release.sh workspace-host.tar.gz workspace-release.json
+          sha256sum workspace-host.tar.gz > workspace-host.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workspace-release-${{ github.sha }}
+          path: |
+            workspace-release.json
+            workspace-host.tar.gz
+            workspace-host.tar.gz.sha256
+          retention-days: 90

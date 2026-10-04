@@ -1,0 +1,64 @@
+import {isDeepStrictEqual} from 'node:util';
+
+// Read-only recovery assessment. Never restart, rename or delete anything from
+// a journal alone: compare durable configuration with inspected Docker state.
+export async function assessMigrationRecovery({records,config,docker}) {
+ if(!Array.isArray(records)||!records.length)throw Error('Missing migration journal');
+ const id=records[0].workspaceId;
+ if(typeof id!=='string'||!/^[a-z][a-z0-9-]{0,47}$/.test(id))throw Error('Invalid workspace identity');
+ records.forEach((r,i)=>{if(r.workspaceId!==id||r.sequence!==i+1)throw Error('Invalid journal sequence');});
+ const prepared=records.findLast(r=>r.phase==='prepared');
+ if(!prepared)return {state:'before-replacement',workspaceId:id};
+ if(typeof prepared.originalContainerId!=='string'||!prepared.originalContainerId||
+    typeof prepared.preservedContainer!=='string'||!prepared.preservedContainer.startsWith(`canopy-preserved-${id}-`)||
+    !/^canopy-preserved-[a-z0-9-]+$/.test(prepared.preservedContainer))throw Error('Invalid recovery identities');
+ const inspect=async name=>{try{return JSON.parse((await docker(['inspect',name])).stdout)[0];}catch(error){if(error.missingResource)return null;throw error;}};
+ const current=await inspect(`canopy-ws-${id}`);
+ const preserved=await inspect(prepared.preservedContainer);
+ for(const container of [current,preserved])if(container&&container.Config?.Labels?.['canopy.workspace']!==id)throw Error('Container ownership changed; manual recovery required');
+ const workspace=config.workspaces.find(w=>w.id===id);
+ if(!workspace)throw Error('Workspace configuration missing; manual recovery required');
+ const published=isDeepStrictEqual(workspace,prepared.next);
+ if(published){
+  if(!current||current.Id===prepared.originalContainerId||preserved?.Id!==prepared.originalContainerId)throw Error('Published migration disagrees with containers; manual recovery required');
+  return {state:'published',workspaceId:id,originalContainer:prepared.preservedContainer,running:current.State?.Running===true};
+ }
+ if(records.some(r=>r.phase==='committed'))throw Error('Committed migration disagrees with configuration; manual recovery required');
+ if(!prepared.originalWorkspace||!isDeepStrictEqual(workspace,prepared.originalWorkspace))throw Error('Configuration changed; manual recovery required');
+ if(current?.Id===prepared.originalContainerId){
+  if(preserved)throw Error('Conflicting preserved container; manual recovery required');
+  return {state:'original-restored',workspaceId:id,running:current.State?.Running===true,restorePolicy:prepared.restorePolicy};
+ }
+ if(preserved?.Id!==prepared.originalContainerId||preserved.State?.Running!==false)throw Error('Stopped original unavailable; manual recovery required');
+ return {state:'rollback-needed',workspaceId:id,originalContainer:prepared.preservedContainer,replacementContainerId:current?.Id??null,restorePolicy:prepared.restorePolicy};
+}
+
+// Offline host operation. Caller holds the host service stopped and supplies a
+// separate durable recovery journal. The original remains stopped throughout.
+export async function rollbackMigration({records,readConfig,host,journal}) {
+ if(typeof readConfig!=='function'||typeof journal?.append!=='function')throw Error('Recovery requires fresh configuration and a durable journal');
+ return host.withResourceLock(async()=>{
+  const assessment=await assessMigrationRecovery({records,config:await readConfig(),docker:host.docker});
+  if(assessment.state!=='rollback-needed')return assessment;
+  const prepared=records.findLast(r=>r.phase==='prepared');
+  if(!/^(no|always|unless-stopped|on-failure(?::[1-9][0-9]*)?)$/.test(prepared.restorePolicy))throw Error('Invalid restart policy');
+  const id=assessment.workspaceId;
+  const name='canopy-ws-'+id;
+  await journal.append({phase:'rollback-started',originalContainerId:prepared.originalContainerId,replacementContainerId:assessment.replacementContainerId});
+  try{
+   if(assessment.replacementContainerId){
+    const replacement=assessment.replacementContainerId;
+    await host.docker(['update','--restart','no',replacement]);
+    await host.docker(['stop','--timeout','30',replacement]);
+    await host.docker(['rename',replacement,prepared.preservedContainer+'-failed']);
+   }
+   await host.docker(['rename',prepared.originalContainerId,name]);
+   await host.docker(['update','--restart',prepared.restorePolicy,prepared.originalContainerId]);
+   host.runtimes.delete(id);
+   const restored=JSON.parse((await host.docker(['inspect',name])).stdout)[0];
+   if(restored?.Id!==prepared.originalContainerId||restored.State?.Running!==false)throw Error('Original restoration could not be verified');
+   await journal.append({phase:'rollback-complete',originalContainerId:prepared.originalContainerId});
+   return {state:'original-restored',workspaceId:id,running:false};
+  }catch(error){host.migrationCleanupRequired.add(id);throw error;}
+ });
+}

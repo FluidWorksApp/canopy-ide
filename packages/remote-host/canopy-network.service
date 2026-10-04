@@ -1,0 +1,14 @@
+[Unit]
+Description=Canopy workspace network isolation
+After=docker.service
+Requires=docker.service
+Before=canopy-host.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/canopy-host/network-isolation.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
