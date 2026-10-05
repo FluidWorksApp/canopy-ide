@@ -10,3 +10,11 @@
 
 !hook-build/
 !hook-build/**
+
+!chrome-stream/
+!chrome-stream/server.mjs
+!chrome-stream/playwright.mjs
+!chrome-stream/protocol.mjs
+!chrome-stream/viewer.html
+!chrome-stream/viewer.js
+!chrome-stream/preview_picker.js
