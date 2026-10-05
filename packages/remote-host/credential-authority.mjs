@@ -8,7 +8,7 @@ export function credentialAuthority({workspaces,authorizeMember,bindings,now=Dat
  if(typeof authorizeMember!=='function'||typeof bindings!=='function')throw Error('Shared execution requires live authority and trusted bindings');
  return async(principal,context)=>{
   if(!principal?.memberId||!Number.isFinite(principal.expiresAt)||principal.expiresAt<=now()||principal.workspaceId!==context.workspaceId||principal.memberId!==context.memberId||typeof principal.bearer!=='string')return null;
-  const slot=slots[context.operation];if(!slot)return null;
+  if(!Object.hasOwn(slots,context.operation))return null;const slot=slots[context.operation];
   const workspace=workspaces.find(w=>w.id===context.workspaceId);if(!workspace||['stopped','deleted'].includes(workspace.desiredState??workspace.desired_state))return null;
   const current=await authorizeMember(principal,principal.bearer);
   if(!current?.sharedAccess||!current.projectAccess)return null;

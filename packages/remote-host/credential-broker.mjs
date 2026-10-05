@@ -3,11 +3,13 @@
 const operations=new Set(['git:fetch','git:push','agents:claude','agents:codex']);
 const id=value=>typeof value==='string'&&/^[a-zA-Z0-9_-]{1,128}$/.test(value);
 export class CredentialBroker {
- constructor({authorize,loadCredential,fetchImpl=fetch}){
+ constructor({authorize,loadCredential,fetchImpl=fetch,pollMs=2000,maxDurationMs=120000}){
   if(typeof authorize!=='function'||typeof loadCredential!=='function')throw Error('Credential broker requires trusted authority and vault');
-  this.authorize=authorize;this.loadCredential=loadCredential;this.fetch=fetchImpl;
+  if(!Number.isInteger(pollMs)||pollMs<20||pollMs>2000||!Number.isInteger(maxDurationMs)||maxDurationMs<20||maxDurationMs>120000)throw Error('Invalid broker observation bounds');
+  this.pollMs=pollMs;this.maxDurationMs=maxDurationMs;this.authorize=authorize;this.loadCredential=loadCredential;this.fetch=fetchImpl;
  }
- async execute(principal,request){
+ async execute(principal,request,{signal}={}){
+  if(signal?.aborted)throw Error('Shared provider request cancelled');
   if(!principal||typeof principal.memberId!=='string'||!principal.memberId||typeof principal.workspaceId!=='string'||!id(request?.projectId)||!operations.has(request?.operation))throw Error('Forbidden');
   // Only project/operation and bounded payload enter from the developer runtime.
   if(request.advertise!==undefined&&typeof request.advertise!=='boolean')throw Error('Invalid advertisement mode');
@@ -38,12 +40,40 @@ export class CredentialBroker {
   // merely because its first lookup was accepted before revocation.
   const current=await this.authorize(principal,context);
   if(!current||Object.keys(context).some(k=>current[k]!==context[k])||current.accountId!==grant.accountId)throw Error('Forbidden');
+  const abort=new AbortController();let checking=false;
+  const same=value=>value&&Object.keys(context).every(k=>value[k]===context[k])&&value.accountId===grant.accountId;
+  const deadline=setTimeout(()=>abort.abort(),this.maxDurationMs);
+  const poll=setInterval(async()=>{
+   if(checking||abort.signal.aborted)return;checking=true;
+   try{if(!same(await this.authorize(principal,context)))abort.abort();}catch{abort.abort();}finally{checking=false;}
+  },this.pollMs);
+  const cancelClient=()=>abort.abort();
+  if(signal?.aborted)abort.abort();else signal?.addEventListener('abort',cancelClient,{once:true});
+  const cleanup=()=>{clearInterval(poll);clearTimeout(deadline);signal?.removeEventListener('abort',cancelClient);};
   try{
-   const response=await this.fetch(url,{method,headers,...(method==='POST'?{body}:{}),redirect:'error',signal:AbortSignal.timeout(120000)});
-   // Only the provider body/content type/status are exposed, never Set-Cookie,
-   // authentication headers, redirects or transport errors with credentials.
-   if(response.status>=300&&response.status<400)throw Error('Provider redirect');
-   return new Response(response.body,{status:response.status,headers:{'content-type':response.headers.get('content-type')??'application/octet-stream','cache-control':'no-store'}});
-  }catch{throw Error('Shared provider request failed');}
+   if(abort.signal.aborted)throw Error('Request cancelled');
+   const response=await this.fetch(url,{method,headers,...(method==='POST'?{body}:{}),redirect:'error',signal:abort.signal});
+   if(abort.signal.aborted||response.status>=300&&response.status<400)throw Error('Provider unavailable');
+   if(!response.ok){response.body?.cancel().catch(()=>{});cleanup();return Response.json({error:{message:'Shared provider rejected the request'}},{status:response.status,headers:{'cache-control':'no-store'}});}
+   const safeHeaders={'content-type':response.headers.get('content-type')??'application/octet-stream','cache-control':'no-store'};
+   if(!response.body){cleanup();return new Response(null,{status:response.status,headers:safeHeaders});}
+   const reader=response.body.getReader();let bytes=0;
+   let rejectAbort;const cancelled=new Promise((_,reject)=>{rejectAbort=reject;});cancelled.catch(()=>{});
+   const onAbort=()=>rejectAbort(Error('Shared access ended'));abort.signal.addEventListener('abort',onAbort,{once:true});
+   const finish=()=>{cleanup();abort.signal.removeEventListener('abort',onAbort);};
+   const stream=new ReadableStream({
+    async pull(controller){
+     try{
+      const result=await Promise.race([reader.read(),cancelled]);
+      if(abort.signal.aborted)throw Error('Shared access ended');
+      if(result.done){finish();controller.close();return;}
+      bytes+=result.value.byteLength;if(bytes>512*1024*1024)throw Error('Provider response too large');
+      controller.enqueue(result.value);
+     }catch{finish();abort.abort();reader.cancel().catch(()=>{});controller.error(Error('Shared provider stream failed'));}
+    },
+    cancel(){finish();abort.abort();reader.cancel().catch(()=>{});}
+   });
+   return new Response(stream,{status:response.status,headers:safeHeaders});
+  }catch{cleanup();abort.abort();throw Error('Shared provider request failed');}
  }
 }

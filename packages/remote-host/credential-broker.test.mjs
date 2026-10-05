@@ -47,3 +47,24 @@ test('repository traversal and nonboolean advertisement cannot reach a provider'
  const broker=new CredentialBroker({authorize:async()=>grant,loadCredential:async()=>credential});
  await assert.rejects(broker.execute(principal,{...r,advertise:'true'}));assert.equal(calls,0);
 });
+test('revocation aborts an active provider stream even when its body ignores cancellation',async()=>{
+ let allowed=true,signal;const broker=new CredentialBroker({pollMs:20,maxDurationMs:1000,authorize:async()=>allowed?grant:null,loadCredential:async()=>credential,fetchImpl:async(_url,options)=>{
+  signal=options.signal;return new Response(new ReadableStream({start(c){c.enqueue(new TextEncoder().encode('first'));},pull(){return new Promise(()=>{});}}));
+ }});
+ const response=await broker.execute(principal,request),reader=response.body.getReader();assert.equal(new TextDecoder().decode((await reader.read()).value),'first');allowed=false;
+ await assert.rejects(reader.read(),/Shared provider stream failed/);assert.equal(signal.aborted,true);
+});
+test('provider stream deadline and downstream cancellation terminate execution',async()=>{
+ let signal;const make=()=>new CredentialBroker({pollMs:20,maxDurationMs:60,authorize:async()=>grant,loadCredential:async()=>credential,fetchImpl:async(_url,options)=>{signal=options.signal;return new Response(new ReadableStream({pull(){return new Promise(()=>{});}}));}});
+ const response=await make().execute(principal,request);await assert.rejects(response.body.getReader().read(),/Shared provider stream failed/);assert.equal(signal.aborted,true);
+ const next=await make().execute(principal,request);await next.body.cancel();assert.equal(signal.aborted,true);
+});
+test('provider error bodies cannot reflect credentials back to a member',async()=>{
+ const broker=new CredentialBroker({authorize:async()=>grant,loadCredential:async()=>credential,fetchImpl:async()=>Response.json({error:{message:secret}},{status:401,headers:{'x-api-key':secret}})});
+ const response=await broker.execute(principal,request);assert.equal(response.status,401);assert.ok(!(await response.text()).includes(secret));assert.equal(response.headers.get('x-api-key'),null);
+});
+test('client disconnect before provider headers aborts the upstream request',async()=>{
+ const client=new AbortController();let upstream;
+ const broker=new CredentialBroker({authorize:async()=>grant,loadCredential:async()=>credential,fetchImpl:async(_url,options)=>{upstream=options.signal;return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(Error(secret)),{once:true}));}});
+ const pending=broker.execute(principal,request,{signal:client.signal});setTimeout(()=>client.abort(),20);await assert.rejects(pending,error=>!error.message.includes(secret));assert.equal(upstream.aborted,true);
+});

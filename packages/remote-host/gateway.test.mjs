@@ -271,3 +271,26 @@ test('shared account import and selection are owner-only and never return secret
   assert.equal((await call({},{action:'remove',accountId:'shared'})).status,200);await assert.rejects(vault.load('shared',{workspaceId:id}));
  }finally{await close(gateway);await rm(root,{recursive:true,force:true});}
 });
+test('broker transport binds payloads and prevents replay before provider execution',async()=>{
+ const {mkdtemp,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const path=await import('node:path');const {CredentialVault}=await import('./credential-vault.mjs');const {SharedAccounts}=await import('./shared-accounts.mjs');const {CredentialTickets}=await import('./credential-tickets.mjs');const {createHmac,createHash}=await import('node:crypto');
+ const id='ws-11111111-1111-4111-8111-111111111111',key='k'.repeat(48),secret='synthetic-provider-secret';
+ const workspace={id,accounts:[],memoryMiB:1024,cpus:1,projectMounts:[{id:'app',writable:true}]};
+ const config={workspaces:[workspace],principals:[{id:'managed-account',scope:'drive',workspaces:[id],tokenSha256:'0'.repeat(64)}],managedSession:{workspaceId:id,key}};
+ const claims={version:2,workspaceId:id,memberId:'alice',accessVersion:1,scope:'drive',expires:Math.floor(Date.now()/1000)+120},encoded=Buffer.from(JSON.stringify(claims)).toString('base64url'),bearer='Bearer '+encoded+'.'+createHmac('sha256',key).update(encoded).digest('base64url');
+ const root=await mkdtemp(path.join(tmpdir(),'broker-gateway-')),vault=await CredentialVault.initialize(path.join(root,'vault')),accounts=new SharedAccounts(vault),tickets=await CredentialTickets.initialize(path.join(root,'tickets'),'host-ticket-key'.repeat(3));
+ await vault.store(id,'claude',{provider:'anthropic',token:secret});await accounts.bind(id,'app','claude','claude');
+ let allowed=true,provider=0;const access={allRead:true,allWrite:true,selected:[]};
+ const options={config,workspaces:{},credentialVault:vault,sharedAccounts:accounts,credentialTickets:tickets,authorizeMember:async()=>allowed?{projectAccess:access,sharedAccess:{git:access,agents:access}}:false,brokerOptions:{fetchImpl:async(url,opts)=>{provider++;assert.equal(url,'https://api.anthropic.com/v1/messages');assert.equal(opts.headers['x-api-key'],secret);return Response.json({result:'synthetic'});}}};
+ let gateway=createGateway(options),base=await listen(gateway);
+ const call=(operation,input)=>fetch(base+'/v1/workspaces/'+id+operation,{method:'POST',headers:{authorization:bearer,'content-type':'application/json'},body:JSON.stringify(input)});
+ const payload=Buffer.from('{"messages":[]}'),request={projectId:'app',operation:'agents:claude',bodySha256:createHash('sha256').update(payload).digest('hex')};
+ try{
+  const ticket=(await (await call('/shared-ticket',request)).json()).ticket;assert.ok(ticket);
+  assert.equal((await call('/shared-execute',{ticket,body:Buffer.from('forged').toString('base64')})).status,400);assert.equal(provider,0);
+  const executed=await call('/shared-execute',{ticket,body:payload.toString('base64')});assert.equal(executed.status,200);const text=await executed.text();assert.ok(!text.includes(secret));assert.equal(provider,1);
+  assert.equal((await call('/shared-execute',{ticket,body:payload.toString('base64')})).status,400);assert.equal(provider,1);
+  await close(gateway);options.credentialTickets=await CredentialTickets.initialize(path.join(root,'tickets'),'host-ticket-key'.repeat(3));gateway=createGateway(options);base=await listen(gateway);
+  assert.equal((await call('/shared-execute',{ticket,body:payload.toString('base64')})).status,400);assert.equal(provider,1);
+  const next=(await (await call('/shared-ticket',request)).json()).ticket;allowed=false;assert.equal((await call('/shared-execute',{ticket:next,body:payload.toString('base64')})).status,401);assert.equal(provider,1);
+ }finally{await close(gateway);await rm(root,{recursive:true,force:true});}
+});

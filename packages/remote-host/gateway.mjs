@@ -2,6 +2,11 @@ import {quarantineImageUpgrades} from './image-upgrade.mjs';
 import {quarantineInterruptedMigrations} from './migration-startup.mjs';
 import {runtimeReady} from './runtime-readiness.mjs';
 import {RuntimeSupervisor} from './runtime-supervisor.mjs';
+import {Readable} from 'node:stream';
+import {pipeline} from 'node:stream/promises';
+import {CredentialBroker} from './credential-broker.mjs';
+import {CredentialTickets} from './credential-tickets.mjs';
+import {credentialAuthority} from './credential-authority.mjs';
 import {CredentialVault} from './credential-vault.mjs';
 import {SharedAccounts} from './shared-accounts.mjs';
 import {runtimeAuthority} from './runtime-authority.mjs';
@@ -22,7 +27,7 @@ import {ElasticMemory, memoryRange} from './elastic-memory.mjs';
 import {ElasticCpu, cpuRange} from './elastic-cpu.mjs';
 import { body, json } from './http.mjs';
 
-export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts }) {
+export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, brokerOptions={} }) {
   validateConfig(config);
   const checkMember = async (principal, bearer) => {
     if (!principal.memberId) return;
@@ -72,13 +77,37 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       const match = route.match(/^\/v1\/workspaces\/([a-z][a-z0-9-]{0,47})(\/.*)$/);
       if (!match) return json(response, 404, { error: 'Unknown operation' });
       const [, workspaceId, operation] = match;
-      const reads = new Set(['/projects', '/sessions', '/files/list', '/files/read', '/git/status', '/git/diff']);
+      const reads = new Set(['/shared-ticket', '/shared-execute', '/projects', '/sessions', '/files/list', '/files/read', '/git/status', '/git/diff']);
       const write = operation !== '/sessions' || request.method !== 'GET';
       const scope = operation === '/open' || operation === '/resources' || operation === '/ticket' || (reads.has(operation) && (operation !== '/sessions' || !write)) ? 'view' : 'drive';
       const workspace = authorize(config, principal, workspaceId, scope);
       if (!['GET', 'POST'].includes(request.method)) throw new Error('Unsupported method');
-      if (!['/shared-accounts', '/projects', '/open', '/resources', '/sessions', '/ticket', '/desktop', '/files/list', '/files/read', '/files/write', '/git/status', '/git/diff', '/language/analyze', '/native'].includes(operation) &&
+      if (!['/shared-ticket', '/shared-execute', '/shared-accounts', '/projects', '/open', '/resources', '/sessions', '/ticket', '/desktop', '/files/list', '/files/read', '/files/write', '/git/status', '/git/diff', '/language/analyze', '/native'].includes(operation) &&
           !/^\/sessions\/\d+\/(input|resize|stop)$/.test(operation)) throw new Error('Unknown operation');
+      if(operation==='/shared-ticket'||operation==='/shared-execute'){
+        if(request.method!=='POST'||!principal.memberId||!credentialTickets||!credentialVault||!sharedAccounts||!authorizeMember)throw Error('Forbidden');
+        const member={...principal,bearer:request.headers.authorization};
+        const authority=credentialAuthority({workspaces:config.workspaces,authorizeMember,bindings:(workspaceId,projectId,slot)=>sharedAccounts.resolve(workspaceId,projectId,slot)});
+        if(operation==='/shared-ticket'){
+          const input=await body(request,4096);
+          if(!input||Object.keys(input).some(k=>!['projectId','operation','bodySha256','advertise'].includes(k)))throw Error('Invalid credential request');
+          const context={workspaceId:workspace.id,memberId:member.memberId,projectId:input.projectId,operation:input.operation};
+          const grant=await authority(member,context);if(!grant)throw Error('Forbidden');
+          return json(response,200,{ticket:credentialTickets.issue(member,grant,{bodySha256:input.bodySha256,advertise:input.advertise??false})});
+        }
+        const input=await body(request,6*1024*1024);
+        if(!input||Object.keys(input).some(k=>!['ticket','body','advertise'].includes(k))||typeof input.body!=='string'||input.body.length>5592408||typeof (input.advertise??false)!=='boolean')throw Error('Invalid credential payload');
+        const payload=Buffer.from(input.body,'base64');if(payload.toString('base64')!==input.body)throw Error('Invalid credential payload');
+        const claims=await credentialTickets.consume(input.ticket,member,payload,{advertise:input.advertise??false});
+        const broker=new CredentialBroker({...brokerOptions,authorize:async(p,c)=>{const current=await authority(p,c);return current?.accountId===claims.accountId?current:null;},loadCredential:(accountId,context)=>credentialVault.load(accountId,context)});
+        const clientGone=new AbortController(),onClose=()=>clientGone.abort();response.once('close',onClose);if(response.destroyed)clientGone.abort();
+        try{
+        const result=await broker.execute(member,{projectId:claims.projectId,operation:claims.operation,body:payload,...(claims.operation.startsWith('git:')?{advertise:claims.advertise}:{})},{signal:clientGone.signal});
+        response.writeHead(result.status,Object.fromEntries(result.headers));
+        if(result.body)await pipeline(Readable.fromWeb(result.body),response);else response.end();
+        }finally{response.removeListener('close',onClose);}
+        return;
+      }
       if(operation==='/shared-accounts'){
         if(principal.memberId||principal.id!=='managed-account'||config.managedSession?.workspaceId!==workspace.id||!credentialVault||!sharedAccounts)throw Error('Forbidden');
         try{
@@ -151,6 +180,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       }
       return json(response, result.status, output);
     } catch (error) {
+      if(response.headersSent){response.destroy();return;}
       json(response, error.message === 'Forbidden' ? 403 : 400, { error: error.message });
     } finally {
       const count = (active.get(principal.id) ?? 1) - 1;
@@ -225,6 +255,7 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
     secret = randomBytes(32).toString('hex'); await writeFile(keyPath, secret, { mode: 0o600, flag: 'wx' });
   }
   const credentialVault=config.managedSession?await CredentialVault.initialize(path.join(state,'credential-vault')):undefined;
+  const credentialTickets=credentialVault?await CredentialTickets.initialize(path.join(state,'credential-ticket-journal'),secret):undefined;
   const sharedAccounts=credentialVault?new SharedAccounts(credentialVault):undefined;
   const authority=runtimeAuthority(config.managedSession?.runtimePolicyUrl,config.managedSession);
   const workspaces = new DockerWorkspaces({ secret, image: process.env.CANOPY_WORKSPACE_IMAGE, registry: config.workspaces,releaseChannel:process.env.CANOPY_WORKSPACE_IMAGE,resolveRelease:authority?workspace=>authority.release({...workspace,id:workspace.parentWorkspaceId??workspace.id}):undefined,upgradeDirectory:path.join(state,'image-upgrades') });
@@ -237,7 +268,7 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   const elasticMemory = new ElasticMemory({registry:config.workspaces,docker:workspaces});
   const elasticCpu = new ElasticCpu({registry:config.workspaces,docker:workspaces});
   const supervisor=new RuntimeSupervisor({directory:path.join(state,'runtime-recovery'),host:workspaces});
-  const server = createGateway({ config, workspaces, credentialVault, sharedAccounts, elasticMemory, elasticCpu, supervisor, authorizeMember:memberAuthority(config.managedSession?.authorizationUrl), authorizeRuntime:authority, origins: (process.env.CANOPY_HOST_ORIGINS ?? '').split(',').filter(Boolean) });
+  const server = createGateway({ config, workspaces, credentialVault, sharedAccounts, credentialTickets, elasticMemory, elasticCpu, supervisor, authorizeMember:memberAuthority(config.managedSession?.authorizationUrl), authorizeRuntime:authority, origins: (process.env.CANOPY_HOST_ORIGINS ?? '').split(',').filter(Boolean) });
   server.on('close', () => { elasticMemory.stop(); elasticCpu.stop(); });
   server.listen(Number(process.env.PORT ?? 8787), '127.0.0.1', () => { elasticMemory.start(); elasticCpu.start(); supervisor.start(); console.log('Canopy remote host listening on loopback'); });
 }

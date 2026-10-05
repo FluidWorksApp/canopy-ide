@@ -14,6 +14,6 @@ test('live resource authority intersects shared grant with trusted project mount
 });
 test('expired, forged, missing or stopped contexts cannot resolve account bindings',async()=>{
  let calls=0;const authorize=credentialAuthority({workspaces:[ws],now:()=>100,authorizeMember:async()=>{calls++;return {projectAccess:app,sharedAccess:{git:app,agents:app}};},bindings:async()=>{throw Error('Must not load');}});
- for(const [principal,context] of [[{...p,expiresAt:99},ctx],[{...p,workspaceId:'other'},ctx],[{...p,memberId:'bob'},ctx],[{...p,bearer:undefined},ctx],[p,{...ctx,operation:'billing'}]])assert.equal(await authorize(principal,context),null);
+ for(const [principal,context] of [[{...p,expiresAt:99},ctx],[{...p,workspaceId:'other'},ctx],[{...p,memberId:'bob'},ctx],[{...p,bearer:undefined},ctx],[p,{...ctx,operation:'billing'}],[p,{...ctx,operation:'toString'}],[p,{...ctx,operation:'__proto__'}]])assert.equal(await authorize(principal,context),null);
  ws.desiredState='stopped';assert.equal(await authorize(p,ctx),null);ws.desiredState='running';assert.equal(calls,0);
 });
