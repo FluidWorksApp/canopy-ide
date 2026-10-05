@@ -80,6 +80,11 @@ test('container reuse rejects a changed project volume, network or added capabil
   assert.equal(calls.filter(args=>args[0]==='start').length,1);
   current.HostConfig.RestartPolicy={Name:'unless-stopped'};
   await assert.rejects(host.ensure(workspace,{resume:true}),/configuration differs/);
+  current=structuredClone(original);
+  host.releaseChannel='ghcr.io/fluidworksapp/canopy-workspace:stable';
+  current.Config.Labels['canopy.image-channel']=host.releaseChannel;
+  host.resolveRelease=async()=>{throw Error('Running container must not consult releases');};
+  assert.ok((await host.ensure(workspace,{resume:true})).url);
 });
 test('resource changes and workspace admission share one serial lock',async()=>{
  const host=new DockerWorkspaces({secret:'test'}),order=[];let release;
@@ -124,4 +129,14 @@ test('quarantined workspaces cannot be resized while recovery is pending',async(
   await assert.rejects(host.updateCpus(workspace,2),/requires recovery/);
  }
  assert.equal(calls,0);
+});
+
+test('failed fresh release lookup cannot mutate a stopped workspace',async()=>{
+ const calls=[];let lookups=0;
+ const host=new DockerWorkspaces({secret:'test',releaseChannel:'ghcr.io/fluidworksapp/canopy-workspace:stable',resolveRelease:async()=>{lookups++;throw Error('Authority unavailable');},docker:async args=>{calls.push(args);return {stdout:JSON.stringify([{State:{Running:false}}])};}});
+ const workspace={id:'alice',accounts:[],memoryMiB:2048,cpus:2};
+ await assert.rejects(host.ensure(workspace,{resume:true}),/Authority unavailable/);
+ assert.equal(lookups,1);assert.deepEqual(calls.map(c=>c[0]),['inspect']);
+ await assert.rejects(host.ensure({...workspace,memberId:'member',ownerImage:'sha256:'+'a'.repeat(64)},{resume:true}));
+ assert.equal(lookups,1,'member runtime retains its owner checkpoint instead of consulting owner release policy');
 });

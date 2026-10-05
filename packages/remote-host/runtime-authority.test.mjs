@@ -32,3 +32,14 @@ test('intentional stop, stale generation and missing authority fail closed',asyn
  }
  assert.throws(()=>runtimeAuthority('http://control.invalid/api/runtime-policy',{key}));
 });
+test('explicit release lookup is fresh, immutable and bound to current run intent',async()=>{
+ const image='ghcr.io/fluidworksapp/canopy-workspace@sha256:'+'a'.repeat(64);
+ let output={allowed:true,workspaceId:workspace.id,generation:4,image},calls=0;
+ const authority=runtimeAuthority('https://control.invalid/api/runtime-policy',{key,workspaceId:workspace.id},{fetchImpl:async()=>{calls++;return Response.json(output);}});
+ assert.equal(await authority.release(workspace),image);
+ output={...output,image:image.replace('a'.repeat(64),'b'.repeat(64))};
+ assert.equal(await authority.release(workspace),output.image);assert.equal(calls,2);
+ for(const invalid of [{...output,allowed:false},{...output,generation:3},{...output,workspaceId:'other'},{...output,image:'ghcr.io/fluidworksapp/canopy-workspace:stable'},{...output,image:'file:///tmp/image'}]){
+  output=invalid;await assert.rejects(authority.release(workspace));
+ }
+});

@@ -207,7 +207,8 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
     if (error.code !== 'ENOENT') throw error;
     secret = randomBytes(32).toString('hex'); await writeFile(keyPath, secret, { mode: 0o600, flag: 'wx' });
   }
-  const workspaces = new DockerWorkspaces({ secret, image: process.env.CANOPY_WORKSPACE_IMAGE, registry: config.workspaces,releaseChannel:process.env.CANOPY_WORKSPACE_IMAGE,upgradeDirectory:path.join(state,'image-upgrades') });
+  const authority=runtimeAuthority(config.managedSession?.runtimePolicyUrl,config.managedSession);
+  const workspaces = new DockerWorkspaces({ secret, image: process.env.CANOPY_WORKSPACE_IMAGE, registry: config.workspaces,releaseChannel:process.env.CANOPY_WORKSPACE_IMAGE,resolveRelease:authority?.release,upgradeDirectory:path.join(state,'image-upgrades') });
   await quarantineImageUpgrades(path.join(state,'image-upgrades'),workspaces);
   await workspaces.recoverMigrations();
   await quarantineInterruptedMigrations({directory:path.join(state, 'migrations'),config,host:workspaces});
@@ -217,7 +218,7 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   const elasticMemory = new ElasticMemory({registry:config.workspaces,docker:workspaces});
   const elasticCpu = new ElasticCpu({registry:config.workspaces,docker:workspaces});
   const supervisor=new RuntimeSupervisor({directory:path.join(state,'runtime-recovery'),host:workspaces});
-  const server = createGateway({ config, workspaces, elasticMemory, elasticCpu, supervisor, authorizeMember:memberAuthority(config.managedSession?.authorizationUrl), authorizeRuntime:runtimeAuthority(config.managedSession?.runtimePolicyUrl,config.managedSession), origins: (process.env.CANOPY_HOST_ORIGINS ?? '').split(',').filter(Boolean) });
+  const server = createGateway({ config, workspaces, elasticMemory, elasticCpu, supervisor, authorizeMember:memberAuthority(config.managedSession?.authorizationUrl), authorizeRuntime:authority, origins: (process.env.CANOPY_HOST_ORIGINS ?? '').split(',').filter(Boolean) });
   server.on('close', () => { elasticMemory.stop(); elasticCpu.stop(); });
   server.listen(Number(process.env.PORT ?? 8787), '127.0.0.1', () => { elasticMemory.start(); elasticCpu.start(); supervisor.start(); console.log('Canopy remote host listening on loopback'); });
 }

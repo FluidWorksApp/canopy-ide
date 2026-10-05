@@ -35,9 +35,9 @@ export class DockerWorkspaces {
   runtimes = new Map();
   migrationCleanupRequired = new Set();
   migrationHelperCleanupRequired = new Set();
-  constructor({ secret, image = 'canopy-workspace:0.1.0', docker = dockerCommand, registry = [], readHost = hostMemory, verifyCapacity = verifyCapacityGroup, readResources = hostResources, releaseChannel, upgradeDirectory }) {
+  constructor({ secret, image = 'canopy-workspace:0.1.0', docker = dockerCommand, registry = [], readHost = hostMemory, verifyCapacity = verifyCapacityGroup, readResources = hostResources, releaseChannel, resolveRelease, upgradeDirectory }) {
     this.secret = secret; this.image = image; this.docker = docker; this.registry = registry; this.readHost = readHost; this.verifyCapacity = verifyCapacity; this.readResources = readResources;
-    this.releaseChannel=releaseChannel;this.upgradeDirectory=upgradeDirectory;
+    this.releaseChannel=releaseChannel;this.resolveRelease=resolveRelease;this.upgradeDirectory=upgradeDirectory;
     this.resourceTail = Promise.resolve();
   }
   withResourceLock(action) {
@@ -184,9 +184,10 @@ export class DockerWorkspaces {
     try { existing = JSON.parse((await this.docker(['inspect', name])).stdout)[0]; }
     catch (error) { if (!error.missingResource && !/no such/i.test(String(error.stderr))) throw error; }
     let release;
-    if(this.releaseChannel&&!releaseImage){
+    if(this.releaseChannel&&!releaseImage&&!workspace.memberId){
       if(!existing||(resume&&existing.State?.Running===false)){
-        release=await pullWorkspaceImage(this.releaseChannel,{docker:this.docker});
+        const reference=this.resolveRelease?await this.resolveRelease(workspace):this.releaseChannel;
+        release=await pullWorkspaceImage(reference,{docker:this.docker});
         image=existing?existing.Config.Image:release.reference;
       }else if(existing.Config?.Labels?.['canopy.image-channel']===this.releaseChannel)image=existing.Config.Image;
     }
