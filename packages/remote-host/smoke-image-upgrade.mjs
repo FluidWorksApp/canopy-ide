@@ -8,7 +8,7 @@ import path from 'node:path';
 import {randomBytes} from 'node:crypto';
 import {DockerWorkspaces,safeDockerError} from './docker.mjs';
 import {imageUpgradeJournal,upgradeRuntimeImage,recoverImageUpgrade,readImageUpgrade} from './image-upgrade.mjs';
-import {runtimeReady} from './runtime-readiness.mjs';
+import {waitForRuntimeReady} from './runtime-readiness.mjs';
 const run=promisify(execFile),id='upgrade-smoke-'+randomBytes(4).toString('hex');
 const directory=await mkdtemp(path.join(tmpdir(),id+'-'));
 const base=process.argv[2]??'canopy-workspace:0.1.0';
@@ -19,7 +19,7 @@ const workspace={id,accounts:[],memoryMiB:2048,cpus:0.5};
 const host=new DockerWorkspaces({secret:randomBytes(32).toString('hex'),image:images[0],docker});
 const name='canopy-ws-'+id,journal=imageUpgradeJournal(directory,id);
 const inspect=async name=>JSON.parse((await docker(['inspect',name])).stdout)[0];
-const ready=async runtime=>{for(let i=0;i<80;i++){if(await runtimeReady(runtime))return true;await new Promise(resolve=>setTimeout(resolve,250));}return false;};
+const ready=runtime=>waitForRuntimeReady(runtime);
 try{
  for(const [i,image] of images.entries()){
   await writeFile(path.join(directory,'Dockerfile'),`FROM ${base}\nLABEL canopy.synthetic-release="${i}"\n`);

@@ -1,6 +1,6 @@
 import {pullWorkspaceImage} from './image-release.mjs';
 import {imageUpgradeJournal,upgradeRuntimeImage} from './image-upgrade.mjs';
-import {runtimeReady} from './runtime-readiness.mjs';
+import {waitForRuntimeReady} from './runtime-readiness.mjs';
 import {hostResources} from './host-resources.mjs';
 import {verifyCapacityGroup} from './capacity-group.mjs';
 import { execFile } from 'node:child_process';
@@ -214,7 +214,7 @@ export class DockerWorkspaces {
             JSON.stringify([['/workspace', `canopy-project-${workspace.id}`, true], ['/home/agent', `canopy-home-${workspace.id}`, true], ...workspace.accounts.map(id => [`/accounts/${id}`, `canopy-account-${id}`, false]), ...projects].sort())) throw new Error('Workspace container configuration differs; administrator action required');
       if(!existing.State.Running&&!resume)throw Error('Workspace runtime is stopped. Resume the workspace to continue');
       if(release&&existing.Image!==release.imageId){
-        try{return await upgradeRuntimeImage(workspace,existing,release,{docker:this.docker,journal:imageUpgradeJournal(this.upgradeDirectory,workspace.id),launch:reference=>this.ensure(workspace,{releaseImage:reference}),verify:runtimeReady});}
+        try{return await upgradeRuntimeImage(workspace,existing,release,{docker:this.docker,journal:imageUpgradeJournal(this.upgradeDirectory,workspace.id),launch:reference=>this.ensure(workspace,{releaseImage:reference}),verify:waitForRuntimeReady});}
         catch(error){this.runtimes.delete(workspace.id);if(!error.imageUpgradeRolledBack)this.migrationCleanupRequired.add(workspace.id);throw error;}
       }
       if(workspace.memberId&&resume&&existing.HostConfig.RestartPolicy?.Name==='no')await this.docker(['update','--restart','on-failure:3',name]);

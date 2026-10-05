@@ -9,3 +9,17 @@ export async function runtimeReady(runtime,{fetchImpl=fetch,timeoutMs=2000}={}){
   return Array.isArray(sessions)&&sessions.length<=256&&sessions.every(s=>s&&Number.isSafeInteger(s.id)&&s.id>0&&(s.exitCode===null||Number.isSafeInteger(s.exitCode)));
  }catch{return false;}
 }
+
+// A new image can take time to start its service. Use the same bounded wait in
+// production and the real-engine smoke test, rather than a test-only retry loop.
+export async function waitForRuntimeReady(runtime,{timeoutMs=30000,intervalMs=250,fetchImpl=fetch}={}){
+ if(!Number.isInteger(timeoutMs)||timeoutMs<1||timeoutMs>60000||!Number.isInteger(intervalMs)||intervalMs<1||intervalMs>1000)throw Error('Invalid readiness deadline');
+ const deadline=performance.now()+timeoutMs;
+ while(performance.now()<deadline){
+  const remaining=Math.max(1,Math.ceil(deadline-performance.now()));
+  if(await runtimeReady(runtime,{fetchImpl,timeoutMs:Math.min(2000,remaining)}))return true;
+  const pause=Math.min(intervalMs,Math.max(0,deadline-performance.now()));
+  if(pause)await new Promise(resolve=>setTimeout(resolve,pause));
+ }
+ return false;
+}
