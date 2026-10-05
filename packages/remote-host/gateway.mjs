@@ -17,6 +17,7 @@ import {SessionViewLeases} from './session-view-leases.mjs';
 import {IdleAttestation} from './idle-attestation.mjs';
 import {runtimeAuthority} from './runtime-authority.mjs';
 import {memberAuthority} from './member-authority.mjs';
+import {authorizeNativeRead} from './readonly-native.mjs';
 import {memberRuntime} from './member-runtime.mjs';
 import {memberRenewal} from './member-renewal.mjs';
 import {MemberLeases} from './member-leases.mjs';
@@ -139,7 +140,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       const [, workspaceId, operation] = match;
       const reads = new Set(['/shared-ticket', '/shared-execute', '/shared-sessions', '/projects', '/sessions', '/files/list', '/files/read', '/git/status', '/git/diff']);
       const write = operation !== '/sessions' || request.method !== 'GET';
-      const scope = operation === '/open' || operation === '/resources' || operation === '/ticket' || (reads.has(operation) && (operation !== '/sessions' || !write)) ? 'view' : 'drive';
+      const scope = operation === '/open' || operation === '/resources' || operation === '/ticket' || operation === '/native' || (reads.has(operation) && (operation !== '/sessions' || !write)) ? 'view' : 'drive';
       const workspace = authorize(config, principal, workspaceId, scope);
       if(operation!=='/idle-attestation'&&idleAttestation?.reserved(workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
       if(operation!=='/sharing-setup'&&sharingSetup?.active(workspace.id))throw Error('Sharing setup is moving project storage. Reconnect after it finishes.');
@@ -236,15 +237,19 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         const args = await body(request, 4096);
         const shared=args.stream?.match(/^\/shared-sessions\/([a-f0-9-]{36})\/stream$/);
         if (!/^\/sessions\/\d+\/stream$/.test(args.stream) && args.stream !== '/desktop/ws'&&!shared) throw new Error('Invalid stream');
+        if(principal.memberId&&principal.scope==='view'&&!shared)throw Error('Viewer terminals are unavailable');
         if(shared)await resolveShared(workspace,principal,request.headers.authorization,shared[1]);
         authorize(config, principal, workspaceId, args.stream === '/desktop/ws' ? 'drive' : 'view');
         const ticket = randomBytes(32).toString('base64url');
         tickets.issue(ticket, { principalId: principal.id, principalFingerprint:principal.tokenSha256, expiresAt:principal.expiresAt, memberPrincipal:principal.memberId?principal:undefined, bearer:principal.memberId?request.headers.authorization:undefined, workspaceId, stream: args.stream });
         return json(response, 200, { ticket });
       }
+      const nativePayload=operation==='/native'&&request.method==='POST'?await body(request):undefined;
+      if(operation==='/native'){if(request.method!=='POST')throw Error('Unsupported native method');if(principal.scope==='view')authorizeNativeRead(nativePayload?.command);else authorize(config,principal,workspaceId,'drive');}
+      if(principal.memberId&&principal.scope==='view'&&operation==='/sessions')return json(response,200,[]);
       const opening=operation==='/open'&&request.method==='POST'?await body(request,4096):{};
-      if(opening.resume===true)authorize(config,principal,workspaceId,'drive');
-      const runtime = await openRuntime(workspace,principal,request.headers.authorization,projectAccess,{resume:opening.resume===true});
+      if(opening.resume===true&&(!principal.memberId||principal.scope!=='view'))authorize(config,principal,workspaceId,'drive');
+      const runtime = await openRuntime(workspace,principal,request.headers.authorization,projectAccess,{resume:opening.resume===true||!!principal.memberId});
       if (operation === '/open') {
         if(!await runtimeReady(runtime))throw Error('Workspace services are not responding yet');
         return json(response, 200, { id: workspace.id, connected: true });
@@ -253,7 +258,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         if (request.method !== 'GET') throw Error('Resource configuration is administrator-managed');
         return json(response, 200, {...(elasticMemory?.status(workspace.id) ?? {minMiB:workspace.memoryMiB,maxMiB:memoryRange(workspace).max,currentMiB:null,status:'pending'}), cpu:elasticCpu?.status(workspace.id) ?? {minCpus:workspace.cpus,maxCpus:cpuRange(workspace).max,currentCpus:null,status:'pending'}});
       }
-      const payload = request.method === 'POST' ? await body(request) : undefined;
+      const payload = operation==='/native'?nativePayload:request.method === 'POST' ? await body(request) : undefined;
       if(operation==='/sessions'&&request.method==='POST'){
         if(Object.hasOwn(payload??{},'sharedAgents'))throw Error('Shared agent configuration is administrator-managed');
         if(cliSessions&&payload?.projectId){const launch=await cliSessions.prepare(workspace,principal,payload.projectId,payload.requestId);if(Object.keys(launch).length)payload.sharedAgents=launch;}

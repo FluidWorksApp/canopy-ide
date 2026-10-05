@@ -4,10 +4,10 @@ import {providerQuotaHeaders} from './provider-quota-headers.mjs';
 const operations=new Set(['git:fetch','git:push','agents:claude','agents:codex','agents:claude:count-tokens','agents:claude:models','agents:codex:models']);
 const id=value=>typeof value==='string'&&/^[a-zA-Z0-9_-]{1,128}$/.test(value);
 export class CredentialBroker {
- constructor({authorize,loadCredential,fetchImpl=fetch,pollMs=2000,maxDurationMs=120000}){
+ constructor({authorize,loadCredential,fetchImpl=fetch,pollMs=2000,maxDurationMs=1800000,idleTimeoutMs=120000}){
   if(typeof authorize!=='function'||typeof loadCredential!=='function')throw Error('Credential broker requires trusted authority and vault');
-  if(!Number.isInteger(pollMs)||pollMs<20||pollMs>2000||!Number.isInteger(maxDurationMs)||maxDurationMs<20||maxDurationMs>120000)throw Error('Invalid broker observation bounds');
-  this.pollMs=pollMs;this.maxDurationMs=maxDurationMs;this.authorize=authorize;this.loadCredential=loadCredential;this.fetch=fetchImpl;
+  if(!Number.isInteger(pollMs)||pollMs<20||pollMs>2000||!Number.isInteger(maxDurationMs)||maxDurationMs<20||maxDurationMs>1800000||!Number.isInteger(idleTimeoutMs)||idleTimeoutMs<20||idleTimeoutMs>120000)throw Error('Invalid broker observation bounds');
+  this.pollMs=pollMs;this.maxDurationMs=maxDurationMs;this.idleTimeoutMs=idleTimeoutMs;this.authorize=authorize;this.loadCredential=loadCredential;this.fetch=fetchImpl;
  }
  async execute(principal,request,{signal}={}){
   if(signal?.aborted)throw Error('Shared provider request cancelled');
@@ -47,31 +47,35 @@ export class CredentialBroker {
   if(!current||Object.keys(context).some(k=>current[k]!==context[k])||current.accountId!==grant.accountId)throw Error('Forbidden');
   const abort=new AbortController();let checking=false;
   const same=value=>value&&Object.keys(context).every(k=>value[k]===context[k])&&value.accountId===grant.accountId;
+  let idleTimer,rejectAbort,outputController,providerReader;const cancelled=new Promise((_,reject)=>{rejectAbort=reject;});cancelled.catch(()=>{});
+  const onAbort=()=>{rejectAbort(Error('Shared access ended'));cleanup();providerReader?.cancel().catch(()=>{});outputController?.error(Error('Shared provider stream failed'));};abort.signal.addEventListener('abort',onAbort,{once:true});
+  const touch=()=>{clearTimeout(idleTimer);idleTimer=setTimeout(()=>abort.abort(),this.idleTimeoutMs);};touch();
   const deadline=setTimeout(()=>abort.abort(),this.maxDurationMs);
   const poll=setInterval(async()=>{
    if(checking||abort.signal.aborted)return;checking=true;
    try{if(!same(await this.authorize(principal,context)))abort.abort();}catch{abort.abort();}finally{checking=false;}
   },this.pollMs);
   const cancelClient=()=>abort.abort();
+  const cleanup=()=>{clearInterval(poll);clearTimeout(deadline);clearTimeout(idleTimer);abort.signal.removeEventListener('abort',onAbort);signal?.removeEventListener('abort',cancelClient);};
   if(signal?.aborted)abort.abort();else signal?.addEventListener('abort',cancelClient,{once:true});
-  const cleanup=()=>{clearInterval(poll);clearTimeout(deadline);signal?.removeEventListener('abort',cancelClient);};
   try{
    if(abort.signal.aborted)throw Error('Request cancelled');
-   const response=await this.fetch(url,{method,headers,...(method==='POST'?{body}:{}),redirect:'error',signal:abort.signal});
+   const response=await Promise.race([this.fetch(url,{method,headers,...(method==='POST'?{body}:{}),redirect:'error',signal:abort.signal}),cancelled]);
    if(abort.signal.aborted||response.status>=300&&response.status<400)throw Error('Provider unavailable');
+   touch();
    if(!response.ok){response.body?.cancel().catch(()=>{});cleanup();return Response.json({error:{message:'Shared provider rejected the request'}},{status:response.status,headers:{'cache-control':'no-store',...(request.operation.startsWith('agents:codex')?providerQuotaHeaders(response.headers):{})}});}
    const safeHeaders={'content-type':response.headers.get('content-type')??'application/octet-stream','cache-control':'no-store',...(request.operation.startsWith('agents:codex')?providerQuotaHeaders(response.headers):{})};
    if(!response.body){cleanup();return new Response(null,{status:response.status,headers:safeHeaders});}
-   const reader=response.body.getReader();let bytes=0;
-   let rejectAbort;const cancelled=new Promise((_,reject)=>{rejectAbort=reject;});cancelled.catch(()=>{});
-   const onAbort=()=>rejectAbort(Error('Shared access ended'));abort.signal.addEventListener('abort',onAbort,{once:true});
-   const finish=()=>{cleanup();abort.signal.removeEventListener('abort',onAbort);};
+   const reader=response.body.getReader();providerReader=reader;let bytes=0;
+   const finish=cleanup;
    const stream=new ReadableStream({
+    start(controller){outputController=controller;},
     async pull(controller){
      try{
       const result=await Promise.race([reader.read(),cancelled]);
       if(abort.signal.aborted)throw Error('Shared access ended');
       if(result.done){finish();controller.close();return;}
+      if(result.value.byteLength)touch();
       bytes+=result.value.byteLength;if(bytes>512*1024*1024)throw Error('Provider response too large');
       controller.enqueue(result.value);
      }catch{finish();abort.abort();reader.cancel().catch(()=>{});controller.error(Error('Shared provider stream failed'));}

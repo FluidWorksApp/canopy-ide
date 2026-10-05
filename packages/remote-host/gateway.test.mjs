@@ -294,3 +294,17 @@ test('broker transport binds payloads and prevents replay before provider execut
   const next=(await (await call('/shared-ticket',request)).json()).ticket;allowed=false;assert.equal((await call('/shared-execute',{ticket:next,body:payload.toString('base64')})).status,401);assert.equal(provider,1);
  }finally{await close(gateway);await rm(root,{recursive:true,force:true});}
 });
+
+test('member viewer can browse its read-only project runtime and cannot invoke mutations, shell or arbitrary native commands',async()=>{
+ const {createHmac}=await import('node:crypto');const key='synthetic-management-key-123456789012345',workspaceId='ws-11111111-1111-4111-8111-111111111111';
+ const claims={version:2,workspaceId,memberId:'viewer',scope:'view',accessVersion:1,expires:Math.floor(Date.now()/1000)+120},payload=Buffer.from(JSON.stringify(claims)).toString('base64url'),bearer='Bearer '+payload+'.'+createHmac('sha256',key).update(payload).digest('base64url');
+ const calls=[],opened=[];const upstream=http.createServer(async(req,res)=>{let data='';for await(const part of req)data+=part;calls.push({path:req.url,body:data?JSON.parse(data):null});res.setHeader('content-type','application/json');res.end(JSON.stringify(req.url==='/native'?{result:'synthetic-file'}:[]));});const upstreamUrl=await listen(upstream);
+ const config={managedSession:{workspaceId,key},principals:[{id:'managed-account',tokenSha256:'0'.repeat(64),scope:'drive',workspaces:[workspaceId]}],workspaces:[{id:workspaceId,accounts:[],memoryMiB:1024,cpus:1,cgroupParent:'canopy-shared.slice',projectMounts:[{id:'app',writable:true}]}]};
+ const server=createGateway({config,authorizeMember:async()=>({projectAccess:{allRead:true,allWrite:false,selected:[]}}),workspaces:{open:async runtime=>{opened.push(runtime);return {url:upstreamUrl,token:'synthetic'};},suspendMember:async()=>{}}}),url=await listen(server);
+ const native=command=>fetch(url+'/v1/workspaces/'+workspaceId+'/native',{method:'POST',headers:{authorization:bearer,'content-type':'application/json'},body:JSON.stringify({command,args:{path:'/workspace/projects/app/readme.md'}})});
+ try{
+  assert.equal((await native('fs_read_file')).status,200);assert.equal(opened[0].readOnly,true);assert.equal(opened[0].projectMounts[0].writable,false);assert.deepEqual(opened[0].accounts,[]);
+  const count=opened.length;for(const command of ['fs_write_file','profile_import_credentials','git_commit','workspace_browser_open','unknown','which_check'])assert.equal((await native(command)).status,403);assert.equal(opened.length,count);
+  assert.equal((await fetch(url+'/v1/workspaces/'+workspaceId+'/sessions',{method:'POST',headers:{authorization:bearer,'content-type':'application/json'},body:JSON.stringify({command:'bash'})})).status,403);
+ }finally{await close(server);await close(upstream);}
+});

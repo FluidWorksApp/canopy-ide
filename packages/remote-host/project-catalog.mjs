@@ -10,7 +10,7 @@ export function sharedProjectDefinitions(workspace){
   const components=project.components??[{id:project.id,label:name,relativePath:'.'}];
   if(!Array.isArray(components)||!components.length||components.length>64)throw Error('Invalid shared project components');
   const ids=new Set();
-  return {id:project.id,name,sharedWorkspaceId:workspace.parentWorkspaceId??workspace.id,components:components.map(component=>{
+  return {id:project.id,name,sharedWorkspaceId:workspace.parentWorkspaceId??workspace.id,readOnly:!project.writable,components:components.map(component=>{
    const relative=component.relativePath;
    if(!identifier(component.id)||ids.has(component.id)||!label(component.label)||typeof relative!=='string'||
       relative.length>1024||relative!=='.'&&(!relative||relative.split('/').some(part=>!part||part==='.'||part==='..'))||

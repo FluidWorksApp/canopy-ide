@@ -1,3 +1,4 @@
+import {safeGitRead,GIT_READ_COMMANDS} from './git-read.mjs';
 import {gitIdentityEnvironment} from './git-identity.mjs';
 // Native IDE command boundary for a Linux workspace. Files and subprocesses
 // never escape the selected container; no host Docker/cloud credential API.
@@ -52,7 +53,7 @@ let changeCursor=0;const changes=[];
 async function run(bin,argv,cwd=ROOT,timeout=15000,environment={}){
   if(children>=4)throw Error('Workspace process limit reached');
   children++;
-  try{return (await execute(bin,argv,{cwd:await scoped(cwd),timeout,maxBuffer:1024*1024,env:{...process.env,HOME,CODEX_HOME:HOME+'/.codex',CLAUDE_CONFIG_DIR:HOME+'/.claude',GIT_TERMINAL_PROMPT:'0',GIT_OPTIONAL_LOCKS:'0',...environment}})).stdout;}
+  try{const options={allowedRoot:ROOT,cwd:await scoped(cwd),timeout,maxBuffer:1024*1024,env:{...process.env,HOME,CODEX_HOME:HOME+'/.codex',CLAUDE_CONFIG_DIR:HOME+'/.claude',GIT_TERMINAL_PROMPT:'0',GIT_OPTIONAL_LOCKS:'0',...environment}};return (await (bin==='git'&&GIT_READ_COMMANDS.has(argv[0])?safeGitRead(execute,argv,options):execute(bin,argv,options))).stdout;}
   catch(error){throw Error(String(error.stderr||'Workspace command failed').slice(0,4096));}
   finally{children--;}
 }

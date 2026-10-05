@@ -6,7 +6,7 @@ const workspace={id:'owner',cgroupParent:'canopy-owner.slice',projectMounts:[{id
 test('member project discovery preserves granted project components without owner execution settings',()=>{
  const member=memberRuntime(workspace,{memberId:'alice',workspaceId:'owner',scope:'drive'},{allRead:false,allWrite:false,selected:[{id:'app',writable:true}]});
  const projects=sharedProjectDefinitions(member);
- assert.deepEqual(projects,[{id:'app',name:'Product',sharedWorkspaceId:'owner',components:[{id:'web',label:'Frontend',path:'/workspace/projects/app/web'},{id:'api',label:'Backend',path:'/workspace/projects/app/services/api'}]}]);
+ assert.deepEqual(projects,[{id:'app',name:'Product',sharedWorkspaceId:'owner',readOnly:false,components:[{id:'web',label:'Frontend',path:'/workspace/projects/app/web'},{id:'api',label:'Backend',path:'/workspace/projects/app/services/api'}]}]);
 });
 test('refresh removes revoked shared metadata while retaining private projects and tab state',()=>{
  const result=JSON.parse(mergeSharedProjects(JSON.stringify({projects:[{id:'personal',name:'Mine'},{id:'revoked',sharedWorkspaceId:'owner'}],openIds:['personal','revoked'],activeId:'revoked'}),{id:'member',parentWorkspaceId:'owner',projectMounts:[workspace.projectMounts[0]]}));

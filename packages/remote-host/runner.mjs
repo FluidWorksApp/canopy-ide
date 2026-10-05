@@ -10,6 +10,7 @@ import { randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import { body, json, sendBounded } from './http.mjs';
 import { SessionHistory } from './history.mjs';
+import {safeGitRead} from './git-read.mjs';
 import {gitIdentityEnvironment} from './git-identity.mjs';
 import { analyze } from './language.mjs';
 const exec = promisify(execFile);
@@ -175,7 +176,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
         return json(response, 200, { saved: true });
       }
       if (request.method === 'POST' && (route === '/git/status' || route === '/git/diff')) {
-        const result = await exec('git', ['-C', ROOT, ...(route === '/git/diff' ? ['diff', '--no-ext-diff', '--no-textconv', '--', '.'] : ['status', '--short'])], { maxBuffer: 1024 * 1024, timeout: 10_000 });
+        const result = await safeGitRead(exec,route === '/git/diff'?['diff','--','.']:['status','--short'],{allowedRoot:ROOT,cwd:ROOT,env:process.env,maxBuffer:1024*1024,timeout:10000});
         return json(response, 200, { text: result.stdout });
       }
       const match = route.match(/^\/sessions\/(\d+)\/(input|resize|stop)$/);

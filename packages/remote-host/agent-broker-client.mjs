@@ -13,6 +13,6 @@ export class AgentBrokerClient {
   const headers={authorization:'Bearer '+credential.token,'content-type':'application/json'},base=this.endpoint+'/v1/workspaces/'+this.workspaceId;
   const ticket=await this.fetch(base+'/shared-ticket',{method:'POST',headers,body:JSON.stringify({projectId:this.projectId,operation,bodySha256:createHash('sha256').update(payload).digest('hex')}),redirect:'error',signal:signal?AbortSignal.any([signal,AbortSignal.timeout(10000)]):AbortSignal.timeout(10000)});
   if(!ticket.ok)throw Error('Shared CLI access is unavailable');const value=await ticket.json();if(typeof value.ticket!=='string'||value.ticket.length>2048)throw Error('Invalid shared CLI ticket');
-  return this.fetch(base+'/shared-execute',{method:'POST',headers,body:JSON.stringify({ticket:value.ticket,body:Buffer.from(payload).toString('base64')}),redirect:'error',signal:signal?AbortSignal.any([signal,AbortSignal.timeout(120000)]):AbortSignal.timeout(120000)});
+  return this.fetch(base+'/shared-execute',{method:'POST',headers,body:JSON.stringify({ticket:value.ticket,body:Buffer.from(payload).toString('base64')}),redirect:'error',signal:signal?AbortSignal.any([signal,AbortSignal.timeout(1800000)]):AbortSignal.timeout(1800000)});
  }
 }

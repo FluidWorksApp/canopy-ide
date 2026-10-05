@@ -195,11 +195,32 @@ export class DockerWorkspaces {
     }
     return this.pending.get(workspace.id).promise;
   }
+  async retireMemberVersions(workspace){
+    if(!workspace.memberId||!workspace.storageId)return;
+    const stable='member-'+createHash('sha256').update(JSON.stringify([workspace.parentWorkspaceId,workspace.memberId])).digest('hex').slice(0,40);
+    if(workspace.storageId!==stable)throw Error('Member storage ownership differs');
+    const found=await this.docker(['ps','--all','--filter',`label=canopy.member-storage=${stable}`,'--format','{{.Names}}']);
+    const names=new Set(found.stdout.trim().split('\n').filter(Boolean));names.add(`canopy-ws-${stable}`);
+    for(const name of names){
+      if(name===`canopy-ws-${workspace.id}`)continue;
+      if(!/^canopy-ws-member-[a-f0-9]{40}$/.test(name))throw Error('Unexpected member runtime name');
+      let current;try{current=JSON.parse((await this.docker(['inspect',name])).stdout)[0];}catch(error){if(error.missingResource)continue;throw error;}
+      const id=name.slice('canopy-ws-'.length),labels=current?.Config?.Labels;
+      if(labels?.['canopy.workspace']!==id||(id!==stable&&labels?.['canopy.member-storage']!==stable)||!current.Mounts?.some(m=>m.Destination==='/home/agent'&&m.Type==='volume'&&m.Name===`canopy-home-${stable}`))throw Error('Member runtime storage ownership differs');
+      await this.docker(['update','--restart','no',name]);
+      if(current.State?.Running)await this.docker(['stop','--time','5',name]);
+      const stopped=JSON.parse((await this.docker(['inspect',name])).stdout)[0];if(stopped.State?.Running!==false)throw Error('Previous member runtime did not stop');
+      await this.docker(['rm',name]); // Never --volumes: preserve this member's home/history/files.
+      this.runtimes.delete(id);
+    }
+  }
   async ensure(workspace,{resume=false,releaseImage}={}) {
     if(this.idleReserved?.(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
     if(this.migrationCleanupRequired.has(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace migration requires recovery');
     if (!validId(workspace.id) || !workspace.accounts.every(validId)) throw new Error('Invalid workspace');
     if(workspace.ownerImage!=null&&(workspace.memberId||!/^sha256:[a-f0-9]{64}$/.test(workspace.ownerImage)))throw Error('Invalid owner image checkpoint');
+    await this.retireMemberVersions(workspace);
+    const storageId=workspace.storageId??workspace.id;
     let image=releaseImage??workspace.ownerImage??this.image;
     const projects=projectMounts(workspace);
     if(workspace.cgroupParent!=null&&!/^canopy-[a-z0-9]+\.slice$/.test(workspace.cgroupParent))throw Error('Invalid capacity group');
@@ -246,7 +267,7 @@ export class DockerWorkspaces {
           !hasNoNewPrivileges(existing.HostConfig.SecurityOpt) ||
           existing.Mounts?.some(mount => mount.Type !== 'volume') ||
           JSON.stringify(existing.Mounts?.map(m => [m.Destination, m.Name, m.RW]).sort()) !==
-            JSON.stringify([['/workspace', `canopy-project-${workspace.id}`, true], ['/home/agent', `canopy-home-${workspace.id}`, true], ...workspace.accounts.map(id => [`/accounts/${id}`, `canopy-account-${id}`, false]), ...projects].sort())) throw new Error('Workspace container configuration differs; administrator action required');
+            JSON.stringify([['/workspace', `canopy-project-${storageId}`, true], ['/home/agent', `canopy-home-${storageId}`, true], ...workspace.accounts.map(id => [`/accounts/${id}`, `canopy-account-${id}`, false]), ...projects].sort())) throw new Error('Workspace container configuration differs; administrator action required');
       if(!existing.State.Running&&!resume)throw Error('Workspace runtime is stopped. Resume the workspace to continue');
       if(release&&existing.Image!==release.imageId){
         try{return await upgradeRuntimeImage(workspace,existing,release,{docker:this.docker,journal:imageUpgradeJournal(this.upgradeDirectory,workspace.id),launch:reference=>this.ensure(workspace,{releaseImage:reference}),verify:waitForRuntimeReady});}
@@ -280,6 +301,7 @@ export class DockerWorkspaces {
       const accounts = workspace.accounts.flatMap(account => ['--mount', `type=volume,source=canopy-account-${account},target=/accounts/${account},readonly`]);
       await this.docker(['run', '-d', '--name', name, '--label', `canopy.workspace=${workspace.id}`,
         ...(this.releaseChannel?['--label',`canopy.image-channel=${this.releaseChannel}`]:[]),
+        ...(workspace.storageId?['--label',`canopy.member-storage=${workspace.storageId}`]:[]),
         ...(workspace.cgroupParent?['--cgroup-parent',workspace.cgroupParent]:[]),
         '--network', network, '--init', '--restart', 'on-failure:3', '--user', '1000:1000',
         '--memory', `${workspace.memoryMiB}m`, '--memory-swap', `${memorySwapMiB(workspace,workspace.memoryMiB)}m`,
@@ -287,8 +309,8 @@ export class DockerWorkspaces {
         '--security-opt', 'no-new-privileges:true', '--shm-size', '256m',
         '--publish', '127.0.0.1::8080', '--env', `CANOPY_RUNNER_TOKEN=${this.token(workspace.id)}`,
         '--env', `CANOPY_WORKSPACE_ID=${workspace.id}`, '--env', `CANOPY_ACCOUNTS=${workspace.accounts.join(',')}`,
-        '--mount', `type=volume,source=canopy-project-${workspace.id},target=/workspace`,
-        '--mount', `type=volume,source=canopy-home-${workspace.id},target=/home/agent`,
+        '--mount', `type=volume,source=canopy-project-${storageId},target=/workspace`,
+        '--mount', `type=volume,source=canopy-home-${storageId},target=/home/agent`,
         ...accounts, ...projects.flatMap(([target,source,writable])=>['--mount',`type=volume,source=${source},target=${target}${writable?'':',readonly'}`]), image]);
     }
     const inspected = JSON.parse((await this.docker(['inspect', name])).stdout)[0];

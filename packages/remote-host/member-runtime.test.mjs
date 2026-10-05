@@ -9,19 +9,19 @@ test('member identity determines private runtime, never inherits owner credentia
  assert.notEqual(a.id,b.id);assert.deepEqual(a.accounts,[]);assert.deepEqual(b.accounts,[]);
  assert.equal(memberRuntime(workspace,principal('alice')).id,a.id);
  assert.throws(()=>memberRuntime(workspace,{...principal('alice'),workspaceId:'other'}),/Forbidden/);
- assert.throws(()=>memberRuntime(workspace,{...principal('alice'),scope:'view'}),/Viewer/);
+ assert.equal(memberRuntime(workspace,{...principal('alice'),scope:'view'}).readOnly,true);
  const host=new DockerWorkspaces({secret:'host-secret'});assert.notEqual(host.token(a.id),host.token(b.id));assert.notEqual(host.token(a.id),host.token(workspace.id));
 });
 test('host-generated Docker resource names cannot contain attacker path separators',()=>{
  const runtime=memberRuntime(workspace,principal('../../owner'));assert.match(runtime.id,/^member-[a-f0-9]{40}$/);assert.equal(runtime.id.includes('..'),false);
 });
 test('member Docker launch contains only that members volumes and no shared credential pool',async()=>{
- const calls=[];const runtime=memberRuntime(workspace,principal('alice'));let checks=0;
- const host=new DockerWorkspaces({secret:'host-secret',verifyCapacity:async()=>{},docker:async args=>{calls.push(args);if(args[0]==='inspect'&&checks++===0)throw Object.assign(Error('missing'),{missingResource:true});if(args[0]==='inspect')return {stdout:JSON.stringify([{NetworkSettings:{Networks:{['canopy-net-'+runtime.id]:{IPAddress:'172.18.0.2'}},Ports:{'8080/tcp':[{HostIp:'127.0.0.1',HostPort:'41000'}]}}}])};return {stdout:''};}});
+ const calls=[];const runtime=memberRuntime(workspace,principal('alice'));let launched=false;
+ const host=new DockerWorkspaces({secret:'host-secret',verifyCapacity:async()=>{},docker:async args=>{calls.push(args);if(args[0]==='run')launched=true;if(args[0]==='inspect'&&!launched)throw Object.assign(Error('missing'),{missingResource:true});if(args[0]==='inspect')return {stdout:JSON.stringify([{NetworkSettings:{Networks:{['canopy-net-'+runtime.id]:{IPAddress:'172.18.0.2'}},Ports:{'8080/tcp':[{HostIp:'127.0.0.1',HostPort:'41000'}]}}}])};return {stdout:''};}});
  await host.open(runtime);const run=calls.find(args=>args[0]==='run');
  assert.ok(run.includes('--cgroup-parent'));assert.ok(run.includes('canopy-shared.slice'));
- assert.ok(run.includes(`type=volume,source=canopy-home-${runtime.id},target=/home/agent`));
- assert.ok(run.includes(`type=volume,source=canopy-project-${runtime.id},target=/workspace`));
+ assert.ok(run.includes(`type=volume,source=canopy-home-${runtime.storageId},target=/home/agent`));
+ assert.ok(run.includes(`type=volume,source=canopy-project-${runtime.storageId},target=/workspace`));
  assert.ok(!run.some(x=>x.includes('owner-credentials')||x.includes('docker.sock')||x.includes('canopy-home-shared')));
 });
 
