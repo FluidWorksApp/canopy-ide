@@ -15,7 +15,7 @@ RUN bash install-agents.sh
 COPY install-native-build.sh ./
 RUN bash install-native-build.sh
 RUN apt-get update && apt-get install -y --no-install-recommends nano vim-tiny && rm -rf /var/lib/apt/lists/*
-COPY shared-git-launch.mjs shared-agent-launch.mjs git-identity.mjs activity.mjs agent-workspace.mjs agent-usage.mjs runner.mjs http.mjs history.mjs language.mjs native.mjs git-read.mjs terminal-screen.mjs agent-accounts.mjs profiles.mjs workspace-metrics.mjs open-url.mjs git-source.mjs git-clone.mjs file-write.mjs file-upload.mjs file-search.mjs session-processes.mjs session-digests.mjs session-transfer.mjs agent-integrations.mjs agent-events.mjs agent-mcp.mjs ./
+COPY browser-streams.mjs opencode-usage.mjs shared-git-launch.mjs shared-agent-launch.mjs git-identity.mjs activity.mjs agent-workspace.mjs agent-usage.mjs runner.mjs http.mjs history.mjs language.mjs native.mjs git-read.mjs terminal-screen.mjs agent-accounts.mjs profiles.mjs workspace-metrics.mjs open-url.mjs git-source.mjs git-clone.mjs file-write.mjs file-upload.mjs file-search.mjs session-processes.mjs session-digests.mjs session-transfer.mjs agent-integrations.mjs agent-events.mjs agent-mcp.mjs ./
 RUN chmod 755 /opt/canopy/open-url.mjs && ln -sf /opt/canopy/open-url.mjs /usr/local/bin/xdg-open
 RUN usermod --login agent --home /home/agent --move-home node && groupmod --new-name agent node && mkdir /workspace && chown agent:agent /workspace
 ENV NPM_CONFIG_PREFIX="/home/agent/.local"
@@ -23,3 +23,5 @@ ENV PATH="/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin"
 USER 1000:1000
 EXPOSE 8080
 CMD ["node", "runner.mjs"]
+
+COPY chrome-stream/ ./chrome-stream/

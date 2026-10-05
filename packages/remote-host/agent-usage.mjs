@@ -1,6 +1,7 @@
 // Numeric usage only; never return prompt/tool contents or credentials.
 import {readdir,stat,open,readFile,realpath} from 'node:fs/promises';
 import path from 'node:path';
+import {opencodeUsageReader} from './opencode-usage.mjs';
 import {WorkspaceProfiles} from './profiles.mjs';
 const fields=['input_tokens','output_tokens','cache_read_tokens','cache_creation_tokens'];
 const number=value=>Number.isSafeInteger(value)&&value>=0?value:0;
@@ -32,7 +33,7 @@ export function foldUsage(row,value){
  }
 }
 export function agentUsageReader(home='/home/agent'){
- const cache=new Map(),profiles=new WorkspaceProfiles(home),requested=new Map();let listingAt=0,files=[],inflight,profileStamp='';
+ const opencode=opencodeUsageReader(home),cache=new Map(),profiles=new WorkspaceProfiles(home),requested=new Map();let listingAt=0,files=[],inflight,profileStamp='';
  // Bound traversal and retained readers separately. An old directory must not
  // fill the retained 256 slots before an active or recently updated session.
  async function discover(root,agent,depth,profile,candidates){
@@ -77,10 +78,10 @@ export function agentUsageReader(home='/home/agent'){
    if(info.size>entry.offset){const handle=await open(file.path,'r');try{const buffer=Buffer.alloc(Math.min(8*1024*1024,info.size-entry.offset));const {bytesRead}=await handle.read(buffer,0,buffer.length,entry.offset);const end=buffer.subarray(0,bytesRead).lastIndexOf(10)+1;if(end){for(const line of buffer.subarray(0,end).toString('utf8').split('\n')){if(line.length>1024*1024)continue;try{foldUsage(entry.row,JSON.parse(line));}catch{/* Incomplete/malformed records never invent usage. */}}entry.offset+=end;}}finally{await handle.close();}}
    entry.row.supported=entry.offset===info.size;cache.set(file.path,entry);if(entry.row.plan)entry.row.plan.profile=file.profile;const {messages,plan,...row}=entry.row;if(row.turns)rows.push(row);
   }
-  return rows;
+  return [...rows,...await opencode.usage()];
  }
  const usage=()=>{if(!inflight)inflight=scan().finally(()=>{inflight=null;});return inflight;};
- return {usage,sessionStats:async transcript=>{
+ return {usage,opencodeSessionStats:sessionId=>opencode.sessionStats(sessionId),sessionStats:async transcript=>{
   if(typeof transcript!=='string'||!path.isAbsolute(transcript)||!transcript.endsWith('.jsonl'))throw Error('Not a Claude transcript');
   const canonical=await realpath(transcript);
   if(canonical!==path.resolve(transcript))throw Error('Not a Claude transcript');

@@ -21,3 +21,17 @@ test('foreign identity and mismatched container inspect IDs cannot produce an id
 test('an already queued start rechecks the idle reservation inside the resource lock',async()=>{
  const f=fixture();let release;const hold=new Promise(resolve=>{release=resolve;});const held=f.host.withResourceLock(()=>hold);const proof=f.manager.attest(f.workspace,f.input);const queued=f.host.open(f.workspace,{resume:true});release();await held;assert.equal((await proof).idle,true);await assert.rejects(queued,/idle shutdown/);assert.ok(f.calls.every(args=>['ps','inspect'].includes(args[0])));
 });
+
+test('owner-close proof permits only the exact owner container and retains member jobs after management restart',async()=>{
+ const f=fixture(),owner={...f.stopped,Name:`/canopy-ws-${f.workspace.id}`,State:{...f.stopped.State,Running:true}};
+ f.setContainers([owner]);assert.equal((await f.manager.attest(f.workspace,f.input)).idle,false);
+ const result=await f.manager.attest(f.workspace,f.input,{ownerClosing:true});assert.equal(result.idle,true);assert.equal(JSON.parse(Buffer.from(result.proof.split('.')[0],'base64url')).purpose,'workspace-owner-close');
+ for(const changed of [{Name:'/canopy-ws-member-private',Config:{Labels:{'canopy.workspace':'member-private'}}},{Name:'/unknown-owner-helper'}]){
+  const g=fixture();g.setContainers([{...owner,...changed}]);assert.equal((await g.manager.attest(g.workspace,g.input,{ownerClosing:true})).idle,false);assert.equal(g.manager.reserved(g.workspace.id),false);
+ }
+ const g=fixture();g.setContainers([owner,{...g.stopped,Id:'b'.repeat(64),Name:'/canopy-ws-member-private',Config:{Labels:{'canopy.workspace':'member-private'}},State:{...g.stopped.State,Running:true}}]);assert.equal((await g.manager.attest(g.workspace,g.input,{ownerClosing:true})).idle,false);
+});
+test('owner-close reservations fence queued member starts and tracked detached work',async()=>{
+ const f=fixture();f.setBusy(true);assert.equal((await f.manager.attest(f.workspace,f.input,{ownerClosing:true})).idle,false);f.setBusy(false);
+ const result=await f.manager.attest(f.workspace,f.input,{ownerClosing:true});assert.equal(result.idle,true);await assert.rejects(f.host.open({...f.workspace,id:'member-private',parentWorkspaceId:f.workspace.id},{resume:true}),/idle shutdown/);
+});

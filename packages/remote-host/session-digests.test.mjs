@@ -31,3 +31,14 @@ test('hook lifecycle joins saved transcript while retaining verified resume loca
   const [row]=await sessionDigestReader(home)();assert.equal(row.state,'working');assert.equal(row.surface,'42');assert.equal(row.store,false);assert.equal(row.resume_cwd,'/workspace/app');assert.equal(row.transcript_path,undefined);
  }finally{await rm(home,{recursive:true,force:true});}
 });
+
+test('bounded newest conversation inventory stays fair across a full default profile and a named account',async()=>{
+ const {utimes}=await import('node:fs/promises');const home=await realpath(await mkdtemp(path.join(os.tmpdir(),'canopy-fair-conversations-')));
+ try{
+  const work=await new WorkspaceProfiles(home).create('Work'),personal=home+'/.claude/projects/app',named=work.root+'/.claude/projects/app';await mkdir(personal,{recursive:true});await mkdir(named,{recursive:true});
+  for(let i=0;i<530;i++){const id='old-'+i,file=personal+'/'+id+'.jsonl';await writeFile(file,JSON.stringify({sessionId:id,cwd:'/workspace/app',type:'user',message:{content:id}})+'\n');await utimes(file,100,100);}
+  await writeFile(personal+'/newest.jsonl',JSON.stringify({sessionId:'newest',cwd:'/workspace/app',type:'user',message:{content:'newest'}})+'\n');
+  await writeFile(named+'/named.jsonl',JSON.stringify({sessionId:'named',cwd:'/workspace/app',type:'user',message:{content:'named'}})+'\n');
+  const rows=await sessionDigestReader(home)();assert.equal(rows.length,512);assert.ok(rows.some(row=>row.session_id==='named'&&row.profile==='work'));assert.ok(rows.some(row=>row.session_id==='newest'));
+ }finally{await rm(home,{recursive:true,force:true});}
+});

@@ -38,3 +38,14 @@ test('fabricated hook digest cannot copy a credential as a conversation',async()
   await assert.rejects(prepareSession(home,{agent:'claude',sessionId:'forged',sourceProfile:'default',targetProfile:'work'}),/not found/);
  }finally{await rm(home,{recursive:true,force:true});}
 });
+
+test('an exact known old conversation transfers even when it is outside the 512-row display inventory',async()=>{
+ const {utimes}=await import('node:fs/promises');const home=await realpath(await mkdtemp(path.join(os.tmpdir(),'canopy-old-transfer-')));
+ try{
+  const work=await new WorkspaceProfiles(home).create('Work'),dir=home+'/.claude/projects/app';await mkdir(dir,{recursive:true});
+  for(let i=0;i<530;i++){const id='session-'+i;await writeFile(dir+'/'+id+'.jsonl',JSON.stringify({sessionId:id,cwd:'/workspace/app',type:'user',message:{content:id}})+'\n');}
+  const id='old-selected',content=JSON.stringify({sessionId:id,cwd:'/workspace/app',type:'user',message:{content:'old selected conversation'}})+'\n';await writeFile(dir+'/'+id+'.jsonl',content);await utimes(dir+'/'+id+'.jsonl',1,1);
+  const {sessionDigestReader}=await import('./session-digests.mjs');assert.ok(!(await sessionDigestReader(home)()).some(row=>row.session_id===id));
+  await prepareSession(home,{agent:'claude',sessionId:id,sourceProfile:'default',targetProfile:'work'});assert.equal(await readFile(work.root+'/.claude/projects/app/'+id+'.jsonl','utf8'),content);
+ }finally{await rm(home,{recursive:true,force:true});}
+});

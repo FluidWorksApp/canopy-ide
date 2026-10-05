@@ -24,3 +24,5 @@ test('remote browser rejects unsafe sign-in schemes and embedded credentials',as
 test('workspace preview cannot launch arbitrary URLs or embedded credentials',async()=>{
  for(const url of ['file:///etc/passwd','https://example.com','http://localhost.evil.test:6001','http://user:secret@localhost:6001']) await assert.rejects(nativeInvoke('workspace_preview_open',{url}),/localhost HTTP/);
 });
+
+test('OpenCode footer handler is registered and rejects path-like session selectors before any store access',async()=>{await assert.rejects(nativeInvoke('opencode_session_stats',{sessionId:'../other-member'}),/Invalid OpenCode session/);});

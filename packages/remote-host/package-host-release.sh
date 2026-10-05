@@ -15,5 +15,9 @@ done
 for file in install.sh network-isolation.sh package.json package-lock.json agents.lock.json canopy-host.service canopy-network.service; do
   cp "$source_dir/$file" "$bundle/"
 done
+mkdir "$bundle/chrome-stream"
+for file in server.mjs playwright.mjs protocol.mjs viewer.html viewer.js preview_picker.js; do
+  cp "$source_dir/chrome-stream/$file" "$bundle/chrome-stream/$file"
+done
 cp "$release" "$bundle/workspace-release.json"
 tar -C "$bundle" -czf "$output" .

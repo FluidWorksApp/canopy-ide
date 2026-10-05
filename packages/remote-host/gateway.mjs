@@ -110,7 +110,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
   }}):null;
   const active = new Map();
   const total = counts => [...counts.values()].reduce((sum, count) => sum + count, 0);
-  const idleAttestation=config.managedSession?new IdleAttestation({config,host:workspaces,authorizeRuntime,now,busy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.entries.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||config.workspaces.some(w=>sharingSetup?.active(w.id))}):null;
+  const idleAttestation=config.managedSession?new IdleAttestation({config,host:workspaces,authorizeRuntime,now,busy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||config.workspaces.some(w=>sharingSetup?.active(w.id))||cliSessions?.entries.size>0,closeBusy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||config.workspaces.some(w=>sharingSetup?.active(w.id))||[...(cliSessions?.entries.values()??[])].some(entry=>!entry.isOwner)}):null;
   const acceptedOrigins = new Set(['tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost', ...origins]);
   const server = http.createServer(async (request, response) => {
     try{if(cliSessions&&await cliSessions.handle(request,response))return;}
@@ -142,12 +142,12 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       const write = operation !== '/sessions' || request.method !== 'GET';
       const scope = operation === '/open' || operation === '/resources' || operation === '/ticket' || operation === '/native' || (reads.has(operation) && (operation !== '/sessions' || !write)) ? 'view' : 'drive';
       const workspace = authorize(config, principal, workspaceId, scope);
-      if(operation!=='/idle-attestation'&&idleAttestation?.reserved(workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
+      if(!['/idle-attestation','/close-attestation'].includes(operation)&&idleAttestation?.reserved(workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
       if(operation!=='/sharing-setup'&&sharingSetup?.active(workspace.id))throw Error('Sharing setup is moving project storage. Reconnect after it finishes.');
       if (!['GET', 'POST'].includes(request.method)) throw new Error('Unsupported method');
-      if(operation==='/idle-attestation'){
+      if(['/idle-attestation','/close-attestation'].includes(operation)){
         if(!idleAttestation||request.method!=='POST'||principal.memberId||principal.id!=='managed-account'||config.managedSession?.workspaceId!==workspace.id)throw Error('Forbidden');
-        return json(response,200,await idleAttestation.attest(workspace,await body(request,4096)));
+        return json(response,200,await idleAttestation.attest(workspace,await body(request,4096),{ownerClosing:operation==='/close-attestation'}));
       }
       if(operation==='/sharing-setup'){
         if(!sharingSetup||principal.memberId||principal.id!=='managed-account'||config.managedSession?.workspaceId!==workspace.id)throw Error('Forbidden');
@@ -236,10 +236,10 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       if (operation === '/ticket') {
         const args = await body(request, 4096);
         const shared=args.stream?.match(/^\/shared-sessions\/([a-f0-9-]{36})\/stream$/);
-        if (!/^\/sessions\/\d+\/stream$/.test(args.stream) && args.stream !== '/desktop/ws'&&!shared) throw new Error('Invalid stream');
+        if (!/^\/sessions\/\d+\/stream$/.test(args.stream) && args.stream !== '/desktop/ws'&&!/^\/browsers\/[a-f0-9-]{36}\/stream$/.test(args.stream)&&!shared) throw new Error('Invalid stream');
         if(principal.memberId&&principal.scope==='view'&&!shared)throw Error('Viewer terminals are unavailable');
         if(shared)await resolveShared(workspace,principal,request.headers.authorization,shared[1]);
-        authorize(config, principal, workspaceId, args.stream === '/desktop/ws' ? 'drive' : 'view');
+        authorize(config, principal, workspaceId, args.stream === '/desktop/ws'||args.stream.startsWith('/browsers/') ? 'drive' : 'view');
         const ticket = randomBytes(32).toString('base64url');
         tickets.issue(ticket, { principalId: principal.id, principalFingerprint:principal.tokenSha256, expiresAt:principal.expiresAt, memberPrincipal:principal.memberId?principal:undefined, bearer:principal.memberId?request.headers.authorization:undefined, workspaceId, stream: args.stream });
         return json(response, 200, { ticket });
@@ -336,7 +336,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       if (socket.destroyed) { release(); return; }
       wss.handleUpgrade(request, socket, head, client => {
         const upstreamStream=publication?`/sessions/${publication.sessionId}/stream`:grant.stream;
-        const upstream = new WebSocket(`${(grant.stream !== '/desktop/ws' && runtime.nativeUrl ? runtime.nativeUrl : runtime.url).replace('http:', 'ws:')}${upstreamStream}`, { headers: { authorization: `Bearer ${runtime.token}` }, maxPayload: 2 * 1024 * 1024, perMessageDeflate: false, handshakeTimeout: 10_000 });
+        const upstream = new WebSocket(`${(grant.stream !== '/desktop/ws' && runtime.nativeUrl ? runtime.nativeUrl : runtime.url).replace('http:', 'ws:')}${upstreamStream}`, { headers: { authorization: `Bearer ${runtime.token}` }, maxPayload: grant.stream.startsWith('/browsers/') ? 8 * 1024 * 1024 : 2 * 1024 * 1024, perMessageDeflate: false, handshakeTimeout: 10_000 });
         let checkingAuthorization=false;
         const authorizationTimer = setInterval(async () => {
           if(checkingAuthorization)return;
@@ -349,7 +349,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         client.once('close', () => clearInterval(authorizationTimer));
         // Client input before the upstream opens is refused, never buffered.
         client.on('message', (data, binary) => {
-          if (grant.stream !== '/desktop/ws') return; // terminals use scoped REST input
+          if (grant.stream !== '/desktop/ws'&&!grant.stream.startsWith('/browsers/')) return; // terminals use scoped REST input
           if (upstream.readyState !== 1 || upstream.bufferedAmount > 1024 * 1024) return client.close(1013);
           upstream.send(data, { binary });
         });

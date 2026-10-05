@@ -1,3 +1,4 @@
+import {BrowserStreams} from './browser-streams.mjs';
 import {safeGitRead,GIT_READ_COMMANDS} from './git-read.mjs';
 import {gitIdentityEnvironment} from './git-identity.mjs';
 // Native IDE command boundary for a Linux workspace. Files and subprocesses
@@ -31,6 +32,7 @@ const sessionProcesses=sessionProcessReader();
 const workspaceMetrics=metricsReader();
 const execute=promisify(execFile);
 const ROOT='/workspace', HOME='/home/agent', STORE=HOME+'/.canopy/ide-projects.json';
+const browsers=new BrowserStreams({home:HOME});
 const profiles=new WorkspaceProfiles(HOME);
 const integrations=new AgentIntegrations(HOME);
 const sessionDigests=sessionDigestReader(HOME);
@@ -196,11 +198,14 @@ export async function nativeInvoke(command,args={}){
   if(command==='git_diff')return run('git',['diff','--no-ext-diff','--no-textconv',...(args.staged?['--cached']:[]),'--',args.path??args.file??'.'],target);
   if(command==='git_remote_url'){try{return (await run('git',['remote','get-url','origin'],target)).trim();}catch{return null;}}
   if(command==='git_branch_current')return (await run('git',['branch','--show-current'],target)).trim();
+  if(command==='opencode_session_stats')return agentUsage.opencodeSessionStats(args.sessionId??args.session_id);
   if(command==='claude_session_stats')return agentUsage.sessionStats(args.transcriptPath);
   if(command==='agent_usage')return agentUsage.usage();
   if(command==='plan_usage'){await agentUsage.usage();return agentUsage.plans(args.sessionId??null);}
   if(command==='profile_prepare_session')return prepareSession(HOME,args);
   if(command==='session_digests')return sessionDigests();
+  if(command==='workspace_chrome_stream_open')return browsers.open(args);
+  if(command==='workspace_chrome_stream_close'){await browsers.close(args.id);return;}
   if(command==='agent_integration_health')return Promise.all(['claude','codex'].map(agent=>integrations.health(agent)));
   if(command==='agent_session_summaries'||command==='session_history'||command==='pr_watch_list')return [];
   if(command==='agent_events_poll')return readAgentEvents(HOME+'/.canopy/agent-events.jsonl',args.cursor);
@@ -221,9 +226,9 @@ export function startNativeServer(){
   const screens=terminalScreens(secret);
   const authorized=request=>{const auth=Buffer.from(request.headers.authorization??'');return auth.length===expected.length&&timingSafeEqual(auth,expected);};
   const server=http.createServer(async(request,response)=>{if(!authorized(request))return json(response,401,{error:'Unauthorized'});try{const input=await body(request);const resize=request.url.match(/^\/sessions\/(\d+)\/resize$/);if(resize)return json(response,200,await screens.resize(Number(resize[1]),input.cols,input.rows));if(request.url!=='/native')throw Error('Unknown workspace operation');return json(response,200,{result:(await nativeInvoke(input.command,input.args))??null});}catch(error){return json(response,400,{error:error.message});}});
-  const wss=new WebSocketServer({noServer:true,maxPayload:4096,perMessageDeflate:false});
-  server.on('upgrade',(request,socket,head)=>{const match=request.url.match(/^\/sessions\/(\d+)\/stream$/);if(!authorized(request)||!match)return socket.destroy();wss.handleUpgrade(request,socket,head,client=>{client.on('error',()=>{});void screens.attach(Number(match[1]),client).catch(()=>client.close(1011,'Terminal unavailable'));});});
-  server.on('close',()=>screens.dispose());
+  const wss=new WebSocketServer({noServer:true,maxPayload:256000,perMessageDeflate:false});
+  server.on('upgrade',(request,socket,head)=>{const match=request.url.match(/^\/sessions\/(\d+)\/stream$/),browser=request.url.match(/^\/browsers\/([a-f0-9-]{36})\/stream$/);if(!authorized(request)||(!match&&!browser))return socket.destroy();wss.handleUpgrade(request,socket,head,client=>{client.on('error',()=>{});if(browser){try{browsers.attach(browser[1],client);}catch{client.close(1008,'Unknown browser');}return;}void screens.attach(Number(match[1]),client).catch(()=>client.close(1011,'Terminal unavailable'));});});
+  server.on('close',()=>{screens.dispose();browsers.dispose();});
   server.maxConnections=32;server.requestTimeout=30000;server.headersTimeout=10000;server.listen(8081,'0.0.0.0');
 }
 

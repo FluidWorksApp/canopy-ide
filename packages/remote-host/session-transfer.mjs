@@ -10,7 +10,7 @@ export async function prepareSession(home,{agent,sessionId,sourceProfile,targetP
  if(!['claude','codex'].includes(agent))throw Error('This agent does not support conversation transfer');
  const profiles=new WorkspaceProfiles(home);
  const source=await profiles.root(sourceProfile),target=await profiles.root(targetProfile);
- const rows=await sessionDigestReader(home,{includePaths:true})();
+ const rows=await sessionDigestReader(home,{includePaths:true,target:{agent,sessionId,profile:sourceProfile}})();
  const row=rows.find(r=>r.agent===agent&&r.session_id===sessionId&&r.profile===sourceProfile);
  if(!row?.resumable||!row.transcript_path)throw Error('Saved conversation not found in the source account');
  if(source===target)return {sessionId,profile:targetProfile,cwd:row.resume_cwd};

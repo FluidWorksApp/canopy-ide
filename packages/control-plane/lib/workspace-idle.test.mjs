@@ -7,3 +7,10 @@ test('only provider-confirmed, lease-free, signed management idle proof permits 
 test('any active IDE lease prevents an idle request including another member',async()=>{const f=fixture();f.db.query=async()=>({rows:[{}]});assert.equal((await trustedWorkspaceIdle(f.db,w,f.options)).accepted,false);assert.equal(f.requests(),0);});
 test('fabricated user activity, changed identity, stale nonce and sharing-purpose proof cannot stop compute',async()=>{for(const change of [c=>c.purpose='sharing-ready',c=>c.generation=3,c=>c.workspaceId='other',c=>c.instanceName='other',c=>c.nonce='b'.repeat(64),c=>c.expiresAt=now,c=>c.idle=false]){const f=fixture();change(f.c);assert.equal((await trustedWorkspaceIdle(f.db,w,f.options)).accepted,false);}const f=fixture();f.options.request=async()=>({ok:true,headers:{get:()=>w.instance_name},json:async()=>({idle:true,activeAgents:0,activeJobs:0,sampledAt:now})});assert.equal((await trustedWorkspaceIdle(f.db,w,f.options)).accepted,false);});
 test('intentional shutdown and foreign provider identity deny automatic shutdown',async()=>{const f=fixture();assert.equal((await trustedWorkspaceIdle(f.db,{...w,desired_state:'stopped'},f.options)).accepted,false);f.options.provider.instance=async()=>null;assert.equal((await trustedWorkspaceIdle(f.db,w,f.options)).accepted,false);});
+
+test('closing the owner projects requires a different purpose and endpoint from whole-workspace idle',async()=>{
+ const f=fixture();f.c.purpose='workspace-owner-close';let url;const request=f.options.request;f.options.request=async (...args)=>{url=args[0];return request(...args);};
+ assert.equal((await trustedWorkspaceIdle(f.db,w,{...f.options,ownerClosing:true})).accepted,true);assert.ok(url.endsWith('/close-attestation'));
+ assert.equal((await trustedWorkspaceIdle(f.db,w,f.options)).accepted,false);
+ const g=fixture();assert.equal((await trustedWorkspaceIdle(g.db,w,{...g.options,ownerClosing:true})).accepted,false);
+});

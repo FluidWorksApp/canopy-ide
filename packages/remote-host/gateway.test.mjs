@@ -308,3 +308,18 @@ test('member viewer can browse its read-only project runtime and cannot invoke m
   assert.equal((await fetch(url+'/v1/workspaces/'+workspaceId+'/sessions',{method:'POST',headers:{authorization:bearer,'content-type':'application/json'},body:JSON.stringify({command:'bash'})})).status,403);
  }finally{await close(server);await close(upstream);}
 });
+
+test('owner-close proof is owner-only and never opens a developer runtime',async()=>{
+ const {createHmac}=await import('node:crypto');const {DockerWorkspaces}=await import('./docker.mjs');
+ const id='ws-11111111-1111-4111-8111-111111111111',key='synthetic-private-host-key'.repeat(3),workspace={id,generation:4,accounts:[],memoryMiB:1024,cpus:1};
+ const config={workspaces:[workspace],principals:[{id:'managed-account',scope:'drive',workspaces:[id],tokenSha256:'0'.repeat(64)}],managedSession:{workspaceId:id,key}},calls=[];
+ const host=new DockerWorkspaces({secret:'synthetic',docker:async args=>{calls.push(args);if(args[0]==='ps')return {stdout:'a'.repeat(64)};if(args[0]==='inspect')return {stdout:JSON.stringify([{Id:'a'.repeat(64),Name:`/canopy-ws-${id}`,Config:{Labels:{'canopy.workspace':id}},State:{Running:true}}])};throw Error('Unexpected runtime mutation');}});
+ const oldInstance=process.env.CANOPY_INSTANCE_NAME;process.env.CANOPY_INSTANCE_NAME='synthetic-machine';
+ const gateway=createGateway({config,workspaces:host,authorizeMember:async()=>true,authorizeRuntime:async()=>true}),base=await listen(gateway);
+ const token=claims=>{const payload=Buffer.from(JSON.stringify({workspaceId:id,expires:Math.floor(Date.now()/1000)+120,...claims})).toString('base64url');return payload+'.'+createHmac('sha256',key).update(payload).digest('base64url');};
+ const call=claims=>fetch(base+'/v1/workspaces/'+id+'/close-attestation',{method:'POST',headers:{authorization:'Bearer '+token(claims),'content-type':'application/json'},body:JSON.stringify({nonce:'f'.repeat(64),generation:4,instanceName:'synthetic-machine'})});
+ try{
+  const response=await call({});assert.equal(response.status,200);const result=await response.json();assert.equal(result.idle,true);assert.equal(JSON.parse(Buffer.from(result.proof.split('.')[0],'base64url')).purpose,'workspace-owner-close');
+  const count=calls.length;assert.equal((await call({version:2,memberId:'alice',accessVersion:1,scope:'drive'})).status,403);assert.equal(calls.length,count);assert.ok(calls.every(args=>['ps','inspect'].includes(args[0])));
+ }finally{await close(gateway);if(oldInstance===undefined)delete process.env.CANOPY_INSTANCE_NAME;else process.env.CANOPY_INSTANCE_NAME=oldInstance;}
+});

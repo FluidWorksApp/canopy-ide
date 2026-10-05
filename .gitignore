@@ -57,3 +57,6 @@ src-tauri/onnxruntime/*.dll
 # Inside the workspace because fs_read_file only reads registered roots; never
 # part of the repo. See prArtifactPath in src/microTasks.ts.
 .canopy/
+
+packages/remote-host/chrome-stream/
+public/chrome-stream/

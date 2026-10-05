@@ -89,6 +89,6 @@ export function authorizeStream(config, grant, now = Date.now()) {
   const template = config.principals.find(p => p.id === (grant.memberPrincipal ? 'managed-account' : grant.principalId));
   const principal = grant.memberPrincipal && template ? {...grant.memberPrincipal,tokenSha256:template.tokenSha256} : template;
   if (!principal || principal.tokenSha256 !== grant.principalFingerprint) throw Error('Unauthorized');
-  const workspace = authorize(config, principal, grant.workspaceId, grant.stream === '/desktop/ws' ? 'drive' : 'view');
+  const workspace = authorize(config, principal, grant.workspaceId, grant.stream === '/desktop/ws'||grant.stream.startsWith('/browsers/') ? 'drive' : 'view');
   return {principal, workspace};
 }

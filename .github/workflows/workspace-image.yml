@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'packages/remote-host/**'
+      - 'packages/chrome-stream/**'
+      - 'src-tauri/src/preview_picker.js'
       - 'packages/agent-hook/**'
       - 'src-tauri/src/bin/canopy_hook.rs'
       - 'src-tauri/src/agent_instructions.rs'
@@ -50,6 +52,7 @@ jobs:
       - run: npm ci --prefix packages/remote-host --workspaces=false --ignore-scripts
       - run: node --test packages/remote-host/*.test.mjs
       - run: node packages/remote-host/prepare-hook-build.mjs
+      - run: node packages/remote-host/prepare-browser-build.mjs
       - uses: docker/setup-buildx-action@v3
       - name: Build candidate locally
         uses: docker/build-push-action@v6
@@ -64,6 +67,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
       - name: Verify actual candidate runtime and integrations
         run: |
+          docker run --rm --network none -v "$PWD/packages/remote-host/browser-smoke.mjs:/opt/canopy/browser-smoke.mjs:ro" --entrypoint node canopy-workspace:0.1.0 /opt/canopy/browser-smoke.mjs
           node packages/remote-host/smoke-linux.mjs
           node packages/remote-host/smoke-agent-integrations.mjs canopy-workspace:0.1.0
           CANOPY_WORKSPACE_IMAGE=canopy-workspace:0.1.0 node packages/remote-host/smoke-cli-compatibility.mjs
