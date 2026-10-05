@@ -208,7 +208,7 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
     secret = randomBytes(32).toString('hex'); await writeFile(keyPath, secret, { mode: 0o600, flag: 'wx' });
   }
   const authority=runtimeAuthority(config.managedSession?.runtimePolicyUrl,config.managedSession);
-  const workspaces = new DockerWorkspaces({ secret, image: process.env.CANOPY_WORKSPACE_IMAGE, registry: config.workspaces,releaseChannel:process.env.CANOPY_WORKSPACE_IMAGE,resolveRelease:authority?.release,upgradeDirectory:path.join(state,'image-upgrades') });
+  const workspaces = new DockerWorkspaces({ secret, image: process.env.CANOPY_WORKSPACE_IMAGE, registry: config.workspaces,releaseChannel:process.env.CANOPY_WORKSPACE_IMAGE,resolveRelease:authority?workspace=>authority.release({...workspace,id:workspace.parentWorkspaceId??workspace.id}):undefined,upgradeDirectory:path.join(state,'image-upgrades') });
   await quarantineImageUpgrades(path.join(state,'image-upgrades'),workspaces);
   await workspaces.recoverMigrations();
   await quarantineInterruptedMigrations({directory:path.join(state, 'migrations'),config,host:workspaces});

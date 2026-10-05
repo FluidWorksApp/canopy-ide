@@ -137,6 +137,6 @@ test('failed fresh release lookup cannot mutate a stopped workspace',async()=>{
  const workspace={id:'alice',accounts:[],memoryMiB:2048,cpus:2};
  await assert.rejects(host.ensure(workspace,{resume:true}),/Authority unavailable/);
  assert.equal(lookups,1);assert.deepEqual(calls.map(c=>c[0]),['inspect']);
- await assert.rejects(host.ensure({...workspace,memberId:'member',ownerImage:'sha256:'+'a'.repeat(64)},{resume:true}));
- assert.equal(lookups,1,'member runtime retains its owner checkpoint instead of consulting owner release policy');
+ await assert.rejects(host.ensure({...workspace,memberId:'member'},{resume:true}));
+ assert.equal(lookups,2,'member resume also requires fresh base-image authority');
 });

@@ -184,7 +184,7 @@ export class DockerWorkspaces {
     try { existing = JSON.parse((await this.docker(['inspect', name])).stdout)[0]; }
     catch (error) { if (!error.missingResource && !/no such/i.test(String(error.stderr))) throw error; }
     let release;
-    if(this.releaseChannel&&!releaseImage&&!workspace.memberId){
+    if(this.releaseChannel&&!releaseImage){
       if(!existing||(resume&&existing.State?.Running===false)){
         const reference=this.resolveRelease?await this.resolveRelease(workspace):this.releaseChannel;
         release=await pullWorkspaceImage(reference,{docker:this.docker});
