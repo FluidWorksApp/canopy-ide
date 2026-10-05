@@ -1,0 +1,49 @@
+// Runs in the trusted management runtime. Callers never select credentials,
+// upstream URLs, provider headers or another member's identity.
+const operations=new Set(['git:fetch','git:push','agents:claude','agents:codex']);
+const id=value=>typeof value==='string'&&/^[a-zA-Z0-9_-]{1,128}$/.test(value);
+export class CredentialBroker {
+ constructor({authorize,loadCredential,fetchImpl=fetch}){
+  if(typeof authorize!=='function'||typeof loadCredential!=='function')throw Error('Credential broker requires trusted authority and vault');
+  this.authorize=authorize;this.loadCredential=loadCredential;this.fetch=fetchImpl;
+ }
+ async execute(principal,request){
+  if(!principal||typeof principal.memberId!=='string'||!principal.memberId||typeof principal.workspaceId!=='string'||!id(request?.projectId)||!operations.has(request?.operation))throw Error('Forbidden');
+  // Only project/operation and bounded payload enter from the developer runtime.
+  if(request.advertise!==undefined&&typeof request.advertise!=='boolean')throw Error('Invalid advertisement mode');
+  if(Object.keys(request).some(k=>!['projectId','operation','body','advertise'].includes(k)))throw Error('Invalid credential operation');
+  const body=request.body??new Uint8Array();
+  if(!(body instanceof Uint8Array)||body.byteLength>4*1024*1024)throw Error('Credential payload too large');
+  const context={workspaceId:principal.workspaceId,memberId:principal.memberId,projectId:request.projectId,operation:request.operation};
+  const grant=await this.authorize(principal,context);
+  if(!grant||Object.keys(context).some(k=>grant[k]!==context[k])||!id(grant.accountId))throw Error('Forbidden');
+  const credential=await this.loadCredential(grant.accountId,context);
+  if(!credential||credential.workspaceId!==context.workspaceId||credential.accountId!==grant.accountId||typeof credential.token!=='string'||!credential.token||credential.token.length>8192||/[\r\n]/.test(credential.token))throw Error('Shared account is unavailable');
+  let url,method='POST',headers={'content-type':'application/json'};
+  if(request.operation.startsWith('git:')){
+   if(credential.provider!=='github'||! /^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}\/[-\w.]{1,100}$/.test(credential.repository??'')||['.','..'].includes(credential.repository?.split('/')[1]))throw Error('Shared Git account is unavailable');
+   const service=request.operation==='git:fetch'?'git-upload-pack':'git-receive-pack';
+   if(request.advertise===true){if(body.byteLength)throw Error('Invalid Git advertisement');method='GET';url=`https://github.com/${credential.repository}.git/info/refs?service=${service}`;}
+   else {url=`https://github.com/${credential.repository}.git/${service}`;headers['content-type']=`application/x-${service}-request`;}
+   headers.authorization='Basic '+Buffer.from('x-access-token:'+credential.token).toString('base64');
+  }else{
+   if(request.advertise!==undefined)throw Error('Invalid agent operation');
+   if(request.operation==='agents:claude'&&credential.provider==='anthropic'){
+    url='https://api.anthropic.com/v1/messages';headers['x-api-key']=credential.token;headers['anthropic-version']='2023-06-01';
+   }else if(request.operation==='agents:codex'&&credential.provider==='openai'){
+    url='https://api.openai.com/v1/responses';headers.authorization='Bearer '+credential.token;
+   }else throw Error('Shared agent account is unavailable');
+  }
+  // Check again after vault I/O, so a revoked grant cannot release a credential
+  // merely because its first lookup was accepted before revocation.
+  const current=await this.authorize(principal,context);
+  if(!current||Object.keys(context).some(k=>current[k]!==context[k])||current.accountId!==grant.accountId)throw Error('Forbidden');
+  try{
+   const response=await this.fetch(url,{method,headers,...(method==='POST'?{body}:{}),redirect:'error',signal:AbortSignal.timeout(120000)});
+   // Only the provider body/content type/status are exposed, never Set-Cookie,
+   // authentication headers, redirects or transport errors with credentials.
+   if(response.status>=300&&response.status<400)throw Error('Provider redirect');
+   return new Response(response.body,{status:response.status,headers:{'content-type':response.headers.get('content-type')??'application/octet-stream','cache-control':'no-store'}});
+  }catch{throw Error('Shared provider request failed');}
+ }
+}

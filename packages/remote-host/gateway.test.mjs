@@ -251,3 +251,23 @@ test('trusted project catalog can be read without opening a stopped runtime and 
   const write=await fetch(url+'/v1/workspaces/catalog/projects',{method:'POST',headers:{authorization:'Bearer owner'},body:'{}'});assert.ok(write.status>=400);assert.equal(opens,0);
  }finally{await close(server);}
 });
+test('shared account import and selection are owner-only and never return secrets',async()=>{
+ const {mkdtemp,rm}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const path=await import('node:path');const {CredentialVault}=await import('./credential-vault.mjs');const {SharedAccounts}=await import('./shared-accounts.mjs');const {createHmac}=await import('node:crypto');
+ const id='ws-11111111-1111-4111-8111-111111111111',key='k'.repeat(48),secret='synthetic-shared-provider-secret';
+ const workspace={id,accounts:[],memoryMiB:1024,cpus:1,projectMounts:[{id:'app',writable:true}]};
+ const config={workspaces:[workspace],principals:[{id:'managed-account',scope:'drive',workspaces:[id],tokenSha256:'0'.repeat(64)}],managedSession:{workspaceId:id,key}};
+ const token=claims=>{const payload=Buffer.from(JSON.stringify({workspaceId:id,expires:Math.floor(Date.now()/1000)+120,...claims})).toString('base64url');return payload+'.'+createHmac('sha256',key).update(payload).digest('base64url');};
+ const root=await mkdtemp(path.join(tmpdir(),'canopy-gateway-vault-'));const vault=await CredentialVault.initialize(root);
+ const gateway=createGateway({config,workspaces:{},credentialVault:vault,sharedAccounts:new SharedAccounts(vault),authorizeMember:async()=>true});const base=await listen(gateway);
+ const call=(claims,input)=>fetch(base+'/v1/workspaces/'+id+'/shared-accounts',{method:input?'POST':'GET',headers:{authorization:'Bearer '+token(claims),'content-type':'application/json'},...(input?{body:JSON.stringify(input)}:{})});
+ try{
+  const member={version:2,memberId:'alice',accessVersion:1,scope:'drive'};
+  assert.equal((await call(member,{action:'import',accountId:'shared',credential:{provider:'anthropic',token:secret}})).status,403);
+  assert.equal((await call({},{action:'import',accountId:'shared',credential:{provider:'anthropic',token:secret}})).status,200);
+  assert.equal((await call({},{action:'bind',projectId:'app',slot:'claude',accountId:'shared'})).status,200);
+  const listed=await (await call({})).text();assert.ok(!listed.includes(secret));assert.equal(JSON.parse(listed).bindings[0].accountId,'shared');
+  assert.equal((await call(member,{action:'remove',accountId:'shared'})).status,403);
+  assert.equal((await call({},{action:'bind',projectId:'other',slot:'claude',accountId:'shared'})).status,400);
+  assert.equal((await call({},{action:'remove',accountId:'shared'})).status,200);await assert.rejects(vault.load('shared',{workspaceId:id}));
+ }finally{await close(gateway);await rm(root,{recursive:true,force:true});}
+});

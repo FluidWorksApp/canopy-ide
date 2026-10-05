@@ -1,4 +1,5 @@
 import {validateGitIdentity} from './git-identity.mjs';
+import {validateSharedResourceAccess} from './credential-authority.mjs';
 import {validateProjectAccess} from './project-mounts.mjs';
 // This endpoint is set by trusted provisioning, never by a development container.
 export function memberAuthority(endpoint,{fetchImpl=fetch}={}){
@@ -14,7 +15,7 @@ export function memberAuthority(endpoint,{fetchImpl=fetch}={}){
    while(true){const {done,value}=await reader.read();if(done)break;length+=value.length;if(length>32768){await reader.cancel();return false;}chunks.push(Buffer.from(value));}
    const result=JSON.parse(Buffer.concat(chunks).toString());
    if(!(result.allowed===true&&result.workspaceId===principal.workspaceId&&result.memberId===principal.memberId&&result.accessVersion===principal.accessVersion&&result.scope===principal.scope))return false;
-   return result.projectAccess ? {projectAccess:validateProjectAccess(result.projectAccess),...(result.gitIdentity?{gitIdentity:validateGitIdentity(result.gitIdentity)}:{})} : true;
+   return result.projectAccess ? {projectAccess:validateProjectAccess(result.projectAccess),...(result.gitIdentity?{gitIdentity:validateGitIdentity(result.gitIdentity)}:{}),...(result.sharedAccess?{sharedAccess:validateSharedResourceAccess(result.sharedAccess)}:{})} : true;
   }catch{return false;}
  };
 }

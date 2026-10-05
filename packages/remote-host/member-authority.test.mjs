@@ -22,3 +22,9 @@ test('Git identity only travels with authenticated current membership and is val
  assert.deepEqual(await check({allowed:true,...p,projectAccess,gitIdentity}),{projectAccess,gitIdentity});
  assert.equal(await check({allowed:true,...p,projectAccess,gitIdentity:{...gitIdentity,name:'Injected\nAuthor'}}),false);
 });
+test('shared resource policy is carried only with matching identity and valid independent scopes',async()=>{
+ const projectAccess={allRead:true,allWrite:false,selected:[]},sharedAccess={git:{allRead:false,allWrite:false,selected:[{id:'app',writable:true}]},agents:{allRead:false,allWrite:false,selected:[]}};
+ const check=body=>memberAuthority('https://canopyide.dev/api/member-access',{fetchImpl:async()=>Response.json(body)})(p,'Bearer test');
+ assert.deepEqual(await check({allowed:true,...p,projectAccess,sharedAccess}),{projectAccess,sharedAccess});
+ for(const invalid of [{...sharedAccess,billing:projectAccess},{git:projectAccess},{...sharedAccess,git:{...projectAccess,allRead:false,allWrite:true}},{...sharedAccess,agents:{...projectAccess,selected:[{id:'../secret',writable:true}]}}])assert.equal(await check({allowed:true,...p,projectAccess,sharedAccess:invalid}),false);
+});
