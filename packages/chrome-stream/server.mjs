@@ -6,6 +6,12 @@ import { fileURLToPath } from 'node:url';
 import { connectChrome, connectWorkspace, pageSession, WebSocketServer } from './playwright.mjs';
 import { FRAME_POLL_MS, FrameGate, refreshBackoff, shouldRefreshStream, viewportSize, websiteUrl } from './protocol.mjs';
 
+export async function waitForPicker(page,timeoutMs=10000){
+  const deadline=Date.now()+timeoutMs;
+  await page.waitForLoadState('domcontentloaded',{timeout:timeoutMs});
+  await page.waitForFunction(() => !!window.__canopyBrowser,undefined,{timeout:Math.max(1,deadline-Date.now())});
+}
+
 export async function startBridge(config, connectBrowser = config.workspace?()=>connectWorkspace(config.profileDirectory):connectChrome) {
   const lines = createInterface({ input: process.stdin });
   const initialUrl = websiteUrl(config.url);
@@ -240,6 +246,7 @@ export async function startBridge(config, connectBrowser = config.workspace?()=>
       const image = await page.screenshot({ type: 'png' });
       send({ canopy: 'capture-result', id: message.id, image: image.toString('base64'), width: size.width, height: size.height });
     } else if (['mode', 'sync', 'region', 'agent'].includes(message.canopy)) {
+      await waitForPicker(page);
       await page.evaluate(d => {
         if (!window.__canopyBrowser) throw new Error('The page is still loading.');
         window.__canopyBrowser.cmd(d);

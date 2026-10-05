@@ -21,7 +21,7 @@ try{
  const next=url.replace('/first','/second');ws.send(JSON.stringify({canopy:'navigate',url:next}));await wait(m=>m.canopy==='nav'&&m.url===next);messages.length=0;
  ws.send(JSON.stringify({canopy:'navigate',delta:-1}));await wait(m=>m.canopy==='nav'&&m.url===url);messages.length=0;
  ws.send(JSON.stringify({canopy:'navigate',delta:0}));await wait(m=>m.canopy==='nav'&&m.url===url);
- ws.send(JSON.stringify({canopy:'agent',id:'dom',op:'snapshot'}));const dom=await wait(m=>m.canopy==='agent-result'&&m.id==='dom');assert.equal(dom.ok,true);assert.ok(JSON.stringify(dom.data).includes('Synthetic workspace preview'));
+ ws.send(JSON.stringify({canopy:'agent',id:'dom',op:'snapshot'}));const dom=await wait(m=>m.canopy==='agent-result'&&m.id==='dom');assert.equal(dom.ok,true,JSON.stringify(dom));assert.ok(JSON.stringify(dom.data).includes('Synthetic workspace preview'));
  ws.send(JSON.stringify({canopy:'mode',on:true}));
  for(const message of [{type:'mouse',event:'mouseMoved',x:40,y:30,button:'none',buttons:0},{type:'mouse',event:'mousePressed',x:40,y:30,button:'left',buttons:1,clickCount:1},{type:'mouse',event:'mouseReleased',x:40,y:30,button:'left',buttons:0,clickCount:1}])ws.send(JSON.stringify(message));
  const annotation=await wait(m=>m.canopy==='annotation');assert.equal(annotation.payload.id,'target');ws.send(JSON.stringify({canopy:'mode',on:false}));
