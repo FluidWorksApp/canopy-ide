@@ -1,0 +1,173 @@
+import {validChatMessage} from './messageSchema';
+import {open,seal,registration,MessageReplayError,type Envelope,type PublicIdentity,type Address} from './crypto';
+import {deviceIdentity,rememberMessage,messageOutbox,type MessageOutbox,type PendingEnvelope,type DeviceIdentity} from './store';
+export type Device={id:string;user_id:string;public_keys:PublicIdentity};
+export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number};
+type Payload={kind:'message';message:ChatMessage}|{kind:'receipt';id:string}|{kind:'signal';description:RTCSessionDescriptionInit};
+export type PeerRequest=<T>(body:unknown)=>Promise<T>;
+type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerRequest;team:string;user:string;message:(message:ChatMessage)=>void;receipt:(id:string,user:string)=>void;status:(value:string)=>void;identity?:()=>Promise<DeviceIdentity>;remember?:typeof rememberMessage;rtc?:(config:RTCConfiguration)=>RTCPeerConnection;outbox?:MessageOutbox;persist?:(message:ChatMessage)=>Promise<void>};
+export class PeerClient {
+ private identity?:DeviceIdentity;private devices=new Map<string,Device>();private peers=new Map<string,{pc:RTCPeerConnection;channel?:RTCDataChannel}>();
+ private timer?:ReturnType<typeof setTimeout>;private stopped=false;private directoryAt=0;private tail=Promise.resolve();private watchdog?:ReturnType<typeof setInterval>;
+ private fallbacks=new Map<string,{timer:ReturnType<typeof setTimeout>;user:string;message:string}>();
+ private registered=false;private started=false;
+ private sent=new Map<string,Set<string>>();
+ private iceServers:RTCIceServer[]=[];
+ private options:Options;
+ private outbox:MessageOutbox;
+ private pending=new Map<string,PendingEnvelope>();
+ private attempted=new Map<string,number>();
+ constructor(options:Options){this.options=options;this.outbox=options.outbox??messageOutbox(options.user,options.team);}
+ private address(device:string,user=this.options.user):Address{return {team:this.options.team,user,device};}
+ private async request<T>(body:Record<string,unknown>){if(this.stopped)throw Error('Team connection closed');return this.options.request<T>({...body,teamId:this.options.team,deviceId:this.identity!.id});}
+ async start(){
+  if(this.started||this.stopped)return;this.started=true;
+  this.identity=await (this.options.identity?.()??deviceIdentity(this.options.user));if(this.stopped)return;
+  for(const row of await this.outbox.load()){
+   if(row.envelope.from.device!==this.identity.id||row.envelope.from.user!==this.options.user||row.envelope.from.team!==this.options.team||row.envelope.to.team!==this.options.team)continue;
+   this.pending.set(row.envelope.id,row);
+   const users=this.sent.get(row.messageId)??new Set<string>();users.add(row.envelope.to.user);this.sent.set(row.messageId,users);
+  }
+  if(this.stopped)return;
+  this.watchdog=setInterval(()=>{if(Date.now()-this.directoryAt>10000){this.closePeers();this.options.status('Reconnecting securely…');}},1000);
+  await this.poll();
+ }
+ private closePeers(){for(const value of this.peers.values())value.pc.close();this.peers.clear();}
+ stop(){this.stopped=true;clearTimeout(this.timer);clearInterval(this.watchdog);this.closePeers();this.devices.clear();for(const value of this.fallbacks.values())clearTimeout(value.timer);this.fallbacks.clear();}
+ private async directory(){
+  const {devices,members=[],iceServers=[]}=await this.request<{devices:Device[];members?:{id:string;name:string}[];iceServers?:RTCIceServer[]}>({action:'directory'});if(this.stopped)return;
+  if(!devices.some(d=>d.id===this.identity!.id&&d.user_id===this.options.user))throw Error('This device no longer has team access');
+  const next=new Map(devices.map(d=>[d.id,d]));
+  for(const [id,peer] of this.peers)if(!next.has(id)||JSON.stringify(next.get(id)?.public_keys)!==JSON.stringify(this.devices.get(id)?.public_keys)){peer.pc.close();this.peers.delete(id);}
+  this.options.members?.(members);
+  this.devices=next;this.iceServers=iceServers;this.directoryAt=Date.now();
+  // Stable initiator avoids simultaneous offers from the two devices.
+  for(const d of devices)if(d.id!==this.identity!.id&&this.identity!.id<d.id&&!this.peers.has(d.id))void this.offer(d,iceServers).catch(()=>{/* encrypted relay remains available */});
+ }
+ private async poll(){
+  if(this.stopped)return;
+  try{
+   if(!this.registered){await this.options.request(await registration(this.identity!.keys,this.options.user,this.identity!.id));if(this.stopped)return;this.registered=true;}
+   await this.directory();if(this.stopped)return;
+   await this.retryPending();if(this.stopped)return;
+   const {envelopes}=await this.request<{envelopes:{id:string;envelope:Envelope}[]}>({action:'poll'});
+   const acknowledged:string[]=[];
+   for(const row of envelopes){try{await this.receive(row.envelope);acknowledged.push(row.id);}catch(error){if(String(error).includes('Message replay refused'))acknowledged.push(row.id);else this.options.status('A message could not be verified.');}}
+   if(acknowledged.length)await this.request({action:'ack',ids:acknowledged});
+   if(!this.stopped)this.options.status('Connected · end-to-end encrypted');
+  }catch(error){this.directoryAt=0;this.closePeers();if(!this.stopped)this.options.status(String(error));}
+  finally{if(!this.stopped)this.timer=setTimeout(()=>void this.poll(),2000);}
+ }
+ private async deliver(device:Device,payload:Payload,relayOnly=false){
+  if(this.stopped||!this.devices.has(device.id))throw Error('Team access needs to be refreshed');
+  const envelope=await seal(this.identity!.keys,device.public_keys,this.address(this.identity!.id),this.address(device.id,device.user_id),JSON.stringify(payload));
+  if(this.stopped)throw Error('Team connection closed');
+  if(payload.kind==='message'){
+   const row={envelope,messageId:payload.message.id};await this.outbox.put(row);
+   this.pending.set(envelope.id,row);this.attempted.set(envelope.id,Date.now());
+  }
+  await this.transmit(device,envelope,payload.kind==='message'?payload.message.id:undefined,relayOnly);
+ }
+ private async transmit(device:Device,envelope:Envelope,messageId?:string,relayOnly=false){
+  if(this.stopped||Date.now()-this.directoryAt>10000||!this.devices.has(device.id))throw Error('Team access needs to be refreshed');
+  const channel=this.peers.get(device.id)?.channel;
+  if(!relayOnly&&channel?.readyState==='open'&&channel.bufferedAmount<131072){try{channel.send(JSON.stringify(envelope));
+    if(messageId){
+     const timer=setTimeout(()=>{this.fallbacks.delete(envelope.id);if(!this.stopped&&this.devices.has(device.id)&&Date.now()-this.directoryAt<=10000)void this.request({action:'relay',recipientDevice:device.id,envelope}).catch(()=>this.options.status('Delivery could not be confirmed.'));},3000);
+     const previous=this.fallbacks.get(envelope.id);if(previous)clearTimeout(previous.timer);
+     this.fallbacks.set(envelope.id,{timer,user:device.user_id,message:messageId});
+    }
+    return;}catch{/* relay on a failed direct send */}}
+  await this.request({action:'relay',recipientDevice:device.id,envelope});
+ }
+ private async retryPending(){
+  const discard:string[]=[];
+  for(const [id,row]of this.pending){
+   const device=this.devices.get(row.envelope.to.device);
+   if(row.envelope.expires<=Date.now()||!device||device.user_id!==row.envelope.to.user){discard.push(id);continue;}
+   if(Date.now()-(this.attempted.get(id)??0)<5000)continue;
+   this.attempted.set(id,Date.now());
+   await this.transmit(device,row.envelope,row.messageId).catch(()=>{});
+  }
+  if(discard.length){await this.outbox.remove(discard);for(const id of discard){this.pending.delete(id);this.attempted.delete(id);const prior=this.fallbacks.get(id);if(prior)clearTimeout(prior.timer);this.fallbacks.delete(id);}}
+ }
+
+ async send(text:string,recipient:string|null){
+  if(!text.trim()||new TextEncoder().encode(text).length>16000)throw Error('Write a message under 16 KB');
+  if(this.fallbacks.size>=500)throw Error('Wait for pending messages to finish sending');
+  try{await this.directory();}catch(error){
+   // A sender may retain pending ciphertext while offline, but never deliver
+   // through a stale directory. A fresh poll authorizes the eventual retry.
+   if(!this.devices.size||navigator.onLine!==false)throw error;
+   this.directoryAt=0;this.closePeers();
+  }
+  const devices=[...this.devices.values()].filter(d=>d.user_id!==this.options.user&&(!recipient||d.user_id===recipient));
+  if(!devices.length)throw Error('No recipient devices are registered yet. Ask your teammate to sign in to Canopy.');
+  const message:ChatMessage={id:crypto.randomUUID(),sender:this.options.user,recipient,text,created:Date.now()};
+  if(new TextEncoder().encode(JSON.stringify({kind:'message',message})).length>32000)throw Error('This message is too large after encoding. Split it into smaller messages.');
+  await this.options.persist?.(message);
+  this.sent.set(message.id,new Set(devices.map(d=>d.user_id)));if(this.sent.size>500)this.sent.delete(this.sent.keys().next().value!);
+  const outcomes=await Promise.allSettled(devices.map(d=>this.deliver(d,{kind:'message',message})));
+  const queued=[...this.pending.values()].some(row=>row.messageId===message.id);
+  if(outcomes.every(result=>result.status==='rejected')&&!queued)throw Error('Message could not be saved or sent. Try again.');
+  this.options.message(message);return {id:message.id,queued:outcomes.every(result=>result.status==='rejected'),partial:outcomes.some(result=>result.status==='rejected')};
+ }
+ private receive(envelope:Envelope):Promise<void>{
+  const task=this.tail.catch(()=>{}).then(async()=>{
+   if(this.stopped||Date.now()-this.directoryAt>10000)throw Error('Team access expired');
+   const sender=this.devices.get(envelope.from?.device);if(!sender)throw Error('Sender is no longer a team member');
+   let text:string;
+   try{text=await open(this.identity!.keys,sender.public_keys,this.address(sender.id,sender.user_id),this.address(this.identity!.id),envelope,this.options.remember??rememberMessage,Date.now(),async decoded=>{
+    if(this.stopped||Date.now()-this.directoryAt>10000||!this.currentSender(sender))throw Error('Team access expired');
+    const payload=JSON.parse(decoded) as Payload;
+    if(payload.kind==='message'){this.validateMessage(payload.message,sender,envelope);await this.options.persist?.(payload.message);}
+   });}
+   catch(error){if(error instanceof MessageReplayError){const prior=JSON.parse(error.plaintext) as Payload;if(prior.kind==='message'){this.validateMessage(prior.message,sender,envelope);await this.deliver(sender,{kind:'receipt',id:prior.message.id});return;}if(prior.kind==='receipt'){await this.acceptReceipt(prior.id,sender);return;}}throw error;}
+   if(this.stopped||Date.now()-this.directoryAt>10000||!this.currentSender(sender))return;
+   const payload=JSON.parse(text) as Payload;
+   if(payload.kind==='message'){
+    const m=payload.message;this.validateMessage(m,sender,envelope);
+    this.options.message(m);await this.deliver(sender,{kind:'receipt',id:m.id});
+   }else if(payload.kind==='receipt'){await this.acceptReceipt(payload.id,sender);}
+   else if(payload.kind==='signal')await this.signal(sender,payload.description);
+   else throw Error('Unknown peer message');
+  });this.tail=task;return task;
+ }
+ private async acceptReceipt(id:string,sender:Device){
+  if(typeof id!=='string'||!this.sent.get(id)?.has(sender.user_id))throw Error('Invalid receipt');
+  const delivered=[...this.pending].filter(([,row])=>row.messageId===id&&row.envelope.to.user===sender.user_id).map(([key])=>key);
+  // Storage failure keeps the queue intact; an authenticated duplicate receipt
+  // can retry this cleanup after restarting without rerendering the message.
+  await this.outbox.remove(delivered);
+  for(const key of delivered){this.pending.delete(key);this.attempted.delete(key);}
+  for(const [key,pending]of this.fallbacks)if(pending.message===id&&pending.user===sender.user_id){clearTimeout(pending.timer);this.fallbacks.delete(key);}
+  this.options.receipt(id,sender.user_id);
+ }
+ private currentSender(sender:Device){const current=this.devices.get(sender.id);return current?.user_id===sender.user_id&&JSON.stringify(current.public_keys)===JSON.stringify(sender.public_keys);}
+ private validateMessage(m:ChatMessage,sender:Device,envelope:Envelope){
+  if(!validChatMessage(m)||m.sender!==sender.user_id||(m.recipient!==null&&m.recipient!==this.options.user)||typeof m.text!=='string'||new TextEncoder().encode(m.text).length>16000||!Number.isSafeInteger(m.created)||m.created<envelope.created-300000||m.created>envelope.expires)throw Error('Invalid peer message');
+ }
+ private connection(device:Device,iceServers:RTCIceServer[]=this.iceServers){
+  const pc=this.options.rtc?.({iceServers})??new RTCPeerConnection({iceServers});const peer:{pc:RTCPeerConnection;channel?:RTCDataChannel}={pc};this.peers.set(device.id,peer);
+  const attach=(channel:RTCDataChannel)=>{peer.channel=channel;channel.onmessage=e=>{if(typeof e.data!=='string'||e.data.length>50000)return;try{void this.receive(JSON.parse(e.data)).catch(()=>this.options.status('A direct message could not be verified.'));}catch{/* reject malformed peer input */}};};
+  pc.ondatachannel=e=>attach(e.channel);pc.onconnectionstatechange=()=>{if(['closed','failed'].includes(pc.connectionState)&&this.peers.get(device.id)===peer){pc.close();this.peers.delete(device.id);}};
+  return {pc,attach};
+ }
+ private async gathered(pc:RTCPeerConnection){
+  if(pc.iceGatheringState==='complete')return;
+  await new Promise<void>(resolve=>{const finish=()=>{clearTimeout(timer);pc.removeEventListener('icegatheringstatechange',changed);resolve();};const changed=()=>{if(pc.iceGatheringState==='complete')finish();};const timer=setTimeout(finish,4000);pc.addEventListener('icegatheringstatechange',changed);});
+ }
+ private async offer(device:Device,iceServers:RTCIceServer[]){
+  const {pc,attach}=this.connection(device,iceServers);attach(pc.createDataChannel('canopy-im-v1',{ordered:true}));
+  try{await pc.setLocalDescription(await pc.createOffer());await this.gathered(pc);if(pc.localDescription&&!this.stopped)await this.deliver(device,{kind:'signal',description:pc.localDescription.toJSON()},true);}catch(error){pc.close();this.peers.delete(device.id);throw error;}
+ }
+ private async signal(device:Device,description:RTCSessionDescriptionInit){
+  if(!description||!['offer','answer'].includes(description.type)||typeof description.sdp!=='string'||description.sdp.length>20000)throw Error('Invalid peer offer');
+  if(description.type==='offer'){
+   if(device.id>this.identity!.id)return;
+   this.peers.get(device.id)?.pc.close();const {pc}=this.connection(device);
+   await pc.setRemoteDescription(description);await pc.setLocalDescription(await pc.createAnswer());await this.gathered(pc);
+   if(pc.localDescription)await this.deliver(device,{kind:'signal',description:pc.localDescription.toJSON()},true);
+  }else{const pc=this.peers.get(device.id)?.pc;if(pc?.signalingState==='have-local-offer')await pc.setRemoteDescription(description);}
+ }
+}

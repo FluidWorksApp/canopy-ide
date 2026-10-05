@@ -11,6 +11,7 @@ import { WebSocket } from 'ws';
 import { DockerWorkspaces } from './docker.mjs';
 import { createGateway } from './gateway.mjs';
 import { digest } from './policy.mjs';
+import {waitForRuntimeReady} from './runtime-readiness.mjs';
 const execute = promisify(execFile);
 const exec = (command, args, options = {}) => execute(command, args, { timeout: 120_000, maxBuffer: 256 * 1024, ...options });
 const suffix = randomBytes(4).toString('hex');
@@ -47,8 +48,8 @@ const call = async (id, route, args) => {
 };
 const pause = () => new Promise(resolve => setTimeout(resolve, 200));
 async function awaitRunner(id) {
-  for (let i = 0; i < 50; i++) { const result = await call(id, '/sessions'); if (result.status === 200) return; await pause(); }
-  throw new Error('Workspace runner did not become ready');
+  const workspace=config.workspaces.find(w=>w.id===id);
+  if(!workspace||!await waitForRuntimeReady(await host.open(workspace)))throw new Error('Workspace runner did not become ready');
 }
 const socket = async stream => {
   const ticket = await call(ids[0], '/ticket', { stream }); assert.equal(ticket.status, 200);
@@ -88,6 +89,7 @@ try {
   assert.equal((await call(ids[0], '/files/read', { path: 'identity.txt' })).data.text, 'workspace A');
   assert.equal((await call(ids[0], '/files/read', { path: '/etc/passwd' })).status, 400);
   const b = await host.open(config.workspaces[1]);
+  assert.ok(await waitForRuntimeReady(b),'Second synthetic workspace runner must be ready before its isolation read');
   const other = await fetch(`${b.url}/files/read`, { method: 'POST', headers: { authorization: `Bearer ${b.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ path: 'identity.txt' }) });
   assert.equal(other.status, 400);
   assert.equal((await call(ids[0], '/sessions', { command: '/bin/true', accountId: accountIds[1], requestId: 'private-account-denied' })).status, 400);
