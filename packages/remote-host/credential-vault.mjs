@@ -20,13 +20,19 @@ export class CredentialVault {
   catch(error){if(error.code!=='EEXIST')throw error;}finally{await handle?.close();}
   const key=await privateRead(keyPath,32);if(key.length!==32)throw Error('Invalid vault key');return new CredentialVault(root,key);
  }
- constructor(root,key){this.root=root;this.key=key;}
+ constructor(root,key){this.root=root;this.key=key;this.pending=new Map();}
+ serialize(workspaceId,account,action){const key=binding(workspaceId,account),prior=this.pending.get(key)??Promise.resolve();const next=prior.catch(()=>{}).then(action);this.pending.set(key,next);void next.finally(()=>{if(this.pending.get(key)===next)this.pending.delete(key);}).catch(()=>{});return next;}
  location(workspaceId,account){const aad=binding(workspaceId,account);return {aad,file:path.join(this.root,createHash('sha256').update(aad).digest('hex')+'.json')};}
- async store(workspaceId,account,credential){
+ async store(workspaceId,account,credential){return this.serialize(workspaceId,account,()=>this.writeCredential(workspaceId,account,credential));}
+ async renew(workspaceId,account,refresh){return this.serialize(workspaceId,account,async()=>{const saved=await this.load(account,{workspaceId});const next=await refresh(saved);if(next===saved)return saved;const {workspaceId:_,accountId:__,...credential}=next;await this.writeCredential(workspaceId,account,credential);return {...credential,workspaceId,accountId:account};});}
+ async writeCredential(workspaceId,account,credential){
   if(!credential||!['github','anthropic','openai'].includes(credential.provider)||typeof credential.token!=='string'||!credential.token||credential.token.length>8192||/[\r\n]/.test(credential.token))throw Error('Invalid shared credential');
   if(credential.provider==='github'&&(! /^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}\/[-\w.]{1,100}$/.test(credential.repository??'')||['.','..'].includes(credential.repository?.split('/')[1])))throw Error('Invalid Git repository');
   if(credential.provider!=='github'&&credential.repository!==undefined)throw Error('Invalid agent credential fields');
-  if(Object.keys(credential).some(k=>!['provider','token','repository'].includes(k)))throw Error('Invalid shared credential fields');
+  if(credential.authType!==undefined&&credential.authType!=='oauth')throw Error('Invalid authentication type');
+  if(credential.authType==='oauth'){if(credential.provider==='github'||typeof credential.refreshToken!=='string'||!credential.refreshToken||credential.refreshToken.length>8192||/[\r\n]/.test(credential.refreshToken)||!Number.isSafeInteger(credential.expiresAt)||credential.expiresAt<1||credential.provider==='openai'&&(typeof credential.providerAccountId!=='string'||!/^[\w-]{1,128}$/.test(credential.providerAccountId)))throw Error('Invalid subscription credential');}
+  else if(['refreshToken','expiresAt','providerAccountId'].some(k=>credential[k]!==undefined))throw Error('Invalid API credential fields');
+  if(Object.keys(credential).some(k=>!['provider','token','repository','authType','refreshToken','expiresAt','providerAccountId'].includes(k)))throw Error('Invalid shared credential fields');
   const {aad,file}=this.location(workspaceId,account),iv=randomBytes(12),cipher=createCipheriv('aes-256-gcm',this.key,iv);cipher.setAAD(Buffer.from(aad));
   const ciphertext=Buffer.concat([cipher.update(JSON.stringify(credential)),cipher.final()]);
   const value=JSON.stringify({version:1,iv:iv.toString('base64'),tag:cipher.getAuthTag().toString('base64'),ciphertext:ciphertext.toString('base64')});
@@ -43,5 +49,5 @@ export class CredentialVault {
    return {...credential,workspaceId:context.workspaceId,accountId:account};
   }catch{throw Error('Shared credential is unavailable');}
  }
- async remove(workspaceId,account){const {file}=this.location(workspaceId,account);await unlink(file).catch(error=>{if(error.code!=='ENOENT')throw error;});}
+ async remove(workspaceId,account){return this.serialize(workspaceId,account,async()=>{const {file}=this.location(workspaceId,account);await unlink(file).catch(error=>{if(error.code!=='ENOENT')throw error;});});}
 }

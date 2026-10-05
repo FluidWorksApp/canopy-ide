@@ -1,5 +1,5 @@
 import {mkdir,lstat,open,readdir,unlink} from 'node:fs/promises';import {constants} from 'node:fs';import {randomBytes,createHmac,createHash,timingSafeEqual} from 'node:crypto';import path from 'node:path';import {privateRead} from './credential-vault.mjs';
-const operations=new Set(['git:fetch','git:push','agents:claude','agents:codex']);
+const operations=new Set(['git:fetch','git:push','agents:claude','agents:codex','agents:claude:count-tokens','agents:claude:models','agents:codex:models']);
 const id=value=>typeof value==='string'&&/^[a-zA-Z0-9_-]{1,128}$/.test(value);
 const hash=value=>createHash('sha256').update(value).digest('hex');
 function validate(c,now){

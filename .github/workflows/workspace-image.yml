@@ -2,7 +2,7 @@ name: Workspace image
 
 on:
   push:
-    branches: [main, runtime/prebuilt-workspace-images]
+    branches: [main]
     paths:
       - 'packages/remote-host/**'
       - 'packages/agent-hook/**'
@@ -67,6 +67,10 @@ jobs:
           node packages/remote-host/smoke-linux.mjs
           node packages/remote-host/smoke-agent-integrations.mjs canopy-workspace:0.1.0
           bash packages/remote-host/smoke-isolation.sh canopy-workspace:0.1.0
+          node packages/remote-host/smoke-project-sharing.mjs canopy-workspace:0.1.0
+          node packages/remote-host/smoke-member-revocation.mjs canopy-workspace:0.1.0
+          node packages/remote-host/smoke-project-migration.mjs canopy-workspace:0.1.0
+          node packages/remote-host/smoke-migration-recovery.mjs canopy-workspace:0.1.0
           node packages/remote-host/smoke-image-upgrade.mjs canopy-workspace:0.1.0
       - uses: docker/login-action@v3
         with:

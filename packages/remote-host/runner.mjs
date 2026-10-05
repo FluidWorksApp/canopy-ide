@@ -1,3 +1,4 @@
+import {prepareSharedAgentLaunch} from './shared-agent-launch.mjs';
 import { nativeInvoke, startNativeServer } from "./native.mjs";
 import http from 'node:http';
 import net from 'node:net';
@@ -93,8 +94,9 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
         try { template = await realpath(`${template}/current`); } catch (error) { if (error.code !== 'ENOENT') throw error; }
         await cp(template, accountHome, { recursive: true, dereference: true });
       }
+      const sharedBin=args.sharedAgents?await prepareSharedAgentLaunch(accountHome,args.requestId,args.sharedAgents):null;
       const cols = 120, rows = 40;
-      const pty = spawnPty('/bin/bash', ['-lc', 'export PATH="/home/agent/.local/bin:$PATH" NPM_CONFIG_PREFIX=/home/agent/.local; '+args.command], { name: 'xterm-256color', cols, rows, cwd: ROOT,
+      const pty = spawnPty('/bin/bash', ['-lc', 'export PATH="'+(sharedBin?sharedBin+':':'')+'/home/agent/.local/bin:$PATH" NPM_CONFIG_PREFIX=/home/agent/.local; '+args.command], { name: 'xterm-256color', cols, rows, cwd: ROOT,
         env: { CANOPY:'1', CANOPY_PTY:String(id), CANOPY_INSTANCE:'remote-'+workspaceId, PATH: process.env.PATH, HOME: accountHome, USER: 'agent', NPM_CONFIG_PREFIX:'/home/agent/.local', TERM: 'xterm-256color',
           CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests',BROWSER:'/opt/canopy/open-url.mjs',GH_CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests',BROWSER:'/opt/canopy/open-url.mjs', LANG: 'C.UTF-8', DISPLAY: ':99', CODEX_HOME: `${accountHome}/.codex`,
           CLAUDE_CONFIG_DIR: `${accountHome}/.claude`, CANOPY_WORKSPACE_ID: workspaceId, CANOPY_SESSION_REQUEST_ID:args.requestId,...gitEnvironment } });

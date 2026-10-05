@@ -32,10 +32,44 @@ export function foldUsage(row,value){
  }
 }
 export function agentUsageReader(home='/home/agent'){
- const cache=new Map(),profiles=new WorkspaceProfiles(home);let listingAt=0,files=[],inflight;
- async function discover(root,agent,depth,profile){if(files.length>=256||depth<0)return;let entries;try{entries=await readdir(root,{withFileTypes:true});}catch(error){if(error.code==='ENOENT')return;throw error;}for(const entry of entries){if(files.length>=256)break;const target=path.join(root,entry.name);if(entry.isDirectory())await discover(target,agent,depth-1,profile);else if(entry.isFile()&&entry.name.endsWith('.jsonl'))files.push({path:target,agent,profile});}}
+ const cache=new Map(),profiles=new WorkspaceProfiles(home),requested=new Map();let listingAt=0,files=[],inflight,profileStamp='';
+ // Bound traversal and retained readers separately. An old directory must not
+ // fill the retained 256 slots before an active or recently updated session.
+ async function discover(root,agent,depth,profile,candidates){
+  if(candidates.length>=4096||depth<0)return;
+  let entries;try{entries=await readdir(root,{withFileTypes:true});}catch(error){if(error.code==='ENOENT')return;throw error;}
+  entries.sort((a,b)=>b.name.localeCompare(a.name));
+  for(const entry of entries){
+   if(candidates.length>=4096)break;
+   const target=path.join(root,entry.name);
+   if(entry.isDirectory())await discover(target,agent,depth-1,profile,candidates);
+   else if(entry.isFile()&&entry.name.endsWith('.jsonl'))candidates.push({path:target,agent,profile});
+  }
+ }
  async function scan(){
-  if(Date.now()-listingAt>=30000){files=[];for(const profile of await profiles.list()){let root;try{root=await profiles.root(profile.id);}catch{continue;}await discover(root+'/.claude/projects','claude',2,profile.id);await discover(root+'/.codex/sessions','codex',4,profile.id);}listingAt=Date.now();const present=new Set(files.map(file=>file.path));for(const key of cache.keys())if(!present.has(key))cache.delete(key);}
+  const inventory=await profiles.list();
+  const stamp=JSON.stringify(inventory.map(p=>[p.id,p.root]));
+  if(Date.now()-listingAt>=30000||stamp!==profileStamp){
+   const candidates=[];
+   for(const profile of inventory){
+    let root;try{root=await profiles.root(profile.id);}catch{continue;}
+    await discover(root+'/.claude/projects','claude',2,profile.id,candidates);
+    await discover(root+'/.codex/sessions','codex',4,profile.id,candidates);
+   }
+   // Explicit footer lookups remain admitted even beyond the inventory cap.
+   for(const file of requested.values())if(inventory.some(p=>p.id===file.profile)&&!candidates.some(c=>c.path===file.path))candidates.push(file);
+   const recent=[];
+   for(let index=0;index<candidates.length;index+=32){
+    const batch=await Promise.all(candidates.slice(index,index+32).map(async file=>{
+     try{return {...file,modified:(await stat(file.path)).mtimeMs};}catch{return null;}
+    }));
+    recent.push(...batch.filter(Boolean));
+   }
+   recent.sort((a,b)=>Number(requested.has(b.path))-Number(requested.has(a.path))||b.modified-a.modified||a.path.localeCompare(b.path));
+   files=recent.slice(0,256);listingAt=Date.now();profileStamp=stamp;
+   const present=new Set(files.map(file=>file.path));for(const key of cache.keys())if(!present.has(key))cache.delete(key);
+   for(const [key,file]of requested)if(!inventory.some(p=>p.id===file.profile))requested.delete(key);
+  }
   const rows=[];
   for(const file of files){let info;try{info=await stat(file.path);}catch{continue;}
    let entry=cache.get(file.path);if(!entry||info.ino!==entry.ino||info.size<entry.offset)entry={ino:info.ino,offset:0,row:freshUsage(file.agent,path.basename(file.path,'.jsonl'))};
@@ -51,7 +85,7 @@ export function agentUsageReader(home='/home/agent'){
   const canonical=await realpath(transcript);
   if(canonical!==path.resolve(transcript))throw Error('Not a Claude transcript');
   const roots=await profiles.list();let permitted=false;
-  for(const profile of roots){const root=await profiles.root(profile.id);if(canonical.startsWith(root+'/.claude/projects/'))permitted=true;}
+  for(const profile of roots){const root=await profiles.root(profile.id);if(canonical.startsWith(root+'/.claude/projects/')){permitted=true;requested.delete(canonical);requested.set(canonical,{path:canonical,agent:'claude',profile:profile.id});while(requested.size>32)requested.delete(requested.keys().next().value);}}
   if(!permitted)throw Error('Not a Claude transcript');
   if(!cache.has(canonical))listingAt=0;
   await usage();const row=cache.get(canonical)?.row;

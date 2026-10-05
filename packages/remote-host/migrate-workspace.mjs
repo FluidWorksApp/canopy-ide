@@ -15,7 +15,8 @@ export async function migrateWorkspace({config,workspaceId,projects,host,saveCon
  if(typeof saveConfig!=='function'||typeof verifyRuntime!=='function'||typeof journal?.append!=='function')throw Error('Migration requires persistence, a durable journal and readiness verification');
  return host.withResourceLock(async()=>{
   if(host.migrationCleanupRequired.has(workspaceId))throw Error('Workspace migration requires recovery');
-  await host.verifyCapacity(workspace);
+  const cgroupParent=workspace.cgroupParent??workspace.sharingCgroupParent;
+  await host.verifyCapacity({...workspace,cgroupParent});
   const name='canopy-ws-'+workspaceId;
   const before=JSON.parse((await host.docker(['inspect',name])).stdout)[0];
   await journal.append({phase:'checkpointing',originalContainerId:before.Id});
@@ -23,7 +24,7 @@ export async function migrateWorkspace({config,workspaceId,projects,host,saveCon
   const mounts=[];
   try{for(const project of projects)mounts.push(await migrateProjectVolume(workspace,project,{docker:host.docker,image:host.image}));}
   catch(error){if(error.migrationCleanupRequired)host.migrationCleanupRequired.add(workspaceId);throw error;}
-  const next={...workspace,ownerImage:checkpoint.ownerImage,projectMounts:mounts};
+  const next={...workspace,cgroupParent,ownerImage:checkpoint.ownerImage,projectMounts:mounts};
   const preserved=`canopy-preserved-${workspaceId}-${randomBytes(6).toString('hex')}`;
   const current=JSON.parse((await host.docker(['inspect',name])).stdout)[0];
   if(current.Id!==checkpoint.originalContainerId||current.State?.Running!==false)throw Error('Workspace changed during migration');

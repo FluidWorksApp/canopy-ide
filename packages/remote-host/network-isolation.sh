@@ -18,6 +18,9 @@ for binary in iptables ip6tables; do
   ensure "$binary" CANOPY-INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
   ensure "$binary" INPUT -i 'cnp+' -j CANOPY-INPUT
   if [[ $binary == iptables ]]; then
+    # Only the authenticated HTTPS facade is reachable from development
+    # containers. Loopback management/runner ports remain behind INPUT DROP.
+    ensure "$binary" CANOPY-INPUT -p tcp --dport 443 -j ACCEPT
     # Includes cloud metadata, private management services and other members.
     for range in 169.254.0.0/16 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8; do
       ensure "$binary" CANOPY-EGRESS -d "$range" -j DROP

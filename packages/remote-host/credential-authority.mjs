@@ -1,5 +1,5 @@
 import {validateProjectAccess,grantedProjects} from './project-mounts.mjs';
-const slots={'git:fetch':'git','git:push':'git','agents:claude':'claude','agents:codex':'codex'};
+const slots={'git:fetch':'git','git:push':'git','agents:claude':'claude','agents:codex':'codex','agents:claude:count-tokens':'claude','agents:claude:models':'claude','agents:codex:models':'codex'};
 export function validateSharedResourceAccess(value){
  if(!value||Object.keys(value).length!==2||!Object.hasOwn(value,'git')||!Object.hasOwn(value,'agents'))throw Error('Invalid shared resource access');
  return {git:validateProjectAccess(value.git),agents:validateProjectAccess(value.agents)};

@@ -68,3 +68,15 @@ test('client disconnect before provider headers aborts the upstream request',asy
  const broker=new CredentialBroker({authorize:async()=>grant,loadCredential:async()=>credential,fetchImpl:async(_url,options)=>{upstream=options.signal;return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(Error(secret)),{once:true}));}});
  const pending=broker.execute(principal,request,{signal:client.signal});setTimeout(()=>client.abort(),20);await assert.rejects(pending,error=>!error.message.includes(secret));assert.equal(upstream.aborted,true);
 });
+test('CLI model discovery and token counting use fixed provider routes and reject injected discovery bodies',async()=>{
+ for(const [operation,provider,url,method]of [['agents:claude:count-tokens','anthropic','https://api.anthropic.com/v1/messages/count_tokens','POST'],['agents:claude:models','anthropic','https://api.anthropic.com/v1/models','GET'],['agents:codex:models','openai','https://api.openai.com/v1/models','GET']]){
+  let calls=0;const broker=new CredentialBroker({authorize:async(p,c)=>({...c,accountId:'selected'}),loadCredential:async()=>({...credential,accountId:'selected',provider}),fetchImpl:async(actual,options)=>{calls++;assert.equal(actual,url);assert.equal(options.method,method);assert.equal(options.body===undefined,method==='GET');return Response.json({data:[]});}});
+  const body=method==='GET'?Buffer.alloc(0):Buffer.from('{}');const result=await broker.execute(principal,{projectId:'app',operation,body});assert.equal(result.status,200);await result.json();assert.equal(calls,1);
+  if(method==='GET'){await assert.rejects(broker.execute(principal,{projectId:'app',operation,body:Buffer.from('forged')}),/Unexpected model discovery body/);assert.equal(calls,1);}
+ }
+});
+test('capability headers cannot replace authentication, redirect routing or inject CRLF',async()=>{
+ let loads=0;const broker=new CredentialBroker({authorize:async()=>grant,loadCredential:async()=>{loads++;return credential;}});
+ for(const providerHeaders of [{authorization:'forged'},{host:'169.254.169.254'},{'anthropic-beta':'value\r\nAuthorization: forged'},{'anthropic-beta':'x'.repeat(2049)}])await assert.rejects(broker.execute(principal,{...request,providerHeaders}),/Invalid provider capability headers/);
+ assert.equal(loads,0);
+});

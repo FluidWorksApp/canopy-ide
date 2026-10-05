@@ -59,3 +59,13 @@ test('a second IDE cannot shorten a renewed lease with an older credential',asyn
   now=200;await leases.checkAll();assert.deepEqual(stopped,['alice']);
  }finally{leases.close();}
 });
+test('detached renewal requires trusted running container, fresh same access and bounded time since actual IDE admission',async()=>{
+ let now=0,running=true,allowed=true,renewals=0;const stopped=[],principal={workspaceId:'workspace',memberId:'alice',accessVersion:1,scope:'drive',expiresAt:50000};
+ const leases=new MemberLeases({now:()=>now,maxDetachedMs:100000,authorize:async()=>{if(!allowed)throw Error('Revoked');},stop:async runtime=>stopped.push(runtime.id),inspectRunning:async()=>running,renew:async(runtime,p)=>{renewals++;return {principal:{...p,expiresAt:now+120000},bearer:'fresh'};}});
+ try{
+  await leases.open({id:'member-a'},principal,'initial',async()=>{});now=40000;await leases.checkAll();assert.equal(renewals,1);assert.equal(leases.entries.get('member-a').bearer,'fresh');assert.equal(leases.entries.get('member-a').lastClientAt,0);
+  now=110000;await leases.checkAll();assert.deepEqual(stopped,['member-a']);assert.equal(renewals,1);
+  now=0;await leases.open({id:'member-b'},principal,'initial',async()=>{});running=false;await leases.checkAll();assert.deepEqual(stopped,['member-a','member-b']);assert.equal(renewals,1);
+  running=true;await leases.open({id:'member-c'},principal,'initial',async()=>{});allowed=false;await leases.checkAll();assert.deepEqual(stopped,['member-a','member-b','member-c']);
+ }finally{leases.close();}
+});
