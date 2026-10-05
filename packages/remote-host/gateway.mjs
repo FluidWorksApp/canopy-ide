@@ -6,7 +6,8 @@ import {runtimeAuthority} from './runtime-authority.mjs';
 import {memberAuthority} from './member-authority.mjs';
 import {memberRuntime} from './member-runtime.mjs';
 import {MemberLeases} from './member-leases.mjs';
-import {mergeSharedProjects} from './project-catalog.mjs';
+import {mergeSharedProjects,sharedProjectDefinitions} from './project-catalog.mjs';
+import {grantedProjects} from './project-mounts.mjs';
 import http from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
@@ -69,13 +70,18 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       const match = route.match(/^\/v1\/workspaces\/([a-z][a-z0-9-]{0,47})(\/.*)$/);
       if (!match) return json(response, 404, { error: 'Unknown operation' });
       const [, workspaceId, operation] = match;
-      const reads = new Set(['/sessions', '/files/list', '/files/read', '/git/status', '/git/diff']);
+      const reads = new Set(['/projects', '/sessions', '/files/list', '/files/read', '/git/status', '/git/diff']);
       const write = operation !== '/sessions' || request.method !== 'GET';
       const scope = operation === '/open' || operation === '/resources' || operation === '/ticket' || (reads.has(operation) && (operation !== '/sessions' || !write)) ? 'view' : 'drive';
       const workspace = authorize(config, principal, workspaceId, scope);
       if (!['GET', 'POST'].includes(request.method)) throw new Error('Unsupported method');
-      if (!['/open', '/resources', '/sessions', '/ticket', '/desktop', '/files/list', '/files/read', '/files/write', '/git/status', '/git/diff', '/language/analyze', '/native'].includes(operation) &&
+      if (!['/projects', '/open', '/resources', '/sessions', '/ticket', '/desktop', '/files/list', '/files/read', '/files/write', '/git/status', '/git/diff', '/language/analyze', '/native'].includes(operation) &&
           !/^\/sessions\/\d+\/(input|resize|stop)$/.test(operation)) throw new Error('Unknown operation');
+      if(operation==='/projects'){
+        if(request.method!=='GET')throw Error('Project catalog is administrator-managed');
+        const catalog=principal.memberId?{...workspace,projectMounts:grantedProjects(workspace,projectAccess)}:workspace;
+        return json(response,200,{projects:sharedProjectDefinitions(catalog).map(p=>({id:p.id,name:p.name,components:p.components.map(c=>({id:c.id,name:c.label}))}))});
+      }
       if (operation === '/ticket') {
         const args = await body(request, 4096);
         if (!/^\/sessions\/\d+\/stream$/.test(args.stream) && args.stream !== '/desktop/ws') throw new Error('Invalid stream');

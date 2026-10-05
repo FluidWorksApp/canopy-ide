@@ -231,6 +231,8 @@ test('member store loads discover only granted shared projects and their compone
  const server=createGateway({config,workspaces:{open:async()=>({url:upstreamUrl,token:'runtime'})},authorizeMember:async()=>({projectAccess:{allRead:false,allWrite:false,selected:[{id:'app',writable:true}]}})});
  const url=await listen(server);
  try{
+  const catalogResponse=await fetch(url+'/v1/workspaces/shared/projects',{headers:{authorization:bearer}});
+  assert.equal(catalogResponse.status,200);assert.deepEqual(await catalogResponse.json(),{projects:[{id:'app',name:'Product',components:[{id:'web',name:'Web'}]}]});
   const response=await fetch(url+'/v1/workspaces/shared/native',{method:'POST',headers:{authorization:bearer,'content-type':'application/json'},body:JSON.stringify({command:'store_load'})});
   assert.equal(response.status,200);
   const store=JSON.parse((await response.json()).result);
@@ -238,4 +240,14 @@ test('member store loads discover only granted shared projects and their compone
   assert.equal(store.projects[1].components[0].path,'/workspace/projects/app/web');
   assert.equal(store.activeId,'mine');
  }finally{await close(server);await close(upstream);}
+});
+
+test('trusted project catalog can be read without opening a stopped runtime and rejects writes',async()=>{
+ let opens=0;const config={workspaces:[{id:'catalog',accounts:[],memoryMiB:1024,cpus:1,projectMounts:[{id:'app',name:'Product',writable:true,components:[{id:'web',label:'Frontend',relativePath:'web'}]}]}],principals:[{id:'owner',tokenSha256:digest('owner'),workspaces:['catalog'],scope:'drive'}]};
+ const server=createGateway({config,workspaces:{open:async()=>{opens++;throw Error('Stopped runtime must not be opened');}}});const url=await listen(server);
+ try{
+  const result=await fetch(url+'/v1/workspaces/catalog/projects',{headers:{authorization:'Bearer owner'}});
+  assert.equal(result.status,200);assert.deepEqual(await result.json(),{projects:[{id:'app',name:'Product',components:[{id:'web',name:'Frontend'}]}]});
+  const write=await fetch(url+'/v1/workspaces/catalog/projects',{method:'POST',headers:{authorization:'Bearer owner'},body:'{}'});assert.ok(write.status>=400);assert.equal(opens,0);
+ }finally{await close(server);}
 });
