@@ -1,4 +1,10 @@
+import net from 'node:net';
+import {networkInterfaces} from 'node:os';
 import {chromium} from 'playwright-core';import {createRequire} from 'node:module';import {createServer} from 'node:http';import {readFile,mkdir,writeFile,rm,mkdtemp} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';import {registrationProof,relayEnvelope} from '/smoke/peer-messaging.mjs';
+const blocked=target=>new Promise(resolve=>{const [host,port]=target.split(':');let settled=false;const socket=net.connect({host,port:Number(port)}),finish=value=>{if(settled)return;settled=true;clearTimeout(timer);socket.destroy();resolve(value);};const timer=setTimeout(()=>finish(true),2000);socket.once('connect',()=>finish(false));socket.once('error',()=>finish(true));});
+assert.equal((await readFile('/proc/sys/net/ipv6/conf/all/disable_ipv6','utf8')).trim(),'1','Fixture namespace IPv6 must be disabled');
+const targets=[process.env.CANOPY_PEER_PROBE_HOST,process.env.CANOPY_PEER_PROBE_EGRESS];if(targets.some(value=>!value))throw Error('Synthetic isolation probes missing');for(const target of targets)assert.equal(await blocked(target),true,'Synthetic host/cross-network canary must be blocked');
+const route=(await readFile('/proc/net/route','utf8')).split('\n').slice(1).some(line=>line.trim().split(/\s+/)[1]==='00000000');assert.equal(route,true,'Fixture needs realistic default route while firewall blocks egress');
 const ts=createRequire(import.meta.url)('/usr/local/lib/node_modules/typescript'),home=await mkdtemp(join(tmpdir(),'canopy-peer-fixture-')),modules=new Map();
 for(const file of ['client','crypto','store','history','messageSchema'])modules.set('/'+file+'.js',ts.transpileModule(await readFile('/smoke/source/'+file+'.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText);
 const team=randomUUID(),users=new Set(['synthetic-alice','synthetic-bob']),devices=new Map(),queues=new Map(),revoked=new Set(),relayWire=[];let relayCount=0;
@@ -44,7 +50,7 @@ try{
   const client=new PeerClient({team,user,rtc,request:async body=>{const response=await fetch('/relay',{method:'POST',headers:{'content-type':'application/json','x-test-user':user},body:JSON.stringify(body)}),result=await response.json();if(!response.ok)throw Error(result.error);return result;},message:message=>messages.push(message),receipt:id=>receipts.push(id),status:status=>statuses.push(status),persist:message=>history.saveChatMessage(user,team,message)});
   window.fixture={client,messages,receipts,statuses,directWire,user,team};await client.start();
  },{team,user:index?'synthetic-bob':'synthetic-alice'});
- try{for(const page of pages)await page.waitForFunction(()=>[...window.fixture.client.peers.values()].some(peer=>peer.pc.connectionState==='connected'&&peer.channel?.readyState==='open'),{},{timeout:30000});}catch(error){console.error('Peer direct diagnostic '+JSON.stringify({application:await diagnostics(pages),nativeBaseline:await nativeBaseline(pages[0])}));throw error;}
+ try{for(const page of pages)await page.waitForFunction(()=>[...window.fixture.client.peers.values()].some(peer=>peer.pc.connectionState==='connected'&&peer.channel?.readyState==='open'),{},{timeout:30000});}catch(error){console.error('Peer direct diagnostic '+JSON.stringify({defaultRoute:route,ipv4Interfaces:Object.values(networkInterfaces()).flat().filter(value=>value?.family==='IPv4'&&!value.internal).length,application:await diagnostics(pages),nativeBaseline:await nativeBaseline(pages[0])}));throw error;}
  const before=relayCount,text='Synthetic direct encrypted delivery '+randomUUID(),sent=await pages[0].evaluate(async text=>window.fixture.client.send(text,'synthetic-bob'),text);
  await pages[1].waitForFunction(id=>window.fixture.messages.some(message=>message.id===id&&message.sender==='synthetic-alice'),sent.id,{timeout:5000});await pages[0].waitForFunction(id=>window.fixture.receipts.includes(id),sent.id,{timeout:5000});
  const received=await pages[1].evaluate(id=>window.fixture.messages.find(message=>message.id===id),sent.id);assert.equal(received.text,text);
@@ -53,6 +59,6 @@ try{
  // Membership removal denies the next send through real directory authority.
  revoked.add('synthetic-bob');await assert.rejects(pages[0].evaluate(()=>window.fixture.client.send('Synthetic revoked send','synthetic-bob')));
  console.log('PASS real PeerClient direct P2P: isolated Chromium contexts, connected nominated ICE pair, authenticated encrypted message+receipt, zero message relay submissions, revoked-recipient denial');
- console.log(JSON.stringify({directDataFrames:wire.flat().length,encryptedSignalingRelays:before,messageRelaySubmissions:relayCount-before,selectedPairConnected:true,contexts:2,syntheticOnly:true}));
+ console.log(JSON.stringify({directDataFrames:wire.flat().length,encryptedSignalingRelays:before,messageRelaySubmissions:relayCount-before,selectedPairConnected:true,contexts:2,syntheticOnly:true,hostServicesBlocked:true,crossNetworkEgressBlocked:true}));
  for(const page of pages)await page.evaluate(()=>window.fixture.client.stop());
 }finally{await browser?.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await rm(home,{recursive:true,force:true});}
