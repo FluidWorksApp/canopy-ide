@@ -123,6 +123,7 @@ jobs:
           cat workspace-release.json >> "$GITHUB_STEP_SUMMARY"
       - name: Package matching trusted host runtime
         run: |
+          node packages/remote-host/prepare-browser-build.mjs
           bash packages/remote-host/package-host-release.sh workspace-host.tar.gz workspace-release.json
           sha256sum workspace-host.tar.gz > workspace-host.tar.gz.sha256
       - uses: actions/upload-artifact@v4
