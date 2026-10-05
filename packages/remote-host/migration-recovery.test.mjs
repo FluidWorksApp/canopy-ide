@@ -32,3 +32,14 @@ test('recovery refuses a configuration changed since migration preparation',asyn
  const o=options();o.config.workspaces[0].cpus=2;
  await assert.rejects(assessMigrationRecovery(o),/Configuration changed/);
 });
+test('committed lifecycle tolerance refuses changed mounts, checkpoint, accounts, groups, generation regression or active original',async()=>{
+ const {projectMounts}=await import('./project-mounts.mjs');const committedNext={...next,generation:4,accounts:['owner'],cgroupParent:'canopy-test.slice',memoryMiB:1024,cpus:1,projectMounts:[{id:'app',writable:true}]};
+ const mounts=[['/workspace','canopy-project-owner',true],['/home/agent','canopy-home-owner',true],['/accounts/owner','canopy-account-owner',false],...projectMounts(committedNext)].map(([Destination,Name,RW])=>({Type:'volume',Destination,Name,RW}));
+ const committedRecords=[{...records[0],next:committedNext},{workspaceId:'owner',sequence:2,phase:'committed'}];
+ const source=(changed={},container={})=>({records:committedRecords,config:{workspaces:[{...committedNext,generation:5,cpus:2,...changed}]},docker:async args=>({stdout:JSON.stringify([args[1]==='canopy-ws-owner'?{...replacement,Mounts:mounts,HostConfig:{CgroupParent:'canopy-test.slice'},...container}:original])})});
+ assert.equal((await assessMigrationRecovery(source())).state,'published');
+ for(const changed of [{ownerImage:'other'},{accounts:[]},{cgroupParent:'canopy-other.slice'},{generation:3},{projectMounts:[{id:'other',writable:true}]}])await assert.rejects(assessMigrationRecovery(source(changed)),/disagrees/);
+ await assert.rejects(assessMigrationRecovery(source({},{Mounts:mounts.slice(1)})),/disagrees/);
+ const activeOriginal=source();activeOriginal.docker=async args=>({stdout:JSON.stringify([args[1]==='canopy-ws-owner'?{...replacement,Mounts:mounts,HostConfig:{CgroupParent:'canopy-test.slice'}}:{...original,State:{Running:true}}])});await assert.rejects(assessMigrationRecovery(activeOriginal),/disagrees/);
+ const interrupted=source();interrupted.records=committedRecords.slice(0,1);await assert.rejects(assessMigrationRecovery(interrupted),/Configuration changed/);
+});

@@ -189,7 +189,7 @@ test('member commits override forged attribution and fail closed without trusted
  const {createHmac}=await import('node:crypto'),key='k'.repeat(48),received=[];
  const upstream=http.createServer(async(req,res)=>{
   let body='';for await(const chunk of req)body+=chunk;
-  received.push(JSON.parse(body));res.setHeader('content-type','application/json');res.end(JSON.stringify({result:'committed'}));
+  received.push(JSON.parse(body));res.setHeader('content-type','application/json');res.end(JSON.stringify(req.url==='/sessions'?{id:1}:{result:'committed'}));
  });const upstreamUrl=await listen(upstream);
  const config={workspaces:[{id:'shared',cgroupParent:'canopy-shared.slice',accounts:[],memoryMiB:1024,cpus:1}],principals:[{id:'managed-account',tokenSha256:'0'.repeat(64),scope:'drive',workspaces:['shared']}],managedSession:{key,workspaceId:'shared'}};
  const payload=Buffer.from(JSON.stringify({version:2,workspaceId:'shared',memberId:'alice',accessVersion:1,scope:'drive',expires:Math.floor(Date.now()/1000)+120})).toString('base64url');

@@ -24,13 +24,17 @@ export async function migrateProjectVolume(workspace,project,{docker,image}){
  const script=fileURLToPath(new URL('./project-migration.mjs',import.meta.url));
  if(script.includes(','))throw Error('Migration installation path is invalid');
  const helper='canopy-migrate-'+randomUUID();
- try{await docker(['run','--rm','--name',helper,'--label','canopy.migration=true','--label',`canopy.workspace=${workspace.id}`,'--network','none','--read-only','--user','1000:1000','--cap-drop','ALL',
+ let mapped;
+ try{const result=await docker(['run','--rm','--name',helper,'--label','canopy.migration=true','--label',`canopy.workspace=${workspace.id}`,'--network','none','--read-only','--user','1000:1000','--cap-drop','ALL',
   '--security-opt','no-new-privileges:true','--memory','256m','--memory-swap','256m','--cpus','1','--pids-limit','32',
   '--mount',`type=volume,source=${source},target=/source,readonly`,
   '--mount',`type=volume,source=${destination},target=/destination`,
   '--mount',`type=bind,source=${script},target=/migration.mjs,readonly`,
   '--entrypoint','node',image,'--input-type=module','-e',
-  "import {copyProjectComponents} from '/migration.mjs'; await copyProjectComponents({sourceRoot:'/source',destinationRoot:'/destination',components:JSON.parse(process.argv[1])});",JSON.stringify(project.components)]);
+  "import {copyProjectComponents} from '/migration.mjs'; console.log(JSON.stringify(await copyProjectComponents({sourceRoot:'/source',destinationRoot:'/destination',components:JSON.parse(process.argv[1]),runtimeRoot:process.argv[2]})));",JSON.stringify(project.components),`/workspace/projects/${project.id}/content`]);
+  if(typeof result.stdout!=='string'||result.stdout.length>65536)throw Error('Invalid migration component result');mapped=JSON.parse(result.stdout.trim());
+  if(!Array.isArray(mapped)||mapped.length!==project.components.length||mapped.some((c,i)=>!c||Object.keys(c).some(k=>!['id','label','relativePath'].includes(k))||c.id!==project.components[i].id||c.label!==project.components[i].label||typeof c.relativePath!=='string'||!/^content(?:\/|$)/.test(c.relativePath)))throw Error('Invalid migration component result');
+  sharedProjectDefinitions({...workspace,projectMounts:[{...catalog,components:mapped}]});
  }catch(error){
   // A timed-out Docker CLI does not stop its container. Do not leave a copier
   // running after the host has released the migration lock.
@@ -38,5 +42,5 @@ export async function migrateProjectVolume(workspace,project,{docker,image}){
   catch(cleanup){if(!cleanup.missingResource&&!/no such/i.test(String(cleanup.stderr)))throw Object.assign(Error('Migration failed and its helper could not be stopped'),{migrationCleanupRequired:true});}
   throw error;
  }
- return catalog;
+ return {...catalog,components:mapped};
 }

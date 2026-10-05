@@ -16,3 +16,16 @@ test('stopped session facade is revoked even if the actor workspace lease contin
  const sessions=new AgentCliSessions({endpoint:()=> 'https://workspace.example/',resolvePrincipal:async()=>principal,authorize:async(p,c)=>({...c,accountId:'shared'}),execute:async()=>Response.json({})});
  try{await sessions.prepare(workspace,principal,'app','request-123');sessions.bind(workspace.id,'alice','request-123',5);assert.equal(sessions.entries.size,1);sessions.revoke(workspace.id,'bob',5);assert.equal(sessions.entries.size,1);sessions.revoke(workspace.id,'alice',5);assert.equal(sessions.entries.size,0);}finally{sessions.close();}
 });
+test('unbound starts expire in30seconds, retries remain idempotent, and one actor cannot fill global capacity',async()=>{
+ let now=0;const workspace={id:'ws-11111111-1111-4111-8111-111111111111'},principal={memberId:'alice',accessVersion:1,scope:'drive',expiresAt:100000};
+ const sessions=new AgentCliSessions({now:()=>now,endpoint:()=> 'https://workspace.example/',resolvePrincipal:async entry=>({...principal,memberId:entry.memberId}),authorize:async(p,c)=>({...c,accountId:'shared'}),execute:async()=>Response.json({})});
+ try{
+  const first=await sessions.prepare(workspace,principal,'app','request-bound');sessions.bind(workspace.id,'alice','request-bound',1);
+  const retry=await sessions.prepare(workspace,principal,'app','request-ambiguous');now=10000;assert.deepEqual(await sessions.prepare(workspace,principal,'app','request-ambiguous'),retry);
+  for(let n=0;n<30;n++)await sessions.prepare(workspace,principal,'app','request-'+String(n).padStart(3,'0'));
+  await assert.rejects(sessions.prepare(workspace,principal,'app','request-excess'),/actor capacity/);
+  await sessions.prepare(workspace,{...principal,memberId:'bob'},'app','request-other');assert.equal(sessions.entries.size,33);
+  sessions.discard(workspace.id,'alice','request-bound');assert.equal(sessions.entries.size,33); // A failed retry cannot remove a successful bound session.
+  now=40001;sessions.prune();assert.equal(sessions.entries.size,1);assert.deepEqual(await sessions.prepare(workspace,principal,'app','request-bound'),first);
+ }finally{sessions.close();}
+});

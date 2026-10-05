@@ -66,6 +66,7 @@ jobs:
         run: |
           node packages/remote-host/smoke-linux.mjs
           node packages/remote-host/smoke-agent-integrations.mjs canopy-workspace:0.1.0
+          CANOPY_WORKSPACE_IMAGE=canopy-workspace:0.1.0 node packages/remote-host/smoke-cli-compatibility.mjs
           bash packages/remote-host/smoke-isolation.sh canopy-workspace:0.1.0
           node packages/remote-host/smoke-project-sharing.mjs canopy-workspace:0.1.0
           node packages/remote-host/smoke-member-revocation.mjs canopy-workspace:0.1.0

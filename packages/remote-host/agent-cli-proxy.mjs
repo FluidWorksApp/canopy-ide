@@ -1,3 +1,4 @@
+import {providerQuotaHeaders} from './provider-quota-headers.mjs';
 import http from 'node:http';
 import {timingSafeEqual} from 'node:crypto';
 import {Readable} from 'node:stream';
@@ -14,12 +15,14 @@ export function agentCliHandler({agent,secret,execute}){
   const fail=(status,message)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify({error:{message}}));};
   if(actual.length!==expected.length||!timingSafeEqual(actual,expected))return fail(401,'Shared CLI authentication required');
   const url=new URL(req.url,'http://adapter'),operation=routes[agent][req.method+' '+url.pathname];
-  if(url.search||!operation)return fail(404,'Unsupported shared CLI endpoint');
+  const betaQuery=agent==='claude'&&url.search==='?beta=true'&&(req.method==='POST'&&['/v1/messages','/v1/messages/count_tokens'].includes(url.pathname)||req.method==='GET'&&url.pathname==='/v1/models');
+  const clientVersion=url.searchParams.get('client_version'),versionQuery=agent==='codex'&&req.method==='GET'&&['/models','/v1/models'].includes(url.pathname)&&typeof clientVersion==='string'&&/^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$/.test(clientVersion)&&url.search==='?client_version='+clientVersion;
+  if(url.search&&!betaQuery&&!versionQuery||!operation)return fail(404,'Unsupported shared CLI endpoint');
   const abort=new AbortController();const closed=()=>abort.abort();res.once('close',closed);
   try{
    const chunks=[];let length=0;for await(const chunk of req){length+=chunk.length;if(length>4*1024*1024)return fail(413,'Shared CLI request too large');chunks.push(chunk);}
-   const response=await execute(operation,Buffer.concat(chunks),{signal:abort.signal,providerHeaders:agent==='claude'?Object.fromEntries(['anthropic-beta','anthropic-version'].filter(k=>typeof req.headers[k]==='string').map(k=>[k,req.headers[k]])):undefined});
-   res.writeHead(response.status,{'content-type':response.headers.get('content-type')??'application/json','cache-control':'no-store'});
+   const response=await execute(operation,Buffer.concat(chunks),{signal:abort.signal,...(versionQuery?{clientVersion}:{}),providerHeaders:agent==='claude'?Object.fromEntries(['anthropic-beta','anthropic-version'].filter(k=>typeof req.headers[k]==='string').map(k=>[k,req.headers[k]])):undefined});
+   res.writeHead(response.status,{'content-type':response.headers.get('content-type')??'application/json','cache-control':'no-store',...(agent==='codex'?providerQuotaHeaders(response.headers):{})});
    if(response.body)await pipeline(Readable.fromWeb(response.body),res);else res.end();
   }catch{if(res.headersSent)res.destroy();else fail(502,'Shared CLI request failed');}finally{res.removeListener('close',closed);}
  };

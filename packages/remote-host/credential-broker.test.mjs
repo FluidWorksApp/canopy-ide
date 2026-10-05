@@ -69,7 +69,7 @@ test('client disconnect before provider headers aborts the upstream request',asy
  const pending=broker.execute(principal,request,{signal:client.signal});setTimeout(()=>client.abort(),20);await assert.rejects(pending,error=>!error.message.includes(secret));assert.equal(upstream.aborted,true);
 });
 test('CLI model discovery and token counting use fixed provider routes and reject injected discovery bodies',async()=>{
- for(const [operation,provider,url,method]of [['agents:claude:count-tokens','anthropic','https://api.anthropic.com/v1/messages/count_tokens','POST'],['agents:claude:models','anthropic','https://api.anthropic.com/v1/models','GET'],['agents:codex:models','openai','https://api.openai.com/v1/models','GET']]){
+ for(const [operation,provider,url,method]of [['agents:claude:count-tokens','anthropic','https://api.anthropic.com/v1/messages/count_tokens','POST'],['agents:claude:models','anthropic','https://api.anthropic.com/v1/models','GET'],['agents:codex:models','openai','https://chatgpt.com/backend-api/codex/models','GET']]){
   let calls=0;const broker=new CredentialBroker({authorize:async(p,c)=>({...c,accountId:'selected'}),loadCredential:async()=>({...credential,accountId:'selected',provider}),fetchImpl:async(actual,options)=>{calls++;assert.equal(actual,url);assert.equal(options.method,method);assert.equal(options.body===undefined,method==='GET');return Response.json({data:[]});}});
   const body=method==='GET'?Buffer.alloc(0):Buffer.from('{}');const result=await broker.execute(principal,{projectId:'app',operation,body});assert.equal(result.status,200);await result.json();assert.equal(calls,1);
   if(method==='GET'){await assert.rejects(broker.execute(principal,{projectId:'app',operation,body:Buffer.from('forged')}),/Unexpected model discovery body/);assert.equal(calls,1);}
@@ -79,4 +79,11 @@ test('capability headers cannot replace authentication, redirect routing or inje
  let loads=0;const broker=new CredentialBroker({authorize:async()=>grant,loadCredential:async()=>{loads++;return credential;}});
  for(const providerHeaders of [{authorization:'forged'},{host:'169.254.169.254'},{'anthropic-beta':'value\r\nAuthorization: forged'},{'anthropic-beta':'x'.repeat(2049)}])await assert.rejects(broker.execute(principal,{...request,providerHeaders}),/Invalid provider capability headers/);
  assert.equal(loads,0);
+});
+test('Codex client version reaches only the fixed metadata endpoint in API-key and OAuth modes',async()=>{
+ for(const authType of [undefined,'oauth']){
+  let calls=0;const broker=new CredentialBroker({authorize:async(p,c)=>({...c,accountId:'selected'}),loadCredential:async()=>({...credential,accountId:'selected',provider:'openai',authType,providerAccountId:authType?'account-a':undefined}),fetchImpl:async(url,options)=>{calls++;assert.equal(url,'https://chatgpt.com/backend-api/codex/models?client_version=0.160.0');assert.equal(options.method,'GET');assert.equal(options.headers.authorization,'Bearer '+secret);assert.equal(options.headers['chatgpt-account-id'],authType?'account-a':undefined);return Response.json({models:[]});}});
+  const request={projectId:'app',operation:'agents:codex:models',body:Buffer.alloc(0),clientVersion:'0.160.0'};assert.deepEqual(await (await broker.execute(principal,request)).json(),{models:[]});
+  for(const clientVersion of ['http://metadata','0.160.0&url=http://metadata','0.160.0\r\nHost: evil'])await assert.rejects(broker.execute(principal,{...request,clientVersion}));assert.equal(calls,1);
+ }
 });

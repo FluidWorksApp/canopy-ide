@@ -14,6 +14,7 @@ import {SharedAccounts} from './shared-accounts.mjs';
 import {SharedSessions,sessionRuntimeJson} from './shared-sessions.mjs';
 import {SharingSetup} from './sharing-setup.mjs';
 import {SessionViewLeases} from './session-view-leases.mjs';
+import {IdleAttestation} from './idle-attestation.mjs';
 import {runtimeAuthority} from './runtime-authority.mjs';
 import {memberAuthority} from './member-authority.mjs';
 import {memberRuntime} from './member-runtime.mjs';
@@ -53,6 +54,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
     return sharedSessions.resolve(workspace,principal,bearer,id,operation);
   };
   if(supervisor)supervisor.authorize=async workspace=>{
+    if(idleAttestation?.reserved(workspace.parentWorkspaceId??workspace.id))return false;
     if(sharingSetup?.active(workspace.parentWorkspaceId??workspace.id))return false;
     if(workspace.memberId){
       if(workspace.memberId.startsWith('collaboration:')){const parent=config.workspaces.find(w=>w.id===workspace.parentWorkspaceId);return sharedSessions.activeRuntime(workspace.id)&&!!parent&&!['stopped','deleted'].includes(parent.desiredState??parent.desired_state)&&(!config.managedSession||!!authorizeRuntime&&await authorizeRuntime(parent));}
@@ -97,7 +99,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
     if(!workspace||principal.workspaceId!==context.workspaceId||principal.memberId!==context.memberId||!Object.hasOwn(slots,context.operation)||!(workspace.projectMounts??[]).some(p=>p.id===context.projectId&&p.writable)||!await authorizeRuntime(workspace))return null;
     const accountId=await sharedAccounts.resolve(context.workspaceId,context.projectId,slots[context.operation]);return accountId?{...context,accountId}:null;
   };
-  const cliSessions=credentialVault&&sharedAccounts&&credentialTickets&&sharedAuthority?new AgentCliSessions({resolvePrincipal:resolveCliPrincipal,authorize:cliAuthority,endpoint:workspace=>'https://'+workspace.id+'.workspaces.canopyide.dev',loadGitRepository:async(id,context)=>(await credentialVault.load(id,context)).repository,execute:async(principal,input,options)=>{
+  const cliSessions=credentialVault&&sharedAccounts&&credentialTickets&&sharedAuthority?new AgentCliSessions({now,resolvePrincipal:resolveCliPrincipal,authorize:cliAuthority,endpoint:workspace=>'https://'+workspace.id+'.workspaces.canopyide.dev',loadGitRepository:async(id,context)=>(await credentialVault.load(id,context)).repository,execute:async(principal,input,options)=>{
     const context={workspaceId:principal.workspaceId,memberId:principal.memberId,projectId:input.projectId,operation:input.operation},grant=await cliAuthority(principal,context);
     if(!grant)throw Error('Forbidden');
     const ticket=credentialTickets.issue(principal,grant,{bodySha256:(await import('node:crypto')).createHash('sha256').update(input.body).digest('hex'),advertise:input.advertise??false});
@@ -107,9 +109,11 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
   }}):null;
   const active = new Map();
   const total = counts => [...counts.values()].reduce((sum, count) => sum + count, 0);
+  const idleAttestation=config.managedSession?new IdleAttestation({config,host:workspaces,authorizeRuntime,now,busy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.entries.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||config.workspaces.some(w=>sharingSetup?.active(w.id))}):null;
   const acceptedOrigins = new Set(['tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost', ...origins]);
   const server = http.createServer(async (request, response) => {
-    if(cliSessions&&await cliSessions.handle(request,response))return;
+    try{if(cliSessions&&await cliSessions.handle(request,response))return;}
+    catch{if(response.headersSent)response.destroy();else json(response,400,{error:'Invalid agent request'});return;}
     const origin = request.headers.origin;
     if (origin && !acceptedOrigins.has(origin)) return json(response, 403, { error: 'Origin not allowed' });
     if (origin) response.setHeader('access-control-allow-origin', origin);
@@ -137,8 +141,13 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       const write = operation !== '/sessions' || request.method !== 'GET';
       const scope = operation === '/open' || operation === '/resources' || operation === '/ticket' || (reads.has(operation) && (operation !== '/sessions' || !write)) ? 'view' : 'drive';
       const workspace = authorize(config, principal, workspaceId, scope);
+      if(operation!=='/idle-attestation'&&idleAttestation?.reserved(workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
       if(operation!=='/sharing-setup'&&sharingSetup?.active(workspace.id))throw Error('Sharing setup is moving project storage. Reconnect after it finishes.');
       if (!['GET', 'POST'].includes(request.method)) throw new Error('Unsupported method');
+      if(operation==='/idle-attestation'){
+        if(!idleAttestation||request.method!=='POST'||principal.memberId||principal.id!=='managed-account'||config.managedSession?.workspaceId!==workspace.id)throw Error('Forbidden');
+        return json(response,200,await idleAttestation.attest(workspace,await body(request,4096)));
+      }
       if(operation==='/sharing-setup'){
         if(!sharingSetup||principal.memberId||principal.id!=='managed-account'||config.managedSession?.workspaceId!==workspace.id)throw Error('Forbidden');
         if(request.method==='GET')return json(response,200,await sharingSetup.status(workspace));
@@ -260,6 +269,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       const result = await fetch(`${(operation === "/native" || /^\/sessions\/\d+\/resize$/.test(operation)) && runtime.nativeUrl ? runtime.nativeUrl : runtime.url}${operation}`, { method: request.method, redirect:'error',
         headers: { authorization: `Bearer ${runtime.token}`, 'content-type': 'application/json' },
         body: payload === undefined ? undefined : JSON.stringify(payload), signal: AbortSignal.timeout(operation === "/native" && ["git_clone","git_fetch","git_pull","git_push"].includes(payload?.command) ? 330_000 : payload?.command === "profile_import_git" ? 45_000 : 15_000) });
+      if(operation==='/sessions'&&request.method==='POST'&&!result.ok)cliSessions?.discard(workspace.id,principal.memberId??'owner',payload.requestId);
       const reader = result.body.getReader(); const chunks = []; let length = 0;
       while (true) {
         const { done, value } = await reader.read(); if (done) break;
@@ -267,7 +277,8 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         if (length > 2 * 1024 * 1024) { await reader.cancel(); throw new Error('Workspace response too large'); }
         chunks.push(Buffer.from(value));
       }
-      const output = JSON.parse(Buffer.concat(chunks).toString());
+      let output;try{output=JSON.parse(Buffer.concat(chunks).toString());}catch(error){if(operation==='/sessions'&&request.method==='POST')cliSessions?.discard(workspace.id,principal.memberId??'owner',payload.requestId);throw error;}
+      if(operation==='/sessions'&&request.method==='POST'&&result.ok&&(!Number.isSafeInteger(output?.id)||output.id<1)){cliSessions?.discard(workspace.id,principal.memberId??'owner',payload.requestId);throw Error('Invalid session startup result');}
       if(result.ok&&cliSessions){
         const actor=principal.memberId??'owner';
         if(operation==='/sessions'&&request.method==='POST'&&Number.isSafeInteger(output?.id))cliSessions.bind(workspace.id,actor,payload.requestId,output.id);

@@ -68,9 +68,14 @@ test('container reuse rejects a changed project volume, network or added capabil
   workspace.cpusMax=4;current=structuredClone(original);current.HostConfig.NanoCpus=3e9;
   assert.ok((await host.ensure(workspace)).url);
   for(const invalid of [undefined,1e9,5e9]){current.HostConfig.NanoCpus=invalid;await assert.rejects(host.ensure(workspace),/configuration differs/);}
-  for (const change of [c => { c.Mounts[0].Name = 'canopy-project-bob'; }, c => { c.HostConfig.NetworkMode = 'host'; }, c => { c.HostConfig.CapAdd = ['SYS_ADMIN']; }]) {
+  for (const change of [c => { c.Mounts[0].Name = 'canopy-project-bob'; }, c => { c.HostConfig.NetworkMode = 'host'; }, c => { c.HostConfig.CapAdd = ['SYS_ADMIN']; },...['PidMode','IpcMode','UTSMode'].flatMap(key=>['host','container:other','shareable','unknown'].map(value=>c=>{c.HostConfig[key]=value;})),...['no-new-privileges:false','no-new-privileges=false','no-new-privileges:1','no-new-privileges-not-enabled'].map(value=>c=>{c.HostConfig.SecurityOpt=[value];}),c=>{c.HostConfig.SecurityOpt=['no-new-privileges:true','no-new-privileges:false'];}]) {
     current = structuredClone(original); change(current);
     await assert.rejects(host.ensure(workspace), /configuration differs/);
+  }
+  for(const security of ['no-new-privileges','no-new-privileges:true','no-new-privileges=true']){
+    current=structuredClone(original);current.HostConfig.PidMode='';current.HostConfig.IpcMode='private';current.HostConfig.UTSMode='';current.HostConfig.SecurityOpt=[security];
+    assert.ok((await host.ensure(workspace)).url);
+    current.State={Running:false,ExitCode:0};assert.ok((await host.ensure(workspace,{resume:true})).url);
   }
   current=structuredClone(original);current.State={Running:false,ExitCode:0};
   const calls=[];const inspect=host.docker;host.docker=async args=>{calls.push(args);return inspect(args);};
@@ -83,6 +88,7 @@ test('container reuse rejects a changed project volume, network or added capabil
   current=structuredClone(original);
   host.releaseChannel='ghcr.io/fluidworksapp/canopy-workspace:stable';
   current.Config.Labels['canopy.image-channel']=host.releaseChannel;
+  current.Config.Image='ghcr.io/fluidworksapp/canopy-workspace@sha256:'+'a'.repeat(64);current.Image='sha256:'+'b'.repeat(64);
   host.resolveRelease=async()=>{throw Error('Running container must not consult releases');};
   assert.ok((await host.ensure(workspace,{resume:true})).url);
 });

@@ -1,4 +1,4 @@
-import {pullWorkspaceImage} from './image-release.mjs';
+import {pullWorkspaceImage,workspaceImageReference} from './image-release.mjs';
 import {imageUpgradeJournal,upgradeRuntimeImage} from './image-upgrade.mjs';
 import {waitForRuntimeReady} from './runtime-readiness.mjs';
 import {hostResources} from './host-resources.mjs';
@@ -29,6 +29,28 @@ async function dockerCommand(args) {
 }
 
 export function memorySwapMiB(workspace,memoryMiB){return Math.round(memoryMiB*(1+(workspace.swapRatio??0.75)));}
+function privateNamespace(mode){return mode==null||mode===''||mode==='private';}
+function hasNoNewPrivileges(options){
+  if(!Array.isArray(options))return false;
+  const flags=options.filter(value=>typeof value==='string'&&/^no-new-privileges(?::|=|$)/.test(value));
+  return flags.length>0&&flags.every(value=>['no-new-privileges','no-new-privileges:true','no-new-privileges=true'].includes(value));
+}
+
+export function retainedRuntimeImage(workspace,current,releaseChannel){
+  if(current?.Config?.Labels?.['canopy.workspace']!==workspace.id)return undefined;
+  const configured=current.Config.Image;
+  // A private checkpoint is bound to this owner by trusted host configuration,
+  // never accepted in member runtimes or merely because a container claimed it.
+  if(!workspace.memberId&&workspace.ownerImage&&configured===workspace.ownerImage&&current.Image===workspace.ownerImage)return configured;
+  const channel=current.Config.Labels['canopy.image-channel'];
+  const repository=value=>value.split('@')[0].replace(/:[^/:]+$/,'');
+  try{
+    const trusted=workspaceImageReference(releaseChannel),prior=workspaceImageReference(channel),image=workspaceImageReference(configured);
+    const repo=repository(trusted);
+    if(!repo.startsWith('ghcr.io/')||repository(prior)!==repo||repository(image)!==repo||!image.includes('@sha256:')||!/^sha256:[a-f0-9]{64}$/.test(current.Image??''))return undefined;
+    return image;
+  }catch{return undefined;}
+}
 
 export class DockerWorkspaces {
   pending = new Map();
@@ -138,6 +160,7 @@ export class DockerWorkspaces {
   }
   async recoverRuntime(workspace,containerId,{authorize,reserve}){
     return this.withResourceLock(async()=>{
+      if(this.idleReserved?.(workspace.parentWorkspaceId??workspace.id))return false;
       if(this.migrationCleanupRequired.has(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace migration requires recovery');
       if(!await authorize())return false;
       const current=await this.inspectRuntime(workspace);
@@ -158,6 +181,7 @@ export class DockerWorkspaces {
     });
   }
   async open(workspace,{resume=false}={}) {
+    if(this.idleReserved?.(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
     if(this.migrationCleanupRequired.has(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace migration requires recovery');
     // A changed grant must bypass both the short cache and an in-flight open.
     const fingerprint = JSON.stringify([workspace,resume]);
@@ -172,6 +196,7 @@ export class DockerWorkspaces {
     return this.pending.get(workspace.id).promise;
   }
   async ensure(workspace,{resume=false,releaseImage}={}) {
+    if(this.idleReserved?.(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
     if(this.migrationCleanupRequired.has(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace migration requires recovery');
     if (!validId(workspace.id) || !workspace.accounts.every(validId)) throw new Error('Invalid workspace');
     if(workspace.ownerImage!=null&&(workspace.memberId||!/^sha256:[a-f0-9]{64}$/.test(workspace.ownerImage)))throw Error('Invalid owner image checkpoint');
@@ -188,8 +213,16 @@ export class DockerWorkspaces {
       if(!existing||(resume&&existing.State?.Running===false)){
         const reference=this.resolveRelease?await this.resolveRelease(workspace):this.releaseChannel;
         release=await pullWorkspaceImage(reference,{docker:this.docker});
-        image=existing?existing.Config.Image:release.reference;
-      }else if(existing.Config?.Labels?.['canopy.image-channel']===this.releaseChannel)image=existing.Config.Image;
+        if(existing){
+          const retained=retainedRuntimeImage(workspace,existing,this.releaseChannel);
+          if(!retained&&(existing.Config?.Labels?.['canopy.image-channel']||existing.Config?.Image!==this.image))throw Error('Workspace container image provenance differs; administrator action required');
+          image=retained??existing.Config.Image;
+        }else image=release.reference;
+      }else{
+        const retained=retainedRuntimeImage(workspace,existing,this.releaseChannel);
+        if(retained)image=retained;
+        else if(existing.Config?.Labels?.['canopy.image-channel'])throw Error('Workspace container image provenance differs; administrator action required');
+      }
     }
     if (existing) {
       if (existing.Config.Labels?.['canopy.workspace'] !== workspace.id ||
@@ -207,9 +240,10 @@ export class DockerWorkspaces {
           ((existing.HostConfig.RestartPolicy?.Name!=='on-failure'||existing.HostConfig.RestartPolicy?.MaximumRetryCount!==3)&&!(workspace.memberId&&resume&&existing.State?.Running===false&&existing.HostConfig.RestartPolicy?.Name==='no')) ||
           (workspace.cgroupParent!=null && existing.HostConfig.CgroupParent!==workspace.cgroupParent) ||
           existing.HostConfig.Privileged || existing.HostConfig.CapAdd?.length ||
+          !privateNamespace(existing.HostConfig.PidMode)||!privateNamespace(existing.HostConfig.IpcMode)||!privateNamespace(existing.HostConfig.UTSMode)||
           existing.HostConfig.NetworkMode !== `canopy-net-${workspace.id}` || existing.Config.User !== '1000:1000' ||
           !existing.HostConfig.CapDrop?.includes('ALL') ||
-          !existing.HostConfig.SecurityOpt?.some(value => value.startsWith('no-new-privileges')) ||
+          !hasNoNewPrivileges(existing.HostConfig.SecurityOpt) ||
           existing.Mounts?.some(mount => mount.Type !== 'volume') ||
           JSON.stringify(existing.Mounts?.map(m => [m.Destination, m.Name, m.RW]).sort()) !==
             JSON.stringify([['/workspace', `canopy-project-${workspace.id}`, true], ['/home/agent', `canopy-home-${workspace.id}`, true], ...workspace.accounts.map(id => [`/accounts/${id}`, `canopy-account-${id}`, false]), ...projects].sort())) throw new Error('Workspace container configuration differs; administrator action required');

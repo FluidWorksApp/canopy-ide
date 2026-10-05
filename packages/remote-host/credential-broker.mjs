@@ -1,3 +1,4 @@
+import {providerQuotaHeaders} from './provider-quota-headers.mjs';
 // Runs in the trusted management runtime. Callers never select credentials,
 // upstream URLs, provider headers or another member's identity.
 const operations=new Set(['git:fetch','git:push','agents:claude','agents:codex','agents:claude:count-tokens','agents:claude:models','agents:codex:models']);
@@ -13,8 +14,9 @@ export class CredentialBroker {
   if(!principal||typeof principal.memberId!=='string'||!principal.memberId||typeof principal.workspaceId!=='string'||!id(request?.projectId)||!operations.has(request?.operation))throw Error('Forbidden');
   // Only project/operation and bounded payload enter from the developer runtime.
   if(request.advertise!==undefined&&typeof request.advertise!=='boolean')throw Error('Invalid advertisement mode');
-  if(Object.keys(request).some(k=>!['projectId','operation','body','advertise','providerHeaders'].includes(k)))throw Error('Invalid credential operation');
+  if(Object.keys(request).some(k=>!['projectId','operation','body','advertise','providerHeaders','clientVersion'].includes(k)))throw Error('Invalid credential operation');
   if(request.providerHeaders!==undefined&&(!request.providerHeaders||Object.keys(request.providerHeaders).some(k=>!['anthropic-beta','anthropic-version'].includes(k))||Object.values(request.providerHeaders).some(v=>typeof v!=='string'||v.length>2048||! /^[\x20-\x7e]*$/.test(v))))throw Error('Invalid provider capability headers');
+  if(request.clientVersion!==undefined&&(request.operation!=='agents:codex:models'||typeof request.clientVersion!=='string'||! /^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$/.test(request.clientVersion)))throw Error('Invalid model client version');
   const body=request.body??new Uint8Array();
   if(!(body instanceof Uint8Array)||body.byteLength>4*1024*1024)throw Error('Credential payload too large');
   const context={workspaceId:principal.workspaceId,memberId:principal.memberId,projectId:request.projectId,operation:request.operation};
@@ -34,9 +36,10 @@ export class CredentialBroker {
    if(request.operation.startsWith('agents:claude')&&credential.provider==='anthropic'){
     url='https://api.anthropic.com/v1/'+(request.operation==='agents:claude:models'?'models':request.operation==='agents:claude:count-tokens'?'messages/count_tokens':'messages');if(request.operation.endsWith(':models'))method='GET';headers['x-api-key']=credential.token;headers['anthropic-version']=request.providerHeaders?.['anthropic-version']??'2023-06-01';if(request.providerHeaders?.['anthropic-beta'])headers['anthropic-beta']=request.providerHeaders['anthropic-beta'];if(credential.authType==='oauth'){delete headers['x-api-key'];headers.authorization='Bearer '+credential.token;headers['anthropic-beta']=[headers['anthropic-beta'],'oauth-2025-04-20'].filter(Boolean).join(',');}
    }else if(request.operation.startsWith('agents:codex')&&credential.provider==='openai'){
-    url='https://api.openai.com/v1/'+(request.operation==='agents:codex:models'?'models':'responses');if(request.operation.endsWith(':models'))method='GET';headers.authorization='Bearer '+credential.token;if(credential.authType==='oauth'){url='https://chatgpt.com/backend-api/codex/'+(request.operation==='agents:codex:models'?'models':'responses');headers['chatgpt-account-id']=credential.providerAccountId;headers.originator='codex_cli_rs';}
+    url='https://api.openai.com/v1/'+(request.operation==='agents:codex:models'?'models':'responses');if(request.operation.endsWith(':models'))method='GET';headers.authorization='Bearer '+credential.token;if(request.operation==='agents:codex:models'){url='https://chatgpt.com/backend-api/codex/models';headers.originator='codex_cli_rs';}if(credential.authType==='oauth'){url='https://chatgpt.com/backend-api/codex/'+(request.operation==='agents:codex:models'?'models':'responses');headers['chatgpt-account-id']=credential.providerAccountId;headers.originator='codex_cli_rs';}
    }else throw Error('Shared agent account is unavailable');
   }
+  if(request.operation==='agents:codex:models'&&request.clientVersion)url+='?client_version='+request.clientVersion;
   if(method==='GET'&&body.byteLength)throw Error('Unexpected model discovery body');
   // Check again after vault I/O, so a revoked grant cannot release a credential
   // merely because its first lookup was accepted before revocation.
@@ -56,8 +59,8 @@ export class CredentialBroker {
    if(abort.signal.aborted)throw Error('Request cancelled');
    const response=await this.fetch(url,{method,headers,...(method==='POST'?{body}:{}),redirect:'error',signal:abort.signal});
    if(abort.signal.aborted||response.status>=300&&response.status<400)throw Error('Provider unavailable');
-   if(!response.ok){response.body?.cancel().catch(()=>{});cleanup();return Response.json({error:{message:'Shared provider rejected the request'}},{status:response.status,headers:{'cache-control':'no-store'}});}
-   const safeHeaders={'content-type':response.headers.get('content-type')??'application/octet-stream','cache-control':'no-store'};
+   if(!response.ok){response.body?.cancel().catch(()=>{});cleanup();return Response.json({error:{message:'Shared provider rejected the request'}},{status:response.status,headers:{'cache-control':'no-store',...(request.operation.startsWith('agents:codex')?providerQuotaHeaders(response.headers):{})}});}
+   const safeHeaders={'content-type':response.headers.get('content-type')??'application/octet-stream','cache-control':'no-store',...(request.operation.startsWith('agents:codex')?providerQuotaHeaders(response.headers):{})};
    if(!response.body){cleanup();return new Response(null,{status:response.status,headers:safeHeaders});}
    const reader=response.body.getReader();let bytes=0;
    let rejectAbort;const cancelled=new Promise((_,reject)=>{rejectAbort=reject;});cancelled.catch(()=>{});

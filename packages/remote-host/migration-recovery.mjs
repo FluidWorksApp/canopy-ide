@@ -1,4 +1,19 @@
 import {isDeepStrictEqual} from 'node:util';
+import {projectMounts} from './project-mounts.mjs';
+
+// A completed migration survives later control-plane resume/resize generations.
+// Only lifecycle-owned fields may advance. Project/account/image/capacity-group
+// identity remains bound to the durable migration and real Docker mounts.
+const lifecycleFields=new Set(['generation','name','desiredState','desired_state','memoryMiB','memoryMaxMiB','cpus','cpusMax','swapRatio']);
+function committedLifecycleMatches(workspace,next,current){
+ const stable=value=>Object.fromEntries(Object.entries(value).filter(([key])=>!lifecycleFields.has(key)));
+ if(!isDeepStrictEqual(stable(workspace),stable(next)))return false;
+ const before=next.generation??0,after=workspace.generation??0;
+ if(!Number.isSafeInteger(before)||before<0||!Number.isSafeInteger(after)||after<before)return false;
+ const expected=[['/workspace',`canopy-project-${workspace.id}`,true],['/home/agent',`canopy-home-${workspace.id}`,true],...(workspace.accounts??[]).map(id=>[`/accounts/${id}`,`canopy-account-${id}`,false]),...projectMounts(workspace)].sort();
+ if(!Array.isArray(current?.Mounts)||current.Mounts.some(m=>m.Type!=='volume')||!isDeepStrictEqual(current.Mounts.map(m=>[m.Destination,m.Name,m.RW]).sort(),expected)||current.HostConfig?.CgroupParent!==workspace.cgroupParent)return false;
+ return true;
+}
 
 // Read-only recovery assessment. Never restart, rename or delete anything from
 // a journal alone: compare durable configuration with inspected Docker state.
@@ -18,9 +33,10 @@ export async function assessMigrationRecovery({records,config,docker}) {
  for(const container of [current,preserved])if(container&&container.Config?.Labels?.['canopy.workspace']!==id)throw Error('Container ownership changed; manual recovery required');
  const workspace=config.workspaces.find(w=>w.id===id);
  if(!workspace)throw Error('Workspace configuration missing; manual recovery required');
- const published=isDeepStrictEqual(workspace,prepared.next);
+ const committed=records.at(-1).phase==='committed';
+ const published=isDeepStrictEqual(workspace,prepared.next)||committed&&committedLifecycleMatches(workspace,prepared.next,current);
  if(published){
-  if(!current||current.Id===prepared.originalContainerId||preserved?.Id!==prepared.originalContainerId)throw Error('Published migration disagrees with containers; manual recovery required');
+  if(!current||current.Id===prepared.originalContainerId||preserved?.Id!==prepared.originalContainerId||preserved.State?.Running!==false)throw Error('Published migration disagrees with containers; manual recovery required');
   return {state:'published',workspaceId:id,originalContainer:prepared.preservedContainer,running:current.State?.Running===true};
  }
  if(records.some(r=>r.phase==='committed'))throw Error('Committed migration disagrees with configuration; manual recovery required');

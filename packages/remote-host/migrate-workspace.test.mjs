@@ -13,6 +13,7 @@ function setup(){
   if(args[0]==='volume'&&args[1]==='inspect')return {stdout:JSON.stringify([{Name:args[2],Driver:'local',Labels:{'canopy.workspace':'owner','canopy.project':'app'}}])};
   if(args[0]==='rename'){assert.ok(!containers.has(args[2]));containers.set(args[2],containers.get(args[1]));containers.delete(args[1]);}
   if(args[0]==='stop')containers.get(args.at(-1)).State.Running=false;
+  if(args[0]==='run'&&args.includes('node'))return {stdout:JSON.stringify(JSON.parse(args.at(-2)).map(({id,label,relativePath})=>({id,label,relativePath:relativePath==='.'?'content':'content/'+relativePath})))};
   return {stdout:''};
  }};
  const options={journal:{append:async()=>{}},config,workspaceId:'owner',projects:[{id:'app',name:'App',components:[{id:'app',label:'App',source:'repo',relativePath:'.'}]}],host,verifyRuntime:async()=>{},saveConfig:async()=>{}};

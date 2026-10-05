@@ -10,3 +10,18 @@ test('model discovery and token counting accept only fixed paths without caller 
   try{for(const [method,path,operation]of paths){assert.equal((await fetch(base+path,{method,headers:{authorization:'Bearer '+secret},...(method==='POST'?{body:'{}'}:{})})).status,200);assert.equal(calls.at(-1),operation);}assert.equal((await fetch(base+'/v1/models?url=http://metadata',{headers:{authorization:'Bearer '+secret}})).status,404);}finally{server.closeAllConnections();await new Promise(r=>server.close(r));}
  }
 });
+test('exact Anthropic SDK beta query reaches generation/counting while arbitrary query routing is denied',async()=>{
+ const secret='s'.repeat(43),calls=[],server=createAgentCliProxy({agent:'claude',secret,execute:async(operation)=>{calls.push(operation);return Response.json({ok:true});}});server.listen(0,'127.0.0.1');await once(server,'listening');const base='http://127.0.0.1:'+server.address().port;
+ try{
+  const call=path=>fetch(base+path,{method:'POST',headers:{'x-api-key':secret},body:'{}'});
+  assert.equal((await call('/v1/messages?beta=true')).status,200);assert.equal((await call('/v1/messages/count_tokens?beta=true')).status,200);
+  for(const path of ['/v1/messages?beta=false','/v1/messages?beta=true&url=http://metadata','/v1/models?beta=false'])assert.equal((await call(path)).status,404);
+  assert.equal((await fetch(base+'/v1/models?beta=true',{headers:{'x-api-key':secret}})).status,200);assert.deepEqual(calls,['agents:claude','agents:claude:count-tokens','agents:claude:models']);
+ }finally{server.closeAllConnections();await new Promise(r=>server.close(r));}
+});
+test('Codex model client_version accepts only strict semver on fixed GET routes',async()=>{
+ const secret='s'.repeat(43),calls=[],server=createAgentCliProxy({agent:'codex',secret,execute:async(op,payload,options)=>{calls.push([op,options.clientVersion]);return Response.json({models:[]});}});server.listen(0,'127.0.0.1');await once(server,'listening');const base='http://127.0.0.1:'+server.address().port;
+ try{for(const path of ['/models?client_version=0.160.0','/v1/models?client_version=0.160.0'])assert.equal((await fetch(base+path,{headers:{authorization:'Bearer '+secret}})).status,200);
+ for(const path of ['/v1/models?client_version=http://metadata','/v1/models?client_version=0.160.0&url=http://metadata','/v1/models?client_version=01.160.0','/v1/models?client_version=%30.160.0','/v1/responses?client_version=0.160.0'])assert.equal((await fetch(base+path,{headers:{authorization:'Bearer '+secret}})).status,404);
+ assert.deepEqual(calls,[['agents:codex:models','0.160.0'],['agents:codex:models','0.160.0']]);}finally{server.closeAllConnections();await new Promise(r=>server.close(r));}
+});

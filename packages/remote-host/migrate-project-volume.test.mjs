@@ -3,13 +3,14 @@ import {migrateProjectVolume} from './migrate-project-volume.mjs';
 import {projectMounts} from './project-mounts.mjs';
 const workspace={id:'owner'},project={id:'app',name:'App',components:[{id:'web',label:'Web',source:'repo',relativePath:'.'}]};
 const destination=projectMounts({...workspace,projectMounts:[{id:'app',writable:true}]})[0][1];
-function harness({busy=false,failure=false}={}){
+function harness({busy=false,failure=false,mapping}={}){
  const calls=[];
  const docker=async args=>{
   calls.push(args);
   if(args[0]==='volume'&&args[1]==='inspect')return {stdout:JSON.stringify([{Name:args[2],Driver:'local',Labels:{'canopy.workspace':'owner','canopy.project':'app'}}])};
   if(args[0]==='ps')return {stdout:busy?'live-container':''};
   if(args[0]==='run'&&args.includes('node')&&failure)throw Error('Docker timeout');
+  if(args[0]==='run'&&args.includes('node'))return {stdout:JSON.stringify(mapping??project.components.map(({id,label,relativePath})=>({id,label,relativePath:relativePath==='.'?'content':'content/'+relativePath})))};
   return {stdout:''};
  };return {calls,docker,image:'synthetic-image'};
 }
@@ -53,4 +54,9 @@ test('host recovery stops orphaned copies only for configured workspace ownershi
  const host=new DockerWorkspaces({secret:'synthetic',docker,registry:[workspace]});
  await assert.rejects(host.recoverMigrations(),/ownership differs/);assert.ok(!calls.some(a=>a[0]==='rm'));
  owner='owner';await host.recoverMigrations();assert.deepEqual(calls.at(-1),['rm','--force',name]);
+});
+test('returned component metadata cannot change identities, escape the volume or inject configuration',async()=>{
+ for(const mapping of [[{id:'other',label:'Web',relativePath:'content'}],[{id:'web',label:'Web',relativePath:'content/../../home'}],[{id:'web',label:'Web',relativePath:'content',credential:'forged'}]]){
+  const h=harness({mapping});await assert.rejects(migrateProjectVolume(workspace,project,h));const cleanup=h.calls.at(-1);assert.equal(cleanup[0],'rm');assert.equal(cleanup[1],'--force');assert.match(cleanup[2],/^canopy-migrate-/);
+ }
 });
