@@ -14,3 +14,6 @@
 c13693c03b4bb7800d2a244cdc6987bd8e649215:packages/control-plane/lifecycle.test.mjs:generic-api-key:3
 # Provider configuration names an environment variable; no token value is present.
 c13693c03b4bb7800d2a244cdc6987bd8e649215:packages/remote-host/shared-agent-launch.mjs:generic-api-key:15
+
+# Same audited variable-name configuration in the earlier runtime commit.
+8bd513a8e4d31da40518783f4c790e860f5f5e1b:packages/remote-host/shared-agent-launch.mjs:generic-api-key:15
