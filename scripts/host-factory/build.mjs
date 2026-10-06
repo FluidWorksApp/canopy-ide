@@ -15,7 +15,11 @@ export async function buildHostSnapshot(config,{aws,ssh,presign,wait=ms=>new Pro
   // A job-specific credential avoids both browser-certificate compatibility
   // and the account-wide default key. It never enters user data or the catalog.
   keyCreated=true;const key=await aws('create-key-pair',{keyPairName,tags});
-  if(!own(key.keyPair)||key.keyPair.name!==keyPairName||typeof key.privateKeyBase64!=='string'||!key.privateKeyBase64||key.privateKeyBase64.length>16384)throw Error('Factory SSH key identity is unavailable');
+  // Verify tags on an independent provider read: the create response can omit
+  // tags even when tagged creation and the subsequent read succeeded.
+  const observedKey=(await aws('get-key-pair',{keyPairName})).keyPair;
+  if(!own(observedKey)||observedKey.name!==keyPairName)throw Error('Factory SSH key identity is unavailable');
+  if(typeof key.privateKeyBase64!=='string'||!key.privateKeyBase64||key.privateKeyBase64.length>16384)throw Error('Factory SSH key material is unavailable');
   const credential={keyPairName,privateKey:key.privateKeyBase64};
   created=true;await aws('create-instances',{instanceNames:[builder],availabilityZone:config.region+'a',blueprintId:'ubuntu_24_04',bundleId:config.sourceBundle,ipAddressType:'dualstack',keyPairName,tags,userData:recipe});
   await until(async()=> (await observe()).state?.name==='running');

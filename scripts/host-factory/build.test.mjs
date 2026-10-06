@@ -33,6 +33,12 @@ test('an uncertain key creation cleans its tagged key without creating compute',
  const f=fixture({keyUncertain:true});await assert.rejects(buildHostSnapshot(config,f.options),/uncertain key/);
  assert.equal(f.calls.some(c=>c.action==='create-instances'),false);assert.equal(f.calls.at(-1).action,'delete-key-pair');
 });
+test('key creation without response tags still requires independent matching provider tags',async()=>{
+ const f=fixture(),aws=f.options.aws;
+ f.options.aws=async(action,input)=>{const result=await aws(action,input);return action==='create-key-pair'?{...result,keyPair:{...result.keyPair,tags:[]}}:result;};
+ const catalog=await buildHostSnapshot(config,f.options);assert.equal(catalog.version,1);
+ assert.ok(f.calls.findIndex(c=>c.action==='get-key-pair')<f.calls.findIndex(c=>c.action==='create-instances'));
+});
 test('foreign keys are not deleted and key cleanup failure prevents catalog publication',async()=>{
  const foreign=fixture({foreignKey:true});await assert.rejects(buildHostSnapshot(config,foreign.options),/foreign factory key/);assert.equal(foreign.calls.some(c=>c.action==='delete-key-pair'),false);
  const failed=fixture({keyCleanupFails:true});await assert.rejects(buildHostSnapshot(config,failed.options),/key cleanup failed/);assert.equal(failed.calls.some(c=>c.action==='delete-instance'),true);
