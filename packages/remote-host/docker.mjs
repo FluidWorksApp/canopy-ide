@@ -57,13 +57,13 @@ export class DockerWorkspaces {
   runtimes = new Map();
   migrationCleanupRequired = new Set();
   migrationHelperCleanupRequired = new Set();
-  constructor({ secret, image = 'canopy-workspace:0.1.0', docker = dockerCommand, registry = [], readHost = hostMemory, verifyCapacity = verifyCapacityGroup, readResources = hostResources, releaseChannel, resolveRelease, upgradeDirectory }) {
+  constructor({ secret, image = 'canopy-workspace:0.1.0', docker = dockerCommand, registry = [], readHost = hostMemory, verifyCapacity = verifyCapacityGroup, readResources = hostResources, releaseChannel, resolveRelease, upgradeDirectory,resourceAdmission=action=>action(),authorizeAdmission }) {
     this.secret = secret; this.image = image; this.docker = docker; this.registry = registry; this.readHost = readHost; this.verifyCapacity = verifyCapacity; this.readResources = readResources;
     this.releaseChannel=releaseChannel;this.resolveRelease=resolveRelease;this.upgradeDirectory=upgradeDirectory;
-    this.resourceTail = Promise.resolve();
+    this.authorizeAdmission=authorizeAdmission;this.resourceAdmission=resourceAdmission;this.resourceTail = Promise.resolve();
   }
   withResourceLock(action) {
-    const result = this.resourceTail.then(action);
+    const result = this.resourceTail.then(()=>this.resourceAdmission(action));
     this.resourceTail = result.catch(() => {}); return result;
   }
   migrateProject(workspace,project){
@@ -180,7 +180,7 @@ export class DockerWorkspaces {
       return true;
     });
   }
-  async open(workspace,{resume=false}={}) {
+  async open(workspace,{resume=false,authorize}={}) {
     if(this.idleReserved?.(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
     if(this.migrationCleanupRequired.has(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace migration requires recovery');
     // A changed grant must bypass both the short cache and an in-flight open.
@@ -188,9 +188,9 @@ export class DockerWorkspaces {
     const cached=this.runtimes.get(workspace.id);
     if(!resume&&cached&&cached.fingerprint===fingerprint&&Date.now()-cached.checkedAt<2000)return cached.runtime;
     const pending=this.pending.get(workspace.id);
-    if(pending && pending.fingerprint!==fingerprint){await pending.promise.catch(()=>{});return this.open(workspace,{resume});}
+    if(pending && pending.fingerprint!==fingerprint){await pending.promise.catch(()=>{});return this.open(workspace,{resume,authorize});}
     if (!this.pending.has(workspace.id)) {
-      const opening = this.withResourceLock(() => this.ensure(workspace,{resume})).then(runtime=>{this.runtimes.set(workspace.id,{workspace,runtime,fingerprint,checkedAt:Date.now()});return runtime;}).finally(() => this.pending.delete(workspace.id));
+      const opening = this.withResourceLock(async()=>{if(this.authorizeAdmission&&!await this.authorizeAdmission(workspace)||authorize&&!await authorize())throw Error('Workspace admission changed');return this.ensure(workspace,{resume});}).then(runtime=>{this.runtimes.set(workspace.id,{workspace,runtime,fingerprint,checkedAt:Date.now()});return runtime;}).finally(() => this.pending.delete(workspace.id));
       this.pending.set(workspace.id, {promise:opening,fingerprint});
     }
     return this.pending.get(workspace.id).promise;

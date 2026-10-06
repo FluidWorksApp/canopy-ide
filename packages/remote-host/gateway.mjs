@@ -1,3 +1,4 @@
+import {hostResourceAdmission,RESOURCE_ADMISSION_PROTOCOL} from './resource-admission.mjs';
 import {quarantineImageUpgrades} from './image-upgrade.mjs';
 import {quarantineInterruptedMigrations} from './migration-startup.mjs';
 import {runtimeReady} from './runtime-readiness.mjs';
@@ -69,7 +70,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
   };
   const openRuntime=(workspace,principal,bearer,access,options)=>{
     const runtime=memberRuntime(workspace,principal,access);
-    return principal.memberId?leases.open(runtime,principal,bearer,()=>workspaces.open(runtime,options)):workspaces.open(runtime,options);
+    return principal.memberId?leases.open(runtime,principal,bearer,()=>workspaces.open(runtime,{...options,authorize:()=>checkMember(principal,bearer).then(()=>true).catch(()=>false)})):workspaces.open(runtime,config.managedSession?{...options,authorize:()=>Boolean(authorizeRuntime)&&authorizeRuntime(workspace)}:options);
   };
   const loadSharedCredential=credentialVault?subscriptionCredentialLoader(credentialVault,{fetchImpl:brokerOptions.refreshFetchImpl}):null;
   const ownerLeases=new Map();
@@ -113,6 +114,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
   const idleAttestation=config.managedSession?new IdleAttestation({config,host:workspaces,authorizeRuntime,now,busy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||config.workspaces.some(w=>sharingSetup?.active(w.id))||cliSessions?.entries.size>0,closeBusy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||config.workspaces.some(w=>sharingSetup?.active(w.id))||[...(cliSessions?.entries.values()??[])].some(entry=>!entry.isOwner)}):null;
   const acceptedOrigins = new Set(['tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost', ...origins]);
   const server = http.createServer(async (request, response) => {
+    if(process.env.CANOPY_RESOURCE_ADMISSION_LOCK)response.setHeader('x-canopy-resource-admission',String(RESOURCE_ADMISSION_PROTOCOL));
     try{if(cliSessions&&await cliSessions.handle(request,response))return;}
     catch{if(response.headersSent)response.destroy();else json(response,400,{error:'Invalid agent request'});return;}
     const origin = request.headers.origin;
@@ -386,7 +388,7 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   const credentialTickets=credentialVault?await CredentialTickets.initialize(path.join(state,'credential-ticket-journal'),secret):undefined;
   const sharedAccounts=credentialVault?new SharedAccounts(credentialVault):undefined;
   const authority=runtimeAuthority(config.managedSession?.runtimePolicyUrl,config.managedSession);
-  const workspaces = new DockerWorkspaces({ secret, image: process.env.CANOPY_WORKSPACE_IMAGE, registry: config.workspaces,releaseChannel:process.env.CANOPY_WORKSPACE_IMAGE,resolveRelease:authority?workspace=>authority.release({...workspace,id:workspace.parentWorkspaceId??workspace.id}):undefined,upgradeDirectory:path.join(state,'image-upgrades') });
+  const workspaces = new DockerWorkspaces({ secret, image: process.env.CANOPY_WORKSPACE_IMAGE, registry: config.workspaces,releaseChannel:process.env.CANOPY_WORKSPACE_IMAGE,resolveRelease:authority?workspace=>authority.release({...workspace,id:workspace.parentWorkspaceId??workspace.id}):undefined,upgradeDirectory:path.join(state,'image-upgrades'),authorizeAdmission:config.managedSession?runtime=>{const parent=config.workspaces.find(w=>w.id===(runtime.parentWorkspaceId??runtime.id));return !!parent&&!!authority&&authority(parent);}:undefined,resourceAdmission:process.env.CANOPY_RESOURCE_ADMISSION_LOCK?hostResourceAdmission(process.env.CANOPY_RESOURCE_ADMISSION_LOCK,{timeoutMs:45000}):action=>action() });
   await quarantineImageUpgrades(path.join(state,'image-upgrades'),workspaces);
   await workspaces.recoverMigrations();
   await quarantineInterruptedMigrations({directory:path.join(state, 'migrations'),config,host:workspaces});
@@ -399,5 +401,6 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   const sharingSetup=config.managedSession?new SharingSetup({config,host:workspaces,directory:path.join(state,'migrations'),configPath:process.env.CANOPY_HOST_CONFIG??'./host.json',authorizeRuntime:authority}):undefined;
   const server = createGateway({ config, workspaces, renewMember:memberRenewal(config), credentialVault, sharedAccounts, credentialTickets, sharingSetup, elasticMemory, elasticCpu, supervisor, authorizeMember:memberAuthority(config.managedSession?.authorizationUrl), authorizeRuntime:authority, origins: (process.env.CANOPY_HOST_ORIGINS ?? '').split(',').filter(Boolean) });
   server.on('close', () => { elasticMemory.stop(); elasticCpu.stop(); });
+  if(process.env.CANOPY_RESOURCE_ADMISSION_LOCK)console.log('Canopy resource admission protocol '+RESOURCE_ADMISSION_PROTOCOL);
   server.listen(Number(process.env.PORT ?? 8787), '127.0.0.1', () => { elasticMemory.start(); elasticCpu.start(); supervisor.start(); console.log('Canopy remote host listening on loopback'); });
 }

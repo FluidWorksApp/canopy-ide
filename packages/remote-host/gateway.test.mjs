@@ -323,3 +323,17 @@ test('owner-close proof is owner-only and never opens a developer runtime',async
   const count=calls.length;assert.equal((await call({version:2,memberId:'alice',accessVersion:1,scope:'drive'})).status,403);assert.equal(calls.length,count);assert.ok(calls.every(args=>['ps','inspect'].includes(args[0])));
  }finally{await close(gateway);if(oldInstance===undefined)delete process.env.CANOPY_INSTANCE_NAME;else process.env.CANOPY_INSTANCE_NAME=oldInstance;}
 });
+
+test('managed owner and member queued opens recheck live authority after resource admission',async()=>{
+ const {createHmac}=await import('node:crypto');
+ for(const member of [false,true]){
+  const key='synthetic'.repeat(8),workspace={id:'shared',generation:9,cgroupParent:'canopy-shared.slice',accounts:[],memoryMiB:1024,cpus:1,projectMounts:[{id:'app',writable:true}]};
+  const config={workspaces:[workspace],principals:[{id:'managed-account',scope:'drive',workspaces:['shared'],tokenSha256:digest('owner')}],managedSession:{workspaceId:'shared',key}};
+  let resume,admitted;const waiting=new Promise(r=>admitted=r),gate=new Promise(r=>resume=r);let allowed=true,starts=0;
+  const host=new DockerWorkspaces({secret:'synthetic',resourceAdmission:async action=>{admitted();await gate;return action();}});host.ensure=async()=>{starts++;return{};};
+  const server=createGateway({config,workspaces:host,authorizeRuntime:async()=>allowed,authorizeMember:async()=>allowed&&{projectAccess:{allRead:true,allWrite:true,selected:[]}}}),url=await listen(server);
+  let bearer='owner';if(member){const payload=Buffer.from(JSON.stringify({version:2,workspaceId:'shared',memberId:'alice',accessVersion:1,scope:'drive',expires:Math.floor(Date.now()/1000)+120})).toString('base64url');bearer=payload+'.'+createHmac('sha256',key).update(payload).digest('base64url');}
+  try{const request=fetch(url+'/v1/workspaces/shared/open',{method:'POST',headers:{authorization:'Bearer '+bearer,'content-type':'application/json'},body:'{"resume":true}'});await waiting;allowed=false;resume();const result=await request;assert.equal(result.status,400);assert.equal(starts,0);}
+  finally{resume();await close(server);}
+ }
+});
