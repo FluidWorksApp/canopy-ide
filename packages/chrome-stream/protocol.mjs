@@ -20,6 +20,71 @@ export const FRAME_QUIET_MS = 400;
 /** How often the bridge checks whether the stream has gone quiet. */
 export const FRAME_POLL_MS = 200;
 
+/** One owner serializes all screencast transitions for a CDP page session.
+ * A timed-out command has an unknown remote outcome: fence this session rather
+ * than starting again while the old request may still complete in Chromium. */
+export class ScreencastLifecycle {
+  constructor(session, shouldRun, { timeoutMs = 10_000 } = {}) {
+    Object.assign(this, { session, shouldRun, timeoutMs });
+    this.running = false;
+    this.queue = Promise.resolve();
+    this.fault = null;
+  }
+  enqueue(operation) {
+    const request = this.queue.then(() => {
+      if (this.fault) throw this.fault;
+      return operation();
+    });
+    this.queue = request.catch(() => {});
+    return request;
+  }
+  async command(method, args) {
+    if (this.fault) throw this.fault;
+    let timer;
+    try {
+      return await Promise.race([
+        this.session.send(method, args),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            this.fault = new Error(`Chrome screencast command timed out (${method}). Reconnect to open a new tab.`);
+            reject(this.fault);
+          }, this.timeoutMs);
+        }),
+      ]);
+    } finally { clearTimeout(timer); }
+  }
+  async stopNow() {
+    if (!this.running) return;
+    await this.command('Page.stopScreencast');
+    this.running = false;
+  }
+  async startNow() {
+    if (!this.shouldRun() || this.running) return;
+    // Older extension-backed Chrome may refuse these hints. A refusal is
+    // harmless, whereas an unresolved command must retain the timeout fence.
+    for (const [method, args] of [
+      ['Page.setWebLifecycleState', { state: 'active' }],
+      ['Emulation.setFocusEmulationEnabled', { enabled: true }],
+    ]) {
+      try { await this.command(method, args); }
+      catch (error) { if (this.fault) throw error; }
+    }
+    if (!this.shouldRun()) return;
+    await this.command('Page.startScreencast', { format: 'jpeg', quality: 75, maxWidth: 1920, maxHeight: 1200, everyNthFrame: 1 });
+    this.running = true;
+    if (!this.shouldRun()) await this.stopNow();
+  }
+  start() { return this.enqueue(() => this.startNow()); }
+  stop() { return this.enqueue(() => this.stopNow()); }
+  restart() {
+    return this.enqueue(async () => {
+      if (!this.shouldRun()) return this.stopNow();
+      await this.stopNow();
+      await this.startNow();
+    });
+  }
+}
+
 /** A page nobody is touching paints nothing, so a refresh that returns the
  *  same picture means there was nothing to send. Backing off from the first
  *  repeat to this ceiling keeps an idle preview close to free, while any real

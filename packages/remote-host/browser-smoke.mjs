@@ -16,8 +16,12 @@ try{
  ws=new WebSocket(entry.viewer.replace('http:','ws:')+'socket',{origin:target.origin});
  const messages=[];ws.on('message',data=>{const message=JSON.parse(data);messages.push(message);if(message.type==='frame')ws.send(JSON.stringify({type:'ack'}));});
  const wait=async predicate=>{const end=Date.now()+20000;while(Date.now()<end){const hit=messages.find(predicate);if(hit)return hit;await new Promise(r=>setTimeout(r,20));}throw Error('Browser protocol timed out: '+JSON.stringify(messages.filter(m=>m.type==='status')));};
- await wait(m=>m.canopy==='nav'&&m.url===url);ws.send(JSON.stringify({type:'visible',visible:true}));
- ws.send(JSON.stringify({canopy:'capture',id:'shot'}));const capture=await wait(m=>m.canopy==='capture-result'&&m.id==='shot');assert.ok(capture.image?.startsWith('iVBOR'));assert.ok(capture.width>0);
+ await wait(m=>m.canopy==='nav'&&m.url===url);
+ // Visibility bypasses the input queue and can overlap initial attach and the
+ // frame-refresh timer. Repeated visible hints must not start CDP twice.
+ for(let i=0;i<8;i++)ws.send(JSON.stringify({type:'visible',visible:true}));
+ ws.send(JSON.stringify({type:'visible',visible:false}));ws.send(JSON.stringify({type:'visible',visible:true}));
+ ws.send(JSON.stringify({canopy:'capture',id:'shot'}));const capture=await wait(m=>m.canopy==='capture-result'&&m.id==='shot');assert.ok(capture.image?.startsWith('iVBOR'));assert.ok(capture.width>0);assert.deepEqual(messages.filter(m=>m.type==='status'&&m.error),[],'Repeated visibility must not start an already active CDP stream');
  const next=url.replace('/first','/second');ws.send(JSON.stringify({canopy:'navigate',url:next}));await wait(m=>m.canopy==='nav'&&m.url===next);messages.length=0;
  ws.send(JSON.stringify({canopy:'navigate',delta:-1}));await wait(m=>m.canopy==='nav'&&m.url===url);messages.length=0;
  ws.send(JSON.stringify({canopy:'navigate',delta:0}));await wait(m=>m.canopy==='nav'&&m.url===url);
@@ -28,5 +32,6 @@ try{
  ws.send(JSON.stringify({canopy:'region',on:true}));
  for(const message of [{type:'mouse',event:'mousePressed',x:10,y:10,button:'left',buttons:1,clickCount:1},{type:'mouse',event:'mouseMoved',x:100,y:100,button:'left',buttons:1},{type:'mouse',event:'mouseReleased',x:100,y:100,button:'left',buttons:0,clickCount:1}])ws.send(JSON.stringify(message));
  const region=await wait(m=>m.canopy==='region-done');assert.ok(region.rect.w>50&&region.rect.h>50);
+ assert.deepEqual(messages.filter(m=>m.type==='status'&&m.error),[],'Visibility/refresh races must not disconnect the workspace browser');
  console.log('PASS isolated workspace Chromium CDP: real navigation, back, reload, PNG screenshot, DOM picker snapshot, element annotation and real region drag');
 }finally{ws?.close();registry.dispose();await new Promise(r=>setTimeout(r,1700));await new Promise(r=>page.close(r));await rm(home,{recursive:true,force:true});}
