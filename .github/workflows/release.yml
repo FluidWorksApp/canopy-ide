@@ -296,6 +296,16 @@ jobs:
           fi
           echo "$sigs updater signature(s) present"
 
+      - name: Preserve verified installer and updater artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: canopy-${{ matrix.target }}-${{ github.sha }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/**
+            src-tauri/target/release/bundle/**
+          if-no-files-found: error
+          retention-days: 30
+
       # Tauri versions its filenames (Canopy_0.1.0_aarch64.dmg), but
       # `releases/latest/download/<name>` only resolves names that are identical
       # in every release. So each release also carries a version-less alias of
