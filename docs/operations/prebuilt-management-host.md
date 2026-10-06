@@ -117,6 +117,14 @@ Keep existing private `releases/*` object permissions unchanged. The separate
 factory role needs create/read/stop/delete instance, temporary SSH access, and
 create/read/delete snapshot actions scoped to its region and resources tagged
 `managed-by=canopy-host-factory`; creation requires that request tag. It also needs
+`CreateKeyPair`, `GetKeyPair` and `DeleteKeyPair` for this job's tagged
+`canopy-factory-key-*` resource. The factory installs that temporary key on only
+its builder, verifies provider host keys, and deletes the key after builder
+cleanup. It does not download or use the account-wide default SSH key. Private
+key material is kept in private temporary files and never enters user data,
+snapshot metadata or the published catalog. Key cleanup failure blocks catalog
+publication. Completed cloud-init without the smoke marker fails promptly and
+cleans up instead of waiting for the global deadline. It needs
 only GetObject on the private `releases/*` runtime prefix. Do not give these factory
 controls or credentials to development containers.
 
