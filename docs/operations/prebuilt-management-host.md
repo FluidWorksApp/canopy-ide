@@ -85,8 +85,12 @@ before live evidence exists.
 
 ## Managed-compute IAM addition (review and apply separately)
 
-The existing managed role does not yet have snapshot launch permissions. Add only
-the selected snapshot ARN, substituting the actual account/region/ARN below:
+The existing managed role does not yet have snapshot launch permissions. Scope
+creation to the selected snapshot ARN. `GetInstanceSnapshot` does not support
+resource-level permissions, so its read-only metadata access needs `Resource: "*"`
+with the selected region condition. This grants no snapshot deletion or export.
+See the [Lightsail authorization reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_lightsail.html).
+Substitute the actual account/region/ARN below:
 
 ```json
 {
@@ -95,17 +99,17 @@ the selected snapshot ARN, substituting the actual account/region/ARN below:
     {
       "Effect": "Allow",
       "Action": "lightsail:GetInstanceSnapshot",
-      "Resource": "arn:aws:lightsail:REGION:ACCOUNT:InstanceSnapshot/SNAPSHOT-ID"
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {"aws:RequestedRegion": "REGION"}
+      }
     },
     {
       "Effect": "Allow",
       "Action": "lightsail:CreateInstancesFromSnapshot",
-      "Resource": [
-        "arn:aws:lightsail:REGION:ACCOUNT:InstanceSnapshot/SNAPSHOT-ID",
-        "arn:aws:lightsail:REGION:ACCOUNT:Instance/*"
-      ],
+      "Resource": "arn:aws:lightsail:REGION:ACCOUNT:InstanceSnapshot/SNAPSHOT-ID",
       "Condition": {
-        "StringEquals": {"aws:RequestTag/managed-by": "canopy"},
+        "StringEquals": {"aws:RequestTag/managed-by": "canopy", "aws:RequestedRegion": "REGION"},
         "StringLike": {"aws:RequestTag/canopy-workspace": "ws-*"}
       }
     }
