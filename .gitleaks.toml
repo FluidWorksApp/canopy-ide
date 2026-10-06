@@ -20,3 +20,22 @@ paths = [
     '''^src-tauri/binaries/''',
     '''^src-tauri/target/''',
 ]
+
+# Keep audited non-secret exceptions stable across squash commit IDs.
+# Both the exact source path AND exact extracted value must match.
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Synthetic lifecycle idempotency UUID"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^packages/control-plane/lifecycle\.test\.mjs$''']
+regexes = ['''^f9b67dc0-f389-4ddb-b6c9-bb9aff258e67$''']
+
+[[rules.allowlists]]
+description = "Empty Anthropic environment override, not an API key"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^packages/remote-host/shared-agent-launch\.mjs$''']
+regexes = ['''^ANTHROPIC_API_KEY=$''']
