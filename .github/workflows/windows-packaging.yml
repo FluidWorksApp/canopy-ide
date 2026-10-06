@@ -42,7 +42,13 @@ jobs:
       - name: Build and test the independent helper
         run: cargo test --manifest-path packages/agent-hook/Cargo.toml --target x86_64-pc-windows-msvc
       - name: Build the actual Windows release installer
-        run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis
+        shell: pwsh
+        run: |
+          # PR packaging checks have no updater signing secret and publish
+          # nothing. The tag release separately signs every updater artifact.
+          '{"bundle":{"createUpdaterArtifacts":false}}' | Set-Content -Encoding utf8NoBOM packaging-check.json
+          $config = (Resolve-Path packaging-check.json).Path
+          npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis --config $config
       - name: Verify staged helper, installer and one v6 application manifest
         shell: pwsh
         run: |
