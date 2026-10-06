@@ -206,6 +206,18 @@ jobs:
           codesign -dvvv src-tauri/onnxruntime/libonnxruntime.dylib 2>&1 \
             | grep -E "Authority=Developer ID|Timestamp=|flags=.*runtime" || true
 
+      - name: Read rolled-up release notes
+        id: release-notes
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {readFileSync, existsSync, appendFileSync} from 'node:fs';
+          const {version} = JSON.parse(readFileSync('package.json', 'utf8'));
+          const path = `docs/releases/${version}.md`;
+          const body = existsSync(path) ? readFileSync(path, 'utf8').trim() : 'See the assets below to download and install.';
+          appendFileSync(process.env.GITHUB_OUTPUT, `body<<CANOPY_RELEASE_NOTES\n${body}\nCANOPY_RELEASE_NOTES\n`);
+          NODE
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -227,7 +239,7 @@ jobs:
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: "Canopy __VERSION__"
-          releaseBody: "See the assets below to download and install."
+          releaseBody: ${{ steps.release-notes.outputs.body }}
           # Draft: a release is public the moment it publishes, and the tag is
           # the only gate. Review before it reaches anyone.
           releaseDraft: true
