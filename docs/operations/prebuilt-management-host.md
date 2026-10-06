@@ -56,12 +56,25 @@ stopped and disabled. Fresh per-workspace user data must perform the existing
 boot fence and storage mount before any Docker service is started.
 
 Snapshots are created only after both smokes and sanitization pass and the builder
-is provider-observed stopped. Every factory stage shares a 30-minute deadline.
-Failure removes only this job's tagged snapshot/builder; uncertain creation
-responses are re-observed before cleanup. Foreign resources are never deleted.
-On success the temporary builder is deleted and the ready catalog is emitted.
-If AWS rejects cleanup, the workflow fails rather than emitting a ready catalog;
-inspect and remove the exact tagged factory resource before retrying.
+is provider-observed stopped. Preparation shares a 30-minute observation deadline.
+A verified snapshot still pending at that deadline or a later observation outage
+is preserved. The CLI exits with status 2, emits a private non-secret job handoff,
+and publishes no ready catalog. Its stopped builder remains billable until the
+same job is finalized; the workflow retains the handoff artifact.
+
+Use the original reviewed config and that handoff to observe the same snapshot:
+
+```sh
+node scripts/host-factory/cli.mjs --finalize reviewed-factory.json ready-catalog.json ready-catalog.json.pending.json
+```
+
+The workflow also accepts the pending-job JSON in its optional `handoff` input.
+Finalization creates no compute, key or snapshot. It checks the exact release,
+job ownership and snapshot proof, then removes only its stopped builder and key.
+A ready catalog is emitted only after independent reads confirm both are absent.
+Pending asynchronous cleanup can be finalized again using the same handoff.
+Other failures retain the existing scoped cleanup behavior; foreign resources are
+never deleted. A cleanup failure cannot publish a ready catalog.
 
 The workflow publishes the verified catalog artifact only after successful
 cleanup. Setting `CANOPY_HOST_SNAPSHOTS_JSON` to that reviewed catalog activates
