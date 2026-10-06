@@ -40,7 +40,7 @@ if (!triple) {
   process.exit(1);
 }
 
-const ext = process.platform === "win32" ? ".exe" : "";
+const ext = triple.includes("-windows-") ? ".exe" : "";
 const destDir = join(root, "src-tauri", "binaries");
 const dest = join(destDir, `canopy-hook-${triple}${ext}`);
 
