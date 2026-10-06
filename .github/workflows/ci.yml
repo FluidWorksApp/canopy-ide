@@ -32,6 +32,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run test
+      - run: node --test scripts/release-assets.test.mjs
       - name: Install runtime search dependency
         run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm run test --workspace @canopy/remote-host
