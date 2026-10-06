@@ -19,61 +19,132 @@ pub struct RemoteConnectionState(pub Mutex<Option<RemoteConnection>>);
 
 #[cfg(target_os = "macos")]
 fn account_token() -> Result<Option<String>, String> {
-    match security_framework::passwords::get_generic_password("app.causeconnect.canopy.account", "device") {
-        Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|_| "Account credential is invalid".into()),
+    match security_framework::passwords::get_generic_password(
+        "app.causeconnect.canopy.account",
+        "device",
+    ) {
+        Ok(bytes) => String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| "Account credential is invalid".into()),
         Err(error) if error.code() == -25300 => Ok(None),
         Err(_) => Err("Cannot read account credential from Keychain".into()),
     }
 }
 #[cfg(not(target_os = "macos"))]
-fn account_token() -> Result<Option<String>, String> { Ok(None) }
+fn account_token() -> Result<Option<String>, String> {
+    Ok(None)
+}
 
 #[cfg(target_os = "macos")]
 fn store_account_token(token: &str) -> Result<(), String> {
-    security_framework::passwords::set_generic_password("app.causeconnect.canopy.account", "device", token.as_bytes())
-        .map_err(|_| "Cannot save account credential to Keychain".into())
+    security_framework::passwords::set_generic_password(
+        "app.causeconnect.canopy.account",
+        "device",
+        token.as_bytes(),
+    )
+    .map_err(|_| "Cannot save account credential to Keychain".into())
 }
 #[cfg(not(target_os = "macos"))]
-fn store_account_token(_: &str) -> Result<(), String> { Err("Secure account storage is unavailable on this platform".into()) }
+fn store_account_token(_: &str) -> Result<(), String> {
+    Err("Secure account storage is unavailable on this platform".into())
+}
 
 // Display caches are namespaced by the local device credential without exposing it.
 #[tauri::command]
 pub fn canopy_account_cache_key() -> Result<Option<String>, String> {
     use sha2::{Digest, Sha256};
-    Ok(account_token()?.map(|token| format!("{:x}", Sha256::digest(format!("canopy-display-cache:{token}").as_bytes()))))
+    Ok(account_token()?.map(|token| {
+        format!(
+            "{:x}",
+            Sha256::digest(format!("canopy-display-cache:{token}").as_bytes())
+        )
+    }))
 }
 
 #[tauri::command]
-pub async fn canopy_account_request(route: String, body: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
-    if !matches!(route.as_str(), "/api/device" | "/api/me" | "/api/workspaces" | "/api/plans" | "/api/credits" | "/api/operations" | "/api/teams" | "/api/peers") {
+pub async fn canopy_account_request(
+    route: String,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    if !matches!(
+        route.as_str(),
+        "/api/device"
+            | "/api/me"
+            | "/api/workspaces"
+            | "/api/plans"
+            | "/api/credits"
+            | "/api/operations"
+            | "/api/teams"
+            | "/api/peers"
+    ) {
         return Err("Invalid account request".into());
     }
-    let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(20)).build().map_err(|_| "Account connection unavailable")?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|_| "Account connection unavailable")?;
     let url = format!("https://canopyide.dev{route}");
     let mut request = if let Some(ref value) = body {
-        client.post(url).header("content-type", "application/json").body(value.to_string())
-    } else { client.get(url) };
-    if let Some(token) = account_token()? { request = request.bearer_auth(token); }
-    let response = request.send().await.map_err(|_| "Cannot reach Canopy. Check your connection and try again.")?;
+        client
+            .post(url)
+            .header("content-type", "application/json")
+            .body(value.to_string())
+    } else {
+        client.get(url)
+    };
+    if let Some(token) = account_token()? {
+        request = request.bearer_auth(token);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|_| "Cannot reach Canopy. Check your connection and try again.")?;
     let status = response.status();
-    let bytes = response.bytes().await.map_err(|_| "Canopy returned an invalid response")?;
-    let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| "Canopy returned an invalid response")?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| "Canopy returned an invalid response")?;
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| "Canopy returned an invalid response")?;
     if !status.is_success() {
-        return Err(value.get("error").and_then(|v| v.as_str()).unwrap_or("Account request failed").to_string());
+        return Err(value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Account request failed")
+            .to_string());
     }
     if route == "/api/device" && value.get("status").and_then(|v| v.as_str()) == Some("approved") {
-        let token = value.get("token").and_then(|v| v.as_str()).ok_or("Sign-in did not return a credential")?;
-        if token.len() != 64 || !token.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-') {
+        let token = value
+            .get("token")
+            .and_then(|v| v.as_str())
+            .ok_or("Sign-in did not return a credential")?;
+        if token.len() != 64
+            || !token
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        {
             return Err("Invalid account credential".into());
         }
         store_account_token(token)?;
-        value.as_object_mut().ok_or("Invalid sign-in response")?.remove("token");
+        value
+            .as_object_mut()
+            .ok_or("Invalid sign-in response")?
+            .remove("token");
     }
-    if route == "/api/device" && body.as_ref().and_then(|v| v.get("action")).and_then(|v| v.as_str()) == Some("revoke") {
+    if route == "/api/device"
+        && body
+            .as_ref()
+            .and_then(|v| v.get("action"))
+            .and_then(|v| v.as_str())
+            == Some("revoke")
+    {
         #[cfg(target_os = "macos")]
-        security_framework::passwords::delete_generic_password("app.causeconnect.canopy.account", "device")
-            .map_err(|_| "Cannot remove account credential from Keychain")?;
+        security_framework::passwords::delete_generic_password(
+            "app.causeconnect.canopy.account",
+            "device",
+        )
+        .map_err(|_| "Cannot remove account credential from Keychain")?;
     }
     Ok(value)
 }
@@ -114,7 +185,10 @@ pub fn execution_remote_set(
     if !(endpoint.scheme() == "https" || (endpoint.scheme() == "http" && loopback))
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()
-        || connection.scope.as_deref().is_some_and(|scope| !matches!(scope, "view" | "drive"))
+        || connection
+            .scope
+            .as_deref()
+            .is_some_and(|scope| !matches!(scope, "view" | "drive"))
         || connection.token.len() < 16
         || connection.token.len() > 1024
         || connection.workspace_id.is_empty()
@@ -250,7 +324,11 @@ pub fn execution_remote_forget(
     if current.as_ref().is_some_and(|c| connection_id(c) == id) {
         *current = None;
     }
-    let marker = app.path().app_config_dir().map_err(|_| "Workspace storage unavailable")?.join("active-remote-workspace");
+    let marker = app
+        .path()
+        .app_config_dir()
+        .map_err(|_| "Workspace storage unavailable")?
+        .join("active-remote-workspace");
     if std::fs::read_to_string(&marker).ok().as_deref() == Some(&id) {
         std::fs::remove_file(marker).map_err(|_| "Workspace storage unavailable")?;
     }
@@ -329,52 +407,161 @@ fn select_account_credentials<'a>(
 
 // Select only this profile's item. Never enumerate the user's Keychain or
 // fall back to the default account when a named account has no credential.
-fn credential_key(agent: &str, directory: &std::path::Path, custom: bool) -> (String, Option<String>) {
+fn credential_key(
+    agent: &str,
+    directory: &std::path::Path,
+    custom: bool,
+) -> (String, Option<String>) {
     use sha2::{Digest, Sha256};
-    let directory = if agent == "codex" { std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf()) } else { directory.to_path_buf() };
-    let hash = format!("{:x}", Sha256::digest(directory.to_string_lossy().as_bytes()));
-    if agent == "codex" { ("Codex Auth".into(), Some(format!("cli|{}", &hash[..16]))) }
-    else { (if custom { format!("Claude Code-credentials-{}", &hash[..8]) } else { "Claude Code-credentials".into() }, None) }
+    let directory = if agent == "codex" {
+        std::fs::canonicalize(directory).unwrap_or_else(|_| directory.to_path_buf())
+    } else {
+        directory.to_path_buf()
+    };
+    let hash = format!(
+        "{:x}",
+        Sha256::digest(directory.to_string_lossy().as_bytes())
+    );
+    if agent == "codex" {
+        ("Codex Auth".into(), Some(format!("cli|{}", &hash[..16])))
+    } else {
+        (
+            if custom {
+                format!("Claude Code-credentials-{}", &hash[..8])
+            } else {
+                "Claude Code-credentials".into()
+            },
+            None,
+        )
+    }
 }
 fn credential_json(file: &std::path::Path) -> Result<Option<serde_json::Value>, String> {
-    let meta = match std::fs::symlink_metadata(file) { Ok(v)=>v, Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(None), Err(_)=>return Err("Cannot read account credentials".into()) };
-    if !meta.is_file() || meta.len()>65536 { return Err("Invalid account credential file".into()); }
-    let bytes=std::fs::read(file).map_err(|_| "Cannot read account credentials")?;
-    serde_json::from_slice(&bytes).map(Some).map_err(|_| "Invalid account credential data".into())
-}
-fn keychain_login(service: &str, account: Option<&str>) -> Result<Option<serde_json::Value>, String> {
-    #[cfg(target_os="macos")]
-    {
-        let mut command=std::process::Command::new("/usr/bin/security");
-        command.args(["find-generic-password","-s",service]);
-        if let Some(account)=account { command.args(["-a",account]); }
-        let output=command.arg("-w").output().map_err(|_| "Cannot access account credential store")?;
-        // errSecItemNotFound is -25300, returned by security as exit code 44.
-        if output.status.code()==Some(44) { return Ok(None); }
-        if !output.status.success() { return Err("Account credential store is locked or access was denied. Unlock it and retry.".into()); }
-        if output.stdout.len()>65536 { return Err("Agent credentials too large".into()); }
-        return serde_json::from_slice(&output.stdout).map(Some).map_err(|_| "Invalid account credential data".into());
+    let meta = match std::fs::symlink_metadata(file) {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("Cannot read account credentials".into()),
+    };
+    if !meta.is_file() || meta.len() > 65536 {
+        return Err("Invalid account credential file".into());
     }
-    #[cfg(not(target_os="macos"))]
-    { let _=(service,account); Err("Copying credentials from this operating system's credential store is not supported yet".into()) }
+    let bytes = std::fs::read(file).map_err(|_| "Cannot read account credentials")?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| "Invalid account credential data".into())
 }
-fn codex_store(directory: &std::path::Path) -> Result<String,String> {
-    let file=directory.join("config.toml");
-    let raw=match std::fs::read_to_string(file) { Ok(v)=>v,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok("file".into()),Err(_)=>return Err("Cannot read Codex credential storage setting".into()) };
-    let config:toml::Value=toml::from_str(&raw).map_err(|_| "Cannot parse Codex credential storage setting")?;
-    if config.get("cli_auth_credentials_store").is_some_and(|v|v.as_str().is_none()) { return Err("Invalid Codex credential storage setting".into()); }
-    Ok(config.get("cli_auth_credentials_store").and_then(|v|v.as_str()).unwrap_or("file").to_string())
+fn keychain_login(
+    service: &str,
+    account: Option<&str>,
+) -> Result<Option<serde_json::Value>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = std::process::Command::new("/usr/bin/security");
+        command.args(["find-generic-password", "-s", service]);
+        if let Some(account) = account {
+            command.args(["-a", account]);
+        }
+        let output = command
+            .arg("-w")
+            .output()
+            .map_err(|_| "Cannot access account credential store")?;
+        // errSecItemNotFound is -25300, returned by security as exit code 44.
+        if output.status.code() == Some(44) {
+            return Ok(None);
+        }
+        if !output.status.success() {
+            return Err(
+                "Account credential store is locked or access was denied. Unlock it and retry."
+                    .into(),
+            );
+        }
+        if output.stdout.len() > 65536 {
+            return Err("Agent credentials too large".into());
+        }
+        return serde_json::from_slice(&output.stdout)
+            .map(Some)
+            .map_err(|_| "Invalid account credential data".into());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (service, account);
+        Err("Copying credentials from this operating system's credential store is not supported yet".into())
+    }
 }
-fn choose_login(agent: &str, mode: &str, file: Option<serde_json::Value>, keychain: Option<serde_json::Value>) -> Result<Option<serde_json::Value>,String> {
-    let chosen=match mode { "file"=>file,"keyring"=>keychain,"auto"=>keychain.or(file),"ephemeral"=>None,_=>return Err("Unsupported credential storage setting".into()) };
-    match chosen { Some(value) if valid_account_credentials(agent,&value)=>Ok(Some(if agent=="claude" {serde_json::json!({"claudeAiOauth":value.get("claudeAiOauth")})} else {value})),Some(_)=>Err("Account credentials are incomplete".into()),None=>Ok(None) }
+fn codex_store(directory: &std::path::Path) -> Result<String, String> {
+    let file = directory.join("config.toml");
+    let raw = match std::fs::read_to_string(file) {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("file".into()),
+        Err(_) => return Err("Cannot read Codex credential storage setting".into()),
+    };
+    let config: toml::Value =
+        toml::from_str(&raw).map_err(|_| "Cannot parse Codex credential storage setting")?;
+    if config
+        .get("cli_auth_credentials_store")
+        .is_some_and(|v| v.as_str().is_none())
+    {
+        return Err("Invalid Codex credential storage setting".into());
+    }
+    Ok(config
+        .get("cli_auth_credentials_store")
+        .and_then(|v| v.as_str())
+        .unwrap_or("file")
+        .to_string())
 }
-fn export_profile_login(agent: &str, directory: &std::path::Path, custom: bool) -> Result<Option<serde_json::Value>,String> {
-    let mode=if agent=="codex" {codex_store(directory)?} else if cfg!(target_os="macos") {"auto".into()} else {"file".into()};
-    if mode=="ephemeral" {return Ok(None);}
-    let keychain=if mode=="auto"||mode=="keyring" {let (service,account)=credential_key(agent,directory,custom);keychain_login(&service,account.as_deref())?} else {None};
-    let file=if mode=="file"||(mode=="auto"&&keychain.is_none()) {credential_json(&directory.join(if agent=="claude" {".credentials.json"} else {"auth.json"}))?} else {None};
-    choose_login(agent,&mode,file,keychain)
+fn choose_login(
+    agent: &str,
+    mode: &str,
+    file: Option<serde_json::Value>,
+    keychain: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, String> {
+    let chosen = match mode {
+        "file" => file,
+        "keyring" => keychain,
+        "auto" => keychain.or(file),
+        "ephemeral" => None,
+        _ => return Err("Unsupported credential storage setting".into()),
+    };
+    match chosen {
+        Some(value) if valid_account_credentials(agent, &value) => Ok(Some(if agent == "claude" {
+            serde_json::json!({"claudeAiOauth":value.get("claudeAiOauth")})
+        } else {
+            value
+        })),
+        Some(_) => Err("Account credentials are incomplete".into()),
+        None => Ok(None),
+    }
+}
+fn export_profile_login(
+    agent: &str,
+    directory: &std::path::Path,
+    custom: bool,
+) -> Result<Option<serde_json::Value>, String> {
+    let mode = if agent == "codex" {
+        codex_store(directory)?
+    } else if cfg!(target_os = "macos") {
+        "auto".into()
+    } else {
+        "file".into()
+    };
+    if mode == "ephemeral" {
+        return Ok(None);
+    }
+    let keychain = if mode == "auto" || mode == "keyring" {
+        let (service, account) = credential_key(agent, directory, custom);
+        keychain_login(&service, account.as_deref())?
+    } else {
+        None
+    };
+    let file = if mode == "file" || (mode == "auto" && keychain.is_none()) {
+        credential_json(&directory.join(if agent == "claude" {
+            ".credentials.json"
+        } else {
+            "auth.json"
+        }))?
+    } else {
+        None
+    };
+    choose_login(agent, &mode, file, keychain)
 }
 
 // This command runs only after the user chooses to copy accounts into the
@@ -650,28 +837,61 @@ mod account_import_tests {
     use super::*;
     #[test]
     fn profile_keys_are_scoped_and_default_is_never_a_named_fallback() {
-        let a=credential_key("claude",std::path::Path::new("/profiles/work/.claude"),true);
-        let b=credential_key("claude",std::path::Path::new("/profiles/personal/.claude"),true);
-        assert_ne!(a,b);
+        let a = credential_key(
+            "claude",
+            std::path::Path::new("/profiles/work/.claude"),
+            true,
+        );
+        let b = credential_key(
+            "claude",
+            std::path::Path::new("/profiles/personal/.claude"),
+            true,
+        );
+        assert_ne!(a, b);
         assert!(a.0.starts_with("Claude Code-credentials-"));
-        assert_eq!(credential_key("claude",std::path::Path::new("/home/.claude"),false).0,"Claude Code-credentials");
-        assert_eq!(credential_key("codex",std::path::Path::new("/profiles/work/.codex"),true).0,"Codex Auth");
+        assert_eq!(
+            credential_key("claude", std::path::Path::new("/home/.claude"), false).0,
+            "Claude Code-credentials"
+        );
+        assert_eq!(
+            credential_key("codex", std::path::Path::new("/profiles/work/.codex"), true).0,
+            "Codex Auth"
+        );
     }
     #[test]
     fn codex_store_selection_never_uses_stale_file_in_keyring_or_ephemeral_mode() {
-        let file=serde_json::json!({"OPENAI_API_KEY":"synthetic-file"});
-        let key=serde_json::json!({"OPENAI_API_KEY":"synthetic-keychain"});
-        assert_eq!(choose_login("codex","file",Some(file.clone()),Some(key.clone())).unwrap(),Some(file.clone()));
-        assert_eq!(choose_login("codex","auto",Some(file.clone()),Some(key.clone())).unwrap(),Some(key));
-        assert_eq!(choose_login("codex","keyring",Some(file.clone()),None).unwrap(),None);
-        assert_eq!(choose_login("codex","ephemeral",Some(file.clone()),None).unwrap(),None);
-        assert_eq!(choose_login("codex","auto",Some(file),None).unwrap().is_some(),true);
-        assert!(choose_login("codex","unsupported",None,None).is_err());
+        let file = serde_json::json!({"OPENAI_API_KEY":"synthetic-file"});
+        let key = serde_json::json!({"OPENAI_API_KEY":"synthetic-keychain"});
+        assert_eq!(
+            choose_login("codex", "file", Some(file.clone()), Some(key.clone())).unwrap(),
+            Some(file.clone())
+        );
+        assert_eq!(
+            choose_login("codex", "auto", Some(file.clone()), Some(key.clone())).unwrap(),
+            Some(key)
+        );
+        assert_eq!(
+            choose_login("codex", "keyring", Some(file.clone()), None).unwrap(),
+            None
+        );
+        assert_eq!(
+            choose_login("codex", "ephemeral", Some(file.clone()), None).unwrap(),
+            None
+        );
+        assert_eq!(
+            choose_login("codex", "auto", Some(file), None)
+                .unwrap()
+                .is_some(),
+            true
+        );
+        assert!(choose_login("codex", "unsupported", None, None).is_err());
     }
     #[test]
     fn claude_export_excludes_unrelated_mcp_secrets() {
-        let source=serde_json::json!({"claudeAiOauth":{"accessToken":"synthetic","refreshToken":"synthetic-refresh"},"mcpOAuth":{"private":"not-exported"}});
-        let selected=choose_login("claude","auto",None,Some(source)).unwrap().unwrap();
+        let source = serde_json::json!({"claudeAiOauth":{"accessToken":"synthetic","refreshToken":"synthetic-refresh"},"mcpOAuth":{"private":"not-exported"}});
+        let selected = choose_login("claude", "auto", None, Some(source))
+            .unwrap()
+            .unwrap();
         assert!(selected.get("mcpOAuth").is_none());
         assert!(selected.get("claudeAiOauth").is_some());
     }

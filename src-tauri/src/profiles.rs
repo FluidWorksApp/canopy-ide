@@ -796,7 +796,11 @@ mod tests {
 
 /// Transcript layout is owned by the profile adapter.
 pub(crate) fn conversation_store(agent: &str) -> Option<&'static str> {
-    match agent { "claude" => Some(".claude/projects"), "codex" => Some(".codex/sessions"), _ => None }
+    match agent {
+        "claude" => Some(".claude/projects"),
+        "codex" => Some(".codex/sessions"),
+        _ => None,
+    }
 }
 pub(crate) fn conversation_file_matches(agent: &str, name: &str, id: &str) -> bool {
     match agent {

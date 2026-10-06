@@ -417,34 +417,83 @@ mod tests {
 /// Stage explicitly dropped images on the selected workspace, never send Mac paths to Linux.
 #[tauri::command]
 pub async fn execution_remote_stage_images(
-    app: tauri::AppHandle, state: tauri::State<'_, RemoteConnectionState>,
-    workspace_id: String, endpoint: String, dir: String, paths: Vec<String>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RemoteConnectionState>,
+    workspace_id: String,
+    endpoint: String,
+    dir: String,
+    paths: Vec<String>,
 ) -> Result<Vec<String>, String> {
-    if paths.is_empty() || paths.len() > 16 { return Err("Drop up to 16 images at a time".into()); }
-    let c=execution_remote_get(app,state)?.ok_or("Select a remote workspace first")?;
-    if c.workspace_id!=workspace_id || c.endpoint.trim_end_matches('/')!=endpoint.trim_end_matches('/') { return Err("Workspace changed; drop the images again".into()); }
-    let client=reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().map_err(|_|"Upload unavailable")?;
-    let destination=format!("{}/.canopy/attachments",dir.trim_end_matches('/'));
-    let mut sources=Vec::new();
-    for path in paths {
-        let source=PathBuf::from(path);
-        let ext=source.extension().and_then(|s|s.to_str()).unwrap_or("").to_ascii_lowercase();
-        if !["png","jpg","jpeg","gif","webp","avif","bmp","svg"].contains(&ext.as_str()) { return Err("Drop an image here. Use Upload files for other file types.".into()); }
-        let meta=std::fs::symlink_metadata(&source).map_err(|_|"Dropped image is no longer available")?;
-        if !meta.is_file() || meta.len()>25*1024*1024 { return Err("Each dropped image must be a regular file under 25 MB".into()); }
-        sources.push((source,ext,meta));
+    if paths.is_empty() || paths.len() > 16 {
+        return Err("Drop up to 16 images at a time".into());
     }
-    remote(&client,&c,"fs_upload_dir",serde_json::json!({"path":destination})).await?;
-    let mut staged=Vec::new();
-    for (source,ext,expected) in sources {
-        let mut file=tokio::fs::File::open(&source).await.map_err(|_|"Cannot open dropped image")?;
-        let actual=file.metadata().await.map_err(|_|"Cannot inspect dropped image")?;
-        if !same_file(&expected,&actual) { return Err("Dropped image changed; try again".into()); }
-        let mut random=[0u8;16];getrandom::getrandom(&mut random).map_err(|_|"Cannot create attachment name")?;
-        let unique=random.iter().map(|b|format!("{b:02x}")).collect::<String>();
-        let target=format!("{}/{}.{}",destination,unique,ext);
-        let start=remote(&client,&c,"fs_upload_begin",serde_json::json!({"path":target,"size":expected.len(),"mode":384})).await?;
-        let id=start.get("id").and_then(|v|v.as_str()).ok_or("Invalid upload response")?.to_string();
+    let c = execution_remote_get(app, state)?.ok_or("Select a remote workspace first")?;
+    if c.workspace_id != workspace_id
+        || c.endpoint.trim_end_matches('/') != endpoint.trim_end_matches('/')
+    {
+        return Err("Workspace changed; drop the images again".into());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|_| "Upload unavailable")?;
+    let destination = format!("{}/.canopy/attachments", dir.trim_end_matches('/'));
+    let mut sources = Vec::new();
+    for path in paths {
+        let source = PathBuf::from(path);
+        let ext = source
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "svg"].contains(&ext.as_str()) {
+            return Err("Drop an image here. Use Upload files for other file types.".into());
+        }
+        let meta = std::fs::symlink_metadata(&source)
+            .map_err(|_| "Dropped image is no longer available")?;
+        if !meta.is_file() || meta.len() > 25 * 1024 * 1024 {
+            return Err("Each dropped image must be a regular file under 25 MB".into());
+        }
+        sources.push((source, ext, meta));
+    }
+    remote(
+        &client,
+        &c,
+        "fs_upload_dir",
+        serde_json::json!({"path":destination}),
+    )
+    .await?;
+    let mut staged = Vec::new();
+    for (source, ext, expected) in sources {
+        let mut file = tokio::fs::File::open(&source)
+            .await
+            .map_err(|_| "Cannot open dropped image")?;
+        let actual = file
+            .metadata()
+            .await
+            .map_err(|_| "Cannot inspect dropped image")?;
+        if !same_file(&expected, &actual) {
+            return Err("Dropped image changed; try again".into());
+        }
+        let mut random = [0u8; 16];
+        getrandom::getrandom(&mut random).map_err(|_| "Cannot create attachment name")?;
+        let unique = random
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let target = format!("{}/{}.{}", destination, unique, ext);
+        let start = remote(
+            &client,
+            &c,
+            "fs_upload_begin",
+            serde_json::json!({"path":target,"size":expected.len(),"mode":384}),
+        )
+        .await?;
+        let id = start
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("Invalid upload response")?
+            .to_string();
         let uploaded:Result<(),String>=async {
             let mut offset=0u64;let mut hash=Sha256::new();let mut buffer=vec![0;CHUNK];
             loop {
@@ -458,7 +507,10 @@ pub async fn execution_remote_stage_images(
             remote(&client,&c,"fs_upload_finish",serde_json::json!({"id":id,"sha256":format!("{:x}",hash.finalize())})).await?;
             Ok(())
         }.await;
-        if let Err(error)=uploaded{let _=remote(&client,&c,"fs_upload_abort",serde_json::json!({"id":id})).await;return Err(error);}
+        if let Err(error) = uploaded {
+            let _ = remote(&client, &c, "fs_upload_abort", serde_json::json!({"id":id})).await;
+            return Err(error);
+        }
         staged.push(target);
     }
     Ok(staged)
