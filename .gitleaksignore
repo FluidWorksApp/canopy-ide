@@ -9,11 +9,3 @@
 25813e594d711bac3c842c004ab19c6df0ddbcaf:src-tauri/src/clipboard.rs:generic-api-key:982
 17529adc30f8fcadc59d52250c7f5fea2fedd0bb:src-tauri/src/mcp.rs:gcp-api-key:866
 49c420961ce29187e73abaed4f15f75ccf43c443:src/hibernation.ts:generic-api-key:309
-
-# Audited synthetic lifecycle request ID, not an authentication credential.
-c13693c03b4bb7800d2a244cdc6987bd8e649215:packages/control-plane/lifecycle.test.mjs:generic-api-key:3
-# Provider configuration names an environment variable; no token value is present.
-c13693c03b4bb7800d2a244cdc6987bd8e649215:packages/remote-host/shared-agent-launch.mjs:generic-api-key:15
-
-# Same audited variable-name configuration in the earlier runtime commit.
-8bd513a8e4d31da40518783f4c790e860f5f5e1b:packages/remote-host/shared-agent-launch.mjs:generic-api-key:15
