@@ -1,3 +1,4 @@
+import { fixedNumber } from "../format";
 // Agent management: one row per terminal session, named after whatever the pty
 // has in its foreground (see agentIdentity.ts), with CPU/memory for the runaway
 // guard.
@@ -704,7 +705,7 @@ export function AgentsPanel({
         </div>
         {task && <div className="agent-task">{task}</div>}
         <div className="agent-stats">
-          <span>{s.total_cpu.toFixed(0)}% cpu</span>
+          <span>{fixedNumber(s.total_cpu, 0)}% cpu</span>
           <span>{fmtMem(s.total_mem_bytes)}</span>
           <span>{s.procs.length} procs</span>
           {canHibernate && (

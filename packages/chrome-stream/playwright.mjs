@@ -23,3 +23,11 @@ export async function connectChrome() {
   );
   return browser;
 }
+
+// A workspace preview owns its Chromium process/profile. It never connects to
+// the viewing computer's Chrome extension or another member's browser profile.
+export async function connectWorkspace(profileDirectory){
+ const {chromium}=require('playwright-core');
+ const context=await chromium.launchPersistentContext(profileDirectory,{executablePath:process.env.CANOPY_CHROMIUM_EXECUTABLE??'/usr/bin/chromium',headless:true,args:['--no-sandbox','--disable-dev-shm-usage'],viewport:{width:1280,height:720}});
+ return context.browser();
+}

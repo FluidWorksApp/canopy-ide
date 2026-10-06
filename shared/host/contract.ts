@@ -12,6 +12,7 @@ export interface HostChannel<T> {
 }
 
 export interface Host {
+  readonly readOnly?: boolean;
   readonly kind: "native" | "socket";
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
   listen<T>(event: string, handler: (event: HostEvent<T>) => void): Promise<UnlistenFn>;

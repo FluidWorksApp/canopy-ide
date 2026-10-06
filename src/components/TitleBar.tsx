@@ -1,8 +1,11 @@
+import type {HibernateProgressListener} from '../remoteExecution/hibernateWorkspace';
+import { WorkspaceSelector } from "../remoteExecution/WorkspaceSelector";
 import {
   memo,
   useCallback,
   useEffect,
   useState,
+  useRef,
   useSyncExternalStore,
   type MouseEvent,
 } from "react";
@@ -88,6 +91,7 @@ interface TitleBarProps {
   onSelectProject: (id: string) => void;
   onCloseProject: (id: string) => void;
   onHibernateProject: (id: string) => void;
+  onHibernateWorkspace?: (onProgress?:HibernateProgressListener) => Promise<void>;
   onWakeProject: (id: string) => void;
   onToggleVibe: (id: string) => void;
   onEditProject: (p: Project) => void;
@@ -220,6 +224,7 @@ function TitleBarImpl({
   onSelectProject,
   onCloseProject,
   onHibernateProject,
+  onHibernateWorkspace,
   onWakeProject,
   onToggleVibe,
   onEditProject,
@@ -227,6 +232,8 @@ function TitleBarImpl({
   onNewProject,
   onManageProjects,
 }: TitleBarProps) {
+  const projectStrip=useRef<HTMLDivElement>(null);
+  useEffect(()=>{projectStrip.current?.querySelector('.project-tab-active')?.scrollIntoView?.({block:'nearest',inline:'nearest'});},[activeId]);
   const fullscreen = useMacFullscreen();
   const menu = useContextMenu();
   const activeProject = openProjects.find((project) => project.id === activeId);
@@ -263,7 +270,7 @@ function TitleBarImpl({
           projectId={activeProject.id}
         />
       ) : (
-      <div className="project-tabs" data-tauri-drag-region>
+      <div className="titlebar-projects" data-tauri-drag-region><div ref={projectStrip} className="project-tabs" data-tauri-drag-region onWheel={event=>{if(Math.abs(event.deltaY)>Math.abs(event.deltaX)){event.currentTarget.scrollLeft+=event.deltaY;}}}>
         {openProjects.map((p, i) => {
           const asleep = p.id in hibernated;
           // Only the first nine are reachable by digit, so only they wear one.
@@ -333,12 +340,14 @@ function TitleBarImpl({
           </div>
           );
         })}
+      </div>
         <Button icon title="New project" onClick={onNewProject}>
           ＋
         </Button>
       </div>
       )}
-      <div className="titlebar-spacer" data-tauri-drag-region />
+      <div className="titlebar-context">
+      <WorkspaceSelector onHibernateWorkspace={onHibernateWorkspace} />
       {activeProject && !(activeProject.id in hibernated) && (
         <button
           type="button"
@@ -355,6 +364,7 @@ function TitleBarImpl({
           <span className={buildMode ? "" : "active"}>Engineer</span>
         </button>
       )}
+      </div>
       {collabActive && !buildMode && (
         <div
           className="collab-live"
@@ -404,10 +414,10 @@ function TitleBarImpl({
           <span aria-hidden>⌄</span>
         </Button>
       ) : (
-        <Button className="project-manage-btn"
+        <Button className="project-manage-btn" icon aria-label="Manage projects"
           title="Manage projects — open, create, edit, delete"
           onClick={onManageProjects}>
-          Projects ▾
+          ▾
         </Button>
       )}
       {menu.menu && (

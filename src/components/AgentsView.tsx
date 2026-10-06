@@ -1,3 +1,4 @@
+import { fixedNumber } from "../format";
 // Agent management, as a page rather than a column.
 //
 // The side panel is 300px of stacked lists: it answers "is anything waiting on
@@ -53,7 +54,7 @@ const fmtMem = (bytes: number) =>
     ? `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
     : `${Math.round(bytes / 1024 / 1024)} MB`;
 
-const fmtCost = (n: number) => (n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`);
+const fmtCost = (n: number) => (n >= 100 ? `$${fixedNumber(n, 0)}` : `$${fixedNumber(n, 2)}`);
 
 /** Compact relative age; a card has room for "4h ago", not a timestamp. */
 const ago = (secs?: number) => {
@@ -400,7 +401,7 @@ export function AgentsView({
         <footer className="agv-card-foot">
           <div className="agv-card-metrics">
             <span className="agv-metric" title="CPU across every process in this terminal">
-              {s.total_cpu.toFixed(0)}% cpu
+              {fixedNumber(s.total_cpu, 0)}% cpu
             </span>
             <span className="agv-metric" title="Resident memory across every process in this terminal">
               {fmtMem(s.total_mem_bytes)}
@@ -620,7 +621,7 @@ export function AgentsView({
                   <span className="agv-term-name">{s.title || "shell"}</span>
                   {dir && <span className="agv-chip">{dir}</span>}
                   <span className="agv-spacer" />
-                  <span className="agv-metric">{s.total_cpu.toFixed(0)}% cpu</span>
+                  <span className="agv-metric">{fixedNumber(s.total_cpu, 0)}% cpu</span>
                   <span className="agv-metric">{fmtMem(s.total_mem_bytes)}</span>
                   <Button
                     icon

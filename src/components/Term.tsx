@@ -1,3 +1,6 @@
+import {registerSelectAll} from '../selectAll';
+import { pastedImages } from '../spotCompose';
+import { MAX_CONTEXT_IMAGE_BYTES, readFileBase64 } from '../fileData';
 // One xterm.js terminal bound to one PTY session. Raw bytes pass straight
 // through in both directions — no filtering or normalization anywhere.
 import {
@@ -15,6 +18,7 @@ import "@xterm/xterm/css/xterm.css";
 import { openFileLink, openLink } from "../links";
 import { matchesModifierClick } from "../shortcuts";
 import * as ipc from "../ipc";
+import { isRemoteHost } from "../host";
 import { getSettings, type Settings } from "../settings";
 import { terminalTheme } from "../terminalThemes";
 import {
@@ -504,6 +508,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       const chord = resolve(id);
       return chord && chord.code ? [{ chord, seq }] : [];
     });
+    const releaseSelectAll=registerSelectAll(el,()=>term.selectAll());
+    let imagePastePending = false;
     term.attachCustomKeyEventHandler((ev) => {
       if (ev.type !== "keydown") return true;
       // Never touch a key that is mid-composition. Option+letter starts a dead
@@ -513,6 +519,21 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       // handler, so returning false here would skip it and strand the
       // composition, making the next keypress behave as if Option were held.
       if (ev.isComposing || ev.keyCode === 229) return true;
+      if (isRemoteHost() && matchesChord(ev, { code: "KeyV", ctrl: true, meta: false, alt: false, shift: false })) {
+        ev.preventDefault();
+        if (!imagePastePending) {
+          imagePastePending = true;
+          void ipc.clipboardImagePng().then(async image => {
+            if (disposed) return;
+            if (!image) { term.input("\x16"); return; }
+            const path = await ipc.spotSaveContextImage(cwd || "/workspace", image);
+            if (!disposed) term.paste(shellQuote(path) + " ");
+          }).catch(error => void ipc.notifyNative("Image paste failed", String(error)))
+            .finally(() => { imagePastePending = false; });
+        }
+        return false;
+      }
+
       // Every modifier flag must agree, so a composed character can never
       // collide with these entries and Option+Cmd+Left matches nothing.
       const hit = NATURAL_EDITING.find(({ chord }) => matchesChord(ev, chord));
@@ -568,7 +589,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       } else if (next.cols !== term.cols || next.rows !== term.rows) {
         void ipc
           .ptyResize(ptyIdRef.current, next.cols, next.rows)
-          .then(applyGeometry)
+          .then(geometry => { if(!isRemoteHost())applyGeometry(geometry); })
           .catch(() => {});
       }
     };
@@ -647,6 +668,10 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       if (disposed) return;
       if (!streamLedger.accept(epoch, streamEpoch, chunk.end)) return;
       el.dataset.streamEnd = String(chunk.end);
+      // Remote frames are parser-acknowledged one at a time. Their geometry
+      // belongs to these bytes, not to a later HTTP resize response.
+      if(chunk.reset)term.reset();
+      if(chunk.cols && chunk.rows)applyGeometry({cols:chunk.cols,rows:chunk.rows});
       // xterm owns the bytes as soon as write() accepts them into its ordered
       // parser queue. Advancing here (rather than in the completion callback)
       // makes a hide/show between enqueue and parse resume after this chunk,
@@ -982,6 +1007,25 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     // insertion, focus and theme events to terminals. This terminal contributes
     // only a small target record; hidden tabs do not each retain four global
     // event closures and a Tauri drag/drop subscription.
+    // Capture image paste before xterm forwards it to the remote CLI's X11
+    // clipboard. Upload through the same workspace boundary as screenshots.
+    const onImagePaste = (event: ClipboardEvent) => {
+      const images = pastedImages(event.clipboardData);
+      if (!images.length) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void (async () => {
+        for (const image of images) {
+          const base64 = await readFileBase64(image, { scope: cwd || "terminal", maxBytes: MAX_CONTEXT_IMAGE_BYTES });
+          if (!base64 || disposed) continue;
+          const uploaded = await ipc.spotSaveContextImage(cwd || '/workspace', base64);
+          if (disposed) return;
+          term.paste(shellQuote(uploaded) + ' ');
+        }
+        term.focus();
+      })().catch(error => void ipc.notifyNative('Image upload failed', String(error)));
+    };
+    el.addEventListener('paste', onImagePaste, true);
     const unregisterWindowEvents = registerTerminalWindowEvents({
       active: () => activeRef.current,
       containsPoint: (x, y) => {
@@ -1006,8 +1050,11 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
           term.paste(ready.map(shellQuote).join(" ") + " ");
           term.focus();
         };
-        if (!cwd) return paste(paths);
-        void ipc.spotStageDropImages(cwd, paths).then(paste).catch(() => paste(paths));
+        if (!cwd && !isRemoteHost()) return paste(paths);
+        void ipc.spotStageDropImages(cwd || '/workspace', paths).then(paste).catch((error) => {
+          if (!isRemoteHost()) return paste(paths);
+          void ipc.notifyNative('Image upload failed', String(error));
+        });
       },
       themeChanged: onThemeChange,
     });
@@ -1063,6 +1110,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       }
       streamVisibilityRef.current = null;
       syncNowRef.current = null;
+      el.removeEventListener('paste', onImagePaste, true);
+      releaseSelectAll();
       term.dispose();
       termRef.current = null;
     };

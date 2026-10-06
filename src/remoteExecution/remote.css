@@ -1,0 +1,17 @@
+:root { color-scheme: dark; background: #0d0f12; color: #d8dde5; font: 14px system-ui; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, input, select, textarea { font: inherit; color: inherit; background: #171c24; border: 1px solid #343d4a; border-radius: 5px; padding: 7px 10px; }
+button { cursor: pointer; } button:hover, button.selected { background: #263447; } button:disabled { opacity: .45; cursor: default; }
+input:focus, button:focus-visible, textarea:focus, select:focus { outline: 2px solid #7ca5dd; }
+.remote-app { height: 100vh; display: flex; flex-direction: column; }
+.remote-header, .remote-toolbar { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid #28303c; flex-wrap: wrap; }
+.remote-header strong { font-size: 18px; }.remote-spacer { flex: 1; }
+.remote-login { width: min(520px, 90vw); margin: auto; display: grid; gap: 18px; }.remote-login h1 { font-size: 28px; margin-bottom: 0; }.remote-login p { color: #a5afbd; line-height: 1.6; }
+.remote-login label { display: grid; gap: 8px; }
+.remote-body { flex: 1; display: flex; min-height: 0; }.remote-sidebar { width: 220px; overflow: auto; padding: 14px; border-right: 1px solid #28303c; }.remote-sidebar h2 { font-size: 13px; text-transform: uppercase; color: #a5afbd; }.remote-sidebar button { width: 100%; text-align: left; margin-bottom: 6px; overflow-wrap: anywhere; }.remote-sidebar small { display: block; color: #a5afbd; margin: 4px 0; }
+.remote-content { flex: 1; min-width: 0; display: flex; flex-direction: column; }.remote-terminal, .remote-desktop { flex: 1; min-height: 0; display: flex; flex-direction: column; }.remote-status { padding: 8px 12px; color: #a5afbd; font-size: 12px; }.remote-terminal-surface, .remote-desktop-surface { flex: 1; min-height: 0; overflow: hidden; }.remote-terminal-surface { padding: 8px; }.remote-empty { flex: 1; padding: 40px; color: #a5afbd; }.remote-file { height: 40%; min-height: 150px; display: flex; flex-direction: column; border-top: 1px solid #343d4a; }.remote-file > div { display: flex; align-items: center; gap: 12px; padding: 8px 12px; }.remote-file strong { flex: 1; }.remote-file textarea { flex: 1; resize: none; border-radius: 0; font: 13px ui-monospace, monospace; tab-size: 2; }.remote-error { padding: 12px 18px; color: #ffada7; background: #382329; }
+
+.remote-inspection { max-height: 40%; overflow: auto; padding: 12px; border-top: 1px solid #343d4a; }
+.remote-inspection pre, .remote-diagnostics { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px ui-monospace, monospace; }
+.remote-diagnostics { max-height: 120px; overflow: auto; padding: 8px; margin: 0; }

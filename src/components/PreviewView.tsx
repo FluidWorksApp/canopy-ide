@@ -1,3 +1,4 @@
+import { activeWorkspace } from "../remoteExecution/workspace";
 // The in-app browser: a page, a URL bar, and an annotate mode. In annotate mode
 // the injected picker highlights elements in the live page; each click lands
 // here as an annotation the user comments on, and the collected feedback goes
@@ -198,7 +199,10 @@ export function PreviewView({
   // until the proxy's origin became project-scoped and stable, because its
   // cookies were host-shared and its port ephemeral; that is what preview.rs
   // now provides.
-  const engine = buildMode && chosenEngine === "webview" ? "proxy" : chosenEngine;
+  const chromeSession = useRef<string | null>(null);
+  const remoteWorkspace = activeWorkspace();
+  const remotePreview = !!remoteWorkspace && (() => { try { const target = new URL(url); return ['http:', 'https:'].includes(target.protocol) && (['localhost','127.0.0.1','0.0.0.0','[::1]'].includes(target.hostname) || target.hostname.endsWith('.localhost')); } catch { return false; } })();
+  const engine = remotePreview ? "chrome" : buildMode && chosenEngine === "webview" ? "proxy" : chosenEngine;
   const native = engine === "webview";
   // What the placeholder stands in with while the native view is out of the
   // way: a still of the page, or the app's own background — never a white hole.
@@ -271,14 +275,16 @@ export function PreviewView({
     if (engine !== "chrome" || !hasUrl || !chromeStarted) return;
     let stale = false;
     const sessionId = `${tabId}-${crypto.randomUUID()}`;
+    chromeSession.current=sessionId;
     setProxyError(null);
     setChromeSrc(null);
-    void ipc.chromeStreamOpen(sessionId, urlRef.current).then(src => {
+    void ipc.chromeStreamOpen(sessionId, urlRef.current, tabId).then(src => {
       if (stale) { void ipc.chromeStreamClose(sessionId); return; }
       setChromeSrc(src);
     }, error => { if (!stale) setProxyError(String(error)); });
     return () => {
       stale = true;
+      if(chromeSession.current===sessionId)chromeSession.current=null;
       void ipc.chromeStreamClose(sessionId);
     };
   }, [engine, hasUrl, tabId, chromeStarted, chromeRetry]);
@@ -682,6 +688,11 @@ export function PreviewView({
       if (e.source !== iframeRef.current?.contentWindow) return;
       if (engine === "chrome") {
         if (!chromeSrc || e.origin !== new URL(chromeSrc).origin) return;
+        if(e.data?.canopy === "remote-stream-ticket-request" && e.data.sessionId===chromeSession.current){
+          const session=e.data.sessionId,source=e.source,origin=e.origin;
+          void ipc.chromeStreamTicket(session).then(url=>{if(chromeSession.current===session&&iframeRef.current?.contentWindow===source)iframeRef.current?.contentWindow?.postMessage({canopy:"remote-stream-ticket",url},origin);},error=>setProxyError(String(error)));
+          return;
+        }
         if (e.data?.canopy === "stream-ready") { initChromeFrame(); return; }
         if (e.data?.canopy === "install-extension") {
           void openUrl("https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm");
@@ -933,7 +944,7 @@ export function PreviewView({
       ? (await ipc.browserSnapshot(tabId, SHOOT_WIDTH)).image
       : await ipc.webviewSnapshot(rect.x, rect.y, rect.width, rect.height, SHOOT_WIDTH);
     return { png, cssWidth: rect.width };
-  }, [painted, tabId]);
+  }, [painted, tabId, remotePreview]);
 
   /** Put the page into region-drag mode and wait for what the user drew.
    *  Resolves null if they pressed Escape, clicked without dragging, or walked
@@ -1005,7 +1016,7 @@ export function PreviewView({
         setCapturing(false);
       }
     },
-    [askRegion, buildMode, dir, onNotice, shootPane],
+    [askRegion, buildMode, dir, onNotice, shootPane, remotePreview],
   );
 
   /** Take one, and remember the mode as the button's one-click default. */
@@ -1197,7 +1208,7 @@ export function PreviewView({
     return frameSrc ? (
       <iframe ref={iframeRef} className="preview-frame" src={frameSrc} title="preview" />
     ) : null;
-  }, [engine, native, proxyError, origin, frameSrc, navigate, pane, chromeSrc, initChromeFrame]);
+  }, [engine, native, proxyError, origin, frameSrc, navigate, pane, chromeSrc, initChromeFrame, remotePreview, remoteWorkspace, url]);
 
   // ---------- empty tab: pick one of the project's own servers ----------
   // The empty tab offers only servers Canopy can trace back to a component, so
@@ -1353,7 +1364,7 @@ export function PreviewView({
             for changing your mind. Same split shape as the agent launcher. */}
         <span className="split-btn split-btn-mini">
           <Button size="sm" className="split-btn-main"
-            title={`Screenshot — ${captureModeLabel(captureMode).toLowerCase()}`}
+            title={remotePreview ? "Screenshot workspace browser" : `Screenshot — ${captureModeLabel(captureMode).toLowerCase()}`}
             disabled={capturing}
             onClick={() => runCapture(captureMode)}>
             ▣ Screenshot{shots.length > 0 ? ` (${shots.length})` : ""}

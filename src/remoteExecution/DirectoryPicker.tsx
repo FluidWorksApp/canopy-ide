@@ -1,0 +1,23 @@
+import {Dialog} from '../components/Dialog';
+import {Button,TextInput,Checkbox} from '../components/ui';
+import {useEffect,useState} from 'react';
+import {invoke} from '../host';
+import './workspace.css';
+type Entry={name:string;path:string;is_dir:boolean;is_symlink:boolean};
+export function DirectoryPicker({multiple=false,initialPath='/workspace',title='Choose remote directory',body,confirmLabel,editablePath=false,onSelect,onCancel}:{multiple?:boolean;initialPath?:string;title?:string;body?:string;confirmLabel?:string;editablePath?:boolean;onSelect:(paths:string[])=>void;onCancel:()=>void}){
+ const [path,setPath]=useState(initialPath),[draftPath,setDraftPath]=useState(initialPath),[loadedPath,setLoadedPath]=useState(''),[entries,setEntries]=useState<Entry[]>([]),[selected,setSelected]=useState<string[]>([]),[error,setError]=useState(''),[busy,setBusy]=useState(true),[name,setName]=useState(''),[creating,setCreating]=useState(false);
+ useEffect(()=>setDraftPath(path),[path]);
+ useEffect(()=>{let alive=true;setBusy(true);setError('');setEntries([]);void invoke<Entry[]>('fs_read_dir',{path}).then(v=>{if(alive){setEntries(v.filter(e=>e.is_dir&&!e.is_symlink).sort((a,b)=>a.name.localeCompare(b.name)));setLoadedPath(path);}}).catch(e=>{if(alive)setError(String(e));}).finally(()=>{if(alive)setBusy(false);});return()=>{alive=false;};},[path]);
+ useEffect(()=>{const escape=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.stopImmediatePropagation();onCancel();}};window.addEventListener('keydown',escape,true);return()=>window.removeEventListener('keydown',escape,true);},[onCancel]);
+ const validName=!!name.trim()&&!/[\/\\]/.test(name)&&!['.','..'].includes(name.trim());
+ const create=async()=>{if(!validName)return;setBusy(true);setError('');try{const next=path+'/'+name.trim();await invoke('fs_create_dir',{path:next});setName('');setCreating(false);setPath(next);}catch(e){setError(String(e));}finally{setBusy(false);}};
+ const parts=path.split('/').filter(Boolean);
+ return <div onClick={e=>e.stopPropagation()}><Dialog title={title} body={body??(multiple?'Select folders to add as project components.':'Choose where the repository will be cloned.')} size="md" onDismiss={onCancel} dismissLabel="Cancel" actions={[{label:confirmLabel??(selected.length?`Use ${selected.length} folders`:'Use this folder'),primary:true,disabled:busy||!!error||loadedPath!==path||(editablePath&&draftPath.trim()!==path),onClick:()=>onSelect(selected.length?selected:[path])}]}><div className="workspace-tools directory-picker">
+  <div className="directory-toolbar"><nav aria-label="Remote directory path">{parts.map((part,i)=><Button key={i} disabled={busy||i===parts.length-1} onClick={()=>setPath('/'+parts.slice(0,i+1).join('/'))}>{i===0?'Workspace':part}{i<parts.length-1&&<span>/</span>}</Button>)}</nav><Button disabled={busy} onClick={()=>setCreating(v=>!v)}>＋ New folder</Button></div>
+  {editablePath?<form className="directory-create" onSubmit={e=>{e.preventDefault();if(draftPath.trim())setPath(draftPath.trim().replace(/\/+$/,'')||'/');}}><label>Destination<TextInput width="full" value={draftPath} onChange={e=>setDraftPath(e.target.value)}/></label><Button type="submit" disabled={busy||!draftPath.trim()||draftPath.trim()===path}>Go</Button></form>:<p className="directory-path">{path}</p>}
+  {creating&&<form className="directory-create" onSubmit={e=>{e.preventDefault();void create();}}><label>New folder<TextInput autoFocus placeholder="Folder name" value={name} onChange={e=>setName(e.target.value)}/></label><Button type="submit" disabled={busy||!validName}>Create folder</Button></form>}
+  <div className="remote-directory-list">{busy?<p className="directory-empty">Loading folders…</p>:entries.length?entries.map(e=><div key={e.path}>{multiple&&<Checkbox label={`Select ${e.name}`} checked={selected.includes(e.path)} onChange={()=>setSelected(v=>v.includes(e.path)?v.filter(p=>p!==e.path):[...v,e.path])}/>}<Button onClick={()=>setPath(e.path)}><span aria-hidden="true">▱</span><span>{e.name}</span><span className="directory-enter" aria-hidden="true">›</span></Button></div>):<div className="directory-empty"><strong>{error?'Folders could not be loaded':'No folders here yet'}</strong><span>{error?'Check the workspace connection or choose another path.':editablePath?'Create a folder, or upload to this location.':'Create a folder, or use this location to clone a repository.'}</span></div>}</div>
+  {error&&<p className="workspace-feedback error" role="alert">{error}</p>}
+  <small>{selected.length?`${selected.length} folders selected`:parts.at(-1)==='workspace'?'Workspace root':parts.at(-1)}</small>
+ </div></Dialog></div>;
+}

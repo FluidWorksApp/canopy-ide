@@ -39,6 +39,18 @@ function toOsBrowser(url: string) {
  *  scheme is dropped, not forwarded. */
 export function openLink(href: string, external = false) {
   if (!/^https?:\/\//i.test(href)) return;
+  // Provider logins must leave the preview and return to the owning VM.
+  if (/^https:\/\/(auth\.openai\.com|claude\.ai|console\.anthropic\.com|platform\.claude\.com)\//i.test(href) && new URL(href).searchParams.has('redirect_uri')) {
+    void import('./host').then(async ({isRemoteHost}) => {
+      if (isRemoteHost()) {
+        const {invoke} = await import('@tauri-apps/api/core');
+        await invoke('execution_remote_login_prepare',{url:href});
+      }
+      toOsBrowser(href);
+    }).catch(() => window.dispatchEvent(new CustomEvent('canopy:remote-login-error',{detail:'Could not forward the sign-in callback. The local port may already be in use. Finish the other sign-in or use device-code login.'})));
+    return;
+  }
+  if (/^https:\/\/github\.com\/login\/device(?:[/?#]|$)/i.test(href)) {toOsBrowser(href);return;}
   if (!external) {
     const claimed = !window.dispatchEvent(
       new CustomEvent<OpenUrlDetail>(OPEN_URL_EVENT, {

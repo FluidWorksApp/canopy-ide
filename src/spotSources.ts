@@ -8,6 +8,7 @@
 // something native (see openers in ProjectView). A source that can't say what
 // Enter would open drops the row instead of showing it.
 import * as ipc from "./ipc";
+import {explicitFilePaths} from './explicitFilePaths';
 import { fuzzy, pathScore } from "./fuzzy";
 import type { ServerGroup } from "./servers";
 import type { SubTab, TermSubTab } from "./components/ProjectView/helpers";
@@ -448,10 +449,11 @@ export function prRows(query: string): SpotRow[] {
 
 // ---------- async sources ----------
 
-export async function fileRows(query: string, corpus: string[]): Promise<SpotRow[]> {
+export async function fileRows(query: string, corpus: string[], roots: string[] = []): Promise<SpotRow[]> {
   if (!query.trim()) return [];
   const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
-  return corpus
+  const paths = [...new Set([...await explicitFilePaths(query, roots), ...corpus])];
+  return paths
     .map((p) => ({ p, s: pathScore(query, p, base(p)) }))
     .filter((r): r is { p: string; s: number } => r.s !== null)
     // Shortest path breaks a tie, so two files with the same name rank by how
@@ -784,7 +786,7 @@ const SOURCES: SpotSource[] = [
   // you are most likely to be reaching for, and it is the one row here that
   // disappears if you go and find it somewhere else first.
   { id: "clipboard", group: "Clipboard", blurb: "What you copied. Off until you switch it on in Settings → Clipboard.", timing: "instant", rows: (q) => clipRows(q.query, q.ctx) },
-  { id: "files", group: "Files", blurb: "File names under the project's components.", timing: "deferred", rows: (q) => fileRows(q.query, q.corpus) },
+  { id: "files", group: "Files", blurb: "File names under the project's components.", timing: "deferred", rows: (q) => fileRows(q.query, q.corpus, q.roots) },
   { id: "symbols", group: "Symbols", blurb: "Workspace symbols from language servers already running — never starts one.", timing: "deferred", minQuery: 2, rows: (q) => codeSymbolRows(q.query, q.roots) },
   { id: "content", group: "In Files", blurb: "Text inside the project's files (ripgrep, live per query).", timing: "deferred", minQuery: 2, rows: (q) => contentRows(q.query, q.roots) },
   // One source, two sections: the persistent index answers for terminal

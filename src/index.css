@@ -2006,6 +2006,15 @@ body.resizing-side * {
   scrollbar-gutter: stable;
 }
 
+/* Workspace explanations are prose, unlike one-line process rows. */
+.status-breakdown .bd-workspace-note {
+  display: block;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  padding-left: 10px;
+  line-height: 1.5;
+}
+
 /* Labels take the slack and ellipsis; the figures keep their own column, so a
    row that gains a digit can't push the label around. */
 .bd-row > span:first-child,
@@ -28583,3 +28592,38 @@ a.btn-sm {
   background: var(--bg-deep);
   font: inherit;
 }
+
+/* Resource breakdown keeps the existing bottom status popover and tokens. */
+.status-breakdown .bd-resource-section {padding:10px 0;border-bottom:1px solid var(--border);}
+.status-breakdown .bd-resource-label {display:block;color:var(--text-muted);font-size:var(--fs-xs);margin-bottom:8px;}
+.status-breakdown .bd-resource-grid {display:grid;grid-template-columns:auto minmax(0,1fr);gap:8px 16px;margin:0;}
+.status-breakdown .bd-resource-grid dt,.status-breakdown .bd-resource-grid dd {margin:0;white-space:normal;overflow-wrap:anywhere;}
+.status-breakdown .bd-resource-grid dd {text-align:right;font-variant-numeric:tabular-nums;}
+.status-breakdown .bd-resource-muted {color:var(--text-muted);}
+.status-breakdown p.bd-workspace-note {padding:0;margin:10px 0 0;}
+
+.workspace-startup{padding:20px;border:1px solid var(--border);border-radius:8px;margin:16px 0}.workspace-startup ol{list-style:none;padding:0;display:grid;gap:16px;margin:20px 0}.workspace-startup li{display:flex;align-items:center;gap:12px;opacity:.5}.workspace-startup li.current,.workspace-startup li.complete{opacity:1}.workspace-startup li.current{font-weight:700}.workspace-startup li span{display:inline-grid;place-items:center;width:24px;height:24px;border:1px solid currentColor;border-radius:50%}.workspace-startup p{line-height:1.5}
+
+.component-servers { border-bottom: 1px solid var(--border); margin-bottom: 8px; }
+.component-servers > summary { cursor: pointer; padding: 12px; font-weight: 600; }
+.component-servers > summary > span { float: right; font-size: 11px; color: var(--muted); font-weight: 400; }
+
+.agent-integration-warning {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  padding: 14px 18px;
+  border: 1px solid #ff6b72;
+  border-left-width: 4px;
+  background: #301b21;
+  color: #fff1f2;
+}
+.agent-integration-warning-copy { flex: 1 1 280px; min-width: 0; }
+.agent-integration-warning strong { color: #ffadb1; }
+.agent-integration-warning p { margin: 5px 0 0; overflow-wrap: anywhere; }
+.agent-integration-warning .agent-integration-warning-error { color: #ffadb1; white-space: pre-wrap; }
+.agent-integration-warning button { flex: 0 1 auto; max-width: 100%; white-space: normal; background: #ffadb1; color: #301018; border: 0; border-radius: 6px; padding: 10px 14px; font-weight: 700; cursor: pointer; }
+.agent-integration-warning button:disabled { opacity: .7; cursor: wait; }
+.hook-nudge button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }

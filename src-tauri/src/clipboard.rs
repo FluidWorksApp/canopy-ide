@@ -1167,3 +1167,40 @@ mod tests {
         assert_eq!(recent(&conn, 50).unwrap().len(), 1);
     }
 }
+
+/// Explicit user-triggered image paste; never retained in clipboard history.
+#[tauri::command]
+pub fn clipboard_image_png() -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use base64::Engine;
+        use objc2_app_kit::{NSPasteboard, NSBitmapImageRep, NSBitmapImageFileType};
+        use objc2_foundation::{NSString, NSDictionary};
+        objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
+            objc2::rc::autoreleasepool(|_| {
+                let pb = NSPasteboard::generalPasteboard();
+                for format in ["public.png", "public.tiff"] {
+                    if let Some(data) = pb.dataForType(&NSString::from_str(format)) {
+                        if data.len() > 20 * 1024 * 1024 {
+                            return Err("Clipboard image exceeds 20 MB".into());
+                        }
+                        let png = if format == "public.png" { data } else {
+                            let rep = NSBitmapImageRep::imageRepWithData(&data)
+                                .ok_or("Cannot decode clipboard image")?;
+                            unsafe { rep.representationUsingType_properties(
+                                NSBitmapImageFileType::PNG, &NSDictionary::new()
+                            ) }.ok_or("Cannot encode clipboard image")?
+                        };
+                        if png.len() > 20 * 1024 * 1024 {
+                            return Err("Clipboard image exceeds 20 MB".into());
+                        }
+                        return Ok(Some(base64::engine::general_purpose::STANDARD.encode(png.to_vec())));
+                    }
+                }
+                Ok(None)
+            })
+        })).map_err(|_| "Cannot access the Mac clipboard".to_string())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    { Ok(None) }
+}

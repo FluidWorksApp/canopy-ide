@@ -1,0 +1,32 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {readFile} from 'node:fs/promises';import {randomUUID} from 'node:crypto';import {createRequire} from 'node:module';
+import {changeWorkspaceOrganizationGrant} from './workspace-organization-grants.mjs';import {workspaceAccess,allowsWorkspaceAccess} from './workspace-access.mjs';import {accessVersion} from './member-access.mjs';
+const connectionString=process.env.CANOPY_SYNTHETIC_DATABASE_URL;
+test('real Postgres dynamic organization grants, membership epochs and scope isolation',{skip:!connectionString},async()=>{
+ assert.equal(new URL(connectionString).hostname,'127.0.0.1');assert.equal(new URL(connectionString).port,'55461');assert.equal(new URL(connectionString).username,'canopy_validation');
+ const require=createRequire(process.env.CANOPY_SYNTHETIC_PG_PACKAGE_JSON??new URL('../../../package.json',import.meta.url));const {Pool}=require('pg');const pool=new Pool({connectionString});const db=await pool.connect();
+ try{await db.query('BEGIN');await db.query(await readFile(new URL('../workspace-organization-access-schema.sql',import.meta.url),'utf8'));
+ const owner=randomUUID(),member=randomUUID(),future=randomUUID(),other=randomUUID(),org=randomUUID(),foreign=randomUUID(),team=randomUUID(),workspace='ws-'+randomUUID();
+ for(const id of [owner,member,future,other])await db.query('INSERT INTO "user"(id,name,email) VALUES($1,$1,$2)',[id,id+'@example.invalid']);
+ for(const id of [org,foreign])await db.query('INSERT INTO organization(id,name,created_by) VALUES($1,$2,$3)',[id,'Synthetic organization',owner]);
+ await db.query("INSERT INTO organization_member(organization_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'member'),($4,$5,'member')",[org,owner,member,foreign,other]);
+ await db.query("INSERT INTO workspace(id,owner_id,name,organization_id,state,desired_state) VALUES($1,$2,'Synthetic access test',$3,'ready','running')",[workspace,owner,org]);
+ const input={workspaceId:workspace,organizationId:org,action:'grant',role:'viewer',permissions:{projects:'all'}};
+ await changeWorkspaceOrganizationGrant(db,owner,input);
+ assert.equal(allowsWorkspaceAccess(await workspaceAccess(db,workspace,member),{action:'view',projectId:'any'}),true);
+ assert.deepEqual(await workspaceAccess(db,workspace,future),[]);
+ await db.query("INSERT INTO organization_member(organization_id,user_id,role) VALUES($1,$2,'member')",[org,future]);
+ const inherited=await workspaceAccess(db,workspace,future);assert.equal(inherited[0].source,'organization');const oldVersion=accessVersion(inherited,0);
+ await db.query('UPDATE organization_member SET removed_at=now() WHERE organization_id=$1 AND user_id=$2',[org,future]);assert.deepEqual(await workspaceAccess(db,workspace,future),[]);
+ await db.query("UPDATE organization_member SET removed_at=NULL,joined_at=joined_at+interval '1 second' WHERE organization_id=$1 AND user_id=$2",[org,future]);assert.notEqual(accessVersion(await workspaceAccess(db,workspace,future),0),oldVersion);
+ assert.deepEqual(await workspaceAccess(db,workspace,other),[]);
+ await db.query('SAVEPOINT unrelated');await assert.rejects(()=>db.query("INSERT INTO workspace_organization_access(workspace_id,organization_id,role) VALUES($1,$2,'viewer')",[workspace,foreign]),/same organization/);await db.query('ROLLBACK TO SAVEPOINT unrelated');
+ await db.query('SAVEPOINT move');await assert.rejects(()=>db.query('UPDATE workspace SET organization_id=$2 WHERE id=$1',[workspace,foreign]),/Revoke organization access/);await db.query('ROLLBACK TO SAVEPOINT move');
+ await db.query("INSERT INTO workspace_member(workspace_id,user_id,role,permissions) VALUES($1,$2,'member',$3)",[workspace,member,JSON.stringify({projects:'selected',projectIds:['app']})]);
+ await db.query('INSERT INTO team(id,name,owner_id,organization_id) VALUES($1,$2,$3,$4)',[team,'Synthetic team',owner,org]);await db.query("INSERT INTO team_member(team_id,user_id,role) VALUES($1,$2,'member')",[team,member]);await db.query("INSERT INTO workspace_team_access(workspace_id,team_id,role,permissions) VALUES($1,$2,'viewer',$3)",[workspace,team,JSON.stringify({projects:'selected',projectIds:['other']})]);
+ const mixed=await workspaceAccess(db,workspace,member);assert.equal(allowsWorkspaceAccess(mixed,{action:'connect',projectId:'app'}),true);assert.equal(allowsWorkspaceAccess(mixed,{action:'connect',projectId:'other'}),false);
+ await changeWorkspaceOrganizationGrant(db,owner,{...input,action:'revoke'});
+ const remaining=await workspaceAccess(db,workspace,member);assert.deepEqual(remaining.map(g=>g.source).sort(),['direct','team']);assert.deepEqual(await workspaceAccess(db,workspace,future),[]);
+ await changeWorkspaceOrganizationGrant(db,owner,input);assert.equal((await db.query('SELECT access_version FROM workspace_organization_access WHERE workspace_id=$1',[workspace])).rows[0].access_version,3);
+ assert.equal((await db.query('SELECT count(*)::int n FROM workspace_member WHERE workspace_id=$1',[workspace])).rows[0].n,1);
+ }finally{await db.query('ROLLBACK');db.release();await pool.end();}
+});

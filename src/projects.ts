@@ -118,6 +118,8 @@ export interface VibeConfig {
 }
 
 export interface Project {
+  /** Server-supplied shared project access; UI hint only, host enforces writes. */
+  readOnly?: boolean;
   id: string;
   name: string;
   components: Component[];
@@ -783,6 +785,8 @@ export interface AgentCli {
 export interface AgentCliCapabilities {
   profiles?: true;
   managedIntegration?: true;
+  conversationTransfer?: true;
+  remoteIntegration?: true;
   approvalInput?: "keystroke";
   terminalMinimumContrast?: number;
   eventSessionLookup?: true;
@@ -906,6 +910,8 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     capabilities: {
       profiles: true,
       managedIntegration: true,
+      conversationTransfer: true,
+      remoteIntegration: true,
       approvalInput: "keystroke",
       routingModelFamily: "anthropic",
       refreshModelCatalog: "anthropic",
@@ -974,6 +980,8 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     capabilities: {
       profiles: true,
       managedIntegration: true,
+      conversationTransfer: true,
+      remoteIntegration: true,
       approvalInput: "keystroke",
       planUsageRequiresSession: true,
       terminalMinimumContrast: 4.5,
@@ -1995,6 +2003,22 @@ export function restoreCommand(
     : resumed;
 }
 
+/** Rebuild remembered agent launches with today's permission preference. */
+export function rememberedAgentCommand(command: string | undefined, sessionId?: string): string | undefined {
+  if (!command) return command;
+  const cli = AGENT_CLIS.find(agent => {
+    const bin = shellBin(agent.bin);
+    return command === bin || command.startsWith(bin + " ");
+  });
+  if (!cli) return command;
+  const id = sessionId || resumeSessionId(command);
+  if (id) return restoreCommand(cli.id, id) || command;
+  const bin = shellBin(cli.bin);
+  if (command === bin || (cli.skipPermissions && command === bin + " " + cli.skipPermissions))
+    return launchCommand(cli);
+  return command;
+}
+
 /** The session id a terminal's command carries when it was launched to resume a
  *  conversation, or null for a fresh start. Inverted from each CLI's own `resume`
  *  builder (via a sentinel), so it can never drift from the command that was
@@ -2083,3 +2107,7 @@ export function componentForPath(
       .sort((a, b) => b.path.length - a.path.length)[0]?.path ?? null;
   return owns(cwd) ?? owns(checkoutKey(cwd));
 }
+
+// Shared credential slots are provider adapters, separate from CLI launch identities.
+export const SHARED_ACCOUNT_SLOTS = ["git", "claude", "codex"] as const;
+export const SHARED_ACCOUNT_PROVIDERS = {git: "github", claude: "anthropic", codex: "openai"} as const;

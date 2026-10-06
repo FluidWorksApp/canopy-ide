@@ -3,10 +3,16 @@ import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { connectChrome, pageSession, WebSocketServer } from './playwright.mjs';
+import { connectChrome, connectWorkspace, pageSession, WebSocketServer } from './playwright.mjs';
 import { FRAME_POLL_MS, FrameGate, refreshBackoff, shouldRefreshStream, viewportSize, websiteUrl } from './protocol.mjs';
 
-export async function startBridge(config, connectBrowser = connectChrome) {
+export async function waitForPicker(page,timeoutMs=10000){
+  const deadline=Date.now()+timeoutMs;
+  await page.waitForLoadState('domcontentloaded',{timeout:timeoutMs});
+  await page.waitForFunction(() => !!window.__canopyBrowser,undefined,{timeout:Math.max(1,deadline-Date.now())});
+}
+
+export async function startBridge(config, connectBrowser = config.workspace?()=>connectWorkspace(config.profileDirectory):connectChrome) {
   const lines = createInterface({ input: process.stdin });
   const initialUrl = websiteUrl(config.url);
   const picker = await readFile(new URL('./preview_picker.js', import.meta.url), 'utf8');
@@ -91,7 +97,7 @@ export async function startBridge(config, connectBrowser = connectChrome) {
   async function attach(page) {
     ownedPages.add(page);
     if (closing || page.isClosed()) return;
-    const entry = { id: ++serial, page, session: pageSession(page) };
+    const entry = { id: ++serial, page, session: config.workspace?await page.context().newCDPSession(page):pageSession(page) };
     pages.set(entry.id, entry);
     page.setDefaultTimeout(10_000);
     page.setDefaultNavigationTimeout(30_000);
@@ -141,7 +147,7 @@ export async function startBridge(config, connectBrowser = connectChrome) {
 
   async function connect() {
     if (connecting || (browser && active)) return;
-    status('Approve the Playwright connection in Chrome. Canopy will open a new project tab.');
+    status(config.workspace?'Opening your workspace browser…':'Approve the Playwright connection in Chrome. Canopy will open a new project tab.');
     connecting = (async () => {
       if (!browser) {
         browser = await connectBrowser();
@@ -240,6 +246,7 @@ export async function startBridge(config, connectBrowser = connectChrome) {
       const image = await page.screenshot({ type: 'png' });
       send({ canopy: 'capture-result', id: message.id, image: image.toString('base64'), width: size.width, height: size.height });
     } else if (['mode', 'sync', 'region', 'agent'].includes(message.canopy)) {
+      await waitForPicker(page);
       await page.evaluate(d => {
         if (!window.__canopyBrowser) throw new Error('The page is still loading.');
         window.__canopyBrowser.cmd(d);

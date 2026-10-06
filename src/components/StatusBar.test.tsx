@@ -689,3 +689,17 @@ describe("the account switcher", () => {
     expect(await screen.findByText("claude")).toBeTruthy();
   });
 });
+
+ it("uses the existing bottom resource chip for workspace totals", async () => {
+  vi.mocked(ipc.onAppStats).mockImplementation(async cb=>{cb({cpu:44,mem_bytes:1.2*1024**3,procs:0,includes_webviews:true,workspace:{available:true,memoryLimitBytes:3*1024**3,cpus:1,elasticCpu:{minCpus:1,maxCpus:4,currentCpus:1,availableMaxCpus:2,status:'steady',sampledAt:0},elasticMemory:{minMiB:3072,maxMiB:16384,currentMiB:3072,availableMaxMiB:5632,status:'steady',sampledAt:0}}});return ()=>{};});
+  const {container}=render(<StatusBar {...base} events={[]}/>);
+  const chip=await screen.findByTitle(/^Remote workspace:/);expect(chip.closest('.status-res')).toBeTruthy();expect(chip.textContent).toContain('44% cpu');expect(container.querySelector('.workspace-metrics')).toBeNull();fireEvent.click(chip);expect(screen.getByText('Usage now')).toBeTruthy();expect(screen.getByText('of 1 allocated cores')).toBeTruthy();expect(screen.queryByText('Core services')).toBeNull();expect(screen.getByText('Automatic scaling · configured range')).toBeTruthy();expect(screen.getByText('1 – 4 cores')).toBeTruthy();expect(screen.getByText(/This VM allows up to 2 CPU cores/)).toBeTruthy();expect(screen.getByText('3.0 GB – 16.0 GB')).toBeTruthy();expect(screen.getByText(/RAM available to this workspace: 5.5 GB/)).toBeTruthy();
+ });
+
+it('shows the exact active Codex session model and totals rather than another account or session',async()=>{
+ const row={agent:'codex',session_id:'active-rollout',profile:'work',cwd:'/workspace',title:null,model:'gpt-6.1-sol',input_tokens:100,output_tokens:200,cache_read_tokens:0,cache_creation_tokens:0,cost:null,turns:7,updated:1,supported:true};
+ vi.mocked(ipc.agentUsage).mockResolvedValue([{...row,profile:'default',model:'wrong-account'},{...row,session_id:'other',model:'wrong-session'},row]);
+ render(<StatusBar {...base} events={[]} agentId="codex" agentProfile="work" activeSessionId="active-rollout" activePtyId={9} modelSwitch={null}/>);
+ expect(await screen.findByTitle(/7 turns/)).toBeTruthy();
+ expect(screen.queryByText('wrong-account')).toBeNull();expect(screen.queryByText('wrong-session')).toBeNull();
+});

@@ -1,0 +1,21 @@
+import {mkdir,readFile,writeFile,rename,realpath,lstat} from 'node:fs/promises';
+import path from 'node:path';
+import {randomUUID} from 'node:crypto';
+
+// Same registry and home-shaped layout as src-tauri/src/profiles.rs.
+export class WorkspaceProfiles {
+ constructor(home){this.home=home;this.queue=Promise.resolve();}
+ valid(id){return typeof id==='string'&&/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)&&id.length<=32;}
+ async directory(directory){await mkdir(directory,{recursive:true,mode:0o700});if(await realpath(directory)!==directory)throw Error('Profile directory must not be a symlink');return directory;}
+ async read(file,fallback={}){try{const info=await lstat(file);if(!info.isFile()||info.isSymbolicLink()||info.size>1048576)throw Error('Invalid profile file');return JSON.parse(await readFile(file,'utf8'));}catch(e){if(e.code==='ENOENT')return fallback;throw e;}}
+ async registry(){const r=await this.read(path.join(this.home,'.canopy/profiles.json'),{profiles:[],active:'default'});if(!Array.isArray(r.profiles)||r.profiles.some(p=>!this.valid(p.id)||p.id==='default'||typeof p.label!=='string'))throw Error('Invalid profile registry');return r;}
+ async save(r){const directory=await this.directory(path.join(this.home,'.canopy'));const tmp=path.join(directory,randomUUID()+'.next');await writeFile(tmp,JSON.stringify(r),{mode:0o600,flag:'wx'});await rename(tmp,path.join(directory,'profiles.json'));}
+ mutate(fn){const next=this.queue.then(fn);this.queue=next.catch(()=>{});return next;}
+ async list(){return [{id:'default',label:'Default',root:this.home,removable:false},...(await this.registry()).profiles.map(p=>({...p,root:path.join(this.home,'.canopy/profiles',p.id),removable:true}))];}
+ async root(id){const p=(await this.list()).find(p=>p.id===id);if(!p)throw Error('Account profile not found');if(await realpath(p.root)!==p.root)throw Error('Profile directory must not be a symlink');return p.root;}
+ async create(label,prepare=async()=>{}){return this.mutate(async()=>{if(typeof label!=='string'||label.length>80)throw Error('Choose a profile name');const id=label.toLowerCase().replace(/[^a-z0-9]+/g,'-').slice(0,32).replace(/^-|-$/g,'');if(!this.valid(id)||id==='default')throw Error('Choose another profile name');const r=await this.registry();if(r.profiles.some(p=>p.id===id))throw Error('A profile with this name already exists');const base=await this.directory(path.join(this.home,'.canopy'));await this.directory(path.join(base,'profiles'));const root=await this.directory(path.join(base,'profiles',id));for(const sub of ['.claude','.codex','.config','.local','.local/share'])await this.directory(path.join(root,sub));await prepare(root);r.profiles.push({id,label:label.trim()});await this.save(r);return {id,label:label.trim(),root,removable:true};});}
+ async activate(id){return this.mutate(async()=>{await this.root(id);const r=await this.registry();r.active=id;await this.save(r);});}
+ async remove(id){return this.mutate(async()=>{if(id==='default')throw Error('The default account cannot be removed');const root=await this.root(id),r=await this.registry();r.profiles=r.profiles.filter(p=>p.id!==id);if(r.active===id)r.active='default';await this.save(r);return root;});}
+ async env(agent,id){const root=await this.root(id);if(id==='default')return [];const env={claude:[['CLAUDE_CONFIG_DIR',root+'/.claude']],codex:[['CODEX_HOME',root+'/.codex']],opencode:[['XDG_CONFIG_HOME',root+'/.config'],['XDG_DATA_HOME',root+'/.local/share']],amp:[['AMP_SETTINGS_FILE',root+'/.config/amp/settings.json']]};return env[agent]?[['CANOPY_PROFILE',id],...env[agent]]:[];}
+ async accounts(id){const root=await this.root(id),claude=await this.read(root+'/.claude/.claude.json'),codex=await this.read(root+'/.codex/auth.json');let email=null;try{email=JSON.parse(Buffer.from(codex.tokens?.id_token.split('.')[1],'base64url').toString()).email??null;}catch{}const account=claude.oauthAccount?.emailAddress??claude.oauthAccount?.displayName??null;return [{agent:'claude',state:account?'in':'out',account},{agent:'codex',state:codex.OPENAI_API_KEY||codex.tokens?.access_token?'in':'out',account:codex.OPENAI_API_KEY?'API key':typeof email==='string'?email:null},...['opencode','amp'].map(agent=>({agent,state:'unknown',account:null}))];}
+}

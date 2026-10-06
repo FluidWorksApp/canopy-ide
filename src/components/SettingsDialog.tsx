@@ -84,6 +84,8 @@ import {
 } from "../fleetSnapshot";
 import { FleetReadinessPanel } from "./FleetReadinessPanel";
 import { AgentMemorySettings } from "./AgentMemorySettings";
+import {OrganizationSettings} from "./OrganizationSettings";
+import { AccountSettings } from "./AccountSettings";
 import {
   loginCommand,
   supportsProfiles,
@@ -116,6 +118,8 @@ import {
 } from "../sessionNameThemes";
 
 export type SettingsTab =
+  | "account"
+  | "teams"
   | "appearance"
   | "agents"
   | "mascot"
@@ -144,6 +148,8 @@ interface SettingsDialogProps {
  *  half turns that face into a companion that runs a CLI, which is a question
  *  about agents rather than about colours. */
 const TABS: { id: SettingsTab; label: string; group: string }[] = [
+  { id: "account", label: "Account & balance", group: "Your account" },
+  { id: "teams", label: "Teams", group: "Your account" },
   { id: "appearance", label: "Appearance", group: "Look" },
   { id: "editor", label: "Editor", group: "Look" },
   { id: "terminal", label: "Terminal", group: "Look" },
@@ -1402,6 +1408,8 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
             ))}
           </nav>
           <div className="settings-content">
+            {tab === "account" && <Item name="Canopy account" desc="Your workspace plans and usage."><AccountSettings onTeams={()=>setTab("teams")} onWorkspaces={()=>{onClose();window.dispatchEvent(new Event("canopy:open-workspaces"));}} /></Item>}
+            {tab === "teams" && <OrganizationSettings />}
             {tab === "appearance" && (
               <>
                 <Item
@@ -1623,7 +1631,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                       "A CLI with no such flag (Amp) launches unchanged. Applies to agents started from now on. " +
                       "Leave it off and an agent started on a task still launches in its CLI's least " +
                       "intrusive working mode — claude --permission-mode auto, opencode --agent build — " +
-                      "so a brief never lands in plan mode; it just keeps asking before it acts."
+                      "so a brief never lands in plan mode. Auto modes can still ask for approval. Restart existing agents to apply a changed setting."
                     }
                   />
                   {s.dangerouslySkipPermissions && (
@@ -2177,7 +2185,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
         </div>
         <div className="settings-footer">
           <div className="settings-footer-note">
-            Everything here applies immediately and is stored on this machine only.
+            {tab === "account" || tab === "teams" ? "Account and team changes are saved to your Canopy account." : "Device preferences apply immediately and are stored on this machine."}
           </div>
           <Button variant="accent" onClick={onClose}>
             Done

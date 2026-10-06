@@ -1,3 +1,4 @@
+import { fixedNumber } from "../format";
 // Bottom status tray: git branch, base-branch drift, running agent, model,
 // tokens, estimated cost. Token/model data comes from Claude Code session
 // transcripts (path arrives via hook events); cost is an estimate from a
@@ -78,7 +79,7 @@ function Nums({
     <span className="bd-nums">
       {/* Colour is backed up by weight: red alone is a poor signal for anyone
           who can't separate it from the dim grey these numbers normally are. */}
-      <span className={hot.cpu ? "bd-hot" : undefined}>{cpu.toFixed(0)}%</span>{" "}
+      <span className={hot.cpu ? "bd-hot" : undefined}>{fixedNumber(cpu, 0)}%</span>{" "}
       · <span className={hot.mem ? "bd-hot" : undefined}>{fmtMem(mem)}</span>
     </span>
   );
@@ -650,29 +651,30 @@ export const StatusBar = memo(function StatusBar({
   const [storeStats, setStoreStats] = useState<ipc.StoreSessionStats | null>(
     null,
   );
+  const usageSessionId = !transcript && !storeSessionId ? activeSessionId : null;
+  const usageCacheKey = storeSessionId ? `store:${storeSessionId}` :
+    usageSessionId ? `${agentId}:${agentProfile || "default"}:${usageSessionId}` : null;
   useEffect(() => {
-    setStoreStats(
-      storeSessionId ? (STORE_STATS.get(storeSessionId) ?? null) : null,
-    );
-    if (!storeSessionId || !visible) return;
+    setStoreStats(usageCacheKey ? (STORE_STATS.get(usageCacheKey) ?? null) : null);
+    if (!usageCacheKey || !visible) return;
     let cancelled = false;
     const refresh = () => {
-      void ipc
-        .opencodeSessionStats(storeSessionId)
-        .then((s) => {
-          if (!s) return;
-          setBounded(STORE_STATS, storeSessionId, s, SESSION_STATS_CACHE_LIMIT);
-          if (!cancelled) setStoreStats(s);
-        })
-        .catch(() => {});
+      const pending = storeSessionId
+        ? ipc.opencodeSessionStats(storeSessionId)
+        : ipc.agentUsage().then(rows => rows.find(row =>
+          row.session_id === usageSessionId && row.agent === agentId &&
+          row.profile === (agentProfile || "default") && row.supported) ?? null);
+      void pending.then(s => {
+        if (cancelled) return;
+        if (s) setBounded(STORE_STATS, usageCacheKey, s, SESSION_STATS_CACHE_LIMIT);
+        else STORE_STATS.delete(usageCacheKey);
+        setStoreStats(s);
+      }).catch(() => {});
     };
     refresh();
     const timer = setInterval(refresh, 8_000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [storeSessionId, visible]);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [usageCacheKey, storeSessionId, usageSessionId, agentId, agentProfile, visible]);
 
   // Transcript first, store second: a tab has one or the other, never both.
   // The store's `cost` is the CLI's own billed figure — for a custom provider
@@ -693,7 +695,9 @@ export const StatusBar = memo(function StatusBar({
   // The tray chip reddens on the whole app's own footprint, not on anything
   // inside the popup: the per-session numbers only stream while the popup is
   // open, so a chip that watched them would go quiet the moment you closed it.
-  const appLoad = app ? loadFlags("app", app.cpu, app.mem_bytes) : null;
+  const appLoad = app?.workspace
+    ? { hot: false, cpu: app.cpu >= 90, mem: !!app.workspace.memoryLimitBytes && app.mem_bytes / app.workspace.memoryLimitBytes >= .85 }
+    : app ? loadFlags("app", app.cpu, app.mem_bytes) : null;
 
   // `rev-parse --abbrev-ref HEAD` answers a literal "HEAD" off a branch, which
   // the tray used to print as if it were one. It is the snapshot state the Git
@@ -938,7 +942,9 @@ export const StatusBar = memo(function StatusBar({
         <span className="status-item status-res status-model-anchor">
           <button
             className="status-model-btn"
-            title={withLoadNote(
+            title={app.workspace
+              ? `Remote workspace: ${app.workspace.available ? "agents, shells, builds and desktop" : "resources unavailable"}. CPU is a percentage of the workspace CPU allocation. Click for workspace resources.`
+              : withLoadNote(
               `${app.includes_webviews ? "canopy" : "canopy lower bound"}: ` +
                 `${app.procs} process${app.procs === 1 ? "" : "es"} — ` +
                 `Rust core, language servers, terminals and everything they spawned. ` +
@@ -958,11 +964,11 @@ export const StatusBar = memo(function StatusBar({
             }}
           >
             <span className={appLoad?.cpu ? "bd-hot" : undefined}>
-              {app.cpu.toFixed(0)}% cpu
+              {Number.isFinite(app.cpu) ? fixedNumber(app.cpu, 0) : "—"}% cpu
             </span>{" "}
             ·{" "}
             <span className={appLoad?.mem ? "bd-hot" : undefined}>
-              {fmtMem(app.mem_bytes)}
+              {Number.isFinite(app.mem_bytes) ? fmtMem(app.mem_bytes) : "—"}
             </span>
           </button>
           {breakdown && (
@@ -971,7 +977,22 @@ export const StatusBar = memo(function StatusBar({
               style={menuStyle}
               onMouseLeave={() => setBreakdown(false)}
             >
-              {(() => {
+              {app.workspace ? <>
+                <div className="bd-head"><span>Workspace resources</span></div>
+                <div className="bd-resource-section"><span className="bd-resource-label">Usage now</span><dl className="bd-resource-grid">
+                  <dt>RAM</dt><dd>{Number.isFinite(app.mem_bytes)?fmtMem(app.mem_bytes):'—'} <span className="bd-resource-muted">of {app.workspace.memoryLimitBytes?fmtMem(app.workspace.memoryLimitBytes):'—'} allocated</span></dd>
+                  <dt>CPU</dt><dd>{Number.isFinite(app.cpu)?`${fixedNumber(app.cpu, 0)}%`:'—'} <span className="bd-resource-muted">of {app.workspace.cpus??'—'} allocated cores</span></dd>
+                </dl></div>
+                {(app.workspace.elasticCpu||app.workspace.elasticMemory)&&<div className="bd-resource-section"><span className="bd-resource-label">Automatic scaling · configured range</span><dl className="bd-resource-grid">
+                  {app.workspace.elasticMemory&&<><dt>RAM</dt><dd>{fmtMem(app.workspace.elasticMemory.minMiB*1024**2)} – {fmtMem(app.workspace.elasticMemory.maxMiB*1024**2)}</dd></>}
+                  {app.workspace.elasticCpu&&<><dt>CPU</dt><dd>{app.workspace.elasticCpu.minCpus} – {app.workspace.elasticCpu.maxCpus} cores</dd></>}
+                </dl></div>}
+                {app.workspace.elasticMemory&&app.workspace.elasticMemory.availableMaxMiB<app.workspace.elasticMemory.maxMiB&&<p className="bd-workspace-note"><strong>RAM available to this workspace: {fmtMem(app.workspace.elasticMemory.availableMaxMiB*1024**2)}.</strong> The VM reserves capacity for its host and other workspaces.</p>}
+                {app.workspace.elasticCpu&&app.workspace.elasticCpu.availableMaxCpus<app.workspace.elasticCpu.maxCpus&&<p className="bd-workspace-note">This VM allows up to {app.workspace.elasticCpu.availableMaxCpus} CPU cores for this workspace.</p>}
+                {(app.workspace.elasticMemory?.status==='update_failed'||app.workspace.elasticCpu?.status==='update_failed')&&<p className="bd-workspace-note" role="status">Allocation update failed. Retrying automatically.</p>}
+                <p className="bd-workspace-note bd-resource-muted">{app.workspace.available?'Usage includes all agents, builds, shells and the desktop. Allocation grows with sustained demand, within the VM’s available capacity.':'Resources unavailable. Reconnecting…'}</p>
+
+              </> : (() => {
                 // Each session lands in the first project whose roots contain
                 // its cwd; two projects sharing a root can't double-count it.
                 const assigned = new Set<number>();
@@ -1057,7 +1078,7 @@ export const StatusBar = memo(function StatusBar({
                         <span className="bd-nums">
                           ↑{fmtTokens(usSent)} ↓{fmtTokens(usRecv)}
                           {usPriced &&
-                            ` · ${usEst ? "~" : ""}$${usCost.toFixed(2)}`}
+                            ` · ${usEst ? "~" : ""}$${fixedNumber(usCost, 2)}`}
                         </span>
                       </div>
                     )}
@@ -1321,7 +1342,7 @@ export const StatusBar = memo(function StatusBar({
               : "estimated session cost"
           }
         >
-          {billed ? "" : "~"}${cost.toFixed(2)}
+          {billed ? "" : "~"}${fixedNumber(cost, 2)}
         </span>
       )}
       {/* Plan headroom, right of spend: the two answer different questions —

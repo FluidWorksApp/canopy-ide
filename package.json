@@ -31,6 +31,7 @@
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@fontsource/vt323": "^5.3.0",
     "@git-diff-view/react": "0.1.7",
+    "@novnc/novnc": "1.7.0",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-notification": "^2.3.3",

@@ -5,9 +5,9 @@ const read = (path: string) => readFileSync(path, "utf8");
 
 describe("renderer recovery wiring", () => {
   it("registers and answers liveness before Monaco can delay React", () => {
-    const main = read("src/main.tsx");
+    const main = read("src/localMain.tsx");
     const selftest = read("src-tauri/src/selftest.rs");
-    const registration = main.indexOf("ptyRendererRegister()");
+    const registration = main.indexOf("registerRendererWithRetry(ptyRendererRegister");
     const exitListener = main.indexOf("await onPtyExit");
     const heartbeat = main.indexOf("installEarlyWatchdogHeartbeat()");
     const monacoBarrier = main.indexOf("Promise.all([");
@@ -16,10 +16,8 @@ describe("renderer recovery wiring", () => {
     expect(heartbeat).toBeGreaterThan(exitListener);
     expect(heartbeat).toBeLessThan(monacoBarrier);
     expect(main).not.toContain('invoke("pty_kill_all")');
-    expect(main).toContain("renderer registration failed; retrying");
-    expect(main).toContain('new Error("renderer registration timed out")');
-    expect(main).toContain("Promise.race([");
-    expect(main).toContain("retryMs = Math.min(retryMs * 2, 2_000)");
+    expect(main).toContain("registerRendererWithRetry(ptyRendererRegister");
+    expect(main).not.toContain("Promise.race([");
     const ipc = read("src/ipc.ts");
     expect(ipc).toContain("renderer registration was superseded");
     const reload = ipc.indexOf('await invoke<void>("selftest_reload_renderer")');

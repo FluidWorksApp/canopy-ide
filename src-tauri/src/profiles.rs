@@ -477,6 +477,24 @@ pub async fn profile_setup(
     crate::agents::setup_agent_in(&agent, &root, &home)
 }
 
+pub(crate) fn valid_account_credentials(agent: &str, value: &serde_json::Value) -> bool {
+    let nonempty = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+    };
+    match agent {
+        "claude" => {
+            nonempty(value.pointer("/claudeAiOauth/accessToken"))
+                && nonempty(value.pointer("/claudeAiOauth/refreshToken"))
+        }
+        "codex" => {
+            nonempty(value.pointer("/tokens/access_token")) || nonempty(value.get("OPENAI_API_KEY"))
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -773,5 +791,17 @@ mod tests {
         .unwrap();
         let ids: Vec<String> = list(&h).into_iter().map(|p| p.id).collect();
         assert_eq!(ids, vec![DEFAULT_ID.to_string(), "ok".to_string()]);
+    }
+}
+
+/// Transcript layout is owned by the profile adapter.
+pub(crate) fn conversation_store(agent: &str) -> Option<&'static str> {
+    match agent { "claude" => Some(".claude/projects"), "codex" => Some(".codex/sessions"), _ => None }
+}
+pub(crate) fn conversation_file_matches(agent: &str, name: &str, id: &str) -> bool {
+    match agent {
+        "claude" => name == format!("{id}.jsonl"),
+        "codex" => name.starts_with("rollout-") && name.ends_with(&format!("-{id}.jsonl")),
+        _ => false,
     }
 }

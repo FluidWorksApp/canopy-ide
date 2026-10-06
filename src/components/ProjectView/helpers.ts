@@ -262,6 +262,7 @@ export interface ClaimSubTab {
 }
 
 export interface ChatSubTab {
+  accountConversation?: import("../AccountChatView").AccountConversation;
   id: string;
   type: "chat";
   /** Relay member id for a DM; null for the everyone channel. */
