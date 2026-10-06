@@ -65,7 +65,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     setStoppingVm(true);setError('');setHibernateConfirm(false);setOpen(false);setProgress(null);setHibernateMinimized(false);
     setHibernateOperation(previous=>({workspaceId:target,name,startedAt:Date.now(),progress:checkExisting?previous?.progress??{phase:'stopping-compute',shutdownAccepted:true}:{phase:'saving-projects',shutdownAccepted:false}}));
     const onProgress:HibernateProgressListener=progress=>{if(run===hibernateRun.current)setHibernateOperation(previous=>previous?{...previous,progress:{...previous.progress,...progress},error:undefined}:previous);};
-    try{if(checkExisting)await waitForWorkspaceStopped(target,onProgress);else await onHibernateWorkspace(onProgress);
+    try{if(checkExisting)await waitForWorkspaceStopped(target,onProgress,undefined,{accepted:hibernateOperation?.progress.shutdownAccepted??false});else await onHibernateWorkspace(onProgress);
       if(run!==hibernateRun.current)return;
       setHibernateOperation(previous=>previous?{...previous,progress:{...previous.progress,phase:'completed',shutdownAccepted:true}}:previous);setNotice('Workspace hibernated. Compute is stopped.');
     }catch(error){if(run===hibernateRun.current)setHibernateOperation(previous=>previous?{...previous,error:String(error)}:previous);}
