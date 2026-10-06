@@ -122,7 +122,7 @@ jobs:
           fi
           docker buildx imagetools create "${tags[@]}" "$image:sha-$REVISION-amd64" "$image:sha-$REVISION-arm64"
           docker buildx imagetools inspect "$image:sha-$REVISION" --format '{{json .Manifest}}' > image-manifest.json
-          IMAGE="$image" node --input-type=module -e 'import fs from "node:fs";import {runtimeReleaseKey} from "./packages/remote-host/runtime-release-key.mjs";const m=JSON.parse(fs.readFileSync("image-manifest.json"));if(!/^sha256:[a-f0-9]{64}$/.test(m.digest))throw Error("Missing image digest");fs.writeFileSync("workspace-release.json",JSON.stringify({revision:process.env.REVISION,runtimeKey:runtimeReleaseKey(process.env.REVISION),image:process.env.IMAGE+"@"+m.digest,channel:process.env.IMAGE+":stable",platforms:["linux/amd64","linux/arm64"]},null,2));'
+          IMAGE="$image" node --input-type=module -e 'import fs from "node:fs";import {createHash} from "node:crypto";import {runtimeReleaseKey} from "./packages/remote-host/runtime-release-key.mjs";const m=JSON.parse(fs.readFileSync("image-manifest.json"));if(!/^sha256:[a-f0-9]{64}$/.test(m.digest))throw Error("Missing image digest");fs.writeFileSync("workspace-release.json",JSON.stringify({revision:process.env.REVISION,runtimeLockSha256:createHash("sha256").update(fs.readFileSync("packages/remote-host/package-lock.json")).digest("hex"),checks:{linuxAmd64:true,linuxArm64:true},runtimeKey:runtimeReleaseKey(process.env.REVISION),image:process.env.IMAGE+"@"+m.digest,channel:process.env.IMAGE+":stable",platforms:["linux/amd64","linux/arm64"]},null,2));'
           cat workspace-release.json >> "$GITHUB_STEP_SUMMARY"
       - name: Package matching trusted host runtime
         run: |
