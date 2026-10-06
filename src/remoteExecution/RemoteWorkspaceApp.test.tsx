@@ -33,6 +33,10 @@ it("closing the desktop and disconnecting do not stop remote sessions", async ()
   fireEvent.change(screen.getByLabelText("Access token"), { target: { value: "test-token" } });
   fireEvent.click(screen.getByRole("button", { name: "Connect" }));
   await screen.findByText("writer");
+  // Principal display commits before the workspace initialization effect has
+  // reset its views and opened the session catalog. Interact after that actual
+  // readiness boundary so the test does not race the initial desktop reset.
+  await waitFor(() => expect(mocks.workspace).toHaveBeenCalledWith("team", "/sessions"));
   fireEvent.click(screen.getByRole("button", { name: "Open desktop" }));
   await screen.findByText("remote desktop");
   fireEvent.click(screen.getByRole("button", { name: "Close desktop" }));

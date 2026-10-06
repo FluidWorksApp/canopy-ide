@@ -2086,7 +2086,18 @@ fn denied_research_write(path: &str, entry_dir: &std::path::Path, home: &str) ->
 /// Is this the entry's own `meta.json`? One place, because the gate and the
 /// message it produces have to agree about what they are refusing.
 fn is_entry_meta(path: &str, entry_dir: &std::path::Path) -> bool {
-    path == entry_dir.join("meta.json").to_string_lossy()
+    let expected = entry_dir.join("meta.json");
+    #[cfg(windows)]
+    {
+        // Windows tools legitimately mix slash styles and drive/path case.
+        // They must not bypass the research store's protected metadata file.
+        path.replace('\\', "/")
+            .eq_ignore_ascii_case(&expected.to_string_lossy().replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        path == expected.to_string_lossy()
+    }
 }
 
 fn research_denial(path: &str, entry_dir: &std::path::Path) -> String {
@@ -2212,7 +2223,55 @@ fn bridge_env() -> Option<(String, String)> {
     None
 }
 
+#[cfg(windows)]
+fn windows_parent_of(pid: u32) -> Option<u32> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct ProcessEntry {
+        size: u32,
+        usage: u32,
+        process_id: u32,
+        default_heap: usize,
+        module_id: u32,
+        threads: u32,
+        parent_id: u32,
+        priority: i32,
+        flags: u32,
+        executable: [u16; 260],
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> *mut c_void;
+        fn Process32FirstW(snapshot: *mut c_void, entry: *mut ProcessEntry) -> i32;
+        fn Process32NextW(snapshot: *mut c_void, entry: *mut ProcessEntry) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    // Toolhelp reads process metadata without spawning a shell or requiring
+    // access to another process's private environment or memory.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(2, 0) };
+    if snapshot.is_null() || snapshot as isize == -1 {
+        return None;
+    }
+    let mut entry: ProcessEntry = unsafe { std::mem::zeroed() };
+    entry.size = std::mem::size_of::<ProcessEntry>() as u32;
+    let mut result = None;
+    let mut available = unsafe { Process32FirstW(snapshot, &mut entry) };
+    while available != 0 {
+        if entry.process_id == pid {
+            result = (entry.parent_id != 0).then_some(entry.parent_id);
+            break;
+        }
+        available = unsafe { Process32NextW(snapshot, &mut entry) };
+    }
+    unsafe { CloseHandle(snapshot) };
+    result
+}
+
 fn parent_of(pid: u32) -> Option<u32> {
+    #[cfg(windows)]
+    {
+        return windows_parent_of(pid);
+    }
     #[cfg(target_os = "linux")]
     {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -2221,7 +2280,7 @@ fn parent_of(pid: u32) -> Option<u32> {
         let rest = stat.rsplit_once(')')?.1;
         return rest.split_whitespace().nth(1)?.parse().ok();
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(not(target_os = "linux"), not(windows)))]
     {
         // Absolute: this runs in a sidecar started by a GUI-launched app, where
         // PATH may not contain /bin at all (see spawnPathGuard).
@@ -6892,6 +6951,23 @@ mod tests {
         // A sibling directory sharing a textual prefix is still outside.
         assert!(denied(
             "/Users/dev/.canopy/research/p1/0007-thing-old/research.md"
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_meta_paths_cannot_bypass_the_store_guard_with_slashes_or_case() {
+        let entry = std::path::PathBuf::from(r"C:\Users\dev\.canopy\research\p1\entry");
+        for path in [
+            r"C:\Users\dev\.canopy\research\p1\entry\meta.json",
+            "c:/users/dev/.canopy/research/p1/entry/META.JSON",
+        ] {
+            assert!(is_entry_meta(path, &entry));
+            assert!(denied_research_write(path, &entry, r"C:\Users\dev"));
+        }
+        assert!(!is_entry_meta(
+            "C:/Users/dev/.canopy/research/p1/entry/research.md",
+            &entry
         ));
     }
 
