@@ -20,20 +20,20 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::agent_cli::{self, AccountProbe, ProfileIsolation};
+
 /// The implicit profile: plain `$HOME`, no env, what every session used before
 /// this module existed. Reserved — a created profile can never claim this id.
 pub const DEFAULT_ID: &str = "default";
 
-/// CLIs whose credentials we can actually put in a box. Everything else is
-/// listed by the UI as single-account rather than silently given a profile that
-/// isolates nothing:
+/// CLIs whose credentials we can actually put in a box are declared by the
+/// native CLI manifest. Everything else is listed by the UI as single-account
+/// rather than silently given a profile that isolates nothing:
 ///   - agy (Antigravity): OS keyring, no documented config-home variable
 ///   - omp: no documented config-home variable
 ///   - aider: no login at all — its key is an API key in the environment
-pub const PROFILE_AGENTS: &[&str] = &["claude", "codex", "opencode", "amp"];
-
 pub fn supports_profiles(agent: &str) -> bool {
-    PROFILE_AGENTS.contains(&agent)
+    agent_cli::resolve(agent).is_some_and(|cli| cli.profile_isolation.is_some())
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -260,23 +260,27 @@ pub fn delete(home: &str, id: &str) -> Result<String, String> {
 /// `$HOME`: that would change which code path the CLI takes. Also empty for a
 /// CLI we cannot isolate, so nothing implies an isolation that isn't happening.
 pub fn env_for(home: &str, agent: &str, id: &str) -> Vec<(String, String)> {
-    if id == DEFAULT_ID || !supports_profiles(agent) {
+    if id == DEFAULT_ID {
         return Vec::new();
     }
+    let Some(isolation) = agent_cli::resolve(agent).and_then(|cli| cli.profile_isolation) else {
+        return Vec::new();
+    };
     let root = root_for(home, id);
     let at = |sub: &str| root.join(sub).to_string_lossy().to_string();
     // canopy-hook files digests under this.
     let mut env = vec![("CANOPY_PROFILE".to_string(), id.to_string())];
-    match agent {
-        "claude" => env.push(("CLAUDE_CONFIG_DIR".into(), at(".claude"))),
-        "codex" => env.push(("CODEX_HOME".into(), at(".codex"))),
+    match isolation {
+        ProfileIsolation::ClaudeConfigDir => env.push(("CLAUDE_CONFIG_DIR".into(), at(".claude"))),
+        ProfileIsolation::CodexHome => env.push(("CODEX_HOME".into(), at(".codex"))),
         // opencode splits config from credentials across the XDG pair.
-        "opencode" => {
+        ProfileIsolation::XdgConfigAndData => {
             env.push(("XDG_CONFIG_HOME".into(), at(".config")));
             env.push(("XDG_DATA_HOME".into(), at(".local/share")));
         }
-        "amp" => env.push(("AMP_SETTINGS_FILE".into(), at(".config/amp/settings.json"))),
-        _ => {}
+        ProfileIsolation::AmpSettingsFile => {
+            env.push(("AMP_SETTINGS_FILE".into(), at(".config/amp/settings.json")))
+        }
     }
     env
 }
@@ -396,15 +400,14 @@ fn codex_account(cfg: &Path) -> AccountStatus {
 /// What each CLI's account looks like inside one profile.
 pub fn account_status(home: &str, id: &str) -> Vec<AccountStatus> {
     let root = root_for(home, id);
-    PROFILE_AGENTS
-        .iter()
-        .map(|agent| match *agent {
-            "claude" => claude_account(&root, home),
-            "codex" => codex_account(&root),
+    agent_cli::profile_clis()
+        .map(|cli| match cli.account_probe {
+            AccountProbe::ClaudeState => claude_account(&root, home),
+            AccountProbe::CodexAuth => codex_account(&root),
             // opencode (opencode.db) and amp keep credentials somewhere this
             // has not been verified against the real CLIs.
-            other => AccountStatus {
-                agent: other.into(),
+            AccountProbe::Unknown => AccountStatus {
+                agent: cli.id.into(),
                 state: "unknown",
                 account: None,
             },
@@ -430,10 +433,10 @@ pub async fn profiles_list() -> Result<Vec<Profile>, String> {
 pub async fn profile_create(label: String) -> Result<Profile, String> {
     let home = home()?;
     let profile = create(&home, &label)?;
-    for agent in PROFILE_AGENTS {
+    for cli in agent_cli::profile_clis() {
         // Best effort: a machine without codex still gets a working claude
         // profile. profile_setup is the retry.
-        let _ = crate::agents::setup_agent_in(agent, &profile.root, &home);
+        let _ = crate::agents::setup_agent_in(cli.id, &profile.root, &home);
     }
     Ok(profile)
 }
@@ -474,6 +477,24 @@ pub async fn profile_setup(
     crate::agents::setup_agent_in(&agent, &root, &home)
 }
 
+pub(crate) fn valid_account_credentials(agent: &str, value: &serde_json::Value) -> bool {
+    let nonempty = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+    };
+    match agent {
+        "claude" => {
+            nonempty(value.pointer("/claudeAiOauth/accessToken"))
+                && nonempty(value.pointer("/claudeAiOauth/refreshToken"))
+        }
+        "codex" => {
+            nonempty(value.pointer("/tokens/access_token")) || nonempty(value.get("OPENAI_API_KEY"))
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,8 +523,8 @@ mod tests {
     fn the_default_profile_exports_no_environment() {
         let home = scratch("default-env");
         let h = home.to_string_lossy().to_string();
-        for agent in PROFILE_AGENTS {
-            assert!(env_for(&h, agent, DEFAULT_ID).is_empty());
+        for cli in agent_cli::profile_clis() {
+            assert!(env_for(&h, cli.id, DEFAULT_ID).is_empty());
         }
     }
 
@@ -770,5 +791,21 @@ mod tests {
         .unwrap();
         let ids: Vec<String> = list(&h).into_iter().map(|p| p.id).collect();
         assert_eq!(ids, vec![DEFAULT_ID.to_string(), "ok".to_string()]);
+    }
+}
+
+/// Transcript layout is owned by the profile adapter.
+pub(crate) fn conversation_store(agent: &str) -> Option<&'static str> {
+    match agent {
+        "claude" => Some(".claude/projects"),
+        "codex" => Some(".codex/sessions"),
+        _ => None,
+    }
+}
+pub(crate) fn conversation_file_matches(agent: &str, name: &str, id: &str) -> bool {
+    match agent {
+        "claude" => name == format!("{id}.jsonl"),
+        "codex" => name.starts_with("rollout-") && name.ends_with(&format!("-{id}.jsonl")),
+        _ => false,
     }
 }

@@ -24,6 +24,11 @@ export interface RememberedTerminal {
   /** Runtime identity used to reconnect this terminal to a remembered split. */
   tabId?: string;
   paneGroup?: string;
+  /** The name the user chose, which restore re-asserts on the new session.
+   *  `renamed` is the pre-tabName spelling of the same fact and is still read
+   *  from stores written before that module existed. */
+  userName?: string;
+  renamed?: boolean;
   /** Exact conversation identity. Optional so pre-session memory remains valid. */
   sessionId?: string;
   /** Account that owns the session store. */

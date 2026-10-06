@@ -273,6 +273,13 @@ describe("followLink", () => {
     });
   });
 
+  it("migrates old Session changes links into Source control", () => {
+    expect(followLink({ kind: "panel", panel: "changes" }, ctx())).toEqual({
+      do: "panel",
+      panel: "git",
+    });
+  });
+
   it("carries a file's line through", () => {
     expect(
       followLink({ kind: "file", path: "/a.rs", line: 12 }, ctx()),

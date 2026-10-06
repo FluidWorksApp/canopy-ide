@@ -2,7 +2,7 @@
 // commit, sync with the remote, and pull requests. Everything runs through the
 // system `git`/`gh` in the Rust core — the same tools the user's terminal uses,
 // so hooks, credential helpers and SSH config all behave identically.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { askDialog } from "../branchSwitch";
 import * as ipc from "../ipc";
 import { getSettings } from "../settings";
@@ -34,6 +34,11 @@ interface GitPanelProps {
    *  your section, commit message draft and scroll survive a switch away) but
    *  stops polling git — nobody is looking. */
   visible: boolean;
+  /** The project's live working-tree surface. It is owned by ProjectView
+   * because that is where file opening, collaboration and agent queries live,
+   * but presented here so source control has one rail destination. */
+  changes?: ReactNode;
+  changeCount?: number;
   components: { label: string; path: string }[];
   /** Open a file's diff in the main area. */
   /** Open a pull request in the main area. */
@@ -75,12 +80,14 @@ interface GitPanelProps {
   ) => MenuItem;
 }
 
-type Section = "branches" | "loose" | "history";
+type Section = "changes" | "branches" | "loose" | "history";
 
 
 
 export function GitPanel({
   visible,
+  changes,
+  changeCount = 0,
   components,
   onOpenCommit,
   onOpenBranch,
@@ -103,7 +110,9 @@ export function GitPanel({
   /** Workspace folder -> the port its runs are given. Allocated when the list
    *  loads, never during a render: taking a lease writes to settings. */
   const [ports, setPorts] = useState<Record<string, number>>({});
-  const [section, setSection] = useState<Section>("branches");
+  const [section, setSection] = useState<Section>(() =>
+    changes ? "changes" : "branches",
+  );
   const [busy, setBusy] = useState<string | null>(null);
   const [branchFilter, setBranchFilter] = useState("");
   const [pruning, setPruning] = useState(false);
@@ -663,7 +672,7 @@ export function GitPanel({
     return (
       <div className="side-panel">
         <div className="side-panel-head">
-          <span>Git</span>
+          <span>Source control</span>
         </div>
         <div className="tree-empty">
           No git repository in this project's components.
@@ -676,7 +685,7 @@ export function GitPanel({
   return (
     <div className="side-panel git-panel">
       <div className="side-panel-head">
-        <span>Git</span>
+        <span>Source control</span>
         <Button icon title="Refresh" onClick={() => void refresh()}>
           <RestartIcon size={13} />
         </Button>
@@ -747,15 +756,19 @@ export function GitPanel({
       </div>
 
       <div className="git-tabs">
-        {(["branches", "loose", "history"] as Section[]).map((s) => (
+        {(["changes", "branches", "loose", "history"] as Section[]).map((s) => (
           <button
             key={s}
             className={`git-tab ${section === s ? "git-tab-on" : ""}`}
             onClick={() => setSection(s)}
           >
-            {/* Names only. A count in a tab label is a number you can't act on,
-                and it shifts the tabs sideways as it changes. */}
+            {/* Changes owns the only count: unlike a branch count, it is a
+                queue the tab opens directly, and the bounded pill stays useful
+                when an agent generates hundreds of files. */}
             {s === "loose" ? "Loose ends" : s[0].toUpperCase() + s.slice(1)}
+            {s === "changes" && changeCount > 0 && (
+              <span className="git-tab-count">{Math.min(changeCount, 99)}</span>
+            )}
           </button>
         ))}
         <span className="git-spacer" />
@@ -773,6 +786,10 @@ export function GitPanel({
       </div>
 
       {busy && <div className="git-busy">{busy}…</div>}
+
+      {section === "changes" && (
+        <div className="git-changes">{changes}</div>
+      )}
 
       {section === "branches" && (
         <div className="git-scroll">

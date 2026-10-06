@@ -16,6 +16,7 @@ import {
   fitsOnOneLine,
   pickLaunchCli,
   startCommandParked,
+  unattendedContextFor,
 } from "./agentSeed";
 import { AGENT_CLIS } from "./projects";
 import { updateSettings } from "./settings";
@@ -106,6 +107,18 @@ describe("startCommandParked", () => {
     expect(fitsOnOneLine(start!.command)).toBe(true);
   });
 
+  it("keeps pinned route flags when it parks a long workflow prompt", async () => {
+    const start = await startCommandParked(
+      "codex",
+      long,
+      "/repo",
+      { model: "gpt-5.6-sol", effort: "high" },
+    );
+    expect(start?.command).toContain("-m 'gpt-5.6-sol'");
+    expect(start?.command).toContain("model_reasoning_effort=\"high\"");
+    expect(start?.command).toContain("/repo/.canopy/spot/brief-1.md");
+  });
+
   it("keeps the brief whole — nothing is trimmed to fit", async () => {
     await startCommandParked("claude", long, "/repo");
     expect(spotSaveContextText.mock.calls[0][1]).toHaveLength(long.length);
@@ -178,5 +191,43 @@ describe("pickLaunchCli", () => {
     // something else in its place.
     updateSettings({ defaultAgent: "claude" });
     expect(pickLaunchCli("not-an-agent", only("claude"))).toBeUndefined();
+  });
+});
+
+/** A sandboxed CLI is granted its own directory and nothing else. Canopy runs
+ *  agents in a git worktree beside the repo, and a worktree's index, refs and
+ *  objects live in the repo's `.git` — so the sandbox let a task change the code
+ *  and then refused every `git add`, as a sandbox error with no fix available
+ *  from inside the agent. */
+describe("unattendedContextFor", () => {
+  it("grants the git directory of a repo the caller names", () => {
+    expect(unattendedContextFor("/src/app-wt-review-292", "/src/app")).toEqual({
+      writableRoots: ["/src/app/.git"],
+    });
+    // A trailing separator on either is not a second path component.
+    expect(unattendedContextFor("/src/app-wt-x", "/src/app/")).toEqual({
+      writableRoots: ["/src/app/.git"],
+    });
+  });
+
+  it("reads the repo off a workspace path when the caller has no repo in hand", () => {
+    // The case the explicit argument misses: a task launched in a workspace that
+    // already existed, which nothing in this launch created.
+    expect(unattendedContextFor("/src/app-wt-payments")).toEqual({
+      writableRoots: ["/src/app/.git"],
+    });
+    expect(unattendedContextFor("/src/app-wt-pr-292")).toEqual({
+      writableRoots: ["/src/app/.git"],
+    });
+  });
+
+  it("grants nothing for a task running in an ordinary checkout", () => {
+    // It writes its own `.git`, which is inside the cwd the sandbox already
+    // grants. Naming a root here would be a permission with nothing asking for
+    // it.
+    expect(unattendedContextFor("/src/app")).toEqual({});
+    // "-wt-" has to end the path to name a sibling workspace: a directory inside
+    // one is not itself the worktree root.
+    expect(unattendedContextFor("/src/app-wt-x/packages/api")).toEqual({});
   });
 });

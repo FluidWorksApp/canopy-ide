@@ -3,10 +3,15 @@ import {
   AGENT_CLIS_CHANGED_EVENT,
   CLI_INSTALLS_CHANGED_EVENT,
   checkCliUpdates,
-  checkInstalledClis,
   checkInstalledPrereqs,
+  probeInstalledClis,
 } from "../../../projects";
 import type { CliUpdate } from "../../../projects";
+
+/** Waits before re-asking after a probe that could not answer. The last delay
+ *  repeats, so a machine whose shell keeps failing is asked twice a minute
+ *  rather than never again. */
+const PROBE_RETRY_MS = [2_000, 5_000, 15_000, 30_000];
 
 export function useCliLauncher() {
   const [installed, setInstalled] = useState<Record<string, boolean>>({});
@@ -21,13 +26,46 @@ export function useCliLauncher() {
   // Re-probed whenever it could have changed: an install run finishing, or
   // the launcher opening. A one-shot probe at mount meant a finished install
   // still showed — and re-ran — the installer on every click.
-  const refreshInstalled = useCallback(async () => {
-    const installedRead = checkInstalledClis();
-    void checkInstalledPrereqs().then(setPrereqs);
-    const next = await installedRead;
-    setInstalled(next);
-    return next;
+  //
+  // A probe that could not answer (null) keeps the last known state and tries
+  // again shortly. Writing its silence into state is what put "install" badges
+  // and a missing-Git banner on a machine that has all of them.
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryAttempt = useRef(0);
+  const refreshRef = useRef<() => Promise<Record<string, boolean>>>(
+    async () => installedRef.current,
+  );
+  const scheduleRetry = useCallback((failed: boolean) => {
+    if (!failed) {
+      retryAttempt.current = 0;
+      return;
+    }
+    if (retryTimer.current) return;
+    const delay = PROBE_RETRY_MS[Math.min(retryAttempt.current, PROBE_RETRY_MS.length - 1)];
+    retryAttempt.current += 1;
+    retryTimer.current = setTimeout(() => {
+      retryTimer.current = null;
+      void refreshRef.current();
+    }, delay);
   }, []);
+  useEffect(
+    () => () => {
+      if (retryTimer.current) clearTimeout(retryTimer.current);
+      retryTimer.current = null;
+    },
+    [],
+  );
+  const refreshInstalled = useCallback(async () => {
+    const [next, nextPrereqs] = await Promise.all([
+      probeInstalledClis(),
+      checkInstalledPrereqs(),
+    ]);
+    if (nextPrereqs) setPrereqs(nextPrereqs);
+    if (next) setInstalled(next);
+    scheduleRetry(!next || !nextPrereqs);
+    return next ?? installedRef.current;
+  }, [scheduleRetry]);
+  refreshRef.current = refreshInstalled;
   const getInstalledForLaunch = useCallback(async () => {
     try {
       // Launch-time truth wins over the render cache: PATH and external

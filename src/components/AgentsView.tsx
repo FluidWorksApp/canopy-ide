@@ -1,3 +1,4 @@
+import { fixedNumber } from "../format";
 // Agent management, as a page rather than a column.
 //
 // The side panel is 300px of stacked lists: it answers "is anything waiting on
@@ -20,12 +21,19 @@ import { LIFE_META, NO_ATTENTION, bucketFor, reclaimable, silenceLabel } from ".
 import type { Attention, LifeState } from "../../shared/agentLife";
 import { ashFor } from "../ash";
 import { markRestored } from "../restorable";
-import { lastHumanPrompt, useAgentSessions, type SessionRow } from "../agentSessions";
+import {
+  lastHumanPrompt,
+  useAgentSessions,
+  workingOnNow,
+  type SessionRow,
+} from "../agentSessions";
 import { claimOwnerName } from "../claims";
 import { IntegrationsList, useIntegrations } from "./AgentIntegrations";
+import { AgentControlPanel, type ControlPanelMode } from "./AgentControlPanel";
 import { PendingCard } from "./PendingCard";
 import { Mascot } from "./Mascot";
 import { AgentRuntime } from "./AgentRuntime";
+import { AgentNameEditor } from "./AgentNameEditor";
 import { sessionCost } from "../pricing";
 import { fmtTokens } from "../format";
 import {
@@ -46,7 +54,7 @@ const fmtMem = (bytes: number) =>
     ? `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
     : `${Math.round(bytes / 1024 / 1024)} MB`;
 
-const fmtCost = (n: number) => (n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`);
+const fmtCost = (n: number) => (n >= 100 ? `$${fixedNumber(n, 0)}` : `$${fixedNumber(n, 2)}`);
 
 /** Compact relative age; a card has room for "4h ago", not a timestamp. */
 const ago = (secs?: number) => {
@@ -76,6 +84,9 @@ export interface AgentsViewProps {
   active: boolean;
   projectName: string;
   roots: string[];
+  /** Every open project — the control-panel modes (graph, table) are
+   *  app-wide, so they must see past this project's roots. */
+  allProjects?: { name: string; roots: string[] }[];
   stats: ipc.SessionStats[];
   hookPath: string | null;
   pending?: PendingItem[];
@@ -169,6 +180,7 @@ export function AgentsView({
   active,
   projectName,
   roots,
+  allProjects,
   stats,
   hookPath,
   pending = [],
@@ -249,6 +261,10 @@ export function AgentsView({
   const urgent = pending.filter((i) => i.kind !== "idle");
   const finished = pending.filter((i) => i.kind === "idle");
 
+  // Cards is this page as it has always been; graph and table are the control
+  // panel — two views of one app-wide dataset (see AgentControlPanel).
+  const [mode, setMode] = useState<"cards" | ControlPanelMode>("cards");
+
   // The archive is the one list here long enough to need finding things in.
   const [query, setQuery] = useState("");
   const matches = useMemo(() => {
@@ -283,11 +299,13 @@ export function AgentsView({
     // Only reclaim an agent that has *provably* finished — never one mid-turn,
     // never one blocked, and never one we have merely lost track of.
     const canHibernate = reclaimable(life, attention);
-    const task = lastHumanPrompt(digest?.prompts);
+    const task = workingOnNow(row, tabNames);
     const name = agentDisplayName({
       tab: tabNames?.get(s.id),
-      agentLabel: agent?.label,
+      sessionName: s.name,
       sessionTitle: s.title,
+      cwd: s.cwd,
+      agentLabel: agent?.label,
     });
     const u = digest?.session_id ? usageById.get(digest.session_id) : undefined;
     const cost = u ? sessionCost(u) : null;
@@ -308,7 +326,7 @@ export function AgentsView({
               ) : (
                 <TerminalIcon size={13} className="agv-card-mark" />
               )}
-              {name}
+              <AgentNameEditor ptyId={s.id} name={s.name ?? name} />
             </span>
             <span className={`agv-card-state ${st.cls}`} title={stTitle}>
               {st.label}
@@ -383,7 +401,7 @@ export function AgentsView({
         <footer className="agv-card-foot">
           <div className="agv-card-metrics">
             <span className="agv-metric" title="CPU across every process in this terminal">
-              {s.total_cpu.toFixed(0)}% cpu
+              {fixedNumber(s.total_cpu, 0)}% cpu
             </span>
             <span className="agv-metric" title="Resident memory across every process in this terminal">
               {fmtMem(s.total_mem_bytes)}
@@ -452,7 +470,31 @@ export function AgentsView({
       <header className="agv-head">
         <div className="agv-title">
           <h1>Agents</h1>
-          <span className="agv-project">{projectName}</span>
+          <span className="agv-project">
+            {mode === "cards" ? projectName : "every project"}
+          </span>
+          <span
+            className="agv-modes"
+            role="group"
+            aria-label="How to show the agents"
+          >
+            {(["cards", "graph", "table"] as const).map((m) => (
+              <button
+                key={m}
+                className={`agv-mode ${mode === m ? "agv-mode-on" : ""}`}
+                title={
+                  m === "cards"
+                    ? "This project's agents, as cards"
+                    : m === "graph"
+                      ? "Every agent in Canopy as a live graph — who talks to whom"
+                      : "Every agent in Canopy as a table"
+                }
+                onClick={() => setMode(m)}
+              >
+                {m}
+              </button>
+            ))}
+          </span>
           <span className="agv-spacer" />
           <Button
             size="sm"
@@ -479,6 +521,7 @@ export function AgentsView({
           </span>
         </div>
 
+        {mode === "cards" && (
         <div className="agv-stats">
           <Stat label="running" value={cards.length} tone={cards.length ? "active" : undefined} />
           <Stat label="working" value={working} />
@@ -499,8 +542,20 @@ export function AgentsView({
             />
           )}
         </div>
+        )}
       </header>
 
+      {mode !== "cards" ? (
+        <div className="agv-body acp-body">
+          <AgentControlPanel
+            active={active}
+            mode={mode}
+            allProjects={allProjects ?? [{ name: projectName, roots }]}
+            onJumpToPty={onJumpToPty}
+            tabNames={tabNames}
+          />
+        </div>
+      ) : (
       <div className="agv-body">
         {urgent.length > 0 && (
           <Section title="Needs your input" count={urgent.length}>
@@ -566,7 +621,7 @@ export function AgentsView({
                   <span className="agv-term-name">{s.title || "shell"}</span>
                   {dir && <span className="agv-chip">{dir}</span>}
                   <span className="agv-spacer" />
-                  <span className="agv-metric">{s.total_cpu.toFixed(0)}% cpu</span>
+                  <span className="agv-metric">{fixedNumber(s.total_cpu, 0)}% cpu</span>
                   <span className="agv-metric">{fmtMem(s.total_mem_bytes)}</span>
                   <Button
                     icon
@@ -745,6 +800,7 @@ export function AgentsView({
           )}
         </Section>
       </div>
+      )}
     </div>
   );
 }

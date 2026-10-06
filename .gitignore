@@ -40,6 +40,11 @@ portal/dist/*
 
 # Sidecar binaries staged by scripts/prepare-sidecar.mjs (built artifacts)
 /src-tauri/binaries/
+# Chrome streaming bridge staged by scripts/prepare-chrome-stream.mjs. Keep a
+# committed placeholder so tauri.conf.json's `chrome-stream/**/*` resource glob
+# matches on a fresh checkout (cargo test/check in CI never stages it).
+/src-tauri/chrome-stream/*
+!/src-tauri/chrome-stream/.gitkeep
 
 # design-sync: staged scripts, build output, and all sync state/inputs
 /.ds-sync/
@@ -57,3 +62,10 @@ src-tauri/onnxruntime/*.dll
 # Inside the workspace because fs_read_file only reads registered roots; never
 # part of the repo. See prArtifactPath in src/microTasks.ts.
 .canopy/
+
+# Reviewed helper sources staged into the Docker build context
+/packages/remote-host/hook-build/
+
+# Canonical browser bridge/viewer sources staged for runtime/app builds
+/packages/remote-host/chrome-stream/
+/public/chrome-stream/

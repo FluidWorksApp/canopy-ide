@@ -15,6 +15,13 @@ export type CoachTip =
   | "multiplex";
 
 const key = (tip: CoachTip) => `canopy.coachmark.${tip}.v1`;
+const ALL_TIPS: CoachTip[] = [
+  "rail-project",
+  "rail-review",
+  "rail-agents",
+  "agent",
+  "multiplex",
+];
 
 export function shouldShowTip(tip: CoachTip): boolean {
   try {
@@ -31,4 +38,9 @@ export function markTipSeen(tip: CoachTip): void {
   } catch {
     // A convenience marker; failing to persist it just re-shows the tip.
   }
+}
+
+/** Selftests need a deterministic empty stage before a project exists. */
+export function markAllTipsSeen(): void {
+  for (const tip of ALL_TIPS) markTipSeen(tip);
 }

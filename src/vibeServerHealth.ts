@@ -14,7 +14,7 @@ export interface VibeServerExitSample {
   requested: boolean;
 }
 
-export type VibeServerHealthAction = "ignore" | "restart" | "crash-loop";
+export type VibeServerHealthAction = "ignore" | "repair" | "crash-loop";
 
 export const INITIAL_VIBE_SERVER_HEALTH: VibeServerHealthState = {
   targetKey: null,
@@ -35,7 +35,7 @@ export function judgeVibeServerExit(
 ): { state: VibeServerHealthState; action: VibeServerHealthAction } {
   const state =
     current.targetKey === targetKey ? current : resetVibeServerHealth(targetKey);
-  if (sample.requested || sample.exitCode === 0) {
+  if (sample.requested) {
     return { state: resetVibeServerHealth(targetKey), action: "ignore" };
   }
   if (state.halted) return { state, action: "ignore" };
@@ -54,7 +54,7 @@ export function judgeVibeServerExit(
   }
   return {
     state: { targetKey, failures, halted: false },
-    action: "restart",
+    action: "repair",
   };
 }
 

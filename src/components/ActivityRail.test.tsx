@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
-import { act, render } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, render, fireEvent } from "@testing-library/react";
 import { ActivityRail } from "./ActivityRail";
 import { THEME_CHANGE_EVENT } from "../settings";
 
@@ -29,27 +29,32 @@ describe("ActivityRail", () => {
   // The rail's order is the whole design — which icon leads a group and which
   // ones sit at the foot with Settings. Nothing else asserts it, so a reorder
   // that nobody meant would ship silently.
-  it("puts Agents at the head of its group and Tools at the foot by Settings", () => {
+  it("combines project controls and places Account beside Settings", () => {
     const { container } = render(<ActivityRail {...props} />);
     const labels = [...container.querySelectorAll("button")].map(
       (b) => b.getAttribute("aria-label") ?? b.getAttribute("title"),
     );
     expect(labels).toEqual([
-      "Project — Components & files",
-      "Project — Servers — every component you can run, start and manage",
-      "Source control & Review — Session changes",
-      "Source control & Review — Git — branches, commits, worktrees, PRs",
+      "Project — Components, files & servers",
+      "Project — Integrations — local services, linked accounts and deployments",
+      "Source control & Review — Source control — session changes, branches, commits and worktrees",
       "Source control & Review — Pull requests — every open project, one list",
       "Source control & Review — Issues — GitHub, Linear, …",
-      "Agents — Agents",
-      "Agents — Tasks — one-shot agent jobs",
-      "Agents — Scratchpad — thoughts, ideas and to-dos you'll pick up later",
-      "Agents — Research — what's been investigated, and what shipped from it",
-      "Agents — Team — relay, chat, notifications",
+      "Work — Tasks — one-shot agent jobs",
+      "Work — Scratchpad — thoughts, ideas and to-dos you'll pick up later",
+      "Work — Research — what's been investigated, and what shipped from it",
+      "Work — Team — relay, chat, notifications",
       "Tools — MCP servers your agents can reach, from every CLI",
       "Settings (Cmd+,)",
-      "Pin sidebar open (Cmd+B)",
+      "Account & balance",
     ]);
+  });
+
+  it("opens account settings from the replacement account button", () => {
+    const onOpenAccount = vi.fn();
+    const { getByTitle } = render(<ActivityRail {...props} onOpenAccount={onOpenAccount} />);
+    fireEvent.click(getByTitle("Account & balance"));
+    expect(onOpenAccount).toHaveBeenCalledOnce();
   });
 
   // With hover-to-peek on, a tab's tooltip would fire on the same gesture that
@@ -60,12 +65,12 @@ describe("ActivityRail", () => {
     const withHover = render(<ActivityRail {...props} />);
     const files = () =>
       [...withHover.container.querySelectorAll("button")].find(
-        (b) => b.getAttribute("aria-label") === "Project — Components & files",
+        (b) => b.getAttribute("aria-label") === "Project — Components, files & servers",
       );
     expect(files()?.getAttribute("title")).toBeNull();
 
     withHover.rerender(<ActivityRail {...props} hoverPeeks={false} />);
-    expect(files()?.getAttribute("title")).toBe("Components & files");
+    expect(files()?.getAttribute("title")).toBe("Components, files & servers");
     // The foot buttons never lost theirs; the setting must not touch them.
     expect(
       withHover.container.querySelector('[title="Settings (Cmd+,)"]'),
@@ -98,7 +103,7 @@ describe("ActivityRail", () => {
     it("draws the 8x8 twins for every icon in the rail", () => {
       document.documentElement.dataset.theme = "pixel";
       const { container } = render(<ActivityRail {...props} />);
-      expect(boxes(container)).toEqual(Array(14).fill("0 0 8 8"));
+      expect(boxes(container)).toEqual(Array(12).fill("0 0 8 8"));
     });
 
     it("swaps back and forth when the skin changes under it", () => {

@@ -1,0 +1,13 @@
+import {fireEvent,render,screen,waitFor} from '@testing-library/react';import {it,expect,vi} from 'vitest';
+import {ProjectDialog} from '../components/ProjectDialog';
+const mocks=vi.hoisted(()=>({invoke:vi.fn(),open:vi.fn(),listen:vi.fn().mockResolvedValue(()=>{})}));
+vi.mock('../host',()=>({isRemoteHost:()=>true,invoke:mocks.invoke,listen:mocks.listen}));vi.mock('@tauri-apps/plugin-dialog',()=>({open:mocks.open}));
+it('creates a remote project with multiple components without opening a Mac picker',async()=>{
+ mocks.invoke.mockResolvedValue([{name:'web',path:'/workspace/web',is_dir:true,is_symlink:false},{name:'api',path:'/workspace/api',is_dir:true,is_symlink:false}]);const save=vi.fn(),cancel=vi.fn();render(<ProjectDialog onSave={save} onCancel={cancel}/>);
+ fireEvent.change(screen.getByLabelText('Project name'),{target:{value:'Remote app'}});fireEvent.click(screen.getByRole('button',{name:/add directory/i}));await screen.findByLabelText('Select web');fireEvent.click(screen.getByLabelText('Select web'));fireEvent.click(screen.getByLabelText('Select api'));fireEvent.click(screen.getByRole('button',{name:'Use 2 folders'}));
+ await waitFor(()=>expect(screen.getByRole('button',{name:'Create & open'})).toBeEnabled());fireEvent.click(screen.getByRole('button',{name:'Create & open'}));expect(save.mock.calls[0][0].components.map((c:{path:string})=>c.path)).toEqual(['/workspace/web','/workspace/api']);expect(mocks.open).not.toHaveBeenCalled();expect(cancel).not.toHaveBeenCalled();
+});
+it('clones into the VM folder and registers the result as a component',async()=>{
+ mocks.invoke.mockImplementation(async(command:string)=>command==='fs_read_dir'?[]:command==='git_clone'?{path:'/workspace/repository',name:'repository'}:null);
+ const save=vi.fn();render(<ProjectDialog onSave={save} onCancel={()=>{}}/>);fireEvent.click(screen.getByRole('button',{name:/clone from git/i}));fireEvent.change(screen.getByPlaceholderText('https://github.com/user/repo.git'),{target:{value:'https://github.com/org/repository.git'}});fireEvent.click(screen.getByRole('button',{name:'Clone'}));await screen.findByRole('dialog',{name:'Choose remote directory'});await waitFor(()=>expect(screen.getByRole('button',{name:'Use this folder'})).toBeEnabled());fireEvent.click(screen.getByRole('button',{name:'Use this folder'}));await waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith('git_clone',{parent:'/workspace',url:'https://github.com/org/repository.git'}));await waitFor(()=>expect(screen.getByRole('button',{name:'Create & open'})).toBeEnabled());fireEvent.click(screen.getByRole('button',{name:'Create & open'}));expect(save.mock.calls[0][0].components[0].path).toBe('/workspace/repository');expect(mocks.open).not.toHaveBeenCalled();
+});

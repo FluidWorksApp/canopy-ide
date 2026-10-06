@@ -1,3 +1,5 @@
+import type {AccountConversation} from "./AccountChatView";
+import {TeamHub} from "./TeamHub";
 // Team relay side panel: host a relay (your Canopy IS the server, joined with a
 // 7-digit code) or join a teammate's. Hosting is Local or Internet. Local is a
 // direct TCP listener on the LAN. Internet rides the SAME shared endpoint as
@@ -18,6 +20,7 @@ import { basename } from "../paths";
 
 interface TeamPanelProps {
   relay: RelayHandle;
+  onOpenAccountChat?: (conversation:AccountConversation)=>void;
   onOpenChat: (peer: string | null, name: string) => void;
   onOpenInboxItem: (item: RelayCommandMsg) => void;
   onNotice: Notify;
@@ -80,7 +83,7 @@ export async function offerFileTo(memberId: string, memberName: string, onNotice
   }
 }
 
-export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: TeamPanelProps) {
+function RelayTeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: TeamPanelProps) {
   const s = relay.status;
   const [name, setName] = useState(() => getSettings().relayName);
   const [addr, setAddr] = useState(() => getSettings().relayAddr);
@@ -524,4 +527,9 @@ export function TeamPanel({ relay, onOpenChat, onOpenInboxItem, onNotice }: Team
       )}
     </div>
   );
+}
+
+export function TeamPanel(props: TeamPanelProps){
+ const [advanced,setAdvanced]=useState(false);
+ return <div style={{height:"100%",overflow:"auto"}}>{advanced?<RelayTeamPanel {...props}/>:<TeamHub onOpenChat={props.onOpenAccountChat}/>}<button className="team-input" onClick={()=>setAdvanced(!advanced)}>{advanced?"Back to Teams":"Advanced: self-hosted relay"}</button></div>;
 }

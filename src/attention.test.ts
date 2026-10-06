@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ASH_STATES, ashGlyph, ashMayInterrupt } from "./ash";
 import {
   ashStateFor,
   attentionItems,
   badgeFor,
+  buildAttentionItems,
   clearAttentionHistory,
   dismissToast,
   forProject,
@@ -46,6 +47,11 @@ beforeEach(() => {
   localStorage.clear();
 });
 
+afterEach(() => {
+  vi.clearAllTimers();
+  vi.useRealTimers();
+});
+
 describe("urgency", () => {
   it("derives from tone for an FYI", () => {
     expect(urgencyOf(item({ tone: "info" }))).toBe("low");
@@ -58,6 +64,23 @@ describe("urgency", () => {
     // The whole point: no tone can talk a question down the scale.
     expect(urgencyOf(item({ kind: "question", tone: "info" }))).toBe("high");
     expect(urgencyOf(item({ kind: "question", tone: "success" }))).toBe("high");
+  });
+});
+
+describe("Build attention", () => {
+  it("keeps only questions and actionable errors", () => {
+    const items = [
+      item({ id: "info", kind: "fyi", tone: "info" }),
+      item({ id: "success", kind: "fyi", tone: "success" }),
+      item({ id: "warn", kind: "fyi", tone: "warn" }),
+      item({ id: "error", kind: "fyi", tone: "error" }),
+      item({ id: "question", kind: "question", tone: "info" }),
+    ];
+
+    expect(buildAttentionItems(items).map((entry) => entry.id)).toEqual([
+      "error",
+      "question",
+    ]);
   });
 });
 
@@ -335,6 +358,76 @@ describe("the queue", () => {
     const b = post({ kind: "question", title: "q again", dedupeKey: "s1" });
     expect(b).not.toBe(a);
     expect(attentionItems()).toHaveLength(2);
+  });
+
+  it("never reopens a question the user explicitly answered", () => {
+    const input: AttentionInput = {
+      kind: "question",
+      tone: "info",
+      title: "codex needs permission: apply_patch",
+      source: "agent",
+      dedupeKey: "agent:codex-1",
+    };
+    const first = postAttention(input);
+    resolveAttention(first, "answered");
+    const second = postAttention(input, { collapseMs: 15_000 });
+
+    expect(second).not.toBe(first);
+    expect(attentionItems()).toHaveLength(2);
+  });
+
+  it("never exposes a question resolved inside its dwell", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const input: AttentionInput = {
+      kind: "question",
+      tone: "info",
+      title: "codex needs permission: apply_patch",
+      source: "agent",
+      dedupeKey: "agent:codex-1",
+    };
+    postAttention(input, { dwellMs: 2_000, collapseMs: 15_000 });
+    expect(attentionItems()).toEqual([]);
+
+    resolveAttentionByKey("agent:codex-1", "withdrawn");
+    vi.advanceTimersByTime(2_000);
+    expect(attentionItems()).toEqual([]);
+  });
+
+  it("posts a persistent question once and reuses its id during cooldown", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const input: AttentionInput = {
+      kind: "question",
+      tone: "info",
+      title: "codex needs permission: apply_patch",
+      source: "agent",
+      dedupeKey: "agent:codex-1",
+    };
+    const first = postAttention(input, {
+      dwellMs: 2_000,
+      collapseMs: 15_000,
+    });
+    vi.advanceTimersByTime(1_999);
+    expect(attentionItems()).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(attentionItems()).toHaveLength(1);
+    expect(attentionItems()[0].id).toBe(first);
+
+    resolveAttentionByKey("agent:codex-1", "withdrawn");
+    vi.advanceTimersByTime(1_000);
+    const second = postAttention(input, {
+      dwellMs: 2_000,
+      collapseMs: 15_000,
+    });
+    vi.advanceTimersByTime(2_000);
+
+    expect(second).toBe(first);
+    expect(attentionItems()).toHaveLength(1);
+    expect(attentionItems()[0]).toMatchObject({
+      id: first,
+      resolvedAt: undefined,
+    });
   });
 
   it("collapses a re-posted keyed FYI onto one refreshed item", () => {

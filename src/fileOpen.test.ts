@@ -23,8 +23,20 @@ describe("blockForOpen", () => {
   it("still opens the binary formats that have viewers", () => {
     expect(blockForOpen("/repo/spec.pdf", "pdf", 20 * MB)).toBeNull();
     expect(blockForOpen("/repo/shot.png", "image", 20 * MB)).toBeNull();
-    expect(blockForOpen("/repo/book.xlsx", "sheet", 20 * MB)).toBeNull();
-    expect(blockForOpen("/repo/notes.docx", "docx", 20 * MB)).toBeNull();
+    expect(blockForOpen("/repo/book.xlsx", "sheet", 16 * MB)).toBeNull();
+    expect(blockForOpen("/repo/notes.docx", "docx", 16 * MB)).toBeNull();
+  });
+
+  it("enforces parser-specific boundaries before whole-file reads", () => {
+    expect(blockForOpen("/repo/book.xlsx", "sheet", 16 * MB + 1)).toMatchObject({
+      reason: "too-large",
+      limit: 16 * MB,
+    });
+    expect(blockForOpen("/repo/data.json", "json", 8 * MB)).toBeNull();
+    expect(blockForOpen("/repo/data.json", "json", 8 * MB + 1)).toMatchObject({
+      reason: "too-large",
+      limit: 8 * MB,
+    });
   });
 
   it("caps by the viewer that would render it, not one number", () => {

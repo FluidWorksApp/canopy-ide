@@ -11,7 +11,7 @@
 // team shares.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
-import { AGENT_CLIS } from "../projects";
+import { AGENT_CLIS, agentCliFor } from "../projects";
 import {
   parseDoc,
   parseFrontmatter,
@@ -46,7 +46,7 @@ const OTHER_AGENT_NAMES: Record<string, string> = {
 };
 
 function agentName(id: string): string {
-  return AGENT_CLIS.find((c) => c.id === id)?.name ?? OTHER_AGENT_NAMES[id] ?? id;
+  return agentCliFor(id)?.name ?? OTHER_AGENT_NAMES[id] ?? id;
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -311,9 +311,11 @@ export function InstructionsView({
   useEffect(rescan, [rescan]);
 
   const installedAgents = useMemo(() => {
-    const ids = new Set(AGENT_CLIS.filter((c) => installed[c.bin]).map((c) => c.id));
-    // Antigravity and Gemini CLI share ~/.gemini, so one implies the other's files.
-    if (ids.has("agy")) ids.add("gemini");
+    const present = AGENT_CLIS.filter((cli) => installed[cli.bin]);
+    const ids = new Set(present.map((cli) => cli.id));
+    for (const cli of present) {
+      for (const companion of cli.capabilities?.instructionCompanions ?? []) ids.add(companion);
+    }
     return ids;
   }, [installed]);
 

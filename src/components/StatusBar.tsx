@@ -1,3 +1,4 @@
+import { fixedNumber } from "../format";
 // Bottom status tray: git branch, base-branch drift, running agent, model,
 // tokens, estimated cost. Token/model data comes from Claude Code session
 // transcripts (path arrives via hook events); cost is an estimate from a
@@ -19,6 +20,7 @@ import {
   shouldPrompt,
 } from "../branchSync";
 import { fmtTokens } from "../format";
+import { formatDeepLink } from "../deepLinks";
 import { setBounded } from "../boundedMap";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
@@ -43,7 +45,9 @@ import { BroomIcon, HeartIcon, StatsIcon } from "./icons";
 import { ClipboardHistory } from "./ClipboardHistory";
 import type { AgentEventEntry } from "../types";
 import { modelCommandLine, type ModelSwitch } from "../agentModels";
+import { agentCliFor } from "../projects";
 import { useBranchSwitch } from "../useBranchSwitch";
+import type { SyncMergePayload } from "../microTasks";
 
 /** How many branches the tray's menu shows before you type. It is a shortcut to
  *  the handful you are actually moving between — `for-each-ref` hands them back
@@ -75,7 +79,7 @@ function Nums({
     <span className="bd-nums">
       {/* Colour is backed up by weight: red alone is a poor signal for anyone
           who can't separate it from the dim grey these numbers normally are. */}
-      <span className={hot.cpu ? "bd-hot" : undefined}>{cpu.toFixed(0)}%</span>{" "}
+      <span className={hot.cpu ? "bd-hot" : undefined}>{fixedNumber(cpu, 0)}%</span>{" "}
       · <span className={hot.mem ? "bd-hot" : undefined}>{fmtMem(mem)}</span>
     </span>
   );
@@ -93,6 +97,10 @@ const SESSION_STATS_CACHE_LIMIT = 128;
 
 interface StatusBarProps {
   roots: string[];
+  /** Git checkout represented by the tab in front. A project can contain
+   *  several repositories (and agent worktrees beside them), so the status
+   *  bar must not assume the first configured component is always current. */
+  contextRoot?: string | null;
   agents: { name: string; cpu: number }[];
   events: AgentEventEntry[];
   /** This project is the one on screen. Hidden projects freeze their polling
@@ -122,6 +130,13 @@ interface StatusBarProps {
   /** The pty of the active terminal tab — the model/token tray follows THIS
    *  tab's session, not whichever session in the project spoke last. */
   activePtyId?: number | null;
+  /** The session actually running in the active terminal. Codex writes plan
+   *  snapshots per rollout, so this prevents another Codex tab's newer file
+   *  from lending its percentage to the terminal in front. */
+  activeSessionId?: string | null;
+  /** Hand a merge the one-click button can't finish — uncommitted work in the
+   *  way, or conflicts — to an agent task. Resolves whether one started. */
+  onResolveMerge?: (payload: SyncMergePayload) => Promise<boolean>;
 }
 
 /** How many agent names the tray spells out before it starts counting.
@@ -140,6 +155,7 @@ const lastFetchAt = new Map<string, number>();
 
 export const StatusBar = memo(function StatusBar({
   roots,
+  contextRoot,
   agents,
   events,
   visible,
@@ -150,7 +166,10 @@ export const StatusBar = memo(function StatusBar({
   agentId,
   agentProfile,
   activePtyId,
+  activeSessionId,
+  onResolveMerge,
 }: StatusBarProps) {
+  const repo = contextRoot || roots[0];
   const [branch, setBranch] = useState<string | null>(null);
   const [dirty, setDirty] = useState(0);
   const [branches, setBranches] = useState<ipc.BranchInfo[]>([]);
@@ -309,10 +328,19 @@ export const StatusBar = memo(function StatusBar({
   const [plans, setPlans] = useState<ipc.PlanUsage[]>([]);
   useEffect(() => {
     if (!visible) return;
+    setPlans([]);
+    // Without the terminal's Codex session id, a machine-wide "newest file"
+    // guess can only repeat the bug this chip is meant to avoid. Wait for the
+    // hook/resume binding instead of showing another tab's authoritative-looking
+    // percentage in the meantime.
+    const needsSession = Boolean(
+      agentCliFor(agentId)?.capabilities?.planUsageRequiresSession,
+    );
+    if (needsSession && !activeSessionId) return;
     let cancelled = false;
     const pull = () =>
       void ipc
-        .planUsage()
+        .planUsage(needsSession ? activeSessionId : null)
         .then((p) => {
           if (!cancelled) setPlans(p);
         })
@@ -323,7 +351,7 @@ export const StatusBar = memo(function StatusBar({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [visible]);
+  }, [visible, agentId, activeSessionId]);
   const plan = useMemo(
     () => planFor(plans, agentId, agentProfile || "default"),
     [plans, agentId, agentProfile],
@@ -372,7 +400,11 @@ export const StatusBar = memo(function StatusBar({
     if (activePtyId == null) return null;
     for (let i = events.length - 1; i >= 0; i--) {
       const d = events[i].data;
-      if (d?.pty === activePtyId && d.agent === "opencode" && d.sessionId) {
+      if (
+        d?.pty === activePtyId &&
+        agentCliFor(d.agent)?.capabilities?.eventSessionLookup &&
+        d.sessionId
+      ) {
         return d.sessionId;
       }
     }
@@ -399,11 +431,14 @@ export const StatusBar = memo(function StatusBar({
   // which refreshes immediately. (The transcript reader below is still a
   // poller — that one is reading a file an agent appends to, not git.)
   useEffect(() => {
-    if (!roots[0] || !visible) return;
+    if (!repo || !visible) return;
     let cancelled = false;
+    // Clear the previous tab's branch while this checkout loads.
+    setBranch(null);
+    setDirty(0);
     const refresh = () => {
       void ipc
-        .gitStatus(roots[0])
+        .gitStatus(repo)
         .then((s) => {
           if (cancelled) return;
           setBranch(s.branch);
@@ -423,7 +458,7 @@ export const StatusBar = memo(function StatusBar({
     };
     // `version` bumps whenever the funnel moves a ref, so the chip catches up
     // with a switch immediately instead of waiting on the watcher.
-  }, [roots[0], visible, version]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [repo, visible, version]);
 
   // Base-branch watch. The probe dry-runs the merge in the object store and
   // never touches the worktree, index or HEAD, so it is safe to run on a timer
@@ -434,11 +469,13 @@ export const StatusBar = memo(function StatusBar({
   // `git fetch` (news from the remote can't arrive any other way), while a
   // local commit or checkout re-measures for free off what we already have.
   useEffect(() => {
-    if (!roots[0] || !visible) return;
+    if (!repo || !visible) return;
     let cancelled = false;
+    setSync(null);
+    setSyncOpen(false);
     const run = (fetch: boolean) =>
       void ipc
-        .gitSyncProbe(roots[0], fetch)
+        .gitSyncProbe(repo, fetch)
         .then((p) => !cancelled && setSync(p))
         // No remote, no base branch, not a repo: this chip simply doesn't
         // apply. Nothing to report and nothing broken.
@@ -447,7 +484,6 @@ export const StatusBar = memo(function StatusBar({
     // project becomes visible or the branch funnel moves a ref — so tab-hopping
     // three projects meant three fetches. Keep a floor per repo: inside the
     // probe interval, re-measure for free off what we already have.
-    const repo = roots[0];
     if (Date.now() - (lastFetchAt.get(repo) ?? 0) >= PROBE_INTERVAL_MS) {
       lastFetchAt.set(repo, Date.now());
       run(true);
@@ -467,7 +503,7 @@ export const StatusBar = memo(function StatusBar({
       clearInterval(timer);
       void sub.then((fn) => fn());
     };
-  }, [roots[0], visible, version]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [repo, visible, version]);
 
   // Open the panel by itself the first time a given base tip is seen. Once per
   // set of new commits — closing it counts as "not now", and it stays shut
@@ -511,16 +547,16 @@ export const StatusBar = memo(function StatusBar({
   }); // no deps: closeSync must see the probe from this render
 
   const runMerge = async () => {
-    if (!sync || !roots[0]) return;
+    if (!sync || !repo) return;
     setSyncBusy(true);
     try {
-      const outcome = await ipc.gitSyncApply(roots[0], sync.base);
+      const outcome = await ipc.gitSyncApply(repo, sync.base);
       setSyncResult({
         text: outcomeMessage(sync.base, outcome),
         conflicts: outcome.conflicts,
         ok: outcome.merged,
       });
-      setSync(await ipc.gitSyncProbe(roots[0], false).catch(() => null));
+      setSync(await ipc.gitSyncProbe(repo, false).catch(() => null));
       if (outcome.merged) {
         // Nothing left to decide — let the tray go quiet on its own.
         setTimeout(() => {
@@ -536,13 +572,32 @@ export const StatusBar = memo(function StatusBar({
     }
   };
 
-  const undoMerge = async () => {
-    if (!roots[0]) return;
+  /** "Resolve & merge": the agent does the merge in this checkout. The panel
+   *  closes once it has started — the run is in Tasks from here on. */
+  const resolveWithAgent = async (conflicts: string[]) => {
+    if (!sync || !repo || !onResolveMerge) return;
     setSyncBusy(true);
     try {
-      const msg = await ipc.gitSyncAbort(roots[0]);
+      const started = await onResolveMerge({
+        repo,
+        branch: sync.branch,
+        base: sync.base,
+        overlap: sync.overlap,
+        conflicts,
+      });
+      if (started) closeSync();
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const undoMerge = async () => {
+    if (!repo) return;
+    setSyncBusy(true);
+    try {
+      const msg = await ipc.gitSyncAbort(repo);
       setSyncResult({ text: msg, conflicts: [], ok: true });
-      setSync(await ipc.gitSyncProbe(roots[0], false).catch(() => null));
+      setSync(await ipc.gitSyncProbe(repo, false).catch(() => null));
     } catch (err) {
       setSyncResult({ text: String(err), conflicts: [], ok: false });
     } finally {
@@ -555,16 +610,17 @@ export const StatusBar = memo(function StatusBar({
   // anything moves a ref is enough, and a third git process every ten seconds
   // per project is exactly the cost this component is careful about.
   useEffect(() => {
-    if (!roots[0] || !visible) return;
+    if (!repo || !visible) return;
     let cancelled = false;
+    setBranches([]);
     void ipc
-      .gitBranches(roots[0])
+      .gitBranches(repo)
       .then((b) => !cancelled && setBranches(b))
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [roots[0], visible, version]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [repo, visible, version]);
 
   useEffect(() => {
     // Cached value first (or nothing if this session was never seen) — the
@@ -595,29 +651,30 @@ export const StatusBar = memo(function StatusBar({
   const [storeStats, setStoreStats] = useState<ipc.StoreSessionStats | null>(
     null,
   );
+  const usageSessionId = !transcript && !storeSessionId ? activeSessionId : null;
+  const usageCacheKey = storeSessionId ? `store:${storeSessionId}` :
+    usageSessionId ? `${agentId}:${agentProfile || "default"}:${usageSessionId}` : null;
   useEffect(() => {
-    setStoreStats(
-      storeSessionId ? (STORE_STATS.get(storeSessionId) ?? null) : null,
-    );
-    if (!storeSessionId || !visible) return;
+    setStoreStats(usageCacheKey ? (STORE_STATS.get(usageCacheKey) ?? null) : null);
+    if (!usageCacheKey || !visible) return;
     let cancelled = false;
     const refresh = () => {
-      void ipc
-        .opencodeSessionStats(storeSessionId)
-        .then((s) => {
-          if (!s) return;
-          setBounded(STORE_STATS, storeSessionId, s, SESSION_STATS_CACHE_LIMIT);
-          if (!cancelled) setStoreStats(s);
-        })
-        .catch(() => {});
+      const pending = storeSessionId
+        ? ipc.opencodeSessionStats(storeSessionId)
+        : ipc.agentUsage().then(rows => rows.find(row =>
+          row.session_id === usageSessionId && row.agent === agentId &&
+          row.profile === (agentProfile || "default") && row.supported) ?? null);
+      void pending.then(s => {
+        if (cancelled) return;
+        if (s) setBounded(STORE_STATS, usageCacheKey, s, SESSION_STATS_CACHE_LIMIT);
+        else STORE_STATS.delete(usageCacheKey);
+        setStoreStats(s);
+      }).catch(() => {});
     };
     refresh();
     const timer = setInterval(refresh, 8_000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [storeSessionId, visible]);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [usageCacheKey, storeSessionId, usageSessionId, agentId, agentProfile, visible]);
 
   // Transcript first, store second: a tab has one or the other, never both.
   // The store's `cost` is the CLI's own billed figure — for a custom provider
@@ -638,7 +695,9 @@ export const StatusBar = memo(function StatusBar({
   // The tray chip reddens on the whole app's own footprint, not on anything
   // inside the popup: the per-session numbers only stream while the popup is
   // open, so a chip that watched them would go quiet the moment you closed it.
-  const appLoad = app ? loadFlags("app", app.cpu, app.mem_bytes) : null;
+  const appLoad = app?.workspace
+    ? { hot: false, cpu: app.cpu >= 90, mem: !!app.workspace.memoryLimitBytes && app.mem_bytes / app.workspace.memoryLimitBytes >= .85 }
+    : app ? loadFlags("app", app.cpu, app.mem_bytes) : null;
 
   // `rev-parse --abbrev-ref HEAD` answers a literal "HEAD" off a branch, which
   // the tray used to print as if it were one. It is the snapshot state the Git
@@ -650,7 +709,6 @@ export const StatusBar = memo(function StatusBar({
    *  the one funnel, so a branch held by another workspace asks its question
    *  here exactly as it does in the Git panel. */
   const branchItems = (): MenuItem[] => {
-    const repo = roots[0];
     const items: MenuItem[] = [];
     if (detached)
       items.push({
@@ -800,25 +858,58 @@ export const StatusBar = memo(function StatusBar({
                         >
                           Undo the merge
                         </button>
-                        <button className="btn btn-accent" onClick={closeSync}>
+                        <button
+                          className={onResolveMerge ? "btn-mini" : "btn btn-accent"}
+                          onClick={closeSync}
+                        >
                           Resolve in Changes
                         </button>
+                        {onResolveMerge && (
+                          <button
+                            className="btn btn-accent"
+                            disabled={syncBusy}
+                            title="An agent settles the conflicts, runs the tests and commits the merge"
+                            onClick={() => void resolveWithAgent(syncResult.conflicts)}
+                          >
+                            {syncBusy ? "Starting…" : "Resolve with agent"}
+                          </button>
+                        )}
                       </>
                     ) : (
                       <>
                         <button className="btn-mini" onClick={closeSync}>
                           Keep working
                         </button>
-                        <button
-                          className="btn btn-accent"
-                          disabled={
-                            !d.canMerge || syncBusy || (syncResult?.ok ?? false)
-                          }
-                          title={d.blockedReason ?? `git merge ${sync.base}`}
-                          onClick={() => void runMerge()}
-                        >
-                          {syncBusy ? "Merging…" : d.mergeLabel}
-                        </button>
+                        {/* Blocked outright with an agent on offer: a dead
+                            button beside the live one is just noise. */}
+                        {!(d.canResolve && onResolveMerge && !d.canMerge) && (
+                          <button
+                            className={
+                              d.canResolve && onResolveMerge ? "btn-mini" : "btn btn-accent"
+                            }
+                            disabled={
+                              !d.canMerge || syncBusy || (syncResult?.ok ?? false)
+                            }
+                            title={d.blockedReason ?? `git merge ${sync.base}`}
+                            onClick={() => void runMerge()}
+                          >
+                            {syncBusy ? "Merging…" : d.mergeLabel}
+                          </button>
+                        )}
+                        {d.canResolve && onResolveMerge && (
+                          <button
+                            className="btn btn-accent"
+                            disabled={syncBusy}
+                            title={
+                              sync.overlap.length > 0
+                                ? "An agent sets your edits aside, merges, then puts them back uncommitted"
+                                : "An agent merges, settles the conflicts, runs the tests and commits"
+                            }
+                            onClick={() => void resolveWithAgent(sync.conflicts)}
+                          >
+                            {syncBusy ? "Starting…" : "Resolve & merge"}
+                          </button>
+                        )}
                       </>
                     )}
                   </div>
@@ -851,13 +942,20 @@ export const StatusBar = memo(function StatusBar({
         <span className="status-item status-res status-model-anchor">
           <button
             className="status-model-btn"
-            title={withLoadNote(
-              `canopy: ${app.procs} process${app.procs === 1 ? "" : "es"} — ` +
+            title={app.workspace
+              ? `Remote workspace: ${app.workspace.available ? "agents, shells, builds and desktop" : "resources unavailable"}. CPU is a percentage of the workspace CPU allocation. Click for workspace resources.`
+              : withLoadNote(
+              `${app.includes_webviews ? "canopy" : "canopy lower bound"}: ` +
+                `${app.procs} process${app.procs === 1 ? "" : "es"} — ` +
                 `Rust core, language servers, terminals and everything they spawned. ` +
                 `Memory is charged physical footprint on macOS (resident memory elsewhere). ` +
                 `Click for the per-project breakdown.\n\n` +
-                `Does not include the WebView: macOS runs it in system-owned WebKit ` +
-                `processes parented to launchd, which can't be attributed back to us.`,
+                (app.includes_webviews
+                  ? `Includes WebView helper processes on this platform.`
+                  : `Does not include WebContent, Graphics or Networking: macOS runs ` +
+                    `those as system-owned WebKit processes parented to launchd. ` +
+                    `Activity Monitor shows them as separate rows; add them to this ` +
+                    `lower bound for the OS-level Canopy total.`),
               appLoad ? loadNote("app", appLoad) : "",
             )}
             onClick={(e) => {
@@ -866,11 +964,11 @@ export const StatusBar = memo(function StatusBar({
             }}
           >
             <span className={appLoad?.cpu ? "bd-hot" : undefined}>
-              {app.cpu.toFixed(0)}% cpu
+              {Number.isFinite(app.cpu) ? fixedNumber(app.cpu, 0) : "—"}% cpu
             </span>{" "}
             ·{" "}
             <span className={appLoad?.mem ? "bd-hot" : undefined}>
-              {fmtMem(app.mem_bytes)}
+              {Number.isFinite(app.mem_bytes) ? fmtMem(app.mem_bytes) : "—"}
             </span>
           </button>
           {breakdown && (
@@ -879,7 +977,22 @@ export const StatusBar = memo(function StatusBar({
               style={menuStyle}
               onMouseLeave={() => setBreakdown(false)}
             >
-              {(() => {
+              {app.workspace ? <>
+                <div className="bd-head"><span>Workspace resources</span></div>
+                <div className="bd-resource-section"><span className="bd-resource-label">Usage now</span><dl className="bd-resource-grid">
+                  <dt>RAM</dt><dd>{Number.isFinite(app.mem_bytes)?fmtMem(app.mem_bytes):'—'} <span className="bd-resource-muted">of {app.workspace.memoryLimitBytes?fmtMem(app.workspace.memoryLimitBytes):'—'} allocated</span></dd>
+                  <dt>CPU</dt><dd>{Number.isFinite(app.cpu)?`${fixedNumber(app.cpu, 0)}%`:'—'} <span className="bd-resource-muted">of {app.workspace.cpus??'—'} allocated cores</span></dd>
+                </dl></div>
+                {(app.workspace.elasticCpu||app.workspace.elasticMemory)&&<div className="bd-resource-section"><span className="bd-resource-label">Automatic scaling · configured range</span><dl className="bd-resource-grid">
+                  {app.workspace.elasticMemory&&<><dt>RAM</dt><dd>{fmtMem(app.workspace.elasticMemory.minMiB*1024**2)} – {fmtMem(app.workspace.elasticMemory.maxMiB*1024**2)}</dd></>}
+                  {app.workspace.elasticCpu&&<><dt>CPU</dt><dd>{app.workspace.elasticCpu.minCpus} – {app.workspace.elasticCpu.maxCpus} cores</dd></>}
+                </dl></div>}
+                {app.workspace.elasticMemory&&app.workspace.elasticMemory.availableMaxMiB<app.workspace.elasticMemory.maxMiB&&<p className="bd-workspace-note"><strong>RAM available to this workspace: {fmtMem(app.workspace.elasticMemory.availableMaxMiB*1024**2)}.</strong> The VM reserves capacity for its host and other workspaces.</p>}
+                {app.workspace.elasticCpu&&app.workspace.elasticCpu.availableMaxCpus<app.workspace.elasticCpu.maxCpus&&<p className="bd-workspace-note">This VM allows up to {app.workspace.elasticCpu.availableMaxCpus} CPU cores for this workspace.</p>}
+                {(app.workspace.elasticMemory?.status==='update_failed'||app.workspace.elasticCpu?.status==='update_failed')&&<p className="bd-workspace-note" role="status">Allocation update failed. Retrying automatically.</p>}
+                <p className="bd-workspace-note bd-resource-muted">{app.workspace.available?'Usage includes all agents, builds, shells and the desktop. Allocation grows with sustained demand, within the VM’s available capacity.':'Resources unavailable. Reconnecting…'}</p>
+
+              </> : (() => {
                 // Each session lands in the first project whose roots contain
                 // its cwd; two projects sharing a root can't double-count it.
                 const assigned = new Set<number>();
@@ -929,6 +1042,15 @@ export const StatusBar = memo(function StatusBar({
                 }
                 return (
                   <>
+                    {!app.includes_webviews && (
+                      <div
+                        className="bd-head"
+                        title="macOS WebContent, Graphics and Networking are XPC processes outside Canopy's native process tree. Activity Monitor reports those rows separately."
+                      >
+                        <span>WebKit layers</span>
+                        <span className="bd-nums">OS-owned · add separately</span>
+                      </div>
+                    )}
                     {/* Memory and CPU are what this popup has always shown, and
                         disk is the resource next door: the same projects, the
                         same "what is this costing me", one click away. */}
@@ -956,7 +1078,7 @@ export const StatusBar = memo(function StatusBar({
                         <span className="bd-nums">
                           ↑{fmtTokens(usSent)} ↓{fmtTokens(usRecv)}
                           {usPriced &&
-                            ` · ${usEst ? "~" : ""}$${usCost.toFixed(2)}`}
+                            ` · ${usEst ? "~" : ""}$${fixedNumber(usCost, 2)}`}
                         </span>
                       </div>
                     )}
@@ -988,7 +1110,7 @@ export const StatusBar = memo(function StatusBar({
                                 <div
                                   className="bd-row bd-session"
                                   title={withLoadNote(
-                                    s.cwd,
+                                    `${s.cwd}\nClick to go to this terminal · ▸ expands its processes`,
                                     loadNote(
                                       "session",
                                       loadFlags(
@@ -998,15 +1120,37 @@ export const StatusBar = memo(function StatusBar({
                                       ),
                                     ),
                                   )}
-                                  onClick={() =>
-                                    setOpenSessions((prev) => ({
-                                      ...prev,
-                                      [s.id]: !sOpen,
-                                    }))
-                                  }
+                                  // A row is a terminal, so clicking it goes
+                                  // there — the same deep-link route an OS
+                                  // banner takes, which switches project when
+                                  // the terminal lives in another one. The
+                                  // chevron alone expands the process list.
+                                  onClick={() => {
+                                    setBreakdown(false);
+                                    window.dispatchEvent(
+                                      new CustomEvent("canopy:follow-deep-link", {
+                                        detail: {
+                                          url: formatDeepLink({
+                                            kind: "terminal",
+                                            ptyId: s.id,
+                                            path: s.cwd,
+                                          }),
+                                        },
+                                      }),
+                                    );
+                                  }}
                                 >
                                   <span>
-                                    <span className="tree-chevron">
+                                    <span
+                                      className="tree-chevron"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setOpenSessions((prev) => ({
+                                          ...prev,
+                                          [s.id]: !sOpen,
+                                        }));
+                                      }}
+                                    >
                                       {sOpen ? "▾" : "▸"}
                                     </span>
                                     {s.title || "shell"}
@@ -1198,7 +1342,7 @@ export const StatusBar = memo(function StatusBar({
               : "estimated session cost"
           }
         >
-          {billed ? "" : "~"}${cost.toFixed(2)}
+          {billed ? "" : "~"}${fixedNumber(cost, 2)}
         </span>
       )}
       {/* Plan headroom, right of spend: the two answer different questions —

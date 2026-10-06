@@ -52,6 +52,7 @@ export const SPOT_ICONS: Record<string, () => ReactNode> = {
   chat: () => <ExchangeIcon />,
   task: () => <TasksIcon size={14} />,
   "task-history": () => <TasksIcon size={14} />,
+  workflows: () => <GitBranchIcon size={14} />,
   collab: () => <TeamIcon />,
   "shared-project": () => <TeamIcon />,
   agent: () => <AgentsIcon size={14} />,

@@ -63,11 +63,11 @@
             "linux": { "mods": ["Mod", "Shift"], "key": "KeyN" }
           }
         },
-        "new-project": {
+        "new-agent-workspace": {
           "chord": { "mods": ["Mod", "Shift"], "key": "KeyN" },
           "platform": {
-            "windows": { "mods": ["Mod", "Alt", "Shift"], "key": "KeyN" },
-            "linux": { "mods": ["Mod", "Alt", "Shift"], "key": "KeyN" }
+            "windows": { "mods": ["Mod", "Alt"], "key": "KeyN" },
+            "linux": { "mods": ["Mod", "Alt"], "key": "KeyN" }
           }
         },
         "open-workspace": {
@@ -110,12 +110,33 @@
   },
   "shortcuts": [
     {
+      "id": "select-all",
+      "label": "Select all",
+      "surface": "menu",
+      "chord": {"mods": ["Mod"], "key": "KeyA"},
+      "platform": {"windows": {"mods": ["Mod", "Shift"], "key": "KeyA"}, "linux": {"mods": ["Mod", "Shift"], "key": "KeyA"}},
+      "scoped": true,
+      "note": "Native Mac menu selection targets the focused editor or terminal. Other platforms retain editor Ctrl+A and terminal readline Ctrl+A."
+    },
+    {
       "id": "new-launcher",
-      "label": "New tab — shell, preview or an agent (type to filter, ↵ to open)",
+      "label": "New tab — shell, preview or an agent here (type to filter, ↵ to open)",
       "surface": "menu",
       "chord": {
         "mods": [
           "Mod"
+        ],
+        "key": "KeyN"
+      }
+    },
+    {
+      "id": "new-agent-workspace",
+      "label": "New agent in a workspace of its own (a fresh worktree)",
+      "surface": "menu",
+      "chord": {
+        "mods": [
+          "Mod",
+          "Shift"
         ],
         "key": "KeyN"
       }
@@ -127,6 +148,7 @@
       "chord": {
         "mods": [
           "Mod",
+          "Alt",
           "Shift"
         ],
         "key": "KeyN"

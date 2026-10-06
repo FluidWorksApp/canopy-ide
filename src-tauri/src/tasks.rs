@@ -69,7 +69,11 @@ pub struct TaskRouteSnapshot {
     pub executable_fingerprint: Option<String>,
     pub profile_id: String,
     #[serde(default)]
+    pub requested_provider: Option<String>,
+    #[serde(default)]
     pub requested_model: Option<String>,
+    #[serde(default)]
+    pub requested_effort: Option<String>,
     #[serde(default)]
     pub observed_model: Option<String>,
     pub harness_version: String,
@@ -697,7 +701,10 @@ impl TaskStore {
         })
     }
 
-    fn settle_attempt(&self, input: TaskAttemptSettlement) -> Result<TaskAttempt, String> {
+    pub(crate) fn settle_attempt(
+        &self,
+        input: TaskAttemptSettlement,
+    ) -> Result<TaskAttempt, String> {
         validate_id(&input.attempt_id, "attempt id")?;
         if !matches!(
             input.state.as_str(),
@@ -809,9 +816,27 @@ impl TaskStore {
         })
     }
 
-    fn get(&self, run_id: &str) -> Result<Option<TaskEnvelopeDetail>, String> {
+    pub(crate) fn get(&self, run_id: &str) -> Result<Option<TaskEnvelopeDetail>, String> {
         validate_id(run_id, "run id")?;
         self.with_conn(|conn| read_detail(conn, run_id))
+    }
+
+    fn get_for_attempt(&self, attempt_id: &str) -> Result<Option<TaskEnvelopeDetail>, String> {
+        validate_id(attempt_id, "attempt id")?;
+        self.with_conn(|conn| {
+            let run_id: Option<String> = conn
+                .query_row(
+                    "SELECT run_id FROM task_attempts WHERE attempt_id = ?1",
+                    [attempt_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            match run_id {
+                Some(run_id) => read_detail(conn, &run_id),
+                None => Ok(None),
+            }
+        })
     }
 
     fn list_all(&self, limit: usize) -> Result<Vec<TaskEnvelopeSummary>, String> {
@@ -852,7 +877,7 @@ impl TaskStore {
         })
     }
 
-    fn update_metadata(
+    pub(crate) fn update_metadata(
         &self,
         run_id: String,
         metadata: Value,
@@ -891,6 +916,47 @@ impl TaskStore {
             tx.commit().map_err(|e| e.to_string())?;
             Ok((project_id, run_id, summary))
         })
+    }
+
+    /// Cooperatively cancel the current durable attempt for an MCP Tasks
+    /// request. The frontend receives a separate opaque action so it can stop
+    /// the live runner too; this write is the authority when no surface is
+    /// mounted to receive that action.
+    pub(crate) fn cancel_run(&self, run_id: &str) -> Result<TaskEnvelopeDetail, String> {
+        let detail = self
+            .get(run_id)?
+            .ok_or_else(|| "task not found".to_string())?;
+        if detail.envelope.summary.status == "cancelled" {
+            return Ok(detail);
+        }
+        if matches!(
+            detail.envelope.summary.status.as_str(),
+            "completed" | "failed"
+        ) {
+            return Err(format!(
+                "task is already {}",
+                detail.envelope.summary.status
+            ));
+        }
+        let attempt = detail
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| {
+                matches!(
+                    attempt.state.as_str(),
+                    "reserved" | "launching" | "running" | "waiting"
+                )
+            })
+            .ok_or_else(|| "task has no active attempt to cancel".to_string())?;
+        self.settle_attempt(TaskAttemptSettlement {
+            attempt_id: attempt.attempt_id.clone(),
+            state: "cancelled".into(),
+            failure_class: Some("user".into()),
+            failure_code: Some("mcp-task-cancelled".into()),
+        })?;
+        self.get(run_id)?
+            .ok_or_else(|| "task disappeared after cancellation".to_string())
     }
 
     fn interrupt_stale(&self, current_instance: &str) -> Result<usize, String> {
@@ -1808,7 +1874,9 @@ fn validate_route(route: &TaskRouteSnapshot) -> Result<(), String> {
     for (value, label) in [
         (&route.cli_version, "cli version"),
         (&route.executable_fingerprint, "executable fingerprint"),
+        (&route.requested_provider, "requested provider"),
         (&route.requested_model, "requested model"),
+        (&route.requested_effort, "requested effort"),
         (&route.observed_model, "observed model"),
     ] {
         bounded_opt(value, 512, label)?;
@@ -2018,6 +2086,14 @@ pub fn task_get(
 }
 
 #[tauri::command]
+pub fn task_get_for_attempt(
+    attempt_id: String,
+    store: State<'_, TaskStore>,
+) -> Result<Option<TaskEnvelopeDetail>, String> {
+    store.get_for_attempt(&attempt_id)
+}
+
+#[tauri::command]
 pub fn task_list_all(
     limit: Option<usize>,
     store: State<'_, TaskStore>,
@@ -2127,7 +2203,9 @@ mod tests {
             cli_version: Some("1.0".into()),
             executable_fingerprint: Some("bin-1".into()),
             profile_id: "default".into(),
+            requested_provider: None,
             requested_model: Some("frontier".into()),
+            requested_effort: Some("high".into()),
             observed_model: None,
             harness_version: "1".into(),
             prompt_version: "1".into(),
@@ -2207,6 +2285,46 @@ mod tests {
         assert_eq!(
             detail.attempts[0].attempt_id,
             reservation.attempt.attempt_id
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reads_an_envelope_by_its_attempt_reference() {
+        let root = root();
+        let store = TaskStore::at(root.clone());
+        let reservation = store.reserve(input()).unwrap();
+
+        let detail = store
+            .get_for_attempt(&reservation.attempt.attempt_id)
+            .unwrap()
+            .expect("reserved attempt should resolve to its envelope");
+        assert_eq!(detail.envelope.summary.run_id, reservation.envelope.run_id);
+        assert_eq!(detail.attempts.len(), 1);
+        assert_eq!(
+            detail.attempts[0].attempt_id,
+            reservation.attempt.attempt_id
+        );
+        assert!(store.get_for_attempt("attempt_missing").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_cancellation_settles_the_durable_attempt_and_is_idempotent() {
+        let root = root();
+        let store = TaskStore::at(root.clone());
+        let reservation = store.reserve(input()).unwrap();
+        let cancelled = store.cancel_run(&reservation.envelope.run_id).unwrap();
+        assert_eq!(cancelled.envelope.summary.status, "cancelled");
+        assert_eq!(cancelled.attempts[0].state, "cancelled");
+        assert_eq!(
+            store
+                .cancel_run(&reservation.envelope.run_id)
+                .unwrap()
+                .envelope
+                .summary
+                .status,
+            "cancelled"
         );
         let _ = std::fs::remove_dir_all(root);
     }

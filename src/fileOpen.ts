@@ -51,7 +51,8 @@ const BINARY_EXTENSIONS = new Set([
 const TEXT_LIMIT = 8 * 1024 * 1024;
 /** Kinds parsed in full by a JS library (SheetJS, mammoth, JSON.parse) — the
  *  parse peak is several times the file, so the cap is lower than it looks. */
-const PARSE_LIMIT = 32 * 1024 * 1024;
+const STRUCTURED_TEXT_LIMIT = 8 * 1024 * 1024;
+const ARCHIVE_PARSE_LIMIT = 16 * 1024 * 1024;
 /** Kinds handed straight to the platform as a blob URL. Cheap; the cap only
  *  exists so a mis-sized file can't blow the webview's memory. */
 const MEDIA_LIMIT = 128 * 1024 * 1024;
@@ -63,9 +64,10 @@ export function sizeLimitFor(kind: ViewerKind): number {
       return MEDIA_LIMIT;
     case "sheet":
     case "docx":
+      return ARCHIVE_PARSE_LIMIT;
     case "notebook":
     case "json":
-      return PARSE_LIMIT;
+      return STRUCTURED_TEXT_LIMIT;
     default:
       return TEXT_LIMIT;
   }

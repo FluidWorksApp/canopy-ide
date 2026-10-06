@@ -29,6 +29,7 @@ import {
   type SpotAttachment,
 } from "../spotCompose";
 import { composerRows, insertNewlineAtCaret, isNewlineChord } from "../composer";
+import { MAX_CONTEXT_IMAGE_BYTES, readFileBase64 } from "../fileData";
 import {
   deferredRows,
   instantRows,
@@ -40,7 +41,9 @@ import {
 
 interface SpotSearchProps {
   ctx: SpotContext;
-  onAction: (action: SpotAction) => void;
+  /** `false` means the receiving surface could not durably accept the action,
+   *  so the palette must remain open with the user's prompt intact. */
+  onAction: (action: SpotAction) => boolean | void | Promise<boolean | void>;
   onClose: () => void;
 }
 
@@ -79,6 +82,7 @@ function sectioned(rows: SpotRow[]): Entry[] {
 /** Groups whose detail is a short status token rather than prose — rendered as
  *  a chip on the right so the eye can skim states down a column. */
 const CHIP_GROUPS = new Set(["Open Tabs", "Servers", "Tickets"]);
+const RESEARCH_INTENT = /^(?:(?:can|could|would) you\s+|please\s+)?(?:research|investigate|look into|find out)\b/i;
 
 /** The title with the matched characters marked. Falls back to plain text when
  *  the query doesn't subsequence-match this particular string (a row can match
@@ -117,6 +121,8 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
    *  the text is what gets searched, and a base64 blob is not a search term. */
   const [shots, setShots] = useState<SpotAttachment[]>([]);
   const [attaching, setAttaching] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const attachmentAbortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   // Hover only takes the selection after the pointer has actually moved:
@@ -127,6 +133,11 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
 
   useEffect(() => {
     inputRef.current?.focus();
+    return () => {
+      const controller = attachmentAbortRef.current;
+      attachmentAbortRef.current = null;
+      controller?.abort();
+    };
   }, []);
 
   // On open: fetch the quick-open corpus once, and bring the persistent index
@@ -181,9 +192,16 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
     setBusy(true);
     const t = setTimeout(() => {
-      void deferredRows({ query, ctx: ctxRef.current, corpus, roots })
+      void deferredRows({
+        query,
+        ctx: ctxRef.current,
+        corpus,
+        roots,
+        signal: controller.signal,
+      })
         .then((rows) => {
           if (cancelled) return;
           // A transcript hit and a live session row can name the same session;
@@ -195,6 +213,7 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
     }, 180);
     return () => {
       cancelled = true;
+      controller.abort();
       clearTimeout(t);
     };
   }, [query, corpus, roots.join("\n"), composing]);
@@ -209,7 +228,22 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
     [items],
   );
 
-  useEffect(() => setSel(0), [query]);
+  useEffect(() => {
+    // Natural-language intent should choose the action it names. The Cognito
+    // request that exposed this began "Can you research…" but Enter still ran
+    // the first row (Run task), so the research store was never called and the
+    // request appeared to vanish. Keep the rows stable; change only which one
+    // Enter is about to commit.
+    if (RESEARCH_INTENT.test(query.trim())) {
+      const research = selectable.findIndex((row) => row.action.type === "start-research");
+      setSel(research >= 0 ? research : 0);
+    } else {
+      setSel(0);
+    }
+    // `selectable` is derived from this query in the same render. Async search
+    // rows arriving later must not reset a keyboard selection the user moved.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
   useEffect(() => {
     setSel((i) => Math.min(i, Math.max(0, selectable.length - 1)));
   }, [selectable.length]);
@@ -219,36 +253,38 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
       ?.scrollIntoView({ block: "nearest" });
   }, [sel]);
 
-  const commit = (row: SpotRow | undefined) => {
-    if (!row) return;
-    onClose();
+  const commit = async (row: SpotRow | undefined) => {
+    if (!row || submitting) return;
     // The pasted images belong to whatever this row sends off. Only the two
     // rows that carry prose can carry them — everything else opens a thing that
     // already exists and has nothing to do with a screenshot.
-    if (shots.length > 0 && row.action.type === "run-task") {
-      onAction({ type: "run-task", brief: briefWithAttachments(row.action.brief, shots) });
-      return;
-    }
-    if (shots.length > 0 && row.action.type === "start-research") {
-      onAction({
+    let action = row.action;
+    if (shots.length > 0 && action.type === "run-task") {
+      action = { type: "run-task", brief: briefWithAttachments(action.brief, shots) };
+    } else if (shots.length > 0 && action.type === "start-research") {
+      action = {
         type: "start-research",
-        question: briefWithAttachments(row.action.question, shots),
-      });
-      return;
+        question: briefWithAttachments(action.question, shots),
+      };
     }
     // A note keeps its images as attachments rather than as paths inlined into
     // the text: the note outlives this palette, this project's worktrees, and
     // the `.canopy/spot/` directory these are staged in, so what it needs is
     // the files themselves — which is what the paths let ProjectView copy.
-    if (shots.length > 0 && row.action.type === "save-note") {
-      onAction({
+    if (shots.length > 0 && action.type === "save-note") {
+      action = {
         type: "save-note",
-        text: row.action.text,
+        text: action.text,
         attachments: shots.map((s) => s.path),
-      });
-      return;
+      };
     }
-    onAction(row.action);
+    setSubmitting(true);
+    try {
+      const accepted = await onAction(action);
+      if (accepted !== false) onClose();
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   /** Paste an image: write it where an agent can read it, keep a thumbnail.
@@ -257,14 +293,16 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
   const attach = async (files: File[]) => {
     const dir = ctx.components[0]?.path;
     if (!dir || files.length === 0) return;
+    attachmentAbortRef.current?.abort();
+    const controller = new AbortController();
+    attachmentAbortRef.current = controller;
     setAttaching(true);
     for (const file of files) {
       try {
-        const base64 = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onerror = () => reject(reader.error);
-          reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
-          reader.readAsDataURL(file);
+        const base64 = await readFileBase64(file, {
+          scope: ctx.projectId,
+          maxBytes: MAX_CONTEXT_IMAGE_BYTES,
+          signal: controller.signal,
         });
         if (!base64) continue;
         const path = await ipc.spotSaveContextImage(dir, base64);
@@ -279,11 +317,15 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
           )
           .catch(() => {});
       } catch (err) {
+        if (controller.signal.aborted) break;
         void ipc.jsLog("warn", `spot: could not attach a pasted image: ${String(err)}`);
       }
     }
-    setAttaching(false);
-    inputRef.current?.focus();
+    if (attachmentAbortRef.current === controller) {
+      attachmentAbortRef.current = null;
+      setAttaching(false);
+      inputRef.current?.focus();
+    }
   };
 
   /** Move the cursor by `d`, wrapping at both ends — a list this long is
@@ -326,7 +368,7 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
       setQuery(insertNewlineAtCaret(e.currentTarget as HTMLTextAreaElement));
     } else if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      commit(selectable[sel]);
+      void commit(selectable[sel]);
     } else if (e.key === "Backspace" && !query && shots.length > 0) {
       // Nothing left to delete in the text, so delete the thing before it.
       e.preventDefault();
@@ -413,7 +455,7 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
         </div>
         {/* A hairline that sweeps while the slow sources are out — the footer
             saying "searching…" is easy to miss under a full list. */}
-        <div className={`spot-progress${busy || attaching ? " spot-progress-on" : ""}`} />
+        <div className={`spot-progress${busy || attaching || submitting ? " spot-progress-on" : ""}`} />
         <div
           className="palette-list"
           ref={listRef}
@@ -463,7 +505,7 @@ export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
                   item.index === sel ? "palette-row-active" : ""
                 }`}
                 onMouseEnter={() => hoverArmed.current && setSel(item.index)}
-                onClick={() => commit(item.row)}
+                onClick={() => void commit(item.row)}
               >
                 <span className="spot-icon">
                   <SpotRowIcon row={item.row} />

@@ -4,6 +4,7 @@ import type { ProjectRunnerController } from "./projectRunner";
 import type { StructuredRunnerHost } from "./structuredEvents";
 import type { TaskReservation } from "./taskEnvelope";
 import type { AbstractionRunResult } from "./vibeAbstractionRunner";
+import type { VibeRepairTaskInput, VibeRepairTaskResult } from "./vibeRepairSession";
 import {
   createVibeBuilderSession,
   DEFAULT_VIBE_BUILDER_DEPS,
@@ -112,7 +113,7 @@ function harness(
       },
       // No `verification` here on purpose — it is the session's observation,
       // not the project's, and the type no longer allows it to be smuggled in.
-      deploy: { dirty: false, cliInstalled: true },
+      deploy: { dirty: false, cliInstalled: true, revision: "head-1:config-1" },
     })),
     runAbstraction: vi.fn(async (argv: string[], cwd: string) => {
       abstractionRuns.push({ argv, cwd });
@@ -233,6 +234,60 @@ function harness(
 beforeEach(() => vi.clearAllMocks());
 
 describe("VibeBuilderSession", () => {
+  it("answers a question without verification or checkpoint noise", async () => {
+    const h = harness();
+    await h.session.send("What's this error?");
+    h.emit({ kind: "delta", text: "The preview cannot reach its products API." });
+    h.emit({ kind: "turnEnd" });
+
+    await vi.waitFor(() =>
+      expect(h.deps.settleAttempt).toHaveBeenCalledWith(
+        expect.objectContaining({ state: "completed" }),
+      ),
+    );
+    expect(h.deps.runCheck).not.toHaveBeenCalled();
+    expect(h.deps.inspectBrowser).not.toHaveBeenCalled();
+    expect(h.deps.reviewCheckpoint).not.toHaveBeenCalled();
+    expect(h.deps.commit).not.toHaveBeenCalled();
+    expect(h.session.state.question).toBeNull();
+    expect(h.deps.reserve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        acceptance: expect.arrayContaining([
+          "Do not change the project unless the person asks for a change.",
+        ]),
+        authorityPolicy: expect.objectContaining({ writes: "denied" }),
+      }),
+    );
+    expect(h.deps.runner.start).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.objectContaining({
+        policy: expect.objectContaining({
+          authority: "read-only",
+          disallowedTools: expect.arrayContaining(["Bash", "Edit", "Write"]),
+        }),
+      }),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(h.transcripts).toContainEqual(
+      expect.objectContaining({
+        kind: "assistant",
+        body: "The preview cannot reach its products API.",
+      }),
+    );
+  });
+
+  it("still verifies when an editor tool changes the project during a question", async () => {
+    const h = harness();
+    await h.session.send("What's this error?");
+    h.emit({ kind: "tool", name: "Edit", detail: "src/App.tsx" });
+    h.emit({ kind: "turnEnd" });
+
+    await vi.waitFor(() => expect(h.deps.runCheck).toHaveBeenCalledTimes(1));
+    expect(h.deps.reviewCheckpoint).toHaveBeenCalledTimes(1);
+  });
+
   it("collects turn-scoped network evidence through the production dependency", async () => {
     vi.spyOn(ipc, "browserHere").mockResolvedValue({
       url: "http://localhost:5173/",
@@ -283,6 +338,74 @@ describe("VibeBuilderSession", () => {
     );
     expect(inspection.observations).toContainEqual(
       expect.objectContaining({ kind: "network", verdict: "pass" }),
+    );
+  });
+
+  it("retains the browser error that existed before verification reloads", async () => {
+    const order: string[] = [];
+    vi.spyOn(ipc, "browserHere").mockResolvedValue({
+      url: "http://localhost:5173/login",
+      title: "Login",
+    });
+    vi.spyOn(ipc, "browserNavigate").mockImplementation(async () => {
+      order.push("reload");
+    });
+    vi.spyOn(ipc, "browserPainted").mockResolvedValue(true);
+    let consoleReads = 0;
+    let evalCalls = 0;
+    vi.spyOn(ipc, "browserRunOp").mockImplementation(async (_tab, request) => {
+      if (request.op === "console") {
+        order.push("console");
+        return {
+          done: true,
+          ok: true,
+          data: {
+            messages: consoleReads++ === 0
+              ? [{ level: "error", text: "TypeError: auth.user is undefined" }]
+              : [],
+          },
+        };
+      }
+      if (request.op === "network") {
+        return {
+          done: true,
+          ok: true,
+          data: {
+            requests: [{ url: "/api/session", status: 500, ms: 18, bytes: 42 }],
+            total: 1,
+            pending: 0,
+            lastActivityAt: 0,
+          },
+        };
+      }
+      if (request.op === "eval") {
+        return {
+          done: true,
+          ok: true,
+          data: { result: evalCalls++ === 0 ? 100 : { ready: "complete", origin: 200 } },
+        };
+      }
+      return null;
+    });
+
+    const inspection = await DEFAULT_VIBE_BUILDER_DEPS.inspectBrowser(
+      "preview-1",
+      false,
+      10,
+      true,
+    );
+
+    expect(order.indexOf("console")).toBeLessThan(order.indexOf("reload"));
+    expect(inspection.consoleErrors).toEqual([
+      "TypeError: auth.user is undefined",
+    ]);
+    expect(inspection.consoleTail).toContain("auth.user is undefined");
+    expect(inspection.failedRequests).toContainEqual(
+      expect.objectContaining({ url: "/api/session", status: 500 }),
+    );
+    expect(inspection.pageUrl).toBe("http://localhost:5173/login");
+    expect(inspection.observations).toContainEqual(
+      expect.objectContaining({ kind: "console", verdict: "fail" }),
     );
   });
 
@@ -353,6 +476,24 @@ describe("VibeBuilderSession", () => {
         }),
       }),
     );
+  });
+
+  it("routes on the person's words while sending page evidence to the agent", async () => {
+    const h = harness();
+    await h.session.send("Polish this page", {
+      context: "The selected card says deploy to production and install Stripe.",
+    });
+
+    expect(h.order).toContain("spawn");
+    expect(h.abstractionRuns).toEqual([]);
+    expect(h.transport.send).toHaveBeenCalledWith(
+      "Polish this page\n\nLive preview context:\n" +
+        "The selected card says deploy to production and install Stripe.",
+    );
+    expect(h.transcripts).toContainEqual(expect.objectContaining({
+      kind: "user",
+      body: "Polish this page",
+    }));
   });
 
   it("puts the verification summary on the run's history row", async () => {
@@ -455,6 +596,65 @@ describe("VibeBuilderSession", () => {
     );
     expect(h.deps.reserve).not.toHaveBeenCalled();
     expect(h.deps.runner.start).not.toHaveBeenCalled();
+    expect(h.session.state.question).toEqual(
+      expect.objectContaining({
+        kind: "question",
+        prompt: "I need a coding agent before I can make this change.",
+        detail: "claude: signed out",
+        actions: expect.arrayContaining([
+          expect.objectContaining({ label: "Sign in to Claude Code" }),
+          expect.objectContaining({ label: "Use another Claude Code account" }),
+          expect.objectContaining({ label: "Agent settings & binary path" }),
+        ]),
+      }),
+    );
+  });
+
+  it("executes a zero-route card response through the ProjectView recovery boundary", async () => {
+    const recoverRoute = vi.fn(async () => ({
+      ok: true,
+      prompt: "Claude Code sign-in is open.",
+      detail: "Finish signing in, then retry your change.",
+    }));
+    const h = harness(
+      {
+        listRoutes: vi.fn(async () => [
+          {
+            cli: "claude",
+            profileId: "default",
+            family: "anthropic" as const,
+            state: {
+              agent: "claude",
+              profile: "default",
+              kind: "unusable" as const,
+              reasons: ["signed-out" as const],
+            },
+            choices: [{ id: "claude-fable-5", label: "Fable 5", hint: "" }],
+          },
+        ]),
+      },
+      { recoverRoute },
+    );
+    await expect(h.session.send("Make the button blue")).rejects.toThrow();
+    const response = h.session.state.question?.actions?.find(
+      (action) => action.label === "Sign in to Claude Code",
+    )?.response;
+    expect(response).toBeTruthy();
+
+    await h.session.send(response!);
+
+    expect(recoverRoute).toHaveBeenCalledWith({
+      kind: "sign-in",
+      cli: "claude",
+    });
+    expect(h.session.state).toEqual({
+      persona: { kind: "idle" },
+      question: expect.objectContaining({
+        kind: "notice",
+        prompt: "Claude Code sign-in is open.",
+      }),
+    });
+    expect(h.deps.reserve).not.toHaveBeenCalled();
   });
 
   it("launches on the model the route asked for", async () => {
@@ -468,6 +668,40 @@ describe("VibeBuilderSession", () => {
       }),
       expect.anything(),
       expect.anything(),
+    );
+  });
+
+  it("briefs Build with cross-component and migration topology", async () => {
+    const h = harness({}, {
+      projectComponents: [
+        { id: "web", label: "Web", path: "/repo/web", role: "web", commands: [] },
+        { id: "api", label: "API", path: "/repo/api", role: "api", commands: [] },
+      ],
+      componentLinks: [{
+        fromComponentId: "web",
+        toComponentId: "api",
+        kind: "http",
+        description: "Web calls API",
+      }],
+      dataStores: [{
+        id: "app-db",
+        label: "App DB",
+        engine: "postgresql",
+        mode: "managed",
+        providerId: "supabase",
+        componentIds: ["api"],
+        schemaPaths: ["/repo/api/schema.sql"],
+        migrationPaths: ["/repo/api/migrations/001.sql"],
+        latestMigration: "001.sql",
+      }],
+    });
+    await h.session.send("Add login");
+
+    const launch = vi.mocked(h.deps.runner.start).mock.calls[0][2];
+    expect(launch.policy.systemPromptAppend).toContain("Web calls API");
+    expect(launch.policy.systemPromptAppend).toContain("001.sql");
+    expect(launch.policy.systemPromptAppend).toContain(
+      "Never push a managed database migration merely because Build opened",
     );
   });
 
@@ -507,14 +741,29 @@ describe("VibeBuilderSession", () => {
       "claude",
       expect.objectContaining({
         policy: expect.objectContaining({
-          allowedTools: [CANOPY_MCP_ALLOWANCE],
-          // Authority still comes from what is withheld, not from the allowance.
-          disallowedTools: expect.arrayContaining(["Bash", "KillShell"]),
+          // Bash is here on purpose, and it is the change that made Build able
+          // to finish a job. Withholding it meant a turn could add a dependency
+          // to package.json and had no way to install it, so the code it had
+          // just written could not run and the person was shown the error.
+          //
+          // Authority no longer comes from withholding tools — it comes from
+          // the workspace grant and is enforced by the sandbox, which confines
+          // writes to the component's own directories. See workspaceAuthority.
+          allowedTools: [CANOPY_MCP_ALLOWANCE, "Bash"],
+          disallowedTools: expect.arrayContaining(["KillShell", "NotebookEdit"]),
+          // The boundary, actually passed to the sandbox rather than described
+          // in a prompt.
+          authority: "workspace-write",
+          network: true,
+          writableRoots: expect.arrayContaining([expect.any(String)]),
         }),
       }),
       expect.anything(),
       expect.anything(),
     );
+    const policy = (h.deps.runner.start as ReturnType<typeof vi.fn>).mock
+      .calls[0][2].policy;
+    expect(policy.disallowedTools).not.toContain("Bash");
   });
 
   it("ends the attempt when a Canopy tool is refused, in Canopy's own words", async () => {
@@ -656,9 +905,121 @@ describe("VibeBuilderSession", () => {
       }),
     );
     expect(h.session.state.question?.prompt).toBe(
-      "The app server keeps stopping.",
+      "The project process keeps stopping.",
     );
   });
+
+  it("hands a live startup prompt and terminal tail to the repair agent", async () => {
+    const repair = vi.fn(async (): Promise<VibeRepairTaskResult> => ({
+      ok: true,
+      runId: "repair-1",
+      verdict: {
+        diagnosis: "npx was waiting for its package confirmation.",
+        actions: [{ did: "Restarted it with npx --yes." }],
+        fixed: true,
+      },
+    }));
+    const h = harness({ repair }, {
+      projectComponents: [{
+        id: "worker",
+        label: "Worker",
+        path: "/repo/worker",
+        role: "worker",
+        commands: [],
+      }],
+    });
+
+    await h.session.reportServerStartupStall({
+      key: "worker:dev:startup",
+      componentId: "worker",
+      runCommandId: "dev",
+      reason: "interactive-prompt",
+      promptCode: "npx-install",
+      ports: [],
+      outputBytes: 100,
+      totalCpu: 0,
+      totalMemBytes: 1024,
+      logTail: "Need to install trigger.dev. Ok to proceed? (y)",
+      component: { label: "Worker", path: "/repo/worker", role: "worker" },
+      commands: [],
+      command: { name: "Trigger.dev worker", command: "npx trigger.dev@latest dev" },
+    });
+
+    await vi.waitFor(() => expect(repair).toHaveBeenCalled());
+    expect(repair).toHaveBeenCalledWith({
+      onActivity: expect.any(Function),
+      problem: expect.objectContaining({
+        code: "server-start-failed",
+        statement: expect.stringContaining("waiting for interactive input"),
+        evidence: expect.objectContaining({
+          logTail: "Need to install trigger.dev. Ok to proceed? (y)",
+          context: expect.stringContaining("npx-install"),
+        }),
+      }),
+    });
+  });
+
+  it.each([
+    ["setup", "setup-failed", "setup command exited"],
+    ["runtime", "runtime-error", "process exited with an error"],
+  ] as const)(
+    "constructs a %s repair problem on the first non-zero managed-process exit",
+    async (kind, code, statement) => {
+      const repair = vi.fn(async (): Promise<VibeRepairTaskResult> => ({
+        ok: true,
+        runId: `repair-${kind}`,
+        verdict: {
+          diagnosis: "The command used an unavailable dependency.",
+          actions: [{ did: "Installed the declared dependencies and verified the command." }],
+          fixed: true,
+        },
+      }));
+      const h = harness({ repair }, {
+        projectComponents: [{
+          id: "api",
+          label: "API",
+          path: "/repo/api",
+          role: "api",
+          commands: [],
+        }],
+      });
+
+      const onRepaired = vi.fn();
+      await h.session.reportManagedProcessFailure({
+        onRepaired,
+        key: `api:${kind}:first-exit`,
+        kind,
+        componentId: "api",
+        runCommandId: kind === "setup" ? "install" : "dev",
+        exitCode: 1,
+        ports: [],
+        outputBytes: 48,
+        totalCpu: 0,
+        totalMemBytes: 1024,
+        logTail: "error: dependency not found",
+        component: { label: "API", path: "/repo/api", role: "api" },
+        commands: [],
+        command: {
+          name: kind === "setup" ? "Install dependencies" : "API server",
+          command: kind === "setup" ? "npm install" : "npm run dev",
+        },
+      });
+
+      await vi.waitFor(() => expect(onRepaired).toHaveBeenCalledTimes(1));
+      expect(repair).toHaveBeenCalledWith({
+        onActivity: expect.any(Function),
+        problem: expect.objectContaining({
+          code,
+          statement: expect.stringContaining(statement),
+          evidence: expect.objectContaining({
+            exitCode: 1,
+            logTail: "error: dependency not found",
+            context: expect.stringContaining("first observed non-zero exit"),
+          }),
+        }),
+      });
+    },
+  );
 
   it("correlates a retried incident to the attempt that was live when it crashed", async () => {
     // The crash is observed during one turn but only persists during a later
@@ -880,7 +1241,15 @@ describe("VibeBuilderSession", () => {
     const review = new Promise<CheckpointReview>((resolve) => {
       finishReview = resolve;
     });
-    const h = harness({ reviewCheckpoint: vi.fn(() => review) });
+    const h = harness({
+      reviewCheckpoint: vi.fn(() => review),
+      // This test owns the review/incident race. Keep the separately tested
+      // background repair from replacing the checkpoint question after the
+      // assertion's subject has completed.
+      repair: vi.fn(
+        (_: VibeRepairTaskInput) => new Promise<VibeRepairTaskResult>(() => {}),
+      ),
+    });
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
     await vi.waitFor(() => expect(h.deps.reviewCheckpoint).toHaveBeenCalled());
@@ -900,8 +1269,11 @@ describe("VibeBuilderSession", () => {
     });
     finishReview(safeReview("verified"));
     await vi.waitFor(() => {
-      expect(h.session.state.question?.prompt).toBe("This turn was not auto-saved.");
+      expect(h.events).toContainEqual(
+        expect.objectContaining({ kind: "checkpoint.refused", code: "incident-open" }),
+      );
     });
+    expect(h.session.state.question).toBeNull();
     expect(h.deps.commit).not.toHaveBeenCalled();
   });
 
@@ -962,7 +1334,90 @@ describe("VibeBuilderSession", () => {
       .toHaveLength(5);
   });
 
-  it("records unknown evidence and offers the diff instead of inventing a pass", async () => {
+  it("repairs a browser runtime error once, then re-inspects and re-judges", async () => {
+    let previewTabId = "preview-1";
+    const inspectBrowser = vi
+      .fn<VibeBuilderSessionDeps["inspectBrowser"]>()
+      .mockResolvedValueOnce({
+        observations: [
+          observation("server"),
+          { ...observation("console", "fail"), note: "auth.user is undefined" },
+          { ...observation("network", "fail"), note: "/api/session returned 500" },
+          observation("screenshot"),
+        ],
+        consoleErrors: ["TypeError: auth.user is undefined"],
+        consoleTail: "[error] TypeError: auth.user is undefined",
+        failedRequests: [{ url: "/api/session", status: 500, ms: 18, bytes: 42 }],
+        pageUrl: "http://localhost:5173/login",
+      })
+      .mockResolvedValueOnce({
+        observations: [
+          { ...observation("server"), at: 11 },
+          { ...observation("console"), at: 11 },
+          { ...observation("network"), at: 11 },
+          { ...observation("screenshot"), at: 11 },
+        ],
+        consoleErrors: [],
+        failedRequests: [],
+        pageUrl: "http://localhost:5173/login",
+      });
+    const repair = vi.fn<NonNullable<VibeBuilderSessionDeps["repair"]>>(async () => ({
+      ok: true,
+      verdict: {
+        diagnosis: "The login page read the session before it existed.",
+        actions: [{ did: "Guarded the session lookup." }],
+        fixed: true,
+      },
+      runId: "repair-1",
+    }));
+    const h = harness(
+      { inspectBrowser, repair },
+      { previewTabId: () => previewTabId },
+    );
+    await h.session.send("Fix the runtime bug");
+    // Closing/replacing the project-level preview during the turn must not
+    // redirect verification or the repair attempt onto the new page.
+    previewTabId = "preview-2";
+    h.emit({ kind: "turnEnd" });
+
+    await vi.waitFor(() =>
+      expect(h.deps.settleAttempt).toHaveBeenCalledWith(
+        expect.objectContaining({ state: "completed" }),
+      ),
+    );
+    expect(inspectBrowser).toHaveBeenCalledTimes(2);
+    expect(inspectBrowser.mock.calls.map(([tabId]) => tabId)).toEqual([
+      "preview-1",
+      "preview-1",
+    ]);
+    expect(h.deps.beginBrowserTurn).toHaveBeenCalledWith("preview-1");
+    expect(repair).toHaveBeenCalledTimes(1);
+    expect(repair).toHaveBeenCalledWith({
+      previewTabId: "preview-1",
+      problem: expect.objectContaining({
+        code: "runtime-error",
+        evidence: expect.objectContaining({
+          pageUrl: "http://localhost:5173/login",
+          consoleTail: "[error] TypeError: auth.user is undefined",
+          failedRequests: [
+            expect.objectContaining({ url: "/api/session", status: 500 }),
+          ],
+        }),
+      }),
+    });
+    const consoleEvents = h.events.filter(
+      (event) => event.kind === "verification.observation" && event.code === "console",
+    );
+    expect(consoleEvents).toHaveLength(2);
+    expect(consoleEvents.map((event) => (
+      event.metadata as VerificationObservation
+    ).verdict)).toEqual(["fail", "pass"]);
+    expect(h.events).toContainEqual(
+      expect.objectContaining({ kind: "verification.verdict", code: "verified" }),
+    );
+  });
+
+  it("records unknown evidence without surfacing checkpoint bookkeeping", async () => {
     const unknown = (kind: VerificationObservation["kind"]) =>
       observation(kind, "unknown");
     const review = safeReview("incomplete");
@@ -982,11 +1437,12 @@ describe("VibeBuilderSession", () => {
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
 
-    await vi.waitFor(() => {
-      expect(h.session.state.question?.prompt).toBe("This turn was not auto-saved.");
-    });
-    expect(h.session.state.question?.diff).toContain("diff --git");
-    expect(h.session.state.question?.actions?.[0]?.response).toBe("Save this version");
+    await vi.waitFor(() =>
+      expect(h.events).toContainEqual(
+        expect.objectContaining({ kind: "checkpoint.refused" }),
+      ),
+    );
+    expect(h.session.state.question).toBeNull();
     expect(h.events).toContainEqual(
       expect.objectContaining({ kind: "verification.verdict", code: "incomplete" }),
     );
@@ -1010,44 +1466,24 @@ describe("VibeBuilderSession", () => {
     );
   });
 
-  it("holds the first automatic checkpoint on a machine that has never made one", async () => {
+  it("saves the first safe checkpoint without asking the user", async () => {
     const h = harness();
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
 
-    await vi.waitFor(() => expect(h.session.state.question).not.toBeNull());
-    // No unattended git write along a path that has never executed here.
-    expect(h.deps.commit).not.toHaveBeenCalled();
-    expect(h.session.state.question?.prompt).toBe(
-      "This is the first version I'd save here.",
-    );
-    expect(h.session.state.question?.diff).toContain("diff --git");
-    // The evidence trail is intact: the decision, the paths, the baseline and
-    // an empty reason list, because the policy did not refuse anything.
-    const held = h.events.find((event) => event.kind === "checkpoint.held");
-    expect(held).toBeDefined();
-    expect(held?.code).toBe("auto-checkpoint-never-observed");
-    expect(held?.metadata).toMatchObject({
-      reasons: [],
-      paths: ["src/App.tsx"],
-      repoRoot: "/repo",
-      baselineHead: "abc",
-      secretScan: "unknown",
-      context: expect.objectContaining({ verification: "verified" }),
-    });
-    expect(h.events).not.toContainEqual(
-      expect.objectContaining({ kind: "checkpoint.refused" }),
+    await vi.waitFor(() => expect(h.deps.commit).toHaveBeenCalledTimes(1));
+    expect(h.session.state.question).toBeNull();
+    expect(h.deps.recordAutoCheckpointObserved).toHaveBeenCalledTimes(1);
+    expect(h.events).toContainEqual(
+      expect.objectContaining({ kind: "checkpoint.saved", code: "automatic" }),
     );
   });
 
-  it("arms automatic checkpointing only once a save has actually committed", async () => {
+  it("records automatic checkpoint support only after the commit succeeds", async () => {
     const h = harness();
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
-    await vi.waitFor(() => expect(h.session.state.question).not.toBeNull());
-    expect(h.deps.recordAutoCheckpointObserved).not.toHaveBeenCalled();
-
-    await h.session.send("Save this version");
+    await vi.waitFor(() => expect(h.deps.commit).toHaveBeenCalledTimes(1));
     expect(h.deps.commit).toHaveBeenCalledTimes(1);
     expect(h.deps.recordAutoCheckpointObserved).toHaveBeenCalledTimes(1);
   });
@@ -1060,9 +1496,7 @@ describe("VibeBuilderSession", () => {
     });
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
-    await vi.waitFor(() => expect(h.session.state.question).not.toBeNull());
-
-    await h.session.send("Save this version");
+    await vi.waitFor(() => expect(h.deps.commit).toHaveBeenCalledTimes(1));
     expect(h.deps.commit).toHaveBeenCalledTimes(1);
     expect(h.deps.recordAutoCheckpointObserved).not.toHaveBeenCalled();
   });
@@ -1073,7 +1507,12 @@ describe("VibeBuilderSession", () => {
     const h = harness({ reviewCheckpoint: vi.fn(async () => review) });
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
-    await vi.waitFor(() => expect(h.session.state.question).not.toBeNull());
+    await vi.waitFor(() =>
+      expect(h.events).toContainEqual(
+        expect.objectContaining({ kind: "checkpoint.refused" }),
+      ),
+    );
+    expect(h.session.state.question).toBeNull();
     expect(h.deps.commit).not.toHaveBeenCalled();
 
     await h.session.send("Save this version");
@@ -1096,11 +1535,15 @@ describe("VibeBuilderSession", () => {
     const h = harness({ reviewCheckpoint: review });
     await h.session.send("Make the button blue");
     h.emit({ kind: "turnEnd" });
-    await vi.waitFor(() => expect(h.session.state.question).not.toBeNull());
+    await vi.waitFor(() =>
+      expect(h.events).toContainEqual(
+        expect.objectContaining({ kind: "checkpoint.refused" }),
+      ),
+    );
 
     await h.session.send("Save this version");
     expect(h.deps.commit).not.toHaveBeenCalled();
-    expect(h.session.state.question?.prompt).toContain("diff changed");
+    expect(h.session.state.question?.prompt).toContain("changed while I was saving");
     await h.session.send("Save this version");
     expect(h.deps.commit).toHaveBeenCalledTimes(1);
   });
@@ -1116,6 +1559,28 @@ describe("VibeBuilderSession", () => {
     await second;
     expect(h.transport.send).toHaveBeenCalledTimes(2);
     h.emit({ kind: "turnEnd" });
+  });
+
+  it("stops the current Build turn without closing the session", async () => {
+    const h = harness();
+    await h.session.send("Change the checkout");
+
+    await h.session.cancelCurrentTurn();
+
+    expect(h.transport.stop).toHaveBeenCalledTimes(1);
+    expect(h.deps.settleAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        state: "cancelled",
+        failureClass: "user",
+        failureCode: "user-stopped",
+      }),
+    );
+    expect(h.session.state).toEqual({
+      persona: { kind: "idle" },
+      question: null,
+    });
+    await expect(h.session.send("Change the header")).resolves.toBeUndefined();
+    expect(h.transport.send).toHaveBeenCalledTimes(2);
   });
 
   it("kills a process that finishes spawning after the session was stopped", async () => {
@@ -1214,10 +1679,52 @@ describe("finding the env file in a monorepo", () => {
     // It must refuse, and it must not claim the file is safely out of git.
     expect(said).not.toMatch(/untracked|stay out of git|out of git/i);
     expect(said).toMatch(/can't link|tracked/i);
+    expect(q?.kind).toBe("notice");
+    expect(h.order).not.toContain("spawn");
   });
 });
 
 describe("managed abstractions", () => {
+  it("sends a safe service-link request to the Build agent instead of showing its internal plan", async () => {
+    const h = harness();
+    await h.session.send("can we link supabase");
+
+    expect(h.order).toContain("spawn");
+    expect(h.transport.send).toHaveBeenCalledWith("can we link supabase");
+    expect(h.session.state.question).toBeNull();
+    expect(h.replies.join(" ")).not.toMatch(/Linking Supabase|SUPABASE_SERVICE_ROLE_KEY/);
+  });
+
+  it("prefers a linked provider account tool and keeps the CLI as fallback guidance", async () => {
+    const h = harness({
+      abstractionContext: vi.fn(async (cwd: string) => ({
+        cwd,
+        entries: ["package.json", "package-lock.json"],
+        packageManagerField: null,
+        dependencies: {},
+        devDependencies: {},
+        link: {
+          linkedReaches: ["mcp" as const],
+          toolAllowances: ["mcp__supabase"],
+          accountLinkAvailable: true,
+          cliInstalled: true,
+          authenticated: false,
+          presentSecrets: [],
+          envFileTracked: false,
+        },
+        deploy: { dirty: false, cliInstalled: true, revision: "head-1:config-1" },
+      })),
+    });
+
+    await h.session.send("connect supabase");
+
+    const launch = (h.deps.runner.start as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    expect(launch.policy.allowedTools).toContain("mcp__supabase");
+    expect(launch.policy.systemPromptAppend).toMatch(/prefer an already-linked account API/i);
+    expect(launch.policy.systemPromptAppend).toMatch(/authenticated CLI as the fallback/i);
+    expect(launch.policy.systemPromptAppend).toContain('"linked":true');
+  });
+
   it("proposes an install instead of running it, and never sends it to the agent", async () => {
     const h = harness();
     await h.session.send("install stripe");
@@ -1285,7 +1792,7 @@ describe("managed abstractions", () => {
     // "incomplete" — and production must not go out on an unproven build, no
     // matter what the project on disk claims.
     await h.session.send("deploy to production");
-    expect(h.session.state.question?.kind).toBe("question");
+    expect(h.session.state.question?.kind).toBe("notice");
     expect(h.abstractionRuns).toHaveLength(0);
   });
 
@@ -1352,16 +1859,37 @@ describe("managed abstractions", () => {
     expect(h.order).toContain("spawn");
   });
 
-  it("offers a preview without a typed phrase, and runs it on confirm", async () => {
+  it("routes explicit previews to the local agent without a hosting command", async () => {
     const h = harness();
     await deployable(h);
+    await h.session.send("deploy a preview");
+    expect(h.order).toContain("spawn");
+    expect(h.abstractionRuns).toHaveLength(0);
+  });
+
+  it("rechecks the source after publish approval", async () => {
+    const h = harness();
+    await deployable(h);
+    await verified(h);
     await h.session.send("deploy this");
-    const q = h.session.state.question;
-    expect(q?.kind).toBe("confirm");
-    const confirm = q!.actions![0];
-    await h.session.send(confirm.response);
-    expect(h.abstractionRuns).toHaveLength(1);
-    expect(h.abstractionRuns[0].argv[0]).toBe("vercel");
+    const read = h.deps.abstractionContext;
+    h.deps.abstractionContext = async (cwd, intent) => {
+      const context = await read(cwd, intent);
+      return { ...context, deploy: { ...context.deploy, revision: "head-2:config-1" } };
+    };
+    await h.session.send("Publish to production");
+    expect(h.abstractionRuns).toHaveLength(0);
+    expect(h.session.state.question?.prompt).toContain("changed");
+  });
+
+  it("refuses publishing when fresh checks fail after a verified turn", async () => {
+    const h = harness();
+    await deployable(h);
+    await verified(h);
+    h.deps.runCheck = async () => ({ observation: observation("check", "fail"), output: "broken" });
+    await h.session.send("deploy this");
+    expect(h.session.state.question?.kind).toBe("notice");
+    expect(h.abstractionRuns).toHaveLength(0);
   });
 
   it("leaves an ordinary build request alone", async () => {
@@ -1512,4 +2040,28 @@ describe("concurrent messages", () => {
 
     expect(h.abstractionRuns).toHaveLength(1);
   });
+});
+
+it("checks every runnable component before reporting verified work", async () => {
+  const runCheck = vi.fn(async (_command, cwd) => ({ observation: observation("check", cwd === "/api" ? "fail" : "pass"), output: cwd }));
+  const h = harness({ runCheck }, { projectComponents: [
+    { id: "web", label: "Web", path: "/web", role: "web", commands: [{ id: "test", name: "Test", command: "npm test", purpose: "check" }] },
+    { id: "api", label: "API", path: "/api", role: "api", commands: [{ id: "test", name: "Test", command: "npm test", purpose: "check" }] },
+  ] });
+  await h.session.send("Make the button blue");
+  h.emit({ kind: "turnEnd" });
+  await vi.waitFor(() => expect(runCheck).toHaveBeenCalledWith("npm test", "/api", 10));
+  expect(runCheck).toHaveBeenCalledWith("npm test", "/web", 10);
+  await h.session.stop();
+});
+
+it("hands a first app creation to setup before browser verification", async () => {
+  const onBootstrapReady = vi.fn(async () => {});
+  const h = harness({}, { onBootstrapReady, previewTabId: () => null });
+  await h.session.send("Create a notes app");
+  h.emit({ kind: "turnEnd" });
+  await vi.waitFor(() => expect(onBootstrapReady).toHaveBeenCalledOnce());
+  expect(h.deps.runCheck).not.toHaveBeenCalled();
+  expect(h.replies.join(" ")).toContain("local preview");
+  await h.session.stop();
 });

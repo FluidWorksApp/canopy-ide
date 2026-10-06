@@ -21,11 +21,14 @@
   align-items: center;
   gap: 6px;
   overflow-x: auto;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+  min-width:0;
+  overflow-y:hidden;
+  overscroll-behavior:contain;
 }
 
 .project-tabs::-webkit-scrollbar {
-  height: 4px;
+  display: none;
 }
 
 .project-tabs::-webkit-scrollbar-thumb {
@@ -35,6 +38,7 @@
 
 .project-tab {
   position: relative;
+  flex:0 0 auto;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -251,3 +255,8 @@
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 14%, transparent);
 }
+
+.titlebar-projects {display:flex;align-items:center;gap:6px;min-width:0;flex:1;}
+.titlebar-projects > .project-tabs {flex:1;}
+.titlebar-context {display:flex;align-items:center;gap:12px;flex-shrink:0;}
+.titlebar-context .project-mode-toggle {border-left:1px solid var(--border);margin-left:4px;}

@@ -7,6 +7,17 @@ const entry = (payload: Record<string, unknown>): AgentEventEntry => ({
 });
 
 describe("cross-connector event projection", () => {
+  it("keeps the human prompt on a turn-start event", () => {
+    const data = entry({
+      session_id: "claude-1",
+      cwd: "/repo",
+      canopy_pty: 7,
+      hook_event_name: "UserPromptSubmit",
+      prompt: "Fix the agent status title",
+    }).data;
+    expect(data?.prompt).toBe("Fix the agent status title");
+  });
+
   it("keeps the durable task binding stamped by the PTY", () => {
     const projected = entry({
       session_id: "claude-1",

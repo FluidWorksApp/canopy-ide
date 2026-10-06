@@ -186,8 +186,9 @@ export function HibernationView({
         <p className="hib-sub">
           {waking
             ? "Putting everything back where you left it — this stays up until it's ready."
-            : `Frozen ${ago(snapshot.at)}. Nothing is running: its terminals, agents and
-               open files were all put away, and they come back exactly as they were.`}
+            : `Saved ${ago(snapshot.at)}. This project’s terminals and agents have stopped.
+               Wake it to restore its tabs and resume saved sessions. Other projects can
+               keep the workspace running. Use Hibernate workspace to stop all compute.`}
         </p>
 
         {!waking && (

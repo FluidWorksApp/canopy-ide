@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, act } from "@testing-library/react";
+import { render, screen, act, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { FileTree } from "./FileTree";
 import * as ipc from "../ipc";
@@ -152,4 +152,31 @@ describe("FileTree keyboard navigation", () => {
     });
     expect(ev.defaultPrevented).toBe(true);
   });
+});
+
+it("refreshes loaded folders on remote overflow events",async()=>{
+ let change:((event:ipc.FsChange)=>void)|undefined;vi.mocked(ipc.onFsChange).mockImplementation(async cb=>{change=cb;return ()=>{};});await renderTree();vi.mocked(ipc.fsReadDir).mockClear();await act(async()=>{change?.({root:ROOT,kind:'other',paths:[],overflow:true});await new Promise(resolve=>setTimeout(resolve,350));});expect(ipc.fsReadDir).toHaveBeenCalledWith(ROOT);
+});
+it("refreshes without resetting the existing tree",async()=>{
+ const {rerender}=render(<FileTree roots={[ROOT]} changedPaths={new Set()} onOpenFile={()=>{}} hideRootHeader refreshRevision={0}/>);await screen.findByText('README.md');vi.mocked(ipc.fsReadDir).mockClear();rerender(<FileTree roots={[ROOT]} changedPaths={new Set()} onOpenFile={()=>{}} hideRootHeader refreshRevision={1}/>);await act(async()=>{});expect(ipc.fsReadDir).toHaveBeenCalledWith(ROOT);
+});
+
+it('remote upload actions target the selected directory and refresh after completion',async()=>{
+ const upload=vi.fn().mockResolvedValue(undefined);
+ render(<FileTree roots={[ROOT]} changedPaths={new Set()} onOpenFile={()=>{}} onUpload={upload} hideRootHeader/>);
+ const folder=await screen.findByText('src');fireEvent.contextMenu(folder,{clientX:30,clientY:30});
+ await userEvent.click(await screen.findByText('Upload files…'));expect(upload).toHaveBeenCalledWith('/proj/src','files');
+ await act(async()=>{});expect(ipc.fsReadDir).toHaveBeenCalledWith('/proj/src');
+ fireEvent.contextMenu(folder,{clientX:30,clientY:30});await userEvent.click(await screen.findByText('Upload folder…'));expect(upload).toHaveBeenCalledWith('/proj/src','folder');
+});
+it('local trees retain their existing menus without remote upload actions',async()=>{
+ await renderTree();fireEvent.contextMenu(screen.getByText('src'),{clientX:30,clientY:30});expect(screen.queryByText('Upload files…')).toBeNull();
+});
+
+it('offers uploads from the component root header',async()=>{
+ const upload=vi.fn().mockResolvedValue(undefined);
+ render(<FileTree roots={[ROOT]} changedPaths={new Set()} onOpenFile={vi.fn()} onUpload={upload}/>);
+ await screen.findByText('src');fireEvent.contextMenu(screen.getByText('proj'));
+ fireEvent.click(await screen.findByText('Upload files…'));
+ expect(upload).toHaveBeenCalledWith('/proj','files');
 });

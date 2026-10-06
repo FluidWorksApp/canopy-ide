@@ -1,0 +1,48 @@
+import { afterEach, expect, it, vi } from "vitest";
+import { installEarlyWatchdogHeartbeat, ptyRendererRegister } from "./ipc";
+import { mockCommands } from "./test/setup";
+
+afterEach(() => vi.useRealTimers());
+
+it("acknowledges liveness from the renderer without a native event listener", async () => {
+  vi.useFakeTimers();
+  const generations: unknown[] = [];
+  mockCommands({
+    pty_renderer_register: () => ({ generation: 7, sessions: [] }),
+    watchdog_ack: ({ generation }: { generation?: unknown }) => {
+      generations.push(generation);
+    },
+  });
+  await ptyRendererRegister();
+
+  const stop = await installEarlyWatchdogHeartbeat();
+  expect(generations).toEqual([7]);
+  await vi.advanceTimersByTimeAsync(9_000);
+  expect(generations).toEqual([7, 7, 7, 7]);
+
+  stop();
+  await vi.advanceTimersByTimeAsync(3_000);
+  expect(generations).toHaveLength(4);
+});
+
+it("does not block startup or queue heartbeats when the native ack stalls", async () => {
+  vi.useFakeTimers();
+  let complete!: () => void;
+  const ack = vi.fn(() => new Promise<void>((resolve) => { complete = resolve; }));
+  mockCommands({
+    pty_renderer_register: () => ({ generation: 8, sessions: [] }),
+    watchdog_ack: ack,
+  });
+  await ptyRendererRegister();
+  const stop = await installEarlyWatchdogHeartbeat();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(ack).toHaveBeenCalledTimes(1);
+  complete();
+  await vi.advanceTimersByTimeAsync(3_000);
+  expect(ack).toHaveBeenCalledTimes(2);
+  stop();
+  complete();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(ack).toHaveBeenCalledTimes(2);
+  expect(vi.getTimerCount()).toBe(0);
+});

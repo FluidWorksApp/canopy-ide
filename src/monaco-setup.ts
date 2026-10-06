@@ -8,6 +8,11 @@
 import * as monaco from "monaco-editor";
 import { MonacoVscodeApiWrapper } from "monaco-languageclient/vscodeApiWrapper";
 import { configureDefaultWorkerFactory } from "monaco-languageclient/workerFactory";
+import {
+  acknowledgeEditorModelRestore,
+  refreshEditorModelInstance,
+  retainedEditorModelText,
+} from "./editorModelRetention";
 // Registers the monarch grammars (typescript, rust, python, ...) used by classic mode.
 import "@codingame/monaco-vscode-standalone-languages";
 import { registerTauriFileSystem } from "./lsp/fsProvider";
@@ -118,9 +123,21 @@ export function refreshModelLanguages(): void {
 /** Get or create the shared text model for a file. */
 export function modelFor(path: string, content: string): monaco.editor.ITextModel {
   const uri = monaco.Uri.file(path);
+  const key = uri.toString();
   const existing = monaco.editor.getModel(uri);
-  if (existing) return existing;
-  return monaco.editor.createModel(content, languageForPath(path), uri);
+  if (existing) {
+    refreshEditorModelInstance(existing);
+    return existing;
+  }
+  const retained = retainedEditorModelText(key);
+  const created = monaco.editor.createModel(
+    retained ?? content,
+    languageForPath(path),
+    uri,
+  );
+  if (retained !== undefined) acknowledgeEditorModelRestore(key);
+  refreshEditorModelInstance(created);
+  return created;
 }
 
 export { monaco };

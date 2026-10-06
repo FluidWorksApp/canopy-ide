@@ -150,7 +150,7 @@ export const DOC_STACKS: { key: string; label: string; types: readonly string[] 
   { key: "workspaces", label: "Workspaces", types: ["agent"] },
   { key: "files", label: "Files", types: ["file", "collab"] },
   { key: "browser", label: "Browser", types: ["preview"] },
-  { key: "tasks", label: "Tasks", types: ["ticket"] },
+  { key: "tasks", label: "Tasks", types: ["ticket", "task-history", "workflows"] },
   { key: "reviews", label: "Reviews", types: ["pr", "review"] },
   { key: "history", label: "History", types: ["branch", "commit"] },
   { key: "team", label: "Team", types: ["chat", "shared-project"] },

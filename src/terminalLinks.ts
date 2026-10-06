@@ -28,6 +28,47 @@ export function opensLink(e: MouseEvent, hasSelection = false): boolean {
   return !hasSelection || commandHeld(e);
 }
 
+export interface TerminalFileLink {
+  path: string;
+  /** Zero-based start and exclusive end columns. */
+  start: number;
+  end: number;
+  line?: number;
+}
+
+const withLine = (value: string) => {
+  const match = /^(.*?):(\d+)(?::\d+)?$/.exec(value);
+  return match
+    ? { path: match[1], line: Number(match[2]) }
+    : { path: value, line: undefined };
+};
+
+/** Find quoted and unquoted absolute paths in one terminal row. */
+export function terminalFileLinks(text: string): TerminalFileLink[] {
+  const found: TerminalFileLink[] = [];
+  const occupied: [number, number][] = [];
+  const add = (value: string, start: number, end: number) => {
+    const trimmed = value.replace(/[.,;!?)\]}]+$/, "");
+    if (!trimmed || occupied.some(([a, b]) => start < b && end > a)) return;
+    const at = withLine(trimmed);
+    found.push({ ...at, start, end: start + trimmed.length });
+    occupied.push([start, end]);
+  };
+
+  for (const match of text.matchAll(/(['"])((?:\/|[A-Za-z]:[\\/])[^'"\r\n]+)\1/g)) {
+    const start = (match.index ?? 0) + 1;
+    add(match[2], start, start + match[2].length);
+  }
+  for (const match of text.matchAll(
+    /(?:^|[\s([{<])((?:\/(?!\/)|[A-Za-z]:[\\/])[^\s'"<>|]*)/g,
+  )) {
+    const value = match[1];
+    const start = (match.index ?? 0) + match[0].length - value.length;
+    add(value, start, start + value.length);
+  }
+  return found.sort((a, b) => a.start - b.start);
+}
+
 /** The bubble that appears while the pointer rests on a link. xterm underlines
  *  a hovered link whether or not the modifier is down, and an underline that
  *  does nothing when clicked reads as a broken link rather than a guarded one —
@@ -35,7 +76,7 @@ export function opensLink(e: MouseEvent, hasSelection = false): boolean {
  *  the click does what the underline promises, and there is no chord to name. */
 export interface LinkHint {
   /** Pointer entered a link; `e` places the bubble. */
-  show(e: MouseEvent): void;
+  show(e: MouseEvent, kind?: "url" | "file"): void;
   hide(): void;
   dispose(): void;
 }
@@ -76,7 +117,7 @@ export function createLinkHint(host: HTMLElement): LinkHint {
   };
 
   return {
-    show(e) {
+    show(e, kind = "url") {
       clearTimeout(timer);
       // The event is pooled by nobody here, but it does not survive the delay
       // in any useful sense — read the coordinates now.
@@ -88,13 +129,19 @@ export function createLinkHint(host: HTMLElement): LinkHint {
           el.className = "term-link-hint";
           const label = host.ownerDocument.createElement("span");
           label.className = "term-link-hint-label";
-          label.textContent = "Open in Canopy";
           const chip = host.ownerDocument.createElement("span");
           chip.className = "term-link-hint-chord";
-          chip.textContent = `${LINK_CHORD} for browser`;
           el.append(label);
           el.append(chip);
           host.append(el);
+        }
+        const label = el.querySelector<HTMLElement>(".term-link-hint-label");
+        const chip = el.querySelector<HTMLElement>(".term-link-hint-chord");
+        if (label)
+          label.textContent = kind === "file" ? "Open file in Canopy" : "Open in Canopy";
+        if (chip) {
+          chip.textContent = kind === "file" ? "" : `${LINK_CHORD} for browser`;
+          chip.hidden = kind === "file";
         }
         place(el, at);
       }, SHOW_DELAY_MS);

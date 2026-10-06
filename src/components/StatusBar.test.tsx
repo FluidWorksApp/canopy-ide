@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StatusBar } from "./StatusBar";
 import { BranchSwitchProvider } from "../useBranchSwitch";
 import * as ipc from "../ipc";
@@ -105,6 +105,16 @@ const base = {
   projects: [{ name: "canopy", roots: ["/repo"] }],
 };
 
+it("reads Git state from the focused tab's checkout", async () => {
+  const { rerender } = render(
+    <StatusBar {...base} contextRoot="/repo-two" events={[]} />,
+  );
+  await waitFor(() => expect(ipc.gitStatus).toHaveBeenCalledWith("/repo-two"));
+
+  rerender(<StatusBar {...base} contextRoot="/repo-three" events={[]} />);
+  await waitFor(() => expect(ipc.gitStatus).toHaveBeenCalledWith("/repo-three"));
+});
+
 describe("the tray's base-branch chip", () => {
   const behind = {
     ...inSync,
@@ -165,6 +175,49 @@ describe("the tray's base-branch chip", () => {
     expect(screen.getByText(/Commit or stash it/)).toBeTruthy();
   });
 
+  it("hands a merge blocked by uncommitted work to an agent", async () => {
+    vi.mocked(ipc.gitSyncProbe).mockResolvedValue({
+      ...behind,
+      dirty: 2,
+      overlap: ["src/a.ts"],
+    } as never);
+    const onResolveMerge = vi.fn().mockResolvedValue(true);
+    render(<StatusBar {...base} events={[]} onResolveMerge={onResolveMerge} />);
+
+    fireEvent.click(await screen.findByText("Resolve & merge"));
+    // The dead "Merge main" button gives way to the live one.
+    expect(screen.queryByText("Merge main")).toBeNull();
+    await vi.waitFor(() =>
+      expect(onResolveMerge).toHaveBeenCalledWith({
+        repo: "/repo",
+        branch: "fix/login",
+        base: "origin/main",
+        overlap: ["src/a.ts"],
+        conflicts: [],
+      }),
+    );
+    expect(ipc.gitSyncApply).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(screen.queryByText("main has 4 new commits")).toBeNull());
+  });
+
+  it("offers the agent beside a manual merge that would conflict", async () => {
+    vi.mocked(ipc.gitSyncProbe).mockResolvedValue({
+      ...behind,
+      state: "conflict",
+      conflicts: ["src/a.ts"],
+    } as never);
+    const onResolveMerge = vi.fn().mockResolvedValue(true);
+    render(<StatusBar {...base} events={[]} onResolveMerge={onResolveMerge} />);
+
+    expect(await screen.findByText("Merge and resolve now")).toBeTruthy();
+    fireEvent.click(screen.getByText("Resolve & merge"));
+    await vi.waitFor(() =>
+      expect(onResolveMerge).toHaveBeenCalledWith(
+        expect.objectContaining({ conflicts: ["src/a.ts"] }),
+      ),
+    );
+  });
+
   it("takes 'keep working' for an answer until the base moves again", async () => {
     vi.mocked(ipc.gitSyncProbe).mockResolvedValue(behind as never);
     const { rerender } = render(<StatusBar {...base} events={[]} />);
@@ -196,6 +249,38 @@ describe("the tray's plan chip", () => {
     vi.mocked(ipc.planUsage).mockResolvedValue([claudePlan] as never);
     render(<StatusBar {...base} events={[]} agentId="claude" />);
     expect(await screen.findByText("7d 52% · 5h 18%")).toBeTruthy();
+  });
+
+  it("requests the active Codex session's own limit snapshot", async () => {
+    const codexPlan = {
+      ...claudePlan,
+      agent: "codex",
+      plan: "pro",
+      windows: [{ label: "7d", used_percent: 39, resets_at: null }],
+    };
+    vi.mocked(ipc.planUsage).mockResolvedValue([codexPlan] as never);
+    render(
+      <StatusBar
+        {...base}
+        events={[]}
+        agentId="codex"
+        activePtyId={9}
+        activeSessionId="019fe3a6-5c29-7d62-a51d-9803afc76843"
+      />,
+    );
+    expect(await screen.findByText("7d 39%")).toBeTruthy();
+    expect(ipc.planUsage).toHaveBeenCalledWith(
+      "019fe3a6-5c29-7d62-a51d-9803afc76843",
+    );
+  });
+
+  it("does not guess Codex usage before the active session is identified", async () => {
+    render(
+      <StatusBar {...base} events={[]} agentId="codex" activePtyId={9} />,
+    );
+    await screen.findByText(/main/);
+    expect(ipc.planUsage).not.toHaveBeenCalled();
+    expect(screen.queryByText(/^7d /)).toBeNull();
   });
 
   // The important negative: a chip belonging to another CLI is worse than no
@@ -479,6 +564,44 @@ describe("the tray's branch chip", () => {
   });
 });
 
+describe("the app resource boundary", () => {
+  const publish = (includesWebviews: boolean) => {
+    vi.mocked(ipc.onAppStats).mockImplementation(async (cb) => {
+      cb({
+        cpu: 44,
+        mem_bytes: 2.4 * 1024 ** 3,
+        procs: 93,
+        includes_webviews: includesWebviews,
+      });
+      return () => {};
+    });
+  };
+
+  it("marks the macOS descendant reading as a lower bound and names WebKit", async () => {
+    publish(false);
+    render(<StatusBar {...base} events={[]} />);
+
+    const chip = await screen.findByTitle(/canopy lower bound/);
+    expect(chip.textContent).toContain("44% cpu · 2.4 GB");
+    expect(chip.textContent).not.toContain("≥");
+    expect(chip.getAttribute("title")).toContain("Activity Monitor");
+
+    fireEvent.click(chip);
+    expect(screen.getByText("WebKit layers")).toBeTruthy();
+    expect(screen.getByText("OS-owned · add separately")).toBeTruthy();
+  });
+
+  it("keeps an exact total when the platform process tree includes WebViews", async () => {
+    publish(true);
+    render(<StatusBar {...base} events={[]} />);
+
+    const chip = await screen.findByTitle(/^canopy:/);
+    expect(chip.textContent).toContain("44% cpu · 2.4 GB");
+    expect(chip.textContent).not.toContain("≥");
+    expect(chip.getAttribute("title")).toContain("Includes WebView helper processes");
+  });
+});
+
 // The tray is one line, and this is the only chip whose length is set by how
 // much work is running. Twenty-five agents spelled out ran the width of the
 // window and pushed the branch, the model and the cost off the bar.
@@ -565,4 +688,18 @@ describe("the account switcher", () => {
     fireEvent.click(await screen.findByTitle(/New agents launch as Default/));
     expect(await screen.findByText("claude")).toBeTruthy();
   });
+});
+
+ it("uses the existing bottom resource chip for workspace totals", async () => {
+  vi.mocked(ipc.onAppStats).mockImplementation(async cb=>{cb({cpu:44,mem_bytes:1.2*1024**3,procs:0,includes_webviews:true,workspace:{available:true,memoryLimitBytes:3*1024**3,cpus:1,elasticCpu:{minCpus:1,maxCpus:4,currentCpus:1,availableMaxCpus:2,status:'steady',sampledAt:0},elasticMemory:{minMiB:3072,maxMiB:16384,currentMiB:3072,availableMaxMiB:5632,status:'steady',sampledAt:0}}});return ()=>{};});
+  const {container}=render(<StatusBar {...base} events={[]}/>);
+  const chip=await screen.findByTitle(/^Remote workspace:/);expect(chip.closest('.status-res')).toBeTruthy();expect(chip.textContent).toContain('44% cpu');expect(container.querySelector('.workspace-metrics')).toBeNull();fireEvent.click(chip);expect(screen.getByText('Usage now')).toBeTruthy();expect(screen.getByText('of 1 allocated cores')).toBeTruthy();expect(screen.queryByText('Core services')).toBeNull();expect(screen.getByText('Automatic scaling · configured range')).toBeTruthy();expect(screen.getByText('1 – 4 cores')).toBeTruthy();expect(screen.getByText(/This VM allows up to 2 CPU cores/)).toBeTruthy();expect(screen.getByText('3.0 GB – 16.0 GB')).toBeTruthy();expect(screen.getByText(/RAM available to this workspace: 5.5 GB/)).toBeTruthy();
+ });
+
+it('shows the exact active Codex session model and totals rather than another account or session',async()=>{
+ const row={agent:'codex',session_id:'active-rollout',profile:'work',cwd:'/workspace',title:null,model:'gpt-6.1-sol',input_tokens:100,output_tokens:200,cache_read_tokens:0,cache_creation_tokens:0,cost:null,turns:7,updated:1,supported:true};
+ vi.mocked(ipc.agentUsage).mockResolvedValue([{...row,profile:'default',model:'wrong-account'},{...row,session_id:'other',model:'wrong-session'},row]);
+ render(<StatusBar {...base} events={[]} agentId="codex" agentProfile="work" activeSessionId="active-rollout" activePtyId={9} modelSwitch={null}/>);
+ expect(await screen.findByTitle(/7 turns/)).toBeTruthy();
+ expect(screen.queryByText('wrong-account')).toBeNull();expect(screen.queryByText('wrong-session')).toBeNull();
 });

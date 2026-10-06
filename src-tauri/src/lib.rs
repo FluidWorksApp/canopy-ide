@@ -1,18 +1,26 @@
+mod agent_cli;
+mod agent_instructions;
 mod agent_life;
 mod agentid;
 mod agents;
 mod android;
 mod blocking;
+mod bounded_file;
 mod browser;
 mod change;
+mod chrome_stream;
 mod cleanup;
 mod cli;
+mod client_mode;
 mod clipboard;
 mod companion;
+mod containment;
 mod context;
 mod crash;
 #[cfg(feature = "dictation")]
 mod dictation;
+mod execution;
+mod remote_upload;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
 // keeps the command surface identical so the rest of this file is unchanged.
 #[cfg(not(feature = "dictation"))]
@@ -20,6 +28,7 @@ mod dictation;
 mod dictation;
 mod fsx;
 mod git;
+mod governor;
 mod instructions;
 mod lsp;
 mod maintenance;
@@ -31,6 +40,7 @@ mod notify;
 mod portal;
 mod preview;
 mod procenv;
+mod process_capture;
 mod profiles;
 mod provenance;
 mod prwatch;
@@ -41,6 +51,7 @@ mod remind;
 mod remote;
 mod research;
 mod selftest;
+mod session_transfer;
 mod shortcuts;
 mod snapshot;
 mod spot;
@@ -55,6 +66,7 @@ mod vault_kdbx;
 mod watchdog;
 mod webview_keys;
 mod winproc;
+mod workflow;
 mod wsbridge;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -65,8 +77,10 @@ use tauri::{Emitter, Manager};
 /// and Linux too, not just on the Mac it was written on.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const MENU_SHORTCUT_IDS: &[&str] = &[
+    "select-all",
     "settings",
     "new-launcher",
+    "new-agent-workspace",
     "new-terminal",
     "close-tab",
     "next-tab",
@@ -139,7 +153,13 @@ fn build_menu(app: &tauri::AppHandle, profile: &str) -> tauri::Result<Menu<tauri
             &PredefinedMenuItem::cut(app, None)?,
             &PredefinedMenuItem::copy(app, None)?,
             &PredefinedMenuItem::paste(app, None)?,
-            &PredefinedMenuItem::select_all(app, None)?,
+            &MenuItem::with_id(
+                app,
+                "select-all",
+                "Select All",
+                true,
+                accel("select-all").as_deref(),
+            )?,
         ],
     )?;
     let tabs = Submenu::with_items(
@@ -156,6 +176,16 @@ fn build_menu(app: &tauri::AppHandle, profile: &str) -> tauri::Result<Menu<tauri
                 "New…",
                 true,
                 accel("new-launcher").as_deref(),
+            )?,
+            // The same launcher, but a new agent lands in a worktree of its
+            // own. Not the default: making one costs seconds, opening here
+            // costs nothing, so the slower one takes the Shift.
+            &MenuItem::with_id(
+                app,
+                "new-agent-workspace",
+                "New Agent in Workspace…",
+                true,
+                accel("new-agent-workspace").as_deref(),
             )?,
             &MenuItem::with_id(
                 app,
@@ -241,8 +271,9 @@ fn build_menu(app: &tauri::AppHandle, profile: &str) -> tauri::Result<Menu<tauri
                 "new-project",
                 "New Project…",
                 true,
-                // Cmd/Ctrl+N is the new-tab launcher (Tabs menu); a whole new
-                // project is the rarer, bigger thing, so it takes the Shift.
+                // Cmd/Ctrl+N is the new-tab launcher and Cmd/Ctrl+Shift+N the
+                // same in a new workspace (Tabs menu); a whole new project is
+                // the rarer, bigger thing, so it takes the extra modifier.
                 accel("new-project").as_deref(),
             )?,
             &MenuItem::with_id(
@@ -343,6 +374,21 @@ fn set_shortcut_profile(app: tauri::AppHandle, profile: String) -> Result<(), St
 /// Frontend error bridge: WebView console/errors surface in the dev terminal.
 #[tauri::command]
 fn js_log(level: String, message: String) {
+    // Release diagnostics accept stage codes only: no paths, URLs, tokens or
+    // application error contents are retained in the resilience log.
+    if level == "boot" {
+        if matches!(
+            message.as_str(),
+            "startup-stage:begin"
+                | "startup-stage:unavailable"
+                | "startup-stage:selector-error"
+                | "startup-stage:local-choice"
+                | "startup-stage:connected"
+        ) {
+            log::info!(target: "canopy::watchdog::startup", "{message}");
+        }
+        return;
+    }
     match level.as_str() {
         "error" => log::error!(target: "webview", "{message}"),
         "warn" => log::warn!(target: "webview", "{message}"),
@@ -367,8 +413,50 @@ fn raise_file_descriptor_limit() {
     }
 }
 
+static LOCAL_SERVICES_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn start_local_services(app: &tauri::AppHandle) {
+    if LOCAL_SERVICES_STARTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    // Refresh the capability-neutral context used by CLIs without MCP.
+    // It lives in Canopy's own state, never in the repository, so a CLI
+    // opened outside this IDE does not inherit IDE-specific rules.
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        if let Err(e) = agent_instructions::install_context(&home) {
+            log::warn!("agent context not installed: {e}");
+        }
+        if let Err(e) = agent_instructions::install_omp_task_overlay(&home) {
+            log::warn!("omp task overlay not installed: {e}");
+        }
+    }
+    // Install the hook helper before hooks are (re)written, so the
+    // path they point at exists.
+    if let Err(e) = agents::install_hook_helper() {
+        log::warn!("hook helper not installed: {e}");
+    }
+    // Then re-apply the integrations this machine already opted into.
+    // Every launch is also every update, which is when a generated hook
+    // file goes stale or a newly shipped step (the MCP registration was
+    // one) is missing from a config set up by an older version. Off the
+    // main thread: it shells out to find the CLIs.
+    agents::heal_integrations(app.clone());
+    // The login PATH every shell-less spawn needs, resolved before the
+    // first one asks for it.
+    procenv::warm();
+    agents::start_monitor(app.clone());
+    agents::start_hook_bridge(app.clone());
+    maintenance::start(app.clone());
+    context::start(app.clone());
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Must precede every startup writer. In particular, hook installation and
+    // integration healing write into CLI-owned config files.
+    selftest::prepare().expect("selftest home isolation failed");
+
     #[cfg(target_os = "macos")]
     raise_file_descriptor_limit();
 
@@ -385,6 +473,14 @@ pub fn run() {
     crash::install_panic_hook();
 
     let builder = tauri::Builder::default();
+    // Apple exposes an explicit renderer-termination notification. Use it for
+    // every WebKit view so an OS memory kill becomes an immediate refresh;
+    // the main-view heartbeat remains the cross-platform backstop for hangs
+    // and for terminations that do not produce this callback.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let builder = builder.on_web_content_process_terminate(|webview| {
+        watchdog::web_content_terminated(webview);
+    });
     // Must be first: a second `canopy <dir>` invocation forwards its argv
     // here and exits, instead of starting an app that would fight this one
     // over the hook bridge and PTY ownership.
@@ -401,6 +497,13 @@ pub fn run() {
         cli::open_forwarded(app, argv, cwd);
     }));
     builder
+        // The selftest's renderer replacement needs to know whether a reload
+        // actually started before it decides to issue another one.
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" {
+                selftest::main_page_load(payload.event());
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         // Self-update (see plugins.updater in tauri.conf.json) and the restart
         // that has to follow an install.
@@ -413,18 +516,24 @@ pub fn run() {
         // while Canopy isn't the focused app.
         .plugin(tauri_plugin_notification::init())
         .manage(pty::PtyManager::default())
+        .manage(execution::ExecutionRegistry::default())
         .manage(fsx::WorkspaceManager::default())
         .manage(lsp::LspManager::default())
         .manage(relay::RelayManager::default())
         .manage(portal::RemoteManager::default())
         .manage(preview::PreviewManager::default())
         .manage(browser::BrowserManager::default())
+        .manage(chrome_stream::ChromeStreams::default())
         .manage(context::ContextBridge::default())
         .manage(agents::StatsCache::default())
+        .manage(agents::AppStatsCache::default())
+        .manage(governor::TerminalGovernor::default())
+        .manage(containment::ContainmentManager::default())
         .manage(tunnel::TunnelManager::default())
         .manage(prwatch::PrWatcher::default())
         .manage(dictation::DictationManager::default())
         .manage(selftest::SelftestState::default())
+        .manage(client_mode::RemoteConnectionState::default())
         .manage(spot::SpotIndex::default())
         .manage(research::ResearchStore::default())
         .manage(notes::NotesStore::default())
@@ -436,6 +545,7 @@ pub fn run() {
         .manage(companion::CompanionManager::default())
         .manage(structured_runner::StructuredRunnerManager::default())
         .manage(tasks::TaskStore::default())
+        .manage(workflow::WorkflowStore::default())
         .manage(cli::pending_from_env())
         .manage(cli::pending_link_from_env())
         .setup(|app| {
@@ -472,6 +582,25 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            } else {
+                // Release builds retain one small, content-free resilience log
+                // across renderer and native-host exits. Do not widen this
+                // filter: ordinary application logs may contain paths, URLs or
+                // user-authored text that do not belong in incident telemetry.
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::default()
+                        .level(log::LevelFilter::Info)
+                        .max_file_size(1024 * 1024)
+                        .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+                        .clear_targets()
+                        .target(
+                            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                                file_name: Some("resilience".into()),
+                            })
+                            .filter(|metadata| metadata.target().contains("watchdog")),
+                        )
+                        .build(),
+                )?;
             }
             // Edge's built-in shortcuts are not Canopy's to hand out — see
             // webview_keys.rs. Done here rather than at window creation
@@ -482,21 +611,11 @@ pub fn run() {
             for w in app.webview_windows().values() {
                 webview_keys::disable_browser_accelerators(w);
             }
-            // Install the hook helper before hooks are (re)written, so the
-            // path they point at exists.
-            if let Err(e) = agents::install_hook_helper() {
-                log::warn!("hook helper not installed: {e}");
+            // Cold remote-only launches must not install local CLI hooks or start
+            // local agent monitors. A deliberate switch back initializes them.
+            if !client_mode::is_remote(app.handle()) {
+                start_local_services(app.handle());
             }
-            // Then re-apply the integrations this machine already opted into.
-            // Every launch is also every update, which is when a generated hook
-            // file goes stale or a newly shipped step (the MCP registration was
-            // one) is missing from a config set up by an older version. Off the
-            // main thread: it shells out to find the CLIs.
-            agents::heal_integrations(app.handle().clone());
-            agents::start_monitor(app.handle().clone());
-            agents::start_hook_bridge(app.handle().clone());
-            maintenance::start(app.handle().clone());
-            context::start(app.handle().clone());
             // Webview heartbeat + memory-pressure watchdogs (issue #488).
             watchdog::start(app.handle().clone());
             // Only does anything when this launch asked to test itself.
@@ -511,6 +630,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             js_log,
             set_shortcut_profile,
+            change::store_changes,
             crash::report_crash,
             crash::send_crash,
             crash::take_pending_crash,
@@ -521,7 +641,12 @@ pub fn run() {
             cli::cli_install_shim,
             notify::notify_native,
             selftest::selftest_config,
+            selftest::selftest_checkpoint,
+            selftest::selftest_checkpoint_save,
             selftest::selftest_finish,
+            selftest::selftest_reload_renderer,
+            selftest::selftest_spawn_remote,
+            selftest::selftest_store_contains,
             companion::companion_spawn,
             companion::companion_write,
             companion::companion_kill,
@@ -538,6 +663,7 @@ pub fn run() {
             tasks::task_attempt_wait,
             tasks::task_list,
             tasks::task_get,
+            tasks::task_get_for_attempt,
             tasks::task_list_all,
             tasks::task_list_history,
             tasks::task_update_metadata,
@@ -550,18 +676,47 @@ pub fn run() {
             tasks::task_event_list,
             tasks::task_artifact_write,
             tasks::task_artifact_read,
+            workflow::workflow_run_create,
+            workflow::workflow_step_record,
+            workflow::workflow_run_advance,
+            workflow::workflow_run_resume,
+            workflow::workflow_run_list,
+            workflow::workflow_run_get,
+            execution::environment_identity,
+            client_mode::execution_mode_get,
+            client_mode::execution_mode_set,
+            client_mode::execution_remote_get,
+            client_mode::canopy_account_request,
+            client_mode::canopy_account_cache_key,
+            client_mode::execution_remote_set,
+            client_mode::execution_remote_list,
+            client_mode::execution_remote_forget,
+            client_mode::execution_remote_activate,
+            client_mode::execution_remote_import_accounts,
+            client_mode::execution_remote_import_git,
+            client_mode::execution_remote_login_prepare,
+            remote_upload::execution_remote_upload,
+            remote_upload::execution_remote_upload_cancel,
+            remote_upload::execution_remote_stage_images,
             pty::pty_spawn,
             pty::pty_spawn_detached,
             pty::pty_spawn_argv,
             pty::pty_spawn_attached_argv,
             pty::pty_output,
-            pty::pty_attach,
+            pty::pty_attach_desktop,
+            pty::pty_read_desktop,
+            pty::pty_detach_desktop,
+            pty::pty_renderer_register,
+            pty::pty_renderer_sessions,
+            pty::pty_renderer_events,
             pty::pty_write,
             pty::pty_ack,
             pty::pty_resize,
             pty::pty_kill,
-            pty::pty_kill_all,
+            pty::pty_dev_reap_all,
             pty::pty_set_title,
+            pty::pty_set_name,
+            pty::pty_set_name_theme,
             pty::instance_id,
             android::android_sdk_status,
             android::android_devices,
@@ -582,6 +737,7 @@ pub fn run() {
             clipboard::clipboard_watch_set,
             clipboard::clipboard_recent,
             clipboard::clipboard_read,
+            clipboard::clipboard_image_png,
             clipboard::clipboard_forget,
             clipboard::clipboard_clear,
             clipboard::clipboard_status,
@@ -641,6 +797,7 @@ pub fn run() {
             provenance::provenance_for_session,
             provenance::provenance_backfill,
             spot::spot_save_context_text,
+            spot::spot_stage_drop_images,
             fsx::workspace_add,
             fsx::workspace_remove,
             fsx::workspace_list,
@@ -648,6 +805,7 @@ pub fn run() {
             fsx::fs_read_file,
             fsx::fs_write_file,
             fsx::fs_stat,
+            fsx::fs_stat_many,
             fsx::fs_list_files,
             fsx::fs_snapshot_files,
             fsx::fs_search,
@@ -659,6 +817,7 @@ pub fn run() {
             fsx::fs_duplicate,
             fsx::workspace_export,
             fsx::workspace_import,
+            process_capture::process_capture_metrics,
             instructions::instructions_scan,
             instructions::instructions_read,
             instructions::instructions_write,
@@ -682,6 +841,7 @@ pub fn run() {
             sync::git_sync_probe,
             sync::git_sync_apply,
             sync::git_sync_abort,
+            sync::git_pr_merge_probe,
             git::git_clone,
             git::git_diff,
             git::git_log,
@@ -701,6 +861,7 @@ pub fn run() {
             git::git_worktree_add_pr,
             git::git_worktree_bootstrap,
             git::git_worktree_remove,
+            git::git_worktree_realign,
             git::git_worktree_prune,
             git::gh_available,
             git::gh_auth,
@@ -721,6 +882,7 @@ pub fn run() {
             git::gh_pr_review_batch,
             git::gh_pr_update_branch,
             git::gh_pr_request_review,
+            git::gh_pr_retarget,
             git::gh_pr_auto_merge,
             git::gh_pr_failing_logs,
             git::gh_pr_diff_since,
@@ -739,6 +901,8 @@ pub fn run() {
             fsx::git_head_content,
             fsx::store_load,
             fsx::store_save,
+            fsx::build_operation_acquire,
+            fsx::build_operation_release,
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_stop,
@@ -751,8 +915,12 @@ pub fn run() {
             agents::agent_integration_health,
             agents::agent_health_report,
             mcp::mcp_servers,
+            mcp::mcp_update_sources,
             mcp_client::mcp_connect,
             mcp_client::mcp_call_tool,
+            mcp_client::mcp_task_get,
+            mcp_client::mcp_task_update,
+            mcp_client::mcp_task_cancel,
             mcp_client::mcp_disconnect,
             mcp_client::mcp_connected,
             agents::claude_session_stats,
@@ -763,6 +931,15 @@ pub fn run() {
             agents::set_context_scopes,
             agents::session_digests,
             agents::pty_stats,
+            agents::app_stats,
+            agents::probe_http_readiness,
+            governor::terminal_governor_status,
+            governor::terminal_governor_incidents,
+            governor::terminal_governor_grant,
+            governor::terminal_governor_stop,
+            governor::terminal_governor_remember_default,
+            governor::terminal_governor_memory_maxima,
+            governor::terminal_governor_set_memory_maximum,
             agents::session_forget,
             profiles::profiles_list,
             profiles::profile_create,
@@ -770,6 +947,7 @@ pub fn run() {
             profiles::profile_accounts,
             profiles::profile_activate,
             profiles::profile_env,
+            session_transfer::profile_prepare_session,
             profiles::profile_setup,
             relay::relay_host_start,
             relay::relay_host_stop,
@@ -785,12 +963,16 @@ pub fn run() {
             preview::preview_start,
             preview::preview_stop,
             browser::browser_supported,
+            chrome_stream::chrome_stream_open,
+            chrome_stream::chrome_stream_close,
             browser::browser_open,
             browser::browser_navigate,
             browser::browser_painted,
             browser::browser_set_bounds,
             browser::browser_set_visible,
             browser::browser_close,
+            browser::browser_close_metrics,
+            browser::browser_pressure_reload_metrics,
             browser::browser_run_op,
             browser::browser_command,
             browser::browser_here,
@@ -806,13 +988,18 @@ pub fn run() {
             context::context_claim_history_for_path,
             context::context_release_claim,
             context::context_messages,
+            context::context_mesh_severed,
+            context::context_mesh_sever,
+            context::context_agent_spawn_ready,
             context::browser_result,
             snapshot::webview_snapshot,
             snapshot::browser_snapshot,
             snapshot::browser_frame,
+            snapshot::snapshot_capture_metrics,
             portal::remote_enable,
             portal::remote_disable,
             portal::remote_status,
+            portal::remote_socket_metrics,
             portal::remote_rotate_pin,
             portal::remote_set_theme,
             portal::remote_set_clis,
@@ -831,8 +1018,10 @@ pub fn run() {
             dictation::dictation_stop,
             dictation::dictation_cancel,
             dictation::dictation_supported,
+            watchdog::watchdog_generation,
             watchdog::watchdog_ack,
             watchdog::memory_info,
+            watchdog::watchdog_incidents,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -842,8 +1031,13 @@ pub fn run() {
                 // the app quit mid-dictation. Cheap, and the one piece of state
                 // here that outlives the process.
                 sysaudio::restore();
+                let pty = app.state::<pty::PtyManager>();
+                app.state::<std::sync::Arc<watchdog::WatchdogState>>()
+                    .app_exiting(pty.live_count() as u64);
                 // Guarantee no child processes outlive the app.
-                app.state::<pty::PtyManager>().kill_all();
+                let pty_cleanup = pty.kill_all();
+                app.state::<std::sync::Arc<watchdog::WatchdogState>>()
+                    .app_exit_cleanup_returned(pty_cleanup.requested, pty_cleanup.force_signals);
                 app.state::<lsp::LspManager>().kill_all();
                 // ... and no relay socket either.
                 app.state::<relay::RelayManager>().shutdown();
@@ -853,12 +1047,20 @@ pub fn run() {
                 app.state::<preview::PreviewManager>().shutdown_all();
                 // ... and any embedded-browser views.
                 app.state::<browser::BrowserManager>().shutdown_all(app);
+                app.state::<chrome_stream::ChromeStreams>().shutdown_all();
                 // ... and any public-link tunnel process.
                 app.state::<tunnel::TunnelManager>().kill_all();
                 // ... and stop polling GitHub for pull requests.
                 app.state::<prwatch::PrWatcher>().shutdown();
                 // ... and stop watching the pasteboard.
                 app.state::<clipboard::Clipboard>().shutdown();
+                // AppHandle::exit(code) does not propagate that code through
+                // wry's macOS event-loop return. Cleanup is complete here, so
+                // make a selftest report authoritative for CI before Tauri can
+                // turn every scenario into process status 0.
+                if let Some(code) = selftest::exit_code() {
+                    std::process::exit(code);
+                }
             }
         });
 }

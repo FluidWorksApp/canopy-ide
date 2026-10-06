@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { AgentHint, SessionDigest } from "./ipc";
 import {
+  unattendedEnvFor,
   agentIdForCommand,
   identifyAgent,
   learnBin,
   learnedBins,
   observeForLearning,
+  rememberAgentPtys,
   resetLearned,
 } from "./agentIdentity";
 
@@ -116,6 +118,27 @@ describe("identifyAgent", () => {
   });
 });
 
+describe("rememberAgentPtys", () => {
+  it("holds identity through empty samples, updates it, and forgets on close", () => {
+    const memory = new Map<number, string>();
+    rememberAgentPtys(memory, [7], [{ id: 7, agent_hint: hint() }]);
+    expect(memory.get(7)).toBe("claude");
+
+    // The shell briefly owns the foreground pgrp between CLI samples. This is
+    // not evidence that the terminal stopped being an agent workspace.
+    rememberAgentPtys(memory, [7], [{ id: 7, agent_hint: null }]);
+    expect(memory.get(7)).toBe("claude");
+
+    rememberAgentPtys(memory, [7], [
+      { id: 7, agent_hint: hint({ bin: "codex", path: "/opt/homebrew/bin/codex" }) },
+    ]);
+    expect(memory.get(7)).toBe("codex");
+
+    rememberAgentPtys(memory, [], []);
+    expect(memory.has(7)).toBe(false);
+  });
+});
+
 describe("learning from the hook stream", () => {
   const unknown = hint({ bin: "acme-agent", path: "/opt/acme/bin/acme-agent" });
 
@@ -177,5 +200,35 @@ describe("agentIdForCommand", () => {
     expect(agentIdForCommand("claude-utils sync")).toBeNull();
     expect(agentIdForCommand("")).toBeNull();
     expect(agentIdForCommand(null)).toBeNull();
+  });
+});
+
+describe("unattendedEnvFor", () => {
+  it("gives a task's opencode the permission pin, even behind the micro-task prefix", () => {
+    for (const cmd of ["opencode --agent build", "CANOPY_MICRO_TASK='1' opencode --agent build"]) {
+      const env = Object.fromEntries(unattendedEnvFor(cmd));
+      const pin = JSON.parse(env.OPENCODE_PERMISSION);
+      expect(pin.bash["*"]).toBe("allow");
+      expect(pin.bash["rm -rf *"]).toBe("ask");
+      expect(pin.edit).toBe("allow");
+    }
+  });
+
+  it("asks the PTY for omp's overlay by marker, never by path", () => {
+    expect(unattendedEnvFor("omp --approval-mode=write")).toEqual([
+      ["CANOPY_OMP_TASK_OVERLAY", "1"],
+    ]);
+    expect(unattendedEnvFor("omp --resume abc --approval-mode=write")).toEqual([
+      ["CANOPY_OMP_TASK_OVERLAY", "1"],
+    ]);
+  });
+
+  it("leaves sessions opened by hand alone", () => {
+    expect(unattendedEnvFor("opencode")).toEqual([]);
+    expect(unattendedEnvFor("omp")).toEqual([]);
+    expect(unattendedEnvFor("omp --resume abc")).toEqual([]);
+    // A CLI whose unattended mode is a flag alone needs nothing more.
+    expect(unattendedEnvFor("claude 'hi' --permission-mode auto")).toEqual([]);
+    expect(unattendedEnvFor(null)).toEqual([]);
   });
 });

@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AGENT_CLIS, type AgentCli } from "../projects";
 import { AgentIcon, TerminalIcon } from "./icons";
 import { fuzzy } from "../fuzzy";
+import { getSettings } from "../settings";
 import { useEscapeLayer } from "../useEscape";
 
 type Row =
@@ -22,7 +23,10 @@ interface LaunchPaletteProps {
   /** Where the launch lands — shown in the footer so it isn't a guess. */
   targetLabel?: string;
   onShell: () => void;
-  onLaunchCli: (cli: AgentCli) => void;
+  onLaunchCli: (cli: AgentCli, where: "workspace" | "current") => void;
+  /** Overrides where ↵ puts an agent for this opening — ⌘⇧N passes
+   *  "workspace". Absent, the agentWorkspaceByDefault setting decides. */
+  defaultWhere?: "workspace" | "current";
   /** Escape/backdrop cancellation only. A committed row uses its own callback. */
   onCancel: () => void;
 }
@@ -38,6 +42,7 @@ export function LaunchPalette({
   onShell,
   onLaunchCli,
   onCancel,
+  defaultWhere: requestedWhere,
 }: LaunchPaletteProps) {
   // Escape is the palette's own, all the way down to the panel behind it.
   useEscapeLayer();
@@ -69,10 +74,22 @@ export function LaunchPalette({
       ?.scrollIntoView({ block: "nearest" });
   }, [sel]);
 
-  const commit = (row: Row | undefined) => {
+  // The setting names the default; ⌘⇧N overrides it for one opening. ⇧↵
+  // and the row's side action are always the other one. Read at render: the
+  // palette is remounted per open, so a change in Settings is picked up the
+  // next time it appears.
+  const settingWhere = getSettings().agentWorkspaceByDefault ? "workspace" : "current";
+  const defaultWhere: "workspace" | "current" = requestedWhere ?? settingWhere;
+  const altWhere = defaultWhere === "workspace" ? "current" : "workspace";
+  const altLabel = (name: string) =>
+    altWhere === "current"
+      ? `Open ${name} in the current checkout`
+      : `Open ${name} in a new workspace`;
+
+  const commit = (row: Row | undefined, where: "workspace" | "current" = defaultWhere) => {
     if (!row) return;
     if (row.kind === "shell") onShell();
-    else onLaunchCli(row.cli);
+    else onLaunchCli(row.cli, where);
   };
 
   return (
@@ -96,7 +113,7 @@ export function LaunchPalette({
               setSel((i) => Math.max(i - 1, 0));
             } else if (e.key === "Enter") {
               e.preventDefault();
-              commit(rows[sel]);
+              commit(rows[sel], e.shiftKey ? altWhere : defaultWhere);
             }
           }}
         />
@@ -104,7 +121,10 @@ export function LaunchPalette({
           {rows.length === 0 && <div className="palette-empty">No match</div>}
           {rows.map((r, i) => {
             const up = r.kind === "cli" ? cliUpdates[r.cli.bin] : undefined;
-            const missing = r.kind === "cli" && !installed[r.cli.bin];
+            // Only a probe that answered "no" means missing. An absent answer
+            // is a probe that hasn't finished or failed; badging that as
+            // "install" is how an installed CLI came to look uninstalled.
+            const missing = r.kind === "cli" && installed[r.cli.bin] === false;
             return (
               <div
                 key={rowKey(r)}
@@ -120,11 +140,30 @@ export function LaunchPalette({
                   )}
                 </span>
                 <span className="palette-name">{rowLabel(r)}</span>
+                {r.kind === "cli" && !missing && (
+                  <span className="launch-workspace-hint">
+                    {defaultWhere === "workspace" ? "new workspace" : "here"}
+                  </span>
+                )}
                 {missing && <span className="cli-install">install</span>}
                 {!missing && up?.hasUpdate && (
                   <span className="cli-update" title={`${up.installed} → ${up.latest}`}>
                     ⇡ {up.latest}
                   </span>
+                )}
+                {r.kind === "cli" && !missing && (
+                  <button
+                    type="button"
+                    className="launch-current"
+                    aria-label={altLabel(r.cli.name)}
+                    title={altLabel(r.cli.name)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      commit(r, altWhere);
+                    }}
+                  >
+                    {altWhere === "current" ? "here" : "workspace"}
+                  </button>
                 )}
               </div>
             );
@@ -132,7 +171,10 @@ export function LaunchPalette({
         </div>
         <div className="palette-foot">
           <span>New{targetLabel ? ` · ${targetLabel}` : ""}</span>
-          <span>↑↓ navigate · ↵ open · esc close</span>
+          <span>
+            ↑↓ navigate · ↵ {defaultWhere === "current" ? "here" : "new workspace"} · ⇧↵{" "}
+            {altWhere === "current" ? "here" : "new workspace"} · esc close
+          </span>
         </div>
       </div>
     </div>

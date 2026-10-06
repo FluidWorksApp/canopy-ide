@@ -1,3 +1,4 @@
+import {registerSelectAll} from '../selectAll';
 // Thin React wrapper around monaco.editor.create — one editor instance,
 // models swapped in and out. (The published react wrappers can't pair with the
 // @codingame monaco build, and we need direct model control anyway.)
@@ -5,8 +6,16 @@ import { useEffect, useRef } from "react";
 import { monaco } from "../monaco-setup";
 import { getSettings, THEME_CHANGE_EVENT } from "../settings";
 import { setCaret, truncateSelection } from "../editorState";
+import {
+  editorViewState,
+  rememberEditorViewState,
+} from "../editorViewState";
 
 interface MonacoEditorProps {
+  /** Inactive editors release their DOM/editor instance while retaining the
+   *  model and a bounded view-state record for lossless tab switching. */
+  active?: boolean;
+  readOnly?: boolean;
   model: monaco.editor.ITextModel;
   onSave: () => void;
   onDirty: (dirty: boolean) => void;
@@ -16,17 +25,28 @@ interface MonacoEditorProps {
   onCursor?: (anchor: number, head: number) => void;
 }
 
-export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorProps) {
+export function MonacoEditor({
+  active = true,
+  readOnly = false,
+  model,
+  onSave,
+  onDirty,
+  onCursor,
+}: MonacoEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  const readOnlyRef=useRef(readOnly);readOnlyRef.current=readOnly;
   const saveRef = useRef(onSave);
   const dirtyRef = useRef(onDirty);
   const cursorRef = useRef(onCursor);
+  const modelRef = useRef(model);
   saveRef.current = onSave;
   dirtyRef.current = onDirty;
   cursorRef.current = onCursor;
+  modelRef.current = model;
 
   useEffect(() => {
+    if (!active) return;
     const el = containerRef.current;
     if (!el) return;
     const s = getSettings();
@@ -35,6 +55,7 @@ export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorP
       // monaco-setup.ts already set it to the active skin's (and re-sets it on
       // every skin switch). Naming one here would fight that on mount.
       automaticLayout: true,
+      readOnly,
       minimap: { enabled: false },
       fontFamily: s.editorFontFamily,
       fontSize: s.editorFontSize,
@@ -44,6 +65,17 @@ export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorP
       fixedOverflowWidgets: true,
     });
     editorRef.current = editor;
+    const selectAll=()=>{const current=editor.getModel();if(current){editor.setSelection(current.getFullModelRange());editor.focus();}};
+    const releaseSelectAll=registerSelectAll(el,selectAll);
+    const initialModel = modelRef.current;
+    editor.setModel(initialModel);
+    const saved = editorViewState<monaco.editor.ICodeEditorViewState>(
+      initialModel.uri.toString(),
+    );
+    if (saved) editor.restoreViewState(saved);
+    // The native Paste command targets the focused editor. Opening a new file
+    // or returning from a disk-conflict review must restore that focus.
+    editor.focus();
     // The Editor pane in Settings wrote these four straight to storage and
     // nothing ever read them back, so changing the editor font did nothing at
     // all. Apply on create, and live on change like the terminal does.
@@ -58,8 +90,9 @@ export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorP
     };
     window.addEventListener(THEME_CHANGE_EVENT, onSettingsChange);
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () =>
-      saveRef.current(),
+      !readOnlyRef.current&&saveRef.current(),
     );
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyA,selectAll);
     // Read through the ref, so a tab that isn't collaborating pays for one
     // dead callback rather than the subscription being torn down and rebuilt
     // every time the parent re-renders.
@@ -89,17 +122,29 @@ export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorP
       );
     });
     return () => {
+      const current = editor.getModel();
+      const viewState = editor.saveViewState();
+      if (current && viewState) {
+        rememberEditorViewState(current.uri.toString(), viewState);
+      }
       window.removeEventListener(THEME_CHANGE_EVENT, onSettingsChange);
+      releaseSelectAll();
       cursorSub.dispose();
       editor.dispose();
       editorRef.current = null;
     };
-  }, []);
+  }, [active]);
+
+  useEffect(()=>{editorRef.current?.updateOptions({readOnly});},[readOnly]);
 
   useEffect(() => {
+    if (!active) return;
     const editor = editorRef.current;
     if (!editor) return;
-    editor.setModel(model);
+    if (editor.getModel() !== model) {
+      editor.setModel(model);
+      editor.focus();
+    }
     const pos = editor.getPosition();
     setCaret({ path: model.uri.path, line: pos?.lineNumber ?? 1, column: pos?.column ?? 1 });
     const sub = model.onDidChangeContent(() => dirtyRef.current(true));
@@ -119,7 +164,7 @@ export function MonacoEditor({ model, onSave, onDirty, onCursor }: MonacoEditorP
       window.removeEventListener("canopy:reveal-line", reveal);
       sub.dispose();
     };
-  }, [model]);
+  }, [active, model]);
 
   return <div className="fill" ref={containerRef} />;
 }

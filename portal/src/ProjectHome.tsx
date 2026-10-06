@@ -153,7 +153,7 @@ export function ProjectHome({
                 else onNewAgent()
               }}
             >
-              <AgentBadge agent={cli.id} sz={28} />
+              <AgentBadge agent={cli.id} sz={28} clis={clis} />
               <span>{cli.name}</span>
               {!cli.available && <small>not found</small>}
             </button>
@@ -198,7 +198,7 @@ export function ProjectHome({
                   return next
                 })}
               />
-              <AgentBadge agent={item.agentId} sz={24} />
+              <AgentBadge agent={item.agentId} sz={24} clis={clis} />
               <button className="home-resume-main" onClick={() => restore([item])}>
                 <span className="home-resume-prompt">{item.prompt || '(no prompt captured)'}</span>
                 <span className="home-resume-meta">

@@ -4,6 +4,7 @@
 // read files.
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
+import {explicitFilePaths} from '../explicitFilePaths';
 import { pathScore } from "../fuzzy";
 import { useEscapeLayer } from "../useEscape";
 
@@ -49,6 +50,7 @@ export function Palette({ mode, components, onOpen, onClose }: PaletteProps) {
     return c ? path.slice(c.path.length + 1) : path;
   };
   const [files, setFiles] = useState<string[]>([]);
+  const [explicitFiles, setExplicitFiles] = useState<string[]>([]);
   const [hits, setHits] = useState<ipc.SearchHit[]>([]);
   const [busy, setBusy] = useState(false);
   const [sel, setSel] = useState(0);
@@ -63,6 +65,13 @@ export function Palette({ mode, components, onOpen, onClose }: PaletteProps) {
     if (mode !== "files") return;
     void ipc.fsListFiles(roots).then(setFiles).catch(() => setFiles([]));
   }, [mode, roots.join("\n")]);
+  useEffect(() => {
+    let stopped = false;
+    setExplicitFiles([]);
+    if (mode !== 'files') return;
+    const timer = setTimeout(() => void explicitFilePaths(query, roots).then(files => { if (!stopped) setExplicitFiles(files); }), 150);
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [mode, query, roots.join('\n')]);
 
   // Content search is the expensive one — debounce and drop stale responses.
   useEffect(() => {
@@ -89,13 +98,13 @@ export function Palette({ mode, components, onOpen, onClose }: PaletteProps) {
 
   const rows: Row[] = useMemo(() => {
     if (mode === "search") return hits;
-    return files
+    return [...new Set([...explicitFiles, ...files])]
       .map((p) => ({ p, s: pathScore(query, p, base(p)) }))
       .filter((r): r is { p: string; s: number } => r.s !== null)
       .sort((a, b) => a.s - b.s || a.p.length - b.p.length)
       .slice(0, 100)
       .map((r) => ({ path: r.p }));
-  }, [mode, files, hits, query]);
+  }, [mode, files, explicitFiles, hits, query]);
 
   useEffect(() => setSel(0), [query, mode]);
   useEffect(() => {

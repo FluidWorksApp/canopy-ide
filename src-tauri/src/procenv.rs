@@ -42,11 +42,11 @@ pub(crate) fn login_path() -> Option<&'static str> {
                 // `-l` so the profile that sets PATH is read. `printf` rather
                 // than `echo` because a PATH is printed verbatim by one and not
                 // reliably by the other.
-                let out = std::process::Command::new(shell)
+                let mut command = std::process::Command::new(shell);
+                command
                     .args(["-lc", "printf %s \"$PATH\""])
-                    .no_console_window()
-                    .output()
-                    .ok()?;
+                    .no_console_window();
+                let out = crate::process_capture::output(&mut command, 1024 * 1024).ok()?;
                 if !out.status.success() {
                     return None;
                 }
@@ -100,6 +100,18 @@ pub(crate) fn child_path() -> Option<String> {
     Some(out.join(":"))
 }
 
+/// Pay for the login shell once, at launch, off the main thread.
+///
+/// Both answers above are cached, but the first caller pays a shell startup —
+/// and that caller is typically a `#[tauri::command]`, which Tauri runs on the
+/// main thread. Without this the cost lands as a UI stall at the exact moment
+/// the user asked for something to run.
+pub(crate) fn warm() {
+    std::thread::spawn(|| {
+        let _ = child_path();
+    });
+}
+
 /// Find a bare command the way a login shell would.
 ///
 /// An absolute path is returned untouched, and a name already on the current
@@ -118,11 +130,15 @@ pub(crate) fn resolve_command(cmd: &str) -> String {
     #[cfg(unix)]
     {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        if let Ok(out) = std::process::Command::new(shell)
-            .args(["-lc", &format!("command -v {cmd}")])
-            .no_console_window()
-            .output()
-        {
+        let mut command = std::process::Command::new(shell);
+        command
+            // The name reaches the shell as a positional argument, never as
+            // program text. Run commands are user-configurable, and a value
+            // such as `tool; something` must remain one (invalid) executable
+            // name rather than becoming a second shell command.
+            .args(["-lc", "command -v -- \"$1\"", "canopy-resolve", cmd])
+            .no_console_window();
+        if let Ok(out) = crate::process_capture::output(&mut command, 64 * 1024) {
             if out.status.success() {
                 let found = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if !found.is_empty() {
@@ -161,6 +177,12 @@ mod tests {
             resolve_command("definitely-not-a-real-binary-xyzzy"),
             "definitely-not-a-real-binary-xyzzy"
         );
+    }
+
+    #[test]
+    fn resolving_a_name_never_evaluates_it_as_shell_code() {
+        let suspicious = "definitely-not-a-real-binary-xyzzy; printf injected";
+        assert_eq!(resolve_command(suspicious), suspicious);
     }
 
     #[test]

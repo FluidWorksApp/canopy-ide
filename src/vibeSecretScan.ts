@@ -33,7 +33,7 @@ export interface SecretFinding {
 export interface SecretScanResult {
   clean: boolean;
   findings: SecretFinding[];
-  /** What this scan does and does not cover, for the refusal message. */
+  /** What this scan does and does not cover, for the audit trail. */
   scope: string;
 }
 
@@ -180,15 +180,4 @@ export function redactSecrets(text: string): string {
       return out;
     })
     .join("\n");
-}
-
-/** What Ash says when the scan is why a turn was not saved. Names the rule and
- *  the place, never the value. */
-export function describeSecretFindings(findings: readonly SecretFinding[]): string {
-  if (findings.length === 0) return "";
-  const first = findings[0];
-  const where = first.file ? `${first.file}:${first.line}` : `line ${first.line}`;
-  const rest =
-    findings.length > 1 ? ` (and ${findings.length - 1} more)` : "";
-  return `This looks like a credential in ${where}${rest}, so I haven't saved it. I'm not repeating the value here.`;
 }

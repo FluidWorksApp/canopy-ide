@@ -18,8 +18,8 @@
 // heard of names itself the first time it reports a single event.
 
 import { POLICY, agentLife } from "../shared/agentLife";
-import type { AgentHint, SessionDigest } from "./ipc";
-import { AGENT_CLIS, agentForBin, agentForPkg, binName } from "./projects";
+import type { AgentHint, SessionDigest, SessionStats } from "./ipc";
+import { agentCliFor, agentForBin, agentForPkg, binName } from "./projects";
 
 export interface AgentIdentity {
   /** Registry id, or null when the terminal is running something we can see
@@ -44,7 +44,7 @@ const KNOWN_TUIS = new Set([
 
 /** Looked up per call rather than cached in a Map built at module load: the
  *  registry is re-resolved whenever a binary override is edited. */
-const cliById = (id: string) => AGENT_CLIS.find((c) => c.id === id);
+const cliById = (id: string) => agentCliFor(id);
 
 /** Learned binary -> agent id, keyed by canonical executable path.
  *
@@ -150,6 +150,32 @@ export function identifyAgent(
   return null;
 }
 
+/** Keep the last positively identified CLI for each terminal that still
+ * exists. Foreground-process sampling is intentionally momentary: an agent can
+ * briefly hand the tty back to its shell or a child process between samples.
+ * UI ownership is not momentary — dropping it on one empty sample unmounts the
+ * agent workspace and destroys the interaction in progress.
+ *
+ * A later positive sample replaces the remembered id, so starting a different
+ * CLI in the same terminal still changes identity. Closing the terminal is the
+ * only negative evidence strong enough to forget it. */
+export function rememberAgentPtys(
+  memory: Map<number, string>,
+  livePtys: Iterable<number>,
+  samples: Iterable<Pick<SessionStats, "id" | "agent_hint">>,
+): Map<number, string> {
+  const live = new Set(livePtys);
+  for (const pty of memory.keys()) {
+    if (!live.has(pty)) memory.delete(pty);
+  }
+  for (const sample of samples) {
+    if (!live.has(sample.id)) continue;
+    const id = identifyAgent(sample.agent_hint)?.id;
+    if (id) memory.set(sample.id, id);
+  }
+  return memory;
+}
+
 /**
  * The agent a command *string* would start, or null.
  *
@@ -168,6 +194,30 @@ export function agentIdForCommand(command?: string | null): string | null {
   // binName rather than a hand-rolled split: it folds the Windows separator and
   // `.exe` too, which is the shape an override on that platform takes.
   return agentForBin(binName(first)) ?? null;
+}
+
+/**
+ * The extra environment a task terminal needs for its CLI's unattended mode
+ * (AgentCli.unattendedEnv), or none.
+ *
+ * Keyed on the unattended flag being in the command, which only task launches
+ * and task resumes carry — so a CLI opened by hand never gets it. Leading
+ * `K='v'` assignments (a micro-task's CANOPY_MICRO_TASK prefix) are skipped
+ * before the agent is identified.
+ */
+export function unattendedEnvFor(command?: string | null): [string, string][] {
+  const line = (command ?? "").replace(
+    /^(?:\s*[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S*)\s+)+/,
+    "",
+  );
+  const id = agentIdForCommand(line);
+  const cli = id ? agentCliFor(id) : undefined;
+  if (!cli?.unattended || !cli.unattendedEnv) return [];
+  // A mode that depends on where the run lands only ever appends to its bare
+  // form, so the bare form is what every such command carries.
+  const mode =
+    typeof cli.unattended === "function" ? cli.unattended({}) : cli.unattended;
+  return line.includes(mode) ? cli.unattendedEnv : [];
 }
 
 /**

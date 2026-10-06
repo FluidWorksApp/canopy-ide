@@ -18,7 +18,8 @@ export interface OpenFile {
   dirty: boolean;
   /** New disk content pending user review (diff-first workflow). */
   external: string | null;
-  /** Raw bytes for viewer kinds; refreshed on external change. */
+  /** Raw bytes for native viewer kinds; Monaco-backed files transfer ownership
+   * to their model and clear this duplicate representation. */
   bytes: Uint8Array | null;
   /** Set when the file was refused rather than loaded — a binary blob, or past
    *  the size cap for its viewer. `bytes` stays null in that case: the point is

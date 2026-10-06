@@ -50,6 +50,15 @@ describe("the fast lane end to end: signal → attention", () => {
     expect(cleared).toEqual({ kind: "none" });
   });
 
+  it("does not let Codex bypass its permission dwell through the fast lane", () => {
+    const attention = reduceAttention(
+      NO_ATTENTION,
+      { t: "hook", at: 1, signal: "needs-human-permission" },
+      "codex",
+    );
+    expect(attention).toBe(NO_ATTENTION);
+  });
+
   it("a finished turn rings; looking clears the ring but never a block", () => {
     const rung = reduceAttention(
       NO_ATTENTION,

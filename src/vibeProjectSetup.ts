@@ -1,7 +1,12 @@
-import type { Project, Component, RunCommand } from "./projects";
-import { AGENT_CLIS } from "./projects";
+import type { Project, Component, ComponentRole, RunCommand } from "./projects";
+import {
+  agentCliFor,
+  recordVibeDiscoveryFailure,
+  streamsStructured,
+} from "./projects";
 import { CANOPY_MCP_ALLOWANCE } from "./agentTools";
 import { launchEnvSync } from "./profiles";
+import { getSettings } from "./settings";
 import * as ipc from "./ipc";
 import { DEFAULT_VIBE_BUILDER_DEPS } from "./vibeBuilderSession";
 import type { BuilderSession } from "./vibeBuilderSessionTypes";
@@ -23,18 +28,26 @@ import {
   type RouteVersions,
   type SelectedRoute,
 } from "./vibeFailover";
+import type { RepairProblem } from "./vibeRepair";
+import {
+  DEFAULT_VIBE_SETUP_VERIFICATION_DEPS,
+  verifyVibeSetupBeforePersist,
+  type VibeSetupVerificationFailure,
+  type VibeSetupVerificationResult,
+} from "./vibeSetupVerification";
 
 export const VIBE_SETUP_SCHEMA_VERSION = 1 as const;
 const MAX_COMPONENTS = 64;
 const MAX_COMMANDS_PER_COMPONENT = 16;
 const MAX_ARGV = 64;
 const MAX_SERVICES = 32;
+const DATA_PROVIDER_IDS = new Set(["supabase", "neon", "firebase"]);
 const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 const KEY = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
-export type VibeComponentRole =
-  | "web" | "api" | "worker" | "database" | "mobile"
-  | "library" | "tooling" | "other";
+/** The persisted spelling is the source of truth, so a role survives into the
+ *  project file rather than existing only inside a proposal. */
+export type VibeComponentRole = ComponentRole;
 export type VibeCommandPurpose = "serve" | "check" | "worker" | "setup";
 
 export interface VibeSetupCommandProposal {
@@ -44,10 +57,13 @@ export interface VibeSetupCommandProposal {
   argv: [string, ...string[]];
   cwd: string;
   requiredEnvNames: string[];
+  /** Whether Build may run this command while bringing up the project. This
+   * must be false for operations against a managed database. */
+  automatic: boolean;
   readiness:
-    | { kind: "http"; path: string }
-    | { kind: "port" }
-    | { kind: "process-alive" }
+    | { kind: "http"; path: string; timeoutMs?: number }
+    | { kind: "port"; timeoutMs?: number }
+    | { kind: "process-alive"; timeoutMs?: number }
     | { kind: "one-shot"; timeoutMs: number };
 }
 
@@ -70,7 +86,29 @@ export interface VibeProjectSetupProposal {
     componentKey: string;
     commandKey: string;
     reason: string;
-    requiredFor: "preview";
+    requiredFor: "preview" | "project";
+    dependsOn: Array<{ componentKey: string; commandKey: string }>;
+  }>;
+  componentLinks: Array<{
+    fromComponentKey: string;
+    toComponentKey: string;
+    kind: "http" | "queue" | "database" | "library" | "other";
+    description: string;
+    evidence: string[];
+  }>;
+  dataStores: Array<{
+    key: string;
+    label: string;
+    engine: "postgresql" | "mysql" | "sqlite" | "other";
+    mode: "local" | "managed";
+    providerId: string | null;
+    usedByComponentKeys: string[];
+    schemaPaths: string[];
+    migrationPaths: string[];
+    latestMigration: string | null;
+    migrate: null | { componentKey: string; commandKey: string };
+    status: null | { componentKey: string; commandKey: string };
+    evidence: string[];
   }>;
   externalServices: Array<{
     key: string;
@@ -132,8 +170,12 @@ function exactKeys(value: Record<string, unknown>, allowed: readonly string[], a
 }
 
 export function parseVibeSetupOutput(output: string): unknown {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(output);
-  const source = fenced?.[1] ?? output.slice(output.indexOf("{"), output.lastIndexOf("}") + 1);
+  const finalMarker = output.lastIndexOf("CANOPY_SETUP_FINAL_JSON");
+  const finalOutput = finalMarker >= 0
+    ? output.slice(finalMarker + "CANOPY_SETUP_FINAL_JSON".length)
+    : output;
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(finalOutput);
+  const source = fenced?.[1] ?? finalOutput.slice(finalOutput.indexOf("{"), finalOutput.lastIndexOf("}") + 1);
   if (!source.trim()) throw new Error("the setup agent returned no JSON object");
   return JSON.parse(source);
 }
@@ -149,7 +191,7 @@ export function validateVibeSetupProposal(
   if (redactSecrets(serialized) !== serialized) {
     errors.push("setup output contains a credential value");
   }
-  exactKeys(top, ["schemaVersion", "repositoryFingerprint", "components", "preview", "requiredProcesses", "externalServices", "deployment"], "setup", errors);
+  exactKeys(top, ["schemaVersion", "repositoryFingerprint", "components", "preview", "requiredProcesses", "componentLinks", "dataStores", "externalServices", "deployment"], "setup", errors);
   if (top.schemaVersion !== VIBE_SETUP_SCHEMA_VERSION) errors.push("unsupported setup schemaVersion");
   if (top.repositoryFingerprint !== context.repositoryFingerprint) errors.push("repository changed while setup was running");
   if (!Array.isArray(top.components) || top.components.length === 0 || top.components.length > MAX_COMPONENTS) {
@@ -175,10 +217,21 @@ export function validateVibeSetupProposal(
     else roots.add(componentRoot);
     if (!text(component.label)) errors.push(`${at}.label is required`);
     if (!["web", "api", "worker", "database", "mobile", "library", "tooling", "other"].includes(String(component.role))) errors.push(`${at}.role is invalid`);
-    if (!strings(component.evidence) || component.evidence.length === 0 || component.evidence.some((path) => {
-      const resolved = resolvePath(context.projectRoot, path);
-      return !inside(context.projectRoot, resolved) || !context.existingPaths.has(resolved);
-    })) errors.push(`${at}.evidence must name observed project paths`);
+    // Name the paths that failed. "must name observed project paths" is true of
+    // an invented file and of a real one Canopy's inventory did not reach, and
+    // those want opposite fixes — one is the agent, the other is the cap on
+    // fsSnapshotFiles. Undifferentiated, the message sends you to the wrong one.
+    if (!strings(component.evidence) || component.evidence.length === 0) {
+      errors.push(`${at}.evidence must name observed project paths`);
+    } else {
+      const unobserved = component.evidence.filter((path) => {
+        const resolved = resolvePath(context.projectRoot, path);
+        return !inside(context.projectRoot, resolved) || !context.existingPaths.has(resolved);
+      });
+      if (unobserved.length) {
+        errors.push(`${at}.evidence names paths Canopy did not observe: ${unobserved.join(", ")}`);
+      }
+    }
     const commands = Array.isArray(component.commands) ? component.commands : [];
     if (!Array.isArray(component.commands) || commands.length > MAX_COMMANDS_PER_COMPONENT) errors.push(`${at}.commands is invalid`);
     if (commands.length === 0 && !text(component.nonRunnableReason)) errors.push(`${at} has neither a command nor a nonRunnableReason`);
@@ -188,7 +241,7 @@ export function validateVibeSetupProposal(
       const cat = `${at}.commands[${commandIndex}]`;
       const command = record(rawCommand);
       if (!command) { errors.push(`${cat} is not an object`); return; }
-      exactKeys(command, ["key", "purpose", "label", "argv", "cwd", "requiredEnvNames", "readiness"], cat, errors);
+      exactKeys(command, ["key", "purpose", "label", "argv", "cwd", "requiredEnvNames", "automatic", "readiness"], cat, errors);
       if (!text(command.key) || !KEY.test(command.key) || mine.has(command.key)) errors.push(`${cat}.key is invalid or duplicated`);
       else mine.add(command.key);
       if (!["serve", "check", "worker", "setup"].includes(String(command.purpose))) errors.push(`${cat}.purpose is invalid`);
@@ -197,9 +250,11 @@ export function validateVibeSetupProposal(
       const cwd = text(command.cwd) ? resolvePath(context.projectRoot, command.cwd) : "";
       if (!cwd || !inside(componentRoot, cwd) || !context.existingPaths.has(cwd)) errors.push(`${cat}.cwd is not an observed path inside its component`);
       if (!strings(command.requiredEnvNames) || command.requiredEnvNames.some((name) => !ENV_NAME.test(name))) errors.push(`${cat}.requiredEnvNames is invalid`);
+      if (typeof command.automatic !== "boolean") errors.push(`${cat}.automatic is invalid`);
       const readiness = record(command.readiness);
       if (!readiness || !["http", "port", "process-alive", "one-shot"].includes(String(readiness.kind))) errors.push(`${cat}.readiness is invalid`);
-      if (readiness?.kind === "one-shot" && (typeof readiness.timeoutMs !== "number" || readiness.timeoutMs < 1_000 || readiness.timeoutMs > 30 * 60_000)) errors.push(`${cat}.readiness timeout is out of bounds`);
+      if (readiness?.kind === "one-shot" && readiness.timeoutMs === undefined) errors.push(`${cat}.readiness timeout is out of bounds`);
+      if (readiness?.timeoutMs !== undefined && (typeof readiness.timeoutMs !== "number" || readiness.timeoutMs < 1_000 || readiness.timeoutMs > 30 * 60_000)) errors.push(`${cat}.readiness timeout is out of bounds`);
       if (readiness?.kind === "http" && (!text(readiness.path) || !String(readiness.path).startsWith("/"))) errors.push(`${cat}.readiness HTTP path is invalid`);
     });
   });
@@ -217,11 +272,37 @@ export function validateVibeSetupProposal(
     else if (!commandKeys.get(ref.componentKey)?.has(ref.commandKey)) errors.push(`${at} names an unknown command`);
   };
   reference(top.preview, "preview");
+  const requiredRefs = new Set<string>();
+  const requiredDeps = new Map<string, string[]>();
   if (!Array.isArray(top.requiredProcesses) || top.requiredProcesses.length === 0) errors.push("requiredProcesses must include the preview process");
   else top.requiredProcesses.forEach((raw, index) => {
     const item = record(raw);
+    exactKeys(item ?? {}, ["componentKey", "commandKey", "reason", "requiredFor", "dependsOn"], `requiredProcesses[${index}]`, errors);
     reference(item, `requiredProcesses[${index}]`);
-    if (!item || item.requiredFor !== "preview" || !text(item.reason)) errors.push(`requiredProcesses[${index}] is incomplete`);
+    if (!item || !["preview", "project"].includes(String(item.requiredFor)) || !text(item.reason) || !Array.isArray(item.dependsOn)) {
+      errors.push(`requiredProcesses[${index}] is incomplete`);
+      return;
+    }
+    const key = `${item.componentKey}:${item.commandKey}`;
+    const selectedComponent = Array.isArray(top.components)
+      ? top.components.map(record).find((component) => component?.key === item.componentKey)
+      : null;
+    const selectedCommand = Array.isArray(selectedComponent?.commands)
+      ? selectedComponent.commands.map(record).find((command) => command?.key === item.commandKey)
+      : null;
+    if (selectedCommand?.purpose !== "serve" && selectedCommand?.purpose !== "worker") {
+      errors.push(`requiredProcesses[${index}] is not a long-lived command`);
+    }
+    if (requiredRefs.has(key)) errors.push(`requiredProcesses[${index}] is duplicated`);
+    requiredRefs.add(key);
+    const deps: string[] = [];
+    item.dependsOn.forEach((rawDependency, dependencyIndex) => {
+      const dependency = record(rawDependency);
+      reference(dependency, `requiredProcesses[${index}].dependsOn[${dependencyIndex}]`);
+      if (dependency) deps.push(`${dependency.componentKey}:${dependency.commandKey}`);
+    });
+    if (deps.includes(key)) errors.push(`requiredProcesses[${index}] depends on itself`);
+    requiredDeps.set(key, deps);
   });
   const preview = record(top.preview);
   const requiredHasPreview = Array.isArray(top.requiredProcesses) && top.requiredProcesses.some((raw) => {
@@ -229,6 +310,84 @@ export function validateVibeSetupProposal(
     return item?.componentKey === preview?.componentKey && item?.commandKey === preview?.commandKey;
   });
   if (!requiredHasPreview) errors.push("requiredProcesses omits the preview command");
+
+  // One selected long-lived command per runnable component. The former rule
+  // only required the page server, which is how a web + API + worker project
+  // opened with just one of its three processes running.
+  if (Array.isArray(top.components)) {
+    top.components.forEach((raw, index) => {
+      const component = record(raw);
+      if (!component || !Array.isArray(component.commands)) return;
+      const longLived = component.commands.some((rawCommand) => {
+        const command = record(rawCommand);
+        return command?.purpose === "serve" || command?.purpose === "worker";
+      });
+      if (longLived && ![...requiredRefs].some((key) => key.startsWith(`${component.key}:`))) {
+        errors.push(`components[${index}] has no selected required process`);
+      }
+    });
+  }
+  for (const [key, dependencies] of requiredDeps) {
+    for (const dependency of dependencies) {
+      if (!requiredRefs.has(dependency)) errors.push(`${key} depends on a process that is not required`);
+    }
+  }
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const cyclic = (key: string): boolean => {
+    if (visiting.has(key)) return true;
+    if (visited.has(key)) return false;
+    visiting.add(key);
+    const found = (requiredDeps.get(key) ?? []).some(cyclic);
+    visiting.delete(key);
+    visited.add(key);
+    return found;
+  };
+  if ([...requiredDeps.keys()].some(cyclic)) errors.push("requiredProcesses contains a dependency cycle");
+
+  if (!Array.isArray(top.componentLinks)) errors.push("componentLinks is invalid");
+  else top.componentLinks.forEach((raw, index) => {
+    const at = `componentLinks[${index}]`;
+    const link = record(raw);
+    if (!link) { errors.push(`${at} is not an object`); return; }
+    exactKeys(link, ["fromComponentKey", "toComponentKey", "kind", "description", "evidence"], at, errors);
+    if (!componentKeys.has(String(link.fromComponentKey)) || !componentKeys.has(String(link.toComponentKey))) errors.push(`${at} names an unknown component`);
+    if (!["http", "queue", "database", "library", "other"].includes(String(link.kind)) || !text(link.description)) errors.push(`${at} is incomplete`);
+    if (!strings(link.evidence) || link.evidence.length === 0 || link.evidence.some((path) => !context.existingPaths.has(resolvePath(context.projectRoot, path)))) errors.push(`${at}.evidence is invalid`);
+  });
+
+  if (!Array.isArray(top.dataStores)) errors.push("dataStores is invalid");
+  else top.dataStores.forEach((raw, index) => {
+    const at = `dataStores[${index}]`;
+    const store = record(raw);
+    if (!store) { errors.push(`${at} is not an object`); return; }
+    exactKeys(store, ["key", "label", "engine", "mode", "providerId", "usedByComponentKeys", "schemaPaths", "migrationPaths", "latestMigration", "migrate", "status", "evidence"], at, errors);
+    if (!text(store.key) || !KEY.test(store.key) || !text(store.label)) errors.push(`${at} identity is invalid`);
+    if (!["postgresql", "mysql", "sqlite", "other"].includes(String(store.engine)) || !["local", "managed"].includes(String(store.mode))) errors.push(`${at} engine or mode is invalid`);
+    if (store.providerId !== null && (!text(store.providerId) || !context.providerIds.has(store.providerId))) errors.push(`${at}.providerId is not a trusted provider`);
+    if (store.mode === "managed" && store.providerId === null) errors.push(`${at} is managed but has no trusted provider`);
+    if (store.mode === "managed" && text(store.providerId) && !DATA_PROVIDER_IDS.has(store.providerId)) errors.push(`${at}.providerId is not a database provider`);
+    if (store.engine === "postgresql" && text(store.providerId) && !["supabase", "neon"].includes(store.providerId)) errors.push(`${at}.providerId does not provide PostgreSQL`);
+    if (!strings(store.usedByComponentKeys) || store.usedByComponentKeys.length === 0 || store.usedByComponentKeys.some((key) => !componentKeys.has(key))) errors.push(`${at}.usedByComponentKeys is invalid`);
+    for (const field of ["schemaPaths", "migrationPaths", "evidence"] as const) {
+      const paths = store[field];
+      if (!strings(paths) || (field === "evidence" && paths.length === 0) || paths.some((path) => !context.existingPaths.has(resolvePath(context.projectRoot, path)))) errors.push(`${at}.${field} is invalid`);
+    }
+    if (store.latestMigration !== null && !text(store.latestMigration)) errors.push(`${at}.latestMigration is invalid`);
+    for (const field of ["migrate", "status"] as const) {
+      if (store[field] !== null) reference(store[field], `${at}.${field}`);
+    }
+    if (store.mode === "managed" && store.migrate !== null) {
+      const migration = record(store.migrate);
+      const component = Array.isArray(top.components)
+        ? top.components.map(record).find((item) => item?.key === migration?.componentKey)
+        : null;
+      const command = Array.isArray(component?.commands)
+        ? component.commands.map(record).find((item) => item?.key === migration?.commandKey)
+        : null;
+      if (command?.automatic !== false) errors.push(`${at}.migrate must not run automatically against a managed database`);
+    }
+  });
 
   if (!Array.isArray(top.externalServices) || top.externalServices.length > MAX_SERVICES) errors.push("externalServices is invalid");
   else {
@@ -270,8 +429,23 @@ export interface MaterializedVibeSetup {
 }
 
 /** Canopy assigns identity. Agent keys are references within one proposal and
- * never become authority by themselves. Existing canonical roots and identical
- * argv commands keep their IDs; labels may change without moving automation. */
+ * never become authority by themselves.
+ *
+ * Setup may only ADD to what the person already configured. It ran against
+ * this repository and rewrote all three components: "canopy-website" became
+ * "server" (the run command's name), and the Local Instance command —
+ * `cd … && ORT_DYLIB_PATH=… && pnpm tauri dev` — became `"pnpm" "tauri" "dev"`,
+ * silently dropping the environment variable the app needs, under a new id
+ * that no longer matched the run already on the rail. The relay component's
+ * command was deleted outright for not appearing in the proposal.
+ *
+ * None of that is the survey being wrong: it is asked to describe how the
+ * project runs, and it did. It is this function treating a description as a
+ * replacement. The brief tells the agent the labels are the person's own
+ * words and to treat them as given; the merge has to honour the same promise.
+ * So: an existing component keeps its label, an existing command keeps its
+ * id, name and exact spelling and only gains the `purpose` the survey
+ * established, and a configured command the proposal never mentioned stays. */
 export function materializeVibeSetup(project: Project, proposal: VibeProjectSetupProposal, projectRoot = ""): MaterializedVibeSetup {
   const usedComponents = new Set(project.components.map((item) => item.id));
   const usedCommands = new Set(project.components.flatMap((item) => item.commands?.map((command) => command.id) ?? []));
@@ -290,15 +464,52 @@ export function materializeVibeSetup(project: Project, proposal: VibeProjectSetu
     const existing = project.components.find((item) => normalized(item.path) === candidateRoot);
     const id = existing?.id ?? allocate("cmp", candidateRoot, usedComponents);
     componentIds[candidate.key] = id;
+    const claimed = new Set<string>();
     const commands: RunCommand[] = candidate.commands.map((command) => {
-      const same = existing?.commands?.find((item) =>
-        item.purpose === command.purpose && JSON.stringify(item.argv) === JSON.stringify(command.argv) && normalized(item.cwd ?? existing.path) === (projectRoot ? resolvePath(projectRoot, command.cwd) : normalized(command.cwd)));
       const commandCwd = projectRoot ? resolvePath(projectRoot, command.cwd) : normalized(command.cwd);
+      // What the command RUNS, not how the survey spelled it. Matching on argv
+      // alone never recognised a command configured by hand — those have no
+      // argv and no purpose — so every setup allocated a new id for a command
+      // the person already had, and the old entry disappeared with it.
+      const invocation = command.argv.join(" ");
+      const same = existing?.commands?.find((item) => {
+        if (claimed.has(item.id)) return false;
+        if (normalized(item.cwd ?? existing.path) !== commandCwd) return false;
+        return item.argv?.length
+          ? JSON.stringify(item.argv) === JSON.stringify(command.argv)
+          : item.command.includes(invocation);
+      });
+      if (same) claimed.add(same.id);
       const commandId = same?.id ?? allocate("run", `${id}\0${command.purpose}\0${JSON.stringify(command.argv)}\0${commandCwd}`, usedCommands);
       commandIds[`${candidate.key}:${command.key}`] = commandId;
-      return { id: commandId, name: command.label, command: displayArgv(command.argv), argv: command.argv, cwd: commandCwd, purpose: command.purpose };
+      // Their spelling wins. `cd … && ORT_DYLIB_PATH=… && pnpm tauri dev` is a
+      // working invocation whose argv form is not: the env assignment is not
+      // an argument, so adopting argv here is how it got dropped. Only the
+      // purpose is taken, because that is what the survey actually adds.
+      return same
+        ? {
+            ...same,
+            purpose: command.purpose,
+            automatic: command.automatic,
+            readiness: command.readiness,
+          }
+        : {
+            id: commandId,
+            name: command.label,
+            command: displayArgv(command.argv),
+            argv: command.argv,
+            cwd: commandCwd,
+            purpose: command.purpose,
+            automatic: command.automatic,
+            readiness: command.readiness,
+          };
     });
-    return { id, label: candidate.label, path: candidateRoot, commands };
+    // A configured command the proposal did not mention is still the person's
+    // command. Silence about it is not a finding that it should go.
+    for (const item of existing?.commands ?? []) {
+      if (!claimed.has(item.id)) commands.push(item);
+    }
+    return { id, label: existing?.label ?? candidate.label, path: candidateRoot, commands, role: candidate.role };
   });
   const previewComponentId = componentIds[proposal.preview.componentKey];
   const previewRunCommandId = commandIds[`${proposal.preview.componentKey}:${proposal.preview.commandKey}`];
@@ -317,6 +528,45 @@ export function materializeVibeSetup(project: Project, proposal: VibeProjectSetu
         requiredProcesses: proposal.requiredProcesses.map((item) => ({
           componentId: componentIds[item.componentKey],
           runCommandId: commandIds[`${item.componentKey}:${item.commandKey}`],
+          dependsOn: item.dependsOn.map((dependency) => ({
+            componentId: componentIds[dependency.componentKey],
+            runCommandId: commandIds[`${dependency.componentKey}:${dependency.commandKey}`],
+          })),
+          reason: item.reason,
+          requiredFor: item.requiredFor,
+        })),
+        componentLinks: proposal.componentLinks.map((link) => ({
+          fromComponentId: componentIds[link.fromComponentKey],
+          toComponentId: componentIds[link.toComponentKey],
+          kind: link.kind,
+          description: link.description,
+        })),
+        dataStores: proposal.dataStores.map((store) => ({
+          id: store.key,
+          label: store.label,
+          engine: store.engine,
+          mode: store.mode,
+          providerId: store.providerId,
+          componentIds: store.usedByComponentKeys.map((key) => componentIds[key]),
+          schemaPaths: store.schemaPaths.map((path) => resolvePath(projectRoot, path)),
+          migrationPaths: store.migrationPaths.map((path) => resolvePath(projectRoot, path)),
+          latestMigration: store.latestMigration,
+          ...(store.migrate
+            ? {
+                migrate: {
+                  componentId: componentIds[store.migrate.componentKey],
+                  runCommandId: commandIds[`${store.migrate.componentKey}:${store.migrate.commandKey}`],
+                },
+              }
+            : {}),
+          ...(store.status
+            ? {
+                status: {
+                  componentId: componentIds[store.status.componentKey],
+                  runCommandId: commandIds[`${store.status.componentKey}:${store.status.commandKey}`],
+                },
+              }
+            : {}),
         })),
         externalServices: proposal.externalServices.map((item) => ({
           id: item.key,
@@ -333,15 +583,294 @@ export function materializeVibeSetup(project: Project, proposal: VibeProjectSetu
 }
 
 export const VIBE_SETUP_USER_MESSAGE = "Inspect this repository and return its complete Build setup as the required JSON object. Do not modify files and do not ask the person technical questions.";
+export const VIBE_SETUP_COMPONENT_CHECKPOINT = "CANOPY_SETUP_COMPONENT_JSON";
+export const VIBE_SETUP_FINAL_MARKER = "CANOPY_SETUP_FINAL_JSON";
 
-export function vibeSetupSystemPrompt(fingerprint: string): string {
-  return `You are Canopy's project setup agent. Read the entire repository, including non-JavaScript components. Do not edit files. Discover every component, how each runs, the one page-serving preview target, every process required for that page to work, external services, and deployment evidence. Return exactly one JSON object with schemaVersion 1 and repositoryFingerprint ${JSON.stringify(fingerprint)}. Commands are argv arrays, never shell strings. Evidence fields contain repository paths. If you cannot determine a complete setup, return no proposal and explain the blocker plainly.`;
+export interface VibeSetupComponentEvidence {
+  root: string;
+  component: VibeSetupComponentProposal;
+}
+
+/** Completed component findings are progress, even when the enclosing survey
+ * is cut off. Checkpoints are deliberately one-line JSON so a killed stream is
+ * still recoverable without trying to repair a half-written final object. They
+ * remain untrusted prompt evidence: the final proposal still passes the full
+ * repository/schema validator before anything can be persisted. */
+export function extractVibeSetupComponentEvidence(
+  output: string,
+  componentRoots: readonly string[],
+): VibeSetupComponentEvidence[] {
+  const allowed = new Set(componentRoots.map(normalized));
+  const latest = new Map<string, VibeSetupComponentEvidence>();
+  for (const line of output.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith(`${VIBE_SETUP_COMPONENT_CHECKPOINT} `)) continue;
+    const source = trimmed.slice(VIBE_SETUP_COMPONENT_CHECKPOINT.length + 1);
+    if (source.length > 64_000) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(source);
+    } catch {
+      continue;
+    }
+    const component = record(parsed);
+    if (!component || !text(component.root) || !allowed.has(normalized(component.root))) continue;
+    if (
+      !text(component.key) || !KEY.test(component.key) ||
+      !text(component.label) ||
+      !["web", "api", "worker", "database", "mobile", "library", "tooling", "other"].includes(String(component.role)) ||
+      !Array.isArray(component.commands) ||
+      !strings(component.evidence)
+    ) continue;
+    const serialized = JSON.stringify(component);
+    if (redactSecrets(serialized) !== serialized) continue;
+    const root = normalized(component.root);
+    latest.set(root, {
+      root,
+      component: component as unknown as VibeSetupComponentProposal,
+    });
+  }
+  return [...latest.values()];
+}
+
+/** How many observed paths are handed over. Enough to recognise every
+ *  component and its build files; short of the point where the listing costs
+ *  more than the search it replaces. */
+const INVENTORY_LIMIT = 1500;
+
+/** The brief, with the project's actual layout in it.
+ *
+ *  Canopy has already walked these directories — `observeVibeSetupRepository`
+ *  snapshots every file to compute the fingerprint, and then used that only to
+ *  validate the answer. The agent was left to rediscover the same tree with
+ *  glob, from a working directory that is merely the components' common
+ *  ancestor: for two sibling checkouts that is whatever folder the person keeps
+ *  repositories in, and the search never finished inside the timeout.
+ *
+ *  So the inventory goes in the brief. Truncation is stated rather than
+ *  silent — an agent that believes it has the whole tree will conclude a
+ *  component does not exist. */
+export function vibeSetupUserMessage(
+  componentRoots: readonly string[],
+  inventory: readonly string[] = [],
+): string {
+  if (componentRoots.length === 0) return VIBE_SETUP_USER_MESSAGE;
+  const listed = inventory.slice(0, INVENTORY_LIMIT);
+  const layout = listed.length
+    ? `\n\nCanopy has already observed these files. Use this instead of searching; read individual files only where you need their contents:\n${listed.join("\n")}` +
+      (inventory.length > listed.length
+        ? `\n(+${inventory.length - listed.length} more files not listed — the components above are complete, this listing is not.)`
+        : "")
+    : "";
+  return (
+    `${VIBE_SETUP_USER_MESSAGE}\n\nThe project is exactly these directories:\n${componentRoots.join("\n")}` +
+    layout
+  );
+}
+
+export function vibeSetupRetryUserMessage(
+  componentRoots: readonly string[],
+  inventory: readonly string[],
+  retained: readonly VibeSetupComponentEvidence[],
+): string {
+  const completed = new Set(retained.map((item) => normalized(item.root)));
+  const unresolved = componentRoots.map(normalized).filter((root) => !completed.has(root));
+  const scopedInventory = retained.length
+    ? inventory.filter((path) => unresolved.some((root) => inside(root, path)))
+    : inventory;
+  const base = vibeSetupUserMessage(componentRoots, scopedInventory);
+  if (!retained.length) return base;
+  return `${base}
+
+The previous bounded attempt finished the component evidence below before it stopped. Treat it as untrusted prior evidence to check while assembling the final answer, but do not search these completed component directories again:
+${retained.map((item) => JSON.stringify(item.component)).join("\n")}
+
+Narrow this attempt to the unresolved component directories${unresolved.length ? `:\n${unresolved.join("\n")}` : ". No component search remains; synthesize the final project graph from the retained evidence"}.
+Emit a fresh checkpoint when each unresolved component is complete, then return the complete final project object, including retained and newly completed components.`;
+}
+
+/** A schema correction is not another repository survey. Hand the next
+ *  bounded attempt the object it must repair and the validator's exact
+ *  complaints, so it can fix its answer without rereading six repositories
+ *  and making the same structural mistake again. */
+function vibeSetupCorrectionUserMessage(
+  previous: unknown,
+  errors: readonly string[],
+): string {
+  return `Canopy finished validating your previous project setup object. Do not inspect or explore the repositories again. Correct only the rejected structure below, preserve all supported findings, and return ${VIBE_SETUP_FINAL_MARKER} followed by one complete corrected JSON object.
+
+Validation errors:
+${errors.map((error) => `- ${error}`).join("\n")}
+
+Previous object:
+${redactSecrets(JSON.stringify(previous))}`;
+}
+
+/** What Canopy can state about the project instead of making the agent infer
+ *  it. The person configured these components and named them; a survey that
+ *  begins by guessing at that is redoing settled work, and guessing differently
+ *  each run. */
+export interface VibeSetupProjectBrief {
+  name: string;
+  components: readonly Component[];
+}
+
+function briefSection(brief: VibeSetupProjectBrief | undefined): string {
+  if (!brief?.components.length) return "";
+  const lines = brief.components.map((component) => {
+    const commands = (component.commands ?? []).map((command) => {
+      const argv = command.argv?.length ? command.argv.join(" ") : command.command;
+      const purpose = command.purpose ? ` [${command.purpose}]` : "";
+      return `      - "${command.name}"${purpose}: ${argv}${command.cwd ? ` (in ${command.cwd})` : ""}`;
+    });
+    return (
+      `  - ${component.label} — ${normalized(component.path)}\n` +
+      (commands.length
+        ? `    already configured in Canopy:\n${commands.join("\n")}`
+        : "    no run command configured yet")
+    );
+  });
+  return (
+    `\n\nThis is the project "${brief.name}". Canopy already holds this much, ` +
+    `configured by the person who owns it:\n\n${lines.join("\n")}\n\n` +
+    "Treat that as given, not as a hypothesis to re-derive: the labels are the " +
+    "person's own words for these directories, and an already-configured " +
+    "command is one they have run. Confirm each against the repository and say " +
+    "so if one is now wrong, but do not rename what is already named, and do " +
+    "not omit a component because you found nothing interesting in it."
+  );
+}
+
+export function vibeSetupSystemPrompt(
+  fingerprint: string,
+  componentRoots: readonly string[] = [],
+  brief?: VibeSetupProjectBrief,
+): string {
+  // The working directory is the components' common ancestor, which for two
+  // sibling checkouts is whatever folder the person keeps repositories in —
+  // here that was ~/Documents/GitHub, 106GB of unrelated projects. Told only
+  // to "read the entire repository", the agent globbed all of it and hit the
+  // timeout without producing a proposal. The roots are known before launch,
+  // so name them rather than leaving it to infer them from where it landed.
+  const scope = componentRoots.length
+    ? ` The project consists solely of these directories: ${componentRoots.join(", ")}. Confine every search to them; sibling directories under the working directory belong to unrelated projects.`
+    : "";
+  // The schema is spelled out because validateVibeSetupProposal rejects every
+  // unrecognised field, and prose is not a schema. Described rather than shown,
+  // the agent turned the sentence into field names — "the one page-serving
+  // preview target" came back as `pageServingPreviewTarget`, components carried
+  // `name`/`path`/`kind` instead of `label`/`root`/`role` — and a correct
+  // survey was thrown away for answering in the wrong shape. Any change to the
+  // interfaces above has to be made here too, or that returns.
+  return `You are Canopy's project setup agent.${scope} Read the entire repository, including non-JavaScript components. Do not edit files. Discover every component, how each runs, how components call or depend on one another, the one page-serving preview target, every long-lived process needed to run the project, databases and their schema/migration workflow, external services, and deployment evidence.${briefSection(brief)}
+
+Work one component at a time. Immediately after you finish reading a component, emit exactly one single-line checkpoint with its complete component object:
+${VIBE_SETUP_COMPONENT_CHECKPOINT} {"key":"...","root":"...","label":"...","role":"...","commands":[],"evidence":[]}
+Never put credentials or secret values in a checkpoint. A bounded retry keeps these completed findings and narrows itself to unfinished components instead of searching the whole project again.
+
+After every component is complete, emit ${VIBE_SETUP_FINAL_MARKER} on its own line, then exactly one JSON object in this shape. Field names are exact; any field not listed here is rejected, and so is any missing one:
+
+{
+  "schemaVersion": 1,
+  "repositoryFingerprint": ${JSON.stringify(fingerprint)},
+  "components": [{
+    "key": "short-id",                        // ^[a-z0-9][a-z0-9._-]{0,63}$, unique
+    "root": "<absolute directory path>",
+    "label": "<human name>",
+    "role": "web|api|worker|database|mobile|library|tooling|other",
+    "commands": [{
+      "key": "short-id",                      // unique within this component
+      "purpose": "serve|check|worker|setup",
+      "label": "<human name>",
+      "argv": ["pnpm", "dev"],                // argv array, never a shell string
+      "cwd": "<absolute path inside this component>",
+      "requiredEnvNames": ["API_URL"],        // NAMES only, never values
+      "automatic": true,                      // false for managed DB changes or other remote mutations
+      "readiness": { "kind": "http", "path": "/" }
+      // readiness is one of: {"kind":"http","path":"/..."} | {"kind":"port"}
+      //   | {"kind":"process-alive"} | {"kind":"one-shot","timeoutMs":120000}
+    }],
+    "nonRunnableReason": "<only if commands is empty>",
+    "evidence": ["<absolute path that exists>"]
+  }],
+  "preview": { "componentKey": "...", "commandKey": "..." },
+  "requiredProcesses": [
+    { "componentKey": "...", "commandKey": "...", "reason": "<why it runs>", "requiredFor": "preview|project",
+      "dependsOn": [{ "componentKey": "...", "commandKey": "..." }] }
+  ],
+  "componentLinks": [
+    { "fromComponentKey": "...", "toComponentKey": "...", "kind": "http|queue|database|library|other",
+      "description": "<what crosses this boundary>", "evidence": ["<absolute observed path>"] }
+  ],
+  "dataStores": [
+    { "key": "app-db", "label": "Application database", "engine": "postgresql|mysql|sqlite|other",
+      "mode": "local|managed", "providerId": null,
+      "usedByComponentKeys": ["..."], "schemaPaths": ["<observed path>"],
+      "migrationPaths": ["<observed path>"], "latestMigration": "<latest migration id or filename, or null>",
+      "migrate": { "componentKey": "...", "commandKey": "..." },
+      "status": { "componentKey": "...", "commandKey": "..." },
+      "evidence": ["<absolute observed path>"] }
+    // migrate/status may each be null. A managed store requires a trusted providerId.
+  ],
+  "externalServices": [{
+    "key": "short-id",
+    "providerId": null,                       // or one of: supabase, neon, firebase, stripe, vercel, netlify, cloudflare, fly
+    "label": "<human name>",
+    "purpose": "<what it is for>",
+    "requiredForPreview": false,              // true requires a non-null providerId
+    "usedByComponentKeys": ["..."],
+    "requiredEnvNames": ["DATABASE_URL"],
+    "evidence": ["<absolute path that exists>"]
+  }],
+  "deployment": null
+  // or { "providerId": "...", "componentKey": "...", "evidence": ["..."] } —
+  // providerId must be one of the same ids listed above. Anything else, and
+  // anything self-hosted, is null: null means "not one of these", not "no
+  // deployment", and a real deployment named here that is not on that list is
+  // rejected outright.
+}
+
+Work out what each component IS before deciding how it runs, from its manifest
+rather than from the shape of the tree: package.json, go.mod, Cargo.toml,
+pyproject.toml/requirements.txt, Gemfile, pom.xml, build.gradle(.kts),
+*.xcodeproj/Package.swift, pubspec.yaml, composer.json, *.csproj, Dockerfile,
+Makefile. The run command is whatever that ecosystem's own is — gradlew
+assembleDebug, xcodebuild, go run, cargo run, uvicorn, rails s, mvn spring-boot:run,
+flutter run, dotnet run, make — and argv[0] must be a real executable, never a
+shell built-in and never a script you assume exists. A component that is an
+Android app, an iOS app, a Go service or a Rails API is not served by a
+JavaScript command, and "there is no package.json" is not a reason to call it
+non-runnable.
+
+Rules: every component directory you were given must appear. requiredProcesses must include the preview entry AND one selected serve/worker command for every runnable component; include frontend, API, worker, and a local database process rather than treating only the page server as the app. Encode startup order in dependsOn (for example web -> API -> local DB) without cycles. Put setup commands in the order they must complete (dependency install before local migration); Build runs them sequentially. A local schema/migration may be an automatic setup command; a managed Supabase/Neon migration must have automatic:false and is never applied merely by opening Build. For managed services, record the trusted providerId so Build can prefer a linked account API/MCP route, ask the person to link their Supabase, Google/Firebase, or other provider account when needed, and fall back to the authenticated provider CLI only when account access is unavailable. Preserve migration files as the source of truth and report the latest observed migration. Every path in root, cwd, schemaPaths, migrationPaths and evidence must be a real path you observed. Never include a secret value or ask for a long-lived token in chat. If you cannot determine a complete setup, return no JSON object and explain the blocker plainly instead.`;
+}
+
+/** What the setup agent is doing, in the words of the person watching.
+ *
+ *  The runner's tool events carry the literal invocation — Codex reports a
+ *  command as `/bin/zsh -lc "sed -n '1,220p' /Users/…"` — and forwarding them
+ *  put chips reading `Shell /bin/zsh -lc "for f in …"` into a pane whose own
+ *  footer promises no technical steps. The activity line exists so a run that
+ *  takes minutes does not look hung; it was never meant to publish a
+ *  transcript. The detail is dropped rather than shortened, because a truncated
+ *  shell command is still a shell command.
+ *
+ *  Unknown tools return null and say nothing. A name we have no phrasing for is
+ *  more likely to be jargon than not, and silence beats leaking it. */
+export function plainSetupActivity(tool: string): string | null {
+  if (tool === "Shell") return "Looking through your project";
+  if (tool === "Read" || tool === "Grep" || tool === "Glob") return "Reading how your project is put together";
+  if (tool.startsWith("canopy_")) return "Checking what Canopy already knows";
+  return null;
 }
 
 export interface VibeSetupRepositoryObservation {
   projectRoot: string;
   fingerprint: string;
   paths: ReadonlySet<string>;
+  /** The configured component directories. Distinct from projectRoot, which is
+   *  only their common ancestor and may hold unrelated repositories. */
+  componentRoots: string[];
 }
 
 export async function observeVibeSetupRepository(project: Project): Promise<VibeSetupRepositoryObservation> {
@@ -372,12 +901,52 @@ export async function observeVibeSetupRepository(project: Project): Promise<Vibe
     return `${path}:${snapshot.size}:${snapshot.modified_ms ?? -1}`;
   });
   facts.sort();
-  return { projectRoot, paths, fingerprint: `fs-${hash(facts.join("\n"))}` };
+  return { projectRoot, paths, componentRoots: roots, fingerprint: `fs-${hash(facts.join("\n"))}` };
 }
 
+const SETUP_AGENT_INVENTORY_CAP = 800;
+const SETUP_INVENTORY_SIGNAL = /(?:^|\/)(?:package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|Cargo\.toml|go\.mod|pyproject\.toml|requirements[^/]*\.txt|Gemfile|pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|Dockerfile|compose\.ya?ml|docker-compose\.ya?ml|Makefile|Procfile|Package\.swift|pubspec\.yaml|composer\.json|[^/]+\.csproj|schema\.prisma|drizzle\.config\.[^/]+|wrangler\.toml|vercel\.json|firebase\.json|README[^/]*|[^/]*(?:schema|migration)[^/]*)$/i;
+
+/** Give the survey a map, not a serialization of the whole repository.
+ * Validation still keeps the complete native snapshot. Only the prompt is
+ * bounded: manifests, database/deployment evidence, and shallow landmarks
+ * arrive first; the read-only agent can inspect deeper paths through tools. */
+export function setupAgentInventory(
+  paths: ReadonlySet<string>,
+  componentRoots: readonly string[],
+): string[] {
+  const roots = componentRoots.map(normalized);
+  const rootSet = new Set(roots);
+  const all = [...paths].map(normalized).sort();
+  const depthFromRoot = (path: string) => {
+    const root = roots
+      .filter((candidate) => inside(candidate, path))
+      .sort((a, b) => b.length - a.length)[0];
+    if (!root) return Number.MAX_SAFE_INTEGER;
+    return path.slice(root.length).split("/").filter(Boolean).length;
+  };
+  const priority = all.filter(
+    (path) => rootSet.has(path) || SETUP_INVENTORY_SIGNAL.test(path),
+  );
+  const prioritySet = new Set(priority);
+  const shallow = all
+    .filter((path) => !prioritySet.has(path))
+    .sort((a, b) => depthFromRoot(a) - depthFromRoot(b) || a.localeCompare(b));
+  return [...priority, ...shallow].slice(0, SETUP_AGENT_INVENTORY_CAP);
+}
+
+/** What this task needs from a model, as a class the routing table answers.
+ *
+ *  Discovery reads files and reports structure. It is not the thinking the
+ *  builder does, and asking for the builder's tier spent the frontier model on
+ *  enumeration — slower, dearer, and no more correct. Declared once here so the
+ *  ranking and the failover that follows it cannot disagree about which job
+ *  this is. */
+const SETUP_TASK_CLASS = "survey" as const;
+
 const SETUP_ROUTE_VERSIONS: RouteVersions = {
-  harnessVersion: "vibe-project-setup-1",
-  promptVersion: "vibe-project-setup-1",
+  harnessVersion: "vibe-project-setup-2",
+  promptVersion: "vibe-project-setup-2",
   toolPolicyVersion: "read-only-no-shell-1",
 };
 
@@ -391,19 +960,45 @@ export interface VibeProjectSetupTaskDeps {
   startAttempt(attemptId: string): Promise<unknown>;
   settleAttempt(input: TaskAttemptSettlement): Promise<unknown>;
   reserveAttempt(input: TaskAttemptReserveInput): Promise<import("./taskEnvelope").TaskAttempt>;
+  /** Route discovery starts alongside the app. Production waits briefly before
+   * one empty-result retry; tests may omit this to keep that retry synchronous. */
+  sleep?(ms: number): Promise<void>;
 }
 
 export interface VibeProjectSetupTaskInput {
   projectId: string;
   projectName: string;
   projectRoot: string;
+  /** Named to the agent so it searches the project rather than everything that
+   *  happens to sit beside it under projectRoot. */
+  componentRoots?: readonly string[];
+  /** What Canopy already knows: what each directory is called, and any run
+   *  command already attached to it. Withholding it asked the agent to
+   *  rediscover, from an unlabelled list of paths, facts the person had
+   *  already told Canopy — and to guess at names Canopy could simply state. */
+  components?: readonly Component[];
+  /** Paths Canopy already observed, handed over so the agent reads rather than
+   *  searches. */
+  inventory?: readonly string[];
   repositoryFingerprint: string;
   attemptCap?: number;
   timeoutMs?: number;
   /** Schema/repository validation owned by Canopy. A JSON object is not a
    * successful attempt merely because it parses. */
-  validateOutput?: (output: unknown) => boolean;
+  validateOutput?: (
+    output: unknown,
+  ) =>
+    | boolean
+    | SetupValidation
+    | Promise<boolean | SetupValidation>;
+  /** What the agent is doing right now, for the pane. Setup can run for
+   *  minutes; without this it prints one line and then looks hung, which is
+   *  indistinguishable from being hung. */
+  onActivity?: (event: import("./structuredEvents").StructuredRunnerEvent) => void;
   signal?: AbortSignal;
+  /** The user's primary agent. Alternatives remain available for classified
+   * route failure, but declaration order must never pick the vendor. */
+  preferredCli?: string;
 }
 
 export type VibeProjectSetupTaskResult =
@@ -414,6 +1009,9 @@ export type VibeProjectSetupTaskResult =
       message: string;
       runId: string | null;
       attempts: number;
+      /** Safe, bounded component checkpoints recovered from failed attempts.
+       * They are retry input and diagnostics, never persistable setup. */
+      partialEvidence?: VibeSetupComponentEvidence[];
     };
 
 type AttemptRun =
@@ -425,6 +1023,7 @@ async function runSetupAttempt(
   subscribe: (finish: (result: AttemptRun) => void) => void,
   timeoutMs: number,
   signal?: AbortSignal,
+  brief: string = VIBE_SETUP_USER_MESSAGE,
 ): Promise<AttemptRun> {
   return new Promise<AttemptRun>((resolve) => {
     let finished = false;
@@ -450,7 +1049,7 @@ async function runSetupAttempt(
       void transport.stop().catch(() => {});
       finish({ kind: "failed", text: "project setup agent timed out", timedOut: true });
     }, timeoutMs);
-    void transport.send(VIBE_SETUP_USER_MESSAGE).catch((error) =>
+    void transport.send(brief).catch((error) =>
       finish({ kind: "failed", text: String(error), timedOut: false }),
     );
   });
@@ -464,9 +1063,46 @@ export async function runVibeProjectSetupTask(
   deps: VibeProjectSetupTaskDeps,
 ): Promise<VibeProjectSetupTaskResult> {
   const attemptCap = Math.max(1, Math.min(3, input.attemptCap ?? 3));
-  const timeoutMs = Math.max(1_000, Math.min(180_000, input.timeoutMs ?? 90_000));
-  const candidates = await deps.listRoutes().catch(() => []);
-  const eligible = rankRoutes(candidates, "build");
+  // Setup runs once per repository fingerprint, not once per turn, so a tight
+  // budget buys nothing and costs the whole feature. 90s was set against a
+  // single-component project; a real one (four components, sixty reads to
+  // establish how each runs) does not finish, and the person is told the agent
+  // could not understand their project rather than that it was cut off.
+  // 300s was still short of what a real project needs: every observed run
+  // against a three-repository project expired at exactly 300s, and a
+  // two-component one began expiring too once the survey grew. The attempt cap
+  // then spends the whole budget again on a second route, so the person waits
+  // ten minutes to be told their project could not be understood, when it was
+  // only ever cut off mid-read.
+  //
+  // Each component now checkpoints as it completes. A retry carries those
+  // findings forward and names only unresolved roots, so this ceiling no
+  // longer buys the same whole-project search three times. onActivity still
+  // narrates each tool call while the bounded attempt is live.
+  const timeoutMs = Math.max(1_000, Math.min(1_200_000, input.timeoutMs ?? 900_000));
+  // Setup reads its result off a JSON stream, so a CLI Canopy can only run
+  // one-shot is not a slower route here — it is not a route at all. Ranking it
+  // anyway spends the whole attempt budget on `has no verified streaming
+  // runner`, thrown before a process exists, and reports it as the agent
+  // failing to understand the project.
+  let candidates = (await deps.listRoutes().catch(() => [])).filter(
+    (candidate) => streamsStructured(candidate.cli),
+  );
+  // CLI discovery and profile hydration race the first Build render. One empty
+  // sample is not proof that no route exists: wait for the startup window and
+  // probe once more instead of caching a false no-agent result for five minutes.
+  if (candidates.length === 0 && !input.signal?.aborted) {
+    await deps.sleep?.(750);
+    candidates = (await deps.listRoutes().catch(() => [])).filter(
+      (candidate) => streamsStructured(candidate.cli),
+    );
+  }
+  // Reading a repository and reporting what is in it is a survey, not a build.
+  // Asking for "build" requested the frontier tier — Opus for a job that is
+  // enumeration and file reading, where the workhorse is both faster and the
+  // class the routing table already assigns to delegated work. The tier is a
+  // requirement declared by the task; TIER_FOR_CLASS is where it is answered.
+  const eligible = rankRoutes(candidates, SETUP_TASK_CLASS, input.preferredCli);
   let chosen = eligible[0];
   if (!chosen) {
     return {
@@ -476,14 +1112,21 @@ export async function runVibeProjectSetupTask(
   }
   const routeFor = async (route: SelectedRoute) =>
     resolveRoute(route, eligible, SETUP_ROUTE_VERSIONS, await deps.cliVersion(route.cli).catch(() => null));
+  // Where the agent actually runs. The task record and the launch have to name
+  // the same directory — the native side rejects a structured runner whose cwd
+  // is not its reserved workspace, which is the right check: an attempt filed
+  // against a directory the process never ran in is a record of something that
+  // did not happen.
+  const agentCwd = input.componentRoots?.[0] ?? input.projectRoot;
   let reservation = await deps.reserve({
     kind: "vibe-project-setup",
     projectId: input.projectId,
     componentId: "project-setup",
-    worktreePath: input.projectRoot,
+    worktreePath: agentCwd,
     goal: "Understand and configure this project for Build mode",
     acceptance: [
       "Return a validated structured description of every component.",
+      "Checkpoint each component so a bounded retry only surveys unresolved roots.",
       "Name one preview target and every process and service it requires.",
       "Do not modify the repository or ask the person technical questions.",
     ],
@@ -500,6 +1143,15 @@ export async function runVibeProjectSetupTask(
   const runId = reservation.envelope.runId;
   let attempt = reservation.attempt;
   const history: AttemptOutcomeRecord[] = [];
+  const retainedEvidence = new Map<string, VibeSetupComponentEvidence>();
+  let correction: { previous: unknown; errors: string[] } | null = null;
+  const retain = (text: string) => {
+    for (const item of extractVibeSetupComponentEvidence(
+      text,
+      input.componentRoots ?? [],
+    )) retainedEvidence.set(item.root, item);
+  };
+  const partialEvidence = () => [...retainedEvidence.values()];
   for (let attemptsUsed = 1; attemptsUsed <= attemptCap; attemptsUsed += 1) {
     await deps.startAttempt(attempt.attemptId);
     const bin = deps.binFor(chosen.cli);
@@ -511,10 +1163,31 @@ export async function runVibeProjectSetupTask(
     let error = "";
     let finishEvent: ((result: AttemptRun) => void) | null = null;
     let live: ProjectRunnerTransport | null = null;
+    // Built once and both sent and reported. Rebuilt for the log it would have
+    // been rebuilt with different arguments, and the number describing what was
+    // sent would quietly describe something else.
+    const systemPrompt = vibeSetupSystemPrompt(
+      input.repositoryFingerprint,
+      input.componentRoots ?? [],
+      input.components?.length
+        ? { name: input.projectName, components: input.components }
+        : undefined,
+    );
+    const userMessage = correction
+      ? vibeSetupCorrectionUserMessage(correction.previous, correction.errors)
+      : vibeSetupRetryUserMessage(
+          input.componentRoots ?? [],
+          input.inventory ?? [],
+          partialEvidence(),
+        );
+    const completedRoots = new Set(partialEvidence().map((item) => item.root));
+    const unresolvedRoots = (input.componentRoots ?? [])
+      .map(normalized)
+      .filter((root) => !completedRoots.has(root));
     const launch: StructuredRunnerLaunch = {
       bin,
       policy: {
-        systemPromptAppend: vibeSetupSystemPrompt(input.repositoryFingerprint),
+        systemPromptAppend: systemPrompt,
         permissionMode: "plan",
         // The sidecar as a whole — nobody is here to answer a prompt for the
         // one reader that was left off the list. What this agent may do stays
@@ -524,18 +1197,53 @@ export async function runVibeProjectSetupTask(
         disallowedTools: ["Bash", "Edit", "Write", "NotebookEdit", "KillShell"],
         model: chosen.requestedModel ?? "",
         sessionId: deps.sessionId(),
-        cwd: input.projectRoot,
+        // A component root, never projectRoot. projectRoot is only the
+        // components' common ancestor and has to stay that way — validation
+        // uses it as the containment boundary — but for two sibling checkouts
+        // it is whatever folder the person keeps repositories in. Here that
+        // was ~/Documents/GitHub: every repository on the machine, 106GB of
+        // it, as the agent's working directory. Every relative path it
+        // resolved and every listing it took to orient itself started from
+        // there. The other roots arrive as additionalDirectories, so landing
+        // in one costs nothing and reading the rest still works.
+        cwd: agentCwd,
         authority: "read-only",
       },
       // The attempt is recorded against a route that names a profile; without
       // its env the process runs on the default login and the record is
       // fiction. Same miss as the Build executor's.
+      // cwd is only the components' common ancestor; these are the directories
+      // the project actually is, granted explicitly so reading one never
+      // depends on where the launch happened to land.
+      additionalDirectories: correction
+        ? []
+        : retainedEvidence.size > 0
+          ? unresolvedRoots
+          : input.componentRoots ?? [],
       env: [...launchEnvSync(chosen.cli), ["CANOPY_VIBE_SETUP", "1"], ["CANOPY_RUN_ID", runId], ["CANOPY_ATTEMPT_ID", attempt.attemptId]],
     };
+    // What was actually spawned. A turn that ends having said nothing is the
+    // one failure the transcript cannot explain, because there is no
+    // transcript — and the launch is the only remaining suspect. Rebuilding it
+    // by hand from four files is how an afternoon goes.
+    void ipc.jsLog(
+      "error",
+      `vibe-setup: launching ${chosen.cli} bin=${deps.binFor(chosen.cli)} model=${chosen.requestedModel ?? "(none)"} ` +
+        `cwd=${agentCwd} addDirs=${launch.additionalDirectories?.length ?? 0} briefed=${input.components?.length ?? 0} ` +
+        `promptChars=${systemPrompt.length}+${userMessage.length} ` +
+        `env=${JSON.stringify(launchEnvSync(chosen.cli).map(([name]) => name))}`,
+    );
     let transport: ProjectRunnerTransport;
     try {
       transport = await deps.runner.start(attempt.attemptId, chosen.cli, launch, {
         emit(event) {
+          // Whatever it is doing, said out loud. A setup that runs for minutes
+          // behind one unchanging line is indistinguishable from a hung one,
+          // and the person has no way to tell which they are looking at.
+          if (event.kind === "tool") {
+            const doing = plainSetupActivity(event.name);
+            if (doing) input.onActivity?.({ kind: "tool", name: doing });
+          }
           if (event.kind === "delta" || event.kind === "reply") output += event.text;
           else if (event.kind === "error") error = event.message;
           // A setup agent that cannot read the project cannot describe it. Left
@@ -550,7 +1258,21 @@ export async function runVibeProjectSetupTask(
             void live?.stop().catch(() => {});
             finishEvent?.({ kind: "failed", text: error, timedOut: false });
           }
-          else if (event.kind === "turnEnd") finishEvent?.({ kind: "complete", text: output });
+          // A turn that ended having said nothing did not succeed at producing
+          // an empty proposal — it failed, and something already said why.
+          // `turn.failed` emits `error` and then `turnEnd`, so settling every
+          // turnEnd as complete discarded the reason a moment after receiving
+          // it: an API refusing the requested model ("The 'gpt-5.6' model is
+          // not supported when using Codex with a ChatGPT account") was
+          // reported to the user as the agent returning nothing, which sent us
+          // looking at the prompt, the schema and the launch for an hour. The
+          // error only wins an empty turn; a turn that produced output and a
+          // stray error line is still that output.
+          else if (event.kind === "turnEnd") {
+            finishEvent?.(output || !error
+              ? { kind: "complete", text: output }
+              : { kind: "failed", text: error, timedOut: false });
+          }
           else if (event.kind === "exit") finishEvent?.({ kind: "failed", text: error || output || "setup agent exited", timedOut: false });
         },
       }, { resume: false });
@@ -561,25 +1283,100 @@ export async function runVibeProjectSetupTask(
     }
     const result = error
       ? { kind: "failed", text: error, timedOut: false } as const
-      : await runSetupAttempt(transport, (finish) => { finishEvent = finish; }, timeoutMs, input.signal);
+      : await runSetupAttempt(
+          transport,
+          (finish) => { finishEvent = finish; },
+          timeoutMs,
+          input.signal,
+          userMessage,
+        );
+    // The transport output survives even when runSetupAttempt ends with its
+    // timeout sentence. Harvest checkpoints before classifying the exit so the
+    // next bounded attempt can skip every completed component.
+    retain(output || result.text);
     if (result.kind === "complete") {
+      // Only the parse is guarded. Settling the attempt was inside this try
+      // too, so a lifecycle refusal — "attempt is already interrupted", raised
+      // when the project closed under a run — was reported as the agent's
+      // output failing to parse, with the agent's perfectly good JSON printed
+      // beneath it as the evidence. The catch must cover the thing it names.
+      let parsed: unknown;
       try {
-        const parsed = parseVibeSetupOutput(result.text);
-        if (input.validateOutput && !input.validateOutput(parsed)) {
-          await deps.settleAttempt({ attemptId: attempt.attemptId, state: "blocked", failureClass: "task", failureCode: "invalid-setup-schema" });
-          return { ok: false, reason: "invalid-output", message: "I couldn't determine a safe complete setup for this project.", runId, attempts: attemptsUsed };
-        }
-        await deps.settleAttempt({ attemptId: attempt.attemptId, state: "completed" });
-        return { ok: true, output: parsed, runId, attempts: attemptsUsed };
-      } catch {
+        parsed = parseVibeSetupOutput(result.text);
+      } catch (parseError) {
+        // "invalid-output" is returned both when the JSON will not parse and
+        // when it parses but breaks a rule, and the two need opposite fixes:
+        // one is the agent not answering in the required shape, the other is
+        // the answer disagreeing with what Canopy observed. Say which, and
+        // show the head of what actually came back — a refusal, a preamble
+        // before the JSON, or an empty turn all land here identically.
+        void ipc.jsLog(
+          "error",
+          `vibe-setup: could not parse the output of ${chosen.cli} (${String(parseError)}); it returned: ${result.text.slice(0, 500) || "(nothing)"}`,
+        );
         await deps.settleAttempt({ attemptId: attempt.attemptId, state: "blocked", failureClass: "task", failureCode: "invalid-structured-output" });
-        return { ok: false, reason: "invalid-output", message: "I couldn't determine a safe complete setup for this project.", runId, attempts: attemptsUsed };
+        if (retainedEvidence.size > 0 && attemptsUsed < attemptCap) {
+          attempt = await deps.reserveAttempt({
+            runId,
+            route: await routeFor(chosen),
+            recoveryFromAttemptId: attempt.attemptId,
+          });
+          reservation = { envelope: reservation.envelope, attempt };
+          continue;
+        }
+        return {
+          ok: false,
+          reason: "invalid-output",
+          message: "I couldn't determine a safe complete setup for this project.",
+          runId,
+          attempts: attemptsUsed,
+          ...(retainedEvidence.size ? { partialEvidence: partialEvidence() } : {}),
+        };
       }
+      const rawValidation = input.validateOutput
+        ? await input.validateOutput(parsed)
+        : true;
+      const validation = typeof rawValidation === "boolean"
+        ? {
+            ok: rawValidation,
+            errors: rawValidation ? [] : ["the setup object did not satisfy the required schema"],
+          }
+        : rawValidation;
+      if (!validation.ok) {
+        await deps.settleAttempt({ attemptId: attempt.attemptId, state: "blocked", failureClass: "task", failureCode: "invalid-setup-schema" });
+        if (attemptsUsed < attemptCap) {
+          correction = { previous: parsed, errors: validation.errors };
+          attempt = await deps.reserveAttempt({
+            runId,
+            route: await routeFor(chosen),
+            recoveryFromAttemptId: attempt.attemptId,
+          });
+          reservation = { envelope: reservation.envelope, attempt };
+          continue;
+        }
+        return {
+          ok: false,
+          reason: "invalid-output",
+          message: "I couldn't determine a safe complete setup for this project.",
+          runId,
+          attempts: attemptsUsed,
+          ...(retainedEvidence.size ? { partialEvidence: partialEvidence() } : {}),
+        };
+      }
+      await deps.settleAttempt({ attemptId: attempt.attemptId, state: "completed" });
+      return { ok: true, output: parsed, runId, attempts: attemptsUsed };
     }
     if (input.signal?.aborted) {
       await deps.settleAttempt({ attemptId: attempt.attemptId, state: "interrupted", failureClass: "lifecycle", failureCode: "project-closed" });
       return { ok: false, reason: "agent-failed", message: "Project setup stopped when the project closed.", runId, attempts: attemptsUsed };
     }
+    // The one string that says what actually went wrong. It reaches the
+    // failover classifier and then nothing keeps it: every attempt after this
+    // reports "setup-agent-failed", which names the outcome and not the cause.
+    void ipc.jsLog(
+      "error",
+      `vibe-setup: attempt ${attemptsUsed} on ${chosen.cli} failed (kind=${result.kind} timedOut=${(result as { timedOut?: boolean }).timedOut}): ${result.text.slice(0, 600)}`,
+    );
     await deps.settleAttempt({
       attemptId: attempt.attemptId,
       state: "failed",
@@ -591,7 +1388,7 @@ export async function runVibeProjectSetupTask(
       history,
       current: chosen,
       candidates,
-      task: "build",
+      task: SETUP_TASK_CLASS,
       attemptsUsed,
       attemptCap,
     });
@@ -605,6 +1402,7 @@ export async function runVibeProjectSetupTask(
           : "I couldn't determine a safe complete setup for this project.",
         runId,
         attempts: attemptsUsed,
+        ...(retainedEvidence.size ? { partialEvidence: partialEvidence() } : {}),
       };
     }
     if (decision.action.kind === "switch-route") chosen = decision.action.to;
@@ -615,35 +1413,505 @@ export async function runVibeProjectSetupTask(
     });
     reservation = { envelope: reservation.envelope, attempt };
   }
-  return { ok: false, reason: "agent-failed", message: "I couldn't determine a safe complete setup for this project.", runId, attempts: attemptCap };
+  return {
+    ok: false,
+    reason: "agent-failed",
+    message: "I couldn't determine a safe complete setup for this project.",
+    runId,
+    attempts: attemptCap,
+    ...(retainedEvidence.size ? { partialEvidence: partialEvidence() } : {}),
+  };
 }
 
 export const DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS: VibeProjectSetupTaskDeps = {
   runner: DEFAULT_VIBE_BUILDER_DEPS.runner,
   listRoutes: DEFAULT_VIBE_BUILDER_DEPS.listRoutes,
   cliVersion: DEFAULT_VIBE_BUILDER_DEPS.cliVersion,
-  binFor: (cli) => AGENT_CLIS.find((candidate) => candidate.id === cli)?.bin ?? null,
+  binFor: (cli) => agentCliFor(cli)?.bin ?? null,
   sessionId: DEFAULT_VIBE_BUILDER_DEPS.sessionId,
   reserve: DEFAULT_VIBE_BUILDER_DEPS.reserve,
   startAttempt: DEFAULT_VIBE_BUILDER_DEPS.startAttempt,
   settleAttempt: DEFAULT_VIBE_BUILDER_DEPS.settleAttempt,
   reserveAttempt: DEFAULT_VIBE_BUILDER_DEPS.reserveAttempt,
+  sleep: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
 };
 
 export interface VibeProjectSetupSessionDeps {
   observe(project: Project): Promise<VibeSetupRepositoryObservation>;
   run(input: VibeProjectSetupTaskInput, validation: VibeSetupValidationContext): Promise<VibeProjectSetupTaskResult>;
+  verify(
+    project: Project,
+    existingPaths: ReadonlySet<string>,
+    proposedArgv: ReadonlyMap<string, string[]>,
+    signal?: AbortSignal,
+  ): Promise<VibeSetupVerificationResult>;
+  repair(
+    problem: RepairProblem,
+    signal?: AbortSignal,
+    onActivity?: (doing: string) => void,
+  ): Promise<boolean>;
   providerIds: ReadonlySet<string>;
+}
+
+/** Absolute-looking strings anywhere in a proposal, capped. Walking the parsed
+ *  object rather than naming the fields keeps this from silently missing a
+ *  path when the schema gains one. */
+function citedPaths(value: unknown, found: Set<string> = new Set()): Set<string> {
+  if (found.size >= CONFIRMABLE_PATHS) return found;
+  if (typeof value === "string") {
+    if (absolute(value)) found.add(normalized(value));
+  } else if (Array.isArray(value)) {
+    for (const item of value) citedPaths(item, found);
+  } else if (value && typeof value === "object") {
+    for (const item of Object.values(value)) citedPaths(item, found);
+  }
+  return found;
+}
+const CONFIRMABLE_PATHS = 400;
+
+/** Confirm the paths a proposal names that the inventory does not already
+ *  hold, and add the ones that are really there.
+ *
+ *  The inventory comes from fsSnapshotFiles, which skips ignored files — so a
+ *  real file could be cited and rejected as unobserved. That is not
+ *  hypothetical: a correct survey of this repository was thrown away for citing
+ *  src-tauri/onnxruntime/libonnxruntime.dylib, 27MB, present on disk, listed in
+ *  .gitignore, and the very file ORT_DYLIB_PATH points at — the agent had
+ *  better grounds than the rule that rejected it.
+ *
+ *  The filesystem still decides, which is the point of existingPaths. A
+ *  proposal does not get to assert a path exists; it gets to have the claim
+ *  checked. Only paths inside the project are looked at, so this cannot be used
+ *  to probe the disk. */
+async function confirmCitedPaths(
+  output: unknown,
+  context: VibeSetupValidationContext,
+): Promise<VibeSetupValidationContext> {
+  const unconfirmed = [...citedPaths(output)].filter(
+    (path) => inside(context.projectRoot, path) && !context.existingPaths.has(path),
+  );
+  if (!unconfirmed.length) return context;
+  const confirmed = await Promise.all(
+    unconfirmed.map((path) => ipc.fsStat(path).then(() => path, () => null)),
+  );
+  const real = confirmed.filter((path): path is string => path !== null);
+  if (!real.length) return context;
+  return { ...context, existingPaths: new Set([...context.existingPaths, ...real]) };
 }
 
 export const DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS: VibeProjectSetupSessionDeps = {
   observe: observeVibeSetupRepository,
   run: (input, validation) => runVibeProjectSetupTask({
     ...input,
-    validateOutput: (output) => validateVibeSetupProposal(output, validation).ok,
+    preferredCli: getSettings().defaultAgent,
+    validateOutput: async (output) => {
+      const result = validateVibeSetupProposal(output, await confirmCitedPaths(output, validation));
+      // The rules that rejected it. Without them "invalid-output" says only
+      // that forty checks were run and at least one said no, which is the
+      // difference between a scope bug, a race with an edit, and the model.
+      if (!result.ok) {
+        void ipc.jsLog("error", `vibe-setup: proposal failed validation: ${result.errors.join("; ")}`);
+      }
+      return result;
+    },
   }, DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS),
+  verify: (project, existingPaths, proposedArgv, signal) =>
+    verifyVibeSetupBeforePersist(
+      project,
+      existingPaths,
+      DEFAULT_VIBE_SETUP_VERIFICATION_DEPS,
+      signal,
+      proposedArgv,
+    ),
+  repair: async (problem, signal, onActivity) => {
+    // Dynamic to keep the setup runner and repair runner from forming a
+    // module-initialisation cycle. They deliberately share the same reserved
+    // task/route dependencies once the repair is actually needed.
+    const { runVibeRepairTask } = await import("./vibeRepairSession");
+    const result = await runVibeRepairTask(
+      { problem, signal, onActivity },
+      DEFAULT_VIBE_PROJECT_SETUP_TASK_DEPS,
+    );
+    return result.ok && result.verdict.fixed;
+  },
   providerIds: new Set(["supabase", "neon", "firebase", "stripe", "vercel", "netlify", "cloudflare", "fly"]),
 };
+
+// The executable exit protocol replaces only the external setup-agent edge.
+// Repository observation, proposal validation, command verification,
+// persistence and process startup continue through their production paths.
+// An ordinary launch cannot reach this setter: its caller is dynamically
+// imported only for the short-lived `--selftest=vibe-exit` scenario.
+let selftestSessionDeps: VibeProjectSetupSessionDeps | null = null;
+
+export function setVibeProjectSetupSelftestDeps(
+  deps: VibeProjectSetupSessionDeps | null,
+): void {
+  selftestSessionDeps = deps;
+}
+
+function verificationRepairProblem(
+  project: Project,
+  failure: VibeSetupVerificationFailure,
+): RepairProblem {
+  const code = failure.code === "environment-missing"
+    ? "environment-missing"
+    : failure.code === "readiness-failed"
+      ? "server-start-failed"
+      : "setup-failed";
+  return {
+    code,
+    statement: failure.statement,
+    projectId: project.id,
+    projectName: project.name,
+    component: {
+      id: failure.target.component.id,
+      label: failure.target.component.label,
+      path: failure.target.component.path,
+      ...(failure.target.component.role ? { role: failure.target.component.role } : {}),
+    },
+    runCommand: {
+      id: failure.target.command.id,
+      name: failure.target.command.name,
+      command: failure.target.command.command,
+    },
+    commands: failure.target.component.commands ?? [],
+    topology: {
+      components: project.components.map((component) => ({
+        id: component.id,
+        label: component.label,
+        path: component.path,
+        ...(component.role ? { role: component.role } : {}),
+        commands: component.commands ?? [],
+      })),
+      requiredProcesses: project.vibe?.requiredProcesses ?? [],
+      componentLinks: project.vibe?.componentLinks ?? [],
+      dataStores: project.vibe?.dataStores ?? [],
+      externalServices: project.vibe?.externalServices ?? [],
+    },
+    evidence: { context: failure.context },
+  };
+}
+
+function verificationArgv(
+  proposal: VibeProjectSetupProposal,
+  materialized: MaterializedVibeSetup,
+): ReadonlyMap<string, string[]> {
+  const result = new Map<string, string[]>();
+  for (const component of proposal.components) {
+    const componentId = materialized.componentIds[component.key];
+    for (const command of component.commands) {
+      const commandId = materialized.commandIds[`${component.key}:${command.key}`];
+      if (componentId && commandId) {
+        result.set(`${componentId}:${commandId}`, command.argv);
+      }
+    }
+  }
+  return result;
+}
+
+type SetupSessionEvent = import("./structuredEvents").StructuredRunnerEvent;
+type SetupFlightStatus = "idle" | "running" | "succeeded" | "failed";
+
+interface VibeProjectSetupFlight {
+  project: Project;
+  persist: (configured: Project) => Promise<boolean>;
+  listeners: Set<(event: SetupSessionEvent) => void>;
+  state: BuilderSession["state"];
+  status: SetupFlightStatus;
+  fingerprint: string | null;
+  /** When this flight failed. Mirrored into the project record so a new app
+   *  process also knows not to retry without an explicit request. */
+  failedAt: number | null;
+  abort: AbortController;
+  start(): void;
+}
+
+/** A setup task belongs to the project and dependency lifetime, not to one
+ * React render. ProjectView is intentionally mounted and cleaned up more than
+ * once in development, and a person can switch away and back while discovery
+ * is running. A WeakMap keeps the production cache app-local and lets injected
+ * test dependencies own an isolated cache without a test-only reset hook. */
+const setupFlights = new WeakMap<
+  VibeProjectSetupSessionDeps,
+  Map<string, VibeProjectSetupFlight>
+>();
+
+/** Failed outcomes and explicit retries, surviving hot module replacement.
+ *
+ *  The durable source is `project.vibe.discovery`; this map closes the short
+ *  window before that async workspace write reaches React. There is no time
+ *  expiry: elapsed time is not user intent. Only Retry discovery consumes an
+ *  explicit-retry token and permits another survey. */
+const FAILED_SETUPS = Symbol.for("canopy.vibeSetupFailedAt");
+const failedSetups = ((globalThis as Record<symbol, unknown>)[FAILED_SETUPS] ??=
+  new Map<string, { status: "failed"; attemptedAt: number; message: string }>()) as Map<
+    string,
+    { status: "failed"; attemptedAt: number; message: string } | number
+  >;
+const SETUP_RETRIES = Symbol.for("canopy.vibeSetupExplicitRetries");
+const setupRetries = ((globalThis as Record<symbol, unknown>)[SETUP_RETRIES] ??=
+  new Set<string>()) as Set<string>;
+
+function flightsFor(deps: VibeProjectSetupSessionDeps): Map<string, VibeProjectSetupFlight> {
+  let flights = setupFlights.get(deps);
+  if (!flights) {
+    flights = new Map();
+    setupFlights.set(deps, flights);
+  }
+  return flights;
+}
+
+/** Explicit retry from Build settings. A running survey is cancelled before
+ * replacement, so retry never creates two setup terminals. */
+export function retryVibeProjectSetup(projectId: string): boolean {
+  const flights = flightsFor(DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS);
+  const flight = flights.get(projectId);
+  if (flight?.status === "running") flight.abort.abort();
+  flights.delete(projectId);
+  failedSetups.delete(projectId);
+  setupRetries.add(projectId);
+  return true;
+}
+
+function createVibeProjectSetupFlight(
+  project: Project,
+  persist: (configured: Project) => Promise<boolean>,
+  deps: VibeProjectSetupSessionDeps,
+): VibeProjectSetupFlight {
+  const flight: VibeProjectSetupFlight = {
+    project,
+    persist,
+    listeners: new Set(),
+    state: {
+      persona: { kind: "turn-progress" },
+      card: {
+        id: `vibe-setup-${project.id}`,
+        kind: "progress",
+        stage: "discovering",
+        title: "Understanding your project",
+        detail: "I’m finding the parts that need to start together.",
+      },
+      question: null,
+    },
+    status: "idle",
+    fingerprint: null,
+    failedAt: null,
+    abort: new AbortController(),
+    start() {},
+  };
+  const publish = (event: SetupSessionEvent) => {
+    for (const listener of flight.listeners) listener(event);
+  };
+  const fail = (message: string) => {
+    flight.status = "failed";
+    flight.failedAt = Date.now();
+    flight.state = {
+      persona: { kind: "incident" },
+      card: {
+        id: `vibe-setup-${flight.project.id}`,
+        kind: "outcome",
+        tone: "warning",
+        title: "I couldn’t finish setting up the project",
+        detail: message,
+      },
+      question: null,
+    };
+    if (deps === DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS) {
+      failedSetups.set(flight.project.id, {
+        status: "failed",
+        attemptedAt: flight.failedAt,
+        message,
+      });
+    }
+    const failedProject = recordVibeDiscoveryFailure(
+      flight.project,
+      message,
+      flight.failedAt,
+    );
+    flight.project = failedProject;
+    void flight.persist(failedProject).then((saved) => {
+      if (!saved) {
+        void ipc.jsLog("error", `vibe-setup: could not persist failed discovery for ${flight.project.id}`);
+      }
+    }).catch((error) => {
+      void ipc.jsLog("error", `vibe-setup: could not persist failed discovery for ${flight.project.id}: ${String(error)}`);
+    });
+    publish({ kind: "reply", text: message });
+    // The failed flight is KEPT. Dropping it here made the next mount launch a
+    // new model call. The project marker makes the same rule survive restart.
+  };
+  const execute = async () => {
+    publish({ kind: "reply", text: "I'm understanding how this project fits together and starting everything it needs." });
+    try {
+      const activeProject = flight.project;
+      const before = await deps.observe(activeProject);
+      const validationContext: VibeSetupValidationContext = {
+        projectRoot: before.projectRoot,
+        repositoryFingerprint: before.fingerprint,
+        existingPaths: before.paths,
+        providerIds: deps.providerIds,
+        existingComponents: activeProject.components,
+      };
+      const task = await deps.run({
+        projectId: activeProject.id,
+        projectName: activeProject.name,
+        projectRoot: before.projectRoot,
+        componentRoots: before.componentRoots,
+        components: activeProject.components,
+        inventory: setupAgentInventory(before.paths, before.componentRoots),
+        repositoryFingerprint: before.fingerprint,
+        onActivity: publish,
+        signal: flight.abort.signal,
+      }, validationContext);
+      // An explicit retry replaces this flight immediately. Its cancelled
+      // terminal may still resolve a moment later; never let that stale result
+      // overwrite the replacement flight's progress or failure state.
+      if (flight.abort.signal.aborted) return;
+      if (!task.ok) {
+        // Every exit below says the same plain sentence to the person and
+        // nothing at all to anyone who has to fix it. The reason code and the
+        // run it belongs to are the difference between "the agent couldn't work
+        // it out" and knowing the agent never started.
+        void ipc.jsLog(
+          "error",
+          `vibe-setup: task failed (${task.reason}) runId=${task.runId ?? "none"} attempts=${task.attempts}: ${task.message}`,
+        );
+        fail(task.message);
+        return;
+      }
+      const after = await deps.observe(activeProject);
+      // Cited paths are confirmed here too. This is the second of two
+      // validation passes — the task checks its own attempt, and this one
+      // re-checks against a fresh observation before anything is persisted —
+      // and fixing only the first left the real gate rejecting the same
+      // correct proposal for the same real file. Two passes over one ruleset
+      // means every rule has to be satisfied in both places or the fix is
+      // invisible from the outside.
+      const validation = validateVibeSetupProposal(task.output, await confirmCitedPaths(task.output, {
+        projectRoot: after.projectRoot,
+        // `before`, not `after`, and this is the whole point of the field: it
+        // asks "did the agent answer about the repository we handed it", which
+        // only the fingerprint it was given can answer. Compared against a
+        // fresh one it asks something else entirely — "did anything at all
+        // change during the run" — and that rejected every correct survey of
+        // an actively edited project. It is not an exotic case: setup runs
+        // while the person is in Build, and a Build turn edits files, so
+        // Canopy invalidated its own setup by working. Observed here as a
+        // survey rejected at 04:04 for a stylesheet saved at 04:03.
+        //
+        // Staleness is still checked, and precisely: every path the proposal
+        // cites is re-confirmed against `after` just below, so a component
+        // deleted mid-run is still caught. A command that went stale surfaces
+        // as a run that fails — which is now a repair agent's problem, and it
+        // has the log to work from.
+        repositoryFingerprint: before.fingerprint,
+        existingPaths: after.paths,
+        providerIds: deps.providerIds,
+        existingComponents: activeProject.components,
+      }));
+      if (!validation.ok) {
+        // Which rule rejected it, not just that something did. A proposal is
+        // refused for one of forty reasons and they are not interchangeable:
+        // an unobserved path is a scope bug, a fingerprint mismatch is a race
+        // with the person editing, a missing component is the model.
+        void ipc.jsLog("error", `vibe-setup: proposal rejected: ${validation.errors.join("; ")}`);
+        fail("I couldn't determine a safe complete setup for this project.");
+        return;
+      }
+      const materialized = materializeVibeSetup(
+        activeProject,
+        validation.proposal,
+        after.projectRoot,
+      );
+      const configured = materialized.project;
+      const proposedArgv = verificationArgv(validation.proposal, materialized);
+      let verification = await deps.verify(
+        configured,
+        after.paths,
+        proposedArgv,
+        flight.abort.signal,
+      );
+      if (!verification.ok) {
+        publish({
+          kind: "reply",
+          text: verification.failure.code === "environment-missing"
+            ? "I'm adding a tool this project needs, then I'll check the setup again."
+            : "The proposed setup needs a correction. I'm fixing and checking it before I save anything.",
+        });
+        const fixed = await deps.repair(
+          verificationRepairProblem(configured, verification.failure),
+          flight.abort.signal,
+          (doing) => publish({ kind: "reply", text: doing }),
+        );
+        if (flight.abort.signal.aborted) return;
+        if (!fixed) {
+          void ipc.jsLog(
+            "error",
+            `vibe-setup: verification repair failed (${verification.failure.code}): ${verification.failure.context}`,
+          );
+          fail("I couldn't finish preparing this project yet.");
+          return;
+        }
+        // Provisioning and setup repair may change both PATH and lockfiles.
+        // Re-observe, then re-run the entire gate once. A fixed verdict is not
+        // evidence that the command now resolves or the server becomes ready.
+        const repaired = await deps.observe(configured);
+        verification = await deps.verify(
+          configured,
+          repaired.paths,
+          proposedArgv,
+          flight.abort.signal,
+        );
+        if (!verification.ok) {
+          void ipc.jsLog(
+            "error",
+            `vibe-setup: verification still failed after repair (${verification.failure.code}): ${verification.failure.context}`,
+          );
+          fail("I couldn't finish preparing this project yet.");
+          return;
+        }
+      }
+      if (!(await flight.persist(configured))) {
+        fail("I understood the project, but couldn't save its setup.");
+        return;
+      }
+      flight.fingerprint = after.fingerprint;
+      flight.status = "succeeded";
+      flight.state = {
+        persona: { kind: "question-answered" },
+        card: {
+          id: `vibe-setup-${activeProject.id}`,
+          kind: "outcome",
+          tone: "success",
+          title: "Project setup is ready",
+        },
+        question: null,
+      };
+      failedSetups.delete(activeProject.id);
+      publish({ kind: "ready" });
+    } catch (error) {
+      if (flight.abort.signal.aborted) return;
+      // The person is told the same plain thing either way — they cannot act on
+      // a stack trace. But the cause has to survive somewhere: this catch
+      // covers the whole preflight, including the native file snapshot, which
+      // rejects a path outside the registered workspace scope. Discarded, every
+      // one of those failures reads as "the agent couldn't work it out" and
+      // sends someone hunting the model for a fault in Canopy.
+      void ipc.jsLog("error", `vibe-setup: preflight failed: ${String(error)}`);
+      fail("I couldn't determine a safe complete setup for this project.");
+    }
+  };
+  flight.start = () => {
+    if (flight.status !== "idle") return;
+    flight.status = "running";
+    // Start after the listener is installed. Besides avoiding work during
+    // React render, this makes the first plain-language status observable
+    // instead of publishing it into an empty listener set.
+    queueMicrotask(() => void execute());
+  };
+  return flight;
+}
 
 /** Chat-shaped only because Build already owns that surface. It has no input
  * actions: setup is automatic, and a failure speaks plainly rather than asking
@@ -651,86 +1919,120 @@ export const DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS: VibeProjectSetupSessionDep
 export function createVibeProjectSetupSession(
   project: Project,
   persist: (configured: Project) => Promise<boolean>,
-  deps: VibeProjectSetupSessionDeps = DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS,
+  deps: VibeProjectSetupSessionDeps = selftestSessionDeps ?? DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS,
 ): BuilderSession & { stop(): Promise<void> } {
-  const listeners = new Set<(event: import("./structuredEvents").StructuredRunnerEvent) => void>();
-  let state: BuilderSession["state"] = { persona: { kind: "turn-progress" }, question: null };
-  let stopped = false;
-  let started = false;
-  const abort = new AbortController();
-  const publish = (event: import("./structuredEvents").StructuredRunnerEvent) => {
-    if (!stopped) for (const listener of listeners) listener(event);
-  };
-  const execute = async () => {
-    publish({ kind: "reply", text: "I'm understanding how this project fits together and starting everything it needs." });
-    try {
-      const before = await deps.observe(project);
-      if (stopped) return;
-      const validationContext: VibeSetupValidationContext = {
-        projectRoot: before.projectRoot,
-        repositoryFingerprint: before.fingerprint,
-        existingPaths: before.paths,
-        providerIds: deps.providerIds,
-        existingComponents: project.components,
+  const flights = flightsFor(deps);
+  const explicitRetry = deps === DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS &&
+    setupRetries.delete(project.id);
+  let flight = flights.get(project.id);
+  // A known different persisted revision is a different repository setup. An
+  // absent revision is commonly the stale ProjectView value from just before
+  // this flight persisted; reusing the successful flight prevents that render
+  // race from spending a second model call.
+  if (
+    flight?.status === "succeeded" &&
+    project.vibe?.setupRevision &&
+    project.vibe.setupRevision !== flight.fingerprint
+  ) {
+    flights.delete(project.id);
+    flight = undefined;
+  }
+  // No flight in this module's map does not mean discovery was never tried.
+  // Rebuild the incident from durable project state (or the short async-save
+  // bridge) and stay stopped until the person explicitly retries.
+  if (!flight && !explicitRetry) {
+    const persistedFailure = project.vibe?.discovery;
+    const remembered = deps === DEFAULT_VIBE_PROJECT_SETUP_SESSION_DEPS
+      ? failedSetups.get(project.id)
+      : undefined;
+    // Development HMR may retain the pre-durable map whose values were bare
+    // timestamps. Interpret that one old shape instead of launching again.
+    const rememberedFailure = typeof remembered === "number"
+      ? {
+          status: "failed" as const,
+          attemptedAt: remembered,
+          message: "I couldn't determine a safe complete setup for this project.",
+        }
+      : remembered;
+    const failure = persistedFailure ?? rememberedFailure;
+    if (failure) {
+      flight = createVibeProjectSetupFlight(project, persist, deps);
+      flight.status = "failed";
+      flight.failedAt = failure.attemptedAt;
+      if (!persistedFailure && rememberedFailure) {
+        const migrated = recordVibeDiscoveryFailure(
+          project,
+          rememberedFailure.message,
+          rememberedFailure.attemptedAt,
+        );
+        flight.project = migrated;
+        void persist(migrated).then((saved) => {
+          if (!saved) {
+            void ipc.jsLog("error", `vibe-setup: could not migrate failed discovery for ${project.id}`);
+          }
+        }).catch((error) => {
+          void ipc.jsLog("error", `vibe-setup: could not migrate failed discovery for ${project.id}: ${String(error)}`);
+        });
+      }
+      flight.state = {
+        persona: { kind: "incident" },
+        card: {
+          id: `vibe-setup-${project.id}`,
+          kind: "outcome",
+          tone: "warning",
+          title: failure.status === "stale"
+            ? "Project setup needs a refresh"
+            : "I couldn’t finish setting up the project",
+          detail: failure.message,
+        },
+        question: null,
       };
-      const task = await deps.run({
-        projectId: project.id,
-        projectName: project.name,
-        projectRoot: before.projectRoot,
-        repositoryFingerprint: before.fingerprint,
-        signal: abort.signal,
-      }, validationContext);
-      if (stopped) return;
-      if (!task.ok) {
-        state = { persona: { kind: "incident" }, question: null };
-        publish({ kind: "reply", text: task.message });
-        return;
-      }
-      const after = await deps.observe(project);
-      const validation = validateVibeSetupProposal(task.output, {
-        projectRoot: after.projectRoot,
-        repositoryFingerprint: after.fingerprint,
-        existingPaths: after.paths,
-        providerIds: deps.providerIds,
-        existingComponents: project.components,
-      });
-      if (!validation.ok) {
-        state = { persona: { kind: "incident" }, question: null };
-        publish({ kind: "reply", text: "I couldn't determine a safe complete setup for this project." });
-        return;
-      }
-      const configured = materializeVibeSetup(project, validation.proposal, after.projectRoot).project;
-      if (!(await persist(configured))) {
-        state = { persona: { kind: "incident" }, question: null };
-        publish({ kind: "reply", text: "I understood the project, but couldn't save its setup." });
-        return;
-      }
-      state = { persona: { kind: "question-answered" }, question: null };
-      publish({ kind: "ready" });
-    } catch {
-      if (stopped) return;
-      state = { persona: { kind: "incident" }, question: null };
-      publish({ kind: "reply", text: "I couldn't determine a safe complete setup for this project." });
+      flights.set(project.id, flight);
     }
-  };
-  const start = () => {
-    if (started || stopped) return;
-    started = true;
-    // Start after the listener is installed. Besides avoiding work during
-    // React render, this makes the first plain-language status observable
-    // instead of publishing it into an empty listener set.
-    queueMicrotask(() => void execute());
-  };
+  }
+  if (!flight) {
+    flight = createVibeProjectSetupFlight(project, persist, deps);
+    flights.set(project.id, flight);
+  } else if (flight.status === "idle") {
+    // Strict Mode may dispose the first facade before Build subscribes. Use the
+    // freshest project and persistence callback when the shared flight starts.
+    flight.project = project;
+    flight.persist = persist;
+  }
+  const ownedListeners = new Set<(event: SetupSessionEvent) => void>();
+  let stopped = false;
   return {
-    get state() { return state; },
+    get state() { return flight.state; },
     events$: {
       subscribe(listener) {
-        listeners.add(listener);
-        start();
-        return () => listeners.delete(listener);
+        if (stopped) return () => {};
+        // The same callback may be used by two facades. Give each subscription
+        // its own identity so stopping one view cannot detach the other.
+        const ownedListener = (event: SetupSessionEvent) => listener(event);
+        ownedListeners.add(ownedListener);
+        flight.listeners.add(ownedListener);
+        if (flight.status === "succeeded") {
+          queueMicrotask(() => {
+            if (!stopped && ownedListeners.has(ownedListener)) ownedListener({ kind: "ready" });
+          });
+        } else {
+          flight.start();
+        }
+        return () => {
+          ownedListeners.delete(ownedListener);
+          flight.listeners.delete(ownedListener);
+        };
       },
     },
     send: async () => {},
-    stop: async () => { stopped = true; abort.abort(); },
+    stop: async () => {
+      stopped = true;
+      for (const listener of ownedListeners) flight.listeners.delete(listener);
+      ownedListeners.clear();
+      // Deliberately do not abort: this facade is owned by one ProjectView
+      // mount, while the bounded setup flight is owned by the project. A
+      // switch or Strict Mode cleanup must not spend another reservation and
+      // model call when the person comes back.
+    },
   };
 }

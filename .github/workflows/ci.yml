@@ -32,6 +32,26 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run test
+      - name: Install runtime search dependency
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - run: npm run test --workspace @canopy/remote-host
+
+  remote-host-linux:
+    name: Portable Linux host (real PTY · isolation · desktop · LSP)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node packages/remote-host/prepare-hook-build.mjs
+      - run: node packages/remote-host/prepare-browser-build.mjs
+      - run: docker build -t canopy-workspace:0.1.0 packages/remote-host
+      - run: docker run --rm --network none -v "$PWD/packages/remote-host/browser-smoke.mjs:/opt/canopy/browser-smoke.mjs:ro" --entrypoint node canopy-workspace:0.1.0 /opt/canopy/browser-smoke.mjs
+      - run: node packages/remote-host/smoke-linux.mjs
 
   # THIRD-PARTY-NOTICES.md is what discharges the attribution conditions of the
   # MIT/BSD/ISC/Apache dependencies Canopy redistributes, so letting it go stale
@@ -114,3 +134,37 @@ jobs:
       - name: cargo clippy
         working-directory: src-tauri
         run: cargo clippy --no-default-features --all-targets || true
+
+  containment-platforms:
+    name: Containment compile/unit (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          key: containment-${{ matrix.os }}
+
+      # tauri-build resolves the configured external binary even for a unit
+      # test. Windows requires the native .exe suffix; macOS does not.
+      - name: Stub hook sidecar for platform compile
+        shell: bash
+        run: |
+          mkdir -p src-tauri/binaries
+          triple=$(rustc -vV | awk '/^host:/ { print $2 }')
+          suffix=""
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then suffix=".exe"; fi
+          touch "src-tauri/binaries/canopy-hook-${triple}${suffix}"
+
+      - name: Compile containment launcher
+        working-directory: src-tauri
+        run: cargo check --no-default-features --bin canopy-hook
+
+      - name: Run containment unit contract
+        working-directory: src-tauri
+        run: cargo test --no-default-features --lib containment::tests

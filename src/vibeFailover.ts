@@ -20,6 +20,7 @@ import {
 import { fleetGate, rankFleet, type FleetState } from "./fleetState";
 import type { ModelChoice } from "./agentModels";
 import type { ModelFamily } from "./modelCatalog";
+import { streamsStructured } from "./projects";
 import {
   modelForClass,
   TIER_FOR_CLASS,
@@ -61,9 +62,26 @@ const stateKey = (s: FleetState) => `${s.agent}:${s.profile}`;
 export function rankRoutes(
   candidates: RouteCandidate[],
   task: TaskClass,
+  preferredCli?: string,
 ): SelectedRoute[] {
-  const byKey = new Map(candidates.map((c) => [stateKey(c.state), c]));
-  const allowed = candidates.filter((c) => fleetGate(c.state).allowed);
+  // Fleet ranking is stable within a health tier. Seed it with the user's
+  // primary agent first so an equally healthy Claude/Codex fleet does
+  // not silently turn object declaration order into a product preference.
+  const ordered = preferredCli
+    ? [...candidates].sort(
+        (left, right) =>
+          Number(right.cli === preferredCli) - Number(left.cli === preferredCli),
+      )
+    : candidates;
+  const byKey = new Map(ordered.map((c) => [stateKey(c.state), c]));
+  // The family map is a candidate source, never sufficient authority to
+  // launch. Membership in STRUCTURED_RUNNERS is the dated capability claim;
+  // keep this gate here as well so an injected or stale candidate cannot make
+  // Build reach startStructured and fail after the UI already promised work.
+  const allowed = ordered.filter(
+    (candidate) =>
+      streamsStructured(candidate.cli) && fleetGate(candidate.state).allowed,
+  );
   return rankFleet(allowed.map((c) => c.state)).flatMap((state) => {
     const candidate = byKey.get(stateKey(state));
     if (!candidate) return [];
@@ -81,15 +99,6 @@ export function rankRoutes(
     ];
   });
 }
-
-/** Which model family a coding CLI speaks. Only the three that route today —
- *  an agent absent here has no family we can name, and naming one anyway is
- *  how a route tuple starts lying. */
-export const FAMILY_FOR_CLI: Readonly<Record<string, ModelFamily>> = {
-  claude: "anthropic",
-  codex: "openai",
-  gemini: "google",
-};
 
 /** The route record the task store keeps. Deliberately mirrors
  *  TaskRouteSnapshot rather than importing it: this module decides routes and
@@ -193,7 +202,7 @@ export interface FailoverInput {
 
 /** Plain-language names, so Ash never says "route claude:default". */
 const spoken = (cli: string) =>
-  ({ claude: "Claude", codex: "Codex", gemini: "Gemini" })[cli] ?? cli;
+  ({ claude: "Claude", codex: "Codex" })[cli] ?? cli;
 
 export function failoverDecision(input: FailoverInput): {
   action: FailoverAction;

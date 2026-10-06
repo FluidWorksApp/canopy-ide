@@ -7,6 +7,7 @@
 // feature sets its workspace up instead of leaving a checkout that won't build.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { GitPanel } from "./GitPanel";
 import type * as ipcTypes from "../ipc";
 import type { AgentRef } from "../workspaces";
@@ -84,6 +85,8 @@ function panel(
     serverCwds?: string[];
     agentCwds?: string[];
     agentsAt?: (dir: string) => AgentRef[];
+    changes?: ReactNode;
+    changeCount?: number;
   } = {},
 ) {
   ipc.gitRepos.mockResolvedValue([
@@ -97,6 +100,8 @@ function panel(
   render(
     <GitPanel
       visible
+      changes={props.changes}
+      changeCount={props.changeCount}
       components={[{ label: "app", path: REPO }]}
       activeWorktree={props.activeWorktree ?? null}
       serverCwds={props.serverCwds ?? []}
@@ -121,6 +126,16 @@ beforeEach(() => {
 });
 
 describe("one list", () => {
+  it("opens session changes inside the combined source-control panel", async () => {
+    panel([branch({ name: "main", current: true })], [], {
+      changes: <div>Current session changes</div>,
+      changeCount: 3,
+    });
+    await waitFor(() => expect(screen.getByText("Source control")).toBeTruthy());
+    expect(screen.getByText("Current session changes")).toBeTruthy();
+    expect(screen.getByText("3")).toBeTruthy();
+  });
+
   it("shows a branch with a workspace once, not once per list", async () => {
     panel(
       [branch({ name: "main", current: true }), branch({ name: "feat/a" })],

@@ -1,0 +1,47 @@
+name: Prebuilt management host
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: 'Reviewed factory JSON: region, immutable runtime/image checksums and exact OS/Node package versions. Creates temporary factory compute.'
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: management-host-factory
+  cancel-in-progress: false
+jobs:
+  factory:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: management-host-factory
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify factory orchestration and snapshot validation
+        run: node --test scripts/host-factory/build.test.mjs packages/control-plane/lib/host-snapshot.test.mjs
+      - name: Save reviewed non-secret factory configuration
+        env:
+          FACTORY_CONFIG: ${{ inputs.config }}
+        run: |
+          node --input-type=module -e 'import fs from "node:fs";const c=JSON.parse(process.env.FACTORY_CONFIG);if(!["ap-southeast-1","us-east-1","eu-west-1"].includes(c.region))throw Error("Unsupported region");fs.writeFileSync("factory-config.json",JSON.stringify(c),{mode:384});fs.appendFileSync(process.env.GITHUB_ENV,"FACTORY_REGION="+c.region+"\n");'
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.CANOPY_HOST_FACTORY_ROLE_ARN }}
+          aws-region: ${{ env.FACTORY_REGION }}
+      - name: Build, smoke, sanitize and snapshot the management host
+        run: node scripts/host-factory/cli.mjs --execute factory-config.json host-snapshot-ready.json
+      - name: Publish only verified ready catalog
+        uses: actions/upload-artifact@v4
+        with:
+          name: management-host-ready-${{ github.run_id }}
+          path: host-snapshot-ready.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove local temporary configuration
+        if: always()
+        run: rm -f factory-config.json

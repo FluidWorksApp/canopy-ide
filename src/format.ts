@@ -23,3 +23,14 @@ export const fmtTokens = (n: number, compact = false): string => {
   }
   return `${n}`;
 };
+
+/** IPC and CLI records may contain numeric strings; missing data is not zero. */
+export function finiteNumber(value: unknown): number | null {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+export function fixedNumber(value: unknown, digits = 0): string {
+  return finiteNumber(value)?.toFixed(digits) ?? "—";
+}

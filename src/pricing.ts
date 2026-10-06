@@ -1,3 +1,4 @@
+import { finiteNumber } from "./format";
 // Rough cost estimation from token counts, shared by the status tray and the
 // Statistics panel. Prices are $/MTok (input, output) and are ESTIMATES —
 // published list prices by model family, not billed amounts. Cache-read is
@@ -62,6 +63,7 @@ export function estimateCost(s: TokenUsage): number | null {
 export function sessionCost(
   s: TokenUsage & { cost?: number | null },
 ): number | null {
-  if (s.cost != null) return s.cost;
+  const reported = finiteNumber(s.cost);
+  if (reported != null) return reported;
   return estimateCost(s);
 }

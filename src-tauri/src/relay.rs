@@ -928,11 +928,11 @@ fn status_of(inner: &Inner) -> RelayStatus {
 /// the user explicitly made public; a local relay never phones anywhere.
 fn fetch_public_ip() -> Option<String> {
     for url in ["https://api.ipify.org", "https://ifconfig.me/ip"] {
-        let Ok(out) = std::process::Command::new("curl")
+        let mut command = std::process::Command::new("curl");
+        command
             .no_console_window()
-            .args(["-s", "--max-time", "4", url])
-            .output()
-        else {
+            .args(["-s", "--max-time", "4", url]);
+        let Ok(out) = crate::process_capture::output(&mut command, 64 * 1024) else {
             continue;
         };
         if out.status.success() {
@@ -1194,7 +1194,11 @@ pub fn is_hosting(app: &AppHandle) -> bool {
 /// code-keyed SPAKE2 handshake and `serve_peer` loop on a dedicated thread
 /// (like the TCP/QUIC accepts). `server_halves` spawns the async pump, so this
 /// must be awaited on the runtime; it returns as soon as the peer is handed off.
-pub async fn accept_ws_peer(app: AppHandle, ws: axum::extract::ws::WebSocket) {
+pub async fn accept_ws_peer<G: Send + 'static>(
+    app: AppHandle,
+    ws: axum::extract::ws::WebSocket,
+    socket_owner: G,
+) {
     // Snapshot the code + liveness current at connect time, so New Code stops
     // admitting new joiners just as the TCP/QUIC paths do.
     let (code, alive, inner) = {
@@ -1213,8 +1217,9 @@ pub async fn accept_ws_peer(app: AppHandle, ws: axum::extract::ws::WebSocket) {
     // peer its own thread, matching host_conn / host_conn_quic.
     let _ = thread::Builder::new()
         .name("relay-peer-ws".into())
-        .spawn(
-            move || match secure::handshake(writer, reader, &code, false) {
+        .spawn(move || {
+            let _socket_owner = socket_owner;
+            match secure::handshake(writer, reader, &code, false) {
                 Some((sender, receiver, binding)) => {
                     serve_peer(
                         app,
@@ -1228,8 +1233,8 @@ pub async fn accept_ws_peer(app: AppHandle, ws: axum::extract::ws::WebSocket) {
                     );
                 }
                 None => closer.close(),
-            },
-        );
+            }
+        });
 }
 
 /// One joined connection, host side: secure handshake, authenticate, register,

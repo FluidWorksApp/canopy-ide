@@ -1,0 +1,7 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import {canSleepHost,validatedUsage,workspaceName,tokenHash,newDeviceToken} from './lib/policy.mjs';
+test('never stops a host with a quiet job, connection, agent or unknown activity',()=>{
+ const idle={now:2000000,lastHeartbeatAt:1999000,lastActiveAt:0,idleTimeoutSeconds:1800,autoSleepEnabled:true,connectedLeases:0,activeJobs:0,activeAgents:0,unknownActivity:false};
+ assert.equal(canSleepHost(idle),true);for(const key of ['connectedLeases','activeJobs','activeAgents','unknownActivity'])assert.equal(canSleepHost({...idle,[key]:1}),false);assert.equal(canSleepHost({...idle,lastHeartbeatAt:0}),false);assert.equal(canSleepHost({...idle,autoSleepEnabled:false}),false);
+});
+test('usage payload is numeric and cannot store prompt text or credential values',()=>{assert.deepEqual(validatedUsage({agent:'claude',sessionId:'s',inputTokens:5,prompt:'private',token:'secret'}),{agent:'claude',sessionId:'s',model:null,inputTokens:5,outputTokens:0,cacheReadTokens:0,cacheCreationTokens:0,activeSeconds:0});assert.throws(()=>validatedUsage({agent:'claude',sessionId:'s',inputTokens:-1}));});
+test('workspace name and device credentials are bounded',()=>{assert.equal(workspaceName(' My work '),'My work');assert.throws(()=>workspaceName(''));assert.notEqual(newDeviceToken(),newDeviceToken());assert.equal(tokenHash('synthetic').length,64);});

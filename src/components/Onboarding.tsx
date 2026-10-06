@@ -10,6 +10,7 @@ import { useState } from "react";
 import { useEscape } from "../useEscape";
 import { Button, Checkbox, Select } from "./ui";
 import {
+  type DefaultProjectLens,
   type DictationTriggerMode,
   type Settings,
   formatHotkey,
@@ -312,6 +313,25 @@ export function Onboarding({ onClose, onCreateProject }: OnboardingProps) {
           <div className="onboarding-config">
             {step === 0 && (
               <>
+                <span className="onboarding-config-label">Which sounds like you?</span>
+                <div className="onboarding-persona" role="radiogroup" aria-label="Your experience with code">
+                  {([
+                    ["build", "I build with AI", "Open projects in Build mode"],
+                    ["engineer", "I'm an engineer", "Open projects in Engineer mode"],
+                  ] as const).map(([lens, label, hint]) => (
+                    <button
+                      key={lens}
+                      type="button"
+                      role="radio"
+                      aria-checked={settings.defaultProjectLens === lens}
+                      className={`onboarding-persona-choice ${settings.defaultProjectLens === lens ? "selected" : ""}`}
+                      onClick={() => patch({ defaultProjectLens: lens as DefaultProjectLens })}
+                    >
+                      <strong>{label}</strong>
+                      <span>{hint}</span>
+                    </button>
+                  ))}
+                </div>
                 <span className="onboarding-config-label">Choose your shortcut profile</span>
                 <Select
                   width="lg"

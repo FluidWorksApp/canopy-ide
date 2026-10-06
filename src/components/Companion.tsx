@@ -34,6 +34,8 @@ import {
 } from "../companion";
 import {
   companionState,
+  cancelCompanionTurn,
+  retryCompanion,
   sendToCompanion,
   subscribeCompanion,
   type CompanionProposal,
@@ -436,7 +438,13 @@ export function Companion({
           proposal={proposal}
           onAnswer={onAnswerProposal}
           onInstall={onInstallCli}
-          onRetry={onRetry}
+          onRetry={() => {
+            // Keep the host callback as the public retry signal, then let the
+            // session replay a one-shot turn when it has one to replay.
+            onRetry();
+            void retryCompanion();
+          }}
+          onCancel={() => void cancelCompanionTurn()}
           onSend={(text, attachments) => void sendToCompanion(text, attachments)}
           onClose={() => setOpen(false)}
         />

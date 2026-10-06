@@ -27,31 +27,12 @@ describe("provider detection", () => {
   });
 });
 
-describe("preview deploys", () => {
-  it("goes out for verified work with no caveat", () => {
-    const plan = planDeploy(vercel, "preview", ctx(), "/app");
-    expect(plan.ok).toBe(true);
-    if (!plan.ok) return;
-    expect(plan.argv).toEqual(["vercel"]);
-    expect(plan.caveat).toBeNull();
-  });
-
-  it("still goes out when verification is incomplete, but says so", () => {
-    const plan = planDeploy(vercel, "preview", ctx({ verification: "incomplete" }), "/app");
-    expect(plan.ok).toBe(true);
-    if (!plan.ok) return;
-    expect(plan.caveat).toMatch(/couldn't fully verify/i);
-  });
-
-  it("is refused when the checks actually failed", () => {
-    const plan = planDeploy(vercel, "preview", ctx({ verification: "failed" }), "/app");
-    expect(plan.ok).toBe(false);
-    if (!plan.ok) expect(plan.refusal).toBe("verification-failed");
-  });
-
-  it("does not need confirmation, because a preview is disposable", () => {
-    const plan = planDeploy(vercel, "preview", ctx({ confirmed: false }), "/app");
-    expect(plan.ok).toBe(true);
+describe("local previews", () => {
+  it("never produces a hosting command, including for Fly", () => {
+    for (const entries of [["vercel.json"], ["fly.toml"], ["netlify.toml"], ["wrangler.toml"], []]) {
+      expect(planDeploy(detectDeployProvider(entries), "preview", ctx(), "/app"))
+        .toMatchObject({ ok: false, refusal: "local-preview" });
+    }
   });
 });
 
@@ -89,11 +70,11 @@ describe("production deploys", () => {
 
 describe("prerequisites", () => {
   it("refuses with no provider and offers the install when the CLI is missing", () => {
-    expect(planDeploy(null, "preview", ctx(), "/app")).toMatchObject({
+    expect(planDeploy(null, "production", ctx(), "/app")).toMatchObject({
       ok: false,
       refusal: "no-provider",
     });
-    const missing = planDeploy(vercel, "preview", ctx({ cliInstalled: false }), "/app");
+    const missing = planDeploy(vercel, "production", ctx({ cliInstalled: false }), "/app");
     expect(missing).toMatchObject({ ok: false, refusal: "cli-missing" });
     if (!missing.ok) expect(missing.needs).toBe("npm install -g vercel");
   });
