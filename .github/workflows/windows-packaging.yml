@@ -1,0 +1,60 @@
+name: Windows packaging
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'scripts/prepare-sidecar.mjs'
+      - 'src-tauri/build.rs'
+      - 'packages/agent-hook/**'
+      - '.github/workflows/windows-packaging.yml'
+permissions:
+  contents: read
+jobs:
+  staging:
+    name: Sidecar staging regression checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test scripts/prepare-sidecar.test.mjs
+  windows:
+    name: Windows release installer (no publishing)
+    needs: staging
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri -> target
+            packages/agent-hook -> target
+      - run: npm ci
+      - name: Build and test the independent helper
+        run: cargo test --manifest-path packages/agent-hook/Cargo.toml --target x86_64-pc-windows-msvc
+      - name: Build the actual Windows release installer
+        run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis
+      - name: Verify staged helper, installer and one v6 application manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = 'src-tauri/target/x86_64-pc-windows-msvc/release'
+          $helper = Get-Item 'src-tauri/binaries/canopy-hook-x86_64-pc-windows-msvc.exe'
+          if ($helper.Length -eq 0) { throw 'Empty hook helper' }
+          $installer = Get-ChildItem "$root/bundle/nsis/*-setup.exe"
+          if (!$installer) { throw 'NSIS installer missing' }
+          $mt = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/mt.exe" | Sort-Object FullName | Select-Object -Last 1
+          if (!$mt) { throw 'Windows SDK manifest tool missing' }
+          & $mt.FullName "-inputresource:$root/canopy.exe;#1" '-out:application.manifest'
+          if ($LASTEXITCODE -ne 0) { throw 'Application manifest extraction failed' }
+          $manifest = Get-Content application.manifest -Raw
+          if ($manifest -notmatch 'Microsoft.Windows.Common-Controls' -or $manifest -notmatch 'version="6.0.0.0"') { throw 'Common Controls v6 manifest missing' }

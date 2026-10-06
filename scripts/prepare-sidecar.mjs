@@ -1,7 +1,8 @@
 // Builds the hook helper and stages it as a Tauri sidecar.
 //
-// The helper is a second [[bin]] in the same crate, and neither `tauri dev` nor
-// `tauri build` builds anything but `default-run` — so without this the app
+// The helper uses its independent agent-hook crate, keeping Tauri application
+// resources and GUI dependencies out of its link. Neither `tauri dev` nor
+// `tauri build` builds that crate automatically — so without this the app
 // starts up, fails to install the helper, and registers agent hooks pointing at
 // a binary that does not exist. That failure is invisible: Claude never reports
 // a hook that won't execute.
@@ -15,12 +16,12 @@
 // the file next to the app binary (Canopy.app/Contents/MacOS/canopy-hook),
 // which is exactly where install_hook_helper() looks.
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdirSync, existsSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const manifest = join(root, "src-tauri", "Cargo.toml");
+const manifest = join(root, "packages", "agent-hook", "Cargo.toml");
 const release = process.argv.includes("--release");
 const profile = release ? "release" : "debug";
 
@@ -43,17 +44,9 @@ const ext = process.platform === "win32" ? ".exe" : "";
 const destDir = join(root, "src-tauri", "binaries");
 const dest = join(destDir, `canopy-hook-${triple}${ext}`);
 
-// Bootstrap the sidecar's own existence check. Building --bin canopy-hook
-// compiles the canopy crate, whose tauri build.rs validates that every
-// externalBin (binaries/canopy-hook-<triple>) already exists — but that file is
-// exactly what this build produces. On a fresh checkout binaries/ is empty (it
-// is gitignored), so without a placeholder the build fails before it can ever
-// create the binary: "resource path binaries/canopy-hook-<triple> doesn't
-// exist". Stage an empty placeholder first to satisfy the check; the real
-// binary overwrites it below. (Locally this is invisible because a prior build
-// already left the file in place.)
+// No placeholder is needed: the independent helper crate does not run
+// tauri-build or validate the application's externalBin before it exists.
 mkdirSync(destDir, { recursive: true });
-if (!existsSync(dest)) writeFileSync(dest, "");
 
 // Ask cargo where it put the binary rather than assuming
 // src-tauri/target/<triple>/<profile>/. A `[build] target-dir` in any
@@ -97,9 +90,12 @@ for (const line of out.split("\n")) {
 
 // Fall back to the default layout: a fully cached build still reports the
 // artifact, but don't let an unexpected message stream be fatal on its own.
-if (!src) src = join(root, "src-tauri", "target", triple, profile, `canopy-hook${ext}`);
+if (!src) {
+  const metadata = JSON.parse(execFileSync("cargo", ["metadata", "--manifest-path", manifest, "--no-deps", "--format-version", "1"], {encoding:"utf8"}));
+  src = join(metadata.target_directory, triple, profile, `canopy-hook${ext}`);
+}
 
-if (!existsSync(src)) {
+if (!existsSync(src) || !statSync(src).isFile() || statSync(src).size === 0) {
   console.error(`prepare-sidecar: expected ${src} after build`);
   process.exit(1);
 }

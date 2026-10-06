@@ -15,16 +15,14 @@ fn main() {
     }
     println!("cargo:rustc-env=CANOPY_CONTEXT_BUILD_ID={hash:016x}");
 
-    // tauri-build embeds the Windows application manifest into the app binaries
-    // only, so a test harness links without one. It then binds to Common
-    // Controls v5, which exports none of the v6 entry points tao subclasses its
-    // window with, and the test binary dies at load with
-    // STATUS_ENTRYPOINT_NOT_FOUND before a single test runs. Naming the v6
-    // dependency for every link target puts that assembly reference in the test
-    // binaries too; the app binaries already carry it in their own manifest and
-    // the linker merges the duplicate.
+    // Tauri embeds the v6 application manifest itself. Asking link.exe to
+    // embed a second one produces CVT1100 in release binaries. Only an explicit
+    // Windows library-test invocation needs the standalone test manifest:
+    // CANOPY_WINDOWS_TEST_MANIFEST=1 cargo test --lib
+    println!("cargo:rerun-if-env-changed=CANOPY_WINDOWS_TEST_MANIFEST");
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some()
         && std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+        && std::env::var("CANOPY_WINDOWS_TEST_MANIFEST").as_deref() == Ok("1")
     {
         println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
         println!("cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'");
