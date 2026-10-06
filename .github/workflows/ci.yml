@@ -167,4 +167,8 @@ jobs:
 
       - name: Run containment unit contract
         working-directory: src-tauri
+        # Unit-only Windows binaries need Common Controls v6. Keep this
+        # explicit opt-in out of application and sidecar release builds.
+        env:
+          CANOPY_WINDOWS_TEST_MANIFEST: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: cargo test --no-default-features --lib containment::tests
