@@ -7,6 +7,7 @@ export async function buildHostSnapshot(config,{aws,ssh,presign,wait=ms=>new Pro
  if(!['ap-southeast-1','us-east-1','eu-west-1'].includes(config.region)||config.sourceBundle!=='medium_3_0'||!config.runtimeBucket||!/^[a-z0-9][a-z0-9.-]{2,62}$/.test(config.runtimeBucket))throw Error('Factory region, private bucket and smallest source bundle are required');
  const key=runtimeReleaseKey(config.revision,config.runtimeKey),url=await presign(config.runtimeBucket,key);
  const recipe=factoryRecipe(config,url),id=randomUUID(),builder=`canopy-host-factory-${id}`,keyPairName=`canopy-factory-key-${id}`,snapshotName=`canopy-host-${config.revision.slice(0,12)}-${id.slice(0,8)}`;
+ if(hostSnapshotTags(config).some(tag=>typeof tag.value!=='string'||tag.value.length>256||!/^[A-Za-z0-9+_.:/@= -]+$/.test(tag.value)))throw Error('Factory snapshot tags are invalid');
  const tag={key:'canopy-factory-job',value:id},tags=[{key:'managed-by',value:'canopy-host-factory'},tag];let created=false,keyCreated=false,snapshotCreated=false,verified=false;const deadline=now()+30*60*1000;
  const own=resource=>resource&&resource.tags?.some(t=>t.key===tag.key&&t.value===tag.value)&&resource.tags?.some(t=>t.key==='managed-by'&&t.value==='canopy-host-factory');
  const observe=async()=>{const result=await aws('get-instance',{instanceName:builder});if(!own(result.instance))throw Error('Factory builder ownership changed');return result.instance;};

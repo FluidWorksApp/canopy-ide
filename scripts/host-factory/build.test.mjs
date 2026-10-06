@@ -48,3 +48,6 @@ test('completed failed bootstrap cleans compute and key immediately without snap
  await assert.rejects(buildHostSnapshot(config,f.options),/finished without passing smoke/);assert.equal(checks,1);
  assert.equal(f.calls.some(c=>c.action==='create-instance-snapshot'),false);assert.deepEqual(f.calls.filter(c=>c.action.startsWith('delete-')).map(c=>c.action),['delete-instance','delete-key-pair']);
 });
+test('oversized provider tags are rejected before key or compute creation',async()=>{
+ const f=fixture();await assert.rejects(buildHostSnapshot({...config,dockerVersion:'29.'+'1'.repeat(300)},f.options),/snapshot tags/);assert.equal(f.calls.length,0);
+});
