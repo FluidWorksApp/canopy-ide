@@ -1,3 +1,4 @@
+import {workspaceTabs as buildWorkspaceTabs,workspaceTabId,type SavedWorkspaceTab,type WorkspaceTab} from './workspaceTabs';
 import {WorkspaceHibernateProgress,type HibernateOperation} from './WorkspaceHibernateProgress';
 import {waitForWorkspaceStopped,type HibernateProgressListener} from './hibernateWorkspace';
 import {WorkspaceOwnerTools} from './WorkspaceOwnerTools';
@@ -36,15 +37,15 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     setBusy(true);setError('');
     try{await invoke('canopy_account_request',{route:'/api/workspaces',body:{action:'remove-connection',id:target.id,confirmName:accountRemovalName}});
       if(epoch!==accountRemovalEpoch.current)return;
-      if(selected?.id.endsWith('/'+target.id))await invoke('execution_remote_forget',{id:selected.id});
-      setManaged(items=>items.filter(item=>item.id!==target.id));setSaved(items=>items.filter(item=>!item.id.endsWith('/'+target.id)));setSelectedId('local');setAccountRemoval(null);setNotice('Connection removed. The VM, disks, files and usage history are kept.');void refreshWorkspaceList().catch(()=>{});
+      if(selected?.managedId===target.id)await invoke('execution_remote_forget',{id:selected.savedId??selected.id});
+      setManaged(items=>items.filter(item=>item.id!==target.id));setSaved(items=>items.filter(item=>item.workspaceId!==target.id&&!item.id.endsWith('/'+target.id)));setSelectedId('local');setAccountRemoval(null);setNotice('Connection removed. The VM, disks, files and usage history are kept.');void refreshWorkspaceList().catch(()=>{});
       if(active?.connection.workspaceId===target.id)await setExecutionMode('local');
     }catch(error){if(epoch===accountRemovalEpoch.current)setError(String(error));}finally{if(epoch===accountRemovalEpoch.current)setBusy(false);}
   }
   async function forgetConnection(){
     if(!selected||!canSwitchExecutionMode()){setError('Save or close unsaved files before removing this connection.');return;}
     setBusy(true);setError('');
-    try{if(selectedActive)await setExecutionMode('local');await invoke('execution_remote_forget',{id:selected.id});setSaved(items=>items.filter(item=>item.id!==selected.id));setSelectedId('local');setForgetConfirm(false);}
+    try{if(selectedActive)await setExecutionMode('local');await invoke('execution_remote_forget',{id:selected.savedId??selected.id});setSaved(items=>items.filter(item=>item.id!==(selected.savedId??selected.id)));setSelectedId('local');setForgetConfirm(false);}
     catch(error){setError(String(error));}finally{setBusy(false);}
   }
   const [hibernateConfirm,setHibernateConfirm]=useState(false);
@@ -77,13 +78,13 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     catch(error){setError(String(error));setStopConfirm(false);}
     finally{setStoppingVm(false);}
   }
-  const activeId=active?`${active.connection.endpoint}/${active.connection.workspaceId}`:'local';
-  const connectionState=useConnectionState(activeId);
+  const activeId=active?workspaceTabId({id:`${active.connection.endpoint}/${active.connection.workspaceId}`,endpoint:active.connection.endpoint,workspaceId:active.connection.workspaceId,workspaceName:active.connection.workspaceName},managed):'local';
+  const connectionState=useConnectionState(active?`${active.connection.endpoint}/${active.connection.workspaceId}`:'local');
   const [selectedId,setSelectedId]=useState(activeId);
   const [section,setSection]=useState<'overview'|'access'|'tools'>('overview');
   useEffect(()=>{setSection('overview');},[selectedId]);
   const [adding,setAdding]=useState(false);
-  function savedWorkspace(){return saved.find(workspace=>workspace.id===selectedId)??(managed.find(w=>selectedId.endsWith('/'+w.id))?{id:selectedId,endpoint:'',workspaceName:managed.find(w=>selectedId.endsWith('/'+w.id))!.name}:null)??(selectedId===activeId&&active?{id:activeId,endpoint:active.connection.endpoint,workspaceName:active.connection.workspaceName}:null);}
+  const previousTabs=useRef<WorkspaceTab[]>([]);
   const [signInLink,setSignInLink]=useState('');
   const pendingBrowser=useRef<string|null>(null);
   const [browserRequest,setBrowserRequest]=useState<string|null>(null);
@@ -95,9 +96,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     finally{if(!stopped)timer=setTimeout(()=>void poll(),3000);}};
     void poll();return()=>{stopped=true;clearTimeout(timer);};},[active]);
 
-  const [saved, setSaved] = useState<Array<{id:string;endpoint:string;workspaceName:string}>>([]);
-  const selected=selectedId==='local'?null:savedWorkspace();
-  const selectedActive=selectedId===activeId;
+  const [saved, setSaved] = useState<SavedWorkspaceTab[]>([]);
   useEffect(() => { void invoke<typeof saved>('execution_remote_list').then(setSaved).catch(() => {}); }, []);
   async function chooseSaved(id:string) {
     if (!canSwitchExecutionMode()) { setError('Save or close unsaved files before changing workspace.'); return; }
@@ -138,14 +137,18 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
     catch (e) { setError(String(e)); }
     finally { setBusy(false); }
   }
-  const workspaceTabs=[{id:'local',workspaceName:'Local workspace'},...saved];
-  for(const w of managed){const id=`https://${w.id}.workspaces.canopyide.dev/${w.id}`;if(!workspaceTabs.some(item=>item.id===id))workspaceTabs.push({id,workspaceName:w.name});}
-  const accountSelection=managed.find(w=>selectedId.endsWith('/'+w.id));
-  const legacySelection=accountSelection?.canRemoveConnection===true&&accountSelection.access?.owner!==false?accountSelection:undefined;
-  const managedSelection=managed.find(w=>selectedId.endsWith('/'+w.id));
-  const selectedEndpoint=selected?.endpoint;
-  const selectedManagedId=managed.find(w=>selectedId.endsWith('/'+w.id))?.id??(selectedEndpoint?.endsWith('.workspaces.canopyide.dev')&&selectedId.split('/').at(-1)!=='shoaib-work'?selectedId.split('/').at(-1):undefined);
-  if(active&&!workspaceTabs.some(workspace=>workspace.id===activeId))workspaceTabs.push({id:activeId,workspaceName:active.connection.workspaceName});
+  const workspaceTabs=buildWorkspaceTabs(saved,managed,active?{id:`${active.connection.endpoint}/${active.connection.workspaceId}`,endpoint:active.connection.endpoint,workspaceId:active.connection.workspaceId,workspaceName:active.connection.workspaceName}:null,previousTabs.current);
+  const previousSelection=previousTabs.current.find(tab=>tab.id===selectedId);
+  const resolvedSelectedId=workspaceTabs.some(tab=>tab.id===selectedId)?selectedId:workspaceTabs.find(tab=>tab.savedId&&tab.savedId===previousSelection?.savedId)?.id??(active&&selectedId===`${active.connection.endpoint}/${active.connection.workspaceId}`?activeId:selectedId);
+  previousTabs.current=workspaceTabs;
+  const selected=resolvedSelectedId==='local'?null:workspaceTabs.find(tab=>tab.id===resolvedSelectedId)??null;
+  const selectedActive=resolvedSelectedId===activeId;
+  const managedSelection=managed.find(w=>selected?.managedId===w.id);
+  const legacySelection=managedSelection?.canRemoveConnection===true&&managedSelection.access?.owner!==false?managedSelection:undefined;
+  const selectedManagedId=selected?.managedId;
+  // A newly loaded account ID may normalize the chosen connection, but a poll
+  // never changes which workspace the user is viewing.
+  useEffect(()=>{if(resolvedSelectedId!==selectedId)setSelectedId(resolvedSelectedId);},[resolvedSelectedId,selectedId]);
   async function runSetup(command:string){
     // Native credential import targets the current execution connection only.
     if(!active||!selectedActive)return;
@@ -166,19 +169,19 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
       {active&&onHibernateWorkspace&&<Button variant="ghost" icon disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>setHibernateConfirm(true)} title="Hibernate workspace — save all projects and stop compute" aria-label="Hibernate workspace">❄</Button>}
       {browserRequest && <Button variant="ghost" icon onClick={()=>{openLink(browserRequest,true);pendingBrowser.current=null;setBrowserRequest(null);}} title="Remote CLI sign-in needs your browser" aria-label="Open browser ↗">↗</Button>}
     </div>}
-    {progress&&!hibernateOperation&&!open&&createPortal(<WorkspaceProgress progress={progress} onDetails={()=>setOpen(true)}/>,document.body)}
+    {progress&&!hibernateOperation&&(!open||progress.workspaceId!==selectedManagedId)&&createPortal(<WorkspaceProgress progress={progress} onDetails={()=>{if(progress.workspaceId)setSelectedId(`managed:${progress.workspaceId}`);setOpen(true);}}/>,document.body)}
     {panelMounted && !adding && createPortal(<WorkspacePanel open={open} title="Workspaces" onClose={()=>setOpen(false)}><div className="workspace-tools">
-      <div className="workspace-navigation"><div className="tabs" role="tablist" aria-label="Workspaces">{workspaceTabs.map((workspace,index)=><button type="button" role="tab" id={`workspace-tab-${index}`} aria-controls="workspace-controls" aria-selected={selectedId===workspace.id} tabIndex={selectedId===workspace.id?0:-1} className={`tab ${selectedId===workspace.id?'tab-active':''}`} key={workspace.id} onClick={()=>{setSelectedId(workspace.id);setNotice('');setError('');}} onKeyDown={event=>{let next=index;if(event.key==='ArrowRight')next=(index+1)%workspaceTabs.length;else if(event.key==='ArrowLeft')next=(index-1+workspaceTabs.length)%workspaceTabs.length;else if(event.key==='Home')next=0;else if(event.key==='End')next=workspaceTabs.length-1;else return;event.preventDefault();setSelectedId(workspaceTabs[next].id);setNotice('');setError('');document.getElementById(`workspace-tab-${next}`)?.focus();}}><span className="tab-title">{workspace.workspaceName}</span>{workspace.id===activeId&&<span className="workspace-location connected" title="Active workspace">●</span>}</button>)}</div><Button size="sm" onClick={()=>{setError('');setAdding(true);}}>＋ New workspace</Button></div>
-      <div className={selectedManagedId?"workspace-lifecycle":"workspace-discovery"}><ManagedWorkspaces workspaceId={selectedManagedId??"__discovery__"} showAccount={false} onList={setManaged} onProgress={value=>setProgress(value?{...value,onStop:value.onStop?()=>{setOpen(true);value.onStop?.();}:undefined,onDelete:value.onDelete?()=>{setOpen(true);value.onDelete?.();}:undefined}:null)} onMinimize={()=>setOpen(false)} onDeleted={id=>{setSaved(items=>items.filter(item=>!item.id.endsWith('/'+id)));setSelectedId('local');}}/></div>
+      <div className="workspace-navigation"><div className="tabs" role="tablist" aria-label="Workspaces">{workspaceTabs.map((workspace,index)=><button type="button" role="tab" id={`workspace-tab-${index}`} aria-controls="workspace-controls" aria-selected={resolvedSelectedId===workspace.id} tabIndex={resolvedSelectedId===workspace.id?0:-1} className={`tab ${resolvedSelectedId===workspace.id?'tab-active':''}`} key={workspace.id} onClick={()=>{setSelectedId(workspace.id);setNotice('');setError('');}} onKeyDown={event=>{let next=index;if(event.key==='ArrowRight')next=(index+1)%workspaceTabs.length;else if(event.key==='ArrowLeft')next=(index-1+workspaceTabs.length)%workspaceTabs.length;else if(event.key==='Home')next=0;else if(event.key==='End')next=workspaceTabs.length-1;else return;event.preventDefault();setSelectedId(workspaceTabs[next].id);setNotice('');setError('');document.getElementById(`workspace-tab-${next}`)?.focus();}}><span className="tab-title">{workspace.workspaceName}</span>{workspace.id===activeId&&<span className="workspace-location connected" title="Active workspace">●</span>}</button>)}</div><Button size="sm" onClick={()=>{setError('');setAdding(true);}}>＋ New workspace</Button></div>
+      <div className={selectedManagedId?"workspace-lifecycle":"workspace-discovery"}><ManagedWorkspaces workspaceId={selectedManagedId??"__discovery__"} showAccount={false} onList={setManaged} onProgress={value=>setProgress(value?{...value,onStop:value.onStop?()=>{if(value.workspaceId)setSelectedId(`managed:${value.workspaceId}`);setOpen(true);value.onStop?.();}:undefined,onDelete:value.onDelete?()=>{if(value.workspaceId)setSelectedId(`managed:${value.workspaceId}`);setOpen(true);value.onDelete?.();}:undefined}:null)} onMinimize={()=>setOpen(false)} onDeleted={id=>{setSaved(items=>items.filter(item=>item.workspaceId!==id&&!item.id.endsWith('/'+id)));setSelectedId('local');}}/></div>
       {managedSelection&&<nav className="workspace-section-tabs" aria-label="Workspace sections">{(['overview','access','tools'] as const).map(item=><button type="button" key={item} aria-current={section===item?'page':undefined} className={section===item?'selected':''} onClick={()=>setSection(item)}>{item==='overview'?'Overview':item==='access'?'Access':'Tools & accounts'}</button>)}</nav>}
       {managedSelection&&section==='access'&&(managedSelection.access?.canManageAccess!==false?<WorkspaceSharing key={managedSelection.id} workspaceId={managedSelection.id} workspaceName={managedSelection.name}/>:<div className="workspace-section-empty"><h3>Your workspace access</h3><p>Your workspace owner manages team and individual permissions. Contact them to change your access.</p></div>)}
       {managedSelection&&section==='overview'&&<div className="workspace-overview"><div className="workspace-overview-copy"><h3>{managedSelection.state==='error'?'Preparation needs attention':selectedActive?'Your active workspace':managedSelection.state==='stopped'?'Workspace is stopped':'Ready when you are'}</h3><p>{managedSelection.state==='error'?'Preparation stopped before the workspace was ready. Retry to recover, or use More to stop it. Your saved files are kept.':managedSelection.state==='stopped'?'Compute is off. Resume this workspace to return to your projects. Files and setup stay saved.':'Projects, terminals and agents run together in this workspace.'}</p></div><button type="button" className="workspace-overview-access" onClick={()=>setSection('access')}><span><strong>Manage access</strong><small>Teams, people and workspace permissions</small></span><span aria-hidden="true">→</span></button></div>}
       {managedSelection&&section==='tools'&&managedSelection.access?.owner===true&&<WorkspaceOwnerTools key={managedSelection.id} workspaceId={managedSelection.id}/>}
       {managedSelection&&section==='tools'&&!selectedActive&&<p className="workspace-section-hint">Open this workspace to connect your personal accounts, import projects or use its desktop.</p>}
       {managedSelection&&section==='overview'&&<SharedSessionsPanel key={'sessions-'+managedSelection.id} workspaceId={managedSelection.id} owner={managedSelection.access?.owner===true}/>}
-      <section id="workspace-controls" role="tabpanel" aria-labelledby={`workspace-tab-${workspaceTabs.findIndex(workspace=>workspace.id===selectedId)}`} className="workspace-detail" hidden={!!managedSelection&&section!=='tools'}>
+      <section id="workspace-controls" role="tabpanel" aria-labelledby={`workspace-tab-${workspaceTabs.findIndex(workspace=>workspace.id===resolvedSelectedId)}`} className="workspace-detail" hidden={!!managedSelection&&section!=='tools'}>
         {!selectedManagedId&&<div className="workspace-detail-heading"><div><strong>{selected?.workspaceName??'Local workspace'}</strong><small>{selected?'Remote workspace · files and processes run here':'This Mac · files and processes run on this device'}</small></div><span className="workspace-selected">{selectedActive?(active?connectionLabel(connectionState):'Active'):'Not active'}</span></div>}
-        {!selectedActive&&!managedSelection?<div className="workspace-activate"><p>Switch to this workspace to use its projects, accounts and desktop.</p><Button variant="accent" disabled={busy} onClick={()=>selected?void chooseSaved(selected.id):void choose()}>{busy?'Switching…':'Use this workspace'}</Button></div>:selectedActive&&active?<>
+        {!selectedActive&&!managedSelection?<div className="workspace-activate"><p>Switch to this workspace to use its projects, accounts and desktop.</p><Button variant="accent" disabled={busy} onClick={()=>selected?void chooseSaved(selected.savedId??selected.id):void choose()}>{busy?'Switching…':'Use this workspace'}</Button></div>:selectedActive&&active?<>
           {!['connected','stopping','hibernated'].includes(connectionState.phase)&&<div className="workspace-feedback error" role="status"><span>{connectionLabel(connectionState)}. {connectionState.phase==='authentication-error'?'Reconnect with an updated access token.':'Your files remain on the VM. Waiting for the host connection.'}</span><Button size="sm" disabled={busy} onClick={()=>{setBusy(true);void active.client.workspace(active.connection.workspaceId,'/open',{resume:true}).catch(e=>setError(String(e))).finally(()=>setBusy(false));}}>Retry now</Button></div>}
           <section className="workspace-access"><h3>Personal accounts</h3><p className="workspace-description">Use your own agent subscriptions and Git identity in this workspace.</p><div className="workspace-action-row"><div><strong>Claude & Codex</strong><small>Default and named Claude/Codex accounts from this Mac</small></div><Button disabled={busy} onClick={()=>void runSetup('execution_remote_import_accounts')}>Copy accounts</Button></div><div className="workspace-action-row"><div><strong>GitHub & Git</strong><small>Repository access and commit identity</small></div><Button disabled={busy} onClick={()=>void runSetup('execution_remote_import_git')}>Connect GitHub</Button></div>{notice&&<p className="workspace-feedback" role="status">✓ {notice}</p>}</section>
           <section className="workspace-utilities"><h3>Workspace tools</h3><div className="workspace-inline-actions"><Button onClick={()=>{setOpen(false);setDesktop(true);}}>▣ Open desktop</Button>{onHibernateWorkspace&&<Button disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>setHibernateConfirm(true)}>Hibernate workspace</Button>}{!managedSelection&&active.connection.workspaceId==='shoaib-work'&&<Button disabled={stoppingVm} onClick={()=>setStopConfirm(true)}>Stop workspace</Button>}</div><LocalProjectImport/>

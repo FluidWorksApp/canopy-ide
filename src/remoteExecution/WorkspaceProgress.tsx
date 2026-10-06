@@ -1,6 +1,6 @@
 import {useState} from 'react';
 import {Button} from '../components/ui';
-export type WorkspaceProgressState={name:string;step:number;elapsed:number;message:string;onStop?:()=>void;onDelete?:()=>void};
+export type WorkspaceProgressState={workspaceId?:string;name:string;step:number;elapsed:number;message:string;onStop?:()=>void;onDelete?:()=>void};
 const steps=['Starting machine','Connecting saved files','Starting services','Checking connection','Ready'];
 export function WorkspaceProgress({progress,onDetails}:{progress:WorkspaceProgressState;onDetails:()=>void}){
  const [collapsed,setCollapsed]=useState(false);

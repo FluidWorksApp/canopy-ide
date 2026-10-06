@@ -225,3 +225,11 @@
 .workspace-panel .workspace-navigation .tab-title {font-family:var(--font-ui);}
 .workspace-hero-billing {display:block;margin-top:8px;font-size:var(--fs-xs);color:var(--text-dim);}
 @media(max-height:650px){.workspace-panel{top:48px;max-height:calc(100dvh - 72px);}.workspace-panel > header{padding-top:10px;padding-bottom:10px;}.workspace-panel .workspace-navigation{padding-top:8px;padding-bottom:8px;}.workspace-panel .workspace-lifecycle{padding-top:16px;padding-bottom:16px;}.workspace-section-tabs{margin-bottom:16px;}.workspace-section-tabs button{padding-top:8px;padding-bottom:8px;}.workspace-hero-icon{width:40px;height:40px;}.workspace-hero-right{gap:8px;}}
+
+/* The utility stays anchored while refresh, startup and selected content change. */
+.workspace-panel {height:min(720px,calc(100dvh - 100px));}
+.workspace-panel > header {flex-shrink:0;}
+.workspace-panel-content {flex:1;scrollbar-gutter:stable;}
+.workspace-panel .workspace-navigation {position:sticky;top:0;z-index:2;background:var(--bg-overlay);}
+@media(max-height:650px){.workspace-panel{height:calc(100dvh - 72px);}}
+@media(max-width:600px){.workspace-panel{left:12px;right:12px;width:auto;}}
