@@ -13,7 +13,7 @@ export function selectHostSnapshot(value,region,bundle,expectedRuntimeSha256){
 // Debian package versions may contain '~', which Lightsail tags reject.
 // Preserve legacy safe values; encode unsafe version strings without changing
 // the exact versions compared against the installed tools and signed catalog.
-const versionTag=value=>/^[A-Za-z0-9+_.:/@=-]+$/.test(value)?value:'base64:'+Buffer.from(value,'utf8').toString('base64url');
+const versionTag=value=>/^[A-Za-z0-9_.:/=+@ -]+$/.test(value)?value:'base64:'+Buffer.from(value,'utf8').toString('base64url');
 export function hostSnapshotTags(record){return [
  {key:'managed-by',value:'canopy-host-factory'}, {key:'canopy-factory-schema',value:'1'},
  {key:'canopy-node-version',value:versionTag(record.nodeVersion)},{key:'canopy-docker-version',value:versionTag(record.dockerVersion)},{key:'canopy-caddy-version',value:versionTag(record.caddyVersion)},{key:'canopy-architecture',value:record.architecture},{key:'canopy-revision',value:record.revision},
