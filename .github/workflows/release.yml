@@ -13,13 +13,41 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      skip_notarization:
+        description: 'Build signed macOS installers without notarization (release notes must disclose this)'
+        type: boolean
+        default: false
+      publish:
+        description: 'Publish only after all platforms and updater signatures have been verified'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 # tauri-action creates the release and uploads assets.
 permissions:
   contents: write
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Reject published or immutable release targets
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANOPY_RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-assets.mjs --preflight
+
   build:
+    needs: preflight
     strategy:
       # One platform failing shouldn't bin the artifacts of the others.
       fail-fast: false
@@ -233,8 +261,8 @@ jobs:
           # When these are unset the mac build is unsigned: it runs here, but
           # Gatekeeper blocks it on other people's machines.
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_ID: ${{ !inputs.skip_notarization && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ !inputs.skip_notarization && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
@@ -303,3 +331,20 @@ jobs:
           # tag name. --clobber makes a re-run of the workflow idempotent.
           gh release upload "${{ github.ref_name }}" "$stage"/* --clobber
           rm -rf "$stage"
+
+  finalize:
+    name: Verify complete release before publication
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify all assets, repair complete updater manifest, then optionally publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANOPY_RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-assets.mjs ${{ inputs.publish && '--publish' || '' }}
