@@ -296,6 +296,16 @@ jobs:
           fi
           echo "$sigs updater signature(s) present"
 
+      - name: Preserve verified installer and updater artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: canopy-${{ matrix.target }}-${{ github.sha }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/**
+            src-tauri/target/release/bundle/**
+          if-no-files-found: error
+          retention-days: 30
+
       # Tauri versions its filenames (Canopy_0.1.0_aarch64.dmg), but
       # `releases/latest/download/<name>` only resolves names that are identical
       # in every release. So each release also carries a version-less alias of
@@ -313,15 +323,16 @@ jobs:
           root="src-tauri/target/${{ matrix.target }}/release/bundle"
           [ -d "$root" ] || root="src-tauri/target/release/bundle"
           stage="$(mktemp -d)"
+          version="$(node -p 'require("./package.json").version')"
           case "${{ matrix.target }}" in
             aarch64-apple-darwin)
               cp "$root"/dmg/Canopy_*.dmg "$stage/Canopy-macos-arm64.dmg" ;;
             x86_64-apple-darwin)
               cp "$root"/dmg/Canopy_*.dmg "$stage/Canopy-macos-intel.dmg" ;;
             x86_64-unknown-linux-gnu)
-              cp "$root"/appimage/*.AppImage "$stage/Canopy-linux-x86_64.AppImage"
-              cp "$root"/deb/*.deb          "$stage/Canopy-linux-x86_64.deb"
-              cp "$root"/rpm/*.rpm          "$stage/Canopy-linux-x86_64.rpm" ;;
+              cp "$root/appimage/Canopy_${version}_amd64.AppImage" "$stage/Canopy-linux-x86_64.AppImage"
+              cp "$root/deb/Canopy_${version}_amd64.deb"          "$stage/Canopy-linux-x86_64.deb"
+              cp "$root/rpm/Canopy-${version}-1.x86_64.rpm"          "$stage/Canopy-linux-x86_64.rpm" ;;
             x86_64-pc-windows-msvc)
               cp "$root"/nsis/*-setup.exe   "$stage/Canopy-windows-x86_64-setup.exe" ;;
             *) echo "::error::unmapped target ${{ matrix.target }} — no stable-name alias"; exit 1 ;;

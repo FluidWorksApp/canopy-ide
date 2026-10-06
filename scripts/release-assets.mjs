@@ -31,10 +31,14 @@ export function requireAssets(release,version) {
  for(const n of expected.names)if(!/^sha256:[a-f0-9]{64}$/.test(assets.get(n).digest??''))throw Error('Missing asset digest: '+n);
  return {expected,assets};
 }
-export function releaseManifest(version,notes,payloads,signatures,now=new Date().toISOString()) {
+export function requireReleaseTag(tag,version) {
+ if(tag!==`v${version}`&&!new RegExp(`^v${version.replaceAll('.','\\.')}-rebuild\\.[1-9][0-9]*$`).test(tag??''))throw Error('Tag and checked-out package version disagree');
+}
+export function releaseManifest(version,notes,payloads,signatures,now=new Date().toISOString(),tag=`v${version}`) {
+ requireReleaseTag(tag,version);
  const platforms={};for(const [platform,name]of Object.entries(payloads)){
   const signature=signatures.get(name);if(!signature)throw Error('Missing verified signature: '+name);
-  platforms[platform]={signature,url:`https://github.com/FluidWorksApp/canopy-ide/releases/download/v${version}/${name}`};
+  platforms[platform]={signature,url:`https://github.com/FluidWorksApp/canopy-ide/releases/download/${tag}/${name}`};
  }
  return {version,notes,pub_date:now,platforms};
 }
@@ -42,7 +46,7 @@ const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const gh=(...args)=>execFileSync('gh',args,{encoding:'utf8'});
 async function main(){
  const version=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version,tag=process.env.CANOPY_RELEASE_TAG;
- if(tag!==`v${version}`)throw Error('Tag and checked-out package version disagree');
+ requireReleaseTag(tag,version);
  const releases=JSON.parse(gh('api','repos/FluidWorksApp/canopy-ide/releases?per_page=100'));
  const release=releases.find(r=>r.tag_name===tag);requireDraft(release);
  if(process.argv.includes('--preflight')){console.log('Release target is unpublished and eligible for uploads.');return;}
@@ -63,7 +67,7 @@ async function main(){
    signatures.set(name,encoded);
   }
   const notes=fs.readFileSync(path.join(root,`docs/releases/${version}.md`),'utf8');
-  fs.writeFileSync(path.join(stage,'latest.json'),JSON.stringify(releaseManifest(version,notes,expected.payloads,signatures),null,2)+'\n');
+  fs.writeFileSync(path.join(stage,'latest.json'),JSON.stringify(releaseManifest(version,notes,expected.payloads,signatures,undefined,tag),null,2)+'\n');
   gh('release','upload',tag,'--repo','FluidWorksApp/canopy-ide',path.join(stage,'latest.json'),'--clobber');
   const latest=JSON.parse(gh('api',`repos/FluidWorksApp/canopy-ide/releases/${release.id}`));requireAssets(latest,version);
   if(process.argv.includes('--publish'))gh('release','edit',tag,'--repo','FluidWorksApp/canopy-ide','--draft=false','--latest');
