@@ -32,13 +32,23 @@ it('clears a transient health failure after a successful account-change recheck'
  await waitFor(()=>expect(screen.queryByRole('alert')).toBeNull());view.unmount();
 });
 
-it('a prior profile or terminal event cannot verify a newly launched account session',async()=>{
+it('never shows a restart warning on its own when the integration is installed',async()=>{
  vi.mocked(ipc.agentHooksInstalled).mockResolvedValue(true);
- const view=render(<AgentIntegrationWarning agents={['codex']} targets={[{agent:'codex',ptyId:1,profile:'default'}]}/>);
+ render(<AgentIntegrationWarning agents={['codex']} targets={[{agent:'codex',ptyId:1,profile:'default'}]}/>);
+ await waitFor(()=>expect(ipc.agentHooksInstalled).toHaveBeenCalled());
+ await new Promise(resolve=>setTimeout(resolve,20));
+ expect(screen.queryByRole('alert')).toBeNull();
+});
+
+it('after setup, awaits only the sessions that were already open, each until it reports',async()=>{
+ vi.mocked(ipc.setupAgentHooks).mockImplementation(async()=>{vi.mocked(ipc.agentHooksInstalled).mockResolvedValue(true);return {agent:'codex',ok:true,steps:[],summary:'Installed'};});
+ const view=render(<AgentIntegrationWarning agents={['codex']} targets={[{agent:'codex',ptyId:1,profile:'default'},{agent:'codex',ptyId:2,profile:'work'}]}/>);
+ fireEvent.click(await screen.findByRole('button',{name:'Set up integrations'}));
  await screen.findByText('Restart agents to finish integration');const callback=vi.mocked(ipc.onAgentEvents).mock.calls[0][0];
- callback(['{"agent":"codex","hook_event_name":"SessionStart","canopy_pty":1}']);await waitFor(()=>expect(screen.queryByRole('alert')).toBeNull());
- view.rerender(<AgentIntegrationWarning agents={['codex']} targets={[{agent:'codex',ptyId:2,profile:'work'}]}/>);await screen.findByText('Restart agents to finish integration');
- callback(['{"agent":"codex","hook_event_name":"PostToolUse","canopy_pty":1}']);await waitFor(()=>expect(screen.getByRole('alert')).toBeTruthy());
- callback(['{"agent":"codex","hook_event_name":"SessionStart","canopy_pty":2,"canopy_profile":"default"}']);await waitFor(()=>expect(screen.getByRole('alert')).toBeTruthy());
- callback(['{"agent":"codex","hook_event_name":"SessionStart","canopy_pty":2,"canopy_profile":"work"}']);await waitFor(()=>expect(screen.queryByRole('alert')).toBeNull());view.unmount();
+ callback(['{"agent":"codex","hook_event_name":"SessionStart","canopy_pty":1}']);
+ await waitFor(()=>expect(screen.getByRole('alert')).toBeTruthy());
+ // A session opened after setup already has the integration.
+ view.rerender(<AgentIntegrationWarning agents={['codex']} targets={[{agent:'codex',ptyId:2,profile:'work'},{agent:'codex',ptyId:3,profile:'default'}]}/>);
+ callback(['{"agent":"codex","hook_event_name":"SessionStart","canopy_pty":2,"canopy_profile":"work"}']);
+ await waitFor(()=>expect(screen.queryByRole('alert')).toBeNull());view.unmount();
 });
