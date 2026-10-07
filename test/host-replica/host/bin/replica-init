@@ -14,7 +14,7 @@ mkdir -p /newroot
 # mount -o loop sets autoclear: the boot disk's loop device goes away with the
 # container's mount namespace when the instance stops.
 mount -o loop,discard "$dir/boot.img" /newroot
-mkdir -p /newroot/.replica/disks /newroot/.replica/oldroot
+mkdir -p /newroot/.replica/disks /newroot/.replica/oldroot /disks/disks
 mount --bind /disks/disks /newroot/.replica/disks
 printf 'root %s\n' "$(findmnt -n -o SOURCE /newroot)" > /newroot/.replica/devices
 if [ -s "$dir/attached" ]; then
@@ -28,6 +28,13 @@ if [ -d "$dir/seed" ]; then
  mkdir -p /newroot/var/lib/cloud/seed/nocloud
  cp "$dir/seed/meta-data" "$dir/seed/user-data" /newroot/var/lib/cloud/seed/nocloud/
  chmod 0600 /newroot/var/lib/cloud/seed/nocloud/user-data
+fi
+# Harness option --stale-apt-timers: the apt timers last ran two days ago, as
+# on a host booted from an older snapshot, so systemd catches them up at boot
+# (Persistent=true), which is when first-boot package maintenance happens.
+if [ -f "$dir/stale-apt-timers" ]; then
+ mkdir -p /newroot/var/lib/systemd/timers
+ for t in apt-daily apt-daily-upgrade; do touch -d '-2 days' "/newroot/var/lib/systemd/timers/stamp-$t.timer"; done
 fi
 # Docker's embedded DNS and the --add-host entries (control plane, S3 and
 # registry stand-ins) are the instance's resolver configuration.

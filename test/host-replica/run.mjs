@@ -11,9 +11,8 @@ import {spawn,execFileSync} from 'node:child_process';
 import {createHash,randomBytes,randomUUID} from 'node:crypto';
 import {existsSync,mkdirSync,readFileSync,writeFileSync,readdirSync,statSync,cpSync,rmSync} from 'node:fs';
 import {request} from 'node:https';
-import {lookup} from 'node:dns/promises';
 import {homedir,tmpdir} from 'node:os';
-import {dirname,join,resolve,basename} from 'node:path';
+import {dirname,join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parseArgs} from 'node:util';
 
@@ -24,7 +23,7 @@ const {values:opt}=parseArgs({options:{
  website:{type:'string',default:'origin/main'},'website-repo':{type:'string'},'website-dir':{type:'string'},
  flags:{type:'string',default:''},scenario:{type:'string',default:'resume'},plan:{type:'string',default:'starter'},
  keep:{type:'boolean',default:false},'timeout-minutes':{type:'string',default:'45'},cache:{type:'string'},
- 'cron-seconds':{type:'string',default:'60'},help:{type:'boolean',default:false},clean:{type:'boolean',default:false},preformat:{type:'string'},
+ 'cron-seconds':{type:'string',default:'60'},help:{type:'boolean',default:false},clean:{type:'boolean',default:false},preformat:{type:'string'},'first-runtime':{type:'string'},'first-website':{type:'string'},'stale-apt-timers':{type:'boolean',default:false},'first-image':{type:'string'},
 }});
 const SCENARIOS=['new','resume','stop','retry','migrate'];
 if(!opt.clean&&(opt.help||!opt.runtime||!SCENARIOS.includes(opt.scenario))){
@@ -113,17 +112,17 @@ async function buildRuntime(ref,dir,{image=opt.image}={}){
  await run('bash',[join(src,'packages/remote-host/package-host-release.sh'),join(dir,'workspace-host.tar.gz'),join(dir,'workspace-release.json')],{quiet:true});
  rmSync(src,{recursive:true,force:true});
 }
-function websiteSource(target){
+function websiteSource(target,ref=opt.website){
  const files=['api','lib','database','migrations','package.json','pnpm-lock.yaml','pnpm-workspace.yaml'];
- if(opt['website-dir']){
+ if(opt['website-dir']&&ref===opt.website){
   for(const f of files)cpSync(join(resolve(opt['website-dir']),f),join(target,f),{recursive:true});
   return {label:`dir:${resolve(opt['website-dir'])}`,id:hashTree(files.flatMap(f=>{const p=join(target,f);return statSync(p).isDirectory()?walk(p):[p];}),target)};
  }
  const repo=resolve(opt['website-repo']??process.env.CANOPY_WEBSITE_REPO??join(REPO,'..','canopy-website'));
- if(opt.website.startsWith('origin/'))execFileSync('git',['-C',repo,'fetch','-q','origin'],{stdio:'ignore'});
- const commit=execFileSync('git',['-C',repo,'rev-parse',`${opt.website}^{commit}`],{encoding:'utf8'}).trim();
+ if(ref.startsWith('origin/'))execFileSync('git',['-C',repo,'fetch','-q','origin'],{stdio:'ignore'});
+ const commit=execFileSync('git',['-C',repo,'rev-parse',`${ref}^{commit}`],{encoding:'utf8'}).trim();
  execFileSync('sh',['-c','git -C "$1" archive "$2" '+files.join(' ')+' | tar -x -C "$3"','sh',repo,commit,target]);
- return {label:`${opt.website} (${commit.slice(0,7)})`,id:commit.slice(0,16)};
+ return {label:`${ref} (${commit.slice(0,7)})`,id:commit.slice(0,16)};
 }
 
 // ---------------------------------------------------------------- images
@@ -150,9 +149,9 @@ async function blueprintDisk(hostImage){
  }finally{await docker(['rm','-f',cid],{allowFail:true});}
  return `/cache/${name}`;
 }
-async function buildControlPlane(){
+async function buildControlPlane(ref=opt.website){
  const ctx=join(tmpdir(),`canopy-replica-cp-${RUN}`);rmSync(ctx,{recursive:true,force:true});mkdirSync(join(ctx,'website'),{recursive:true});
- const website=websiteSource(join(ctx,'website'));
+ const website=websiteSource(join(ctx,'website'),ref);
  cpSync(join(HERE,'control-plane'),join(ctx,'control-plane'),{recursive:true});
  const tag=`canopy-replica-cp:${website.id}-${hashTree(walk(join(ctx,'control-plane')),ctx)}`;
  if((await docker(['image','inspect',tag],{allowFail:true})).code!==0){say('building control plane image for website',website.label);await docker(['build','-f',join(ctx,'control-plane','Dockerfile'),'-t',tag,ctx],{quiet:false});}
@@ -172,7 +171,7 @@ function cpEnv(flags){
   CANOPY_WORKSPACE_IMAGE:state.image,CRON_SECRET:secrets.cron,
   REPLICA_RUN:RUN,REPLICA_NETWORK:NET,REPLICA_DISKS_VOLUME:VOLUME,REPLICA_HOST_IMAGE:state.hostImage,REPLICA_BLUEPRINT_IMAGE:state.blueprint,
   REPLICA_RUNTIME_FILE:'/replica-data/runtime.tgz',REPLICA_ADMIN_TOKEN:secrets.admin,REPLICA_ADD_HOSTS:`ghcr.io:${state.proxyIp}`,
-  REPLICA_CRON_SECONDS:opt['cron-seconds'],REPLICA_MAX_MEMORY_MIB:String(state.maxMemoryMiB),REPLICA_PREFORMAT_DISKS:(opt.preformat??(opt.scenario==='new'?'0':'1'))==='1'?'1':'0',REPLICA_DEVICE_TOKEN:secrets.device,NODE_EXTRA_CA_CERTS:'/replica-ca/ca.crt',
+  REPLICA_CRON_SECONDS:opt['cron-seconds'],REPLICA_MAX_MEMORY_MIB:String(state.maxMemoryMiB),REPLICA_STALE_APT_TIMERS:opt['stale-apt-timers']?'1':'0',REPLICA_PREFORMAT_DISKS:(opt.preformat??(opt.scenario==='new'?'0':'1'))==='1'?'1':'0',REPLICA_DEVICE_TOKEN:secrets.device,NODE_EXTRA_CA_CERTS:'/replica-ca/ca.crt',
  };
  if(flags.has('snapshot'))e.CANOPY_SNAPSHOT_STORAGE='1';
  if(flags.has('migrate'))e.CANOPY_SNAPSHOT_STORAGE_MIGRATE='1';
@@ -227,7 +226,12 @@ async function warmImage(){
  const raw=JSON.parse((await docker(['run','--rm','quay.io/skopeo/stable:v1.16','inspect','--retry-times','5','--raw',`docker://${state.image}`])).stdout);
  const platform=raw.manifests?.find(m=>m.platform?.architecture===arch&&m.platform?.os==='linux')?.digest;
  const copy=(src,tag,extra=[])=>skopeo(['copy','--retry-times','10','--preserve-digests','--dest-tls-verify=false',...extra,`docker://${src}`,`docker://${state.proxyIp}/${path}:${tag}`]);
- if(platform){await copy(`${repo}@${platform}`,`replica-${arch}`);await copy(state.image,'replica-index',['--multi-arch','index-only']);}
+ if(platform){
+  await copy(`${repo}@${platform}`,`replica-${arch}`);
+  // Docker's containerd store also fetches the platform's attestation manifest.
+  for(const m of raw.manifests.filter(x=>x.annotations?.['vnd.docker.reference.digest']===platform))await copy(`${repo}@${m.digest}`,`replica-${arch}-attestation`);
+  await copy(state.image,'replica-index',['--multi-arch','index-only']);
+ }
  else await copy(state.image,`replica-${arch}`);
  say('local ghcr.io seeded');
 }
@@ -314,11 +318,21 @@ const scenarios={
  // An existing workspace (its retained disk holds a previous host's state and
  // container) is started again: the production path of every daily resume.
  async resume(){const id=await createWorkspace('Replica resume');await startAndCheck(id,'first start');await stopAndCheck(id,'stop');await startAndCheck(id,'resume of existing workspace');},
- // A failed start is retried from the app (Retry button: action 'retry').
+ // A failed start is retried from the app (Retry button: action 'retry'),
+ // which replaces a host whose bootstrap never reached management services.
+ // --first-runtime runs the first start on another release (e.g. a broken
+ // one) and switches the control plane to --runtime before the retry, as a
+ // production rollout of a fix would.
  async retry(){
+  const fixed=state.runtime,fixedImage=state.image;
+  const fixedCp=cpImage;
+  if(opt['first-runtime']){state.runtime=await resolveRuntime(opt['first-runtime']);state.image=opt['first-image']??state.runtime.image??state.image;if(state.image!==fixedImage)await warmImage();}
+  if(opt['first-website'])cpImage=(await buildControlPlane(opt['first-website'])).tag;
+  if(opt['first-runtime']||opt['first-website']){say(`first start on runtime ${state.runtime.key} and website ${opt['first-website']??opt.website}`);await startControlPlane(FLAGS);}
   const id=await createWorkspace('Replica retry');
   try{await startAndCheck(id,'first start');say('first start succeeded; nothing to retry');return;}
   catch(error){if(!(error instanceof ScenarioFailure))throw error;say('first start failed as expected for retry:',error.message);await evidence('before-retry');}
+  if(opt['first-runtime']||opt['first-website']){state.runtime=fixed;state.image=fixedImage;cpImage=fixedCp;say('switching the control plane to the fixed release before Retry');await startControlPlane(FLAGS);}
   await operate(id,'retry');await waitFor(id,'ready');await connect(id);
  },
  // Retained-disk workspace (flags off) moves to snapshot storage when started

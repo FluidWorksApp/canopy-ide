@@ -9,7 +9,7 @@ export * from 'canopy-replica-real:@aws-sdk/client-s3';
 const file=process.env.REPLICA_RUNTIME_FILE;
 const sha=()=>createHash('sha256').update(readFileSync(file)).digest('hex');
 export class S3Client extends real.S3Client{
- async send(command,options){
+ async send(command){
   const input=command.input??{};
   if(input.Bucket!==process.env.CANOPY_RUNTIME_BUCKET||input.Key!==process.env.CANOPY_RUNTIME_KEY)throw Object.assign(new Error('NoSuchKey'),{name:'NoSuchKey',$metadata:{httpStatusCode:404}});
   if(command instanceof real.HeadObjectCommand)return {ContentLength:statSync(file).size,Metadata:{sha256:sha()},$metadata:{httpStatusCode:200}};

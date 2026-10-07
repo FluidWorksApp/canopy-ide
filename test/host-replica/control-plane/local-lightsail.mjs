@@ -99,6 +99,7 @@ async function launch(record,bootSource,userData){
  writeFileSync(`${dir}/seed/meta-data`,`instance-id: i-${record.instanceId}\nlocal-hostname: ${record.hostname}\n`);
  writeFileSync(`${dir}/seed/user-data`,userData||'#cloud-config\n{}\n');
  writeAttached(record.name);
+ if(env.REPLICA_STALE_APT_TIMERS==='1')writeFileSync(`${dir}/stale-apt-timers`,'');
  const bundle=BUNDLES[record.bundleId];
  const memory=Math.min(bundle.memoryGiB*1024,Number(env.REPLICA_MAX_MEMORY_MIB??bundle.memoryGiB*1024));
  const hosts=(env.REPLICA_ADD_HOSTS??'').split(',').filter(Boolean).flatMap(entry=>['--add-host',entry]);

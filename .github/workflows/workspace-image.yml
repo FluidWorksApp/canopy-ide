@@ -100,9 +100,53 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           outputs: type=image,name=${{ steps.publish-name.outputs.image }},push=true,oci-mediatypes=true,compression=zstd,compression-level=3,force-compression=true
 
+  # The release is assembled only after the runtime package built from this
+  # commit has booted a replica of a managed host (test/host-replica): the real
+  # control plane (canopy-website main), the real generated bootstrap, systemd,
+  # nested Docker and the image pulled by digest, then a stop and a resume of
+  # the existing workspace. Same packaging as the release job below.
+  host-replica:
+    name: Replica host boot (resume)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: FluidWorksApp/canopy-website
+          ref: main
+          path: canopy-website
+          token: ${{ secrets.CANOPY_WEBSITE_READ_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Package this commit's host runtime
+        run: |
+          image="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/canopy-workspace:sha-${{ github.sha }}-amd64"
+          digest=$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ $digest =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "REPLICA_IMAGE=${image%:*}@$digest" >> "$GITHUB_ENV"
+          mkdir -p replica-runtime
+          node --input-type=module -e 'import fs from "node:fs";import {createHash} from "node:crypto";import {runtimeReleaseKey} from "./packages/remote-host/runtime-release-key.mjs";fs.writeFileSync("replica-runtime/workspace-release.json",JSON.stringify({revision:process.env.GITHUB_SHA,runtimeLockSha256:createHash("sha256").update(fs.readFileSync("packages/remote-host/package-lock.json")).digest("hex"),checks:{linuxAmd64:true,linuxArm64:true},runtimeKey:runtimeReleaseKey(process.env.GITHUB_SHA)}))'
+          node packages/remote-host/prepare-browser-build.mjs
+          bash packages/remote-host/package-host-release.sh replica-runtime/workspace-host.tar.gz replica-runtime/workspace-release.json
+      - name: Boot, stop and resume a managed host replica
+        run: npm run replica -- --runtime replica-runtime --image "$REPLICA_IMAGE" --website-dir canopy-website --scenario resume --cache "$RUNNER_TEMP/canopy-replica"
+      - name: Keep replica evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-replica-${{ github.sha }}
+          path: ${{ runner.temp }}/canopy-replica/runs
+          if-no-files-found: ignore
+          retention-days: 14
+
   release:
     name: Publish multi-platform release
-    needs: build
+    needs: [build, host-replica]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
