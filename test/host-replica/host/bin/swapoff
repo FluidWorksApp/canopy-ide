@@ -1,0 +1,17 @@
+#!/bin/sh
+# Replica only: the counterpart of bin/swapon (accounted swap, never global).
+state=/run/canopy-replica-swaps
+[ -s "$state" ] || state_missing=1
+case "${1:-}" in
+ -a|--all) rm -f "$state"; exit 0 ;;
+esac
+status=0
+for arg; do
+ case "$arg" in -*) continue ;; esac
+ if [ -n "${state_missing:-}" ] || ! grep -qx "$arg" "$state"; then
+  echo "swapoff: $arg: swapoff failed: Invalid argument" >&2; status=255; continue
+ fi
+ grep -vx "$arg" "$state" > "$state.new" || true
+ mv "$state.new" "$state"
+done
+exit "$status"

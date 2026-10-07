@@ -1,0 +1,11 @@
+#!/bin/sh
+# Replica only: hot-detach a disk (Lightsail DetachDisk on a running instance).
+# Like an EBS detach, a mounted disk is refused rather than yanked.
+set -eu
+disk=$1
+dev=$(awk -v d="$disk" '$1=="data"&&$3==d{print $2}' /.replica/devices)
+[ -n "$dev" ] || exit 0
+if findmnt -n -S "$dev" >/dev/null 2>&1; then echo "disk $disk is mounted" >&2; exit 16; fi
+losetup -d "$dev"
+awk -v d="$disk" '!($1=="data"&&$3==d)' /.replica/devices > /.replica/devices.new
+mv /.replica/devices.new /.replica/devices

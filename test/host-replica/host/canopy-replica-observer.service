@@ -1,0 +1,9 @@
+[Unit]
+Description=Canopy replica observer (evidence only)
+DefaultDependencies=no
+After=local-fs.target
+[Service]
+ExecStart=/usr/local/lib/canopy-replica/replica-observer
+Restart=always
+[Install]
+WantedBy=sysinit.target

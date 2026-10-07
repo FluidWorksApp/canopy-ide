@@ -1,0 +1,42 @@
+#!/bin/bash
+# Replica "firmware": runs as the privileged container's PID 1, boots the
+# instance's ext4 boot disk like a VM would, then hands PID 1 to systemd.
+# Lightsail equivalents: boot.img = the instance's system disk, attached = disks
+# attached with AttachDisk, seed/ = the instance user data (cloud-init NoCloud).
+set -euo pipefail
+name=${CANOPY_REPLICA_INSTANCE:?}
+dir=/disks/instances/$name
+# The shared Docker VM creates loop devices on demand; a privileged container's
+# /dev is a snapshot taken at start, so provide the nodes up front.
+[ -e /dev/loop-control ] || mknod -m 0660 /dev/loop-control c 10 237
+for i in $(seq 0 511); do [ -e "/dev/loop$i" ] || mknod -m 0660 "/dev/loop$i" b 7 "$i"; done
+mkdir -p /newroot
+# mount -o loop sets autoclear: the boot disk's loop device goes away with the
+# container's mount namespace when the instance stops.
+mount -o loop,discard "$dir/boot.img" /newroot
+mkdir -p /newroot/.replica/disks /newroot/.replica/oldroot
+mount --bind /disks/disks /newroot/.replica/disks
+printf 'root %s\n' "$(findmnt -n -o SOURCE /newroot)" > /newroot/.replica/devices
+if [ -s "$dir/attached" ]; then
+ while read -r disk; do
+  [ -n "$disk" ] || continue
+  dev=$(losetup --find --show "/disks/disks/$disk.img")
+  printf 'data %s %s\n' "$dev" "$disk" >> /newroot/.replica/devices
+ done < "$dir/attached"
+fi
+if [ -d "$dir/seed" ]; then
+ mkdir -p /newroot/var/lib/cloud/seed/nocloud
+ cp "$dir/seed/meta-data" "$dir/seed/user-data" /newroot/var/lib/cloud/seed/nocloud/
+ chmod 0600 /newroot/var/lib/cloud/seed/nocloud/user-data
+fi
+# Docker's embedded DNS and the --add-host entries (control plane, S3 and
+# registry stand-ins) are the instance's resolver configuration.
+cat /etc/resolv.conf > /newroot/etc/resolv.conf
+cat /etc/hosts > /newroot/etc/hosts
+hostname > /newroot/etc/hostname
+mount --make-rprivate /
+for m in dev proc sys; do mount --move "/$m" "/newroot/$m"; done
+cd /newroot
+pivot_root . .replica/oldroot
+umount -l /.replica/oldroot
+exec /lib/systemd/systemd

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Replica only: hot-attach a disk (Lightsail AttachDisk on a running instance).
+set -eu
+disk=$1
+case "$disk" in *[!A-Za-z0-9_-]*|'') echo 'invalid disk' >&2; exit 2 ;; esac
+if awk -v d="$disk" '$1=="data"&&$3==d{found=1}END{exit !found}' /.replica/devices; then exit 0; fi
+dev=$(losetup --find --show "/.replica/disks/$disk.img")
+printf 'data %s %s\n' "$dev" "$disk" >> /.replica/devices
+echo "$dev"

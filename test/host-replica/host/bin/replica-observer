@@ -1,0 +1,15 @@
+#!/bin/bash
+# Replica only: an observer for evidence. It never changes host state; it logs
+# every change of /run/canopy ownership/modes to the journal and keeps a copy
+# of the bootstrap script the host downloaded (which deletes it after running).
+out=/var/log/canopy-replica
+mkdir -p "$out"
+last=''
+while true; do
+ if [ ! -s "$out/bootstrap.sh" ] && [ -f /run/canopy-bootstrap.sh ] && [ "$(tail -n 1 /run/canopy-bootstrap.sh 2>/dev/null)" = CANOPY_BOOTSTRAP ]; then
+  cp /run/canopy-bootstrap.sh "$out/bootstrap.sh"; echo "observer: saved downloaded bootstrap script"
+ fi
+ cur=$(stat -c '%n %a %U:%G' /run/canopy /run/canopy/* 2>/dev/null | tr '\n' ';')
+ if [ "$cur" != "$last" ]; then echo "observer: /run/canopy ${cur:-absent}"; last=$cur; fi
+ sleep 0.2
+done

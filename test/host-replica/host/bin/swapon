@@ -1,0 +1,29 @@
+#!/bin/sh
+# Replica only. Swap is global to the kernel, so a real swapon in a replica
+# would add swap to the shared Docker VM (and outlive a killed replica). This
+# keeps swapon's contract for the host code: the file must carry a valid swap
+# signature, a second swapon of the same file fails, and --show lists it.
+state=/run/canopy-replica-swaps
+case "${1:-}" in
+ --show*|-s|--summary)
+  [ -s "$state" ] && cat "$state"
+  exit 0 ;;
+ -a|--all) exit 0 ;;
+esac
+status=0
+skip=0
+for arg; do
+ if [ "$skip" = 1 ]; then skip=0; continue; fi
+ case "$arg" in
+  -p|-o|--priority|--options) skip=1; continue ;;
+  -*) continue ;;
+ esac
+ if [ "$(blkid -p -s TYPE -o value "$arg" 2>/dev/null)" != swap ]; then
+  echo "swapon: $arg: read swap header failed" >&2; status=255; continue
+ fi
+ if [ -s "$state" ] && grep -qx "$arg" "$state"; then
+  echo "swapon: $arg: swapon failed: Device or resource busy" >&2; status=255; continue
+ fi
+ mkdir -p "$(dirname "$state")"; echo "$arg" >> "$state"
+done
+exit "$status"

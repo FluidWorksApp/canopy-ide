@@ -1,0 +1,24 @@
+#!/bin/sh
+# Replica only. Lightsail exposes the boot disk and an attached disk as NVMe
+# disks; the replica's are loop devices (TYPE "loop"), and lsblk would also list
+# every other device of the shared Docker VM. Answer the three queries the
+# bootstrap and host factory make from this instance's own device map, which
+# bin/replica-init and replica-attach maintain. Anything else is the real lsblk.
+map=/.replica/devices
+real=/usr/bin/lsblk.distrib
+if [ -r "$map" ]; then
+ case "$*" in
+  "-n -o PKNAME "*)
+   for dev; do :; done
+   if grep -qx "root $dev" "$map"; then echo replica-root; exit 0; fi ;;
+  "-dn -o NAME,TYPE")
+   echo 'replica-root disk'
+   awk '$1=="data"{sub("^/dev/","",$2);print $2" disk"}' "$map"
+   exit 0 ;;
+  "-dn -o TYPE")
+   echo disk
+   awk '$1=="data"{print "disk"}' "$map"
+   exit 0 ;;
+ esac
+fi
+exec "$real" "$@"

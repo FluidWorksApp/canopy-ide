@@ -22,7 +22,8 @@
     "build:portal": "vite build --config portal/vite.config.ts",
     "wiki:build": "node scripts/build-wiki.mjs",
     "licenses": "node scripts/generate-third-party-notices.mjs",
-    "licenses:check": "node scripts/generate-third-party-notices.mjs --check"
+    "licenses:check": "node scripts/generate-third-party-notices.mjs --check",
+    "replica": "node test/host-replica/run.mjs"
   },
   "dependencies": {
     "@codingame/monaco-vscode-files-service-override": "~25.1.2",
