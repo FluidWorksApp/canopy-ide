@@ -180,3 +180,42 @@ it('offers uploads from the component root header',async()=>{
  fireEvent.click(await screen.findByText('Upload files…'));
  expect(upload).toHaveBeenCalledWith('/proj','files');
 });
+
+describe("FileTree opening state", () => {
+  it("marks the file being opened as busy with a spinner, and clears it after", async () => {
+    const props = { roots: [ROOT], changedPaths: new Set<string>(), onOpenFile: vi.fn(), hideRootHeader: true };
+    const { rerender } = render(<FileTree {...props} openingPath="/proj/README.md" />);
+    await screen.findByText("README.md");
+    expect(rowOf("README.md")).toHaveAttribute("aria-busy", "true");
+    expect(rowOf("README.md")).toHaveClass("tree-row-opening");
+    expect(screen.getByRole("status", { name: "Opening README.md" })).toBeInTheDocument();
+    expect(rowOf("src")).not.toHaveAttribute("aria-busy");
+    rerender(<FileTree {...props} openingPath={null} />);
+    expect(rowOf("README.md")).not.toHaveAttribute("aria-busy");
+    expect(screen.queryByRole("status", { name: "Opening README.md" })).toBeNull();
+  });
+});
+
+describe("FileTree loading rows", () => {
+  it("shows a loading row under a folder until its listing arrives", async () => {
+    let release!: (entries: ipc.DirEntry[]) => void;
+    await renderTree();
+    vi.mocked(ipc.fsReadDir).mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    fireEvent.click(rowOf("src"));
+    const loading = await screen.findByRole("status", { name: "Loading src" });
+    expect(loading).toHaveTextContent("Loading…");
+    expect(loading).not.toHaveAttribute("role", "treeitem");
+    await act(async () => release(TREE["/proj/src"]));
+    expect(screen.queryByRole("status", { name: "Loading src" })).toBeNull();
+    expect(screen.getByText("app.ts")).toBeInTheDocument();
+  });
+
+  it("shows a loading row for a root that hasn't listed yet", async () => {
+    let release!: (entries: ipc.DirEntry[]) => void;
+    vi.mocked(ipc.fsReadDir).mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    render(<FileTree roots={[ROOT]} changedPaths={new Set()} onOpenFile={vi.fn()} hideRootHeader />);
+    expect(await screen.findByRole("status", { name: "Loading proj" })).toBeInTheDocument();
+    await act(async () => release(TREE["/proj"]));
+    expect(await screen.findByText("README.md")).toBeInTheDocument();
+  });
+});
