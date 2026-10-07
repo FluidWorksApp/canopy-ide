@@ -1,4 +1,6 @@
 import {pullWorkspaceImage,workspaceImageReference,dockerTimeout} from './image-release.mjs';
+import {removeStaleWorkspaceImages,containerdFreeBytes} from './image-retention.mjs';
+import {memorySwapMiB} from './workspace-swap.mjs';
 import {imageUpgradeJournal,upgradeRuntimeImage} from './image-upgrade.mjs';
 import {waitForRuntimeReady} from './runtime-readiness.mjs';
 import {hostResources} from './host-resources.mjs';
@@ -21,6 +23,7 @@ export function safeDockerError(error, operation) {
   // Retain only the classification needed for missing-resource handling.
   const safe = new Error(`Docker workspace ${operation} failed`);
   safe.missingResource = /no such|network .* not found/i.test(String(error.stderr));
+  safe.noSpace = /no space left on device/i.test(String(error.stderr));
   return safe;
 }
 async function dockerCommand(args) {
@@ -28,7 +31,7 @@ async function dockerCommand(args) {
   catch (error) { throw safeDockerError(error, args[0]); }
 }
 
-export function memorySwapMiB(workspace,memoryMiB){return Math.round(memoryMiB*(1+(workspace.swapRatio??0.75)));}
+export {memorySwapMiB};
 function privateNamespace(mode){return mode==null||mode===''||mode==='private';}
 function hasNoNewPrivileges(options){
   if(!Array.isArray(options))return false;
@@ -57,10 +60,22 @@ export class DockerWorkspaces {
   runtimes = new Map();
   migrationCleanupRequired = new Set();
   migrationHelperCleanupRequired = new Set();
-  constructor({ secret, image = 'canopy-workspace:0.1.0', docker = dockerCommand, registry = [], readHost = hostMemory, verifyCapacity = verifyCapacityGroup, readResources = hostResources, releaseChannel, resolveRelease, upgradeDirectory,resourceAdmission=action=>action(),authorizeAdmission }) {
+  constructor({ secret, image = 'canopy-workspace:0.1.0', docker = dockerCommand, registry = [], readHost = hostMemory, verifyCapacity = verifyCapacityGroup, readResources = hostResources, releaseChannel, resolveRelease, upgradeDirectory,resourceAdmission=action=>action(),authorizeAdmission,retainImages=false,freeBytes=containerdFreeBytes,log=message=>console.warn(message) }) {
+    // retainImages (managed hosts): pull space preflight plus removal of old
+    // workspace images and settled rollback containers. Off for local hosts,
+    // whose locally built image cannot be pulled again.
+    this.retainImages=retainImages;this.freeBytes=freeBytes;this.log=log;this.prepullTarget=undefined;
     this.secret = secret; this.image = image; this.docker = docker; this.registry = registry; this.readHost = readHost; this.verifyCapacity = verifyCapacity; this.readResources = readResources;
     this.releaseChannel=releaseChannel;this.resolveRelease=resolveRelease;this.upgradeDirectory=upgradeDirectory;
     this.authorizeAdmission=authorizeAdmission;this.resourceAdmission=resourceAdmission;this.resourceTail = Promise.resolve();
+  }
+  /** Keep only images containers use, the configured image, `keep` and the pre-pull target. */
+  cleanupWorkspaceImages({keep=[]}={}){
+    if(!this.retainImages)return Promise.resolve(null);
+    return removeStaleWorkspaceImages({docker:this.docker,keep:[this.image,this.releaseChannel,this.prepullTarget,...keep],protectWorkspaces:new Set(this.migrationCleanupRequired),log:this.log});
+  }
+  pullSpace(reference,{reserveBytes=0,cleanup=()=>this.cleanupWorkspaceImages({keep:[reference]})}={}){
+    return this.retainImages?{freeBytes:this.freeBytes,reserveBytes,cleanup}:undefined;
   }
   withResourceLock(action) {
     const result = this.resourceTail.then(()=>this.resourceAdmission(action));
@@ -214,7 +229,18 @@ export class DockerWorkspaces {
       this.runtimes.delete(id);
     }
   }
-  async ensure(workspace,{resume=false,releaseImage}={}) {
+  async ensure(workspace,options={}) {
+    const state={};
+    const runtime=await this.ensureRuntime(workspace,options,state);
+    // The rollback window closes once the replacement passed readiness
+    // (upgradeRuntimeImage commits only then); drop what is no longer needed.
+    if(state.release&&!options.releaseImage&&this.retainImages){
+      try{await this.cleanupWorkspaceImages({keep:[state.release.reference]});}
+      catch(error){this.log(`Workspace image cleanup skipped: ${error.message}`);}
+    }
+    return runtime;
+  }
+  async ensureRuntime(workspace,{resume=false,releaseImage}={},state={}) {
     if(this.idleReserved?.(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
     if(this.migrationCleanupRequired.has(workspace.parentWorkspaceId??workspace.id))throw Error('Workspace migration requires recovery');
     if (!validId(workspace.id) || !workspace.accounts.every(validId)) throw new Error('Invalid workspace');
@@ -233,7 +259,7 @@ export class DockerWorkspaces {
     if(this.releaseChannel&&!releaseImage){
       if(!existing||(resume&&existing.State?.Running===false)){
         const reference=this.resolveRelease?await this.resolveRelease(workspace):this.releaseChannel;
-        release=await pullWorkspaceImage(reference,{docker:this.docker});
+        release=await pullWorkspaceImage(reference,{docker:this.docker,space:this.pullSpace(reference)});state.release=release;
         if(existing){
           const retained=retainedRuntimeImage(workspace,existing,this.releaseChannel);
           if(!retained&&(existing.Config?.Labels?.['canopy.image-channel']||existing.Config?.Image!==this.image))throw Error('Workspace container image provenance differs; administrator action required');
@@ -245,6 +271,9 @@ export class DockerWorkspaces {
         else if(existing.Config?.Labels?.['canopy.image-channel'])throw Error('Workspace container image provenance differs; administrator action required');
       }
     }
+    // Containers created before the fixed swap allowance keep the legacy
+    // memory x (1 + swapRatio) limit until normalized below.
+    const legacySwap=!!existing&&workspace.swapMiB!=null&&Number.isInteger(existing.HostConfig?.Memory)&&existing.HostConfig.MemorySwap===Math.round(existing.HostConfig.Memory/1048576*(1+(workspace.swapRatio??0.75)))*1048576;
     if (existing) {
       if (existing.Config.Labels?.['canopy.workspace'] !== workspace.id ||
           existing.Config.Image !== image ||
@@ -253,7 +282,7 @@ export class DockerWorkspaces {
           !Number.isInteger(existing.HostConfig.Memory) ||
           existing.HostConfig.Memory < workspace.memoryMiB * 1024 * 1024 ||
           existing.HostConfig.Memory > memoryRange(workspace).max * 1024 * 1024 ||
-          existing.HostConfig.MemorySwap !== memorySwapMiB(workspace,existing.HostConfig.Memory/1048576)*1048576 ||
+          (existing.HostConfig.MemorySwap !== memorySwapMiB(workspace,existing.HostConfig.Memory/1048576)*1048576&&!legacySwap) ||
           !Number.isInteger(existing.HostConfig.NanoCpus) ||
           existing.HostConfig.NanoCpus < workspace.cpus * 1_000_000_000 ||
           existing.HostConfig.NanoCpus > cpuRange(workspace).max * 1_000_000_000 ||
@@ -274,6 +303,7 @@ export class DockerWorkspaces {
         catch(error){this.runtimes.delete(workspace.id);if(!error.imageUpgradeRolledBack)this.migrationCleanupRequired.add(workspace.id);throw error;}
       }
       if(workspace.memberId&&resume&&existing.HostConfig.RestartPolicy?.Name==='no')await this.docker(['update','--restart','on-failure:3',name]);
+      if (legacySwap) await this.updateMemory(workspace, existing.HostConfig.Memory / 1048576);
       if (!existing.State.Running && existing.HostConfig.Memory !== workspace.memoryMiB * 1024 * 1024) {
         await this.updateMemory(workspace, workspace.memoryMiB); existing.HostConfig.Memory = workspace.memoryMiB * 1024 * 1024;
       }
