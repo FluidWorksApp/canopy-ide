@@ -29,7 +29,7 @@
 // whole page for as long as it is open — a menu is transient, and punching a
 // hole in a native view to avoid the blink is not worth what it would cost.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   chooseEngine,
   overlaps,
@@ -73,7 +73,7 @@ import {
 import { isRegisteredOverlay } from "./overlaySurfaces";
 import { setNativeSurface } from "./activeView";
 import * as ipc from "./ipc";
-import { getSettings } from "./settings";
+import { getSettings, subscribeSettings } from "./settings";
 
 /** Told to whoever is rendering the pane, so the DOM can stand in for the
  *  native view while it is out of the way. */
@@ -988,6 +988,39 @@ export function hostVerdictFor(el: Element): string {
  *  change, a page load that resized the pane. */
 export const refreshBrowserViews = schedule;
 
+/** An in-memory engine choice that outranks the stored setting.
+ *
+ *  Settings only offer Embedded and Playwright: getSettings() migrates the
+ *  retired native-webview preference away on every read, so asking for it
+ *  through updateSettings() is silently undone. The native engine itself is
+ *  still shipped (browser.rs, this file, the freeze-frame machinery), and the
+ *  browser selftest exists to hold it to its occlusion contract — this is how
+ *  it asks for that engine by name. Never persisted: a selftest must not leave
+ *  a preference behind, and nothing a person does can reach it. */
+let engineOverride: BrowserEngine | null = null;
+const engineOverrideListeners = new Set<() => void>();
+
+export function overrideBrowserEngine(engine: BrowserEngine | null): void {
+  if (engineOverride === engine) return;
+  engineOverride = engine;
+  for (const listener of engineOverrideListeners) listener();
+  schedule();
+}
+
+/** The engine asked for, before the platform probe has had its say. */
+export function preferredEngine(): BrowserEngine {
+  return engineOverride ?? getSettings().browserEngine;
+}
+
+function subscribeEngine(cb: () => void): () => void {
+  engineOverrideListeners.add(cb);
+  const unsubscribeSettings = subscribeSettings(cb);
+  return () => {
+    engineOverrideListeners.delete(cb);
+    unsubscribeSettings();
+  };
+}
+
 let supported: EngineSupport | null = null;
 let probe: Promise<void> | null = null;
 
@@ -1001,7 +1034,7 @@ async function probeSupport(): Promise<EngineSupport> {
  *  shows nothing rather than briefly showing the wrong engine. */
 export function useBrowserEngine(): BrowserEngine | null {
   const [, bump] = useState(0);
-  const preferred = getSettings().browserEngine;
+  const preferred = useSyncExternalStore(subscribeEngine, preferredEngine);
   useEffect(() => {
     if (preferred === "chrome" || preferred === "proxy") return;
     if (supported !== null) return;
@@ -1024,6 +1057,7 @@ export function resetBrowserHost() {
   views.clear();
   resetBrowserFrameMetrics();
   suppressed = 0;
+  engineOverride = null;
   setNativeSurface(null);
   if (scheduled) window.clearTimeout(scheduled);
   scheduled = 0;

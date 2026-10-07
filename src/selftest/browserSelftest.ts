@@ -29,7 +29,12 @@ import {
   type OverlaySurface,
 } from "../overlaySurfaces";
 import { BROWSER_INPUT_EVENT } from "../components/PreviewView";
-import { refreshBrowserViews, suppressBrowserViews } from "../browserHost";
+import {
+  overrideBrowserEngine,
+  preferredEngine,
+  refreshBrowserViews,
+  suppressBrowserViews,
+} from "../browserHost";
 import { getSettings, updateSettings } from "../settings";
 import {
   startBrowserWatchdog,
@@ -336,8 +341,16 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
       // is no longer the default — so it is asked for by name. Without this
       // the whole scenario would quietly pass by testing nothing, which is
       // the failure mode this suite exists to prevent.
-      updateSettings({ browserEngine: "webview" });
+      //
+      // Not through settings: they no longer offer the native engine and
+      // migrate it away on every read, which once left this whole scenario
+      // waiting 90s for a view that the proxy engine never registers.
+      overrideBrowserEngine("webview");
       refreshBrowserViews();
+      const asked = preferredEngine();
+      if (asked !== "webview") {
+        throw new StepFailure(`asked for the webview engine but the app is using "${asked}"`);
+      }
     });
 
     await step("project", "Open the scratch project", async () => {
@@ -807,6 +820,7 @@ export async function runBrowserSelftest(cfg: ipc.SelftestConfig, deps: Selftest
     // Measured on pixels rather than state, because there is no view state to
     // read: under the proxy there is nothing to hide, which IS the claim.
     await step("proxy-default", "Under the default engine a panel does not blank the page", async () => {
+      overrideBrowserEngine(null);
       updateSettings({ browserEngine: "proxy" });
       refreshBrowserViews();
       // Let the native views go before framing anything. An iframe drawn over
