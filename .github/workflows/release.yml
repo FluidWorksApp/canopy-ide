@@ -39,6 +39,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Release boundary regression checks
+        run: node --test scripts/release-assets.test.mjs
       - name: Reject published or immutable release targets
         if: github.ref_type == 'tag'
         env:
