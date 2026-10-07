@@ -1,5 +1,5 @@
-import test from 'node:test';import assert from 'node:assert/strict';
-import {expectedRelease,requireDraft,requireAssets,releaseManifest,requireReleaseTag} from './release-assets.mjs';
+import {execFileSync} from 'node:child_process';import test from 'node:test';import assert from 'node:assert/strict';
+import {expectedRelease,requireDraft,requireAssets,releaseManifest,requireReleaseTag,releaseMetadataQuery} from './release-assets.mjs';
 const version='0.4.1';
 const complete=()=>({draft:true,immutable:false,assets:expectedRelease(version).names.map(name=>({name,state:'uploaded',size:42,digest:'sha256:'+'a'.repeat(64)}))});
 test('published or immutable targets are rejected before building or uploading',()=>{assert.doesNotThrow(()=>requireDraft(undefined));assert.throws(()=>requireDraft({...complete(),draft:false}),/published/);assert.throws(()=>requireDraft({...complete(),immutable:true}),/immutable/);});
@@ -12,4 +12,15 @@ test('rebuild tags retain the app version and use the real download tag',()=>{
  const manifest=releaseManifest('0.4.0','Core feature notes',payloads,signatures,undefined,'v0.4.0-rebuild.1');
  assert.equal(manifest.version,'0.4.0');assert.ok(Object.values(manifest.platforms).every(p=>p.url.includes('/v0.4.0-rebuild.1/')));
  for(const tag of ['v0.4.1','v0.4.0-rebuild.0','v0.4.0-rebuild.bad','v0.4.0/other'])assert.throws(()=>requireReleaseTag(tag,'0.4.0'),/disagree/);
+});
+
+test('large release history is filtered before the subprocess output buffer',()=>{
+ const target={...complete(),id:42,tag_name:'v0.4.1',body:'release-notes'.repeat(4000)};
+ const history=Array.from({length:100},(_,i)=>({...target,id:i,tag_name:`v0.3.${i}`}));history.push(target);
+ const input=JSON.stringify(history);assert.ok(Buffer.byteLength(input)>1024*1024);
+ assert.throws(()=>execFileSync('jq',['.'],{input,encoding:'utf8'}),{code:'ENOBUFS'});
+ const selected=JSON.parse(execFileSync('jq',[releaseMetadataQuery('v0.4.1')],{input,encoding:'utf8'}));
+ assert.equal(selected.id,42);assert.equal(selected.body,undefined);requireAssets(selected,version);
+ assert.equal(JSON.parse(execFileSync('jq',[releaseMetadataQuery('v9.9.9')],{input,encoding:'utf8'})),null);
+ assert.equal(JSON.parse(execFileSync('jq',[releaseMetadataQuery('v0.4.1" | .[]')],{input,encoding:'utf8'})),null);
 });

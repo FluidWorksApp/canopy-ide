@@ -14,7 +14,7 @@ test('retained image provenance cannot bypass image, workspace, member or contai
  for(const change of invalid){const f=fixture();change(f.current);await assert.rejects(f.host.ensure(f.workspace),/configuration differs|provenance differs/);assert.ok(f.calls.every(args=>args[0]==='inspect'));}
  const owner=fixture(checkpoint);assert.equal(retainedRuntimeImage({...owner.workspace,memberId:'alice'},owner.current,latest),undefined);owner.current.Image='sha256:'+'0'.repeat(64);await assert.rejects(owner.host.ensure(owner.workspace),/provenance differs/);
 });
-test('stopped migrated owner updates to fresh published image and subsequent opens/restarted management retain strict scope',async()=>{
+test('cached stopped migrated owner explicitly resumes on fresh published image and subsequent opens/restarted management retain strict scope',async()=>{
  const f=fixture(checkpoint),directory=await mkdtemp(join(tmpdir(),'retained-image-'));f.host.upgradeDirectory=directory;f.current.State.Running=false;let preserved,renamed=false;const fetch=globalThis.fetch;globalThis.fetch=async()=>Response.json([]);
  f.host.docker=async args=>{f.calls.push(args);
   if(args[0]==='pull')return {stdout:''};if(args[0]==='image')return {stdout:JSON.stringify([{Id:newImage,RepoDigests:[latest]}])};
@@ -22,7 +22,7 @@ test('stopped migrated owner updates to fresh published image and subsequent ope
   if(args[0]==='rename'){preserved=structuredClone(f.current);f.current=null;renamed=true;}
   if(args[0]==='run'){f.current={...structuredClone(preserved),Id:'1'.repeat(64),Image:newImage,State:{Running:true},Config:{...preserved.Config,Image:args.at(-1),Labels:{'canopy.workspace':'alice','canopy.image-channel':latest}}};}
   return {stdout:''};};
- try{assert.ok((await f.host.ensure(f.workspace,{resume:true})).url);assert.equal(renamed,true);assert.equal(f.current.Config.Image,latest);assert.equal(preserved.Config.Image,checkpoint);assert.equal(preserved.State.Running,false);assert.deepEqual(f.current.Mounts,preserved.Mounts);assert.ok((await f.host.ensure(f.workspace)).url);
+ try{f.host.runtimes.set(f.workspace.id,{runtime:{url:'cached-owner-must-not-return'},fingerprint:JSON.stringify([f.workspace,false]),checkedAt:Date.now()});assert.ok((await f.host.open(f.workspace,{resume:true})).url);assert.equal(f.calls.filter(args=>args[0]==='lookup').length,1);assert.equal(renamed,true);assert.equal(f.current.Config.Image,latest);assert.equal(preserved.Config.Image,checkpoint);assert.equal(preserved.State.Running,false);assert.deepEqual(f.current.Mounts,preserved.Mounts);assert.ok((await f.host.ensure(f.workspace)).url);
   const nextChannel='ghcr.io/fluidworksapp/canopy-workspace@sha256:'+'9'.repeat(64),priorCalls=f.calls.length;f.host.image=nextChannel;f.host.releaseChannel=nextChannel;assert.ok((await f.host.ensure(f.workspace)).url);assert.deepEqual(f.calls.slice(priorCalls).map(args=>args[0]),['inspect','inspect']);
  }finally{globalThis.fetch=fetch;await rm(directory,{recursive:true,force:true});}
 });

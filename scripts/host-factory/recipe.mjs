@@ -1,12 +1,26 @@
 import {workspaceImageReference} from '../../packages/remote-host/image-release.mjs';
 const quote=value=>`'${String(value).replaceAll("'","'\\''")}'`;
+// Lightsail prepends a /bin/sh initialization script to user data. A later
+// shebang cannot select Bash, so explicitly hand the quoted body to Bash.
+export function factoryBootstrapScript(body){
+ if(body.split('\n').includes('CANOPY_FACTORY_BOOTSTRAP'))throw Error('Factory bootstrap delimiter collision');
+ return `#!/bin/sh\nexec /bin/bash <<'CANOPY_FACTORY_BOOTSTRAP'\n${body}\nCANOPY_FACTORY_BOOTSTRAP\n`;
+}
+// A completed cloud-init without the smoke marker is a terminal failure,
+// not a reason to keep a billable builder alive until the global deadline.
+export const factoryStatusScript=`if [ -f /opt/canopy-host/factory.json ]; then
+cat /opt/canopy-host/factory.json
+elif [ -f /var/lib/cloud/data/result.json ]; then
+printf '%s\\n' '{"factoryBootstrapFailed":true}'
+else
+printf '%s\\n' '{}'
+fi`;
 export function factoryRecipe(config,archiveUrl){
  if(config.architecture!=='amd64'||!/^22\.\d+\.\d+$/.test(config.nodeVersion??'')||!/^\d[\w.+:~-]*$/.test(config.dockerVersion??'')||!/^\d[\w.+:~-]*$/.test(config.caddyVersion??'')||['runtimeSha256','lockSha256','nodeSha256'].some(key=>!/^[a-f0-9]{64}$/.test(config[key]??''))||!/^[a-f0-9]{40}$/.test(config.revision??''))throw Error('Pinned factory versions and SHA256 checksums are required');
  const image=workspaceImageReference(config.image);if(!image.startsWith('ghcr.io/fluidworksapp/canopy-workspace@sha256:'))throw Error('Factory smoke requires the published immutable Canopy workspace image');
  const url=new URL(archiveUrl);if(url.protocol!=='https:'||url.username||url.password||!url.hostname.endsWith('.amazonaws.com'))throw Error('Private runtime archive must be a signed AWS HTTPS URL');
  const marker={version:1,architecture:config.architecture,revision:config.revision,runtimeSha256:config.runtimeSha256,lockSha256:config.lockSha256,nodeVersion:config.nodeVersion,dockerVersion:config.dockerVersion,caddyVersion:config.caddyVersion,proof:{docker:true,http:true,sanitized:false,bootFenced:false}};
- return `#!/bin/bash
-set -euo pipefail
+ return factoryBootstrapScript(`set -euo pipefail
 umask 077
 [ "$(uname -m)" = x86_64 ]
 # Only a fresh factory host with exactly its system disk is accepted.
@@ -54,7 +68,7 @@ chmod 644 /opt/canopy-host/factory.json
 # The publisher runs the separately reviewed seal after independently reading
 # the marker. No snapshot is created from a host that has not passed both smokes.
 printf '%s\\n' 'CANOPY_FACTORY_PREPARED'
-`;
+`);
 }
 export const factorySeal=`set -euo pipefail
 [ "$(lsblk -dn -o TYPE | grep -c '^disk$')" -eq 1 ]

@@ -12,9 +12,13 @@ export function selectHostSnapshot(value,region,bundle,expectedRuntimeSha256,exp
  if(expectedRuntimeSha256!==undefined&&record.runtimeSha256!==expectedRuntimeSha256&&(expectedLockSha256===undefined||record.lockSha256!==expectedLockSha256))fail();
  return record;
 }
+// Debian package versions may contain '~', which Lightsail tags reject.
+// Preserve legacy safe values; encode unsafe version strings without changing
+// the exact versions compared against the installed tools and signed catalog.
+const versionTag=value=>/^[A-Za-z0-9_.:/=+@ -]+$/.test(value)?value:'base64:'+Buffer.from(value,'utf8').toString('base64url');
 export function hostSnapshotTags(record){return [
  {key:'managed-by',value:'canopy-host-factory'}, {key:'canopy-factory-schema',value:'1'},
- {key:'canopy-node-version',value:record.nodeVersion},{key:'canopy-docker-version',value:record.dockerVersion},{key:'canopy-caddy-version',value:record.caddyVersion},{key:'canopy-architecture',value:record.architecture},{key:'canopy-revision',value:record.revision},
+ {key:'canopy-node-version',value:versionTag(record.nodeVersion)},{key:'canopy-docker-version',value:versionTag(record.dockerVersion)},{key:'canopy-caddy-version',value:versionTag(record.caddyVersion)},{key:'canopy-architecture',value:record.architecture},{key:'canopy-revision',value:record.revision},
  {key:'canopy-runtime-sha256',value:record.runtimeSha256},{key:'canopy-lock-sha256',value:record.lockSha256},
  {key:'canopy-factory-verified',value:'docker-http-sanitized-fenced'}
 ];}

@@ -56,12 +56,25 @@ stopped and disabled. Fresh per-workspace user data must perform the existing
 boot fence and storage mount before any Docker service is started.
 
 Snapshots are created only after both smokes and sanitization pass and the builder
-is provider-observed stopped. Every factory stage shares a 30-minute deadline.
-Failure removes only this job's tagged snapshot/builder; uncertain creation
-responses are re-observed before cleanup. Foreign resources are never deleted.
-On success the temporary builder is deleted and the ready catalog is emitted.
-If AWS rejects cleanup, the workflow fails rather than emitting a ready catalog;
-inspect and remove the exact tagged factory resource before retrying.
+is provider-observed stopped. Preparation shares a 30-minute observation deadline.
+A verified snapshot still pending at that deadline or a later observation outage
+is preserved. The CLI exits with status 2, emits a private non-secret job handoff,
+and publishes no ready catalog. Its stopped builder remains billable until the
+same job is finalized; the workflow retains the handoff artifact.
+
+Use the original reviewed config and that handoff to observe the same snapshot:
+
+```sh
+node scripts/host-factory/cli.mjs --finalize reviewed-factory.json ready-catalog.json ready-catalog.json.pending.json
+```
+
+The workflow also accepts the pending-job JSON in its optional `handoff` input.
+Finalization creates no compute, key or snapshot. It checks the exact release,
+job ownership and snapshot proof, then removes only its stopped builder and key.
+A ready catalog is emitted only after independent reads confirm both are absent.
+Pending asynchronous cleanup can be finalized again using the same handoff.
+Other failures retain the existing scoped cleanup behavior; foreign resources are
+never deleted. A cleanup failure cannot publish a ready catalog.
 
 The workflow publishes the verified catalog artifact only after successful
 cleanup. Setting `CANOPY_HOST_SNAPSHOTS_JSON` to that reviewed catalog activates
@@ -85,8 +98,12 @@ before live evidence exists.
 
 ## Managed-compute IAM addition (review and apply separately)
 
-The existing managed role does not yet have snapshot launch permissions. Add only
-the selected snapshot ARN, substituting the actual account/region/ARN below:
+The existing managed role does not yet have snapshot launch permissions. Scope
+creation to the selected snapshot ARN. `GetInstanceSnapshot` does not support
+resource-level permissions, so its read-only metadata access needs `Resource: "*"`
+with the selected region condition. This grants no snapshot deletion or export.
+See the [Lightsail authorization reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_lightsail.html).
+Substitute the actual account/region/ARN below:
 
 ```json
 {
@@ -95,17 +112,17 @@ the selected snapshot ARN, substituting the actual account/region/ARN below:
     {
       "Effect": "Allow",
       "Action": "lightsail:GetInstanceSnapshot",
-      "Resource": "arn:aws:lightsail:REGION:ACCOUNT:InstanceSnapshot/SNAPSHOT-ID"
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {"aws:RequestedRegion": "REGION"}
+      }
     },
     {
       "Effect": "Allow",
       "Action": "lightsail:CreateInstancesFromSnapshot",
-      "Resource": [
-        "arn:aws:lightsail:REGION:ACCOUNT:InstanceSnapshot/SNAPSHOT-ID",
-        "arn:aws:lightsail:REGION:ACCOUNT:Instance/*"
-      ],
+      "Resource": "arn:aws:lightsail:REGION:ACCOUNT:InstanceSnapshot/SNAPSHOT-ID",
       "Condition": {
-        "StringEquals": {"aws:RequestTag/managed-by": "canopy"},
+        "StringEquals": {"aws:RequestTag/managed-by": "canopy", "aws:RequestedRegion": "REGION"},
         "StringLike": {"aws:RequestTag/canopy-workspace": "ws-*"}
       }
     }
@@ -117,6 +134,14 @@ Keep existing private `releases/*` object permissions unchanged. The separate
 factory role needs create/read/stop/delete instance, temporary SSH access, and
 create/read/delete snapshot actions scoped to its region and resources tagged
 `managed-by=canopy-host-factory`; creation requires that request tag. It also needs
+`CreateKeyPair`, `GetKeyPair` and `DeleteKeyPair` for this job's tagged
+`canopy-factory-key-*` resource. The factory installs that temporary key on only
+its builder, verifies provider host keys, and deletes the key after builder
+cleanup. It does not download or use the account-wide default SSH key. Private
+key material is kept in private temporary files and never enters user data,
+snapshot metadata or the published catalog. Key cleanup failure blocks catalog
+publication. Completed cloud-init without the smoke marker fails promptly and
+cleans up instead of waiting for the global deadline. It needs
 only GetObject on the private `releases/*` runtime prefix. Do not give these factory
 controls or credentials to development containers.
 

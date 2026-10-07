@@ -42,13 +42,16 @@ export function releaseManifest(version,notes,payloads,signatures,now=new Date()
  }
  return {version,notes,pub_date:now,platforms};
 }
+export function releaseMetadataQuery(tag) {
+ return `[.[] | select(.tag_name == ${JSON.stringify(tag)}) | {id,tag_name,draft,immutable,assets:[.assets[] | {name,state,size,digest}]}][0]`;
+}
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const gh=(...args)=>execFileSync('gh',args,{encoding:'utf8'});
 async function main(){
  const version=JSON.parse(fs.readFileSync(path.join(root,'package.json'),'utf8')).version,tag=process.env.CANOPY_RELEASE_TAG;
  requireReleaseTag(tag,version);
- const releases=JSON.parse(gh('api','repos/FluidWorksApp/canopy-ide/releases?per_page=100'));
- const release=releases.find(r=>r.tag_name===tag);requireDraft(release);
+ // Filter in gh before Node captures stdout; release history can exceed its buffer.
+ const release=JSON.parse(gh('api','repos/FluidWorksApp/canopy-ide/releases?per_page=100','--jq',releaseMetadataQuery(tag)));requireDraft(release);
  if(process.argv.includes('--preflight')){console.log('Release target is unpublished and eligible for uploads.');return;}
  const {expected,assets}=requireAssets(release,version),stage=fs.mkdtempSync(path.join(os.tmpdir(),'canopy-release-complete-'));
  try{
