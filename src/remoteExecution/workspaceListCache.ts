@@ -1,6 +1,9 @@
 import {invoke} from '@tauri-apps/api/core';
 import type {ManagedWorkspace} from './ManagedWorkspaces';
 type Snapshot={workspaces:ManagedWorkspace[];at:number};
+const subscribers=new Set<(snapshot:Snapshot)=>void>();
+/** Every successful refresh, from any caller, reaches every subscriber. */
+export function subscribeWorkspaceList(listener:(snapshot:Snapshot)=>void){subscribers.add(listener);return()=>{subscribers.delete(listener);};}
 let cache:Snapshot|null=null,epoch=0,namespace:Promise<string|null>|undefined,pending:Promise<Snapshot>|undefined;
 const prefix='canopy:workspace-list:v1:';
 function clearStoredWorkspaceLists(){try{for(let i=localStorage.length-1;i>=0;i--){const key=localStorage.key(i);if(key?.startsWith(prefix))localStorage.removeItem(key);}}catch{/* Storage is optional. */}}
@@ -24,6 +27,7 @@ export function refreshWorkspaceList(){
   const next={workspaces:result.workspaces,at:Date.now()};cache=next;
   const key=await cacheKey();if(current===epoch&&key)try{localStorage.setItem(key,JSON.stringify(next));}catch{/* Quota does not block live status. */}
   if(current!==epoch)throw Error('Account changed');
+  subscribers.forEach(listener=>{try{listener(next);}catch{/* One subscriber never blocks the list. */}});
   return next;
  }).catch(error=>{if(current===epoch&&isWorkspaceAuthenticationError(error)){cache=null;clearStoredWorkspaceLists();}throw error;});
  pending=request;void request.finally(()=>{if(pending===request)pending=undefined;}).catch(()=>{});return request;

@@ -3,7 +3,7 @@ import {takeOutputBatch,type OutputFrame} from './outputBatch';
 import type { Host, HostChannel, HostEvent, UnlistenFn } from '../host/contract';
 import { nativeHost } from '../host/native';
 import { RemoteExecutionClient, type RemoteSession } from './client';
-import {connectionKey,reportConnection,reportStream} from './connectionState';
+import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} from './connectionState';
 import {saveRemoteContextImage} from './saveContextImage';
 
 export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive' }
@@ -32,6 +32,7 @@ export class NativeWorkspaceHost implements Host {
   private projectIdle = false;
   private tokenFreshUntil = 0;
   private heartbeat?: ReturnType<typeof setTimeout>;
+  private get stopping(){return !!workspaceLifecyclePhase(connectionKey(this.connection.endpoint,this.connection.workspaceId));}
   setProjectIdle(idle:boolean){this.projectIdle=idle;if(!idle)this.tokenFreshUntil=0;}
   readonly client: RemoteExecutionClient;
   private rendererGeneration = 1;
@@ -73,7 +74,7 @@ export class NativeWorkspaceHost implements Host {
     if(managed||connection.workspaceId==='shoaib-work')window.addEventListener('canopy:account-changed',this.onAccountChanged);
     if(managed){
       const tick=async()=>{
-        try{if(!this.disposed&&!this.projectIdle)await this.call('/open',{});}
+        try{if(!this.disposed&&!this.projectIdle&&!this.stopping)await this.call('/open',{});}
         catch{/* Requests report connection failure; never fall back to local execution. */}
         finally{if(!this.disposed)this.heartbeat=setTimeout(()=>void tick(),30_000);}
       };
@@ -82,7 +83,7 @@ export class NativeWorkspaceHost implements Host {
       // Legacy EC2 keeps its existing runner credential, but participates in
       // account-side presence so another IDE cannot stop active shared compute.
       const tick=async()=>{
-        try{if(!this.disposed&&!this.projectIdle)await this.desktop.invoke('canopy_account_request',{route:'/api/operations',body:{action:'legacy-heartbeat',workspaceId:connection.workspaceId,clientId:this.connectionClientId}});}
+        try{if(!this.disposed&&!this.projectIdle&&!this.stopping)await this.desktop.invoke('canopy_account_request',{route:'/api/operations',body:{action:'legacy-heartbeat',workspaceId:connection.workspaceId,clientId:this.connectionClientId}});}
         catch{/* Lifecycle actions report failures through the project workflow. */}
         finally{if(!this.disposed)this.heartbeat=setTimeout(()=>void tick(),30_000);}
       };
@@ -110,7 +111,7 @@ export class NativeWorkspaceHost implements Host {
   }
   private beginPoll() {
     if(this.poll || this.disposed)return;
-    const tick=async()=>{try{await this.sessions();if(this.listeners.get('pty:stats')?.size){try{const stats=await this.invoke('pty_stats');if(!this.disposed)this.emit('pty:stats',stats);}catch{/* Keep file refresh working if process inspection is unavailable. */}}if(this.listeners.get('agent:events')?.size){try{const batch=await this.native<{cursor:string|null;lines:string[]}>('agent_events_poll',{cursor:this.agentEventCursor});if(!this.disposed){this.agentEventCursor=batch.cursor;if(batch.lines.length)this.emit('agent:events',batch.lines);}}catch{/* Keep polling after transient hook transport failures. */}}this.emit('git:change',{root:'/workspace'});this.emit('fs:change',{root:'/workspace',paths:[],kind:'other',overflow:true});}catch{/* Disconnection never falls back to native execution. */}finally{if(!this.disposed)this.poll=setTimeout(()=>void tick(),3000);}};
+    const tick=async()=>{try{if(this.stopping)return;await this.sessions();if(this.listeners.get('pty:stats')?.size){try{const stats=await this.invoke('pty_stats');if(!this.disposed)this.emit('pty:stats',stats);}catch{/* Keep file refresh working if process inspection is unavailable. */}}if(this.listeners.get('agent:events')?.size){try{const batch=await this.native<{cursor:string|null;lines:string[]}>('agent_events_poll',{cursor:this.agentEventCursor});if(!this.disposed){this.agentEventCursor=batch.cursor;if(batch.lines.length)this.emit('agent:events',batch.lines);}}catch{/* Keep polling after transient hook transport failures. */}}this.emit('git:change',{root:'/workspace'});this.emit('fs:change',{root:'/workspace',paths:[],kind:'other',overflow:true});}catch{/* Disconnection never falls back to native execution. */}finally{if(!this.disposed)this.poll=setTimeout(()=>void tick(),3000);}};
     this.poll=setTimeout(()=>void tick(),3000);
   }
   private async attach(id:number, channel?:HostChannel<ArrayBuffer>) {
@@ -120,7 +121,10 @@ export class NativeWorkspaceHost implements Host {
     const stateKey=connectionKey(this.connection.endpoint,this.connection.workspaceId);
     reportStream(stateKey,id,false);
     let failures=0;
-    const retry=()=>{if(stream.closed)return;clearTimeout(stream.handshake);reportStream(stateKey,id,false);const delay=Math.min(30_000,1000*2**Math.min(failures++,5))+Math.random()*500;stream.retry=setTimeout(()=>void connect(),delay);};
+    // An intentionally stopping or hibernated workspace is not reconnected;
+    // the stream parks without network attempts until that state is cleared.
+    const parked=()=>{if(stream.closed)return;if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}void connect();};
+    const retry=()=>{if(stream.closed)return;clearTimeout(stream.handshake);reportStream(stateKey,id,false);if(workspaceLifecyclePhase(stateKey)){stream.retry=setTimeout(parked,2000);return;}const delay=Math.min(30_000,1000*2**Math.min(failures++,5))+Math.random()*500;stream.retry=setTimeout(()=>void connect(),delay);};
     const connect=async()=>{
       try{
         const url=await this.client.streamUrl(this.connection.workspaceId,`/sessions/${id}/stream`);

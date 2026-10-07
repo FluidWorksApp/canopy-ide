@@ -8,6 +8,9 @@ import {AccountSettings} from '../components/AccountSettings';
 import {canSwitchExecutionMode,setExecutionMode} from '../executionMode';
 import {activeWorkspace} from './workspace';
 import {RemoteExecutionClient} from './client';
+import {connectionKey,reportWorkspaceLifecycle} from './connectionState';
+import {clearStopRequest,markStopRequested,saveStopSwitchNotice,stopRequestError,useWorkspaceLifecycle,workspaceLifecycle} from './workspaceLifecycle';
+import {subscribeWorkspaceList} from './workspaceListCache';
 import type {WorkspaceConnection} from './NativeWorkspaceHost';
 export type ManagedWorkspace={id:string;name:string;provider?:string;state:string;canDelete?:boolean;canRemoveConnection?:boolean;canStop?:boolean;access?:{owner:boolean;canManageAccess:boolean;canStop:boolean;canConnect:boolean;canResume?:boolean;connectionUnavailable?:string};memory_max_mib:number;cpu_max:number;operation?:{phase:string;status:string;action?:string;last_error?:string|null;bootstrap_mode?:'cold'|'prebuilt'|null;bootstrap_report?:{stage:string;status:string;sequence?:number;startedAt?:number;receivedAt?:string}|null}};
 const startupSteps=['Starting machine','Connecting saved files','Starting services','Checking connection','Ready'];
@@ -25,8 +28,8 @@ function startupPollDelay(w:ManagedWorkspace){return w.operation?.bootstrap_repo
 function bootstrapProgress(w:ManagedWorkspace){const report=w.operation?.bootstrap_report;return report?.status==='progress'?report.stage==='packages'&&w.operation?.bootstrap_mode==='prebuilt'?'Verifying prebuilt host tools':reportStages[report.stage]:undefined;}
 
 const stepFor=(w:ManagedWorkspace)=>w.state==='ready'?4:({'creating-storage':0,'creating-compute':0,'starting':0,'attaching-storage':1,'preparing-workspace':2,'connecting-workspace':3,'retiring-previous-compute':3}[w.operation?.phase??'']??0);
-const canDelete=(w:ManagedWorkspace)=>w.canDelete===true&&w.access?.owner!==false;
-const canStop=(w:ManagedWorkspace)=>w.canStop!==false&&w.access?.canStop!==false&&!['created','stopped','stopping','deleting','deleted'].includes(w.state);
+const canDelete=(w:ManagedWorkspace)=>w.canDelete===true&&w.access?.owner!==false&&!['stopping','deleting'].includes(workspaceLifecycle(w));
+const canStop=(w:ManagedWorkspace)=>w.canStop!==false&&w.access?.canStop!==false&&!['not-started','stopped','stopping','deleting'].includes(workspaceLifecycle(w));
 const request=<T,>(route:string,body?:unknown)=>invoke<T>('canopy_account_request',{route,body:body??null});
 export function ManagedWorkspaces({workspaceId,onList,showAccount=true,showList=true,onProgress,onMinimize,onDeleted,openRequest,onOpenFailed}:{workspaceId?:string;onList?:(items:ManagedWorkspace[])=>void;showAccount?:boolean;showList?:boolean;onProgress?:(progress:WorkspaceProgressState|null)=>void;onMinimize?:()=>void;onDeleted?:(id:string)=>void;openRequest?:{id:string;nonce:number}|null;onOpenFailed?:(id:string)=>void}={}){
  const [workspaces,setWorkspaces]=useState<ManagedWorkspace[]>(()=>peekWorkspaceList()?.workspaces.filter(w=>w.provider==='lightsail')??[]),[busy,setBusy]=useState<string|null>(null),[message,setMessage]=useState('');
@@ -39,6 +42,10 @@ export function ManagedWorkspaces({workspaceId,onList,showAccount=true,showList=
  function confirmAction(workspace:ManagedWorkspace,action:'hibernate'|'delete'){setActionError('');setConfirmName('');setActionTarget({workspace,action});}
 
  const listCallback=useRef(onList);listCallback.current=onList;
+ useWorkspaceLifecycle(workspaces);
+ // The workspace whose stop this view requested; its message follows the
+ // lifecycle until compute is confirmed off.
+ const stopMessageFor=useRef<string|null>(null);
  const generation=useRef(0);
  const startedAt=useRef(0);const [elapsed,setElapsed]=useState(0);
  useEffect(()=>{if(!busy)return;const timer=setInterval(()=>setElapsed(Math.floor((Date.now()-startedAt.current)/1000)),1000);return()=>clearInterval(timer);},[busy]);
@@ -51,7 +58,10 @@ export function ManagedWorkspaces({workspaceId,onList,showAccount=true,showList=
   void restoreWorkspaceList().then(saved=>{if(!stopped&&saved)publish(saved.workspaces);});void load();
   const changed=()=>{refreshEpoch++;generation.current++;setBusy(null);setStartup(null);setActionBusy(false);setActionTarget(null);setWorkspaces([]);listCallback.current?.([]);setLoading(true);setLoadError('');void load();};
   window.addEventListener('canopy:account-changed',changed);
-  const timer=setInterval(()=>void load(),10000);return()=>{stopped=true;generation.current++;clearInterval(timer);window.removeEventListener('canopy:account-changed',changed);progressCallback.current?.(null);};
+  // Refreshes made elsewhere (the stop watcher, the header switcher) update
+  // this view too, so it never shows an older state than the rest of the UI.
+  const unsubscribe=subscribeWorkspaceList(snapshot=>{if(!stopped)publish(snapshot.workspaces);});
+  const timer=setInterval(()=>void load(),10000);return()=>{stopped=true;generation.current++;clearInterval(timer);unsubscribe();window.removeEventListener('canopy:account-changed',changed);progressCallback.current?.(null);};
  },[]);
  // The header switcher asks for a workspace by id; resume progress and any
  // failure then surface through onProgress / onOpenFailed, not this list.
@@ -61,6 +71,9 @@ export function ManagedWorkspaces({workspaceId,onList,showAccount=true,showList=
   const fail=()=>{if(fromSwitcher)failedCallback.current?.(w.id);};
   if(w.access?.canConnect===false&&w.access.canResume!==true){setMessage(w.access.connectionUnavailable??'You cannot open or resume this workspace.');fail();return;}
   if(!canSwitchExecutionMode()){setMessage('Save or close unsaved files before changing workspace.');fail();return;}
+  const lifecycle=workspaceLifecycle(w);
+  if(lifecycle==='stopping'||lifecycle==='deleting'){setMessage(lifecycle==='stopping'?'This workspace is still stopping. Resume it once it has stopped.':'This workspace is being deleted.');fail();return;}
+  clearStopRequest(w.id);stopMessageFor.current=null;
   startedAt.current=Date.now();setElapsed(0);const current=++generation.current;setBusy(w.id);setStartup({workspace:w,name:w.name,step:stepFor(w)});setMessage('We’ll connect you automatically when your workspace is ready.');
   try{
    if(w.operation?.status==='failed'&&w.state!=='ready')await request('/api/operations',{workspaceId:w.id,action:w.access?.owner===false?'resume':'retry',requestKey:crypto.randomUUID()});
@@ -108,6 +121,11 @@ export function ManagedWorkspaces({workspaceId,onList,showAccount=true,showList=
   // Cancel pending auto-connect before accepting a shutdown. A late readiness
   // response must never reopen a workspace after the user stops or deletes it.
   const current=++generation.current;setActionBusy(true);setBusy(w.id);setActionError('');
+  // Stopping drops the live connection. Mark it as intentional first so the
+  // transport parks instead of showing a reconnect loop, and undo on failure.
+  const host=activeWorkspace(),connected=host?.connection.workspaceId===w.id,lifecycleKey=connected&&host?connectionKey(host.connection.endpoint,w.id):null;
+  if(lifecycleKey)reportWorkspaceLifecycle(lifecycleKey,'stopping');
+  let accepted=false;
   try{
    const body={workspaceId:w.id,action,confirmInterrupt:true,confirmName:action==='delete'?confirmName:undefined,requestKey:crypto.randomUUID()};
    const deadline=Date.now()+30000;
@@ -115,17 +133,29 @@ export function ManagedWorkspaces({workspaceId,onList,showAccount=true,showList=
     try{await request('/api/operations',body);break;}
     catch(error){if(current!==generation.current)return;if(!String(error).includes('Finishing the current startup step')||Date.now()>=deadline)throw error;setActionError('Finishing the current startup step before stopping…');await new Promise(resolve=>setTimeout(resolve,2000));}
    }
+   accepted=true;
+   if(action==='hibernate')markStopRequested(w.id);
    if(current!==generation.current)return;
    setActionTarget(null);setStartup(null);
-   setWorkspaces(items=>items.map(item=>item.id===w.id?{...item,state:action==='delete'?'deleting':'stopping'}:item));
-   if(activeWorkspace()?.connection.workspaceId===w.id)await setExecutionMode('local');
+   if(action==='delete')setWorkspaces(items=>items.map(item=>item.id===w.id?{...item,state:'deleting'}:item));
+   if(connected){
+    // Leave deliberately: the local workspace takes over and a notice keeps
+    // following the stop after the reload, instead of reconnecting to it.
+    if(action==='hibernate')saveStopSwitchNotice({workspaceId:w.id,name:w.name,at:Date.now()});
+    await setExecutionMode('local');
+   }
    if(action==='delete'){
     await invoke('execution_remote_forget',{id:`https://${w.id}.workspaces.canopyide.dev/${w.id}`});onDeleted?.(w.id);
    }
+   stopMessageFor.current=action==='hibernate'?w.id:null;
    setMessage(action==='delete'?'Workspace deletion started. Compute, files and backups are being removed.':'Workspace is stopping. Files and setup are saved.');
    void refreshWorkspaceList().then(result=>{if(current===generation.current){setWorkspaces(result.workspaces.filter(w=>w.provider==='lightsail'));listCallback.current?.(result.workspaces);}}).catch(()=>{});
   }catch(error){if(current===generation.current){setStartup(null);setActionError(String(error));}}
-  finally{if(current===generation.current){setBusy(null);setActionBusy(false);}}
+  finally{if(lifecycleKey&&!accepted)reportWorkspaceLifecycle(lifecycleKey,null);if(current===generation.current){setBusy(null);setActionBusy(false);}}
  }
- return <section className="workspace-access" aria-busy={loading}>{loading&&!workspaces.length&&<div className="workspace-loading" role="status" aria-label="Loading workspaces"><span className="workspace-skeleton"/><span className="workspace-skeleton short"/><span>Loading workspace details…</span></div>}{!selectedStartup&&refreshing&&!!workspaces.length&&<small className="workspace-cache-status" role="status">Refreshing workspace status…</small>}{loadError&&<div className="workspace-feedback error" role="alert">{workspaces.length?'Showing saved details. ':''}{loadError}<Button size="sm" onClick={()=>void refreshWorkspaceList().then(r=>{setWorkspaces(r.workspaces.filter(w=>w.provider==='lightsail'));listCallback.current?.(r.workspaces);setLoadError('');}).catch(e=>setLoadError(String(e)))}>Retry</Button></div>}{!selectedStartup&&showAccount&&<AccountSettings/>}{selectedStartup&&<div className="workspace-startup" aria-label="Workspace startup"><div className="workspace-startup-heading"><strong>{selectedStartup.name}</strong><small>{Math.floor(elapsed/60)}m {elapsed%60}s elapsed</small></div><ol>{startupSteps.map((label,index)=><li key={label} aria-current={index===selectedStartup.step?'step':undefined} className={index<selectedStartup.step?'complete':index===selectedStartup.step?'current':''}><span aria-hidden="true">{index<selectedStartup.step?'✓':index+1}</span>{label}</li>)}</ol><p className="workspace-description">{selectedStartup.step===2&&selectedStartup.workspace.operation?.bootstrap_mode==='prebuilt'?"Starting your saved tools on a verified prebuilt management host.":selectedStartup.step===2?"Preparing your tools and starting workspace services. First-time setup can take several minutes.":selectedStartup.step===3?"Services are up. Verifying a secure connection before opening your projects.":"Your files stay with this workspace."}</p><p role="status">{message}</p><div className="workspace-inline-actions">{busy&&(onMinimize?<Button onClick={onMinimize}>Continue working</Button>:<Button onClick={()=>{generation.current++;setBusy(null);setStartup(null);setMessage('Setup continues. Open this workspace again when you’re ready.');}}>Connect later</Button>)}{canStop(selectedStartup.workspace)&&<Button disabled={actionBusy} onClick={()=>confirmAction(selectedStartup.workspace,'hibernate')}>Stop workspace</Button>}{canDelete(selectedStartup.workspace)&&<Button variant="danger" disabled={actionBusy} onClick={()=>confirmAction(selectedStartup.workspace,'delete')}>Delete workspace</Button>}</div></div>}{showList&&(!busy||!!workspaceId&&busy!==workspaceId)&&workspaces.filter(w=>!workspaceId||w.id===workspaceId).map(w=><div key={w.id}><WorkspaceHero workspace={w} disabled={!!busy} onOpen={()=>void connect(w)} onStop={canStop(w)?()=>confirmAction(w,'hibernate'):undefined} onDelete={canDelete(w)?()=>confirmAction(w,'delete'):undefined}/>{workspaceStartupProblem(w)&&<p className="workspace-feedback error" role="alert">{workspaceStartupProblem(w)}</p>}</div>)}{actionTarget&&<section className="workspace-stop-confirm" role="alertdialog" aria-modal="false" aria-labelledby="workspace-action-title"><strong id="workspace-action-title">{actionTarget.action==='delete'?'Delete':'Stop'} {actionTarget.workspace.name}?</strong><p>{actionTarget.action==='delete'?'Permanently remove this workspace, its files, installed tools and backups for everyone with access. Running agents, terminals and jobs will stop. This cannot be undone.':'All running agents, terminals and jobs in this workspace will stop, including those used by other connected people. Files and installed tools are kept.'}</p>{actionTarget.action==='delete'&&<label>Type the workspace name to confirm<TextInput width="full" autoComplete="off" value={confirmName} disabled={actionBusy} onChange={event=>setConfirmName(event.target.value)}/></label>}{actionError&&<p className="workspace-feedback error" role="status">{actionError}</p>}<div className="workspace-inline-actions"><Button disabled={actionBusy} onClick={()=>setActionTarget(null)}>Cancel</Button><Button variant={actionTarget.action==='delete'?'danger':'default'} disabled={actionBusy||(actionTarget.action==='delete'&&confirmName!==actionTarget.workspace.name)} onClick={()=>void mutateWorkspace()}>{actionBusy?'Requesting…':actionTarget.action==='delete'?'Confirm delete':'Confirm stop'}</Button></div></section>}{!selectedStartup&&(!busy||busy===workspaceId)&&message&&!workspaces.some(w=>workspaceStartupProblem(w)===message)&&<p role="status">{message}</p>}</section>;
+ // The stop message follows the same lifecycle as the badge.
+ const stopTarget=stopMessageFor.current?workspaces.find(w=>w.id===stopMessageFor.current):undefined;
+ const stopTargetLifecycle=stopTarget?workspaceLifecycle(stopTarget):null;
+ useEffect(()=>{if(!stopTarget)return;if(stopTargetLifecycle==='stopped'){stopMessageFor.current=null;setMessage('Workspace stopped. Files and setup are saved. Resume it when you’re ready.');}else if(stopTargetLifecycle!=='stopping'){stopMessageFor.current=null;setMessage('');}},[stopTarget,stopTargetLifecycle]);
+ return <section className="workspace-access" aria-busy={loading}>{loading&&!workspaces.length&&<div className="workspace-loading" role="status" aria-label="Loading workspaces"><span className="workspace-skeleton"/><span className="workspace-skeleton short"/><span>Loading workspace details…</span></div>}{!selectedStartup&&refreshing&&!!workspaces.length&&<small className="workspace-cache-status" role="status">Refreshing workspace status…</small>}{loadError&&<div className="workspace-feedback error" role="alert">{workspaces.length?'Showing saved details. ':''}{loadError}<Button size="sm" onClick={()=>void refreshWorkspaceList().then(r=>{setWorkspaces(r.workspaces.filter(w=>w.provider==='lightsail'));listCallback.current?.(r.workspaces);setLoadError('');}).catch(e=>setLoadError(String(e)))}>Retry</Button></div>}{!selectedStartup&&showAccount&&<AccountSettings/>}{selectedStartup&&<div className="workspace-startup" aria-label="Workspace startup"><div className="workspace-startup-heading"><strong>{selectedStartup.name}</strong><small>{Math.floor(elapsed/60)}m {elapsed%60}s elapsed</small></div><ol>{startupSteps.map((label,index)=><li key={label} aria-current={index===selectedStartup.step?'step':undefined} className={index<selectedStartup.step?'complete':index===selectedStartup.step?'current':''}><span aria-hidden="true">{index<selectedStartup.step?'✓':index+1}</span>{label}</li>)}</ol><p className="workspace-description">{selectedStartup.step===2&&selectedStartup.workspace.operation?.bootstrap_mode==='prebuilt'?"Starting your saved tools on a verified prebuilt management host.":selectedStartup.step===2?"Preparing your tools and starting workspace services. First-time setup can take several minutes.":selectedStartup.step===3?"Services are up. Verifying a secure connection before opening your projects.":"Your files stay with this workspace."}</p><p role="status">{message}</p><div className="workspace-inline-actions">{busy&&(onMinimize?<Button onClick={onMinimize}>Continue working</Button>:<Button onClick={()=>{generation.current++;setBusy(null);setStartup(null);setMessage('Setup continues. Open this workspace again when you’re ready.');}}>Connect later</Button>)}{canStop(selectedStartup.workspace)&&<Button disabled={actionBusy} onClick={()=>confirmAction(selectedStartup.workspace,'hibernate')}>Stop workspace</Button>}{canDelete(selectedStartup.workspace)&&<Button variant="danger" disabled={actionBusy} onClick={()=>confirmAction(selectedStartup.workspace,'delete')}>Delete workspace</Button>}</div></div>}{showList&&(!busy||!!workspaceId&&busy!==workspaceId)&&workspaces.filter(w=>!workspaceId||w.id===workspaceId).map(w=><div key={w.id}><WorkspaceHero workspace={w} disabled={!!busy} onOpen={()=>void connect(w)} onStop={canStop(w)?()=>confirmAction(w,'hibernate'):undefined} onDelete={canDelete(w)?()=>confirmAction(w,'delete'):undefined}/>{workspaceStartupProblem(w)&&<p className="workspace-feedback error" role="alert">{workspaceStartupProblem(w)}</p>}{!workspaceStartupProblem(w)&&stopRequestError(w.id)&&<p className="workspace-feedback error" role="alert">{stopRequestError(w.id)}</p>}</div>)}{actionTarget&&<section className="workspace-stop-confirm" role="alertdialog" aria-modal="false" aria-labelledby="workspace-action-title"><strong id="workspace-action-title">{actionTarget.action==='delete'?'Delete':'Stop'} {actionTarget.workspace.name}?</strong><p>{actionTarget.action==='delete'?'Permanently remove this workspace, its files, installed tools and backups for everyone with access. Running agents, terminals and jobs will stop. This cannot be undone.':'All running agents, terminals and jobs in this workspace will stop, including those used by other connected people. Files and installed tools are kept.'}</p>{actionTarget.action==='delete'&&<label>Type the workspace name to confirm<TextInput width="full" autoComplete="off" value={confirmName} disabled={actionBusy} onChange={event=>setConfirmName(event.target.value)}/></label>}{actionError&&<p className="workspace-feedback error" role="alert">{actionError}</p>}<div className="workspace-inline-actions"><Button disabled={actionBusy} onClick={()=>setActionTarget(null)}>Cancel</Button><Button variant={actionTarget.action==='delete'?'danger':'default'} disabled={actionBusy||(actionTarget.action==='delete'&&confirmName!==actionTarget.workspace.name)} onClick={()=>void mutateWorkspace()}>{actionBusy?actionTarget.action==='delete'?'Deleting…':'Stopping…':actionTarget.action==='delete'?'Confirm delete':'Confirm stop'}</Button></div></section>}{!selectedStartup&&(!busy||busy===workspaceId)&&message&&!workspaces.some(w=>workspaceStartupProblem(w)===message)&&<p role="status">{message}</p>}</section>;
 }

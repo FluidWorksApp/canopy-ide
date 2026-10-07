@@ -186,6 +186,9 @@
 .workspace-status-badge i {width:6px;height:6px;background:currentColor;border-radius:50%;}
 .workspace-status-badge.attention {color:var(--accent);}
 .workspace-status-badge.running {color:var(--ok);}
+.workspace-status-badge.busy i {width:9px;height:9px;background:none;border:1.5px solid currentColor;border-right-color:transparent;animation:workspace-status-spin .8s linear infinite;}
+@keyframes workspace-status-spin {to{transform:rotate(360deg);}}
+@media(prefers-reduced-motion:reduce){.workspace-status-badge.busy i{animation:none;border-right-color:currentColor;opacity:.6;}}
 .workspace-hero-actions {display:flex;align-items:center;gap:8px;}
 .workspace-panel .workspace-more {position:relative;border:0;padding:0;}
 .workspace-more > summary {list-style:none;display:grid;place-items:center;width:36px;height:36px;border:1px solid var(--border);border-radius:6px;color:var(--text-dim);letter-spacing:2px;}

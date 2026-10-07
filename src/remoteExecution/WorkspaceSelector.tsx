@@ -25,11 +25,17 @@ import {connectionLabel,useConnectionState} from './connectionState';
 import {WorkspaceMenu,type WorkspaceMenuRow} from './WorkspaceMenu';
 import {AccountSync} from './AccountSync';
 import {workspaceStatus} from './WorkspaceHero';
+import {dismissStopSwitchNotice,markStopRequested,saveStopSwitchNotice,takeStopSwitchNotice,useWorkspaceLifecycle,workspaceLifecycle} from './workspaceLifecycle';
+import {WorkspaceStopNotice} from './WorkspaceStopNotice';
+import {connectionKey,reportWorkspaceLifecycle} from './connectionState';
 
 export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: { onboarding?: boolean;onHibernateWorkspace?:(onProgress?:HibernateProgressListener)=>Promise<void> }) {
   const active = activeWorkspace();
   const [managed,setManaged]=useState<ManagedWorkspace[]>(()=>peekWorkspaceList()?.workspaces.filter(w=>w.provider==='lightsail')??[]);
   useEffect(()=>{const changed=()=>{accountRemovalEpoch.current++;hibernateRun.current++;hibernateTask.current=false;setHibernateOperation(null);setHibernateConfirm(false);setStoppingVm(false);setManaged([]);setAccountRemoval(null);setAccountRemovalName('');setBusy(false);};window.addEventListener('canopy:account-changed',changed);return()=>window.removeEventListener('canopy:account-changed',changed);},[]);
+  useWorkspaceLifecycle(managed);
+  // Only shown on the local workspace, after leaving a workspace that stops.
+  const [stopNotice,setStopNotice]=useState(()=>active?null:takeStopSwitchNotice());
   const [stopConfirm,setStopConfirm]=useState(false);
   const [forgetConfirm,setForgetConfirm]=useState(false);
   const accountRemovalEpoch=useRef(0);
@@ -77,8 +83,11 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
   async function stopVm(){
     if(!active||!canSwitchExecutionMode()){setError('Save or close unsaved files before stopping this workspace.');setStopConfirm(false);return;}
     setStoppingVm(true);setError('');
-    try{await invoke('canopy_account_request',{route:'/api/operations',body:{workspaceId:active.connection.workspaceId,action:'hibernate',confirmInterrupt:true,requestKey:crypto.randomUUID()}});setStopConfirm(false);setNotice('Workspace is stopping. Files and setup are saved.');await setExecutionMode('local');}
-    catch(error){setError(String(error));setStopConfirm(false);}
+    const {workspaceId,workspaceName,endpoint:host}=active.connection,key=connectionKey(host,workspaceId);
+    // The connection drops as compute stops: that is intended, not a fault.
+    reportWorkspaceLifecycle(key,'stopping');
+    try{await invoke('canopy_account_request',{route:'/api/operations',body:{workspaceId,action:'hibernate',confirmInterrupt:true,requestKey:crypto.randomUUID()}});markStopRequested(workspaceId);saveStopSwitchNotice({workspaceId,name:workspaceName,at:Date.now()});setStopConfirm(false);setNotice('Workspace is stopping. Files and setup are saved.');await setExecutionMode('local');}
+    catch(error){reportWorkspaceLifecycle(key,null);setError(String(error));setStopConfirm(false);}
     finally{setStoppingVm(false);}
   }
   const activeId=active?workspaceTabId({id:`${active.connection.endpoint}/${active.connection.workspaceId}`,endpoint:active.connection.endpoint,workspaceId:active.connection.workspaceId,workspaceName:active.connection.workspaceName},managed):'local';
@@ -151,6 +160,7 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
   const selected=resolvedSelectedId==='local'?null:workspaceTabs.find(tab=>tab.id===resolvedSelectedId)??null;
   const selectedActive=resolvedSelectedId===activeId;
   const managedSelection=managed.find(w=>selected?.managedId===w.id);
+  const selectedLifecycle=managedSelection?workspaceLifecycle(managedSelection):null;
   const legacySelection=managedSelection?.canRemoveConnection===true&&managedSelection.access?.owner!==false?managedSelection:undefined;
   const selectedManagedId=selected?.managedId;
   // A newly loaded account ID may normalize the chosen connection, but a poll
@@ -167,10 +177,12 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
   const rowFor=(tab:WorkspaceTab):WorkspaceMenuRow=>{
     const isActive=tab.id===activeId;
     if(tab.id==='local')return {id:'local',name:'Local workspace',kind:'local',detail:'This Mac',tone:'quiet',active:isActive};
-    if(isActive&&active)return {id:tab.id,name:tab.workspaceName,kind:tab.managedId?'managed':'saved',detail:connectionLabel(connectionState),tone:connectionState.phase==='connected'?'running':connectionState.phase==='authentication-error'?'danger':'attention',active:true};
-    const workspace=managed.find(w=>w.id===tab.managedId);
+    const workspace=managed.find(w=>w.id===tab.managedId),lifecycle=workspace?workspaceLifecycle(workspace):null,transitioning=lifecycle==='stopping'||lifecycle==='deleting';
+    // A stopping workspace reads as stopping everywhere, even while this
+    // window is still attached to it and its connection is dropping.
+    if(isActive&&active)return transitioning&&workspace?{id:tab.id,name:tab.workspaceName,kind:'managed',detail:workspaceStatus(workspace).label,tone:'attention',active:true}:{id:tab.id,name:tab.workspaceName,kind:tab.managedId?'managed':'saved',detail:connectionLabel(connectionState),tone:connectionState.phase==='connected'?'running':connectionState.phase==='authentication-error'?'danger':'attention',active:true};
     if(workspace){const status=workspaceStatus(workspace),unavailable=workspace.access?.canConnect===false&&workspace.access?.canResume!==true;
-      return {id:tab.id,name:tab.workspaceName,kind:'managed',detail:workspace.state==='stopped'?'Stopped · resumes when opened':status.label,tone:status.tone as WorkspaceMenuRow['tone'],active:false,disabled:unavailable?workspace.access?.connectionUnavailable??'Shared access pending':undefined};}
+      return {id:tab.id,name:tab.workspaceName,kind:'managed',detail:lifecycle==='stopped'?'Stopped · resumes when opened':status.label,tone:status.tone as WorkspaceMenuRow['tone'],active:false,disabled:transitioning?status.label:unavailable?workspace.access?.connectionUnavailable??'Shared access pending':undefined};}
     return {id:tab.id,name:tab.workspaceName,kind:'saved',detail:'Saved host',tone:'quiet',active:false};
   };
   const menuRows=workspaceTabs.map(rowFor);
@@ -198,13 +210,14 @@ export function WorkspaceSelector({ onboarding = false,onHibernateWorkspace }: {
       {active&&onHibernateWorkspace&&<Button variant="ghost" icon disabled={stoppingVm||['stopping','hibernated'].includes(connectionState.phase)} onClick={()=>setHibernateConfirm(true)} title="Hibernate workspace — save all projects and stop compute" aria-label="Hibernate workspace">❄</Button>}
       {browserRequest && <Button variant="ghost" icon onClick={()=>{openLink(browserRequest,true);pendingBrowser.current=null;setBrowserRequest(null);}} title="Remote CLI sign-in needs your browser" aria-label="Open browser ↗">↗</Button>}
     </div>}
+    {stopNotice&&!active&&!onboarding&&createPortal(<WorkspaceStopNotice notice={stopNotice} onDetails={()=>{setSelectedId(`managed:${stopNotice.workspaceId}`);setSection('overview');setOpen(true);}} onDismiss={()=>{dismissStopSwitchNotice();setStopNotice(null);}}/>,document.body)}
     {progress&&!hibernateOperation&&(!open||progress.workspaceId!==selectedManagedId)&&createPortal(<WorkspaceProgress progress={progress} onDetails={()=>{if(progress.workspaceId)setSelectedId(`managed:${progress.workspaceId}`);setOpen(true);}}/>,document.body)}
     {panelMounted && !adding && createPortal(<WorkspacePanel open={open} title="Workspaces" onClose={()=>setOpen(false)}><div className="workspace-tools">
       <div className="workspace-manage"><nav className="workspace-rail" aria-label="Workspace list"><div role="tablist" aria-orientation="vertical" aria-label="Workspaces">{workspaceTabs.map((workspace,index)=>{const row=rowFor(workspace);return <button type="button" role="tab" id={`workspace-tab-${index}`} aria-controls="workspace-controls" aria-selected={resolvedSelectedId===workspace.id} aria-label={workspace.workspaceName} aria-describedby={`workspace-tab-detail-${index}`} tabIndex={resolvedSelectedId===workspace.id?0:-1} className={`workspace-rail-row${resolvedSelectedId===workspace.id?' is-selected':''}`} key={workspace.id} onClick={()=>{setSelectedId(workspace.id);setNotice('');setError('');}} onKeyDown={event=>{let next=index;if(event.key==='ArrowDown')next=(index+1)%workspaceTabs.length;else if(event.key==='ArrowUp')next=(index-1+workspaceTabs.length)%workspaceTabs.length;else if(event.key==='Home')next=0;else if(event.key==='End')next=workspaceTabs.length-1;else return;event.preventDefault();setSelectedId(workspaceTabs[next].id);setNotice('');setError('');document.getElementById(`workspace-tab-${next}`)?.focus();}}><span className="workspace-rail-name">{workspace.workspaceName}</span><span id={`workspace-tab-detail-${index}`} className={`workspace-rail-detail ${row.active?'running':row.tone}`}>{row.active?'● Active':row.detail}</span></button>;})}</div><Button size="sm" variant="ghost" onClick={()=>{setError('');setAdding(true);}}>＋ New workspace</Button></nav><div className="workspace-main">
       <div className={selectedManagedId?"workspace-lifecycle":"workspace-discovery"}><ManagedWorkspaces workspaceId={selectedManagedId??"__discovery__"} showAccount={false} onList={setManaged} onProgress={value=>setProgress(value?{...value,onStop:value.onStop?()=>{if(value.workspaceId)setSelectedId(`managed:${value.workspaceId}`);setOpen(true);value.onStop?.();}:undefined,onDelete:value.onDelete?()=>{if(value.workspaceId)setSelectedId(`managed:${value.workspaceId}`);setOpen(true);value.onDelete?.();}:undefined}:null)} onMinimize={()=>setOpen(false)} onDeleted={id=>{setSaved(items=>items.filter(item=>item.workspaceId!==id&&!item.id.endsWith('/'+id)));setSelectedId('local');}} openRequest={openRequest} onOpenFailed={id=>{setSelectedId(`managed:${id}`);setSection('overview');setOpen(true);}}/></div>
       {managedSelection&&<nav className="workspace-section-tabs" aria-label="Workspace sections">{(['overview','access','tools'] as const).map(item=><button type="button" key={item} aria-current={section===item?'page':undefined} className={section===item?'selected':''} onClick={()=>setSection(item)}>{item==='overview'?'Overview':item==='access'?'Access':'Tools & accounts'}</button>)}</nav>}
       {managedSelection&&section==='access'&&(managedSelection.access?.canManageAccess!==false?<WorkspaceSharing key={managedSelection.id} workspaceId={managedSelection.id} workspaceName={managedSelection.name}/>:<div className="workspace-section-empty"><h3>Your workspace access</h3><p>Your workspace owner manages team and individual permissions. Contact them to change your access.</p></div>)}
-      {managedSelection&&section==='overview'&&<div className="workspace-overview"><div className="workspace-overview-copy"><h3>{managedSelection.state==='error'?'Preparation needs attention':selectedActive?'Your active workspace':managedSelection.state==='stopped'?'Workspace is stopped':'Ready when you are'}</h3><p>{managedSelection.state==='error'?'Preparation stopped before the workspace was ready. Retry to recover, or use More to stop it. Your saved files are kept.':managedSelection.state==='stopped'?'Compute is off. Resume this workspace to return to your projects. Files and setup stay saved.':'Projects, terminals and agents run together in this workspace.'}</p></div><button type="button" className="workspace-overview-access" onClick={()=>setSection('access')}><span><strong>Manage access</strong><small>Teams, people and workspace permissions</small></span><span aria-hidden="true">→</span></button></div>}
+      {managedSelection&&section==='overview'&&<div className="workspace-overview"><div className="workspace-overview-copy"><h3>{selectedLifecycle==='error'?'Preparation needs attention':selectedLifecycle==='stopping'?'Workspace is stopping':selectedActive?'Your active workspace':selectedLifecycle==='stopped'?'Workspace is stopped':'Ready when you are'}</h3><p>{selectedLifecycle==='error'?'Preparation stopped before the workspace was ready. Retry to recover, or use More to stop it. Your saved files are kept.':selectedLifecycle==='stopping'?'Compute is shutting down. Files and setup are saved. You can resume it once it has stopped.':selectedLifecycle==='stopped'?'Compute is off. Resume this workspace to return to your projects. Files and setup stay saved.':'Projects, terminals and agents run together in this workspace.'}</p></div><button type="button" className="workspace-overview-access" onClick={()=>setSection('access')}><span><strong>Manage access</strong><small>Teams, people and workspace permissions</small></span><span aria-hidden="true">→</span></button></div>}
       {managedSelection&&section==='tools'&&managedSelection.access?.owner===true&&<WorkspaceOwnerTools key={managedSelection.id} workspaceId={managedSelection.id}/>}
       {managedSelection&&section==='tools'&&!selectedActive&&<p className="workspace-section-hint">Open this workspace to connect your personal accounts, import projects or use its desktop.</p>}
       {managedSelection&&section==='overview'&&<SharedSessionsPanel key={'sessions-'+managedSelection.id} workspaceId={managedSelection.id} owner={managedSelection.access?.owner===true}/>}
