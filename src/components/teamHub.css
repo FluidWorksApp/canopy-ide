@@ -80,3 +80,7 @@ button.team-row{cursor:pointer;}button.team-row:hover:not(:disabled){background:
 .account-chat-input .btn-icon:disabled{background:color-mix(in srgb,var(--text) 10%,transparent);color:var(--text-muted);cursor:not-allowed}
 .account-chat-hint{display:block;margin-top:4px;font-size:10px;color:var(--text-muted)}
 .account-chat-hint kbd{font-family:inherit;font-size:10px;padding:0 3px;border:1px solid var(--border);border-radius:3px}
+/* Unread messages: a count pill at the row's end and a bolder name. */
+.team-row.is-unread .team-row-text strong{font-weight:650;}
+.team-unread{flex:0 0 auto;min-width:16px;height:16px;padding:0 5px;display:inline-grid;place-items:center;border-radius:999px;background:var(--accent);color:var(--on-accent);font-size:10px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;}
+.team-hub-picker-dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--accent);}

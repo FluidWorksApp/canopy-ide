@@ -1,5 +1,6 @@
 import {useEffect,useId,useLayoutEffect,useMemo,useRef,useState,useSyncExternalStore} from 'react';
 import {teamSession,type DeliveryState} from '../teamMessaging/session';
+import {showConversation} from '../teamMessaging/unread';
 import {Button} from './ui';
 import {InfoIcon,LockIcon,SendIcon} from './icons';
 import {isSendKey} from './chatComposerKeys';
@@ -9,6 +10,8 @@ export type AccountConversation={teamId:string;userId:string;peer:string|null;na
 const GROUP_MS=5*60_000;
 /** The composer grows with its text up to this many lines, then scrolls. */
 const MAX_LINES=6;
+/** How close to the newest message counts as having it in view. */
+const READ_SLACK_PX=48;
 const STORAGE_NOTE='End-to-end encrypted. Pending deliveries survive restarting the IDE and expire after five minutes. The latest 500 messages per team are saved encrypted on this device.';
 /** Status copy under your own messages; a receipt shows "Delivered" on the latest one. */
 const DELIVERY_LABEL:Record<DeliveryState,string>={sending:'Sending…',sent:'Awaiting delivery',queued:'Saved on this device',waiting:'Waiting for connection',failed:'Not sent',expired:'Not delivered · expired'};
@@ -26,11 +29,8 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
  const session=useMemo(()=>teamSession(teamId,userId),[teamId,userId]);
  useEffect(()=>session.retain(),[session]);
  const {messages,members,receipts,status,restoredIds,delivery={}}=useSyncExternalStore(session.subscribe,session.getSnapshot);
- useEffect(()=>{
-  const read=()=>{if(active&&document.visibilityState==='visible')session.markRead(peer);};
-  read();document.addEventListener('visibilitychange',read);
-  return()=>document.removeEventListener('visibilitychange',read);
- },[session,peer,active,messages]);
+  // On screen: notifications for this conversation stay quiet while the window is focused.
+ useEffect(()=>active?showConversation(teamId,userId,peer):undefined,[active,teamId,userId,peer]);
  const [draft,setDraft]=useState(''),[error,setError]=useState('');
  const input=useRef<HTMLTextAreaElement>(null),log=useRef<HTMLDivElement>(null),hintId=useId();
  const visible=messages.filter(m=>peer===null?m.recipient===null:(m.sender===peer&&m.recipient===userId)||(m.sender===userId&&m.recipient===peer));
@@ -47,6 +47,17 @@ export function AccountChatView({conversation,active=true}:{conversation:Account
  // Keep the newest message in view as the conversation grows.
  const newest=visible.at(-1)?.id;
  useEffect(()=>{const el=log.current;if(el)el.scrollTop=el.scrollHeight;},[newest]);
+ // Read means seen: this tab in front, the window focused and not hidden, and
+ // the latest messages scrolled into view. Anything less leaves them unread.
+ useEffect(()=>{
+  const read=()=>{
+   const el=log.current,atEnd=!el||el.scrollHeight-el.scrollTop-el.clientHeight<=READ_SLACK_PX;
+   if(active&&atEnd&&document.visibilityState==='visible'&&document.hasFocus())session.markRead(peer);
+  };
+  read();const el=log.current;
+  document.addEventListener('visibilitychange',read);window.addEventListener('focus',read);el?.addEventListener('scroll',read,{passive:true});
+  return()=>{document.removeEventListener('visibilitychange',read);window.removeEventListener('focus',read);el?.removeEventListener('scroll',read);};
+ },[session,peer,active,messages]);
  // Optimistic: the message joins the conversation at once and the composer
  // clears; encryption and delivery continue in the background. Only a message
  // the session refuses outright (e.g. too large) puts the text back.

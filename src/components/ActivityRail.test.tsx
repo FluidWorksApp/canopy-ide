@@ -124,4 +124,15 @@ describe("ActivityRail", () => {
       expect(boxes(container).every((b) => b === "0 0 24 24")).toBe(true);
     });
   });
+  it("shows unread team messages on the Teams icon, capped at 9+", () => {
+    const { getByTestId, rerender, queryByTestId } = render(
+      <ActivityRail {...props} teamUnread={3} />,
+    );
+    expect(getByTestId("team-rail-badge").textContent).toBe("3");
+    expect(getByTestId("team-rail-badge").className).not.toContain("urgent");
+    rerender(<ActivityRail {...props} teamBadge={2} teamUnread={8} />);
+    expect(getByTestId("team-rail-badge").textContent).toBe("9+");
+    rerender(<ActivityRail {...props} />);
+    expect(queryByTestId("team-rail-badge")).toBeNull();
+  });
 });
