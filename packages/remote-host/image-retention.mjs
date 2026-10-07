@@ -3,7 +3,7 @@ import {constants} from 'node:fs';
 import path from 'node:path';
 import {validId} from './policy.mjs';
 // Workspace images are ~3.7 GB compressed and ~12.8 GB unpacked, and the
-// containerd image store keeps both on the retained 50 GB disk that also holds
+// containerd image store keeps both on the retained disk (50 GB, 100 GB for newer workspaces) that also holds
 // the user's volumes. Every release was previously kept forever until a pull
 // failed with ENOSPC. Retention keeps only what a container uses (running, the
 // stopped workspace, or a rollback container while an upgrade is unconfirmed),
