@@ -25,6 +25,16 @@ export async function auth(pin: string): Promise<string> {
   return j.token as string
 }
 
+/** How often an open socket is pinged. The host answers each with a pong. */
+export const HEARTBEAT_MS = 5_000
+/** Silence after which an open socket is treated as dead, once a ping has gone
+ *  unanswered. A phone that slept or switched networks, or a tunnel that dropped
+ *  the connection without a close, leaves the browser reporting OPEN for
+ *  minutes while every send — every keystroke — goes nowhere. */
+export const STALE_MS = 15_000
+/** How long a ping may go unanswered before that counts against the socket. */
+const PROBE_MS = 4_000
+
 type StatusCb = (up: boolean) => void
 type AuthFailCb = () => void
 
@@ -36,6 +46,12 @@ export class Wire {
   private attempt = 0
   private generation = 0
   private retryTimer?: ReturnType<typeof setTimeout>
+  private heartbeat?: ReturnType<typeof setInterval>
+  private probe?: ReturnType<typeof setTimeout>
+  private lastInbound = 0
+  private lastPing = 0
+  private watching = false
+  private readonly wake = () => this.resume()
   onStatus?: StatusCb
   onAuthFail?: AuthFailCb
 
@@ -60,8 +76,68 @@ export class Wire {
     const generation = ++this.generation
     if (this.retryTimer) clearTimeout(this.retryTimer)
     this.retryTimer = undefined
+    this.stopHeartbeat()
     this.ws?.close()
+    this.watch(true)
     void this.open(generation)
+  }
+
+  /** Coming back to the page (a phone unlocking, a tab refocused) or the
+   *  network returning is exactly when the socket is most likely dead and the
+   *  reconnect backoff longest. Check now instead of waiting either out. */
+  private watch(on: boolean) {
+    if (on === this.watching || typeof document === 'undefined') return
+    this.watching = on
+    const method = on ? 'addEventListener' : 'removeEventListener'
+    document[method]('visibilitychange', this.wake)
+    window[method]('online', this.wake)
+  }
+
+  private resume() {
+    if (this.closed || document.visibilityState === 'hidden') return
+    if (!this.connected) {
+      this.attempt = 0
+      this.connect()
+      return
+    }
+    this.ping()
+    clearTimeout(this.probe)
+    this.probe = setTimeout(() => {
+      this.probe = undefined
+      if (this.connected && this.lastInbound < this.lastPing) this.drop()
+    }, PROBE_MS)
+  }
+
+  private ping() {
+    this.lastPing = Date.now()
+    this.send({ t: 'ping' })
+  }
+
+  private tick() {
+    if (!this.connected) return
+    const now = Date.now()
+    const unanswered = this.lastPing > this.lastInbound && now - this.lastPing >= PROBE_MS
+    if (unanswered && now - this.lastInbound >= STALE_MS) this.drop()
+    else this.ping()
+  }
+
+  private stopHeartbeat() {
+    clearInterval(this.heartbeat)
+    clearTimeout(this.probe)
+    this.heartbeat = undefined
+    this.probe = undefined
+  }
+
+  /** Abandon a socket that stopped answering and open a fresh one. */
+  private drop() {
+    this.stopHeartbeat()
+    const ws = this.ws
+    this.generation += 1
+    this.ws = undefined
+    ws?.close()
+    this.status(false)
+    this.attempt = 0
+    this.connect()
   }
 
   private async open(generation: number) {
@@ -95,17 +171,24 @@ export class Wire {
         return
       }
       this.attempt = 0
+      this.lastInbound = Date.now()
+      this.lastPing = 0
+      this.stopHeartbeat()
+      this.heartbeat = setInterval(() => this.tick(), HEARTBEAT_MS)
       this.status(true)
     }
     ws.onclose = () => {
       if (generation !== this.generation) return
+      this.stopHeartbeat()
       this.status(false)
       if (!this.closed) this.scheduleReconnect()
     }
     ws.onmessage = (e) => {
       if (generation !== this.generation || this.closed || ws.readyState !== WebSocket.OPEN) return
+      this.lastInbound = Date.now()
       try {
         const m = JSON.parse(e.data)
+        if (m?.t === 'pong') return
         this.handlers.forEach((h) => h(m))
       } catch {
         /* ignore malformed frames */
@@ -143,6 +226,8 @@ export class Wire {
     this.generation += 1
     if (this.retryTimer) clearTimeout(this.retryTimer)
     this.retryTimer = undefined
+    this.stopHeartbeat()
+    this.watch(false)
     this.ws?.close()
     this.status(false)
   }
