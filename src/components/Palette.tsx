@@ -28,8 +28,10 @@ interface Row {
 const base = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
 export function Palette({ mode, components, onOpen, onClose }: PaletteProps) {
-  // Escape is the palette's own, all the way down to the panel behind it.
-  useEscapeLayer();
+  // Escape is the palette's own, all the way down to the panel behind it —
+  // and never the terminal's, wherever focus is. The input's own Escape
+  // handling still runs first while it has focus.
+  useEscapeLayer(true, { onEscape: () => onClose() });
   const [query, setQuery] = useState("");
   // null = every component (the default)
   const [scope, setScope] = useState<string | null>(null);

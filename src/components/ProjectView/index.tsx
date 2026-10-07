@@ -5486,21 +5486,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (e.key === "Control" || !e.getModifierState("Control"))
         commitSwitcher();
     };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.preventDefault();
-      e.stopPropagation();
-      cancelSwitcher();
-    };
     window.addEventListener("keyup", onKeyUp, true);
-    window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("blur", cancelSwitcher);
     return () => {
       window.removeEventListener("keyup", onKeyUp, true);
-      window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("blur", cancelSwitcher);
     };
   }, [switcherOpen, visible, commitSwitcher, cancelSwitcher]);
+  // Escape (cancel) through the overlay stack, which also keeps the keys of
+  // the walk away from the terminal underneath. Focus is left alone: the
+  // commit decides where it goes.
+  useEscapeLayer(switcherOpen && visible, {
+    onEscape: () => cancelSwitcher(),
+    keepFocus: true,
+  });
 
   // An agent asked the IDE to do something through the MCP bridge — start a
   // run command, or open a preview. App routed it here by matching the action's
@@ -11387,15 +11386,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // Esc closes the overlay, matching every other overlay in the app — and
   // counts as a layer, so the press that closes it is not also the press that
   // puts the side panel away underneath.
-  useEscapeLayer(wsDrawerOpen);
-  useEffect(() => {
-    if (!wsDrawerOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setWsDrawerOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [wsDrawerOpen, setWsDrawerOpen]);
+  // The overlay stack delivers it whether focus is in the drawer or still in
+  // the agent's terminal behind it, which never sees the press. Only while
+  // this project is on screen: a drawer left open in a background project
+  // must not hold the keyboard of the one in front.
+  useEscapeLayer(wsDrawerOpen && visible, {
+    onEscape: () => setWsDrawerOpen(false),
+  });
 
   const peerMembers = useMemo(
     () => relay.status.members.filter((m) => m.id !== relay.status.self_id),

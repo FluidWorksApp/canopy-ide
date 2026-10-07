@@ -4,6 +4,7 @@ mod agent_life;
 mod agentid;
 mod agents;
 mod android;
+mod app_footprint;
 mod blocking;
 mod bounded_file;
 mod browser;

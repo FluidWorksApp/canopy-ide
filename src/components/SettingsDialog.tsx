@@ -48,7 +48,7 @@ import { forgetAllMemories } from "../companionMemory";
 import { Mascot } from "./Mascot";
 import { Button, Checkbox, Field, Radio, Row, Segmented, Select, Stepper, Switch, TextInput } from "./ui";
 import { drawWave } from "../waveStyles";
-import { useEscape } from "../useEscape";
+import { useEscape, useEscapeLayer } from "../useEscape";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
 import { VaultSettings } from "./VaultSettings";
@@ -2643,6 +2643,8 @@ function RemoteSettings({
 
 function HotkeyCapture({ value, onChange }: { value: Hotkey; onChange: (h: Hotkey) => void }) {
   const [arming, setArming] = useState(false);
+  // Armed, it is the top overlay: Escape disarms it and leaves Settings open.
+  useEscapeLayer(arming, { onEscape: () => setArming(false) });
   useEffect(() => {
     if (!arming) return;
     const onKey = (e: KeyboardEvent) => {

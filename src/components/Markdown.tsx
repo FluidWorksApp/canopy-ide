@@ -29,6 +29,7 @@ import {
   renderMarkdown,
   type Heading,
 } from "../markdown";
+import { useEscape } from "../useEscape";
 
 export interface MarkdownProps {
   text: string;
@@ -303,18 +304,9 @@ function Lightbox({
   alt: string;
   onClose: () => void;
 }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onClose();
-      }
-    };
-    // Capture, so this closes before any surface-level Escape handler decides
-    // the whole tab or palette should close instead.
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose]);
+  // On the overlay stack: it opened last, so it is the top layer and closes
+  // alone — not the tab or palette it was opened from, and not the terminal.
+  useEscape(onClose);
 
   return (
     <div

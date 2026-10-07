@@ -58,3 +58,12 @@ test('host-bootstrap completion is advisory only and cannot declare workspace re
  for(const status of ['progress','failed','succeeded'])await assert.rejects(recordBootstrapReport(f,claims(),{stage:'host-services',status,sequence:7},now),{code:409});
  assert.equal(f.writes.length,1);
 });
+test('a failed image stage may carry the coded disk-full reason, which becomes the operation error',async()=>{
+ const diskFull={stage:'image',status:'failed',sequence:5,reason:'disk-full',freeGB:3.2,neededGB:17.2};
+ assert.deepEqual(validateBootstrapReport(diskFull),diskFull);
+ for(const bad of [{...diskFull,status:'progress'},{...diskFull,stage:'artifact'},{...diskFull,reason:'constructor'},{...diskFull,freeGB:'3.2'},{...diskFull,extra:'stderr'}])assert.throws(()=>validateBootstrapReport(bad),error=>error.code===400);
+ const f=fixture();await recordBootstrapReport(f,claims(),diskFull,now);
+ assert.equal(f.op.status,'failed');assert.equal(f.w.state,'error');
+ const [,args]=f.writes.find(([sql])=>sql.startsWith('UPDATE workspace_operation'));
+ assert.match(args[3],/^Workspace disk is full: 3\.2 GB free, 17\.2 GB needed for the workspace image\./);
+});

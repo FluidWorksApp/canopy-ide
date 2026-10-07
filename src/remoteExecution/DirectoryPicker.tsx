@@ -8,7 +8,8 @@ export function DirectoryPicker({multiple=false,initialPath='/workspace',title='
  const [path,setPath]=useState(initialPath),[draftPath,setDraftPath]=useState(initialPath),[loadedPath,setLoadedPath]=useState(''),[entries,setEntries]=useState<Entry[]>([]),[selected,setSelected]=useState<string[]>([]),[error,setError]=useState(''),[busy,setBusy]=useState(true),[name,setName]=useState(''),[creating,setCreating]=useState(false);
  useEffect(()=>setDraftPath(path),[path]);
  useEffect(()=>{let alive=true;setBusy(true);setError('');setEntries([]);void invoke<Entry[]>('fs_read_dir',{path}).then(v=>{if(alive){setEntries(v.filter(e=>e.is_dir&&!e.is_symlink).sort((a,b)=>a.name.localeCompare(b.name)));setLoadedPath(path);}}).catch(e=>{if(alive)setError(String(e));}).finally(()=>{if(alive)setBusy(false);});return()=>{alive=false;};},[path]);
- useEffect(()=>{const escape=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.stopImmediatePropagation();onCancel();}};window.addEventListener('keydown',escape,true);return()=>window.removeEventListener('keydown',escape,true);},[onCancel]);
+ // Escape needs no listener of its own: the Dialog below is on the overlay
+ // stack with onDismiss=onCancel, so it takes the key before anything else.
  const validName=!!name.trim()&&!/[\/\\]/.test(name)&&!['.','..'].includes(name.trim());
  const create=async()=>{if(!validName)return;setBusy(true);setError('');try{const next=path+'/'+name.trim();await invoke('fs_create_dir',{path:next});setName('');setCreating(false);setPath(next);}catch(e){setError(String(e));}finally{setBusy(false);}};
  const parts=path.split('/').filter(Boolean);

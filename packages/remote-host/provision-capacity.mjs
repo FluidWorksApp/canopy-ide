@@ -2,11 +2,12 @@ import {createHash} from 'node:crypto';
 import {readFile,writeFile,rename} from 'node:fs/promises';
 import {execFileSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
+import {aggregateSwapBytes} from './workspace-swap.mjs';
 export function capacityUnit(workspace){
  const {memoryMiB,cpus}=workspace;const ratio=workspace.swapRatio??0.75;
- if(typeof workspace.id!=='string'||!workspace.id||!Number.isSafeInteger(memoryMiB)||memoryMiB<256||memoryMiB>1048576||!Number.isFinite(cpus)||cpus<=0||cpus>1024||!Number.isFinite(ratio)||ratio<0||ratio>1)throw Error('Invalid workspace capacity');
+ if(typeof workspace.id!=='string'||!workspace.id||!Number.isSafeInteger(memoryMiB)||memoryMiB<256||memoryMiB>1048576||!Number.isFinite(cpus)||cpus<=0||cpus>1024||!Number.isFinite(ratio)||ratio<0||ratio>1||workspace.swapMiB!=null&&(!Number.isInteger(workspace.swapMiB)||workspace.swapMiB<0||workspace.swapMiB>16384))throw Error('Invalid workspace capacity');
  const name=`canopy-${createHash('sha256').update(workspace.id).digest('hex').slice(0,24)}.slice`;
- return {name,content:`[Unit]\nDescription=Canopy workspace capacity\nBefore=canopy-host.service\n\n[Slice]\nMemoryAccounting=yes\nCPUAccounting=yes\nMemoryMax=${memoryMiB*1048576}\nMemorySwapMax=${Math.round(memoryMiB*1048576*ratio)}\nCPUQuota=${Math.round(cpus*10000)/100}%\n\n[Install]\nWantedBy=multi-user.target\n`};
+ return {name,content:`[Unit]\nDescription=Canopy workspace capacity\nBefore=canopy-host.service\n\n[Slice]\nMemoryAccounting=yes\nCPUAccounting=yes\nMemoryMax=${memoryMiB*1048576}\nMemorySwapMax=${aggregateSwapBytes(workspace)}\nCPUQuota=${Math.round(cpus*10000)/100}%\n\n[Install]\nWantedBy=multi-user.target\n`};
 }
 export async function provisionCapacity(configPath,{write=writeFile,read=readFile,move=rename,candidateOnly=false,run=(args)=>execFileSync('systemctl',args,{stdio:'pipe'})}={}){
  const config=JSON.parse(await read(configPath,'utf8'));

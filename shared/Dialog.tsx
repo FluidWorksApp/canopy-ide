@@ -68,8 +68,9 @@ function DialogImpl({
   // because the caller rebuilt its actions array inline.
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
-  // While the dialog is up, Escape belongs to it and to nothing underneath.
-  useEscapeLayer(alive && !closing);
+  // While the dialog is up, Escape belongs to it and to nothing underneath —
+  // the overlay stack hands it the key wherever focus is, terminal included.
+  useEscapeLayer(alive && !closing, { onEscape: () => onDismiss?.() });
 
   // Enter / exit lifecycle
   useEffect(() => {
@@ -111,12 +112,8 @@ function DialogImpl({
       target?.focus({ preventScroll: true });
     }
 
+    // Escape is not here: the overlay stack (useEscapeLayer above) owns it.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        onDismiss?.();
-        return;
-      }
       // Enter commits the dialog wherever focus happens to be — that is the
       // whole point of one shared dialog: the answer is never "click it".
       if (e.key === "Enter") {
