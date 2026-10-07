@@ -28,3 +28,19 @@ test('shared resource policy is carried only with matching identity and valid in
  assert.deepEqual(await check({allowed:true,...p,projectAccess,sharedAccess}),{projectAccess,sharedAccess});
  for(const invalid of [{...sharedAccess,billing:projectAccess},{git:projectAccess},{...sharedAccess,git:{...projectAccess,allRead:false,allWrite:true}},{...sharedAccess,agents:{...projectAccess,selected:[{id:'../secret',writable:true}]}}])assert.equal(await check({allowed:true,...p,projectAccess,sharedAccess:invalid}),false);
 });
+test('a slow control plane is waited for, not treated as a denial',async()=>{
+ const check=memberAuthority('https://canopyide.dev/api/member-access',{fetchImpl:async(_url,opts)=>{await new Promise(r=>setTimeout(r,3200));assert.equal(opts.signal.aborted,false);return Response.json({allowed:true,...p});}});
+ assert.equal(await check(p,'Bearer test'),true);
+});
+test('allowed answers are reused briefly per credential; denials and expiry are not cached',async()=>{
+ let clock=1_000_000,calls=0,body={allowed:true,...p};
+ const check=memberAuthority('https://canopyide.dev/api/member-access',{now:()=>clock,fetchImpl:async()=>{calls++;return Response.json(body);}});
+ const live={...p,expiresAt:clock+120_000};
+ assert.equal(await check(live,'Bearer one'),true);assert.equal(await check(live,'Bearer one'),true);assert.equal(calls,1);
+ await Promise.all([check(live,'Bearer two'),check(live,'Bearer two')]);assert.equal(calls,2);
+ clock+=30_000;body={allowed:false,...p};
+ assert.equal(await check(live,'Bearer one'),false);assert.equal(await check(live,'Bearer one'),false);assert.equal(calls,4);
+ body={allowed:true,...p};const ending={...p,expiresAt:clock+1};
+ assert.equal(await check(ending,'Bearer three'),true);clock+=2;assert.equal(await check(ending,'Bearer three'),true);assert.equal(calls,6);
+ assert.equal(await check({...live,scope:'view'},'Bearer one'),false);
+});
