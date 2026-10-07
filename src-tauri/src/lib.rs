@@ -43,6 +43,7 @@ mod preview;
 mod procenv;
 mod process_capture;
 mod profiles;
+mod session_transfer;
 mod provenance;
 mod prwatch;
 mod pty;
@@ -52,7 +53,6 @@ mod remind;
 mod remote;
 mod research;
 mod selftest;
-mod session_transfer;
 mod shortcuts;
 mod snapshot;
 mod spot;
@@ -154,13 +154,7 @@ fn build_menu(app: &tauri::AppHandle, profile: &str) -> tauri::Result<Menu<tauri
             &PredefinedMenuItem::cut(app, None)?,
             &PredefinedMenuItem::copy(app, None)?,
             &PredefinedMenuItem::paste(app, None)?,
-            &MenuItem::with_id(
-                app,
-                "select-all",
-                "Select All",
-                true,
-                accel("select-all").as_deref(),
-            )?,
+            &MenuItem::with_id(app, "select-all", "Select All", true, accel("select-all").as_deref())?,
         ],
     )?;
     let tabs = Submenu::with_items(
@@ -378,14 +372,10 @@ fn js_log(level: String, message: String) {
     // Release diagnostics accept stage codes only: no paths, URLs, tokens or
     // application error contents are retained in the resilience log.
     if level == "boot" {
-        if matches!(
-            message.as_str(),
-            "startup-stage:begin"
-                | "startup-stage:unavailable"
-                | "startup-stage:selector-error"
-                | "startup-stage:local-choice"
-                | "startup-stage:connected"
-        ) {
+        if matches!(message.as_str(),
+            "startup-stage:begin" | "startup-stage:unavailable" |
+            "startup-stage:selector-error" | "startup-stage:local-choice" |
+            "startup-stage:connected") {
             log::info!(target: "canopy::watchdog::startup", "{message}");
         }
         return;

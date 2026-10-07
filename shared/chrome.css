@@ -260,3 +260,4 @@
 .titlebar-projects > .project-tabs {flex:1;}
 .titlebar-context {display:flex;align-items:center;gap:12px;flex-shrink:0;}
 .titlebar-context .project-mode-toggle {border-left:1px solid var(--border);margin-left:4px;}
+
