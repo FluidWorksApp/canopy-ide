@@ -534,7 +534,9 @@ fn choose_login(
 /// The account Claude records beside its login (`oauthAccount`). Identity
 /// only; a bounded read of a regular file, never the credential itself.
 fn claude_identity(file: &std::path::Path) -> Option<serde_json::Value> {
-    std::fs::symlink_metadata(file).ok().filter(|m| m.is_file() && m.len() <= 16 * 1048576)?;
+    std::fs::symlink_metadata(file)
+        .ok()
+        .filter(|m| m.is_file() && m.len() <= 16 * 1048576)?;
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
     value.get("oauthAccount").filter(|v| v.is_object()).cloned()
 }
@@ -585,7 +587,8 @@ pub(crate) fn claude_login_usable(root: &std::path::Path, home: &str) -> Option<
     }
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
-    static CACHE: std::sync::OnceLock<Mutex<HashMap<std::path::PathBuf, (Instant, Option<bool>)>>> = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<std::path::PathBuf, (Instant, Option<bool>)>>> =
+        std::sync::OnceLock::new();
     let (directory, custom) = if root == std::path::Path::new(home) {
         let (claude, _, custom) = default_agent_dirs(home);
         (claude, custom)
@@ -617,7 +620,11 @@ fn default_agent_dirs(home: &str) -> (std::path::PathBuf, std::path::PathBuf, bo
     let codex = std::env::var("CODEX_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from(home).join(".codex"));
-    (claude, codex, std::env::var_os("CLAUDE_CONFIG_DIR").is_some())
+    (
+        claude,
+        codex,
+        std::env::var_os("CLAUDE_CONFIG_DIR").is_some(),
+    )
 }
 /// One account's export. An incomplete login (e.g. no refresh token) is
 /// reported for that account instead of aborting every other account's copy.
@@ -630,7 +637,10 @@ fn export_or_report(
 ) -> Result<Option<serde_json::Value>, String> {
     match export_profile_login(agent, directory, custom) {
         Err(error) if error == INCOMPLETE_LOGIN => {
-            incomplete.push(format!("{owner} ({})", if agent == "claude" { "Claude" } else { "Codex" }));
+            incomplete.push(format!(
+                "{owner} ({})",
+                if agent == "claude" { "Claude" } else { "Codex" }
+            ));
             Ok(None)
         }
         other => other,
@@ -670,7 +680,11 @@ pub async fn execution_remote_import_accounts(
 ) -> Result<serde_json::Value, String> {
     let connection = execution_remote_get(app, state)?.ok_or("Select a remote workspace first")?;
     // None copies every account; otherwise only the chosen ids ("default" included).
-    let chosen = move |id: &str| profiles.as_ref().map_or(true, |ids| ids.iter().any(|v| v == id));
+    let chosen = move |id: &str| {
+        profiles
+            .as_ref()
+            .map_or(true, |ids| ids.iter().any(|v| v == id))
+    };
     let (accounts, default_identity, profile_copies, skipped, skipped_profiles, incomplete) = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
     let home = std::env::var("HOME").map_err(|_| "Home directory unavailable")?;
     let (claude, codex, custom) = default_agent_dirs(&home);
@@ -1044,7 +1058,10 @@ mod account_import_tests {
         // Large state files (project history) must not drop the identity.
         let padding = "x".repeat(100_000);
         std::fs::write(&file, serde_json::json!({"projects":{"p":padding},"oauthAccount":{"emailAddress":"me@example.com"}}).to_string()).unwrap();
-        assert_eq!(claude_identity(&file), Some(serde_json::json!({"emailAddress":"me@example.com"})));
+        assert_eq!(
+            claude_identity(&file),
+            Some(serde_json::json!({"emailAddress":"me@example.com"}))
+        );
         std::fs::write(&file, r#"{"oauthAccount":"not-an-object"}"#).unwrap();
         assert_eq!(claude_identity(&file), None);
         std::fs::remove_dir_all(&dir).unwrap();

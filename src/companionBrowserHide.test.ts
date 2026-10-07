@@ -25,7 +25,8 @@
 // component does. If the two rules ever point at each other again, it stops
 // converging and this goes red.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import {
@@ -319,17 +320,21 @@ describe("one channel, and nothing reaching around it", () => {
 
   it("catches a consumer that has not been committed yet", () => {
     // The guard above, held to its own claim. Without --untracked this passes
-    // while a brand-new reacher-around sits in the working tree.
-    const probe = join(process.cwd(), "src/zzGuardProbe.ts");
-    writeFileSync(probe, "export const x = browserViewSnapshots;\n");
+    // while a brand-new reacher-around sits in the working tree. The probe lives
+    // in a throwaway repo: writing it into this repo's src/ races every other
+    // test file that scans src/ in parallel.
+    const repo = mkdtempSync(join(tmpdir(), "canopy-guard-probe-"));
     try {
+      execSync("git init -q", { cwd: repo });
+      mkdirSync(join(repo, "src"));
+      writeFileSync(join(repo, "src/zzGuardProbe.ts"), "export const x = browserViewSnapshots;\n");
       const hits = execSync(
         "git grep -l --untracked 'browserViewSnapshots' -- 'src/*' || true",
-        { encoding: "utf8" },
+        { cwd: repo, encoding: "utf8" },
       );
       expect(hits).toContain("src/zzGuardProbe.ts");
     } finally {
-      rmSync(probe, { force: true });
+      rmSync(repo, { recursive: true, force: true });
     }
   });
 });
