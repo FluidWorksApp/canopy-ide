@@ -45,3 +45,13 @@ it('changing the active workspace during observation cannot complete or advance 
 it('without an observed shutdown operation id, status checks cannot advance an unrelated future operation',async()=>{vi.useFakeTimers();try{managed();let reads=0;mocks.invoke.mockImplementation(async(_command,args)=>args.body?.action==='hibernate'?{accepted:true}:{workspaces:[{id:managedId,state:++reads===1?'stopping':'stopped',operation:{action:'hibernate',status:'running'}}]});const result=hibernateWorkspaceProjects([],vi.fn(),vi.fn());await vi.advanceTimersByTimeAsync(2000);await result;expect(mocks.invoke.mock.calls.some(([,args])=>args.body?.action==='advance')).toBe(false);}finally{vi.useRealTimers();}});
 
 it('an accepted operation receipt cannot advance a different later hibernate intent',async()=>{managed();mocks.invoke.mockImplementation(async(_command,args)=>args.body?.action==='hibernate'?{accepted:true,operation:{id:'11111111-1111-1111-1111-111111111111'}}:{workspaces:[{id:managedId,state:'stopping',operation:{id:'22222222-2222-2222-2222-222222222222',action:'hibernate',status:'running'}}]});await expect(hibernateWorkspaceProjects([],vi.fn(),vi.fn())).rejects.toThrow('replaced this shutdown');expect(mocks.invoke.mock.calls.some(([,args])=>args.body?.action==='advance')).toBe(false);});
+it('waits through a long snapshot-storage save and reports its phases instead of timing out after two minutes',async()=>{vi.useFakeTimers();try{
+ const {waitForWorkspaceStopped}=await import('./hibernateWorkspace');managed();let reads=0;const progress=vi.fn();
+ const opId='11111111-2222-4333-8444-555555555555';
+ mocks.invoke.mockImplementation(async(_command,args)=>{if(args.body?.action==='advance')return {};reads++;const done=reads>120;return {workspaces:[{id:managedId,state:done?'stopped':'stopping',storage_mode:'snapshot',operation:done?{id:opId,action:'hibernate',status:'succeeded',phase:'complete'}:{id:opId,action:'hibernate',status:'running',phase:reads<5?'saving-workspace':'saving-snapshot',save_progress:'30%'}}]};});
+ const result=waitForWorkspaceStopped(managedId,progress);
+ await vi.advanceTimersByTimeAsync(5*60*1000);await result;
+ expect(progress).toHaveBeenCalledWith(expect.objectContaining({phase:'stopping-compute',savePhase:'saving-workspace'}));
+ expect(progress).toHaveBeenCalledWith(expect.objectContaining({phase:'stopping-compute',savePhase:'saving-snapshot',saveProgress:'30%'}));
+ expect(progress).toHaveBeenLastCalledWith({phase:'completed',shutdownAccepted:true});
+}finally{vi.useRealTimers();}});
