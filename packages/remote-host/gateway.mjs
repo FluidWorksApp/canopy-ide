@@ -392,7 +392,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         const input=terminal?new SocketInput({
           key:id=>inputKey(principal,workspace.id,publication?`shared:${publication.id}`:`session:${inputSession}`,id),
           apply:(key,seq,data)=>inputLedger.apply(key,seq,()=>forwardInput(runtime,inputSession,data)),
-          allowed:async()=>!inputAllowed?'Forbidden':idleAttestation?.reserved(workspace.id)?'Workspace idle shutdown is reserved. Retry after it finishes.':sharingSetup?.active(workspace.id)?'Sharing setup is moving project storage. Reconnect after it finishes.':null,
+          allowed:async()=>!inputAllowed?'Forbidden':idleAttestation?.reserved(workspace.id)?'Workspace idle shutdown is reserved. Retry after it finishes.':null,
           send:message=>{if(client.readyState===1)client.send(JSON.stringify(message));},
           close:(code,reason)=>client.close(code,reason),
         }):null;
