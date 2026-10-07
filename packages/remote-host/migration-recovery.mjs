@@ -4,7 +4,7 @@ import {projectMounts} from './project-mounts.mjs';
 // A completed migration survives later control-plane resume/resize generations.
 // Only lifecycle-owned fields may advance. Project/account/image/capacity-group
 // identity remains bound to the durable migration and real Docker mounts.
-const lifecycleFields=new Set(['generation','name','desiredState','desired_state','memoryMiB','memoryMaxMiB','cpus','cpusMax','swapRatio','swapMiB']);
+const lifecycleFields=new Set(['generation','name','desiredState','desired_state','memoryMiB','memoryMaxMiB','cpus','cpusMax','swapRatio','swapMiB','storageGiB']);
 function committedLifecycleMatches(workspace,next,current){
  const stable=value=>Object.fromEntries(Object.entries(value).filter(([key])=>!lifecycleFields.has(key)));
  if(!isDeepStrictEqual(stable(workspace),stable(next)))return false;
