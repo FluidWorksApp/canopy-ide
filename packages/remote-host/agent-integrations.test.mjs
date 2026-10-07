@@ -1,7 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {mkdtemp,realpath,writeFile,readFile,mkdir,rm,chmod} from 'node:fs/promises';
 import path from 'node:path';import os from 'node:os';
-import {AgentIntegrations} from './agent-integrations.mjs';import {WorkspaceProfiles} from './profiles.mjs';
+import {AgentIntegrations,claudeStatusLine} from './agent-integrations.mjs';import {WorkspaceProfiles} from './profiles.mjs';
 test('one-click hooks install across profiles, retain existing hooks, and verify the helper',async()=>{
  const home=await realpath(await mkdtemp(path.join(os.tmpdir(),'canopy-hooks-')));
  try{
@@ -36,4 +36,30 @@ test('health reports actual executable availability without treating directories
   await mkdir(path.join(bin,'codex'));assert.equal(await integrations.cliInstalled('codex'),false);
   assert.equal(await integrations.cliInstalled('../claude'),false);
  }finally{await rm(home,{recursive:true,force:true});}
+});
+
+test('Claude setup claims the statusLine for plan limits, wrapping an existing one, per account',async()=>{
+ const home=await realpath(await mkdtemp(path.join(os.tmpdir(),'canopy-statusline-')));
+ try{
+  const helper=home+'/canopy-hook';await writeFile(helper,'#!/bin/sh\nexit 0\n',{mode:0o700});
+  const work=await new WorkspaceProfiles(home).create('Work');await mkdir(home+'/.claude',{recursive:true});
+  await writeFile(home+'/.claude/settings.json',JSON.stringify({statusLine:{type:'command',command:"echo 'mine'"}}));
+  const integrations=new AgentIntegrations(home,helper);
+  // Hooks alone are no longer "installed" for Claude: the status line is what fills the plan chip.
+  await integrations.setup('claude');assert.equal(await integrations.installed('claude'),true);
+  const own=JSON.parse(await readFile(home+'/.claude/settings.json','utf8')).statusLine;
+  assert.deepEqual(own,{type:'command',command:`'${helper}' --statusline --passthrough 'echo '\\''mine'\\'''`,padding:0});
+  const other=JSON.parse(await readFile(work.root+'/.claude/settings.json','utf8')).statusLine;
+  assert.equal(other.command,`'${helper}' --statusline --profile '${work.id}'`);
+  await integrations.setup('claude');
+  assert.deepEqual(JSON.parse(await readFile(home+'/.claude/settings.json','utf8')).statusLine,own,'re-running setup never nests the wrapper');
+  const settings=JSON.parse(await readFile(home+'/.claude/settings.json','utf8'));delete settings.statusLine;
+  await writeFile(home+'/.claude/settings.json',JSON.stringify(settings));
+  assert.equal(await integrations.installed('claude'),false,'a workspace set up before the status line is offered setup again');
+  await integrations.setup('codex');assert.equal(JSON.parse(await readFile(home+'/.codex/hooks.json','utf8')).statusLine,undefined);
+ }finally{await rm(home,{recursive:true,force:true});}
+});
+test('the statusLine command matches the desktop format',()=>{
+ assert.equal(claudeStatusLine({},'/usr/local/bin/canopy-hook','default').command,"'/usr/local/bin/canopy-hook' --statusline");
+ assert.equal(claudeStatusLine({statusLine:{command:"'/x/canopy-hook' --statusline --passthrough 'ccline'"}},'/usr/local/bin/canopy-hook','vj').command,"'/usr/local/bin/canopy-hook' --statusline --profile 'vj' --passthrough 'ccline'");
 });
