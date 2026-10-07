@@ -109,8 +109,10 @@ function Marked({ text, query }: { text: string; query: string }) {
 }
 
 export function SpotSearch({ ctx, onAction, onClose }: SpotSearchProps) {
-  // Escape is the palette's own, all the way down to the panel behind it.
-  useEscapeLayer();
+  // Escape is the palette's own, all the way down to the panel behind it —
+  // and never the terminal's, wherever focus is. The input's own Escape
+  // handling still runs first while it has focus.
+  useEscapeLayer(true, { onEscape: () => onClose() });
   const [query, setQuery] = useState("");
   const [asyncRows, setAsyncRows] = useState<SpotRow[]>([]);
   const [busy, setBusy] = useState(false);

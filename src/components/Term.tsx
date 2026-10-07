@@ -33,6 +33,7 @@ import { TerminalCompactionController } from "../terminalCompaction";
 import { terminalCompactionProtected } from "../terminalGroups";
 import { registerTerminalPressureShedder } from "../rendererPressureRelief";
 import { registerTerminalWindowEvents } from "../terminalWindowEvents";
+import { terminalKeyBlocked } from "../useEscape";
 
 /** Quote a dropped path for the shell, the way iTerm2/Terminal.app do. Paths
  *  that are pure safe chars pass through bare; anything else is single-quoted,
@@ -511,6 +512,13 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     const releaseSelectAll=registerSelectAll(el,()=>term.selectAll());
     let imagePastePending = false;
     term.attachCustomKeyEventHandler((ev) => {
+      // An overlay is open over this terminal: nothing typed goes to the pty.
+      // Above all not Escape — to an agent CLI that is "interrupt", and the
+      // user pressed it to close the popup, not to stop the agent. The overlay
+      // stack normally takes the key before xterm sees it; this is the floor
+      // under that, for keys some surface lets through and for focus that
+      // stayed in the terminal while a menu was up.
+      if (terminalKeyBlocked(ev)) return false;
       if (ev.type !== "keydown") return true;
       // Never touch a key that is mid-composition. Option+letter starts a dead
       // key on a US layout (Option+e = acute), and WebKit then reports a

@@ -547,6 +547,9 @@ export async function retryCompanion(): Promise<boolean> {
   return false;
 }
 
+/** The panel's message cap (see sendToCompanion). */
+export const MAX_COMPANION_MESSAGES = 500;
+
 /** Send a message. Adds the user's turn and an empty reply for the stream to
  *  fill, so the chat shows the question landing immediately rather than after
  *  the first token. */
@@ -560,8 +563,10 @@ export async function sendToCompanion(
   set({
     status: "working",
     error: null,
+    // Bounded: the panel is a view of a transcript the CLI keeps in full, so
+    // the oldest turns can go rather than grow the UI for the app's lifetime.
     messages: [
-      ...state.messages,
+      ...state.messages.slice(-(MAX_COMPANION_MESSAGES - 2)),
       { id: nextId(), who: "you", text: shown, attachments },
       { id: nextId(), who: "ash", text: "" },
     ],

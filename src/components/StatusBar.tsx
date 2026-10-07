@@ -14,6 +14,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { placeAboveAnchor, type PopoverPlacement } from "../popoverPlacement";
+import { useEscape } from "../useEscape";
 import {
   PROFILE_CHANGE_EVENT,
   activeProfile,
@@ -70,6 +71,24 @@ const STATS_PANEL_WIDTH = 452;
  *  with a hundred and fifty branches the rest used to be a dim row counting
  *  what it wouldn't show you and naming a panel to go open instead. */
 const BRANCH_MENU_PREVIEW = 12;
+
+/** The chip tooltip's split of the total, one line per slice. Empty when the
+ *  core predates the breakdown (or for a remote workspace). */
+function appBreakdownLines(app: ipc.AppStats): string {
+  const parts: [string, ipc.AppStatsPart | undefined][] = [
+    ["Core", app.core],
+    ["UI (WebKit)", app.webviews],
+    ["Terminals & agents", app.children],
+  ];
+  return parts
+    .map(([label, part]) =>
+      part
+        ? `${label}: ${fmtMem(part.mem_bytes)} · ${fixedNumber(part.cpu, 0)}% cpu · ` +
+          `${part.procs} process${part.procs === 1 ? "" : "es"}\n`
+        : "",
+    )
+    .join("");
+}
 
 const fmtMem = (bytes: number) =>
   bytes >= 1024 * 1024 * 1024
@@ -258,16 +277,12 @@ export const StatusBar = memo(function StatusBar({
       )
         setStatsOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setStatsOpen(false);
-    };
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("mousedown", onDown);
   }, [statsOpen]);
+  // Escape through the overlay stack: a bubbling listener here ran after the
+  // terminal had already sent the key to the agent as an interrupt.
+  useEscape(() => setStatsOpen(false), statsOpen);
   // Popups anchored to a chip must escape .status-bar's overflow:hidden (it
   // clips its one-line row — and clipped everything that pops above it, so
   // only a shadow sliver ever showed). Fixed positioning, measured from the
@@ -599,14 +614,11 @@ export const StatusBar = memo(function StatusBar({
     const onDown = (e: MouseEvent) => {
       if (!syncAnchorRef.current?.contains(e.target as Node)) closeSync();
     };
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && closeSync();
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("mousedown", onDown);
   }); // no deps: closeSync must see the probe from this render
+  // The layer reads its handler live, so closeSync sees this render's probe.
+  useEscape(() => closeSync(), syncOpen);
 
   const runMerge = async () => {
     if (!sync || !repo) return;
@@ -1008,16 +1020,18 @@ export const StatusBar = memo(function StatusBar({
               ? `Remote workspace: ${app.workspace.available ? "agents, shells, builds and desktop" : "resources unavailable"}. CPU is a percentage of the workspace CPU allocation. Click for workspace resources.`
               : withLoadNote(
               `${app.includes_webviews ? "canopy" : "canopy lower bound"}: ` +
-                `${app.procs} process${app.procs === 1 ? "" : "es"} — ` +
-                `Rust core, language servers, terminals and everything they spawned. ` +
+                `${app.procs} process${app.procs === 1 ? "" : "es"}. ` +
                 `Memory is charged physical footprint on macOS (resident memory elsewhere). ` +
-                `Click for the per-project breakdown.\n\n` +
+                `Click for the per-project breakdown.\n` +
+                appBreakdownLines(app) +
+                "\n" +
                 (app.includes_webviews
-                  ? `Includes WebView helper processes on this platform.`
+                  ? `Includes WebView helper processes (on macOS: WebContent, ` +
+                    `Graphics and Networking, which Activity Monitor lists as separate rows).`
                   : `Does not include WebContent, Graphics or Networking: macOS runs ` +
-                    `those as system-owned WebKit processes parented to launchd. ` +
-                    `Activity Monitor shows them as separate rows; add them to this ` +
-                    `lower bound for the OS-level Canopy total.`),
+                    `those as separate WebKit processes, and they could not be ` +
+                    `attributed to Canopy in this launch. Activity Monitor shows them ` +
+                    `as separate rows; add them to this lower bound for the OS-level Canopy total.`),
               appLoad ? loadNote("app", appLoad) : "",
             )}
             onClick={(e) => {
@@ -1107,10 +1121,29 @@ export const StatusBar = memo(function StatusBar({
                     {!app.includes_webviews && (
                       <div
                         className="bd-head"
-                        title="macOS WebContent, Graphics and Networking are XPC processes outside Canopy's native process tree. Activity Monitor reports those rows separately."
+                        title="macOS WebContent, Graphics and Networking are XPC processes outside Canopy's native process tree, and this launch could not attribute them. Activity Monitor reports those rows separately."
                       >
                         <span>WebKit layers</span>
                         <span className="bd-nums">OS-owned · add separately</span>
+                      </div>
+                    )}
+                    {app.includes_webviews && app.webviews && app.webviews.procs > 0 && (
+                      <div
+                        className="bd-head"
+                        title={withLoadNote(
+                          "The interface itself: WebKit's WebContent, Graphics and Networking processes (and small system helpers macOS runs for Canopy)",
+                          loadNote(
+                            "group",
+                            loadFlags("group", app.webviews.cpu, app.webviews.mem_bytes),
+                          ),
+                        )}
+                      >
+                        <span>UI (WebKit)</span>
+                        <Nums
+                          scope="group"
+                          cpu={app.webviews.cpu}
+                          mem={app.webviews.mem_bytes}
+                        />
                       </div>
                     )}
                     {/* Memory and CPU are what this popup has always shown, and
@@ -1264,8 +1297,16 @@ export const StatusBar = memo(function StatusBar({
                       );
                     })}
                     {(() => {
-                      const coreCpu = Math.max(0, app.cpu - termCpu);
-                      const coreMem = Math.max(0, app.mem_bytes - termMem);
+                      // What is left once terminals and the WebView helpers
+                      // (listed above) are taken out.
+                      const coreCpu = Math.max(
+                        0,
+                        app.cpu - termCpu - (app.webviews?.cpu ?? 0),
+                      );
+                      const coreMem = Math.max(
+                        0,
+                        app.mem_bytes - termMem - (app.webviews?.mem_bytes ?? 0),
+                      );
                       return (
                         <div
                           className="bd-head"
@@ -1524,16 +1565,10 @@ export function AccountSwitcher() {
     const onDown = (e: MouseEvent) => {
       if (!anchorRef.current?.contains(e.target as Node)) setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("mousedown", onDown);
   }, [open]);
+  useEscape(() => setOpen(false), open);
 
   const refresh = useCallback(() => {
     setActive(activeProfile());

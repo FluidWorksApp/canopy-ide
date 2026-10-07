@@ -137,6 +137,11 @@ const projectConversations = new Map<
   { items: BuilderItem[]; hasSpoken: boolean }
 >();
 let builderItemSequence = 0;
+export const MAX_BUILDER_ITEMS = 400;
+
+export function capBuilderItems<T>(items: T[]): T[] {
+  return items.length > MAX_BUILDER_ITEMS ? items.slice(-MAX_BUILDER_ITEMS) : items;
+}
 
 export function vibeStarterIdeas(project: VibeBuilderProject | undefined): string[] {
   if (
@@ -406,7 +411,10 @@ export function VibeBuilderPane({
             break;
         }
 
-        return { ...current, ...state, items, openReplyId };
+        // The newest MAX_BUILDER_ITEMS only: the conversation outlives the
+        // pane (projectConversations is app-lifetime), and a long build would
+        // otherwise grow it for as long as Canopy stays open.
+        return { ...current, ...state, items: capBuilderItems(items), openReplyId };
       });
     });
   }, [projectId, session]);

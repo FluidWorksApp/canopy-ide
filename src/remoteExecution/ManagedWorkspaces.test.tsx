@@ -8,7 +8,7 @@ vi.mock('../executionMode',()=>({canSwitchExecutionMode:mocks.canSwitch,setExecu
 vi.mock('../links',()=>({openInOsBrowser:vi.fn()}));
 vi.mock('./workspace',()=>({activeWorkspace:()=>null}));
 vi.mock('./client',()=>({RemoteExecutionClient:class{workspace=mocks.open;}}));
-import {ManagedWorkspaces} from './ManagedWorkspaces';
+import {ManagedWorkspaces,workspaceStartupProblem} from './ManagedWorkspaces';
 import {resetWorkspaceLifecycle} from './workspaceLifecycle';
 afterEach(()=>{cleanup();resetWorkspaceLifecycle();vi.useRealTimers();vi.clearAllMocks();});
 function setup(){vi.useFakeTimers();mocks.canSwitch.mockReturnValue(true);let state='stopped';const w=()=>({id:'ws-test',name:'My workspace',provider:'lightsail',state,cpu_max:2,memory_max_mib:8192,operation:{phase:'preparing-workspace'}});mocks.invoke.mockImplementation(async(command,args)=>{if(command!=='canopy_account_request')return;if(args.route==='/api/workspaces')return {workspaces:[w()]};if(args.body.action==='resume'){state='starting';return {};}if(args.body.action==='connect')return {connection:{workspaceId:'ws-test',workspaceName:'My workspace',endpoint:'https://ws-test.workspaces.canopyide.dev',token:'synthetic'}};return {};});return {ready:()=>{state='ready';}};}
@@ -88,6 +88,15 @@ it('shared developers can explicitly resume owner-funded resources while backgro
  const control=setup(),original=mocks.invoke.getMockImplementation()!;mocks.invoke.mockImplementation(async(command,args)=>{const result=await original(command,args);return args?.route==='/api/workspaces'?{workspaces:result.workspaces.map((w:{state:string})=>({...w,canDelete:false,canStop:false,access:{owner:false,canManageAccess:false,canConnect:w.state==='ready',canResume:true,canStop:false}}))}:result;});
  render(<ManagedWorkspaces/>);await act(async()=>{});await act(async()=>{await vi.advanceTimersByTimeAsync(10000);});expect(mocks.invoke.mock.calls.some(([,args])=>['resume','advance','retry'].includes(args?.body?.action))).toBe(false);expect(screen.getByText('Running time is billed to the workspace owner.')).toBeTruthy();const button=screen.getByRole('button',{name:'Resume workspace'});expect(button).toBeEnabled();fireEvent.click(button);await act(async()=>{});expect(mocks.invoke).toHaveBeenCalledWith('canopy_account_request',expect.objectContaining({body:expect.objectContaining({action:'resume',workspaceId:'ws-test'})}));expect(screen.queryByRole('button',{name:'Stop workspace'})).toBeNull();expect(screen.queryByRole('button',{name:'Delete workspace'})).toBeNull();control.ready();await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});expect(mocks.switchMode).toHaveBeenCalledWith('remote');
 });
+it('an image-stage failure offers a fresh-machine restart and sends the existing retry action',async()=>{
+ setup();const original=mocks.invoke.getMockImplementation()!;let failed=false;
+ mocks.invoke.mockImplementation(async(command,args)=>{if(args?.body?.action==='advance')failed=true;const result=await original(command,args);return args?.route==='/api/workspaces'&&failed?{workspaces:result.workspaces.map((w:object)=>({...w,state:'error',canDelete:true,operation:{phase:'preparing-workspace',status:'failed',action:'resume',last_error:'Workspace startup failed during image. Saved files are retained.',bootstrap_report:{stage:'image',status:'failed'},retry_replaces_host:true}}))}:result;});
+ render(<ManagedWorkspaces/>);await act(async()=>{});
+ fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
+ expect(screen.getByRole('alert')).toHaveTextContent('Preparing the workspace image failed. Your saved files are retained. Restart on a fresh machine, or stop the workspace to keep compute off.');
+ fireEvent.click(screen.getByRole('button',{name:'Restart on a fresh machine'}));await act(async()=>{});
+ expect(mocks.invoke).toHaveBeenCalledWith('canopy_account_request',expect.objectContaining({body:expect.objectContaining({action:'retry',workspaceId:'ws-test'})}));
+});
 it('a bootstrap failure immediately replaces cached starting details and stops automatic handoff',async()=>{
  setup();const original=mocks.invoke.getMockImplementation()!;let failed=false;
  mocks.invoke.mockImplementation(async(command,args)=>{if(args?.body?.action==='advance')failed=true;const result=await original(command,args);return args?.route==='/api/workspaces'&&failed?{workspaces:result.workspaces.map((w:object)=>({...w,state:'error',canDelete:true,operation:{phase:'preparing-workspace',status:'failed',last_error:'Workspace startup failed during artifact. Saved files are retained.',bootstrap_report:{stage:'artifact',status:'failed'}}}))}:result;});
@@ -124,4 +133,11 @@ it('checks every second once the host is starting its services, and connects wit
  const later=advances();await act(async()=>{await vi.advanceTimersByTimeAsync(1000);});expect(advances()).toBe(later+1);
  state='ready';await act(async()=>{await vi.advanceTimersByTimeAsync(1000);});
  expect(mocks.open).toHaveBeenCalledWith('ws-test','/open',{resume:true});expect(mocks.switchMode).toHaveBeenCalledWith('remote');
+});
+
+it('shows the specific disk-full startup failure instead of a generic image-stage message',()=>{
+ const message='Workspace disk is full: 3.2 GB free, 17.2 GB needed for the workspace image. Old workspace images were already removed and your saved files are retained. The workspace disk needs more space before it can start; contact support.';
+ const w={id:'ws-test',name:'My workspace',state:'error',memory_max_mib:8192,cpu_max:2,operation:{phase:'preparing-workspace',status:'failed',last_error:message,bootstrap_report:{stage:'image',status:'failed',reason:'disk-full' as const,freeGB:3.2,neededGB:17.2}}};
+ expect(workspaceStartupProblem(w)).toBe(message);
+ expect(workspaceStartupProblem({...w,operation:{...w.operation,last_error:'Workspace startup failed during image. Saved files are retained.'}})).toBe('Preparing the workspace image failed. Your saved files are retained. Retry preparation, or stop the workspace to keep compute off.');
 });

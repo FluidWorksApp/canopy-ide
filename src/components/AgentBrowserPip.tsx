@@ -6,7 +6,7 @@
 // browser session, and a second agent's page is a different page. See the pip
 // routing in ProjectView for how a session gets a tab of its own.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { decodedFrame } from "../browserFrame";
+import { decodedFrame, frameResource, releaseFrameSrc } from "../browserFrame";
 import * as ipc from "../ipc";
 import { AgentIcon, CloseIcon, GlobeIcon } from "./icons";
 
@@ -97,6 +97,17 @@ export function AgentBrowserPip({
   const widthRef = useRef(width);
   widthRef.current = width;
 
+  // The current frame's blob URL; nothing else owns it, so it is released
+  // when the pip unmounts.
+  const frameUrl = useRef<string | null>(null);
+  useEffect(
+    () => () => {
+      releaseFrameSrc(frameUrl.current);
+      frameUrl.current = null;
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!supported || minimized || hidden) return;
     let stopped = false;
@@ -115,12 +126,23 @@ export function AgentBrowserPip({
           // in a corner preview are only encode time and IPC weight.
           const shot = await ipc.browserSnapshot(tabId, 720, "jpeg");
           if (stopped) return;
-          const src = `data:${shot.mimeType || "image/jpeg"};base64,${shot.image}`;
+          // A blob URL, not a data URL: at four frames a second every data
+          // URL is a new image-cache key WebKit can keep decoded long after
+          // the <img> moves on (see browserFrame.ts), which grew the UI's
+          // WebContent process without bound while a pip was showing.
+          const { src } = frameResource(shot.image);
           // Decoded before the swap, so the <img> never spends a frame blank
           // while the new picture's bytes are still being unpacked.
           await decodedFrame(src);
-          if (stopped) return;
+          if (stopped) {
+            releaseFrameSrc(src);
+            return;
+          }
+          // Release the previous frame only once the next one is set.
+          const prev = frameUrl.current;
+          frameUrl.current = src;
           setFrame(src);
+          releaseFrameSrc(prev);
           if (shot.width > 0 && shot.height > 0) {
             // Ignore sub-percent wobble: the ratio drives the pip's height,
             // and re-laying it out for a rounding difference makes the whole

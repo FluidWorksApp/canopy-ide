@@ -1,4 +1,4 @@
-import {WorkspaceHero} from './WorkspaceHero';
+import {WorkspaceHero,retryActionLabel} from './WorkspaceHero';
 import {useEffect,useRef,useState} from 'react';
 import {peekWorkspaceList,restoreWorkspaceList,refreshWorkspaceList,isWorkspaceAuthenticationError} from './workspaceListCache';
 import type {WorkspaceProgressState} from './WorkspaceProgress';
@@ -12,14 +12,14 @@ import {connectionKey,reportWorkspaceLifecycle} from './connectionState';
 import {clearStopRequest,markStopRequested,saveStopSwitchNotice,stopRequestError,useWorkspaceLifecycle,workspaceLifecycle} from './workspaceLifecycle';
 import {subscribeWorkspaceList} from './workspaceListCache';
 import type {WorkspaceConnection} from './NativeWorkspaceHost';
-export type ManagedWorkspace={id:string;name:string;provider?:string;state:string;canDelete?:boolean;canRemoveConnection?:boolean;canStop?:boolean;access?:{owner:boolean;canManageAccess:boolean;canStop:boolean;canConnect:boolean;canResume?:boolean;connectionUnavailable?:string};memory_max_mib:number;cpu_max:number;operation?:{phase:string;status:string;action?:string;last_error?:string|null;bootstrap_mode?:'cold'|'prebuilt'|null;bootstrap_report?:{stage:string;status:string;sequence?:number;startedAt?:number;receivedAt?:string}|null}};
+export type ManagedWorkspace={id:string;name:string;provider?:string;state:string;canDelete?:boolean;canRemoveConnection?:boolean;canStop?:boolean;access?:{owner:boolean;canManageAccess:boolean;canStop:boolean;canConnect:boolean;canResume?:boolean;connectionUnavailable?:string};memory_max_mib:number;cpu_max:number;operation?:{phase:string;status:string;action?:string;last_error?:string|null;bootstrap_mode?:'cold'|'prebuilt'|null;bootstrap_report?:{stage:string;status:string;sequence?:number;startedAt?:number;receivedAt?:string;reason?:'disk-full';freeGB?:number;neededGB?:number}|null;retry_replaces_host?:boolean}};
 const startupSteps=['Starting machine','Connecting saved files','Starting services','Checking connection','Ready'];
 const reportStages:Record<string,string>={packages:'Installing host tools',storage:'Connecting saved files',artifact:'Downloading the workspace runtime',image:'Preparing the workspace image','host-services':'Starting workspace services'};
 export function workspaceStartupProblem(w:ManagedWorkspace){
  if(w.state!=='error'&&w.operation?.status!=='failed'&&w.operation?.bootstrap_report?.status!=='failed')return null;
  const report=w.operation?.bootstrap_report,stage=report&&(report.stage==='packages'&&w.operation?.bootstrap_mode==='prebuilt'?'Verifying prebuilt host tools':reportStages[report.stage]);
  const provided=typeof w.operation?.last_error==='string'?w.operation.last_error.replace(/[\u0000-\u001f\u007f]/g,' ').slice(0,400).trim():'';
- if(stage&&(!provided||provided.startsWith('Workspace startup failed during ')))return `${stage} failed. Your saved files are retained. Retry preparation, or stop the workspace to keep compute off.`;
+ if(stage&&(!provided||provided.startsWith('Workspace startup failed during ')))return `${stage} failed. Your saved files are retained. ${retryActionLabel(w)}, or stop the workspace to keep compute off.`;
  return provided||'Workspace preparation stopped. Your saved files are retained. Retry preparation, or stop the workspace to keep compute off.';
 }
 // Once the host is starting its services, readiness is seconds away: the server
@@ -27,7 +27,7 @@ export function workspaceStartupProblem(w:ManagedWorkspace){
 function startupPollDelay(w:ManagedWorkspace){return w.operation?.bootstrap_report?.stage==='host-services'||w.operation?.phase==='connecting-workspace'?1000:5000;}
 function bootstrapProgress(w:ManagedWorkspace){const report=w.operation?.bootstrap_report;return report?.status==='progress'?report.stage==='packages'&&w.operation?.bootstrap_mode==='prebuilt'?'Verifying prebuilt host tools':reportStages[report.stage]:undefined;}
 
-const stepFor=(w:ManagedWorkspace)=>w.state==='ready'?4:({'creating-storage':0,'creating-compute':0,'starting':0,'attaching-storage':1,'preparing-workspace':2,'connecting-workspace':3,'retiring-previous-compute':3}[w.operation?.phase??'']??0);
+const stepFor=(w:ManagedWorkspace)=>w.state==='ready'?4:({'creating-storage':0,'creating-compute':0,'starting':0,'attaching-storage':1,'preparing-workspace':2,'connecting-workspace':3,'retiring-previous-compute':3,'replacing-compute':0}[w.operation?.phase??'']??0);
 const canDelete=(w:ManagedWorkspace)=>w.canDelete===true&&w.access?.owner!==false&&!['stopping','deleting'].includes(workspaceLifecycle(w));
 const canStop=(w:ManagedWorkspace)=>w.canStop!==false&&w.access?.canStop!==false&&!['not-started','stopped','stopping','deleting'].includes(workspaceLifecycle(w));
 const request=<T,>(route:string,body?:unknown)=>invoke<T>('canopy_account_request',{route,body:body??null});
@@ -106,7 +106,7 @@ export function ManagedWorkspaces({workspaceId,onList,showAccount=true,showList=
     // A step that keeps failing is retried by the server; say so instead of
     // presenting an unchanged "Starting" for the whole startup deadline.
     const retrying=typeof latest.operation?.last_error==='string'?latest.operation.last_error.replace(/[\u0000-\u001f\u007f]/g,' ').slice(0,300).trim():'';
-    setMessage(retrying?`The last setup step failed (${retrying}). Retrying automatically…`:advanceError?'Could not reach Canopy to continue setup. Retrying automatically…':bootstrapProgress(latest)?`${bootstrapProgress(latest)}… Your saved files stay with this workspace.`:'We’ll connect you automatically when ready. Your saved files and setup stay with this workspace.');
+    setMessage(retrying?`The last setup step failed (${retrying}). Retrying automatically…`:advanceError?'Could not reach Canopy to continue setup. Retrying automatically…':latest.operation?.phase==='replacing-compute'?'Moving to a fresh machine… Your saved files stay with this workspace.':bootstrapProgress(latest)?`${bootstrapProgress(latest)}… Your saved files stay with this workspace.`:'We’ll connect you automatically when ready. Your saved files and setup stay with this workspace.');
     await new Promise(resolve=>setTimeout(resolve,startupPollDelay(latest)));
    }
    if(current===generation.current)throw Error('The workspace is still preparing. You can retry here or stop the workspace.');

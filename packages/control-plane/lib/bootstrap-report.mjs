@@ -21,7 +21,18 @@ export function verifyBootstrapReportToken(token,keyForWorkspace,now=Date.now())
  const actual=Buffer.from(parts[1],'base64url'),expected=mac(parts[0],secret,c.workspaceId);if(actual.length!==expected.length||!timingSafeEqual(actual,expected))reject(401);
  return c;
 }
+// Coded failure reasons a host may attach to a failed stage. Numbers only: the
+// host never sends daemon output, paths or free text.
+export const BOOTSTRAP_FAILURE_REASONS=Object.freeze({'disk-full':{stage:'image',fields:['freeGB','neededGB']}});
+const gigabytes=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<1e6;
 export function validateBootstrapReport(body){
+ const reason=body&&!Array.isArray(body)&&typeof body==='object'?body.reason:undefined;
+ if(reason!==undefined){
+  const rule=Object.hasOwn(BOOTSTRAP_FAILURE_REASONS,reason)?BOOTSTRAP_FAILURE_REASONS[reason]:null;
+  if(!rule||body.status!=='failed'||body.stage!==rule.stage||Object.keys(body).length!==4+rule.fields.length||!rule.fields.every(field=>gigabytes(body[field])))reject(400);
+  const {reason:_,...base}=body;for(const field of rule.fields)delete base[field];validateBootstrapReport(base);
+  return body;
+ }
  if(!body||Array.isArray(body)||Object.keys(body).length!==3||!BOOTSTRAP_STAGES.includes(body.stage)||!['progress','failed','succeeded'].includes(body.status)||(body.status==='succeeded'&&body.stage!=='host-services')||!Number.isSafeInteger(body.sequence)||body.sequence<1||body.sequence>64)reject(400);
  return body;
 }
@@ -38,8 +49,12 @@ export async function recordBootstrapReport(client,claims,input,now=Date.now()){
  if(previous?.startedAt===claims.startedAt&&(previous.status==='succeeded'||body.sequence<=previous.sequence||BOOTSTRAP_STAGES.indexOf(body.stage)<BOOTSTRAP_STAGES.indexOf(previous.stage)))reject(409);
  const report={...body,startedAt:claims.startedAt,receivedAt:new Date(now).toISOString()};
  const context={...op.context,bootstrapReport:report};
- const error=body.status==='failed'?`Workspace startup failed during ${body.stage}. Saved files are retained. Retry after checking the startup service.`:null;
+ const error=body.status==='failed'?bootstrapFailureMessage(body):null;
  await client.query("UPDATE workspace_operation SET context=$2::jsonb,status=CASE WHEN $3 THEN 'failed' ELSE status END,last_error=CASE WHEN $3 THEN $4 ELSE last_error END,updated_at=now() WHERE id=$1",[op.id,JSON.stringify(context),body.status==='failed',error]);
  if(body.status==='failed')await client.query("UPDATE workspace SET state='error',observed_at=now() WHERE id=$1 AND generation=$2 AND desired_state='running'",[w.id,claims.generation]);
  return {accepted:true};
+}
+export function bootstrapFailureMessage(body){
+ if(body.reason==='disk-full')return `Workspace disk is full: ${body.freeGB.toFixed(1)} GB free, ${body.neededGB.toFixed(1)} GB needed for the workspace image. Old workspace images were already removed and your saved files are retained. The workspace disk needs more space before it can start; contact support.`;
+ return `Workspace startup failed during ${body.stage}. Saved files are retained. Retry after checking the startup service.`;
 }

@@ -43,6 +43,7 @@ import {
 } from "../companionSession";
 import { ashStateFor, isOutstanding, type AttentionItem } from "../attention";
 import { useNativeSurface } from "../activeView";
+import { useEscape } from "../useEscape";
 import { getSettings, updateSettings, SETTINGS_CHANGE_EVENT } from "../settings";
 import { Mascot } from "./Mascot";
 import { CompanionChat } from "./CompanionChat";
@@ -370,14 +371,11 @@ export function Companion({
   // Esc closes the panel, matching every other overlay in the app. Never while
   // a proposal is up: dismissing the surface is not answering the question, and
   // the agent would still be waiting.
-  useEffect(() => {
-    if (!open || proposal) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, proposal]);
+  //
+  // On the overlay stack, so the press that closes the chat is not also an
+  // interrupt for the agent in the terminal. Not a blocking layer: the chat is
+  // a panel people keep open while typing in the terminal.
+  useEscape(() => setOpen(false), open && !proposal, { blocksTerminal: false });
 
   const dragging = Boolean(dragSpot);
 
