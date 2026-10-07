@@ -98,7 +98,7 @@ export function ManagedWorkspaces({workspaceId,onList,showAccount=true,showList=
     setStartup({workspace:latest,name:w.name,step:stepFor(latest)});
     if(latest.state==='ready'){
      setMessage('Connecting securely to your workspace…');
-     const {connection}=await request<{connection:WorkspaceConnection}>('/api/operations',{workspaceId:w.id,action:'connect'});
+     const clientId=crypto.randomUUID();const {connection:issued}=await request<{connection:WorkspaceConnection}>('/api/operations',{workspaceId:w.id,action:'connect',clientId});const connection={...issued,clientId};
      if(connection.workspaceId!==w.id||connection.endpoint!==`https://${w.id}.workspaces.canopyide.dev`)throw Error('Invalid managed connection');
      await new RemoteExecutionClient(connection.endpoint,connection.token).workspace(w.id,'/open',{resume:connection.scope!=='view'});
      if(current!==generation.current)return;
