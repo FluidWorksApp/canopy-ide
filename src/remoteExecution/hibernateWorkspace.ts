@@ -4,8 +4,12 @@ import {activeWorkspace} from './workspace';
 import {isAccountWorkspace} from './accountWorkspace';
 import {connectionKey,reportWorkspaceLifecycle} from './connectionState';
 import type {ManagedWorkspace} from './ManagedWorkspaces';
+import {savePhaseLabel} from './storageStatus';
 export type HibernatePhase='saving-projects'|'stopping-services'|'stopping-compute'|'completed';
-export type HibernateProgress={phase:HibernatePhase;savedProjects?:number;totalProjects?:number;shutdownAccepted:boolean};
+export type HibernateProgress={phase:HibernatePhase;savedProjects?:number;totalProjects?:number;shutdownAccepted:boolean;savePhase?:string|null;saveProgress?:string|null};
+// Snapshot storage saves the whole disk after compute stops (trim, stop,
+// snapshot, verify); that can take many minutes on a large disk.
+export const SNAPSHOT_SAVE_WAIT_MS=90*60*1000;
 export type HibernateProgressListener=(progress:HibernateProgress)=>void;
 class ObservationTimeout extends Error {}
 async function bounded<T>(promise:Promise<T>,message:string,ms=8000):Promise<T>{let timer:ReturnType<typeof setTimeout>;try{return await Promise.race([promise,new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new ObservationTimeout(message)),ms);})]);}finally{clearTimeout(timer!);}}
@@ -24,7 +28,7 @@ export async function waitForWorkspaceStopped(workspaceId:string,onProgress?:Hib
  const fence=shutdownFence(),check=()=>{fence.check();options.checkCurrent?.();};
  const connection=activeWorkspace()?.connection,lifecycleKey=key??(connection?.workspaceId===workspaceId?connectionKey(connection.endpoint,workspaceId):undefined);
  let accepted=options.accepted??true,operationId=options.operationId;
- const deadline=options.deadline??Date.now()+120000;
+ let deadline=options.deadline??Date.now()+120000,extended=false;
  const requestBudget=()=>Math.max(1,Math.min(8000,deadline-Date.now()));
  try{
  check();onProgress?.({phase:'stopping-compute',shutdownAccepted:accepted});
@@ -35,6 +39,8 @@ export async function waitForWorkspaceStopped(workspaceId:string,onProgress?:Hib
   if(!current)throw Error('Could not confirm workspace shutdown. Projects are saved; check its status in Workspaces.');
   const activeOperation=current.operation&&['pending','running'].includes(current.operation.status);
   if(activeOperation&&current.operation?.action&&current.operation.action!=='hibernate')throw Error('Another workspace action replaced this shutdown. Check its current status.');
+  if(current.storage_mode==='snapshot'&&!extended){extended=true;deadline=Math.max(deadline,Date.now()+SNAPSHOT_SAVE_WAIT_MS);}
+  if(current.storage_mode==='snapshot'&&savePhaseLabel(current.operation?.phase))onProgress?.({phase:'stopping-compute',shutdownAccepted:true,savePhase:current.operation?.phase??null,saveProgress:current.operation?.save_progress??null});
   if(current.state==='stopped'){if(lifecycleKey)reportWorkspaceLifecycle(lifecycleKey,'hibernated');onProgress?.({phase:'completed',shutdownAccepted:true});return;}
   const pendingShutdown=current.operation?.action==='hibernate'&&activeOperation;
   if(pendingShutdown&&current.operation?.id){if(operationId&&current.operation.id!==operationId)throw Error('Another workspace action replaced this shutdown. Check its current status.');operationId=current.operation.id;}

@@ -253,6 +253,13 @@ test('installed units order user storage before the runtimes and keep warm-up of
  void mkdir;void SWAP_FILE;
 });
 
+test('host configuration accepts only advertised storage sizes',async()=>{
+ const {validateConfig}=await import('./policy.mjs');
+ const config=gib=>({workspaces:[{id:'w1',accounts:[],memoryMiB:1024,cpus:1,storageGiB:gib}],principals:[]});
+ for(const gib of [50,100,200,500,undefined])assert.doesNotThrow(()=>validateConfig(config(gib)));
+ for(const gib of [0,64,'50',1e6])assert.throws(()=>validateConfig(config(gib)),/storage size/);
+});
+
 test('on today\'s retained-disk layout the preparation trims the data disk and root, and is harmless without a snapshot',async()=>{
  const {run,calls}=fakeRun({'docker ps':{stdout:''},'swapon --show':{stdout:''},'findmnt --noheadings --mountpoint /srv/canopy/docker/volumes':{code:1},'findmnt --noheadings --mountpoint /srv/canopy':{code:0},'fstrim -v /srv/canopy':{stdout:'/srv/canopy: 1 GiB (1073741824 bytes) trimmed\n'},'fstrim -v /':{stdout:'/: 0 B (0 bytes) trimmed\n'}});
  const report=await prepareForSnapshot({run,usage:async()=>null,cleanTmp:async()=>{}});
