@@ -6,7 +6,7 @@ import { RemoteExecutionClient, type RemoteSession } from './client';
 import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} from './connectionState';
 import {saveRemoteContextImage} from './saveContextImage';
 
-export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive' }
+export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive'; clientId?: string }
 type Args = Record<string, unknown>;
 type InputQueue = {data:string; running:boolean; timer?:ReturnType<typeof setTimeout>; waiters:Array<{resolve:()=>void; reject:(error:unknown)=>void}>};
 type Stream = { id:number; receivedSnapshot:boolean; pendingExit?:number; socket?: WebSocket; generation: number; cursor: number; frames:OutputFrame[]; queuedBytes:number; busy:boolean; retry?: ReturnType<typeof setTimeout>; handshake?: ReturnType<typeof setTimeout>; channel?: HostChannel<ArrayBuffer>; closed: boolean };
@@ -27,7 +27,9 @@ export class NativeWorkspaceHost implements Host {
     if(this.connection.scope)return this.connection.scope==='view';
     try{const value=JSON.parse(atob(this.connection.token.split('.')[0].replace(/-/g,'+').replace(/_/g,'/')));return value.version===2&&value.scope==='view';}catch{return false;}
   }
-  readonly connectionClientId = crypto.randomUUID();
+  // The first connect already named this IDE connection; keep that identity
+  // so member token renewals match the lease the control plane issued.
+  get connectionClientId(){return this.connection.clientId??(this.connection.clientId=crypto.randomUUID());}
   private remoteBrowsers = new Map<string,string>();
   private projectIdle = false;
   private tokenFreshUntil = 0;
