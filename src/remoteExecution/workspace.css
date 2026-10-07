@@ -318,3 +318,9 @@
 @media(max-width:640px){.workspace-manage{grid-template-columns:1fr;}.workspace-rail{border-right:0;border-bottom:1px solid var(--border);max-height:180px;}.account-sync-row{grid-template-columns:minmax(0,1fr) auto;}.account-sync-state{grid-column:1;}}
 .account-sync .workspace-feedback {margin:0;}
 .workspace-plan-note {display:block;margin-top:6px;color:var(--text-dim);font-size:var(--fs-xs);}
+
+/* Workspaces is a modal: centred over a backdrop, below the shared Dialog (z 900). */
+.workspace-panel-backdrop {position:fixed;inset:0;z-index:800;display:grid;place-items:center;padding:24px;background:color-mix(in oklab,var(--bg-deep) 62%,transparent);}
+.workspace-panel-backdrop[hidden] {display:none;}
+.workspace-panel-backdrop > .workspace-panel {position:relative;inset:auto;right:auto;top:auto;left:auto;margin:0;max-height:calc(100dvh - 48px);}
+@media(max-width:600px){.workspace-panel-backdrop{padding:12px;}.workspace-panel-backdrop > .workspace-panel{width:100%;}}

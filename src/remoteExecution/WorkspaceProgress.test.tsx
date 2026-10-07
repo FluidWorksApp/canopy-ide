@@ -10,9 +10,9 @@ it('collapses to compact progress without cancelling startup and keeps the IDE a
  fireEvent.click(screen.getByRole('button',{name:'Editor action'}));
  fireEvent.click(screen.getByRole('button',{name:'Expand workspace progress'}));fireEvent.click(screen.getByRole('button',{name:'Details'}));expect(details).toHaveBeenCalledOnce();
 });
-it('workspace panel has no modal focus trap or document scroll lock and retains children when collapsed',()=>{
+it('workspace panel is a modal that does not lock document scroll and retains children when closed',()=>{
  const close=vi.fn();const {rerender}=render(<WorkspacePanel open title="Workspaces" onClose={close}><input aria-label="Workspace filter" defaultValue="Saved"/></WorkspacePanel>);
- expect(screen.getByRole('dialog')).toHaveAttribute('aria-modal','false');expect(document.body.style.overflow).not.toBe('hidden');
+ expect(screen.getByRole('dialog')).toHaveAttribute('aria-modal','true');expect(document.body.style.overflow).not.toBe('hidden');
  rerender(<WorkspacePanel open={false} title="Workspaces" onClose={close}><input aria-label="Workspace filter" defaultValue="Saved"/></WorkspacePanel>);
  expect(screen.queryByRole('dialog')).toBeNull();expect(screen.getByLabelText('Workspace filter')).toHaveValue('Saved');
 });

@@ -16,6 +16,11 @@ let cacheEpoch=0;
 window.addEventListener('canopy:account-changed',()=>{accountCache=null;cacheEpoch++;});
 const unauthorized=(error:unknown)=>/unauthorized|not signed in|sign in required|\b40[13]\b/i.test(String(error));
 const request=<T,>(route:string,body?:unknown)=>invoke<T>('canopy_account_request',{route,body:body??null});
+// The last balance seen for an account, so the card shows a value at once and
+// refreshes it, instead of an empty box. Display only; never used for charging.
+const balanceKey=(email:string)=>`canopy.account-balance:${email}`;
+function rememberedBalance(email:string):Credits|null{try{const saved=JSON.parse(localStorage.getItem(balanceKey(email))??'null');return typeof saved?.balanceUsd==='string'?{balanceUsd:saved.balanceUsd,paymentsEnabled:saved.paymentsEnabled}:null;}catch{return null;}}
+function rememberBalance(email:string,credits:Credits){const balanceUsd=credits.balanceUsd??(credits.balance==null?undefined:String(Number(credits.balance)/100));if(balanceUsd==null)return;try{localStorage.setItem(balanceKey(email),JSON.stringify({balanceUsd,paymentsEnabled:credits.paymentsEnabled}));}catch{/* Storage is optional. */}}
 function base64url(bytes:Uint8Array){return btoa(String.fromCharCode(...bytes)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
 export function AccountSettings({onTeams,onWorkspaces}:{onTeams?:()=>void;onWorkspaces?:()=>void}={}){
  const [user,setUser]=useState<User|null>(accountCache?.user??null),[credits,setCredits]=useState<Credits|null>(accountCache?.credits??null);
@@ -23,7 +28,8 @@ export function AccountSettings({onTeams,onWorkspaces}:{onTeams?:()=>void;onWork
  const generation=useRef(0);
  const [loading,setLoading]=useState(true);
  const [balanceStale,setBalanceStale]=useState(false);
- useEffect(()=>{if(!user)return;let stopped=false;let pending=false;const refresh=async()=>{if(pending||document.hidden)return;pending=true;const epoch=cacheEpoch;try{const next=await request<Credits>('/api/credits');if(!stopped&&epoch===cacheEpoch){setCredits(next);if(accountCache?.user.email===user.email)accountCache={user,credits:next};setBalanceStale(false);}}catch{if(!stopped&&epoch===cacheEpoch)setBalanceStale(true);}finally{pending=false;}};void refresh();const timer=setInterval(()=>void refresh(),10000);window.addEventListener('focus',refresh);return()=>{stopped=true;clearInterval(timer);window.removeEventListener('focus',refresh);};},[user?.email]);
+ const [balanceRefreshing,setBalanceRefreshing]=useState(false);
+ useEffect(()=>{if(!user)return;let stopped=false;let pending=false;const remembered=rememberedBalance(user.email);setCredits(current=>current??remembered);setBalanceRefreshing(true);const refresh=async()=>{if(pending||document.hidden)return;pending=true;const epoch=cacheEpoch;try{const next=await request<Credits>('/api/credits');if(!stopped&&epoch===cacheEpoch){setCredits(next);rememberBalance(user.email,next);if(accountCache?.user.email===user.email)accountCache={user,credits:next};setBalanceStale(false);}}catch{if(!stopped&&epoch===cacheEpoch)setBalanceStale(true);}finally{pending=false;if(!stopped)setBalanceRefreshing(false);}};void refresh();const timer=setInterval(()=>void refresh(),10000);window.addEventListener('focus',refresh);return()=>{stopped=true;clearInterval(timer);window.removeEventListener('focus',refresh);};},[user?.email]);
  useEffect(()=>{
   let alive=true;
   const refresh=async()=>{
@@ -77,7 +83,7 @@ export function AccountSettings({onTeams,onWorkspaces}:{onTeams?:()=>void;onWork
    <Button icon variant="ghost" className="account-header-action" aria-label="Sign out" title="Sign out" disabled={busy} onClick={()=>{setBusy(true);void request('/api/device',{action:'revoke'}).then(()=>{clearTeamSessions();window.dispatchEvent(new Event('canopy:account-changed'));setUser(null);setCredits(null);setMessage('Signed out.');}).catch(error=>setMessage(String(error))).finally(()=>setBusy(false));}}><svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M9 4H4v16h5M14 7l5 5-5 5M8 12h11"/></svg><span className="account-action-tooltip">Sign out</span></Button></nav>}</header>
   {loading&&user&&<p role="status">Refreshing your account…</p>}
   {user?<>
-   <div className="account-balance"><span>Available balance <small>USD</small></span><strong>{credits?dollars(credits.balanceUsd??(credits.balance==null?null:Number(credits.balance)/100)):<span className="account-shimmer account-skeleton-amount" aria-label="Loading balance"/>}</strong><p>{balanceStale ? "Balance could not refresh. Showing the last available amount." : "Shared across your workspaces. Usage is charged per minute."}</p>{credits?.paymentsEnabled===false&&<small>Adding funds is not available during preview.</small>}</div>
+   <div className="account-balance"><span>Available balance <small>USD</small></span><strong>{credits?dollars(credits.balanceUsd??(credits.balance==null?null:Number(credits.balance)/100)):<span className="account-balance-loading" role="status"><span className="account-shimmer account-skeleton-amount"/>Loading balance…</span>}</strong><p>{balanceStale ? "Balance could not refresh. Showing the last available amount." : balanceRefreshing&&credits ? "Updating…" : "Shared across your workspaces. Usage is charged per minute."}</p>{credits?.paymentsEnabled===false&&<small>Adding funds is not available during preview.</small>}</div>
 
   </>:<div className="set-inline"><Button disabled={busy} onClick={()=>void signIn()}>{busy?'Waiting for sign-in…':'Sign in or create account'}</Button>{busy&&<Button onClick={()=>{generation.current++;setBusy(false);setCode('');setMessage('Sign-in cancelled.');}}>Cancel</Button>}</div>}
   {code&&<p>Request code: <strong>{code}</strong></p>}
