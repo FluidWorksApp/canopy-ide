@@ -117,3 +117,25 @@ export function planFor(
     ) ?? null
   );
 }
+
+/** Whether a reading no longer describes the plan: old enough to say so, or a
+ *  window has reset since it was taken (its percentage is then yesterday's). */
+export function planStale(plan: PlanUsage, now = Date.now()): boolean {
+  if (stalenessText(plan, now)) return true;
+  const secs = Math.floor(now / 1000);
+  return plan.windows.some((w) => !!w.resets_at && w.resets_at <= secs);
+}
+
+/** The chip as shown: the account it belongs to when that is not the one new
+ *  agents launch as (the front tab runs under another login), and the age of
+ *  a stale reading. Never another account's numbers under this one's name. */
+export function chipLabel(
+  plan: PlanUsage,
+  opts: { now?: number; accountLabel?: string | null } = {},
+): string {
+  const now = opts.now ?? Date.now();
+  const parts = [chipText(plan)];
+  if (opts.accountLabel) parts.unshift(opts.accountLabel);
+  if (planStale(plan, now)) parts.push(stalenessText(plan, now)?.replace(/^as of /, "") ?? "stale");
+  return parts.join(" · ");
+}

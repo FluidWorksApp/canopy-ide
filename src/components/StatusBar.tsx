@@ -24,7 +24,8 @@ import { formatDeepLink } from "../deepLinks";
 import { setBounded } from "../boundedMap";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
-import { chipText, planFor, planTone, tooltip } from "../planUsage";
+import { chipLabel, planFor, planStale, planTone, tooltip } from "../planUsage";
+import { accountSummary } from "../accountState";
 import {
   loadFlags,
   loadNote,
@@ -356,6 +357,25 @@ export const StatusBar = memo(function StatusBar({
     () => planFor(plans, agentId, agentProfile || "default"),
     [plans, agentId, agentProfile],
   );
+  // The chip reports the front terminal's account. When that is not the
+  // account new agents launch as, it says whose numbers these are.
+  const [launchAccount, setLaunchAccount] = useState(activeProfile());
+  const [accountLabels, setAccountLabels] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const pull = () => {
+      setLaunchAccount(activeProfile());
+      void ipc
+        .profilesList()
+        .then((list) => setAccountLabels(Object.fromEntries(list.map((p) => [p.id, p.label]))))
+        .catch(() => {});
+    };
+    pull();
+    window.addEventListener(PROFILE_CHANGE_EVENT, pull);
+    return () => window.removeEventListener(PROFILE_CHANGE_EVENT, pull);
+  }, []);
+  const chipProfile = agentProfile || "default";
+  const chipAccount =
+    chipProfile !== launchAccount ? (accountLabels[chipProfile] ?? chipProfile) : null;
 
   // The transcript whose model/tokens the tray shows. Per-TAB first: prefer
   // the latest event stamped with the active terminal's pty, so switching
@@ -1352,10 +1372,10 @@ export const StatusBar = memo(function StatusBar({
           nothing rather than a 0% that would read as "plenty left". */}
       {plan && plan.windows.length > 0 && (
         <span
-          className={`status-item status-plan is-${planTone(plan)}`}
-          title={tooltip(plan)}
+          className={`status-item status-plan is-${planTone(plan)}${planStale(plan) ? " is-stale" : ""}`}
+          title={`${chipAccount ? `${chipAccount}'s plan (this terminal's account)\n` : ""}${tooltip(plan)}`}
         >
-          {chipText(plan)}
+          {chipLabel(plan, { accountLabel: chipAccount })}
         </span>
       )}
       {/* Beside the plan chip: that headroom belongs to this account. Hidden
@@ -1418,7 +1438,7 @@ export const StatusBar = memo(function StatusBar({
 
 /** The global account switch. Running sessions keep the account they started
  *  with; this changes what the next launch uses. */
-function AccountSwitcher() {
+export function AccountSwitcher() {
   const [profiles, setProfiles] = useState<ipc.AgentProfile[]>([]);
   const [accounts, setAccounts] = useState<Record<string, ipc.AccountStatus[]>>(
     {},
@@ -1487,9 +1507,6 @@ function AccountSwitcher() {
 
   if (profiles.length < 2) return null;
   const current = profiles.find((p) => p.id === active) ?? profiles[0];
-  /** The CLIs this account holds a login for. */
-  const heldBy = (id: string) =>
-    (accounts[id] ?? []).filter((a) => a.state === "in");
 
   return (
     <span className="status-account-anchor" ref={anchorRef}>
@@ -1517,7 +1534,6 @@ function AccountSwitcher() {
           }
         >
           {profiles.map((p) => {
-            const held = heldBy(p.id);
             return (
               <button
                 key={p.id}
@@ -1533,11 +1549,7 @@ function AccountSwitcher() {
                 </span>
                 {/* Said up front, not at a login prompt. */}
                 <span className="status-account-held">
-                  {held.length
-                    ? held.map((a) => a.agent).join(", ")
-                    : p.id === "default"
-                      ? "signed out"
-                      : "no logins yet"}
+                  {accounts[p.id] ? accountSummary(accounts[p.id]) : "checking…"}
                 </span>
               </button>
             );

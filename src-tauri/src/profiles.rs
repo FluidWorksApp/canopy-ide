@@ -299,6 +299,47 @@ pub fn env_for_command(home: &str, command: &str) -> Vec<(String, String)> {
     env_for(home, bin, &active(home))
 }
 
+/// Variables that pick a CLI's account. Canopy is often started from a
+/// terminal that already runs under a named profile (a dev build launched by
+/// an agent, `open` from a profile shell), and the app inherits that
+/// terminal's account. A "Default" launch or probe that inherits them really
+/// runs as the named profile: two places then use one login, and the second
+/// refresh-token rotation signs one of them out.
+pub const ACCOUNT_VARS: [&str; 4] = [
+    "CANOPY_PROFILE",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "AMP_SETTINGS_FILE",
+];
+
+/// Whether an inherited account variable points into a named profile root.
+/// Only those are dropped: a user who deliberately exports CLAUDE_CONFIG_DIR
+/// for their default login keeps it.
+pub fn inherited_profile_path(home: &str, value: &str) -> bool {
+    let profiles = PathBuf::from(home).join(".canopy").join("profiles");
+    Path::new(value).starts_with(&profiles)
+}
+
+/// The inherited account variables a PTY must not pass on: `CANOPY_PROFILE`
+/// always (only an explicit launch names the account), the config-home
+/// variables when they point into a named profile. A variable the caller sets
+/// explicitly is the launch's own and is never cleared.
+pub fn inherited_account_vars_to_clear(
+    home: &str,
+    inherited: impl Fn(&str) -> Option<String>,
+    explicit: &[(String, String)],
+) -> Vec<&'static str> {
+    ACCOUNT_VARS
+        .into_iter()
+        .filter(|key| !explicit.iter().any(|(k, _)| k == key))
+        .filter(|key| {
+            inherited(key).is_some_and(|value| {
+                *key == "CANOPY_PROFILE" || inherited_profile_path(home, &value)
+            })
+        })
+        .collect()
+}
+
 /// Which profile a path belongs to. Longest root wins — profile roots live
 /// inside `$HOME`, so a plain prefix test would match everything.
 pub fn profile_of_path(home: &str, path: &Path) -> String {
@@ -327,7 +368,13 @@ pub struct AccountStatus {
     pub state: &'static str,
     /// The account, as the CLI itself recorded it — an email, usually. None
     /// when signed in through something that carries no identity (an API key).
+    /// On a signed-out row, the account that was signed in before.
     pub account: Option<String>,
+    /// Why a row reads the way it does, when the state alone would mislead:
+    /// "signed-out" — the CLI cleared a login it once held (a failed token
+    /// renewal); "unverified" — the login store could not be read, so the
+    /// state is the CLI's last record rather than a checked answer.
+    pub reason: Option<&'static str>,
 }
 
 /// The email in a JWT's claims. Read as a label off a local file the CLI wrote,
@@ -357,58 +404,57 @@ fn claude_account(cfg: &Path, home: &str) -> AccountStatus {
                 .map(|s| s.to_string())
         });
     // The recorded account outlives its login: a failed token renewal leaves
-    // `oauthAccount` in place. Ask the credential store whether it is usable,
-    // and fall back to the record only when the store cannot be read.
-    let usable = crate::client_mode::claude_login_usable(cfg, home);
+    // `oauthAccount` in place. The credential store decides.
+    let probe = crate::client_mode::profile_login("claude", cfg, home);
+    verified("claude", probe, account.is_some(), account)
+}
+
+/// One row from the store's answer. The CLI's own record (`recorded`) is used
+/// only when the store cannot be read, and the row says so.
+fn verified(
+    agent: &str,
+    probe: crate::client_mode::LoginProbe,
+    recorded: bool,
+    account: Option<String>,
+) -> AccountStatus {
+    use crate::client_mode::LoginProbe;
+    let (state, reason) = match probe {
+        LoginProbe::Ready => ("in", None),
+        LoginProbe::Incomplete => ("out", Some("signed-out")),
+        LoginProbe::Absent if recorded => ("out", Some("signed-out")),
+        LoginProbe::Absent => ("out", None),
+        LoginProbe::Unreadable => (if recorded { "in" } else { "out" }, Some("unverified")),
+    };
     AccountStatus {
-        agent: "claude".into(),
-        state: if claude_signed_in(account.is_some(), usable) {
-            "in"
-        } else {
-            "out"
-        },
+        agent: agent.into(),
+        state,
         account,
+        reason,
     }
 }
 
-/// The credential store decides when it can be read; the recorded account is
-/// only the fallback for a store that is locked or unavailable.
-fn claude_signed_in(recorded: bool, usable: Option<bool>) -> bool {
-    usable.unwrap_or(recorded)
-}
-
-/// Codex keeps `auth.json` under CODEX_HOME with either an API key or an OAuth
-/// bundle whose id_token carries the account's email.
-fn codex_account(cfg: &Path) -> AccountStatus {
+/// Codex keeps `auth.json` under CODEX_HOME (or the OS keyring, per its
+/// `cli_auth_credentials_store`) with either an API key or an OAuth bundle
+/// whose id_token carries the account's email. The email is read from the
+/// file as a label; whether the login is usable comes from the store.
+fn codex_account(cfg: &Path, home: &str) -> AccountStatus {
     let parsed = std::fs::read_to_string(cfg.join(".codex").join("auth.json"))
         .ok()
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-    let Some(v) = parsed else {
-        return AccountStatus {
-            agent: "codex".into(),
-            state: "out",
-            account: None,
-        };
+    let (recorded, account) = match &parsed {
+        None => (false, None),
+        // An API key names no person. Saying so is better than showing a
+        // blank where every other row shows an email.
+        Some(v) if v["OPENAI_API_KEY"].as_str().is_some_and(|k| !k.is_empty()) => {
+            (true, Some("API key".to_string()))
+        }
+        Some(v) => (
+            v["tokens"]["access_token"].is_string(),
+            v["tokens"]["id_token"].as_str().and_then(jwt_email),
+        ),
     };
-    if v["OPENAI_API_KEY"].as_str().is_some_and(|k| !k.is_empty()) {
-        return AccountStatus {
-            agent: "codex".into(),
-            state: "in",
-            // An API key names no person. Saying so is better than showing a
-            // blank where every other row shows an email.
-            account: Some("API key".into()),
-        };
-    }
-    let email = v["tokens"]["id_token"].as_str().and_then(jwt_email);
-    AccountStatus {
-        agent: "codex".into(),
-        state: if v["tokens"]["access_token"].is_string() {
-            "in"
-        } else {
-            "out"
-        },
-        account: email,
-    }
+    let probe = crate::client_mode::profile_login("codex", cfg, home);
+    verified("codex", probe, recorded, account)
 }
 
 /// What each CLI's account looks like inside one profile.
@@ -417,13 +463,14 @@ pub fn account_status(home: &str, id: &str) -> Vec<AccountStatus> {
     agent_cli::profile_clis()
         .map(|cli| match cli.account_probe {
             AccountProbe::ClaudeState => claude_account(&root, home),
-            AccountProbe::CodexAuth => codex_account(&root),
+            AccountProbe::CodexAuth => codex_account(&root, home),
             // opencode (opencode.db) and amp keep credentials somewhere this
             // has not been verified against the real CLIs.
             AccountProbe::Unknown => AccountStatus {
                 agent: cli.id.into(),
                 state: "unknown",
                 account: None,
+                reason: None,
             },
         })
         .collect()
@@ -657,13 +704,55 @@ mod tests {
         );
     }
 
-    /// An expired login keeps its recorded account; the store decides.
+    /// An expired login keeps its recorded account; the store decides, and a
+    /// row says when it could not ask the store.
     #[test]
     fn a_recorded_account_without_a_usable_login_is_signed_out() {
-        assert!(!claude_signed_in(true, Some(false)));
-        assert!(claude_signed_in(false, Some(true)));
-        assert!(claude_signed_in(true, None));
-        assert!(!claude_signed_in(false, None));
+        use crate::client_mode::LoginProbe;
+        let row = |p, recorded| {
+            let s = verified("claude", p, recorded, Some("me@example.com".into()));
+            (s.state, s.reason)
+        };
+        // The Default incident: a recorded email over a cleared Keychain item.
+        assert_eq!(
+            row(LoginProbe::Incomplete, true),
+            ("out", Some("signed-out"))
+        );
+        assert_eq!(row(LoginProbe::Absent, true), ("out", Some("signed-out")));
+        assert_eq!(row(LoginProbe::Ready, false), ("in", None));
+        assert_eq!(
+            row(LoginProbe::Unreadable, true),
+            ("in", Some("unverified"))
+        );
+        assert_eq!(
+            row(LoginProbe::Unreadable, false),
+            ("out", Some("unverified"))
+        );
+        assert_eq!(row(LoginProbe::Absent, false), ("out", None));
+    }
+
+    /// Canopy started from a profile's terminal must not hand that profile's
+    /// account to a Default tab, nor report it as Default's.
+    #[test]
+    fn an_inherited_profile_account_is_not_passed_to_default_launches() {
+        let h = "/Users/dev";
+        let vj = "/Users/dev/.canopy/profiles/vj/.claude".to_string();
+        let inherited = |key: &str| match key {
+            "CANOPY_PROFILE" => Some("vj".to_string()),
+            "CLAUDE_CONFIG_DIR" => Some(vj.clone()),
+            "CODEX_HOME" => Some("/Users/dev/custom-codex".to_string()),
+            _ => None,
+        };
+        let cleared = inherited_account_vars_to_clear(h, inherited, &[]);
+        assert_eq!(cleared, vec!["CANOPY_PROFILE", "CLAUDE_CONFIG_DIR"]);
+        // A user's own override for the default login is kept.
+        assert!(!cleared.contains(&"CODEX_HOME"));
+        // An explicit launch env is the launch's own and is never cleared.
+        let explicit = vec![
+            ("CANOPY_PROFILE".to_string(), "vj".to_string()),
+            ("CLAUDE_CONFIG_DIR".to_string(), vj.clone()),
+        ];
+        assert!(inherited_account_vars_to_clear(h, inherited, &explicit).is_empty());
     }
 
     /// A signed-in profile must report the account it holds.
