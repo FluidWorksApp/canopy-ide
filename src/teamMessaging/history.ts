@@ -36,6 +36,12 @@ export async function saveChatMessage(account:string,team:string,message:ChatMes
  }
 
 }
+/** Removes one of the account's own messages, used when the sender discards or
+ * resends a message that was never delivered. Missing rows are ignored. */
+export async function forgetChatMessage(account:string,team:string,messageId:string){
+ scope(account,team);const db=await open();
+ await new Promise<void>((resolve,reject)=>{const tx=db.transaction('messages','readwrite',{durability:'strict'});tx.objectStore('messages').delete(JSON.stringify([account,team,messageId]));tx.oncomplete=()=>resolve();tx.onabort=()=>reject(tx.error??Error('Message could not be removed'));});
+}
 export async function loadChatHistory(account:string,team:string):Promise<ChatMessage[]>{
  const db=await open(),localKey=await key(account);
  const rows=await new Promise<Row[]>((resolve,reject)=>{const r=db.transaction('messages').objectStore('messages').index('scope').getAll(scope(account,team));r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
