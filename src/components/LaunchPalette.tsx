@@ -44,8 +44,10 @@ export function LaunchPalette({
   onCancel,
   defaultWhere: requestedWhere,
 }: LaunchPaletteProps) {
-  // Escape is the palette's own, all the way down to the panel behind it.
-  useEscapeLayer();
+  // Escape is the palette's own, all the way down to the panel behind it —
+  // and never the terminal's, wherever focus is. The input's own Escape
+  // handling still runs first while it has focus.
+  useEscapeLayer(true, { onEscape: () => onCancel() });
   const [query, setQuery] = useState("");
   const [sel, setSel] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);

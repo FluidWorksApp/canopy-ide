@@ -130,7 +130,10 @@ export function Dictation({ notify }: { notify: Notify }) {
   phaseRef.current = phase;
   // Escape cancels the recording, and only the recording — nothing behind the
   // pill may take the same press as a dismissal.
-  useEscapeLayer(phase === "recording");
+  // Its own capture listener below does the cancelling; the layer only keeps
+  // the press from the terminal and from the surfaces underneath. Not a
+  // blocking layer: recording is no reason to take the keyboard away.
+  useEscapeLayer(phase === "recording", { blocksTerminal: false, keepFocus: true });
   const noticeTimer = useRef<number | undefined>(undefined);
   const level = useRef(0);
   /** A release that arrived while the mic was still opening. Push-to-talk can
@@ -152,6 +155,10 @@ export function Dictation({ notify }: { notify: Notify }) {
     entries: TranscriptEntry[];
     index: number;
   } | null>(null);
+  // The picker owns the keyboard while it is up (its capture listener below
+  // handles Escape and the arrows); as a layer it also keeps every key from the
+  // terminal. Focus stays put: a pick is typed into whatever had it.
+  useEscapeLayer(picker != null, { keepFocus: true });
 
   useEffect(() => {
     const notice = (msg: string) => {

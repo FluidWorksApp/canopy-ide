@@ -1,5 +1,6 @@
 import {useEffect,useLayoutEffect,useRef,useState} from 'react';
 import {createPortal} from 'react-dom';
+import {useEscapeLayer} from '../useEscape';
 
 export type WorkspaceMenuRow={id:string;name:string;kind:'local'|'saved'|'managed';detail:string;tone:'running'|'attention'|'quiet'|'danger';active:boolean;disabled?:string};
 
@@ -8,6 +9,9 @@ export type WorkspaceMenuRow={id:string;name:string;kind:'local'|'saved'|'manage
  * its own popup rather than in this menu. */
 export function WorkspaceMenu({anchor,rows,busyId,error,onPick,onManage,onNew,onClose}:{anchor:HTMLElement|null;rows:WorkspaceMenuRow[];busyId:string|null;error:string;onPick:(row:WorkspaceMenuRow)=>void;onManage:()=>void;onNew:()=>void;onClose:()=>void}){
  const menu=useRef<HTMLDivElement>(null);
+ // Escape closes the menu (via the overlay stack, so never the terminal too)
+ // and hands focus back to the header button that opened it.
+ useEscapeLayer(true,{onEscape:()=>{onClose();anchor?.focus();}});
  const [position,setPosition]=useState<{top:number;right:number}|null>(null);
  useLayoutEffect(()=>{if(!anchor)return;const place=()=>{const rect=anchor.getBoundingClientRect();setPosition({top:rect.bottom+6,right:Math.max(8,window.innerWidth-rect.right)});};place();window.addEventListener('resize',place);return()=>window.removeEventListener('resize',place);},[anchor]);
  useEffect(()=>{const items=menu.current?.querySelectorAll<HTMLElement>('[role^=menuitem]:not([aria-disabled=true])');(menu.current?.querySelector<HTMLElement>('[aria-checked=true]')??items?.[0])?.focus();},[]);
@@ -16,7 +20,6 @@ export function WorkspaceMenu({anchor,rows,busyId,error,onPick,onManage,onNew,on
   document.addEventListener('mousedown',down);return()=>document.removeEventListener('mousedown',down);
  },[anchor,onClose]);
  function keys(event:React.KeyboardEvent){
-  if(event.key==='Escape'){event.stopPropagation();onClose();anchor?.focus();return;}
   if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return;
   const items=[...(menu.current?.querySelectorAll<HTMLElement>('[role^=menuitem]:not([aria-disabled=true])')??[])];if(!items.length)return;
   const index=items.indexOf(document.activeElement as HTMLElement);

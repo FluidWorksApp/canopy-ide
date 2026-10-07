@@ -3,6 +3,7 @@
 // AgentQueryBar, minus the free-text box — a micro-task always owns a fresh
 // ephemeral session, which is what makes closing it safe.
 import { useRef, useState } from "react";
+import { useEscape } from "../useEscape";
 import type { MicroTaskDef } from "../microTasks";
 import { Button } from "./ui";
 
@@ -17,6 +18,7 @@ export function MicroTaskButton<P>({ task, payload, title, onLaunch }: MicroTask
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  useEscape(() => setOpen(false), open);
 
   const go = () => {
     onLaunch(task, payload, query.trim());
