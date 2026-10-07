@@ -13,3 +13,13 @@ it('names the fresh-machine restart when the control plane says Retry will repla
  const open=vi.fn();render(<WorkspaceHero workspace={{...workspace,operation:{phase:'preparing-workspace',status:'failed',action:'resume',bootstrap_report:{stage:'image',status:'failed'},retry_replaces_host:true}}} onOpen={open}/>);
  expect(screen.queryByRole('button',{name:'Retry preparation'})).toBeNull();fireEvent.click(screen.getByRole('button',{name:'Restart on a fresh machine'}));expect(open).toHaveBeenCalledOnce();
 });
+it('shows the active connection as Connected, with no primary Open action, and offers Switch to local in More',()=>{
+ const open=vi.fn(),local=vi.fn();render(<WorkspaceHero workspace={{...workspace,state:'ready'}} connected onOpen={open} onSwitchLocal={local}/>);
+ expect(screen.queryByRole('button',{name:'Open workspace'})).toBeNull();expect(screen.getByText('Connected')).toBeInTheDocument();expect(screen.queryByText('Running')).toBeNull();
+ const more=screen.getByLabelText('More actions for Machine Works');more.closest('details')!.open=true;
+ fireEvent.click(screen.getByRole('button',{name:/Switch to local workspace/}));expect(local).toHaveBeenCalledOnce();expect(open).not.toHaveBeenCalled();
+});
+it('keeps Open workspace for a running workspace this window is not connected to',()=>{
+ render(<WorkspaceHero workspace={{...workspace,state:'ready'}} onOpen={vi.fn()} onSwitchLocal={vi.fn()}/>);
+ expect(screen.getByRole('button',{name:'Open workspace'})).toBeEnabled();expect(screen.queryByLabelText('More actions for Machine Works')).toBeNull();
+});

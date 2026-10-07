@@ -74,3 +74,22 @@ test('failed rollback journal sync keeps the restored workspace quarantined',asy
  assert.equal(containers.get('canopy-ws-owner').State.Running,false);
  assert.equal(options.host.migrationCleanupRequired.has('owner'),true);
 });
+test('capacity-only adoption recreates the owner in the slice without copying or touching projects',async()=>{
+ const {options,containers,calls}=setup();const legacy=[{id:'old',writable:true}];
+ Object.assign(options.config.workspaces[0],{cgroupParent:undefined,sharingCgroupParent:'canopy-owner.slice',projectMounts:legacy});
+ let saved;options.saveConfig=async c=>{saved=c;};
+ const result=await migrateWorkspace({...options,projects:undefined,capacityOnly:true});
+ assert.equal(containers.get('canopy-ws-owner').Id,'new');assert.equal(containers.get(result.preservedContainer).Id,'original');
+ assert.equal(saved.workspaces[0].cgroupParent,'canopy-owner.slice');assert.equal(saved.workspaces[0].ownerImage,image);assert.deepEqual(saved.workspaces[0].projectMounts,legacy);
+ assert.ok(!calls.some(c=>c[0]==='volume'||c[0]==='run'),'no project volume is created or copied');
+ await assert.rejects(migrateWorkspace({...options,capacityOnly:true}),/not eligible/,'already in the slice');
+});
+test('restoring originals recreates the owner without copy mounts and keeps the copies',async()=>{
+ const {restoreOriginalMounts}=await import('./migrate-workspace.mjs');
+ const {options,containers,calls}=setup();options.config.workspaces[0].projectMounts=[{id:'p_muwfihlx_1cy37g',writable:true}];
+ let saved;options.saveConfig=async c=>{saved=c;};
+ const result=await restoreOriginalMounts(options);
+ assert.equal('projectMounts' in saved.workspaces[0],false);assert.equal(saved.workspaces[0].cgroupParent,'canopy-owner.slice');
+ assert.equal(containers.get(result.preservedContainer).Id,'original');assert.ok(!calls.some(c=>c[0]==='volume'&&c[1]==='rm'),'copies are kept');
+ await assert.rejects(restoreOriginalMounts(options),/no copied projects/);
+});

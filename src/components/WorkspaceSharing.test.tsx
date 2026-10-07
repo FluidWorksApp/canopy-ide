@@ -2,19 +2,103 @@ import {render,screen,fireEvent,waitFor,act,within} from '@testing-library/react
 import {it,expect,vi,beforeEach} from 'vitest';
 import {WorkspaceSharing} from './WorkspaceSharing';
 const invoke=vi.hoisted(()=>vi.fn());vi.mock('@tauri-apps/api/core',()=>({invoke}));
-const owner=[{role:'owner',permissions:{projects:'all'}}];
-function fixture(overrides:Record<string,unknown>={}){invoke.mockImplementation(async(_,{body}={body:{}})=>{if(body.action in overrides){const result=overrides[body.action];if(result instanceof Error)throw result;return typeof result==='function'?(result as Function)(body):result;}return body.action==='workspace-team-list'?{organizationId:'org',teams:[{id:'team',name:'Engineering'}],grants:[],yourAccess:owner}:body.action==='workspace-person-list'?{people:[{id:'ada',name:'Ada',email:'ada@example.invalid'}],grants:[]}:body.action==='workspace-organization-list'?{organizationId:'org',organizationName:'Canopy Labs',grant:null}:body.action==='workspace-project-list'?{projects:[{id:'app',name:'Product',components:[{id:'web',name:'Frontend'},{id:'api',name:'Backend'}]}]}:{ok:true};});}
+type Body={action:string;[key:string]:unknown};
+const listing=(shares:unknown[]=[])=>({organizationId:'org',organizationName:'Canopy Labs',people:[{id:'ada',name:'Ada',email:'ada@example.invalid'},{id:'bo',name:'Bo',email:'bo@example.invalid'}],teams:[{id:'core',name:'Core'}],shares});
+function fixture(overrides:Record<string,unknown>={}){invoke.mockImplementation(async(_:string,{body}:{body:Body}={body:{action:''}})=>{
+ if(body.action in overrides){const result=overrides[body.action];if(result instanceof Error)throw result;return typeof result==='function'?(result as (b:Body)=>unknown)(body):result;}
+ if(body.action==='workspace-share-list')return listing();
+ if(body.action==='sharing-status')return {sharing:{state:'off',enabled:false,ready:false,error:null}};
+ if(body.action==='organization-list')return {organizations:[{id:'org',name:'Canopy Labs'}]};
+ return {ok:true};
+});}
+const calls=(action:string)=>invoke.mock.calls.map(([,args])=>args.body).filter((b:Body)=>b.action===action);
 beforeEach(()=>invoke.mockReset());
-it('starts with a compact access roster and opens only the chosen form',async()=>{fixture();render(<WorkspaceSharing workspaceId="workspace"/>);await screen.findByText('No teams have access');expect(screen.queryByRole('combobox')).toBeNull();expect(screen.queryByText('Share workspace')).toBeNull();expect(screen.queryByText('Shared workspace accounts')).toBeNull();fireEvent.click(screen.getByRole('button',{name:'+ Add access'}));expect(screen.getByRole('combobox',{name:'Team'})).toBeVisible();expect(screen.getByRole('radio',{name:'Viewer'})).toBeChecked();expect(screen.queryByRole('combobox',{name:'Person'})).toBeNull();});
-it('edits a team policy without losing selected projects or explicit resources',async()=>{const permissions={projects:'selected',projectIds:['app'],git:'shared',agents:'personal',sessions:'view'};fixture({'workspace-team-list':{organizationId:'org',teams:[{id:'team',name:'Engineering'}],grants:[{team_id:'team',name:'Engineering',role:'member',permissions}],yourAccess:owner}});render(<WorkspaceSharing workspaceId="workspace"/>);fireEvent.click(await screen.findByRole('button',{name:'Edit'}));fireEvent.click(screen.getByRole('radio',{name:'Viewer'}));fireEvent.click(screen.getByRole('button',{name:'Save changes'}));await waitFor(()=>expect(invoke).toHaveBeenCalledWith('canopy_account_request',{route:'/api/teams',body:{action:'workspace-team-grant',workspaceId:'workspace',teamId:'team',role:'viewer',permissions}}));});
-it('grants a person with personal credentials by default',async()=>{fixture();render(<WorkspaceSharing workspaceId="workspace"/>);await screen.findByText('No teams have access');fireEvent.click(screen.getByRole('tab',{name:/People/}));fireEvent.click(screen.getByRole('button',{name:'Add a person'}));fireEvent.change(screen.getByRole('combobox',{name:'Person'}),{target:{value:'ada'}});fireEvent.click(screen.getByRole('radio',{name:'Developer'}));fireEvent.click(screen.getByRole('button',{name:'Grant access'}));await waitFor(()=>expect(invoke).toHaveBeenCalledWith('canopy_account_request',{route:'/api/teams',body:{action:'workspace-person-grant',workspaceId:'workspace',userId:'ada',role:'member',permissions:{projects:'all',projectIds:[],git:'personal',agents:'personal',sessions:'private'}}}));});
-it('Everyone grants current and future organization members without copying people',async()=>{fixture();render(<WorkspaceSharing workspaceId="workspace"/>);await screen.findByText('No teams have access');fireEvent.click(screen.getByRole('tab',{name:/Everyone/}));fireEvent.click(screen.getByRole('button',{name:'Give everyone access'}));expect(screen.getByRole('combobox',{name:'Organization'})).toHaveValue('org');fireEvent.click(screen.getByRole('button',{name:'Grant access'}));await waitFor(()=>expect(invoke).toHaveBeenCalledWith('canopy_account_request',{route:'/api/teams',body:{action:'workspace-organization-grant',workspaceId:'workspace',organizationId:'org',role:'viewer',permissions:{projects:'all',projectIds:[],git:'personal',agents:'personal',sessions:'private'}}}));});
-it('removes organization access only after explicit confirmation',async()=>{fixture({'workspace-organization-list':{organizationId:'org',organizationName:'Canopy Labs',grant:{organization_id:'org',name:'Canopy Labs',role:'viewer',permissions:{projects:'all'}}}});render(<WorkspaceSharing workspaceId="workspace"/>);await screen.findByText('No teams have access');fireEvent.click(screen.getByRole('tab',{name:/Everyone/}));fireEvent.click(screen.getByRole('button',{name:'Remove'}));expect(invoke.mock.calls.some(([,args])=>args.body.action.endsWith('-revoke'))).toBe(false);fireEvent.click(screen.getByRole('button',{name:'Confirm removal'}));await waitFor(()=>expect(invoke).toHaveBeenCalledWith('canopy_account_request',{route:'/api/teams',body:{action:'workspace-organization-revoke',workspaceId:'workspace',organizationId:'org'}}));});
-it('preserves saved selections while project metadata is unavailable',async()=>{const permissions={projects:'selected',projectIds:['app'],git:'personal',agents:'personal',sessions:'private'};fixture({'workspace-project-list':Error('Workspace offline'),'workspace-person-list':{people:[{id:'ada',name:'Ada',email:'ada@example.invalid'}],grants:[{user_id:'ada',name:'Ada',email:'ada@example.invalid',role:'member',permissions}]}});render(<WorkspaceSharing workspaceId="workspace"/>);await screen.findByText('No teams have access');fireEvent.click(screen.getByRole('tab',{name:/People/}));fireEvent.click(screen.getByRole('button',{name:'Edit'}));expect(await screen.findByRole('checkbox',{name:'app'})).toBeChecked();expect(screen.getByRole('button',{name:'Reload projects'})).toBeEnabled();fireEvent.click(screen.getByRole('button',{name:'Save changes'}));await waitFor(()=>expect(invoke).toHaveBeenCalledWith('canopy_account_request',{route:'/api/teams',body:{action:'workspace-person-grant',workspaceId:'workspace',userId:'ada',role:'member',permissions}}));});
-it('normalizes legacy grants and blocks scoped administrators from editing higher grants',async()=>{fixture({'workspace-team-list':{organizationId:'org',teams:[{id:'team',name:'Engineering'}],grants:[{team_id:'team',name:'Engineering',role:'admin',permissions:{projects:'all'}}],yourAccess:[{role:'admin',permissions:{projects:'selected',projectIds:['app']}}]}});render(<WorkspaceSharing workspaceId="workspace"/>);expect(await screen.findByRole('button',{name:'Edit'})).toBeDisabled();expect(screen.getByRole('button',{name:'Remove'})).toBeDisabled();fireEvent.click(screen.getByRole('button',{name:'+ Add access'}));expect(screen.queryByRole('radio',{name:'Admin'})).toBeNull();expect(within(screen.getByRole('combobox',{name:'Project scope'})).queryByRole('option',{name:'All projects'})).toBeNull();fireEvent.change(screen.getByRole('combobox',{name:'Team'}),{target:{value:'team'}});expect(screen.getByRole('button',{name:'Save changes'})).toBeDisabled();});
-it('resource choices are collapsed by default and remain bounded by delegated resources',async()=>{fixture({'workspace-team-list':{organizationId:'org',teams:[{id:'team',name:'Engineering'}],grants:[],yourAccess:[{role:'admin',permissions:{projects:'all'}},{role:'admin',permissions:{projects:'selected',projectIds:['app'],git:'shared'}}]}});render(<WorkspaceSharing workspaceId="workspace"/>);await screen.findByText('No teams have access');fireEvent.click(screen.getByRole('button',{name:'+ Add access'}));const details=screen.getByText('Shared resources').closest('details');expect(details).not.toHaveAttribute('open');fireEvent.click(screen.getByText('Shared resources'));expect(within(screen.getByRole('combobox',{name:'Git access'})).getByRole('option',{name:'Use shared workspace accounts'})).toBeDisabled();});
-it('ignores responses and pending grants from an old account or workspace',async()=>{let resolveOld!:(value:unknown)=>void;fixture({'workspace-team-list':(body:{workspaceId:string})=>body.workspaceId==='old'?new Promise(resolve=>{resolveOld=resolve;}):{organizationId:'org',teams:[],grants:[],yourAccess:owner}});const view=render(<WorkspaceSharing workspaceId="old"/>);view.rerender(<WorkspaceSharing workspaceId="new"/>);await screen.findByText('No teams have access');await act(async()=>resolveOld({organizationId:'org',teams:[],grants:[{team_id:'stale',name:'Old private team',role:'member'}],yourAccess:owner}));expect(screen.queryByText('Old private team')).toBeNull();fireEvent.click(screen.getByRole('button',{name:'+ Add access'}));await act(async()=>window.dispatchEvent(new Event('canopy:account-changed')));await screen.findByText('No teams have access');expect(screen.queryByRole('combobox',{name:'Team'})).toBeNull();});
-it('retries a metadata failure without waking the workspace',async()=>{let fail=true;fixture({'workspace-team-list':()=>{if(fail)throw Error('Access unavailable');return {organizationId:'org',teams:[],grants:[],yourAccess:owner};}});render(<WorkspaceSharing workspaceId="workspace"/>);await screen.findByRole('alert');fail=false;fireEvent.click(screen.getByRole('button',{name:'Retry'}));await screen.findByText('No teams have access');expect(invoke.mock.calls.every(([,args])=>!['resume','advance','start'].includes(args.body.action))).toBe(true);});
-it('shows project components under their project and saves only selected projects',async()=>{fixture();render(<WorkspaceSharing workspaceId="workspace"/>);await screen.findByText('No teams have access');fireEvent.click(screen.getByRole('button',{name:'+ Add access'}));fireEvent.change(screen.getByRole('combobox',{name:'Team'}),{target:{value:'team'}});fireEvent.change(screen.getByRole('combobox',{name:'Project scope'}),{target:{value:'selected'}});expect(await screen.findByText('Frontend · Backend')).toBeVisible();fireEvent.click(screen.getByRole('checkbox',{name:'Product'}));fireEvent.click(screen.getByRole('button',{name:'Grant access'}));await waitFor(()=>expect(invoke).toHaveBeenCalledWith('canopy_account_request',{route:'/api/teams',body:{action:'workspace-team-grant',workspaceId:'workspace',teamId:'team',role:'viewer',permissions:{projects:'selected',projectIds:['app'],git:'personal',agents:'personal',sessions:'private'}}}));});
-it('does not report a previous account mutation as a new account success',async()=>{let finish!:(value:unknown)=>void;fixture({'workspace-team-grant':()=>new Promise(resolve=>{finish=resolve;})});render(<WorkspaceSharing workspaceId="workspace"/>);await screen.findByText('No teams have access');fireEvent.click(screen.getByRole('button',{name:'+ Add access'}));fireEvent.change(screen.getByRole('combobox',{name:'Team'}),{target:{value:'team'}});fireEvent.click(screen.getByRole('button',{name:'Grant access'}));await waitFor(()=>expect(finish).toBeTypeOf('function'));await act(async()=>window.dispatchEvent(new Event('canopy:account-changed')));await screen.findByText('No teams have access');const before=invoke.mock.calls.filter(([,args])=>args?.body?.action==='workspace-team-list').length;await act(async()=>finish({ok:true}));expect(screen.queryByText('Access granted.')).toBeNull();expect(invoke.mock.calls.filter(([,args])=>args?.body?.action==='workspace-team-list')).toHaveLength(before);});
-it('explains role capabilities where the user chooses a role and keeps an edited recipient fixed',async()=>{fixture({'workspace-person-list':{people:[{id:'ada',name:'Ada',email:'ada@example.invalid'}],grants:[{user_id:'ada',name:'Ada',email:'ada@example.invalid',role:'member',permissions:{projects:'all'}}]}});render(<WorkspaceSharing workspaceId="workspace"/>);await screen.findByText('No teams have access');fireEvent.click(screen.getByRole('tab',{name:/People/}));fireEvent.click(screen.getByRole('button',{name:'Edit'}));expect(screen.queryByRole('combobox',{name:'Person'})).toBeNull();expect(screen.getByText('Ada')).toBeVisible();expect(screen.getByRole('radio',{name:'Developer'})).toBeChecked();expect(screen.getByText('Browse permitted files and view explicitly shared sessions.')).toBeVisible();expect(screen.getByText('Edit files, run tools and resume the workspace.')).toBeVisible();expect(screen.getByText('Developer access plus permission management within assigned scope.')).toBeVisible();fireEvent.click(screen.getByRole('radio',{name:'Admin'}));expect(screen.getByRole('radio',{name:'Admin'})).toBeChecked();fireEvent.click(screen.getByRole('button',{name:'Save changes'}));await waitFor(()=>expect(invoke).toHaveBeenCalledWith('canopy_account_request',{route:'/api/teams',body:{action:'workspace-person-grant',workspaceId:'workspace',userId:'ada',role:'admin',permissions:{projects:'all',projectIds:[],git:'personal',agents:'personal',sessions:'private'}}}));});
+
+it('shares like a document: who, Can view / Can edit, and three switches with Projects on by default',async()=>{
+ fixture();render(<WorkspaceSharing workspaceId="ws" workspaceName="Machine Works"/>);
+ fireEvent.click(await screen.findByRole('button',{name:'Share'}));
+ const dialog=screen.getByRole('form',{name:'Share workspace'});
+ expect(within(dialog).getByRole('combobox',{name:'Access'})).toHaveValue('edit');
+ expect(within(dialog).getByRole('checkbox',{name:'Projects'})).toBeChecked();
+ expect(within(dialog).getByRole('checkbox',{name:'Agent sessions'})).not.toBeChecked();
+ expect(within(dialog).getByRole('checkbox',{name:'Accounts'})).not.toBeChecked();
+ const options=within(within(dialog).getByRole('combobox',{name:'Share with'})).getAllByRole('option').map(o=>o.textContent);
+ expect(options).toEqual(['Choose a person, team or everyone','Everyone in Canopy Labs','Team · Core','Ada · ada@example.invalid','Bo · bo@example.invalid']);
+ for(const jargon of [/Admin/,/Developer/,/Viewer/,/projects:all/,/agents:shared/,/Enable workspace sharing/,/Prepare shared storage/])expect(screen.queryByText(jargon)).toBeNull();
+ fireEvent.change(within(dialog).getByRole('combobox',{name:'Share with'}),{target:{value:'team:core'}});
+ fireEvent.click(within(dialog).getByRole('checkbox',{name:'Agent sessions'}));
+ fireEvent.click(within(dialog).getByRole('button',{name:'Share'}));
+ await waitFor(()=>expect(calls('workspace-share-set')).toEqual([{action:'workspace-share-set',workspaceId:'ws',subject:{type:'team',id:'core'},level:'edit',projects:true,sessions:true,accounts:false}]));
+ expect(await screen.findByText('Shared with Core.')).toBeInTheDocument();
+});
+it('lists each share once with its level and switches editable inline, and removes in one click',async()=>{
+ fixture({'workspace-share-list':listing([{subject:{type:'person',id:'ada',name:'Ada',email:'ada@example.invalid'},level:'view',projects:true,sessions:false,accounts:false,via:['Core']},{subject:{type:'team',id:'core',name:'Core'},level:'edit',projects:true,sessions:true,accounts:true,via:[]}])});
+ render(<WorkspaceSharing workspaceId="ws"/>);
+ const list=await screen.findByRole('list',{name:'Shared with'});
+ expect(within(list).getAllByRole('listitem')).toHaveLength(2);
+ expect(within(list).getByText('ada@example.invalid · also via team Core')).toBeInTheDocument();
+ const ada=within(list).getByText('Ada').closest('li')!;
+ fireEvent.change(within(ada).getByRole('combobox',{name:'Access'}),{target:{value:'edit'}});
+ await waitFor(()=>expect(calls('workspace-share-set').at(-1)).toEqual({action:'workspace-share-set',workspaceId:'ws',subject:{type:'person',id:'ada'},level:'edit',projects:true,sessions:false,accounts:false}));
+ fireEvent.click(within(ada).getByRole('checkbox',{name:'Accounts'}));
+ await waitFor(()=>expect(calls('workspace-share-set').at(-1)).toMatchObject({subject:{type:'person',id:'ada'},accounts:true}));
+ fireEvent.click(within(list).getByRole('button',{name:'Stop sharing with Core'}));
+ await waitFor(()=>expect(calls('workspace-share-remove')).toEqual([{action:'workspace-share-remove',workspaceId:'ws',subject:{type:'team',id:'core'}}]));
+});
+it('a share always keeps Projects or Agent sessions on',async()=>{
+ fixture();render(<WorkspaceSharing workspaceId="ws"/>);
+ fireEvent.click(await screen.findByRole('button',{name:'Share'}));
+ const dialog=screen.getByRole('form',{name:'Share workspace'});
+ expect(within(dialog).getByRole('checkbox',{name:'Projects'})).toBeDisabled();
+ fireEvent.click(within(dialog).getByRole('checkbox',{name:'Agent sessions'}));
+ fireEvent.click(within(dialog).getByRole('checkbox',{name:'Projects'}));
+ expect(within(dialog).getByRole('checkbox',{name:'Projects'})).not.toBeChecked();
+ expect(within(dialog).getByRole('checkbox',{name:'Agent sessions'})).toBeDisabled();
+});
+it('shows one sharing line that turns from not shared to getting ready after a share',async()=>{
+ let sharing={state:'off',enabled:false,ready:false,error:null as string|null};let shared=false;
+ fixture({'sharing-status':()=>({sharing}),'workspace-share-list':()=>listing(shared?[{subject:{type:'team',id:'core',name:'Core'},level:'edit',projects:true,sessions:false,accounts:false,via:[]}]:[]),'workspace-share-set':()=>{shared=true;sharing={state:'pending',enabled:true,ready:false,error:null};return {ok:true};}});
+ render(<WorkspaceSharing workspaceId="ws"/>);
+ expect(await screen.findByText('Not shared · Add a person or team to share this workspace')).toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button',{name:'Share'}));
+ fireEvent.change(screen.getByRole('combobox',{name:'Share with'}),{target:{value:'team:core'}});
+ fireEvent.click(within(screen.getByRole('form',{name:'Share workspace'})).getByRole('button',{name:'Share'}));
+ expect(await screen.findByText('Getting ready · Members can connect in a minute')).toBeInTheDocument();
+ expect(invoke.mock.calls.some(([,args])=>['activate-sharing','sharing-start','sharing-on'].includes(args.body.action))).toBe(false);
+});
+it('a failed readiness check shows its reason with Retry',async()=>{
+ let sharing={state:'failed',enabled:true,ready:false,error:'The workspace host needs an update to share. Restart the workspace to update it' as string|null};
+ fixture({'sharing-status':()=>({sharing}),'sharing-retry':()=>{sharing={state:'ready',enabled:true,ready:true,error:null};return {sharing};}});
+ render(<WorkspaceSharing workspaceId="ws"/>);
+ expect(await screen.findByText('Not ready: The workspace host needs an update to share. Restart the workspace to update it')).toBeInTheDocument();
+ fireEvent.click(screen.getByRole('button',{name:'Retry'}));
+ expect(await screen.findByText('Sharing on · People with access can connect')).toBeInTheDocument();
+});
+it('turning sharing off asks first',async()=>{
+ fixture({'sharing-status':{sharing:{state:'ready',enabled:true,ready:true,error:null}},'sharing-off':{sharing:{state:'off',enabled:false,ready:false,error:null}},'workspace-share-list':listing([{subject:{type:'team',id:'core',name:'Core'},level:'edit',projects:true,sessions:false,accounts:false,via:[]}])});
+ render(<WorkspaceSharing workspaceId="ws"/>);
+ fireEvent.click(await screen.findByRole('button',{name:'Turn off'}));expect(calls('sharing-off')).toHaveLength(0);
+ fireEvent.click(screen.getByRole('button',{name:'Turn off sharing'}));
+ expect(await screen.findByText('Sharing off · People with access can’t connect')).toBeInTheDocument();
+});
+it('people who are not the owner are told only the owner can change sharing',async()=>{
+ fixture({'workspace-share-list':Error('Only the workspace owner can change who it is shared with')});
+ render(<WorkspaceSharing workspaceId="ws" workspaceName="Machine Works"/>);
+ expect(await screen.findByText('Only the owner of Machine Works can change who it is shared with.')).toBeInTheDocument();
+ expect(screen.queryByRole('button',{name:'Share'})).toBeNull();expect(calls('sharing-status')).toHaveLength(0);
+});
+it('a workspace outside an organization offers to add it first',async()=>{
+ fixture({'workspace-share-list':{organizationId:null,organizationName:null,people:[],teams:[],shares:[]}});
+ render(<WorkspaceSharing workspaceId="ws"/>);
+ fireEvent.change(await screen.findByRole('combobox'),{target:{value:'org'}});
+ fireEvent.click(screen.getByRole('button',{name:'Add to organization'}));
+ await waitFor(()=>expect(calls('organization-workspace-attach')).toEqual([{action:'organization-workspace-attach',organizationId:'org',workspaceId:'ws'}]));
+});
+it('ignores a response for a previous workspace or account',async()=>{
+ let resolveOld!:(value:unknown)=>void;
+ fixture({'workspace-share-list':(body:Body)=>body.workspaceId==='old'?new Promise(resolve=>{resolveOld=resolve;}):listing()});
+ const view=render(<WorkspaceSharing workspaceId="old"/>);view.rerender(<WorkspaceSharing workspaceId="new"/>);
+ await screen.findByText('Not shared with anyone yet.');
+ await act(async()=>resolveOld(listing([{subject:{type:'team',id:'stale',name:'Old private team'},level:'edit',projects:true,sessions:false,accounts:false,via:[]}])));
+ expect(screen.queryByText('Old private team')).toBeNull();
+});

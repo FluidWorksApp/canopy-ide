@@ -339,3 +339,15 @@
 .workspace-storage-warning {font-size:var(--fs-xs);}
 .workspace-storage-warning.warning {color:var(--warn);}
 .workspace-storage-warning.critical {color:var(--danger);}
+
+/* Containment: nothing in the workspace pane may be wider than the pane.
+ * Flex and grid children default to min-width:auto and refuse to shrink below
+ * their content, so one long path, label or nowrap line pushed the whole Tools
+ * pane past the modal's right edge. */
+.workspace-main > * {min-width:0;max-width:100%;}
+.workspace-main :is(section,div,header,form,fieldset,details,label,p,ul,li) {min-width:0;}
+.workspace-main :is(p,small,strong,h3,h4,label,summary,span) {overflow-wrap:anywhere;}
+.workspace-main .shared-session-disclosure {white-space:normal;}
+.workspace-hero-right {flex-shrink:1;min-width:0;}
+.workspace-hero-actions {flex-wrap:wrap;justify-content:flex-end;}
+.workspace-hero-unavailable {color:var(--text-dim);}

@@ -247,6 +247,11 @@ export class DockerWorkspaces {
     if(workspace.ownerImage!=null&&(workspace.memberId||!/^sha256:[a-f0-9]{64}$/.test(workspace.ownerImage)))throw Error('Invalid owner image checkpoint');
     await this.retireMemberVersions(workspace);
     const storageId=workspace.storageId??workspace.id;
+    // Members share the owning workspace's project volume (read-only for
+    // viewers); everything else they use is their own.
+    const sharedVolume=workspace.parentWorkspaceId&&workspace.memberId&&!workspace.memberId.startsWith('collaboration:')&&['rw','ro'].includes(workspace.sharedProjects);
+    const projectVolume=sharedVolume?`canopy-project-${workspace.parentWorkspaceId}`:`canopy-project-${storageId}`;
+    const projectWritable=!sharedVolume||workspace.sharedProjects==='rw'&&!workspace.readOnly;
     let image=releaseImage??workspace.ownerImage??this.image;
     const projects=projectMounts(workspace);
     if(workspace.cgroupParent!=null&&!/^canopy-[a-z0-9]+\.slice$/.test(workspace.cgroupParent))throw Error('Invalid capacity group');
@@ -296,7 +301,7 @@ export class DockerWorkspaces {
           !hasNoNewPrivileges(existing.HostConfig.SecurityOpt) ||
           existing.Mounts?.some(mount => mount.Type !== 'volume') ||
           JSON.stringify(existing.Mounts?.map(m => [m.Destination, m.Name, m.RW]).sort()) !==
-            JSON.stringify([['/workspace', `canopy-project-${storageId}`, true], ['/home/agent', `canopy-home-${storageId}`, true], ...workspace.accounts.map(id => [`/accounts/${id}`, `canopy-account-${id}`, false]), ...projects].sort())) throw new Error('Workspace container configuration differs; administrator action required');
+            JSON.stringify([['/workspace', projectVolume, projectWritable], ['/home/agent', `canopy-home-${storageId}`, true], ...workspace.accounts.map(id => [`/accounts/${id}`, `canopy-account-${id}`, false]), ...projects].sort())) throw new Error('Workspace container configuration differs; administrator action required');
       if(!existing.State.Running&&!resume)throw Error('Workspace runtime is stopped. Resume the workspace to continue');
       if(release&&existing.Image!==release.imageId){
         try{return await upgradeRuntimeImage(workspace,existing,release,{docker:this.docker,journal:imageUpgradeJournal(this.upgradeDirectory,workspace.id),launch:reference=>this.ensure(workspace,{releaseImage:reference}),verify:waitForRuntimeReady});}
@@ -339,7 +344,7 @@ export class DockerWorkspaces {
         '--security-opt', 'no-new-privileges:true', '--shm-size', '256m',
         '--publish', '127.0.0.1::8080', '--env', `CANOPY_RUNNER_TOKEN=${this.token(workspace.id)}`,
         '--env', `CANOPY_WORKSPACE_ID=${workspace.id}`, '--env', `CANOPY_ACCOUNTS=${workspace.accounts.join(',')}`,
-        '--mount', `type=volume,source=canopy-project-${storageId},target=/workspace`,
+        '--mount', `type=volume,source=${projectVolume},target=/workspace${projectWritable?'':',readonly'}`,
         '--mount', `type=volume,source=canopy-home-${storageId},target=/home/agent`,
         ...accounts, ...projects.flatMap(([target,source,writable])=>['--mount',`type=volume,source=${source},target=${target}${writable?'':',readonly'}`]), image]);
     }

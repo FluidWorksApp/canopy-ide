@@ -13,7 +13,9 @@ import {credentialAuthority} from './credential-authority.mjs';
 import {CredentialVault} from './credential-vault.mjs';
 import {SharedAccounts} from './shared-accounts.mjs';
 import {SharedSessions,sessionRuntimeJson} from './shared-sessions.mjs';
-import {SharingSetup} from './sharing-setup.mjs';
+import {SharingAttest} from './sharing-attest.mjs';
+import {SharedCatalog} from './shared-catalog.mjs';
+import {adoptCapacityGroup} from './capacity-adoption.mjs';
 import {SessionViewLeases} from './session-view-leases.mjs';
 import {IdleAttestation} from './idle-attestation.mjs';
 import {runtimeAuthority} from './runtime-authority.mjs';
@@ -40,7 +42,7 @@ import {PREPULL_RESERVE_BYTES} from './image-retention.mjs';
 import {hostStorage as createHostStorage} from './host-storage.mjs';
 import {InputLedger,SocketInput,TERMINAL_INPUT_PROTOCOL,forwardInput,inputKey,sequencedInput} from './terminal-input.mjs';
 
-export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingSetup, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage() }) {
+export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage() }) {
   validateConfig(config);
   const checkMember = async (principal, bearer) => {
     if (!principal.memberId) return;
@@ -62,7 +64,6 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
   };
   if(supervisor)supervisor.authorize=async workspace=>{
     if(idleAttestation?.reserved(workspace.parentWorkspaceId??workspace.id))return false;
-    if(sharingSetup?.active(workspace.parentWorkspaceId??workspace.id))return false;
     if(workspace.memberId){
       if(workspace.memberId.startsWith('collaboration:')){const parent=config.workspaces.find(w=>w.id===workspace.parentWorkspaceId);return sharedSessions.activeRuntime(workspace.id)&&!!parent&&!['stopped','deleted'].includes(parent.desiredState??parent.desired_state)&&(!config.managedSession||!!authorizeRuntime&&await authorizeRuntime(parent));}
       const entry=leases.entries.get(workspace.id);
@@ -116,7 +117,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
   }}):null;
   const active = new Map();
   const total = counts => [...counts.values()].reduce((sum, count) => sum + count, 0);
-  const idleAttestation=config.managedSession?new IdleAttestation({config,host:workspaces,authorizeRuntime,now,busy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||config.workspaces.some(w=>sharingSetup?.active(w.id))||cliSessions?.entries.size>0,closeBusy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||config.workspaces.some(w=>sharingSetup?.active(w.id))||[...(cliSessions?.entries.values()??[])].some(entry=>!entry.isOwner)}):null;
+  const idleAttestation=config.managedSession?new IdleAttestation({config,host:workspaces,authorizeRuntime,now,busy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||cliSessions?.entries.size>0,closeBusy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||[...(cliSessions?.entries.values()??[])].some(entry=>!entry.isOwner)}):null;
   const acceptedOrigins = new Set(['tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost', ...origins]);
   const server = http.createServer(async (request, response) => {
     if(process.env.CANOPY_RESOURCE_ADMISSION_LOCK)response.setHeader('x-canopy-resource-admission',String(RESOURCE_ADMISSION_PROTOCOL));
@@ -150,7 +151,6 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       const scope = operation === '/open' || operation === '/resources' || operation === '/ticket' || operation === '/native' || (reads.has(operation) && (operation !== '/sessions' || !write)) ? 'view' : 'drive';
       const workspace = authorize(config, principal, workspaceId, scope);
       if(!['/idle-attestation','/close-attestation','/storage','/storage-prep'].includes(operation)&&idleAttestation?.reserved(workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
-      if(operation!=='/sharing-setup'&&sharingSetup?.active(workspace.id))throw Error('Sharing setup is moving project storage. Reconnect after it finishes.');
       if (!['GET', 'POST'].includes(request.method)) throw new Error('Unsupported method');
       if(['/idle-attestation','/close-attestation'].includes(operation)){
         if(!idleAttestation||request.method!=='POST'||principal.memberId||principal.id!=='managed-account'||config.managedSession?.workspaceId!==workspace.id)throw Error('Forbidden');
@@ -168,13 +168,11 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         const input=await body(request,1024);
         return json(response,202,await hostStorage.requestPrep(input.requestId));
       }
-      if(operation==='/sharing-setup'){
-        if(!sharingSetup||principal.memberId||principal.id!=='managed-account'||config.managedSession?.workspaceId!==workspace.id)throw Error('Forbidden');
-        if(request.method==='GET')return json(response,200,await sharingSetup.status(workspace));
-        const input=await body(request,128*1024);
-        if(input.action==='attest')return json(response,200,await sharingSetup.attest(workspace,input));
-        if(input.action!=='start')throw Error('Unknown sharing setup action');
-        return json(response,202,await sharingSetup.start(workspace,input));
+      // Whole-workspace sharing readiness, for the control plane only.
+      if(operation==='/sharing-attest'){
+        if(!sharingAttest||request.method!=='POST'||principal.memberId||principal.id!=='managed-account'||config.managedSession?.workspaceId!==workspace.id)throw Error('Forbidden');
+        try{return json(response,200,await sharingAttest.attest(workspace,await body(request,4096)));}
+        catch(error){if(error.reason)return json(response,409,{error:error.reason,reason:error.reason});throw error;}
       }
       if (!['/shared-ticket', '/shared-execute', '/shared-accounts', '/shared-sessions', '/projects', '/open', '/resources', '/sessions', '/ticket', '/desktop', '/files/list', '/files/read', '/files/write', '/git/status', '/git/diff', '/language/analyze', '/native'].includes(operation) && !/^\/shared-sessions\/[a-f0-9-]{36}\/input$/.test(operation) &&
           !/^\/sessions\/\d+\/(input|resize|stop)$/.test(operation)) throw new Error('Unknown operation');
@@ -252,7 +250,9 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       if(operation==='/projects'){
         if(request.method!=='GET')throw Error('Project catalog is administrator-managed');
         const catalog=principal.memberId?{...workspace,projectMounts:grantedProjects(workspace,projectAccess)}:workspace;
-        return json(response,200,{projects:sharedProjectDefinitions(catalog).map(p=>({id:p.id,name:p.name,components:p.components.map(c=>({id:c.id,name:c.label}))}))});
+        const legacy=sharedProjectDefinitions(catalog),ids=new Set(legacy.map(p=>p.id));
+        const owner=sharedCatalog?(await sharedCatalog.get(workspace.id)).filter(p=>!ids.has(p.id)):[];
+        return json(response,200,{projects:[...legacy,...owner].map(p=>({id:p.id,name:p.name,components:p.components.map(c=>({id:c.id,name:c.label}))}))});
       }
       if (operation === '/ticket') {
         const args = await body(request, 4096);
@@ -318,8 +318,12 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         const stopped=operation.match(/^\/sessions\/(\d+)\/stop$/);if(stopped)cliSessions.revoke(workspace.id,actor,Number(stopped[1]));
         if(operation==='/sessions'&&request.method==='GET'&&Array.isArray(output))for(const session of output)if(session.exitCode!=null)cliSessions.revoke(workspace.id,actor,session.id);
       }
+      // The owner's store is the source of the project list members see.
+      if(result.ok&&sharedCatalog&&!principal.memberId&&operation==='/native'&&['store_load','store_save'].includes(payload?.command))
+        await sharedCatalog.update(workspace.id,payload.command==='store_save'?payload.args?.data:output.result).catch(()=>{});
       if (result.ok && (principal.memberId || workspace.projectMounts?.length) && operation === '/native' && payload?.command === 'store_load') {
-        output.result=mergeSharedProjects(output.result,memberRuntime(workspace,principal,projectAccess));
+        const owner=principal.memberId&&sharedCatalog?await sharedCatalog.definitions(workspace.id,{readOnly:principal.scope==='view'}):[];
+        output.result=mergeSharedProjects(output.result,memberRuntime(workspace,principal,projectAccess),owner);
       }
       if (operation === '/native' && payload?.command === 'workspace_metrics' && output.result) {
         output.result.elasticMemory = elasticMemory?.status(workspace.id) ?? null;
@@ -351,7 +355,6 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       if (url.pathname !== '/v1/stream') throw new Error('Invalid stream');
       const grant = tickets.consume(url.searchParams.get('ticket'));
       const {principal,workspace} = authorizeStream(config, grant);
-      if(sharingSetup?.active(workspace.id))throw Error('Sharing setup is in progress');
       const projectAccess=await checkMember(principal,grant.bearer);
       if ((streams.get(principal.id) ?? 0) >= 8 || total(streams) >= 32) throw new Error('Stream capacity reached');
       streams.set(principal.id, (streams.get(principal.id) ?? 0) + 1);
@@ -453,8 +456,12 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   const elasticMemory = new ElasticMemory({registry:config.workspaces,docker:workspaces});
   const elasticCpu = new ElasticCpu({registry:config.workspaces,docker:workspaces});
   const supervisor=new RuntimeSupervisor({directory:path.join(state,'runtime-recovery'),host:workspaces});
-  const sharingSetup=config.managedSession?new SharingSetup({config,host:workspaces,directory:path.join(state,'migrations'),configPath:process.env.CANOPY_HOST_CONFIG??'./host.json',authorizeRuntime:authority}):undefined;
-  const server = createGateway({ config, workspaces, renewMember:memberRenewal(config), credentialVault, sharedAccounts, credentialTickets, sharingSetup, elasticMemory, elasticCpu, supervisor, authorizeMember:memberAuthority(config.managedSession?.authorizationUrl), authorizeRuntime:authority, origins: (process.env.CANOPY_HOST_ORIGINS ?? '').split(',').filter(Boolean) });
+  // Members run inside the workspace's capacity slice. A container created
+  // before it existed joins it now, while it is stopped after boot.
+  if(config.managedSession)await adoptCapacityGroup({config,host:workspaces,directory:path.join(state,'migrations'),configPath:process.env.CANOPY_HOST_CONFIG??'./host.json',authorizeRuntime:authority}).catch(error=>console.warn(`Capacity group adoption skipped: ${error.message}`));
+  const sharingAttest=config.managedSession?new SharingAttest({config,host:workspaces,authorizeRuntime:authority}):undefined;
+  const sharedCatalog=config.managedSession?new SharedCatalog({directory:path.join(state,'shared-catalog')}):undefined;
+  const server = createGateway({ config, workspaces, renewMember:memberRenewal(config), credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, elasticMemory, elasticCpu, supervisor, authorizeMember:memberAuthority(config.managedSession?.authorizationUrl), authorizeRuntime:authority, origins: (process.env.CANOPY_HOST_ORIGINS ?? '').split(',').filter(Boolean) });
   server.on('close', () => { elasticMemory.stop(); elasticCpu.stop(); });
   if(process.env.CANOPY_RESOURCE_ADMISSION_LOCK)console.log('Canopy resource admission protocol '+RESOURCE_ADMISSION_PROTOCOL);
   server.listen(Number(process.env.PORT ?? 8787), '127.0.0.1', () => { elasticMemory.start(); elasticCpu.start(); supervisor.start(); console.log('Canopy remote host listening on loopback'); });

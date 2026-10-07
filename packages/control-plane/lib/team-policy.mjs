@@ -2,7 +2,8 @@
 export const roles = ['owner', 'admin', 'member', 'viewer'];
 const actions = {
  owner: ['view','connect','resume','stop','invite','revoke','delete','billing','resize'],
- admin: ['view','connect','resume','stop','invite','revoke','resize'],
+ // Stop, resize, delete and billing stay with the owner, who pays for compute.
+ admin: ['view','connect','resume','invite','revoke'],
  member: ['view','connect','resume'],
  viewer: ['view'],
 };
@@ -17,7 +18,9 @@ export function sharingPolicy(input = {}) {
   sessions:mode(input.sessions,['private','view','interact'],'private')};
 }
 export function invitationRole(actorRole, requestedRole) {
- if (!permits(actorRole,'invite') || !['admin','member','viewer'].includes(requestedRole) || (actorRole==='admin' && requestedRole==='admin')) throw Error('This role cannot be assigned');
+ // Shares are Can view (viewer) or Can edit (member), set by the owner. Older
+ // admin grants still read as Can edit; no new ones are made.
+ if (actorRole!=='owner' || !['member','viewer'].includes(requestedRole)) throw Error('Choose Can view or Can edit');
  return requestedRole;
 }
 export function canRevoke(actorRole,targetRole) {
