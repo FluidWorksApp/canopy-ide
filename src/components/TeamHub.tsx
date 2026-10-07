@@ -1,44 +1,162 @@
 import type {AccountConversation} from './AccountChatView';
-import {useEffect,useRef,useState} from 'react';
+import type {CSSProperties} from 'react';
+import {useCallback,useEffect,useRef,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
-import {Button,TextInput} from './ui';
+import {Button,Select,TextInput} from './ui';
 import {AccountSettings} from './AccountSettings';
+import {SettingsIcon} from './icons';
+import {avatarTone,displayName,initials,secondaryEmail,type Person} from './teamHubPeople';
 import './teamHub.css';
 type Team={id:string;name:string;role:string;organization_id?:string|null};
 type Organization={id:string;name:string;role:string};
 type Member={id:string;name:string;email:string;role:string};
 type Invite={id:string;name:string;email?:string};
+type Directory={teams:Team[];invitations:Invite[];selfId:string;organizations:Organization[]};
+type Detail={members:Member[];pending:Invite[]};
 
 const request=<T,>(body?:unknown)=>invoke<T>('canopy_account_request',{route:'/api/teams',body:body??null});
+const unauthorized=(error:unknown)=>/unauthorized|not signed in|sign in required|\b40[13]\b/i.test(String(error));
+const message=(error:unknown)=>String(error).replace(/^Error:\s*/,'');
+const LIST_POLL_MS=15000,DETAIL_POLL_MS=3000;
+
+// Last-known directory for the signed-in account, kept in memory only. The
+// panel unmounts whenever the sidebar switches views; without this every
+// reopen painted an empty panel until the network answered. Member names and
+// emails are personal data, so nothing is written to disk. An account change
+// drops it before any component handler runs (this listener is registered at
+// import time), so a new account never sees the previous one's people.
+let cache:{directory:Directory|null;details:Record<string,Detail>;selected:string}={directory:null,details:{},selected:''};
+let cacheEpoch=0;
+window.addEventListener('canopy:account-changed',()=>{cacheEpoch++;cache={directory:null,details:{},selected:''};});
+
+function Avatar({person}:{person:Person}){
+ return <span aria-hidden="true" className="team-avatar" style={{'--team-tone':`var(${avatarTone(person)})`} as CSSProperties}>{initials(person)}</span>;
+}
+function SkeletonRows({count}:{count:number}){
+ return <div className="team-skeleton" aria-hidden="true">{Array.from({length:count},(_,i)=><div key={i} className="team-row team-row-skeleton"><span className="team-skel-avatar"/><span className="team-skel-line" style={{width:`${62-i*9}%`}}/></div>)}</div>;
+}
+function AccountIcon(){
+ return <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="8" r="3.6"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>;
+}
+
 export function TeamHub({onOpenChat}:{onOpenChat?:(conversation:AccountConversation)=>void}){
- const [teams,setTeams]=useState<Team[]>([]),[invitations,setInvitations]=useState<Invite[]>([]),[selected,setSelected]=useState('');
- const [organizations,setOrganizations]=useState<Organization[]>([]),[organization,setOrganization]=useState('');
- const [members,setMembers]=useState<Member[]>([]),[pending,setPending]=useState<Invite[]>([]);
- const [name,setName]=useState(''),[email,setEmail]=useState(''),[error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[account,setAccount]=useState(false),[manage,setManage]=useState(false);
- const generation=useRef(0);
- const accountEpoch=useRef(0);
- const [selfId,setSelfId]=useState('');
+ const [epoch,setEpoch]=useState(cacheEpoch);
+ const [directory,setDirectory]=useState<Directory|null>(cache.directory);
+ const [details,setDetails]=useState<Record<string,Detail>>(cache.details);
+ const [selected,setSelectedState]=useState(cache.selected);
+ const [listLoading,setListLoading]=useState(true),[listError,setListError]=useState('');
+ const [detailLoading,setDetailLoading]=useState(''),[detailError,setDetailError]=useState<{team:string;text:string}|null>(null);
+ const [retry,setRetry]=useState(0);
+ const [organization,setOrganization]=useState(cache.directory?.organizations[0]?.id??'');
+ const [name,setName]=useState(''),[email,setEmail]=useState(''),[actionError,setActionError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[account,setAccount]=useState(false),[manage,setManage]=useState(false);
+ const listInFlight=useRef(false);
+
+ const teams=directory?.teams??[],invitations=directory?.invitations??[],organizations=directory?.organizations??[],selfId=directory?.selfId??'';
  const team=teams.find(t=>t.id===selected);
- useEffect(()=>{const changed=()=>{accountEpoch.current++;generation.current++;setTeams([]);setMembers([]);setPending([]);setInvitations([]);setSelected('');setOrganizations([]);setOrganization('');setSelfId('');setNotice('');setName('');setEmail('');setBusy(false);setError('Sign in to access your teams.');};window.addEventListener('canopy:account-changed',changed);return()=>window.removeEventListener('canopy:account-changed',changed);},[]);
- async function refresh(){const epoch=accountEpoch.current;const [data,orgData]=await Promise.all([request<{teams:Team[];invitations:Invite[];selfId:string}>(),request<{organizations:Organization[]}>({action:'organization-list'})]);if(epoch!==accountEpoch.current)return;setSelfId(data.selfId);setTeams(data.teams);setInvitations(data.invitations);setSelected(current=>data.teams.some(t=>t.id===current)?current:data.teams[0]?.id??'');const options=(orgData.organizations??[]).filter(o=>o.role==='owner'||o.role==='admin');setOrganizations(options);setOrganization(current=>options.some(o=>o.id===current)?current:options[0]?.id??'');}
- useEffect(()=>{let alive=true;const load=()=>{if(alive)void refresh().catch(e=>{if(alive)setError(String(e));});};load();const timer=setInterval(load,15000);return()=>{alive=false;clearInterval(timer);};},[]);
- useEffect(()=>{const current=++generation.current;setMembers([]);setPending([]);if(!selected)return;let timer:ReturnType<typeof setTimeout>;let alive=true;
-  const load=async()=>{try{const detail=await request<{members:Member[];invitations:Invite[]}>({action:'detail',teamId:selected});if(alive&&generation.current===current){setMembers(detail.members);setPending(detail.invitations);setError('');}}catch(e){if(alive&&generation.current===current){setError(String(e));}}finally{if(alive)timer=setTimeout(load,3000);}};void load();return()=>{alive=false;clearTimeout(timer);};
- },[selected]);
- async function action(body:unknown){const epoch=accountEpoch.current;setBusy(true);setError('');try{const result=await request<{emailSent?:boolean;alreadyInvited?:boolean}>(body);if(epoch!==accountEpoch.current)return null;await refresh();return epoch===accountEpoch.current?result:null;}catch(e){if(epoch===accountEpoch.current)setError(String(e));return null;}finally{if(epoch===accountEpoch.current)setBusy(false);}}
- return <section className="team-hub" aria-label="Teams">
-  <header className="team-hub-head"><div><small>YOUR PEOPLE</small><h2>Teams</h2></div><Button size="sm" onClick={()=>setAccount(!account)}>Account</Button></header>
+ const detail=selected?details[selected]:undefined;
+ const members=detail?.members??[],pending=detail?.pending??[];
+
+ const setSelected=useCallback((id:string)=>{cache.selected=id;setSelectedState(id);},[]);
+ const storeDetail=useCallback((teamId:string,next:Detail)=>{cache.details={...cache.details,[teamId]:next};setDetails(cache.details);},[]);
+
+ // Account switch: forget everything visible now and go straight back to
+ // loading. The old panel showed a sign-in error and waited for the next
+ // 15s poll, which is the "blank, then it shows up again" the user saw.
+ useEffect(()=>{const changed=()=>{setEpoch(cacheEpoch);setDirectory(null);setDetails({});setSelectedState('');setOrganization('');setNotice('');setName('');setEmail('');setBusy(false);setActionError('');setListError('');setDetailError(null);setListLoading(true);};window.addEventListener('canopy:account-changed',changed);return()=>window.removeEventListener('canopy:account-changed',changed);},[]);
+
+ const loadDirectory=useCallback(async()=>{
+  const current=cacheEpoch;listInFlight.current=true;
+  try{
+   const [data,orgData]=await Promise.all([request<{teams:Team[];invitations:Invite[];selfId:string}>(),request<{organizations:Organization[]}>({action:'organization-list'})]);
+   if(current!==cacheEpoch)return;
+   const next:Directory={teams:data.teams??[],invitations:data.invitations??[],selfId:data.selfId,organizations:(orgData?.organizations??[]).filter(o=>o.role==='owner'||o.role==='admin')};
+   cache.directory=next;setDirectory(next);setListError('');
+   const keep=next.teams.some(t=>t.id===cache.selected)?cache.selected:next.teams[0]?.id??'';
+   cache.selected=keep;setSelectedState(keep);
+   setOrganization(o=>next.organizations.some(x=>x.id===o)?o:next.organizations[0]?.id??'');
+  }catch(e){
+   if(current!==cacheEpoch)return;
+   if(unauthorized(e)){cache={directory:null,details:{},selected:''};setDirectory(null);setDetails({});setSelectedState('');}
+   setListError(unauthorized(e)?'Sign in to see your teams.':message(e));
+  }finally{if(current===cacheEpoch){listInFlight.current=false;setListLoading(false);}}
+ },[]);
+
+ useEffect(()=>{let alive=true;setListLoading(true);void loadDirectory();const timer=setInterval(()=>{if(alive&&!listInFlight.current)void loadDirectory();},LIST_POLL_MS);return()=>{alive=false;clearInterval(timer);};},[epoch,retry,loadDirectory]);
+
+ useEffect(()=>{
+  if(!selected)return;
+  const current=cacheEpoch;let alive=true,first=true;let timer:ReturnType<typeof setTimeout>;
+  setDetailLoading(selected);
+  const load=async()=>{
+   try{const next=await request<{members:Member[];invitations:Invite[]}>({action:'detail',teamId:selected});if(alive&&current===cacheEpoch){storeDetail(selected,{members:next.members??[],pending:next.invitations??[]});setDetailError(null);}}
+   catch(e){if(alive&&current===cacheEpoch)setDetailError({team:selected,text:message(e)});}
+   finally{if(alive){if(first){first=false;setDetailLoading(t=>t===selected?'':t);}timer=setTimeout(load,DETAIL_POLL_MS);}}
+  };
+  void load();return()=>{alive=false;clearTimeout(timer);};
+ },[selected,epoch,retry,storeDetail]);
+
+ async function action(body:unknown){const current=cacheEpoch;setBusy(true);setActionError('');try{const result=await request<{emailSent?:boolean;alreadyInvited?:boolean}>(body);if(current!==cacheEpoch)return null;await loadDirectory();return current===cacheEpoch?result:null;}catch(e){if(current===cacheEpoch)setActionError(message(e));return null;}finally{if(current===cacheEpoch)setBusy(false);}}
+ const patchDetail=(update:(d:Detail)=>Detail)=>{const base=cache.details[selected];if(base)storeDetail(selected,update(base));};
+
+ const firstLoad=!directory&&listLoading&&!listError;
+ const refreshing=!!directory&&(listLoading||(!!detail&&detailLoading===selected));
+ const signedOut=!directory&&!!listError&&/sign in/i.test(listError);
+ const peopleError=detailError?.team===selected?detailError.text:'';
+ const shownError=directory?(listError||peopleError):'';
+ const self=members.find(m=>m.id===selfId);
+ const others=members.filter(m=>m.id!==selfId);
+
+ return <section className="team-hub" aria-label="Teams" aria-busy={firstLoad||refreshing}>
+  <header className="team-hub-head">
+   <h2>Teams</h2>
+   {refreshing&&<span className="team-hub-sync" role="status" aria-label="Refreshing"/>}
+   <Button icon size="sm" variant="ghost" aria-label="Account" title="Account" aria-pressed={account} onClick={()=>setAccount(!account)}><AccountIcon/></Button>
+  </header>
   {account&&<AccountSettings/>}
-  {error&&<p role="alert" className="team-hub-error">{error}</p>}{notice&&<p role="status">{notice}</p>}
-  {invitations.map(i=><div className="team-hub-invite" key={i.id}><span>Invitation to <strong>{i.name}</strong></span><Button disabled={busy} onClick={()=>void action({action:'accept',invitationId:i.id})}>Join team</Button></div>)}
-  <div className="team-hub-picker"><label>Team<select value={selected} onChange={e=>{setSelected(e.target.value);}}><option value="" disabled>Choose a team</option>{teams.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></label><Button size="sm" onClick={()=>setManage(!manage)}>{manage?'Back to team':'Manage'}</Button></div>
-  {(manage||!teams.length)&&<div className="team-hub-management"><h3>Create a team</h3><form onSubmit={e=>{e.preventDefault();void action({action:'organization-team-create',organizationId:organization,name}).then(r=>{if(r)setName('');});}}><label>Organization<select aria-label="Team organization" value={organization} onChange={e=>setOrganization(e.target.value)}><option value="" disabled>Choose an organization</option>{organizations.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}</select></label><TextInput aria-label="Team name" placeholder="Team name" value={name} onChange={e=>setName(e.target.value)} maxLength={80}/><Button disabled={busy||!name.trim()||!organization} type="submit">Create team</Button></form><p className="team-hub-muted">Teams belong to an organization. Organization owners and admins manage their people and workspace access.</p>
-   {team&&team.role!=='member'&&<><h3>Invite a teammate</h3><form onSubmit={e=>{e.preventDefault();void action({action:'invite',teamId:selected,email}).then(r=>{if(r){setNotice(r.emailSent===false?'Invitation saved. Email delivery failed; they can sign in to accept.':r.alreadyInvited?'An invitation is already waiting for this person.':'Invitation sent.');setEmail('');}});}}><TextInput aria-label="Teammate email" type="email" placeholder="name@company.com" value={email} onChange={e=>setEmail(e.target.value)}/><Button type="submit" disabled={busy||!email}>Invite</Button></form><p className="team-hub-muted">Joining enables messaging. Workspace access is granted separately.</p>{pending.map(i=><div key={i.id} className="team-hub-member"><span>{i.email}<small>Invited</small></span><Button size="sm" disabled={busy} onClick={()=>void action({action:'revoke-invitation',teamId:selected,invitationId:i.id}).then(()=>setPending(p=>p.filter(x=>x.id!==i.id)))}>Revoke</Button></div>)}</>}
-   {members.map(m=><div key={m.id} className="team-hub-member"><span><strong>{m.name}</strong><small>{m.email} · {m.role}</small></span>{team?.role==='owner'&&m.role!=='owner'&&<Button size="sm" disabled={busy} onClick={()=>void action({action:'remove',teamId:selected,userId:m.id}).then(r=>{if(r)setMembers(v=>v.filter(x=>x.id!==m.id));})}>Remove</Button>}</div>)}
+
+  {firstLoad&&<div className="team-hub-loading"><span role="status" className="team-hub-sr">Loading teams…</span><div className="team-hub-picker"><span className="team-skel-select"/></div><SkeletonRows count={4}/></div>}
+
+  {!directory&&listError&&!listLoading&&<div className="team-hub-state" role="alert"><p>{signedOut?'Sign in to see your teams and message teammates.':`Couldn't load teams. ${listError}`}</p>{signedOut?<Button size="sm" variant="accent" onClick={()=>setAccount(true)}>Sign in</Button>:<Button size="sm" onClick={()=>setRetry(r=>r+1)}>Retry</Button>}</div>}
+
+  {shownError&&<div className="team-hub-banner" role="alert"><span>Couldn't refresh. {shownError}</span><Button size="sm" variant="ghost" onClick={()=>setRetry(r=>r+1)}>Retry</Button></div>}
+  {actionError&&<p role="alert" className="team-hub-error">{actionError}</p>}{notice&&<p role="status" className="team-hub-notice">{notice}</p>}
+
+  {invitations.map(i=><div className="team-hub-invite" key={i.id}><span>Invited to <strong>{i.name}</strong></span><Button size="sm" variant="accent" disabled={busy} onClick={()=>void action({action:'accept',invitationId:i.id})}>Join</Button></div>)}
+
+  {directory&&teams.length>0&&<div className="team-hub-picker">
+   <Select size="sm" width="full" aria-label="Team" value={selected} onChange={e=>setSelected(e.target.value)}>{teams.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</Select>
+   <Button icon size="sm" variant="ghost" aria-label="Manage teams" title={manage?'Back to team':'Manage teams'} aria-pressed={manage} onClick={()=>setManage(!manage)}><SettingsIcon size={14}/></Button>
   </div>}
+
+  {directory&&(manage||!teams.length)&&<div className="team-hub-management">
+   {!teams.length&&<p className="team-hub-muted">You're not in a team yet. Create one, or ask an organization admin to invite you.</p>}
+   <h3>Create a team</h3>
+   <form onSubmit={e=>{e.preventDefault();void action({action:'organization-team-create',organizationId:organization,name}).then(r=>{if(r)setName('');});}}>
+    <Select size="sm" width="full" aria-label="Team organization" value={organization} onChange={e=>setOrganization(e.target.value)}><option value="" disabled>Choose an organization</option>{organizations.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}</Select>
+    <div className="team-hub-inline"><TextInput aria-label="Team name" placeholder="Team name" value={name} onChange={e=>setName(e.target.value)} maxLength={80}/><Button size="sm" disabled={busy||!name.trim()||!organization} type="submit">Create team</Button></div>
+   </form>
+   <p className="team-hub-muted">Teams belong to an organization. Organization owners and admins manage their people and workspace access.</p>
+   {team&&team.role!=='member'&&<>
+    <h3>Invite to {team.name}</h3>
+    <form onSubmit={e=>{e.preventDefault();void action({action:'invite',teamId:selected,email}).then(r=>{if(r){setNotice(r.emailSent===false?'Invitation saved. Email delivery failed; they can sign in to accept.':r.alreadyInvited?'An invitation is already waiting for this person.':'Invitation sent.');setEmail('');}});}}><div className="team-hub-inline"><TextInput aria-label="Teammate email" type="email" placeholder="name@company.com" value={email} onChange={e=>setEmail(e.target.value)}/><Button size="sm" type="submit" disabled={busy||!email}>Invite</Button></div></form>
+    <p className="team-hub-muted">Joining enables messaging. Workspace access is granted separately.</p>
+    {pending.map(i=><div key={i.id} className="team-row"><Avatar person={{id:i.id,email:i.email}}/><span className="team-row-text"><strong>{i.email}</strong><small>Invited</small></span><Button size="sm" variant="ghost" disabled={busy} onClick={()=>void action({action:'revoke-invitation',teamId:selected,invitationId:i.id}).then(()=>patchDetail(d=>({...d,pending:d.pending.filter(x=>x.id!==i.id)})))}>Revoke</Button></div>)}
+   </>}
+   {team&&<>
+    <h3>Members</h3>
+    {!detail?<SkeletonRows count={3}/>:members.map(m=><div key={m.id} className="team-row"><Avatar person={m}/><span className="team-row-text"><strong>{displayName(m)}{m.id===selfId&&<em> (you)</em>}</strong><small>{m.role}</small></span>{team.role==='owner'&&m.role!=='owner'&&<Button size="sm" variant="ghost" disabled={busy} onClick={()=>void action({action:'remove',teamId:selected,userId:m.id}).then(r=>{if(r)patchDetail(d=>({...d,members:d.members.filter(x=>x.id!==m.id)}));})}>Remove</Button>}</div>)}
+   </>}
+  </div>}
+
   {team&&!manage&&<nav className="team-directory" aria-label="Conversations">
-   <small>CHANNEL</small><button disabled={!onOpenChat} onClick={()=>onOpenChat?.({teamId:selected,userId:selfId,peer:null,name:team.name})}><span aria-hidden="true" className="team-avatar">#</span><span><strong>{team.name}</strong><small>Everyone in this team</small></span></button>
-   <small>PEOPLE · {members.length}</small>{members.filter(m=>m.id!==selfId).map(m=><button key={m.id} disabled={!onOpenChat} onClick={()=>onOpenChat?.({teamId:selected,userId:selfId,peer:m.id,name:m.name,email:m.email})}><span aria-hidden="true" className="team-avatar">{m.name.slice(0,1).toUpperCase()}</span><span><strong>{m.name}</strong><small>{m.email}</small></span></button>)}
+   <h3 className="team-hub-section">Channel</h3>
+   <button className="team-row" disabled={!onOpenChat} onClick={()=>onOpenChat?.({teamId:selected,userId:selfId,peer:null,name:team.name})}><span aria-hidden="true" className="team-avatar team-avatar-channel">#</span><span className="team-row-text"><strong>{team.name}</strong><small>Everyone in this team</small></span></button>
+   <h3 className="team-hub-section">People{detail&&<span> · {members.length}</span>}</h3>
+   {!detail?(peopleError?null:<SkeletonRows count={3}/>):<>
+    {self&&<div className="team-row team-row-self"><Avatar person={self}/><span className="team-row-text"><strong>{displayName(self)} <em>(you)</em></strong>{secondaryEmail(self)&&<small>{secondaryEmail(self)}</small>}</span>{self.role!=='member'&&<span className="team-role">{self.role}</span>}</div>}
+    {others.map(m=><button key={m.id} className="team-row" disabled={!onOpenChat} onClick={()=>onOpenChat?.({teamId:selected,userId:selfId,peer:m.id,name:displayName(m),email:m.email})}><Avatar person={m}/><span className="team-row-text"><strong>{displayName(m)}</strong>{secondaryEmail(m)&&<small>{secondaryEmail(m)}</small>}</span>{m.role!=='member'&&<span className="team-role">{m.role}</span>}</button>)}
+    {!others.length&&<p className="team-hub-muted">No teammates yet.{team.role!=='member'?' Invite people from Manage.':''}</p>}
+   </>}
    {!onOpenChat&&<p className="team-hub-muted">Open Teams in the sidebar to start a conversation.</p>}
   </nav>}
  </section>;
