@@ -782,9 +782,11 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         const attached = await Promise.race([
           pending,
           new Promise<never>((_, reject) => {
+            // A remote attach is a ticket request and a socket over the
+            // network, not a local call: two seconds timed out on slow links.
             attachTimeout = setTimeout(
               () => reject(new Error("terminal attach timed out")),
-              2_000,
+              isRemoteHost() ? 15_000 : 2_000,
             );
           }),
         ]).catch((error) => {
