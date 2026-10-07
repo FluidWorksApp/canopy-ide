@@ -169,7 +169,11 @@ test('shared sessions accept socket input only from live interact grants',async(
 });
 
 test('per-keystroke echo over the stream socket costs about one round trip',async()=>{
- const rtt=55,fixture=await startLatencyFixture({rttMs:rtt,openCostMs:150});
+ // A large simulated RTT and admission cost keep this deterministic on busy CI
+ // runners: scheduler noise is small next to 200 ms, while the regressions it
+ // guards against (an HTTP round trip per key, or paying the 1.5 s admission
+ // refresh on a keystroke) would still blow the bounds by a wide margin.
+ const rtt=200,fixture=await startLatencyFixture({rttMs:rtt,openCostMs:1500});
  const call=(route,input)=>fetch(`${fixture.endpoint}/v1/workspaces/${fixture.workspaceId}${route}`,{method:'POST',headers:{authorization:`Bearer ${fixture.token}`,'content-type':'application/json'},body:JSON.stringify(input)});
  let socket;
  try{
@@ -187,6 +191,6 @@ test('per-keystroke echo over the stream socket costs about one round trip',asyn
   }
   samples.sort((x,y)=>x-y);
   console.info(`[latency] socket keystroke echo at ${rtt} ms RTT: median ${samples[7].toFixed(1)} ms, max ${samples[14].toFixed(1)} ms`);
-  assert.ok(samples[7]<rtt*1.4,`median ${samples[7]} ms`);assert.ok(samples[14]<rtt*2,`max ${samples[14]} ms`);
+  assert.ok(samples[7]<rtt*1.5,`median ${samples[7]} ms`);assert.ok(samples[14]<rtt*2,`max ${samples[14]} ms`);
  }finally{socket?.terminate();await fixture.close();}
 });

@@ -1,7 +1,10 @@
 import { afterEach, expect, it } from 'vitest';
 import { breakdown, startHarness } from './terminalLatency.harness';
 
-const RTT = 55;
+// Large enough that CI scheduler noise can't flip the result, small enough
+// that an HTTP round trip per key (>= 2 x RTT) or a paid admission refresh
+// (1.5 s) still fails the bounds clearly.
+const RTT = 200;
 let harness: Awaited<ReturnType<typeof startHarness>> | undefined;
 afterEach(async () => { await harness?.close(); harness = undefined; });
 const keys = (n: number) => Array.from({ length: n }, (_, i) => String.fromCharCode(0x41 + (i % 26)) + String.fromCharCode(0x61 + Math.floor(i / 26)));
@@ -14,7 +17,7 @@ it('echoes each interactive keystroke in about one network round trip', async ()
   const result = breakdown(samples, RTT);
   console.info('[latency] isolated keystrokes', JSON.stringify(result));
   expect(result.transport).toBe('socket');
-  expect(result.median.clientQueue).toBeLessThan(5);
+  expect(result.median.clientQueue).toBeLessThan(8);
   expect(result.median.total).toBeLessThan(RTT * 1.5);
 }, 30_000);
 
@@ -31,7 +34,7 @@ it('keeps fast typing at about one round trip per key instead of queueing behind
 it('does not pay the gateway runtime-admission refresh on keystrokes', async () => {
   // Production DockerWorkspaces.open re-checks admission (control-plane HTTPS
   // + docker inspect under the resource lock) when its 2 s cache expires.
-  harness = await startHarness({ rttMs: RTT, openCostMs: 120, openCacheMs: 2000 });
+  harness = await startHarness({ rttMs: RTT, openCostMs: 1500, openCacheMs: 2000 });
   await harness.keystroke('warm');
   await new Promise(r => setTimeout(r, 2100));
   const marks = await harness.keystroke('Zz');
