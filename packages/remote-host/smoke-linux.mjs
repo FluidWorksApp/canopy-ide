@@ -54,7 +54,10 @@ async function awaitRunner(id) {
 const socket = async stream => {
   const ticket = await call(ids[0], '/ticket', { stream }); assert.equal(ticket.status, 200);
   const ws = new WebSocket(`${url.replace('http', 'ws')}/v1/stream?ticket=${ticket.data.ticket}`);
-  const first = once(ws, 'message'); await once(ws, 'open');
+  // Terminal streams open with the gateway's capability hello; keep the first
+  // runtime frame (snapshot or RFB banner) as before.
+  const first = new Promise(resolve => ws.on('message', function frame(data) { if (/^\{"t":"hello"/.test(data.toString())) return; ws.off('message', frame); resolve([data]); }));
+  await once(ws, 'open');
   return { ws, first: (await first)[0] };
 };
 const disconnect = async ws => { const closed = once(ws, 'close'); ws.close(); await closed; };

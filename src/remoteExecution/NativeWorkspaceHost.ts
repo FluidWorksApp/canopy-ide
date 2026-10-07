@@ -5,10 +5,10 @@ import { nativeHost } from '../host/native';
 import { RemoteExecutionClient, type RemoteSession } from './client';
 import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} from './connectionState';
 import {saveRemoteContextImage} from './saveContextImage';
+import {TerminalInput} from './terminalInput';
 
 export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive'; clientId?: string }
 type Args = Record<string, unknown>;
-type InputQueue = {data:string; running:boolean; timer?:ReturnType<typeof setTimeout>; waiters:Array<{resolve:()=>void; reject:(error:unknown)=>void}>};
 type Stream = { id:number; receivedSnapshot:boolean; pendingExit?:number; socket?: WebSocket; generation: number; cursor: number; frames:OutputFrame[]; queuedBytes:number; busy:boolean; retry?: ReturnType<typeof setTimeout>; handshake?: ReturnType<typeof setTimeout>; channel?: HostChannel<ArrayBuffer>; closed: boolean };
 const LOCAL_UI = new Set(['js_log','watchdog_ack','watchdog_incidents','memory_info','selftest_config','set_shortcut_profile','notify_native','set_window_zoom','window_zoom','crash_pending','crash_clear','crash_upload','take_pending_crash','dictation_supported','remote_set_theme','remote_set_clis','remote_set_companion','remote_set_hibernated','remote_set_attention','execution_mode_get','execution_mode_set','execution_remote_get','execution_remote_set']);
 // The clipboard and microphone belong to the computer displaying the IDE.
@@ -47,7 +47,7 @@ export class NativeWorkspaceHost implements Host {
   private desktopListeners=new Set<UnlistenFn>();
   private poll?: ReturnType<typeof setTimeout>;
   private agentEventCursor: string | null = null;
-  private inputs = new Map<number,InputQueue>();
+  private inputs = new Map<number,TerminalInput>();
   private known = new Map<number, RemoteSession>();
   readonly connection: WorkspaceConnection;
   private desktop: Host;
@@ -139,6 +139,9 @@ export class NativeWorkspaceHost implements Host {
           if(stream.closed || stream.socket!==socket)return;
           try{
             const message=JSON.parse(event.data);
+            if(message.t==='hello'){this.input(id).hello(socket,message.input);return;}
+            if(message.t==='input-ack'){this.inputs.get(id)?.acknowledge(message.id,message.seq);return;}
+            if(message.t==='input-error'){this.inputs.get(id)?.rejected(message.id,message.error);return;}
             if(message.t==='exit'){stream.pendingExit=message.exitCode;this.deliver(stream);return;}
             if(!['snapshot','data'].includes(message.t))return;
             failures=0;
@@ -151,7 +154,7 @@ export class NativeWorkspaceHost implements Host {
             stream.frames.push(frame);stream.queuedBytes+=bytes.length;this.deliver(stream);
           }catch{socket.close();}
         };
-        socket.onclose=()=>{if(!stream.closed&&stream.socket===socket)retry();};
+        socket.onclose=()=>{this.inputs.get(id)?.closed(socket);if(!stream.closed&&stream.socket===socket)retry();};
       }catch{retry();}
     };
     await connect();return stream;
@@ -166,28 +169,11 @@ export class NativeWorkspaceHost implements Host {
     frame.set([0x43,0x50,0x54,0x32,(data.gap?1:0)|(data.reset?2:0)]);
     view.setUint16(6,data.cols,true);view.setBigUint64(8,BigInt(data.start),true);view.setBigUint64(16,BigInt(data.end),true);view.setUint16(24,data.rows,true);frame.set(data.bytes,32);stream.channel.onmessage(frame.buffer);
   }
-  private detach(id:number){const stream=this.streams.get(id);if(!stream)return;stream.closed=true;clearTimeout(stream.retry);clearTimeout(stream.handshake);stream.socket?.close();this.streams.delete(id);reportStream(connectionKey(this.connection.endpoint,this.connection.workspaceId),id,null);}
-  private write(id:number,data:string):Promise<void>{
-    const queue=this.inputs.get(id)??{data:'',running:false,waiters:[]};
-    if(queue.data.length+data.length>32768||queue.waiters.length>=4096)return Promise.reject(Error('Remote terminal input queue is full'));
-    this.inputs.set(id,queue);queue.data+=data;
-    const done=new Promise<void>((resolve,reject)=>queue.waiters.push({resolve,reject}));
-    const flush=async()=>{
-      queue.timer=undefined;if(queue.running||this.disposed)return;
-      queue.running=true;
-      let size=Math.min(2048,queue.data.length);
-      if(size<queue.data.length&&queue.data.charCodeAt(size-1)>=0xd800&&queue.data.charCodeAt(size-1)<=0xdbff)size--;
-      const batch=queue.data.slice(0,size);queue.data=queue.data.slice(size);
-      try{
-        await this.call(`/sessions/${id}/input`,{data:batch});
-        queue.running=false;
-        if(queue.data.length)queue.timer=setTimeout(()=>void flush(),0);
-        else{queue.waiters.splice(0).forEach(w=>w.resolve());this.inputs.delete(id);}
-      }catch(error){queue.running=false;queue.data='';queue.waiters.splice(0).forEach(w=>w.reject(error));this.inputs.delete(id);}
-    };
-    if(!queue.running&&!queue.timer)queue.timer=setTimeout(()=>void flush(),10);
-    return done;
-  }
+  private detach(id:number){const stream=this.streams.get(id);if(!stream)return;stream.closed=true;const input=this.inputs.get(id);if(stream.socket)input?.closed(stream.socket);if(input?.idle)this.inputs.delete(id);clearTimeout(stream.retry);clearTimeout(stream.handshake);stream.socket?.close();this.streams.delete(id);reportStream(connectionKey(this.connection.endpoint,this.connection.workspaceId),id,null);}
+  /** One ordered input queue per remote PTY; its stream socket carries it
+   * once the gateway announces socket input, HTTP otherwise. */
+  private input(id:number){let input=this.inputs.get(id);if(!input){input=new TerminalInput(body=>this.call(`/sessions/${id}/input`,body));this.inputs.set(id,input);}return input;}
+  private write(id:number,data:string):Promise<void>{return this.input(id).write(data);}
   async invoke<T>(command:string,args:Args={}):Promise<T>{
     if(this.disposed)throw Error('Workspace disconnected');
     if(this.readOnly&&['spot_save_context_image','spot_stage_drop_images','execution_remote_upload'].includes(command))throw Error('This workspace is read-only');
@@ -286,5 +272,5 @@ export class NativeWorkspaceHost implements Host {
     const list=this.listeners.get(event)??new Set();this.listeners.set(event,list);list.add(handler as (event:HostEvent<unknown>)=>void);this.beginPoll();return ()=>{list.delete(handler as (event:HostEvent<unknown>)=>void);};
   }
   channel<T>():HostChannel<T>{return {onmessage:()=>{}};}
-  dispose(){this.disposed=true;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);clearTimeout(this.heartbeat);for(const queue of this.inputs.values()){clearTimeout(queue.timer);queue.waiters.splice(0).forEach(w=>w.reject(Error('Workspace disconnected')));}this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
+  dispose(){this.disposed=true;for(const release of [...this.desktopListeners]){try{release();}catch{/* Disposed handlers stay inert even if native teardown fails. */}}this.desktopListeners.clear();window.removeEventListener('canopy:account-changed',this.onAccountChanged);clearTimeout(this.heartbeat);for(const input of this.inputs.values())input.dispose();this.inputs.clear();clearTimeout(this.poll);for(const id of this.streams.keys())this.detach(id);this.listeners.clear();}
 }
