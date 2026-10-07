@@ -9,3 +9,7 @@ it('gives an attention state one recovery action and keeps destructive actions b
  const more=screen.getByLabelText('More actions for Machine Works');more.closest('details')!.open=true;
  fireEvent.click(screen.getByRole('button',{name:/Stop workspace/}));expect(stop).toHaveBeenCalledOnce();expect(more.closest('details')).not.toHaveAttribute('open');
 });
+it('names the fresh-machine restart when the control plane says Retry will replace the host',()=>{
+ const open=vi.fn();render(<WorkspaceHero workspace={{...workspace,operation:{phase:'preparing-workspace',status:'failed',action:'resume',bootstrap_report:{stage:'image',status:'failed'},retry_replaces_host:true}}} onOpen={open}/>);
+ expect(screen.queryByRole('button',{name:'Retry preparation'})).toBeNull();fireEvent.click(screen.getByRole('button',{name:'Restart on a fresh machine'}));expect(open).toHaveBeenCalledOnce();
+});
