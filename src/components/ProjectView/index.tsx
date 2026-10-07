@@ -7035,7 +7035,12 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   // ---------- files ----------
 
-  const openFile = useCallback(
+  // The file whose open is in flight. On a remote workspace the stat and read
+  // are network round trips, and nothing else changes until the tab appears,
+  // so the tree row shows it is opening.
+  const [openingPath, setOpeningPath] = useState<string | null>(null);
+
+  const openFileNow = useCallback(
     async (
       path: string,
       opts?: { diff?: boolean; force?: boolean; activate?: boolean },
@@ -7145,6 +7150,21 @@ const ProjectViewBody = memo(function ProjectViewBody({
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rootsKey, patchFile],
+  );
+  const openFile = useCallback(
+    async (
+      path: string,
+      opts?: { diff?: boolean; force?: boolean; activate?: boolean },
+    ) => {
+      setOpeningPath(path);
+      try {
+        await openFileNow(path, opts);
+      } finally {
+        // A later click owns the indicator; only clear our own.
+        setOpeningPath((current) => (current === path ? null : current));
+      }
+    },
+    [openFileNow],
   );
   openFileRef.current = openFile;
 
@@ -13921,6 +13941,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     roots={[c.path]}
                     changedPaths={changedPaths}
                     selectedPath={activeFileTab?.file.path ?? null}
+                    openingPath={openingPath}
                     onOpenFile={(p) => void openFile(p)}
                     onNotice={onNotice}
                     hideRootHeader

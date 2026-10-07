@@ -155,9 +155,42 @@
   color: inherit;
 }
 
+/* A file still opening (remote reads can take seconds). The spinner fades in
+   after a beat so a fast local open never flashes it. */
+.tree-row-opening {
+  cursor: progress;
+}
+
+.tree-opening-spinner {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  margin-left: auto;
+  margin-right: 6px;
+  border: 1.5px solid color-mix(in srgb, var(--text-dim) 35%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  opacity: 0;
+  animation:
+    tree-opening-in var(--dur-fast) var(--ease-out) 150ms forwards,
+    tree-opening-spin 0.8s linear infinite;
+}
+
+@keyframes tree-opening-in {
+  to { opacity: 1; }
+}
+
+@keyframes tree-opening-spin {
+  to { transform: rotate(360deg); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .tree-chevron {
     transition: none;
+  }
+  .tree-opening-spinner {
+    animation: tree-opening-in var(--dur-fast) var(--ease-out) 150ms forwards;
+    border-color: var(--accent);
   }
 }
 
