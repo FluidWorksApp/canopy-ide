@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,realpath,rm,readFile,symlink,mkdir} from 'node:fs/promises';
+import {mkdtemp,realpath,rm,readFile,symlink,mkdir,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {WorkspaceProfiles} from './profiles.mjs';
@@ -16,13 +16,24 @@ test('named profiles persist activation, isolate launch env and retain files aft
  await assert.rejects(p.env('codex',work.id),/not found/);
  await assert.rejects(p.remove('default'));
 }));
-test('copies named credentials without overwriting an existing cloud account',()=>fixture(async(home,p)=>{
+test('copies named credentials and refreshes an existing cloud account on re-sync',()=>fixture(async(home,p)=>{
  const item={id:'work',label:'Work account',accounts:{codex:{tokens:{access_token:'synthetic'}}}};
- assert.deepEqual(await importAccountProfiles([item],home),{imported:['Work account'],skipped:[]});
+ assert.deepEqual(await importAccountProfiles([item],home),{imported:['Work account'],updated:[],skipped:[]});
  assert.equal((await p.list())[1].label,'Work account');
  assert.equal((await p.accounts('work')).find(a=>a.agent==='codex').state,'in');
- assert.deepEqual(await importAccountProfiles([item],home),{imported:[],skipped:['Work account']});
- await p.remove('work');assert.match(await readFile(home+'/.canopy/profiles/work/.codex/auth.json','utf8'),/synthetic/);
+ await writeFile(home+'/.canopy/profiles/work/.codex/history.jsonl','kept');
+ const next={...item,label:'Work',accounts:{codex:{tokens:{access_token:'synthetic-next'}},claude:{claudeAiOauth:{accessToken:'synthetic-a',refreshToken:'synthetic-r'}}},claudeIdentity:{emailAddress:'work@example.com',secret:'dropped'}};
+ assert.deepEqual(await importAccountProfiles([next],home),{imported:[],updated:['Work'],skipped:[]});
+ assert.match(await readFile(home+'/.canopy/profiles/work/.codex/auth.json','utf8'),/synthetic-next/);
+ assert.equal(await readFile(home+'/.canopy/profiles/work/.codex/history.jsonl','utf8'),'kept');
+ assert.deepEqual(JSON.parse(await readFile(home+'/.canopy/profiles/work/.claude/.claude.json','utf8')).oauthAccount,{emailAddress:'work@example.com'});
+ assert.deepEqual((await p.accounts('work')).find(a=>a.agent==='claude'),{agent:'claude',state:'in',account:'work@example.com'});
+ assert.equal((await p.list())[1].label,'Work');assert.equal((await p.list()).length,2);
+ await p.remove('work');assert.match(await readFile(home+'/.canopy/profiles/work/.codex/auth.json','utf8'),/synthetic-next/);
+}));
+test('a Claude login without a recorded identity still reads as signed in',()=>fixture(async(home,p)=>{
+ await mkdir(home+'/.claude');await writeFile(home+'/.claude/.credentials.json',JSON.stringify({claudeAiOauth:{accessToken:'synthetic-a',refreshToken:'synthetic-r'}}));
+ assert.deepEqual((await p.accounts('default')).find(a=>a.agent==='claude'),{agent:'claude',state:'in',account:null});
 }));
 test('invalid import and symlink roots cannot write outside a profile',()=>fixture(async(home,p)=>{
  await assert.rejects(importAccountProfiles([{id:'../escape',label:'Bad',accounts:{}}],home));

@@ -7,7 +7,9 @@ import {FilesIcon,TeamIcon} from './icons';
 import {IconClock} from '../../shared/icons';
 import {openInOsBrowser} from '../links';
 type User={email:string;name:string};
-type Credits={balance:string;assigned:string;balanceUsd?:string;paymentsEnabled?:boolean};
+// Amounts are US dollars. `balance` (credits, 1 = 1 cent) is only sent by
+// servers from before the dollar migration; the app outlives server deploys.
+type Credits={balanceUsd?:string;assignedUsd?:string;balance?:string;paymentsEnabled?:boolean};
 const dollars=(value:unknown)=>{if(value==null||value==='')return '—';const n=Number(value);return Number.isFinite(n)?new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(n):'—';};
 let accountCache:{user:User;credits:Credits|null}|null=null;
 let cacheEpoch=0;
@@ -75,7 +77,7 @@ export function AccountSettings({onTeams,onWorkspaces}:{onTeams?:()=>void;onWork
    <Button icon variant="ghost" className="account-header-action" aria-label="Sign out" title="Sign out" disabled={busy} onClick={()=>{setBusy(true);void request('/api/device',{action:'revoke'}).then(()=>{clearTeamSessions();window.dispatchEvent(new Event('canopy:account-changed'));setUser(null);setCredits(null);setMessage('Signed out.');}).catch(error=>setMessage(String(error))).finally(()=>setBusy(false));}}><svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M9 4H4v16h5M14 7l5 5-5 5M8 12h11"/></svg><span className="account-action-tooltip">Sign out</span></Button></nav>}</header>
   {loading&&user&&<p role="status">Refreshing your account…</p>}
   {user?<>
-   <div className="account-balance"><span>Available balance <small>USD</small></span><strong>{credits?dollars(credits.balanceUsd??Number(credits.balance)/100):<span className="account-shimmer account-skeleton-amount" aria-label="Loading balance"/>}</strong><p>{balanceStale ? "Balance could not refresh. Showing the last available amount." : "Shared across your workspaces. Usage is charged per minute."}</p>{credits?.paymentsEnabled===false&&<small>Adding funds is not available during preview.</small>}</div>
+   <div className="account-balance"><span>Available balance <small>USD</small></span><strong>{credits?dollars(credits.balanceUsd??(credits.balance==null?null:Number(credits.balance)/100)):<span className="account-shimmer account-skeleton-amount" aria-label="Loading balance"/>}</strong><p>{balanceStale ? "Balance could not refresh. Showing the last available amount." : "Shared across your workspaces. Usage is charged per minute."}</p>{credits?.paymentsEnabled===false&&<small>Adding funds is not available during preview.</small>}</div>
 
   </>:<div className="set-inline"><Button disabled={busy} onClick={()=>void signIn()}>{busy?'Waiting for sign-in…':'Sign in or create account'}</Button>{busy&&<Button onClick={()=>{generation.current++;setBusy(false);setCode('');setMessage('Sign-in cancelled.');}}>Cancel</Button>}</div>}
   {code&&<p>Request code: <strong>{code}</strong></p>}

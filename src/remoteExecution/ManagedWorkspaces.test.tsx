@@ -105,3 +105,9 @@ it('publishes authoritative failure metadata even when advance returns an infras
 it('a selected prebuilt host shows verification rather than a cold install claim',async()=>{
  setup();const original=mocks.invoke.getMockImplementation()!;mocks.invoke.mockImplementation(async(command,args)=>{const result=await original(command,args);return args?.route==='/api/workspaces'?{workspaces:result.workspaces.map((w:object)=>({...w,state:'error',operation:{phase:'preparing-workspace',status:'failed',bootstrap_mode:'prebuilt',bootstrap_report:{stage:'packages',status:'failed'}}}))}:result;});render(<ManagedWorkspaces/>);await act(async()=>{});expect(screen.getByRole('alert')).toHaveTextContent('Verifying prebuilt host tools failed.');expect(screen.queryByText(/Installing host tools failed/)).toBeNull();
 });
+it('shows a step that keeps failing instead of an unchanged starting state',async()=>{
+ vi.useFakeTimers();let state='stopped';const w=()=>({id:'ws-test',name:'My workspace',provider:'lightsail',state,cpu_max:2,memory_max_mib:8192,operation:state==='stopped'?undefined:{phase:'queued',status:'running',last_error:'Workspace operation will retry'}});
+ mocks.invoke.mockImplementation(async(command,args)=>{if(command!=='canopy_account_request')return;if(args.route==='/api/workspaces')return {workspaces:[w()]};if(args.body.action==='resume'){state='starting';return {};}return {};});
+ render(<ManagedWorkspaces/>);await act(async()=>{});fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
+ expect(screen.getByText('The last setup step failed (Workspace operation will retry). Retrying automatically…')).toBeTruthy();expect(mocks.switchMode).not.toHaveBeenCalled();
+});

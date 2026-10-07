@@ -356,11 +356,25 @@ fn claude_account(cfg: &Path, home: &str) -> AccountStatus {
                 .or_else(|| acct["displayName"].as_str())
                 .map(|s| s.to_string())
         });
+    // The recorded account outlives its login: a failed token renewal leaves
+    // `oauthAccount` in place. Ask the credential store whether it is usable,
+    // and fall back to the record only when the store cannot be read.
+    let usable = crate::client_mode::claude_login_usable(cfg, home);
     AccountStatus {
         agent: "claude".into(),
-        state: if account.is_some() { "in" } else { "out" },
+        state: if claude_signed_in(account.is_some(), usable) {
+            "in"
+        } else {
+            "out"
+        },
         account,
     }
+}
+
+/// The credential store decides when it can be read; the recorded account is
+/// only the fallback for a store that is locked or unavailable.
+fn claude_signed_in(recorded: bool, usable: Option<bool>) -> bool {
+    usable.unwrap_or(recorded)
 }
 
 /// Codex keeps `auth.json` under CODEX_HOME with either an API key or an OAuth
@@ -641,6 +655,15 @@ mod tests {
             profile_of_path(&h, &home.join(".claude/projects/x/a.jsonl")),
             DEFAULT_ID
         );
+    }
+
+    /// An expired login keeps its recorded account; the store decides.
+    #[test]
+    fn a_recorded_account_without_a_usable_login_is_signed_out() {
+        assert!(!claude_signed_in(true, Some(false)));
+        assert!(claude_signed_in(false, Some(true)));
+        assert!(claude_signed_in(true, None));
+        assert!(!claude_signed_in(false, None));
     }
 
     /// A signed-in profile must report the account it holds.

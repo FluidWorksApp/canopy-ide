@@ -39,3 +39,10 @@ test('invalid accounts are rejected before altering credentials',async()=>{
   await assert.rejects(importAgentAccounts({codex:accounts.codex},home),/symlink/);
  }finally{await rm(home,{recursive:true,force:true});}
 });
+test('default Claude import records only the whitelisted account identity',async()=>{
+ const home=await mkdtemp(path.join(tmpdir(),'canopy-accounts-'));try{
+  await mkdir(home+'/.claude');await writeFile(home+'/.claude/.claude.json',JSON.stringify({theme:'dark'}));
+  await importAgentAccounts({claude:accounts.claude},home,{claudeIdentity:{emailAddress:'me@example.com',displayName:'Me',accountUuid:'synthetic-id',accessToken:'leak'}});
+  assert.deepEqual(JSON.parse(await readFile(home+'/.claude/.claude.json','utf8')),{theme:'dark',hasCompletedOnboarding:true,oauthAccount:{emailAddress:'me@example.com',displayName:'Me',accountUuid:'synthetic-id'}});
+ }finally{await rm(home,{recursive:true,force:true});}
+});

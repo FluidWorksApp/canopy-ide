@@ -1533,10 +1533,10 @@ function AccountSwitcher() {
                 </span>
                 {/* Said up front, not at a login prompt. */}
                 <span className="status-account-held">
-                  {p.id === "default"
-                    ? "your existing logins"
-                    : held.length
-                      ? held.map((a) => a.agent).join(", ")
+                  {held.length
+                    ? held.map((a) => a.agent).join(", ")
+                    : p.id === "default"
+                      ? "signed out"
                       : "no logins yet"}
                 </span>
               </button>
