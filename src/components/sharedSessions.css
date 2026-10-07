@@ -1,1 +1,16 @@
 .shared-sessions-panel,.sharing-setup-panel{margin-top:16px;border-top:1px solid var(--border);padding-top:16px}.shared-sessions-panel>summary,.sharing-setup-panel>summary{cursor:pointer;font-weight:700}.shared-sessions-content{display:grid;gap:14px;padding-top:12px}.shared-sessions-content>header,.shared-session-preview>header{display:flex;align-items:center;justify-content:space-between;gap:12px}.shared-session-row{display:flex;align-items:center;flex-wrap:wrap;gap:12px;border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg-deep)}.shared-session-row>span{color:var(--text-dim);flex:1}.shared-session-form{display:grid;gap:12px;border:1px solid var(--border);border-radius:8px;padding:16px}.shared-session-form label{display:grid;gap:6px}.shared-session-form input,.shared-session-form select{background:var(--bg-deep);color:var(--text);padding:8px;border:1px solid var(--border);border-radius:4px}.shared-session-form p{color:var(--text-dim);line-height:1.5;margin:0}.shared-session-form h4{margin:6px 0}.shared-session-disclosure{display:flex;align-items:flex-start;gap:10px;line-height:1.5}.shared-session-disclosure input{margin-top:5px}.shared-session-preview .remote-terminal-surface{height:300px}.shared-session-preview{min-width:0}.shared-session-form button{justify-self:start}
+
+/* One line per action: label, inputs and button together, one short hint below. */
+.shared-sessions-content>header{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.shared-sessions-content>header p,.shared-session-empty{margin:0;font-size:var(--fs-sm);color:var(--text-dim)}
+.shared-session-form{display:flex;flex-direction:column;gap:10px;margin-top:10px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--bg-alt)}
+.shared-session-form h4{display:none}
+.shared-session-action{display:flex;flex-direction:column;gap:3px;padding-top:10px;border-top:1px solid var(--border)}
+.shared-session-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.shared-session-label{flex:0 0 112px;font-size:var(--fs-sm);font-weight:600}
+.shared-session-line select,.shared-session-line input:not([type=checkbox]){flex:1 1 180px;min-width:0;height:28px;font-size:var(--fs-sm)}
+.shared-session-line>.btn{flex-shrink:0}
+.shared-session-line small,.shared-session-action>small{font-size:var(--fs-xs);color:var(--text-dim)}
+.shared-session-action>small{padding-left:120px}
+.shared-session-disclosure{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-xs);color:var(--text-dim);white-space:nowrap}
+@media(max-width:620px){.shared-session-label{flex-basis:100%}.shared-session-action>small{padding-left:0}}
