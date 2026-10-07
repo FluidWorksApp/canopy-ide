@@ -6,6 +6,9 @@ const states=new Map<string,ConnectionState>(), listeners=new Set<()=>void>();
 const streams=new Map<string,Map<number,boolean>>();
 const lifecycle=new Map<string,'stopping'|'hibernated'>();
 export const connectionKey=(endpoint:string,id:string)=>`${endpoint}/${id}`;
+/** Set while a workspace is intentionally stopping or stopped. Transports
+ * must not reconnect to it: a dropped connection is expected, not a fault. */
+export const workspaceLifecyclePhase=(key:string)=>lifecycle.get(key);
 export function reportWorkspaceLifecycle(key:string,phase:'stopping'|'hibernated'|null){
  if(phase)lifecycle.set(key,phase);else lifecycle.delete(key);
  reportConnection(key,phase??'connecting');

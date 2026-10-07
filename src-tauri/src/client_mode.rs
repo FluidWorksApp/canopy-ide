@@ -574,56 +574,105 @@ fn export_profile_login(
 }
 
 const INCOMPLETE_LOGIN: &str = "Account credentials are incomplete";
-/// Whether a Claude config root holds a login the CLI can still use, read
-/// from the same store a sync copies (Keychain on macOS, the file elsewhere).
-/// `Some(false)`: absent, or no refresh token. `None`: the store could not be
-/// read (locked Keychain, denied access), so the caller must not claim either.
-/// Cached briefly: account status is re-read on every window focus.
-pub(crate) fn claude_login_usable(root: &std::path::Path, home: &str) -> Option<bool> {
+
+/// What one CLI's login store holds for one profile, read from the store the
+/// CLI itself reads (Keychain on macOS, the file elsewhere, Codex's configured
+/// store). The single answer behind every "signed in?" in the app: the status
+/// bar switcher, Settings → Accounts, the launcher banner and the remote sync
+/// picker all derive from this, never from `.claude.json`'s `oauthAccount`
+/// record, which outlives a login.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LoginProbe {
+    /// A login the CLI can use and a sync could copy.
+    Ready,
+    /// The CLI cleared or never finished it (no access or refresh token).
+    Incomplete,
+    /// No login stored at all.
+    Absent,
+    /// The store could not be read (locked Keychain, denied access).
+    Unreadable,
+}
+impl LoginProbe {
+    fn of(result: &Result<Option<serde_json::Value>, String>) -> Self {
+        match result {
+            Ok(Some(_)) => Self::Ready,
+            Ok(None) => Self::Absent,
+            Err(error) if error == INCOMPLETE_LOGIN => Self::Incomplete,
+            Err(_) => Self::Unreadable,
+        }
+    }
+    /// The remote sync picker's vocabulary for the same answer.
+    pub(crate) fn candidate(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Incomplete => "incomplete",
+            Self::Absent => "none",
+            Self::Unreadable => "unavailable",
+        }
+    }
+}
+
+/// Where one CLI keeps its login for a profile root, and whether Claude's
+/// Keychain item is the per-directory one.
+pub(crate) fn login_dir(agent: &str, root: &Path, home: &str) -> (std::path::PathBuf, bool) {
+    if root == Path::new(home) {
+        let (claude, codex, custom) = default_agent_dirs(home);
+        if agent == "claude" {
+            (claude, custom)
+        } else {
+            (codex, true)
+        }
+    } else {
+        (root.join(format!(".{agent}")), true)
+    }
+}
+
+/// The login state of one CLI in one profile. Cached briefly: account status
+/// is re-read on every window focus, from several panels at once.
+pub(crate) fn profile_login(agent: &str, root: &Path, home: &str) -> LoginProbe {
     // Tests must never read the developer's real Keychain items.
     if cfg!(test) {
-        let _ = (root, home);
-        return None;
+        let _ = (agent, root, home);
+        return LoginProbe::Unreadable;
     }
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
-    static CACHE: std::sync::OnceLock<Mutex<HashMap<std::path::PathBuf, (Instant, Option<bool>)>>> =
-        std::sync::OnceLock::new();
-    let (directory, custom) = if root == std::path::Path::new(home) {
-        let (claude, _, custom) = default_agent_dirs(home);
-        (claude, custom)
-    } else {
-        (root.join(".claude"), true)
-    };
+    type Cache = Mutex<HashMap<(String, std::path::PathBuf), (Instant, LoginProbe)>>;
+    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let (directory, custom) = login_dir(agent, root, home);
+    let key = (agent.to_string(), directory.clone());
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some((at, value)) = cache.lock().ok().and_then(|c| c.get(&directory).copied()) {
+    if let Some((at, value)) = cache.lock().ok().and_then(|c| c.get(&key).copied()) {
         if at.elapsed() < Duration::from_secs(30) {
             return value;
         }
     }
-    let value = match export_profile_login("claude", &directory, custom) {
-        Ok(found) => Some(found.is_some()),
-        Err(error) if error == INCOMPLETE_LOGIN => Some(false),
-        Err(_) => None,
-    };
+    let value = LoginProbe::of(&export_profile_login(agent, &directory, custom));
     if let Ok(mut c) = cache.lock() {
-        c.insert(directory, (Instant::now(), value));
+        c.insert(key, (Instant::now(), value));
     }
     value
+}
+
+/// A config-home override for the default account, unless it was inherited
+/// from a named profile's terminal (see profiles::ACCOUNT_VARS): following it
+/// would read, report and sync that profile's login as "Default".
+fn default_override(home: &str, value: Option<String>) -> Option<std::path::PathBuf> {
+    value
+        .filter(|v| !v.is_empty() && !crate::profiles::inherited_profile_path(home, v))
+        .map(std::path::PathBuf::from)
 }
 /// The default account's Claude and Codex directories, and whether Claude's is
 /// a custom CLAUDE_CONFIG_DIR (which changes its Keychain item name).
 fn default_agent_dirs(home: &str) -> (std::path::PathBuf, std::path::PathBuf, bool) {
-    let claude = std::env::var("CLAUDE_CONFIG_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(home).join(".claude"));
-    let codex = std::env::var("CODEX_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(home).join(".codex"));
+    let claude = default_override(home, std::env::var("CLAUDE_CONFIG_DIR").ok());
+    let codex = default_override(home, std::env::var("CODEX_HOME").ok())
+        .unwrap_or_else(|| std::path::PathBuf::from(home).join(".codex"));
+    let custom = claude.is_some();
     (
-        claude,
+        claude.unwrap_or_else(|| std::path::PathBuf::from(home).join(".claude")),
         codex,
-        std::env::var_os("CLAUDE_CONFIG_DIR").is_some(),
+        custom,
     )
 }
 /// One account's export. An incomplete login (e.g. no refresh token) is
@@ -652,19 +701,17 @@ fn export_or_report(
 pub async fn execution_remote_account_candidates() -> Result<Vec<serde_json::Value>, String> {
     tauri::async_runtime::spawn_blocking(|| -> Result<Vec<serde_json::Value>, String> {
         let home = std::env::var("HOME").map_err(|_| "Home directory unavailable")?;
-        let status = |agent: &str, directory: &std::path::Path, custom: bool| match export_profile_login(agent, directory, custom) {
-            Ok(Some(_)) => "ready",
-            Ok(None) => "none",
-            Err(error) if error == INCOMPLETE_LOGIN => "incomplete",
-            Err(_) => "unavailable",
-        };
-        let (claude, codex, custom) = default_agent_dirs(&home);
-        let mut out = vec![serde_json::json!({"id":crate::profiles::DEFAULT_ID,"claude":status("claude",&claude,custom),"codex":status("codex",&codex,true)})];
-        for profile in crate::profiles::list(&home).into_iter().filter(|p| p.removable).take(32) {
-            let root = std::path::PathBuf::from(&profile.root);
-            out.push(serde_json::json!({"id":profile.id,"claude":status("claude",&root.join(".claude"),true),"codex":status("codex",&root.join(".codex"),true)}));
-        }
-        Ok(out)
+        // The same probe the account status reads, so the picker and every
+        // "signed in" label agree.
+        Ok(crate::profiles::list(&home)
+            .into_iter()
+            .take(33)
+            .map(|profile| {
+                let root = std::path::PathBuf::from(&profile.root);
+                let state = |agent: &str| profile_login(agent, &root, &home).candidate();
+                serde_json::json!({"id":profile.id,"claude":state("claude"),"codex":state("codex")})
+            })
+            .collect())
     })
     .await
     .map_err(|_| "Account check failed".to_string())?
@@ -733,6 +780,29 @@ pub async fn execution_remote_import_accounts(
     }
         Ok((accounts, default_identity, profile_copies, skipped, skipped_profiles, incomplete))
     }).await.map_err(|_| "Account copy preparation failed")??;
+    // What was actually sent, per account and CLI, so the result can say
+    // exactly what reached the workspace instead of what was asked for.
+    let mut sent = serde_json::Map::new();
+    if !accounts.is_empty() {
+        sent.insert(
+            crate::profiles::DEFAULT_ID.into(),
+            serde_json::json!(accounts.keys().collect::<Vec<_>>()),
+        );
+    }
+    let mut sent_labels = Vec::new();
+    for copy in &profile_copies {
+        if let (Some(id), Some(label), Some(held)) = (
+            copy["id"].as_str(),
+            copy["label"].as_str(),
+            copy["accounts"].as_object(),
+        ) {
+            sent.insert(
+                id.into(),
+                serde_json::json!(held.keys().collect::<Vec<_>>()),
+            );
+            sent_labels.push(label.to_string());
+        }
+    }
     let payload =
         serde_json::json!({"command":"profile_import_credentials","args":{"accounts":accounts,"claudeIdentity":default_identity,"profiles":profile_copies}})
             .to_string();
@@ -773,10 +843,33 @@ pub async fn execution_remote_import_accounts(
         .get("result")
         .cloned()
         .ok_or("Invalid account import response")?;
+    result["notUpdated"] = serde_json::json!(not_updated(&result, &sent_labels));
+    result["sent"] = serde_json::Value::Object(sent);
     result["skipped"] = serde_json::json!(skipped);
     result["skippedProfiles"] = serde_json::json!(skipped_profiles);
     result["incomplete"] = serde_json::json!(incomplete);
     Ok(result)
+}
+/// Profiles sent but neither created nor updated by the workspace. An older
+/// workspace host skips a profile that already exists there (and reports it
+/// as `existingProfiles`); reporting it as synced is how a stale remote copy
+/// kept being shown as current.
+fn not_updated(result: &serde_json::Value, sent: &[String]) -> Vec<String> {
+    let done = |key: &str| -> Vec<String> {
+        result[key]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (imported, updated) = (done("imported"), done("updated"));
+    sent.iter()
+        .filter(|label| !imported.contains(label) && !updated.contains(label))
+        .cloned()
+        .collect()
 }
 #[tauri::command]
 pub async fn execution_remote_import_git(
@@ -1039,6 +1132,37 @@ mod account_import_tests {
             select_account_credentials("claude", Some(&current), None),
             Some(&current)
         );
+    }
+    #[test]
+    fn a_profile_an_older_host_skipped_is_not_reported_as_synced() {
+        let sent = vec!["VJ".to_string(), "Work".to_string()];
+        // Older host: existing profiles are skipped, no `updated` key.
+        let old = serde_json::json!({"imported":["codex"],"existingProfiles":["VJ"]});
+        assert_eq!(not_updated(&old, &sent), sent);
+        let new = serde_json::json!({"imported":["codex","Work"],"updated":["VJ"]});
+        assert!(not_updated(&new, &sent).is_empty());
+    }
+    #[test]
+    fn a_default_override_inherited_from_a_profile_terminal_is_ignored() {
+        let home = "/Users/dev";
+        assert_eq!(
+            default_override(home, Some("/Users/dev/.canopy/profiles/vj/.claude".into())),
+            None
+        );
+        assert_eq!(
+            default_override(home, Some("/Users/dev/alt-claude".into())),
+            Some(std::path::PathBuf::from("/Users/dev/alt-claude"))
+        );
+        assert_eq!(default_override(home, Some(String::new())), None);
+        assert_eq!(default_override(home, None), None);
+    }
+    #[test]
+    fn every_login_answer_has_one_picker_state() {
+        let probe = |r: Result<Option<serde_json::Value>, String>| LoginProbe::of(&r).candidate();
+        assert_eq!(probe(Ok(Some(serde_json::json!({})))), "ready");
+        assert_eq!(probe(Ok(None)), "none");
+        assert_eq!(probe(Err(INCOMPLETE_LOGIN.into())), "incomplete");
+        assert_eq!(probe(Err("locked".into())), "unavailable");
     }
     #[test]
     fn a_login_without_a_refresh_token_is_reported_as_incomplete() {

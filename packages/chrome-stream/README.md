@@ -57,8 +57,10 @@ connection for unattended tests; it does not verify extension compatibility.
   against a background tab and a minimized window driven over a direct CDP
   session; occlusion behaviour through the extension relay, on every platform,
   is not yet covered by a test.
-- One Node bridge/extension connection per Canopy preview tab. No persistent
-  extension token is stored by Canopy; reconnects may require approval.
+- One Node bridge/extension connection per Canopy preview tab. Each connection
+  asks for approval in Chrome unless the user saves the extension's token in
+  Settings → Browser; Canopy keeps it in the OS credential store (Keychain on
+  macOS) and passes it to the bridge as `PLAYWRIGHT_MCP_EXTENSION_TOKEN`.
 - `playwright.mjs` isolates the pinned internal extension factory and existing
   page CDP session. Public `newCDPSession()` does not work through the extension
   because it attempts to attach to the browser target. Upgrade this adapter

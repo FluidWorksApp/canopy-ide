@@ -1709,6 +1709,18 @@ impl PtyManager {
         // value. A run that deliberately supplies `NO_COLOR` in `extra_env`
         // still gets exactly what it requested when the loop below reapplies it.
         clear_inherited_no_color(&mut cmd, &extra_env);
+        // The account a terminal runs under is the launch's own choice. An
+        // account inherited from whatever started Canopy would put a
+        // "Default" tab on a named profile's login.
+        if let Some(home) = dirs_home() {
+            for key in crate::profiles::inherited_account_vars_to_clear(
+                &home,
+                |key| std::env::var(key).ok(),
+                &extra_env,
+            ) {
+                cmd.env_remove(key);
+            }
+        }
         let caller_set_aider_read = extra_env.iter().any(|(k, _)| k == "AIDER_READ");
         let marks_omp_task = extra_env.iter().any(|(k, _)| k == OMP_TASK_MARKER);
         for (k, v) in extra_env {

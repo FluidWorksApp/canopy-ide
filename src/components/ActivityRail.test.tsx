@@ -46,14 +46,14 @@ describe("ActivityRail", () => {
       "Work — Team — relay, chat, notifications",
       "Tools — MCP servers your agents can reach, from every CLI",
       "Settings (Cmd+,)",
-      "Account & balance",
+      "Accounts",
     ]);
   });
 
   it("opens account settings from the replacement account button", () => {
     const onOpenAccount = vi.fn();
     const { getByTitle } = render(<ActivityRail {...props} onOpenAccount={onOpenAccount} />);
-    fireEvent.click(getByTitle("Account & balance"));
+    fireEvent.click(getByTitle("Accounts"));
     expect(onOpenAccount).toHaveBeenCalledOnce();
   });
 

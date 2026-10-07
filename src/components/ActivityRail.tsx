@@ -316,7 +316,7 @@ function ActivityRailImpl({
       </button>
       <button
         className="rail-btn"
-        title="Account & balance"
+        title="Accounts"
         onClick={onOpenAccount ?? (() => window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "account" } })))}
         onMouseEnter={() => onHoverLeave(true)}
       >

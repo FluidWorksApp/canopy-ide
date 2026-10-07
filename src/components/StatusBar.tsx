@@ -3,7 +3,17 @@ import { fixedNumber } from "../format";
 // tokens, estimated cost. Token/model data comes from Claude Code session
 // transcripts (path arrives via hook events); cost is an estimate from a
 // static pricing map.
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
+import { placeAboveAnchor, type PopoverPlacement } from "../popoverPlacement";
 import {
   PROFILE_CHANGE_EVENT,
   activeProfile,
@@ -24,7 +34,8 @@ import { formatDeepLink } from "../deepLinks";
 import { setBounded } from "../boundedMap";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
-import { chipText, planFor, planTone, tooltip } from "../planUsage";
+import { chipLabel, planFor, planStale, planTone, tooltip } from "../planUsage";
+import { accountSummary } from "../accountState";
 import {
   loadFlags,
   loadNote,
@@ -48,6 +59,9 @@ import { modelCommandLine, type ModelSwitch } from "../agentModels";
 import { agentCliFor } from "../projects";
 import { useBranchSwitch } from "../useBranchSwitch";
 import type { SyncMergePayload } from "../microTasks";
+
+/** Preferred width of the usage popup; shrinks to fit a narrow window. */
+const STATS_PANEL_WIDTH = 452;
 
 /** How many branches the tray's menu shows before you type. It is a shortcut to
  *  the handful you are actually moving between — `for-each-ref` hands them back
@@ -229,12 +243,19 @@ export const StatusBar = memo(function StatusBar({
   // click, and a scan must not be cancelled by the user clicking its own list.
   const [cleanupOpen, setCleanupOpen] = useState(false);
   const statsAnchorRef = useRef<HTMLSpanElement>(null);
+  // The panel is portalled to <body> (below), so "inside" is the chip or the
+  // panel — not just the chip's subtree.
+  const statsMenuRef = useRef<HTMLDivElement>(null);
   // Native dismissal: click anywhere outside, or Escape. Mouse-leave felt
   // flimsy on a panel this size — the cursor grazes the edge and it vanishes.
   useEffect(() => {
     if (!statsOpen) return;
     const onDown = (e: MouseEvent) => {
-      if (!statsAnchorRef.current?.contains(e.target as Node))
+      const t = e.target as Node;
+      if (
+        !statsAnchorRef.current?.contains(t) &&
+        !statsMenuRef.current?.contains(t)
+      )
         setStatsOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
@@ -269,6 +290,28 @@ export const StatusBar = memo(function StatusBar({
         bottom: menuPos.bottom,
       } as const)
     : undefined;
+  // The stats panel is a couple of screens tall, so it is placed against the
+  // viewport rather than hung off the chip: clamped inside the window, height
+  // capped at the room above the chip (the body scrolls, the header stays),
+  // and re-measured when the window changes size.
+  const [statsPlace, setStatsPlace] = useState<PopoverPlacement | null>(null);
+  useLayoutEffect(() => {
+    if (!statsOpen) return;
+    const place = () => {
+      const btn = statsAnchorRef.current?.querySelector(".status-stats-btn");
+      if (!btn) return;
+      setStatsPlace(
+        placeAboveAnchor(
+          btn.getBoundingClientRect(),
+          { width: window.innerWidth, height: window.innerHeight },
+          { width: STATS_PANEL_WIDTH, gap: 6, margin: 8 },
+        ),
+      );
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [statsOpen]);
   const [openSessions, setOpenSessions] = useState<Record<number, boolean>>({});
   // What the cleanup task is pointed at: every open project's folders, the cwds
   // of anything live, and the projects that are asleep. Rust unions the busy
@@ -356,6 +399,25 @@ export const StatusBar = memo(function StatusBar({
     () => planFor(plans, agentId, agentProfile || "default"),
     [plans, agentId, agentProfile],
   );
+  // The chip reports the front terminal's account. When that is not the
+  // account new agents launch as, it says whose numbers these are.
+  const [launchAccount, setLaunchAccount] = useState(activeProfile());
+  const [accountLabels, setAccountLabels] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const pull = () => {
+      setLaunchAccount(activeProfile());
+      void ipc
+        .profilesList()
+        .then((list) => setAccountLabels(Object.fromEntries(list.map((p) => [p.id, p.label]))))
+        .catch(() => {});
+    };
+    pull();
+    window.addEventListener(PROFILE_CHANGE_EVENT, pull);
+    return () => window.removeEventListener(PROFILE_CHANGE_EVENT, pull);
+  }, []);
+  const chipProfile = agentProfile || "default";
+  const chipAccount =
+    chipProfile !== launchAccount ? (accountLabels[chipProfile] ?? chipProfile) : null;
 
   // The transcript whose model/tokens the tray shows. Per-TAB first: prefer
   // the latest event stamped with the active terminal's pty, so switching
@@ -1352,10 +1414,10 @@ export const StatusBar = memo(function StatusBar({
           nothing rather than a 0% that would read as "plenty left". */}
       {plan && plan.windows.length > 0 && (
         <span
-          className={`status-item status-plan is-${planTone(plan)}`}
-          title={tooltip(plan)}
+          className={`status-item status-plan is-${planTone(plan)}${planStale(plan) ? " is-stale" : ""}`}
+          title={`${chipAccount ? `${chipAccount}'s plan (this terminal's account)\n` : ""}${tooltip(plan)}`}
         >
-          {chipText(plan)}
+          {chipLabel(plan, { accountLabel: chipAccount })}
         </span>
       )}
       {/* Beside the plan chip: that headroom belongs to this account. Hidden
@@ -1381,25 +1443,40 @@ export const StatusBar = memo(function StatusBar({
         <button
           className={`status-stats-btn ${statsOpen ? "is-open" : ""}`}
           title="Usage & cost across all CLIs"
-          onClick={(e) => {
-            anchorMenu(e);
-            setStatsOpen((v) => !v);
-          }}
+          onClick={() => setStatsOpen((v) => !v)}
         >
           <StatsIcon size={13} />
         </button>
-        {statsOpen && (
-          <div className="status-menu status-stats-menu" style={menuStyle}>
-            <StatsPanel
-              visible={statsOpen}
-              roots={allRoots}
-              onCleanup={() => {
-                setStatsOpen(false);
-                setCleanupOpen(true);
-              }}
-            />
-          </div>
-        )}
+        {/* Portalled so nothing in the status bar's stacking context (or the
+            floating companion over it) can sit on top of the panel. */}
+        {statsOpen &&
+          createPortal(
+            <div
+              ref={statsMenuRef}
+              className="status-menu status-stats-menu"
+              style={
+                statsPlace
+                  ? {
+                      position: "fixed",
+                      left: statsPlace.left,
+                      bottom: statsPlace.bottom,
+                      width: statsPlace.width,
+                      maxHeight: statsPlace.maxHeight,
+                    }
+                  : { visibility: "hidden" }
+              }
+            >
+              <StatsPanel
+                visible={statsOpen}
+                roots={allRoots}
+                onCleanup={() => {
+                  setStatsOpen(false);
+                  setCleanupOpen(true);
+                }}
+              />
+            </div>,
+            document.body,
+          )}
       </span>
       <ClipboardHistory visible={visible} />
       <CleanupDialog
@@ -1418,7 +1495,7 @@ export const StatusBar = memo(function StatusBar({
 
 /** The global account switch. Running sessions keep the account they started
  *  with; this changes what the next launch uses. */
-function AccountSwitcher() {
+export function AccountSwitcher() {
   const [profiles, setProfiles] = useState<ipc.AgentProfile[]>([]);
   const [accounts, setAccounts] = useState<Record<string, ipc.AccountStatus[]>>(
     {},
@@ -1487,9 +1564,6 @@ function AccountSwitcher() {
 
   if (profiles.length < 2) return null;
   const current = profiles.find((p) => p.id === active) ?? profiles[0];
-  /** The CLIs this account holds a login for. */
-  const heldBy = (id: string) =>
-    (accounts[id] ?? []).filter((a) => a.state === "in");
 
   return (
     <span className="status-account-anchor" ref={anchorRef}>
@@ -1517,7 +1591,6 @@ function AccountSwitcher() {
           }
         >
           {profiles.map((p) => {
-            const held = heldBy(p.id);
             return (
               <button
                 key={p.id}
@@ -1533,11 +1606,7 @@ function AccountSwitcher() {
                 </span>
                 {/* Said up front, not at a login prompt. */}
                 <span className="status-account-held">
-                  {held.length
-                    ? held.map((a) => a.agent).join(", ")
-                    : p.id === "default"
-                      ? "signed out"
-                      : "no logins yet"}
+                  {accounts[p.id] ? accountSummary(accounts[p.id]) : "checking…"}
                 </span>
               </button>
             );

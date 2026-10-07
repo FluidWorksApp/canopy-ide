@@ -33,8 +33,10 @@ export function validateAgentAccounts(accounts){
   for(const [agent,value] of Object.entries(accounts)){
     if(!['claude','codex'].includes(agent)||!value||typeof value!=='object'||Array.isArray(value))throw Error('Invalid agent credentials');
     if(Buffer.byteLength(JSON.stringify(value))>65536)throw Error('Agent credentials too large');
-    if(agent==='claude'&&!(typeof value.claudeAiOauth?.accessToken==='string'&&typeof value.claudeAiOauth?.refreshToken==='string'))throw Error('Claude login missing');
-    if(agent==='codex'&&!(typeof value.tokens?.access_token==='string'||typeof value.OPENAI_API_KEY==='string'))throw Error('Codex login missing');
+    // A cleared login (empty tokens) is not a login: copying it would overwrite a working cloud copy.
+    const filled=v=>typeof v==='string'&&v.length>0;
+    if(agent==='claude'&&!(filled(value.claudeAiOauth?.accessToken)&&filled(value.claudeAiOauth?.refreshToken)))throw Error('Claude login missing');
+    if(agent==='codex'&&!(filled(value.tokens?.access_token)||filled(value.OPENAI_API_KEY)))throw Error('Codex login missing');
   }
 }
 export async function importAgentAccounts(accounts,home,{claudeIdentity:identity}={}){
