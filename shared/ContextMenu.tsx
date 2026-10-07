@@ -107,7 +107,9 @@ export function ContextMenu({ x, y, items, above, filter, onClose }: ContextMenu
   // Which row Enter would take. A search box you have to reach back to the
   // mouse to act on is half a search box.
   const [active, setActive] = useState(-1);
-  useEscapeLayer();
+  // Only this menu goes away on Escape — the panel it was opened from stays,
+  // because the overlay stack hands the key to the top layer alone.
+  useEscapeLayer(true, { onEscape: () => onClose() });
 
   const q = query.trim();
   const { rows, hidden } = useMemo(
@@ -162,22 +164,17 @@ export function ContextMenu({ x, y, items, above, filter, onClose }: ContextMenu
       if (ref.current?.contains(e.target as Node)) return;
       onClose();
     };
-    // Only this menu goes away on Escape — the panel it was opened from stays,
-    // because the menu counts itself as an Escape layer below.
-    const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     const bail = () => onClose();
     window.addEventListener("mousedown", close, true);
-    window.addEventListener("keydown", esc);
     window.addEventListener("resize", bail);
     return () => {
       window.removeEventListener("mousedown", close, true);
-      window.removeEventListener("keydown", esc);
       window.removeEventListener("resize", bail);
     };
   }, [onClose]);
 
   /** Arrows walk the rows, Enter takes the one under the highlight. Escape is
-   *  left alone: the window listener above already closes the whole menu, and
+   *  left alone: the overlay stack already closes the whole menu, and
    *  clearing the query first would make the first Escape look like nothing. */
   const onKey = (e: React.KeyboardEvent) => {
     const idx = pickable(rows);

@@ -14,6 +14,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { placeAboveAnchor, type PopoverPlacement } from "../popoverPlacement";
+import { useEscape } from "../useEscape";
 import {
   PROFILE_CHANGE_EVENT,
   activeProfile,
@@ -276,16 +277,12 @@ export const StatusBar = memo(function StatusBar({
       )
         setStatsOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setStatsOpen(false);
-    };
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("mousedown", onDown);
   }, [statsOpen]);
+  // Escape through the overlay stack: a bubbling listener here ran after the
+  // terminal had already sent the key to the agent as an interrupt.
+  useEscape(() => setStatsOpen(false), statsOpen);
   // Popups anchored to a chip must escape .status-bar's overflow:hidden (it
   // clips its one-line row — and clipped everything that pops above it, so
   // only a shadow sliver ever showed). Fixed positioning, measured from the
@@ -617,14 +614,11 @@ export const StatusBar = memo(function StatusBar({
     const onDown = (e: MouseEvent) => {
       if (!syncAnchorRef.current?.contains(e.target as Node)) closeSync();
     };
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && closeSync();
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("mousedown", onDown);
   }); // no deps: closeSync must see the probe from this render
+  // The layer reads its handler live, so closeSync sees this render's probe.
+  useEscape(() => closeSync(), syncOpen);
 
   const runMerge = async () => {
     if (!sync || !repo) return;
@@ -1571,16 +1565,10 @@ export function AccountSwitcher() {
     const onDown = (e: MouseEvent) => {
       if (!anchorRef.current?.contains(e.target as Node)) setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("mousedown", onDown);
   }, [open]);
+  useEscape(() => setOpen(false), open);
 
   const refresh = useCallback(() => {
     setActive(activeProfile());

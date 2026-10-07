@@ -120,8 +120,8 @@ export const OVERLAY_SURFACES: OverlaySurface[] = [
     kind: "persistent",
     covers: "center",
     open: () => fire("menu:quick-open"),
-    // The palette's Escape lives on its input, not on window, so the backdrop
-    // is what dismisses it from here.
+    // Escape closes it too (the overlay stack); the backdrop is the mouse
+    // path, exercised here so both dismissals stay covered between them.
     close: () =>
       document
         .querySelector(".palette-backdrop")

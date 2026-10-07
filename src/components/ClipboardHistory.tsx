@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEscapeLayer } from "../useEscape";
 import * as clipboardStore from "../clipboardStore";
 import * as ipc from "../ipc";
 import { insertTextAtCursor } from "../insertText";
@@ -79,6 +80,10 @@ export function ClipboardHistory({ visible }: { visible: boolean }) {
     openRef.current = false;
     setOpen(false);
   };
+  // On the overlay stack while open, so Escape (and the arrows/Enter it drives
+  // the list with) never reach the terminal it will paste into. Focus stays in
+  // that terminal: it is the insertion target.
+  useEscapeLayer(open, { onEscape: close, keepFocus: true });
 
   const commit = (clip: ipc.Clip) => {
     const insertionTarget = target.current;
