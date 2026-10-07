@@ -42,7 +42,8 @@ RUN bash /usr/local/lib/canopy/install-agents.sh grok /tmp/locks/grok.json
 COPY --from=agent-locks /locks/npm-opencode.json /tmp/locks/
 RUN bash /usr/local/lib/canopy/install-agents.sh npm /tmp/locks/npm-opencode.json
 COPY --from=agent-locks /locks/npm-omp.json /tmp/locks/
-RUN bash /usr/local/lib/canopy/install-agents.sh npm /tmp/locks/npm-omp.json
+# oh-my-pi is ~725 MB compressed: ship a pinned launcher, install on first use.
+RUN bash /usr/local/lib/canopy/install-agents.sh lazy-npm /tmp/locks/npm-omp.json omp
 COPY --from=agent-locks /locks/npm-amp.json /tmp/locks/
 RUN bash /usr/local/lib/canopy/install-agents.sh npm /tmp/locks/npm-amp.json
 RUN npm install -g --cache /tmp/npm-cache --no-audit --no-fund typescript-language-server@5.3.0 typescript@5.9.3 && rm -rf /tmp/npm-cache
