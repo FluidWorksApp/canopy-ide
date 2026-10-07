@@ -1597,6 +1597,27 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                   />
                 </Item>
                 <Item
+                  name="Team messages"
+                  desc="Notify you when a teammate messages you or your team's channel while that conversation isn't on screen. Unread counts show in Teams either way."
+                >
+                  <Checkbox
+                    checked={s.teamMessageNotifications}
+                    onChange={(v) => patch({ teamMessageNotifications: v })}
+                    label="Notify me about team messages"
+                  />
+                  <Checkbox
+                    checked={s.teamMessagePreviews}
+                    disabled={!s.teamMessageNotifications}
+                    onChange={(v) => patch({ teamMessagePreviews: v })}
+                    label="Show message previews"
+                    hint={
+                      s.teamMessagePreviews
+                        ? "Shows the first line of the message. Notifications are kept in the bell on this device."
+                        : "Shows only who wrote; message text stays in the encrypted conversation."
+                    }
+                  />
+                </Item>
+                <Item
                   name="Default agent"
                   desc="What the Start button launches; pick another per ticket."
                 >

@@ -68,7 +68,15 @@ export type DeepLink =
   | ({ kind: "terminal"; ptyId: number } & ProjectHint)
   | ({ kind: "panel"; panel: SideTab } & ProjectHint)
   /** `peer: null` is the team-wide conversation, not a DM. */
-  | ({ kind: "chat"; peer: string | null } & ProjectHint)
+  | ({
+      kind: "chat";
+      peer: string | null;
+      /** An account team conversation rather than a relay one: the team, the
+       *  account (user id) that received it, and a label for its tab. */
+      team?: string;
+      account?: string;
+      name?: string;
+    } & ProjectHint)
   | ({ kind: "file"; path: string; line?: number } & ProjectHint)
   /** A scratchpad note, by store id (`nnnn-slug`). */
   | ({ kind: "note"; noteId: string } & ProjectHint)
@@ -95,6 +103,11 @@ export function formatDeepLink(link: DeepLink): string {
   if (link.kind === "terminal") q.set("pty", String(link.ptyId));
   if (link.kind === "panel") q.set("name", link.panel);
   if (link.kind === "chat" && link.peer !== null) q.set("peer", link.peer);
+  if (link.kind === "chat" && link.team && link.account) {
+    q.set("team", link.team);
+    q.set("account", link.account);
+    if (link.name) q.set("label", link.name);
+  }
   if (link.kind === "file" && link.line != null) q.set("line", String(link.line));
   // `note`, not `id` — `id` is already the project hint on every kind, and a
   // link that spelled the note with it would be a link that can never carry
@@ -155,8 +168,19 @@ export function parseDeepLink(raw: string): DeepLink | null {
       if (!name || !SIDE_TABS.includes(name)) return null;
       return { kind: "panel", panel: name, ...hint };
     }
-    case "chat":
-      return { kind: "chat", peer: p.get("peer"), ...hint };
+    case "chat": {
+      const team = p.get("team");
+      const account = p.get("account");
+      const name = p.get("label");
+      return {
+        kind: "chat",
+        peer: p.get("peer"),
+        ...(team && account
+          ? { team, account, ...(name ? { name } : {}) }
+          : {}),
+        ...hint,
+      };
+    }
     case "note": {
       const noteId = p.get("note");
       if (!noteId) return null;
@@ -213,6 +237,15 @@ export type DeepLinkAction =
   | { do: "tab"; tabId: string }
   | { do: "panel"; panel: SideTab; note?: string }
   | { do: "chat"; peer: string | null; name: string }
+  | {
+      do: "account-chat";
+      conversation: {
+        teamId: string;
+        userId: string;
+        peer: string | null;
+        name: string;
+      };
+    }
   | { do: "file"; path: string; line?: number }
   | { do: "note"; noteId: string }
   | { do: "research"; researchId: string }
@@ -266,6 +299,16 @@ export function followLink(
     }
     case "chat": {
       const peer = link.peer;
+      if (link.team && link.account)
+        return {
+          do: "account-chat",
+          conversation: {
+            teamId: link.team,
+            userId: link.account,
+            peer,
+            name: link.name || (peer === null ? "Team" : "Direct message"),
+          },
+        };
       if (peer === null) return { do: "chat", peer, name: "Team" };
       const name = ctx.members.find((m) => m.key === peer)?.name;
       // A DM with someone who has since disconnected has no conversation to

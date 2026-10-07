@@ -1,6 +1,7 @@
 import {loadChatHistory,saveChatMessage,forgetChatMessage,loadChatReadState,saveChatReadState} from './history';
 import {invoke} from '@tauri-apps/api/core';
 import {PeerClient,type ChatMessage} from './client';
+import {countUnread,type ConversationUnread} from './unread';
 
 /** Local lifecycle of a message this account sent. A delivery receipt (tracked
  * in `receipts`) supersedes every state here.
@@ -22,7 +23,20 @@ const empty=(status:string):Snapshot=>({unreadIds:[],restoredIds:[],members:{},m
 const sessions=new Map<string,TeamSession>();
 const unreadListeners=new Set<()=>void>();
 export const subscribeTeamUnread=(listener:()=>void)=>{unreadListeners.add(listener);return()=>{unreadListeners.delete(listener);};};
-export const getTeamUnread=()=>[...sessions.values()].reduce((sum,session)=>sum+session.getSnapshot().unreadIds.length,0);
+/** Unread counts per session, keyed `${user}:${team}`. Stable between changes for `useSyncExternalStore`. */
+export type TeamUnreadSummary=Record<string,ConversationUnread>;
+let summary:{json:string;value:TeamUnreadSummary}={json:'{}',value:{}};
+export function getUnreadSummary():TeamUnreadSummary{
+ const value:TeamUnreadSummary={};
+ for(const [key,session] of sessions){const counts=session.unread();if(counts.total)value[key]=counts;}
+ const json=JSON.stringify(value);if(json!==summary.json)summary={json,value};
+ return summary.value;
+}
+export const getTeamUnread=()=>Object.values(getUnreadSummary()).reduce((sum,counts)=>sum+counts.total,0);
+/** A message from someone else that this device had not seen before. */
+export type TeamMessageEvent={team:string;user:string;message:ChatMessage;senderName?:string};
+const messageListeners=new Set<(event:TeamMessageEvent)=>void>();
+export const subscribeTeamMessages=(listener:(event:TeamMessageEvent)=>void)=>{messageListeners.add(listener);return()=>{messageListeners.delete(listener);};};
 export class TeamSession {
  private listeners=new Set<()=>void>();
  private client:PeerClient;
@@ -45,7 +59,14 @@ export class TeamSession {
   this.client=new PeerClient({team,user,request:body=>invoke('canopy_account_request',{route:'/api/peers',body}),
    persist:message=>saveChatMessage(this.user,this.team,message),
    members:members=>this.update({members:Object.fromEntries(members.map(m=>[m.id,m.name]))}),
-   message:message=>{if(this.invalid||this.discarded.has(message.id))return;this.update({unreadIds:message.sender!==this.user&&!this.snapshot.messages.some(m=>m.id===message.id)?[...this.snapshot.unreadIds.slice(-499),message.id]:this.snapshot.unreadIds,messages:this.snapshot.messages.some(m=>m.id===message.id)?this.snapshot.messages:[...this.snapshot.messages.slice(-499),message]});this.persistReadState();},
+   message:message=>{
+    if(this.invalid||this.discarded.has(message.id))return;
+    // Own messages (including echoes from this account's other devices) and
+    // repeats of a message already shown never count as unread.
+    const fresh=!this.snapshot.messages.some(m=>m.id===message.id),incoming=fresh&&message.sender!==this.user;
+    this.update({unreadIds:incoming?[...this.snapshot.unreadIds.slice(-499),message.id]:this.snapshot.unreadIds,messages:fresh?[...this.snapshot.messages.slice(-499),message]:this.snapshot.messages});this.persistReadState();
+    if(incoming){const event={team:this.team,user:this.user,message,senderName:this.snapshot.members[message.sender]};messageListeners.forEach(fn=>{try{fn(event);}catch{/* a listener never breaks delivery */}});}
+   },
    receipt:(id,user)=>{if(this.invalid||!this.snapshot.messages.some(m=>m.id===id))return;this.update({receipts:{...this.snapshot.receipts,[id]:[...new Set([...(this.snapshot.receipts[id]??[]),user])].slice(-512)}});this.persistReadState();},
    status:status=>{this.update({status});if(status.startsWith('Connected'))this.resendWaiting();},
    pending:ids=>{
@@ -85,6 +106,9 @@ export class TeamSession {
   const unreadIds=this.snapshot.unreadIds.filter(id=>!ids.has(id));
   if(unreadIds.length!==this.snapshot.unreadIds.length){this.update({unreadIds});this.persistReadState();}
  }
+ /** Unread counts per conversation for this account and team. */
+ unread():ConversationUnread{const {messages,unreadIds}=this.snapshot;if(this.unreadCache?.messages!==messages||this.unreadCache.unreadIds!==unreadIds)this.unreadCache={messages,unreadIds,counts:countUnread(messages,unreadIds,this.user)};return this.unreadCache.counts;}
+ private unreadCache?:{messages:ChatMessage[];unreadIds:string[];counts:ConversationUnread};
  getSnapshot=()=>this.snapshot;
  subscribe=(fn:()=>void)=>{this.listeners.add(fn);return()=>{this.listeners.delete(fn);};};
  retain(){

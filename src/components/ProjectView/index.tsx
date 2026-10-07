@@ -1,4 +1,4 @@
-import {subscribeTeamUnread,getTeamUnread} from "../../teamMessaging/session";
+import {subscribeTeamUnread,getTeamUnread,getUnreadSummary} from "../../teamMessaging/session";
 import {isReadOnlyHost} from "../../host";
 import { AgentIntegrationWarning } from "../AgentIntegrationWarning";
 import {AccountChatView,type AccountConversation} from "../AccountChatView";
@@ -1394,6 +1394,16 @@ const ProjectViewBody = memo(function ProjectViewBody({
     return () => onTerminalQuotaGroupsChange?.(project.id, []);
   }, [onTerminalQuotaGroupsChange, project.id]);
   const accountTeamUnread = useSyncExternalStore(subscribeTeamUnread, getTeamUnread);
+  const accountUnreadSummary = useSyncExternalStore(subscribeTeamUnread, getUnreadSummary);
+  /** Unread count on an account conversation tab that is not in front. */
+  const accountTabUnread = (tab: SubTab) => {
+    if (tab.type !== "chat" || !tab.accountConversation) return 0;
+    if (visible && tab.id === activeTabId) return 0;
+    const {teamId, userId, peer} = tab.accountConversation;
+    const counts = accountUnreadSummary[`${userId}:${teamId}`];
+    if (!counts) return 0;
+    return (peer === null ? counts.channel : counts.peers[peer]) ?? 0;
+  };
   const showTerminalMemoryPrompts = useSyncExternalStore(
     subscribeTerminalMemoryPromptVisibility,
     terminalMemoryPromptsVisible,
@@ -5979,6 +5989,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           });
       } else if (act.do === "chat") {
         openChat(act.peer, act.name);
+      } else if (act.do === "account-chat") {
+        openAccountChat(act.conversation);
       } else if (act.do === "pr") {
         // Re-resolved against the live list: still open → its native tab,
         // merged or closed since → the URL in the browser.
@@ -6034,6 +6046,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   }, [
     project.id,
     openChat,
+    openAccountChat,
     openNote,
     openResearch,
     openTaskHistory,
@@ -12578,6 +12591,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
               ringFor(attention.get(member.ptyId) ?? NO_ATTENTION),
           )
         }
+        tabUnread={accountTabUnread}
         account={accountBanner}
         profileLabels={profileLabels}
         shellChips={shellChips}
@@ -14132,7 +14146,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
             tasksBadge={runningMicro.length}
             pendingCount={pending.length}
             urgentCount={urgentCount}
-            teamBadge={teamBadge + accountTeamUnread}
+            teamBadge={teamBadge}
+            teamUnread={accountTeamUnread}
             relayRole={relay.status.role}
             onSelectTab={selectSideTab}
             onHoverTab={hoverSideTab}

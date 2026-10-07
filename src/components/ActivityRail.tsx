@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { badgeLabel } from "../teamMessaging/unread";
 import {
   FilesIcon,
   GitBranchIcon,
@@ -171,6 +172,8 @@ interface ActivityRailProps {
   pendingCount: number;
   urgentCount: number;
   teamBadge: number;
+  /** Unread account team messages (channel + DMs, every team of this account). */
+  teamUnread?: number;
   relayRole: "off" | "host" | "client";
   onSelectTab: (tab: SideTab) => void;
   onHoverTab: (tab: SideTab) => void;
@@ -197,6 +200,7 @@ function ActivityRailImpl({
   pendingCount,
   urgentCount,
   teamBadge,
+  teamUnread = 0,
   relayRole,
   onSelectTab,
   onHoverTab,
@@ -257,9 +261,17 @@ function ActivityRailImpl({
           {pendingCount}
         </span>
       )}
-      {t.key === "team" && teamBadge > 0 && (
-        <span className="rail-badge rail-badge-urgent">
-          {Math.min(teamBadge, 99)}
+      {t.key === "team" && teamBadge + teamUnread > 0 && (
+        <span
+          className={`rail-badge${teamBadge > 0 ? " rail-badge-urgent" : ""}`}
+          data-testid="team-rail-badge"
+          title={
+            teamUnread > 0
+              ? `${teamUnread} unread team message${teamUnread === 1 ? "" : "s"}`
+              : undefined
+          }
+        >
+          {badgeLabel(teamBadge + teamUnread)}
         </span>
       )}
       {t.key === "team" && relayRole !== "off" && (
