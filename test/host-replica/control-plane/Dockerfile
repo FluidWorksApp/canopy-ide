@@ -3,7 +3,7 @@
 FROM docker:28-cli AS dockercli
 FROM node:24-bookworm-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends util-linux e2fsprogs ca-certificates \
+ && apt-get install -y --no-install-recommends util-linux e2fsprogs xfsprogs ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 WORKDIR /website

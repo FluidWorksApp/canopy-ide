@@ -69,8 +69,9 @@ async function inspect(name){
  try{const {stdout}=await docker(['inspect','--format','{{json .State}}|{{json .NetworkSettings.Networks}}',containerName(name)]);const [s,n]=stdout.trim().split('|');return {state:JSON.parse(s),networks:JSON.parse(n)};}
  catch{return null;}
 }
-// Snapshots (boot disks) are copied sparse: only written blocks take space.
-const copySparse=(from,to)=>exec('cp',['--sparse=always',from,to],{timeout:60*60_000});
+// Boot disks and snapshots are reflink clones on the run's XFS filesystem
+// (copy-on-write, like EBS snapshots); elsewhere a sparse copy.
+const copySparse=(from,to)=>exec('cp',['--reflink=auto','--sparse=always',from,to],{timeout:60*60_000});
 async function grow(file,gib){
  const current=statSync(file).size;if(current>=gib*1024**3)return;
  await exec('truncate',['-s',`${gib}G`,file]);
@@ -105,7 +106,7 @@ async function launch(record,bootSource,userData){
  const hosts=(env.REPLICA_ADD_HOSTS??'').split(',').filter(Boolean).flatMap(entry=>['--add-host',entry]);
  await docker(['create','--name',containerName(record.name),'--hostname',record.hostname,'--privileged','--cgroupns=private',
   '--network',env.REPLICA_NETWORK,...hosts,'-v',`${env.REPLICA_DISKS_VOLUME}:/disks`,'-e',`CANOPY_REPLICA_INSTANCE=${record.name}`,
-  '--label',`canopy-replica.run=${RUN}`,'--label',`canopy-replica.instance=${record.name}`,'--memory',`${memory}m`,'--cpus',String(bundle.cpus),
+  '--label',`canopy-replica.run=${RUN}`,'--label',`canopy-replica.pid=${env.REPLICA_OWNER_PID??''}`,'--label',`canopy-replica.instance=${record.name}`,'--memory',`${memory}m`,'--cpus',String(bundle.cpus),
   '--stop-timeout','90','--entrypoint','/usr/local/lib/canopy-replica/replica-init',env.REPLICA_HOST_IMAGE]);
  await docker(['start',containerName(record.name)]);
 }

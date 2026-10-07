@@ -23,10 +23,10 @@ const {values:opt}=parseArgs({options:{
  website:{type:'string',default:'origin/main'},'website-repo':{type:'string'},'website-dir':{type:'string'},
  flags:{type:'string',default:''},scenario:{type:'string',default:'resume'},plan:{type:'string',default:'starter'},
  keep:{type:'boolean',default:false},'timeout-minutes':{type:'string',default:'45'},cache:{type:'string'},
- 'cron-seconds':{type:'string',default:'60'},help:{type:'boolean',default:false},clean:{type:'boolean',default:false},preformat:{type:'string'},'first-runtime':{type:'string'},'first-website':{type:'string'},'stale-apt-timers':{type:'boolean',default:false},'first-image':{type:'string'},
+ 'cron-seconds':{type:'string',default:'60'},help:{type:'boolean',default:false},clean:{type:'boolean',default:false},'clean-run':{type:'string'},preformat:{type:'string'},'first-runtime':{type:'string'},'first-website':{type:'string'},'stale-apt-timers':{type:'boolean',default:false},'first-image':{type:'string'},
 }});
 const SCENARIOS=['new','resume','stop','retry','migrate'];
-if(!opt.clean&&(opt.help||!opt.runtime||!SCENARIOS.includes(opt.scenario))){
+if(!opt.clean&&!opt['clean-run']&&(opt.help||!opt.runtime||!SCENARIOS.includes(opt.scenario))){
  console.log(`Usage: npm run replica -- --runtime <sha|ref|workspace-host.tar.gz|artifact dir> [--image ghcr.io/...@sha256:...]
   [--website <git ref, default origin/main>] [--website-repo <canopy-website checkout>] [--website-dir <working tree>]
   [--flags snapshot,migrate,warmup] [--scenario ${SCENARIOS.join('|')}] [--plan starter] [--keep]
@@ -40,6 +40,7 @@ const CACHE=resolve(opt.cache??process.env.CANOPY_REPLICA_CACHE??join(homedir(),
 const OUT=join(CACHE,'runs',RUN);mkdirSync(OUT,{recursive:true});
 const NET=`canopy-replica-${RUN}`,VOLUME=`canopy-replica-${RUN}`,CACHE_VOLUME='canopy-replica-cache',REGISTRY_VOLUME='canopy-replica-registry';
 const CP=`canopy-replica-${RUN}-cp`,PG=`canopy-replica-${RUN}-pg`,PROXY=`canopy-replica-${RUN}-ghcr`;
+const OWNER=`${process.pid}`;
 const BUCKET='canopy-replica-runtime',REGION='ap-southeast-1';
 const S3_HOST=`${BUCKET}.s3.${REGION}.amazonaws.com`;
 const started=Date.now();
@@ -145,7 +146,7 @@ async function blueprintDisk(hostImage){
  try{
   const exporter=spawn('docker',['export',cid]);
   await run('docker',['run','--rm','-i','-v',`${CACHE_VOLUME}:/cache`,'--entrypoint','bash',hostImage,'-c',
-   `set -e; mkdir -p /cache/blueprints /r; tar -x -C /r --numeric-owner; rm -f /r/.dockerenv; t=/cache/${name}.tmp; rm -f "$t"; truncate -s 8G "$t"; mkfs.ext4 -q -L cloudimg-rootfs -d /r "$t"; mv "$t" /cache/${name}; find /cache/blueprints -name "*.img" ! -name "${id}.img" -delete`],{input:exporter.stdout,quiet:true});
+   `set -e; mkdir -p /cache/blueprints /r; tar -x -C /r --numeric-owner; rm -f /r/.dockerenv; t=/cache/${name}.tmp; rm -f "$t"; truncate -s 8G "$t"; mkfs.ext4 -q -L cloudimg-rootfs -d /r "$t"; mv "$t" /cache/${name}; find /cache/blueprints -name "*.img" ! -name "${id}.img" -mmin +360 -delete`],{input:exporter.stdout,quiet:true});
  }finally{await docker(['rm','-f',cid],{allowFail:true});}
  return `/cache/${name}`;
 }
@@ -169,7 +170,7 @@ function cpEnv(flags){
   CANOPY_COMPUTE_ACCESS_KEY_ID:'AKIAREPLICALOCAL0000',CANOPY_COMPUTE_SECRET_ACCESS_KEY:'replica-local-not-a-secret',
   CANOPY_RUNTIME_BUCKET:BUCKET,CANOPY_RUNTIME_REGION:REGION,CANOPY_RUNTIME_KEY:state.runtime.key,CANOPY_RUNTIME_SHA256:state.runtime.sha,
   CANOPY_WORKSPACE_IMAGE:state.image,CRON_SECRET:secrets.cron,
-  REPLICA_RUN:RUN,REPLICA_NETWORK:NET,REPLICA_DISKS_VOLUME:VOLUME,REPLICA_HOST_IMAGE:state.hostImage,REPLICA_BLUEPRINT_IMAGE:state.blueprint,
+  REPLICA_RUN:RUN,REPLICA_OWNER_PID:OWNER,REPLICA_NETWORK:NET,REPLICA_DISKS_VOLUME:VOLUME,REPLICA_HOST_IMAGE:state.hostImage,REPLICA_BLUEPRINT_IMAGE:state.blueprint,
   REPLICA_RUNTIME_FILE:'/replica-data/runtime.tgz',REPLICA_ADMIN_TOKEN:secrets.admin,REPLICA_ADD_HOSTS:`ghcr.io:${state.proxyIp}`,
   REPLICA_CRON_SECONDS:opt['cron-seconds'],REPLICA_MAX_MEMORY_MIB:String(state.maxMemoryMiB),REPLICA_STALE_APT_TIMERS:opt['stale-apt-timers']?'1':'0',REPLICA_PREFORMAT_DISKS:(opt.preformat??(opt.scenario==='new'?'0':'1'))==='1'?'1':'0',REPLICA_DEVICE_TOKEN:secrets.device,NODE_EXTRA_CA_CERTS:'/replica-ca/ca.crt',
  };
@@ -181,7 +182,7 @@ function cpEnv(flags){
 async function startControlPlane(flags){
  await docker(['rm','-f',CP],{allowFail:true});
  await docker(['run','-d','--name',CP,'--privileged','--network',NET,'--network-alias','canopyide.dev','--network-alias',S3_HOST,
-  '--label',`canopy-replica.run=${RUN}`,'-v','/var/run/docker.sock:/var/run/docker.sock','-v',`${VOLUME}:/disks`,'-v',`${CACHE_VOLUME}:/cache:ro`,
+  '--label',`canopy-replica.run=${RUN}`,'--label',`canopy-replica.pid=${OWNER}`,'-v','/var/run/docker.sock:/var/run/docker.sock','-v',`${VOLUME}:/disks`,'-v',`${CACHE_VOLUME}:/cache:ro`,
   '-v',`${state.ca}:/replica-ca:ro`,'-v',`${state.runtime.file}:/replica-data/runtime.tgz:ro`,'-p','127.0.0.1::443',...cpEnv(flags),cpImage]);
  cpPort=Number((await docker(['port',CP,'443/tcp'])).stdout.trim().split('\n')[0].split(':').pop());
  for(let i=0;i<60;i++){try{await api('GET','/api/plans');say(`control plane up (flags: ${[...flags].join(',')||'none'})`);return;}catch{await new Promise(r=>setTimeout(r,1000));}}
@@ -199,19 +200,19 @@ async function setup(){
  const memTotal=Number((await docker(['info','--format','{{.MemTotal}}'])).stdout.trim());
  state.maxMemoryMiB=Math.max(2048,Math.floor(memTotal/1048576)-1536);
  state.swappiness=(await docker(['run','--rm','--entrypoint','cat',state.hostImage,'/proc/sys/vm/swappiness'])).stdout.trim();
- await docker(['network','create','--label',`canopy-replica.run=${RUN}`,NET]);
- await docker(['volume','create','--label',`canopy-replica.run=${RUN}`,VOLUME]);
+ await docker(['network','create','--label',`canopy-replica.run=${RUN}`,'--label',`canopy-replica.pid=${OWNER}`,NET]);
+ await createDisksVolume();
  await docker(['volume','create',REGISTRY_VOLUME]);
  // Local stand-in for ghcr.io: a plain registry holding exact copies (same
  // manifests and digests) of the release image, seeded once per image and kept
  // in a volume, so the host's `docker pull <image@digest>` is the production
  // call but reads local disk. Only seeded images are pullable.
- await docker(['run','-d','--name',PROXY,'--network',NET,'--label',`canopy-replica.run=${RUN}`,
+ await docker(['run','-d','--name',PROXY,'--network',NET,'--label',`canopy-replica.run=${RUN}`,'--label',`canopy-replica.pid=${OWNER}`,
   '-v',`${REGISTRY_VOLUME}:/var/lib/registry`,'-v',`${state.ca}:/certs:ro`,'-e','REGISTRY_HTTP_ADDR=0.0.0.0:443',
   '-e','REGISTRY_HTTP_TLS_CERTIFICATE=/certs/leaf.crt','-e','REGISTRY_HTTP_TLS_KEY=/certs/leaf.key','-e','REGISTRY_LOG_LEVEL=warn','-e','REGISTRY_VALIDATION_DISABLED=true','registry:3']);
  state.proxyIp=(await docker(['inspect','--format',`{{(index .NetworkSettings.Networks "${NET}").IPAddress}}`,PROXY])).stdout.trim();
  await warmImage();
- await docker(['run','-d','--name',PG,'--network',NET,'--network-alias','postgres','--label',`canopy-replica.run=${RUN}`,'-e','POSTGRES_PASSWORD=replica','-e','POSTGRES_DB=canopy','--tmpfs','/var/lib/postgresql/data','postgres:17-alpine']);
+ await docker(['run','-d','--name',PG,'--network',NET,'--network-alias','postgres','--label',`canopy-replica.run=${RUN}`,'--label',`canopy-replica.pid=${OWNER}`,'-e','POSTGRES_PASSWORD=replica','-e','POSTGRES_DB=canopy','--tmpfs','/var/lib/postgresql/data','postgres:17-alpine']);
  await docker(['run','--rm','--network',NET,...cpEnv(new Set()),cpImage,'node','/replica/db.mjs'],{quiet:false});
 }
 // Copy the release image (index + this machine's platform manifest and its
@@ -235,6 +236,18 @@ async function warmImage(){
  else await copy(state.image,`replica-${arch}`);
  say('local ghcr.io seeded');
 }
+// Instance disks, boot disks and snapshots live on one XFS filesystem with
+// reflinks (a loop-mounted sparse file in its own volume): a snapshot or a
+// restore is a copy-on-write clone, as on EBS, instead of a full copy of a
+// multi-gigabyte boot disk on the Docker VM's small disk.
+const LOOP_NODES='[ -e /dev/loop-control ] || mknod /dev/loop-control c 10 237; for i in $(seq 0 511); do [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i; done';
+async function createDisksVolume(){
+ await docker(['volume','create','--label',`canopy-replica.run=${RUN}`,'--label',`canopy-replica.pid=${OWNER}`,`${VOLUME}-backing`]);
+ const dev=(await docker(['run','--rm','--privileged','-v',`${VOLUME}-backing:/b`,'--entrypoint','bash',cpImage,'-c',
+  `set -e; ${LOOP_NODES}; truncate -s 2T /b/disks.img; mkfs.xfs -q -m reflink=1 /b/disks.img; losetup --find --show /b/disks.img`])).stdout.trim();
+ if(!/^\/dev\/loop\d+$/.test(dev))throw Error(`Could not attach the disks filesystem: ${dev}`);
+ await docker(['volume','create','--label',`canopy-replica.run=${RUN}`,'--label',`canopy-replica.pid=${OWNER}`,'--driver','local','--opt','type=xfs','--opt',`device=${dev}`,'--opt','o=discard',VOLUME]);
+}
 async function cleanup(run=RUN){
  if(opt.keep&&run===RUN){say(`--keep: leaving run ${RUN} (containers labelled canopy-replica.run=${RUN}, volume ${VOLUME})`);return;}
  const ids=(await docker(['ps','-aq','--filter',`label=canopy-replica.run=${run}`],{allowFail:true})).stdout.split('\n').filter(Boolean);
@@ -248,6 +261,9 @@ async function cleanup(run=RUN){
   if(state.swappiness)await docker(['run','--rm','--privileged','--entrypoint','sh',state.hostImage,'-c',`echo ${state.swappiness} > /proc/sys/vm/swappiness`],{allowFail:true});
  }
  await docker(['volume','rm',`canopy-replica-${run}`],{allowFail:true});
+ if(state.hostImage||cpImage)await docker(['run','--rm','--privileged','-v',`canopy-replica-${run}-backing:/b`,'--entrypoint','bash',cpImage??state.hostImage,'-c',
+  `${LOOP_NODES}; for d in $(losetup -j /b/disks.img | cut -d: -f1); do losetup -d "$d" || true; done`],{allowFail:true});
+ await docker(['volume','rm',`canopy-replica-${run}-backing`],{allowFail:true});
  await docker(['network','rm',`canopy-replica-${run}`],{allowFail:true});
  say('cleaned up run',run);
 }
@@ -256,7 +272,10 @@ async function cleanStale(){
  state.hostImage=images[0];
  const labels=async kind=>(await docker([kind,'ls','--format','{{.Label "canopy-replica.run"}}'],{allowFail:true})).stdout.split('\n');
  const runs=new Set([...(await docker(['ps','-a','--format','{{.Label "canopy-replica.run"}}'])).stdout.split('\n'),...await labels('volume'),...await labels('network')].filter(r=>/^[a-z0-9]+$/.test(r)));
- for(const run of runs)await cleanup(run);
+ // Several worktrees may share this Docker daemon: never touch a run whose
+ // orchestrator is still alive.
+ const alive=async run=>{const pids=(await docker(['ps','-a','--filter',`label=canopy-replica.run=${run}`,'--format','{{.Label "canopy-replica.pid"}}'],{allowFail:true})).stdout.split('\n').filter(Boolean);if(!pids.length)return (await docker(['ps','-q','--filter',`label=canopy-replica.run=${run}`],{allowFail:true})).stdout.trim()!=='';return pids.some(p=>{try{process.kill(Number(p),0);return true;}catch{return false;}});};
+ for(const run of runs){if(await alive(run)){say('skipping live run',run);runs.delete(run);continue;}await cleanup(run);}
  if(!runs.size)say('no leftover replica runs');
 }
 
@@ -374,6 +393,9 @@ function summarizeEvidence(dir){
 }
 
 if(opt.clean){await cleanStale();process.exit(0);}
+if(opt['clean-run']){state.hostImage=(await docker(['images','--format','{{.Repository}}:{{.Tag}}','canopy-replica-host'])).stdout.split('\n')[0];await cleanup(opt['clean-run']);process.exit(0);}
+// An interrupted run still removes what it created.
+for(const signal of ['SIGINT','SIGTERM'])process.once(signal,async()=>{console.error(`[replica] ${signal}: cleaning up`);try{await cleanup();}finally{process.exit(130);}});
 let exitCode=0;
 try{
  say(`run ${RUN}: scenario=${opt.scenario} flags=${[...FLAGS].join(',')||'none'} runtime=${opt.runtime} website=${opt['website-dir']??opt.website}`);
