@@ -84,7 +84,7 @@ export async function nativeInvoke(command,args={}){
     await run('gh',['auth','setup-git','--hostname','github.com']);for(const [key,value] of Object.entries(identity))await run('git',['config','--global',key,value]);
     return {imported:['github','git identity']};
   }
-  if(command==='profile_import_credentials'){const copied=args.profiles?.length?await importAccountProfiles(args.profiles,HOME,profiles):{imported:[]};const defaults=Object.keys(args.accounts??{}).length?await importAgentAccounts(args.accounts,HOME):{imported:[]};return {imported:[...defaults.imported,...copied.imported],existingProfiles:copied.skipped??[]};}
+  if(command==='profile_import_credentials'){const copied=args.profiles?.length?await importAccountProfiles(args.profiles,HOME,profiles):{imported:[],updated:[]};const defaults=Object.keys(args.accounts??{}).length?await importAgentAccounts(args.accounts,HOME,{claudeIdentity:args.claudeIdentity}):{imported:[]};return {imported:[...defaults.imported,...copied.imported],updated:copied.updated,existingProfiles:[]};}
   if(command==='oauth_callback'){
     const port=Number(args.port), callback=new URL(String(args.path),'http://127.0.0.1');
     if(!Number.isInteger(port)||port<=1024||port>65535||[8080,8081,8787].includes(port)||callback.origin!=='http://127.0.0.1'||!['/callback','/auth/callback','/oauth/callback'].includes(callback.pathname)||!callback.searchParams.get('state')||String(args.path).length>8192)throw Error('Invalid sign-in callback');

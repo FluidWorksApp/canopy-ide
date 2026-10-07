@@ -26,7 +26,7 @@ it('keeps Local selected through reordered polls and pins a background startup t
  });
  render(<WorkspaceSelector onboarding/>);await act(async()=>{});
  expect(screen.getAllByRole('tab',{name:'Shoaib workspace'})).toHaveLength(1);
- const initialTabs=screen.getAllByRole('tab').map(tab=>tab.textContent);
+ const initialTabs=screen.getAllByRole('tab').map(tab=>tab.getAttribute('aria-label'));
  expect(screen.getByRole('tab',{name:/^Local workspace/})).toHaveAttribute('aria-selected','true');
  fireEvent.click(screen.getByRole('tab',{name:'Machine Works'}));
  fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
@@ -37,7 +37,7 @@ it('keeps Local selected through reordered polls and pins a background startup t
  expect(screen.getByText(/Projects, agent sign-ins and Git settings use this Mac/)).toBeInTheDocument();
  reversed=true;await act(async()=>{await vi.advanceTimersByTimeAsync(10000);});
  expect(screen.getByRole('tab',{name:/^Local workspace/})).toHaveAttribute('aria-selected','true');
- expect(screen.getAllByRole('tab').map(tab=>tab.textContent)).toEqual(initialTabs);
+ expect(screen.getAllByRole('tab').map(tab=>tab.getAttribute('aria-label'))).toEqual(initialTabs);
  expect(screen.queryByLabelText('Workspace startup')).toBeNull();
  fireEvent.click(screen.getByRole('tab',{name:'Shoaib workspace'}));
  expect(screen.queryByLabelText('Workspace startup')).toBeNull();

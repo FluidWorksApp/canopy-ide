@@ -10,6 +10,9 @@ it('retains pending browser requests without polling header metrics',async()=>{
 it('separates new workspace setup and scopes controls to the selected workspace tab',async()=>{
  mocks.workspace.mockResolvedValue({result:null});render(<WorkspaceSelector/>);await act(async()=>{});
  fireEvent.click(screen.getByTitle('Test · Connecting…'));
+ expect(screen.getByRole('menu',{name:'Switch workspace'})).toBeInTheDocument();
+ fireEvent.click(screen.getByRole('menuitem',{name:/Manage workspaces/}));
+ expect(screen.queryByRole('menu')).toBeNull();
  expect(screen.getByRole('tab',{name:/Test/})).toHaveAttribute('aria-selected','true');
  expect(screen.getByText('Personal accounts')).toBeInTheDocument();
  expect(screen.queryByText('Add remote workspace')).toBeNull();
@@ -32,3 +35,13 @@ it('offers workspace hibernation with a confirmation and runs the project snapsh
  await act(async()=>{});expect(hibernate).toHaveBeenCalledOnce();
 });
 it('replaces the confirmation with live nonmodal stages and can minimize while shutdown is pending',async()=>{let publish!:(value:any)=>void;let finish!:()=>void;const hibernate=vi.fn((listener?:Function)=>{publish=listener as any;return new Promise<void>(resolve=>{finish=resolve;});});mocks.workspace.mockResolvedValue({result:null});render(<WorkspaceSelector onHibernateWorkspace={hibernate}/>);await act(async()=>{});fireEvent.click(screen.getByRole('button',{name:'Hibernate workspace'}));fireEvent.click(screen.getAllByRole('button',{name:/Hibernate workspace/}).at(-1)!);expect(screen.queryByText('Hibernate Test?')).toBeNull();expect(screen.getByLabelText('Workspace hibernation progress')).toBeInTheDocument();await act(async()=>publish({phase:'stopping-compute',shutdownAccepted:true}));fireEvent.click(screen.getByRole('button',{name:'Continue working'}));expect(screen.getByRole('status')).toHaveTextContent('Stop compute');expect(screen.queryByRole('button',{name:'Cancel'})).toBeNull();expect(hibernate).toHaveBeenCalledOnce();await act(async()=>finish());expect(screen.getByRole('status')).toHaveTextContent('Compute is stopped');});
+it('switches from the header dropdown in one click without opening the manage panel',async()=>{
+ mocks.workspace.mockResolvedValue({result:null});const mode=await import('../executionMode');const spy=vi.spyOn(mode,'setExecutionMode').mockResolvedValue(undefined as never);vi.spyOn(mode,'canSwitchExecutionMode').mockReturnValue(true);
+ render(<WorkspaceSelector/>);await act(async()=>{});
+ fireEvent.click(screen.getByTitle('Test · Connecting…'));
+ const rows=screen.getAllByRole('menuitemradio');expect(rows.map(row=>row.textContent)).toEqual(expect.arrayContaining([expect.stringContaining('Local workspace'),expect.stringContaining('Test')]));
+ expect(screen.getByRole('menuitemradio',{name:/Test/})).toHaveAttribute('aria-checked','true');
+ await act(async()=>{fireEvent.click(screen.getByRole('menuitemradio',{name:/Local workspace/}));});
+ expect(spy).toHaveBeenCalledWith('local');
+ expect(screen.queryByRole('dialog',{name:'Workspaces'})).toBeNull();
+});

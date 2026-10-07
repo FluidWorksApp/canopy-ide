@@ -531,6 +531,13 @@ fn choose_login(
         None => Ok(None),
     }
 }
+/// The account Claude records beside its login (`oauthAccount`). Identity
+/// only; a bounded read of a regular file, never the credential itself.
+fn claude_identity(file: &std::path::Path) -> Option<serde_json::Value> {
+    std::fs::symlink_metadata(file).ok().filter(|m| m.is_file() && m.len() <= 16 * 1048576)?;
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
+    value.get("oauthAccount").filter(|v| v.is_object()).cloned()
+}
 fn export_profile_login(
     agent: &str,
     directory: &std::path::Path,
@@ -564,29 +571,125 @@ fn export_profile_login(
     choose_login(agent, &mode, file, keychain)
 }
 
+const INCOMPLETE_LOGIN: &str = "Account credentials are incomplete";
+/// Whether a Claude config root holds a login the CLI can still use, read
+/// from the same store a sync copies (Keychain on macOS, the file elsewhere).
+/// `Some(false)`: absent, or no refresh token. `None`: the store could not be
+/// read (locked Keychain, denied access), so the caller must not claim either.
+/// Cached briefly: account status is re-read on every window focus.
+pub(crate) fn claude_login_usable(root: &std::path::Path, home: &str) -> Option<bool> {
+    // Tests must never read the developer's real Keychain items.
+    if cfg!(test) {
+        let _ = (root, home);
+        return None;
+    }
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<std::path::PathBuf, (Instant, Option<bool>)>>> = std::sync::OnceLock::new();
+    let (directory, custom) = if root == std::path::Path::new(home) {
+        let (claude, _, custom) = default_agent_dirs(home);
+        (claude, custom)
+    } else {
+        (root.join(".claude"), true)
+    };
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((at, value)) = cache.lock().ok().and_then(|c| c.get(&directory).copied()) {
+        if at.elapsed() < Duration::from_secs(30) {
+            return value;
+        }
+    }
+    let value = match export_profile_login("claude", &directory, custom) {
+        Ok(found) => Some(found.is_some()),
+        Err(error) if error == INCOMPLETE_LOGIN => Some(false),
+        Err(_) => None,
+    };
+    if let Ok(mut c) = cache.lock() {
+        c.insert(directory, (Instant::now(), value));
+    }
+    value
+}
+/// The default account's Claude and Codex directories, and whether Claude's is
+/// a custom CLAUDE_CONFIG_DIR (which changes its Keychain item name).
+fn default_agent_dirs(home: &str) -> (std::path::PathBuf, std::path::PathBuf, bool) {
+    let claude = std::env::var("CLAUDE_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(home).join(".claude"));
+    let codex = std::env::var("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(home).join(".codex"));
+    (claude, codex, std::env::var_os("CLAUDE_CONFIG_DIR").is_some())
+}
+/// One account's export. An incomplete login (e.g. no refresh token) is
+/// reported for that account instead of aborting every other account's copy.
+fn export_or_report(
+    agent: &str,
+    directory: &std::path::Path,
+    custom: bool,
+    owner: &str,
+    incomplete: &mut Vec<String>,
+) -> Result<Option<serde_json::Value>, String> {
+    match export_profile_login(agent, directory, custom) {
+        Err(error) if error == INCOMPLETE_LOGIN => {
+            incomplete.push(format!("{owner} ({})", if agent == "claude" { "Claude" } else { "Codex" }));
+            Ok(None)
+        }
+        other => other,
+    }
+}
+/// What each local account could copy, without returning any credential:
+/// "ready", "incomplete" (sign in again on this Mac), "none" or "unavailable".
+#[tauri::command]
+pub async fn execution_remote_account_candidates() -> Result<Vec<serde_json::Value>, String> {
+    tauri::async_runtime::spawn_blocking(|| -> Result<Vec<serde_json::Value>, String> {
+        let home = std::env::var("HOME").map_err(|_| "Home directory unavailable")?;
+        let status = |agent: &str, directory: &std::path::Path, custom: bool| match export_profile_login(agent, directory, custom) {
+            Ok(Some(_)) => "ready",
+            Ok(None) => "none",
+            Err(error) if error == INCOMPLETE_LOGIN => "incomplete",
+            Err(_) => "unavailable",
+        };
+        let (claude, codex, custom) = default_agent_dirs(&home);
+        let mut out = vec![serde_json::json!({"id":crate::profiles::DEFAULT_ID,"claude":status("claude",&claude,custom),"codex":status("codex",&codex,true)})];
+        for profile in crate::profiles::list(&home).into_iter().filter(|p| p.removable).take(32) {
+            let root = std::path::PathBuf::from(&profile.root);
+            out.push(serde_json::json!({"id":profile.id,"claude":status("claude",&root.join(".claude"),true),"codex":status("codex",&root.join(".codex"),true)}));
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|_| "Account check failed".to_string())?
+}
+
 // This command runs only after the user chooses to copy accounts into the
 // selected workspace. Merely saving/reopening a workspace never copies them.
 #[tauri::command]
 pub async fn execution_remote_import_accounts(
     app: tauri::AppHandle,
     state: tauri::State<'_, RemoteConnectionState>,
+    profiles: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
     let connection = execution_remote_get(app, state)?.ok_or("Select a remote workspace first")?;
-    let (accounts, profile_copies, skipped, skipped_profiles) = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+    // None copies every account; otherwise only the chosen ids ("default" included).
+    let chosen = move |id: &str| profiles.as_ref().map_or(true, |ids| ids.iter().any(|v| v == id));
+    let (accounts, default_identity, profile_copies, skipped, skipped_profiles, incomplete) = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
     let home = std::env::var("HOME").map_err(|_| "Home directory unavailable")?;
-    let codex = std::env::var("CODEX_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".codex"));
-    let claude = std::env::var("CLAUDE_CONFIG_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".claude"));
+    let (claude, codex, custom) = default_agent_dirs(&home);
     let mut accounts = serde_json::Map::new();
-    for (agent, directory, custom) in [("claude", &claude, std::env::var_os("CLAUDE_CONFIG_DIR").is_some()), ("codex", &codex, true)] {
-        if let Some(value) = export_profile_login(agent, directory, custom)? { accounts.insert(agent.into(), value); }
+    let mut default_identity = None;
+    let mut incomplete = Vec::new();
+    if chosen(crate::profiles::DEFAULT_ID) {
+        for (agent, directory, custom) in [("claude", &claude, custom), ("codex", &codex, true)] {
+            if let Some(value) = export_or_report(agent, directory, custom, "Default", &mut incomplete)? { accounts.insert(agent.into(), value); }
+        }
+        if accounts.contains_key("claude") {
+            // With CLAUDE_CONFIG_DIR the state file lives inside it; otherwise it is ~/.claude.json.
+            let state_file = if custom { claude.join(".claude.json") } else { crate::profiles::claude_state_file(&home, std::path::Path::new(&home)) };
+            default_identity = claude_identity(&state_file);
+        }
     }
     let mut profile_copies = Vec::new();
     let mut skipped_profiles = Vec::new();
-    for profile in crate::profiles::list(&home).into_iter().filter(|p| p.removable).take(32) {
+    for profile in crate::profiles::list(&home).into_iter().filter(|p| p.removable && chosen(&p.id)).take(32) {
         let root = std::path::PathBuf::from(&profile.root);
         if std::fs::canonicalize(&root).ok().as_ref() != Some(&root) {
             skipped_profiles.push(profile.label);
@@ -594,29 +697,30 @@ pub async fn execution_remote_import_accounts(
         }
         let mut credentials = serde_json::Map::new();
         for (agent, directory) in [("claude", root.join(".claude")), ("codex", root.join(".codex"))] {
-            if let Some(value) = export_profile_login(agent, &directory, true)? { credentials.insert(agent.into(), value); }
+            if let Some(value) = export_or_report(agent, &directory, true, &profile.label, &mut incomplete)? { credentials.insert(agent.into(), value); }
         }
         if !credentials.is_empty() {
-            let identity_file = root.join(".claude/.claude.json");
-            let identity = std::fs::symlink_metadata(&identity_file).ok().filter(|m| m.is_file() && m.len() <= 65536).and_then(|_| std::fs::read(&identity_file).ok())
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| value.get("oauthAccount").cloned());
+            let identity = claude_identity(&crate::profiles::claude_state_file(&home, &root));
             profile_copies.push(serde_json::json!({"id":profile.id,"label":profile.label,"accounts":credentials,"claudeIdentity":identity}));
         } else {
             skipped_profiles.push(profile.label);
         }
     }
-    let skipped: Vec<&str> = ["claude", "codex"]
-        .into_iter()
-        .filter(|agent| !accounts.contains_key(*agent))
-        .collect();
+    let skipped: Vec<&str> = if chosen(crate::profiles::DEFAULT_ID) {
+        ["claude", "codex"].into_iter().filter(|agent| !accounts.contains_key(*agent)).collect()
+    } else {
+        Vec::new()
+    };
     if accounts.is_empty() && profile_copies.is_empty() {
+        if !incomplete.is_empty() {
+            return Err(format!("These logins on this Mac have no refresh token, so they cannot be copied: {}. Run /login in that account on this Mac, then sync again.", incomplete.join(", ")));
+        }
         return Err("No Claude or Codex login was found on this Mac".into());
     }
-        Ok((accounts, profile_copies, skipped, skipped_profiles))
+        Ok((accounts, default_identity, profile_copies, skipped, skipped_profiles, incomplete))
     }).await.map_err(|_| "Account copy preparation failed")??;
     let payload =
-        serde_json::json!({"command":"profile_import_credentials","args":{"accounts":accounts,"profiles":profile_copies}})
+        serde_json::json!({"command":"profile_import_credentials","args":{"accounts":accounts,"claudeIdentity":default_identity,"profiles":profile_copies}})
             .to_string();
     let response = reqwest::Client::new()
         .post(format!(
@@ -657,6 +761,7 @@ pub async fn execution_remote_import_accounts(
         .ok_or("Invalid account import response")?;
     result["skipped"] = serde_json::json!(skipped);
     result["skippedProfiles"] = serde_json::json!(skipped_profiles);
+    result["incomplete"] = serde_json::json!(incomplete);
     Ok(result)
 }
 #[tauri::command]
@@ -920,6 +1025,29 @@ mod account_import_tests {
             select_account_credentials("claude", Some(&current), None),
             Some(&current)
         );
+    }
+    #[test]
+    fn a_login_without_a_refresh_token_is_reported_as_incomplete() {
+        // export_or_report and the candidate check match on this exact error.
+        let access_only = serde_json::json!({"claudeAiOauth":{"accessToken":"synthetic","refreshToken":null,"expiresAt":0}});
+        assert_eq!(
+            choose_login("claude", "auto", None, Some(access_only)),
+            Err(INCOMPLETE_LOGIN.to_string())
+        );
+    }
+    #[test]
+    fn claude_identity_reads_only_the_recorded_account() {
+        let dir = std::env::temp_dir().join(format!("canopy-identity-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(".claude.json");
+        assert_eq!(claude_identity(&file), None);
+        // Large state files (project history) must not drop the identity.
+        let padding = "x".repeat(100_000);
+        std::fs::write(&file, serde_json::json!({"projects":{"p":padding},"oauthAccount":{"emailAddress":"me@example.com"}}).to_string()).unwrap();
+        assert_eq!(claude_identity(&file), Some(serde_json::json!({"emailAddress":"me@example.com"})));
+        std::fs::write(&file, r#"{"oauthAccount":"not-an-object"}"#).unwrap();
+        assert_eq!(claude_identity(&file), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
     fn unrelated_credential_data_and_empty_strings_are_not_logins() {
