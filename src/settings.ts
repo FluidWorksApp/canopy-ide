@@ -432,6 +432,12 @@ export interface Settings {
    * is a presentation preference only — every item stays in the shared queue
    * and remains available from the top-right bell. */
   notificationPopupsEnabled: boolean;
+  /** Announce messages from teammates (DMs and team channels) that arrive while
+   *  their conversation is not on screen. Unread badges are shown either way. */
+  teamMessageNotifications: boolean;
+  /** Include the first line of a teammate's message in its notification. Off
+   *  shows only who wrote, so message text never appears in banners or the bell. */
+  teamMessagePreviews: boolean;
   /** Show the terminal memory warning flyout and governor decision card. The
    *  governor continues measuring in the background when this is off; only its
    *  user-facing prompts and attention items are suppressed. On by default so
@@ -603,6 +609,8 @@ export const DEFAULTS: Settings = {
   agentAskForAttention: false,
   agentsMaySpawn: true,
   notificationPopupsEnabled: true,
+  teamMessageNotifications: true,
+  teamMessagePreviews: true,
   terminalMemoryPromptsEnabled: true,
   disabledTools: [],
   autoImportMarkdownResearch: true,

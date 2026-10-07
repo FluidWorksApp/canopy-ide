@@ -40,6 +40,10 @@ export function AgentTerminal({
   // stops appearing, with no type error and no failing test. `textarea` is in
   // xterm's published typings, so this leans on the supported handle instead.
   const [focused, setFocused] = useState(false)
+  // Why typing is not reaching the PTY right now (reconnecting, refused), or
+  // null. Input is queued or refused by the transport, never silently lost, and
+  // this is where the person typing finds out.
+  const [notice, setNotice] = useState<string | null>(null)
 
   useEffect(() => {
     const term = new Terminal({
@@ -97,6 +101,7 @@ export function AgentTerminal({
       },
       onData: (bytes) => term.write(bytes),
       onGone: () => term.write('\r\n\x1b[2m[session ended]\x1b[0m\r\n'),
+      onNotice: setNotice,
     })
     const onData = term.onData((d) => transport.writePty(pty, d))
 
@@ -107,6 +112,7 @@ export function AgentTerminal({
       ta?.removeEventListener('focus', onFocusIn)
       ta?.removeEventListener('blur', onFocusOut)
       setFocused(false)
+      setNotice(null)
       detach()
       onData.dispose()
       ro.disconnect()
@@ -114,5 +120,14 @@ export function AgentTerminal({
     }
   }, [transport, pty])
 
-  return <div className={focused ? 'term term-focused' : 'term'} ref={ref} />
+  return (
+    <div className="term-host">
+      {notice && (
+        <div className="term-notice" role="status">
+          {notice}
+        </div>
+      )}
+      <div className={focused ? 'term term-focused' : 'term'} ref={ref} />
+    </div>
+  )
 }

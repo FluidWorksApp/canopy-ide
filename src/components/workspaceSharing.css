@@ -7,3 +7,33 @@
 @media(max-width:650px){.workspace-sharing-access-heading{align-items:flex-start;gap:12px}.workspace-sharing-access-private-note{display:none}.workspace-sharing-access-row{grid-template-columns:32px minmax(0,1fr) auto;gap:10px}.workspace-sharing-access-row-actions{grid-column:2/-1}.workspace-sharing-access-fields,.workspace-sharing-access-resource-fields{grid-template-columns:1fr}.workspace-sharing-access-confirm{flex-wrap:wrap}.workspace-sharing-access-confirm>div{flex-basis:100%}.workspace-sharing-access-editor{padding:16px}.workspace-sharing-access-toolbar{gap:8px}.workspace-sharing-access [role=tab]{padding:12px 8px}.workspace-sharing-access-attach{flex-direction:column;align-items:stretch}.workspace-sharing-access-resources summary small{display:block;margin:6px 0 0 14px}}
 .workspace-sharing-access-recipient{max-width:440px}.workspace-sharing-access-fixed-recipient{display:flex;align-items:center;gap:12px;padding:3px 0 12px}.workspace-sharing-access-fixed-recipient strong{font-size:14px;font-weight:600}.workspace-sharing-access-fixed-recipient small{display:block;color:var(--wa-muted);font-size:11px;margin-top:4px}.workspace-sharing-access-role-choices{min-width:0;border:0;padding:0;margin:18px 0 0}.workspace-sharing-access-role-choices legend{font-size:12px;font-weight:550;margin-bottom:9px}.workspace-sharing-access-role-choices>div{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.workspace-sharing-access-role-choices label{position:relative;padding:12px 12px 12px 31px;border:1px solid var(--wa-border);border-radius:6px;cursor:pointer;gap:6px;background:var(--surface,#172128)}.workspace-sharing-access-role-choices label.selected{border-color:var(--accent,#ffaa00);background:color-mix(in srgb,var(--accent,#ffaa00) 6%,var(--surface,#172128))}.workspace-sharing-access-role-choices input{position:absolute;top:14px;left:10px;width:13px;height:13px;margin:0;accent-color:var(--accent,#ffaa00)}.workspace-sharing-access-role-choices strong{font-size:12px;font-weight:600}.workspace-sharing-access-role-choices small{font-size:11px;line-height:1.45;font-weight:400;color:var(--wa-muted)}.workspace-sharing-access-role-choices label:has(input:disabled){opacity:.55;cursor:default}.workspace-sharing-access-role-choices label:has(input:focus-visible){outline:2px solid var(--accent,#ffaa00);outline-offset:3px}.workspace-sharing-access-policy{margin-top:18px}.workspace-sharing-access-editor header{margin-bottom:15px}.workspace-sharing-access-editor footer{margin-top:18px;padding-top:14px}
 @media(max-width:650px){.workspace-sharing-access-role-choices>div{grid-template-columns:1fr}.workspace-sharing-access-role-choices label{padding:10px 12px 10px 31px}.workspace-sharing-access-role-choices small{font-size:11px}.workspace-sharing-access-recipient{max-width:none}}
+
+/* Sharing status: one line at the top of Access. */
+.workspace-sharing-status{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;min-width:0;margin:0 0 16px;padding:8px 12px;border:1px solid var(--border,#2b3942);border-radius:8px;background:var(--surface,#172128);font-size:12px;line-height:1.5}
+.workspace-sharing-status>span{flex:1 1 200px;min-width:0;overflow-wrap:anywhere}
+.workspace-sharing-status i{width:7px;height:7px;flex-shrink:0;border-radius:50%;background:var(--text-muted,#93a3ae)}
+.workspace-sharing-status-on i{background:var(--ok,#4caf7a)}
+.workspace-sharing-status-busy i{background:var(--accent,#ffaa00)}
+.workspace-sharing-status-error i{background:var(--danger,#e5534b)}
+.workspace-sharing-status-confirm{display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px;color:var(--text-muted,#93a3ae)}
+.workspace-sharing-status-error{flex-basis:100%;color:var(--danger,#e5534b);overflow-wrap:anywhere}
+.workspace-sharing-access-heading{flex-wrap:wrap;gap:8px 24px}
+.workspace-sharing-access-heading>div{min-width:0}
+
+/* Share dialog and list: who, Can view / Can edit, three switches. */
+.workspace-share-dialog{display:grid;gap:12px;min-width:0;margin:0 0 16px;padding:14px;border:1px solid var(--accent,#ffaa00);border-radius:8px;background:var(--surface,#172128)}
+.workspace-share-who{display:grid;gap:6px;font-size:12px;min-width:0}
+.workspace-share-who select,.workspace-share-controls select{min-width:0;max-width:100%;padding:6px 8px;background:var(--bg,#0d1419);color:var(--text,#e3e9ed);border:1px solid var(--border,#2b3942);border-radius:5px;font:inherit;font-size:12px}
+.workspace-share-dialog footer{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px}
+.workspace-share-controls{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;min-width:0}
+.workspace-share-dialog .workspace-share-controls{display:grid;gap:10px}
+.workspace-share-switch{display:flex!important;align-items:center;gap:6px;margin:0!important;font-size:12px;min-width:0;cursor:pointer}
+.workspace-share-dialog .workspace-share-switch{display:grid!important;grid-template-columns:auto minmax(0,1fr);row-gap:2px}
+.workspace-share-switch input{margin:0;flex-shrink:0;accent-color:var(--accent,#ffaa00)}
+.workspace-share-switch small{grid-column:2;color:var(--text-muted,#93a3ae);font-size:11px;overflow-wrap:anywhere}
+.workspace-share-list{list-style:none;margin:0;padding:0;display:grid;gap:2px;min-width:0}
+.workspace-share-row{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;min-width:0;padding:8px 4px;border-bottom:1px solid var(--border,#2b3942)}
+.workspace-share-identity{display:grid;flex:1 1 180px;min-width:0}
+.workspace-share-identity strong{font-size:13px;overflow-wrap:anywhere}
+.workspace-share-identity small{font-size:11px;color:var(--text-muted,#93a3ae);overflow-wrap:anywhere}
+.workspace-share-empty{padding:12px 4px;color:var(--text-muted,#93a3ae);font-size:12px}

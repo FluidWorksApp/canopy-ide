@@ -38,6 +38,7 @@ import { tabDisplayLabel, previewLabel, deviceLabel } from "./ProjectView";
 import { claimOwnerName } from "../claims";
 import { tabName } from "../tabName";
 import { Button } from "./ui";
+import { badgeLabel } from "../teamMessaging/unread";
 import { nextTickMs, PREVIEW_TICK_MS } from "../tabPreview";
 import {
   TabPreviewShot,
@@ -255,6 +256,8 @@ export interface PaneBarProps {
   /** Unseen activity on this terminal — an additive ring, never a state of its
    *  own and never a reason to move the tab. */
   tabRing?: (t: TermSubTab) => boolean;
+  /** Unread messages on a team conversation tab that is not in front. */
+  tabUnread?: (t: SubTab) => number;
   /** Drag-to-reorder for the whole strip. One handle, not one per run: a tab is
    *  still confined to the run it was picked up from (the runs are handed to
    *  useTabDragGroups), but a dozen runs must not cost a dozen sets of window
@@ -336,7 +339,7 @@ export interface PaneBarProps {
 function PaneBarImpl({
   tabGroups, stripDrag, stripRef, paneRef, termText, openStacks, onToggleStack,
   stripTabs, activeTabId, flashTabId, renamingTabId, renameDraft,
-  collabPaths, isAgentTab, tabState, tabRing, tabMemoryWarning, showHints,
+  collabPaths, isAgentTab, tabState, tabRing, tabUnread, tabMemoryWarning, showHints,
   shellChips, runChips, runSummary, showRunRail, shellMenuOpen, setShellMenuOpen,
   runMenuOpen, setRunMenuOpen, activeSection,
   activeFileKind, activeFileView,
@@ -565,7 +568,7 @@ function PaneBarImpl({
                   data-flip-id={tab.id}
                   ref={tab.id === activeTabId ? (activeTabElRef as React.RefObject<HTMLDivElement>) : undefined}
                   className={`tab ${isNewTab(tab.id) ? "tab-new" : ""} ${tab.id === activeTabId ? "tab-active" : ""} ${
-                    tab.type === "chat" && tab.unread ? "tab-unread" : ""
+                    tab.type === "chat" && (tab.unread || (tabUnread?.(tab) ?? 0) > 0) ? "tab-unread" : ""
                   } ${tab.type !== "terminal" ? "tab-doc" : isAgentTab(tab) ? "tab-agent" : ""} ${
                     tab.type === "terminal" && (tab.multiplexCount ?? 0) > 1 ? "tab-multiplexed" : ""
                   } ${tab.id === flashTabId ? "tab-flash" : ""} ${
@@ -666,6 +669,15 @@ function PaneBarImpl({
                   {tab.type === "terminal" && Boolean(tab.multiplexCount && tab.multiplexCount > 1) && (
                     <span className="tab-multiplex-count" title={`${tab.multiplexCount} panes`}>
                       {tab.multiplexCount}
+                    </span>
+                  )}
+                  {tab.type === "chat" && (tabUnread?.(tab) ?? 0) > 0 && (
+                    <span
+                      className="tab-unread-count"
+                      title={`${tabUnread!(tab)} unread`}
+                      aria-label={`${tabUnread!(tab)} unread`}
+                    >
+                      {badgeLabel(tabUnread!(tab))}
                     </span>
                   )}
                   {hints.has(tab.id) && (

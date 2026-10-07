@@ -28,7 +28,7 @@ test('purpose-bound, workspace-bound and short-lived token rejects forged, alter
 });
 test('body admits only bounded stage progress/failure, never ready, logs, secrets, or provider instructions',()=>{
  assert.deepEqual(validateBootstrapReport({stage:'artifact',status:'progress',sequence:1}),{stage:'artifact',status:'progress',sequence:1});
- for(const body of [{stage:'artifact',status:'ready',sequence:1},{stage:'artifact',status:'succeeded',sequence:1},{stage:'billing',status:'failed',sequence:1},{stage:'packages',status:'failed',sequence:65},{stage:'packages',status:'failed',sequence:1,error:'SECRET'},null])assert.throws(()=>validateBootstrapReport(body));
+ for(const body of [{stage:'artifact',status:'ready',sequence:1},{stage:'artifact',status:'succeeded',sequence:1},{stage:'billing',status:'failed',sequence:1},{stage:'packages',status:'failed',sequence:257},{stage:'packages',status:'failed',sequence:1,error:'SECRET'},null])assert.throws(()=>validateBootstrapReport(body));
 });
 test('progress preserves lifecycle phase and disk context; replay and regression have zero writes',async()=>{
  const f=fixture();await recordBootstrapReport(f,claims(),{stage:'artifact',status:'progress',sequence:2},now);
@@ -66,4 +66,11 @@ test('a failed image stage may carry the coded disk-full reason, which becomes t
  assert.equal(f.op.status,'failed');assert.equal(f.w.state,'error');
  const [,args]=f.writes.find(([sql])=>sql.startsWith('UPDATE workspace_operation'));
  assert.match(args[3],/^Workspace disk is full: 3\.2 GB free, 17\.2 GB needed for the workspace image\./);
+});
+
+test('a moved workspace may report copied/total bytes during migrating-files only',()=>{
+ const ok={stage:'migrating-files',status:'progress',sequence:3,copiedBytes:5,totalBytes:10};
+ assert.deepEqual(validateBootstrapReport(ok),ok);
+ assert.deepEqual(validateBootstrapReport({stage:'migrating-files',status:'progress',sequence:200}),{stage:'migrating-files',status:'progress',sequence:200});
+ for(const body of [{...ok,copiedBytes:11},{...ok,stage:'image'},{...ok,status:'failed'},{...ok,copiedBytes:-1},{...ok,totalBytes:1.5},{...ok,extra:1},{stage:'migrating-files',status:'progress',sequence:3,copiedBytes:5},{...ok,sequence:257}])assert.throws(()=>validateBootstrapReport(body),{code:400},JSON.stringify(body));
 });

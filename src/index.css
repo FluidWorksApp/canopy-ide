@@ -28696,3 +28696,23 @@ a.btn-sm {
   color: var(--text-dim, inherit);
   font-size: 12px;
 }
+
+/* Unread count on a team conversation tab (replaces the plain unread dot). */
+.tab-unread:has(.tab-unread-count)::before {
+  display: none;
+}
+.tab-unread-count {
+  flex: 0 0 auto;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}

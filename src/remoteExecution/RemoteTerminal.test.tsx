@@ -46,3 +46,14 @@ it('shared terminals use publication routes and read-only terminals never submit
  await waitFor(()=>expect(client.streamUrl).toHaveBeenCalledWith('ws','/shared-sessions/share/stream'));act(()=>state.input?.('secret'));expect(client.workspace).not.toHaveBeenCalled();
  view.rerender(<RemoteTerminal client={client as unknown as RemoteExecutionClient} workspaceId="ws" sessionId={0} sharedSessionId="share" writable/>);await waitFor(()=>expect(Socket.instances).toHaveLength(2));act(()=>state.input?.('echo safe\n'));await waitFor(()=>expect(client.workspace).toHaveBeenCalledWith('ws','/shared-sessions/share/input',{data:'echo safe\n'}));expect(client.workspace.mock.calls.some(([,route])=>route.endsWith('/resize'))).toBe(false);
 });
+it('types over the stream socket when the gateway offers socket input',async()=>{
+ class InputSocket extends Socket {sent:string[]=[];send(text:string){this.sent.push(text);}}
+ vi.stubGlobal('WebSocket',InputSocket);vi.stubGlobal('ResizeObserver',class {observe(){}disconnect(){}});Object.defineProperty(document,'hidden',{configurable:true,value:false});
+ const client={streamUrl:vi.fn().mockResolvedValue('wss://example.test/stream'),workspace:vi.fn().mockResolvedValue({})};
+ render(<RemoteTerminal client={client as unknown as RemoteExecutionClient} workspaceId="ws" sessionId={0} sharedSessionId="share" writable/>);
+ await waitFor(()=>expect(Socket.instances).toHaveLength(1));const socket=Socket.instances[0] as InputSocket;
+ act(()=>socket.onmessage?.({data:JSON.stringify({t:'hello',input:1})}));
+ act(()=>state.input?.('echo fast\n'));
+ await waitFor(()=>expect(socket.sent.map(text=>JSON.parse(text))).toEqual([expect.objectContaining({t:'input',seq:1,data:'echo fast\n'})]));
+ expect(client.workspace).not.toHaveBeenCalledWith('ws','/shared-sessions/share/input',expect.anything());
+});

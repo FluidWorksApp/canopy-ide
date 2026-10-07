@@ -1,6 +1,7 @@
 import {hibernateWorkspaceProjects,type HibernateProgressListener} from './remoteExecution/hibernateWorkspace';
 import {activeWorkspace} from './remoteExecution/workspace';
 import {startBackgroundTeams} from "./teamMessaging/background";
+import {startTeamMessageNotifications} from "./teamMessaging/notifications";
 import {ensureProjectWorkspace,ProjectWorkspaceProgress} from "./remoteExecution/projectWorkspace";
 import {stopIdleProjectWorkspace} from "./remoteExecution/projectIdle";
 import {selectAllFocused} from './selectAll';
@@ -257,6 +258,8 @@ function publishScopes(state: WorkspaceState) {
 
 export default function App() {
   useEffect(() => startBackgroundTeams(), []);
+  // Teammates' messages reach the bell, and the OS when Canopy is in the background.
+  useEffect(() => startTeamMessageNotifications(), []);
   const [ws, setWs] = useState<WorkspaceState>(emptyWorkspace);
   const [loaded, setLoaded] = useState(false);
   const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(null);

@@ -6,12 +6,23 @@ import {sharedProjectDefinitions} from './project-catalog.mjs';
 
 // Trusted, offline operation. The caller must stop the gateway and persist
 // configuration atomically. Nothing here deletes containers, images or volumes.
-export async function migrateWorkspace({config,workspaceId,projects,host,saveConfig,verifyRuntime,journal}){
+// capacityOnly: move an existing owner container into the workspace's capacity
+// slice for whole-workspace sharing. No project is copied; existing project
+// mounts are kept as they are.
+export async function migrateWorkspace({config,workspaceId,projects,host,saveConfig,verifyRuntime,journal,capacityOnly=false,restoreOriginals=false}){
  const workspace=config.workspaces.find(w=>w.id===workspaceId);
+ if(restoreOriginals){
+  if(!workspace||workspace.memberId||workspace.parentWorkspaceId||!workspace.projectMounts?.length)throw Error('Workspace has no copied projects to restore');
+  projects=[];
+ }else if(capacityOnly){
+  if(!workspace||workspace.memberId||workspace.parentWorkspaceId||workspace.cgroupParent||!workspace.sharingCgroupParent)throw Error('Workspace is not eligible for capacity group adoption');
+  projects=[];
+ }else{
  if(!workspace||workspace.memberId||workspace.projectMounts?.length)throw Error('Workspace is not eligible for initial sharing migration');
  if(!Array.isArray(projects)||!projects.length||projects.length>128)throw Error('Choose projects to migrate');
  for(const project of projects)validateMigrationComponents(project.components);
  sharedProjectDefinitions({...workspace,projectMounts:projects.map(p=>({...p,writable:true,components:p.components.map(({id,label,relativePath})=>({id,label,relativePath}))}))});
+ }
  if(typeof saveConfig!=='function'||typeof verifyRuntime!=='function'||typeof journal?.append!=='function')throw Error('Migration requires persistence, a durable journal and readiness verification');
  return host.withResourceLock(async()=>{
   if(host.migrationCleanupRequired.has(workspaceId))throw Error('Workspace migration requires recovery');
@@ -24,7 +35,7 @@ export async function migrateWorkspace({config,workspaceId,projects,host,saveCon
   const mounts=[];
   try{for(const project of projects)mounts.push(await migrateProjectVolume(workspace,project,{docker:host.docker,image:host.image}));}
   catch(error){if(error.migrationCleanupRequired)host.migrationCleanupRequired.add(workspaceId);throw error;}
-  const next={...workspace,cgroupParent,ownerImage:checkpoint.ownerImage,projectMounts:mounts};
+  const next=restoreOriginals?(({projectMounts,...rest})=>({...rest,cgroupParent,ownerImage:checkpoint.ownerImage}))(workspace):capacityOnly?{...workspace,cgroupParent,ownerImage:checkpoint.ownerImage}:{...workspace,cgroupParent,ownerImage:checkpoint.ownerImage,projectMounts:mounts};
   const preserved=`canopy-preserved-${workspaceId}-${randomBytes(6).toString('hex')}`;
   const current=JSON.parse((await host.docker(['inspect',name])).stdout)[0];
   if(current.Id!==checkpoint.originalContainerId||current.State?.Running!==false)throw Error('Workspace changed during migration');
@@ -48,7 +59,7 @@ export async function migrateWorkspace({config,workspaceId,projects,host,saveCon
    await journal.append({phase:'publishing'});
    publicationAttempted=true;
    await saveConfig(updated);
-   Object.assign(workspace,next);
+   Object.assign(workspace,next);if(restoreOriginals)delete workspace.projectMounts;
    await journal.append({phase:'committed'}).catch(()=>host.migrationCleanupRequired.add(workspaceId));
    return {workspaceId,preservedContainer:preserved,ownerImage:checkpoint.ownerImage,projects:mounts};
   }catch(error){
@@ -88,3 +99,8 @@ export async function migrateWorkspace({config,workspaceId,projects,host,saveCon
   }
  });
 }
+
+// Undo a per-project copy: the owner container is recreated with the same
+// volumes, slice and installed tools but without the copy mounts, so its
+// /workspace shows the original folders again. Copies are kept.
+export const restoreOriginalMounts=options=>migrateWorkspace({...options,projects:[],restoreOriginals:true});

@@ -62,6 +62,13 @@ const FORWARDED_EVENTS: [&str; 3] = ["pty:stats", "agent:events", "pty:exit"];
 const PORTAL_OUTBOUND_BYTES: usize = 8 * 1024 * 1024;
 const PORTAL_MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const PORTAL_MAX_INBOUND_BYTES: usize = 1024 * 1024;
+/// A client pings every few seconds (shared/host/wire.ts). One that has said
+/// nothing for this long is gone — a phone that slept or changed networks, a
+/// tunnel that dropped the connection without a close — and its socket would
+/// otherwise hold one of the `REMOTE_SOCKET_MAX` slots until TCP gave up,
+/// minutes later. Enough of those and the client's own reconnect is refused,
+/// which reads on the phone as a terminal that takes no typing at all.
+const PORTAL_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
 struct OutboundMessage {
     text: String,
@@ -749,10 +756,16 @@ async fn ws_conn(
 
     // Per-PTY output streaming tasks, so we can detach/clean up.
     let mut attaches: HashMap<u32, tokio::task::JoinHandle<()>> = HashMap::new();
+    let idle = tokio::time::sleep(PORTAL_IDLE_TIMEOUT);
+    tokio::pin!(idle);
 
     loop {
         tokio::select! {
+            () = &mut idle => break,
             inbound = socket.recv() => {
+                // Anything from the client — a ping, a pong, a keystroke —
+                // proves it is still there.
+                idle.as_mut().reset(tokio::time::Instant::now() + PORTAL_IDLE_TIMEOUT);
                 match inbound {
                     Some(Ok(Message::Text(t))) => {
                         if t.len() > PORTAL_MAX_INBOUND_BYTES {
@@ -829,12 +842,18 @@ fn handle_client_msg(
             }
         }
         Some("input") => {
-            if let (Some(id), Some(data)) = (
-                v.get("pty").and_then(|x| x.as_u64()),
-                v.get("data").and_then(|x| x.as_str()),
-            ) {
-                let _ = p.app.state::<PtyManager>().write(id as u32, data);
+            if let Some(reply) = write_input(&p.app.state::<PtyManager>(), &v) {
+                let out = out.clone();
+                tokio::spawn(async move {
+                    let _ = out.send(reply).await;
+                });
             }
+        }
+        Some("ping") => {
+            let out = out.clone();
+            tokio::spawn(async move {
+                let _ = out.send(json!({ "t": "pong" }).to_string()).await;
+            });
         }
         Some("kill") => {
             if let Some(id) = v.get("pty").and_then(|x| x.as_u64()) {
@@ -919,6 +938,20 @@ fn handle_client_msg(
         }
         _ => {}
     }
+}
+
+/// Write a client's keystrokes to its PTY. A refusal (the session is gone, or
+/// its child stopped reading and the input queue is full) is answered with an
+/// `input-error` the client shows in the terminal, rather than dropped: the
+/// person typing on a phone otherwise just sees nothing happen.
+fn write_input(ptys: &PtyManager, v: &Value) -> Option<String> {
+    let id = v.get("pty").and_then(|x| x.as_u64())?;
+    let data = v.get("data").and_then(|x| x.as_str())?;
+    let error = match u32::try_from(id) {
+        Ok(id) => ptys.write(id, data).err()?,
+        Err(_) => format!("no pty session {id}"),
+    };
+    Some(json!({ "t": "input-error", "pty": id, "error": error }).to_string())
 }
 
 /// The one action entry point, and the reason a new remote module needs no new
@@ -1548,6 +1581,30 @@ mod tests {
             .send("x".repeat(PORTAL_MAX_MESSAGE_BYTES + 1))
             .await
             .is_err());
+    }
+
+    #[test]
+    fn input_the_pty_refuses_is_reported_back_not_dropped() {
+        let ptys = PtyManager::default();
+        let reply = write_input(&ptys, &json!({ "t": "input", "pty": 4242, "data": "ls\r" }))
+            .expect("a refused write must be answered");
+        let reply: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["t"], "input-error");
+        assert_eq!(reply["pty"], 4242);
+        assert!(reply["error"].as_str().unwrap().contains("4242"));
+        // Malformed input is not a write at all, so there is nothing to report.
+        assert!(write_input(&ptys, &json!({ "t": "input", "pty": 1 })).is_none());
+    }
+
+    #[test]
+    fn input_the_pty_accepts_gets_no_reply() {
+        let app = tauri::test::mock_app();
+        let ptys = PtyManager::default();
+        let id = ptys
+            .spawn_headless(app.handle().clone(), Some("/tmp".into()), None, None)
+            .expect("spawn");
+        assert!(write_input(&ptys, &json!({ "t": "input", "pty": id, "data": "x" })).is_none());
+        let _ = ptys.kill(id);
     }
 
     #[test]

@@ -108,6 +108,13 @@ async function appendGitConfig(file,content){
 }
 async function replaceGitFile(file,content){try{if((await lstat(file)).isSymbolicLink())await unlink(file);}catch(e){if(e.code!=='ENOENT')throw e;}await writeFile(file,content);}
 
+// Copies keep the folder's real name: the repository folder's basename,
+// sanitized, with -2, -3… added only when two folders share a name.
+export function copyName(folder,taken,fallback='repository'){
+ const base=(path.basename(folder).replace(/\.git$/,'').replace(/[^A-Za-z0-9._-]+/g,'-').replace(/^[.-]+/,'').slice(0,64))||fallback;
+ let name=base,n=1;while(taken.has(name.toLowerCase()))name=`${base}-${++n}`;
+ taken.add(name.toLowerCase());return name;
+}
 // Called inside a disposable helper with only the old project volume mounted
 // read-only and the new project volume mounted writable. Publication is one
 // rename; originals are never removed, and failed copies remain unpublished.
@@ -116,13 +123,13 @@ export async function copyProjectComponents({sourceRoot,destinationRoot,componen
  const source=await realpath(sourceRoot),destination=await realpath(destinationRoot);
  if(source===destination||destination.startsWith(source+path.sep)||source.startsWith(destination+path.sep))throw Error('Migration roots must be separate');
  if((await readdir(destination)).length)throw Error('Migration destination is not empty');
- const resolved=[],repositories=new Map(),metadata=new Map(),gitCopies=new Map(),configPlans=new Map();
+ const resolved=[],repositories=new Map(),metadata=new Map(),gitCopies=new Map(),configPlans=new Map(),repositoryNames=new Set(),metadataNames=new Set();
  for(const component of components){
   const from=await realpath(path.join(source,component.source));
   if(from!==source&&!from.startsWith(source+path.sep))throw Error('Component leaves source volume');
   if(!(await lstat(from)).isDirectory())throw Error('Component is not a directory');
   const repository=await repositoryFor(from,source);
-  if(repository&&!repositories.has(repository.root))repositories.set(repository.root,{...repository,target:'.canopy-repositories/repository-'+(repositories.size+1)});
+  if(repository&&!repositories.has(repository.root))repositories.set(repository.root,{...repository,target:'.canopy-repositories/'+copyName(repository.root,repositoryNames)});
   resolved.push({...component,from,repository:repository?repositories.get(repository.root):null});
  }
  for(const repository of repositories.values())for(const gitRoot of [repository.commonDir,repository.gitDir])if(!configPlans.has(gitRoot))configPlans.set(gitRoot,await gitConfigPlan(gitRoot,source));
@@ -136,11 +143,11 @@ export async function copyProjectComponents({sourceRoot,destinationRoot,componen
    const worktree=path.join(runtimeRoot??path.join(destination,'content'),repository.target);
    if(!repository.linked){await applyGitConfigPlan(configPlans.get(repository.gitDir),path.join(to,'.git'));await appendGitConfig(path.join(to,'.git','config'),`\n[core]\n\tworktree = ${JSON.stringify(worktree)}\n`);continue;}
    if(!metadata.has(repository.commonDir)){
-    const target='.canopy-git/common-'+(metadata.size+1);metadata.set(repository.commonDir,target);await cp(repository.commonDir,path.join(content,target),{recursive:true,dereference:false,verbatimSymlinks:true,preserveTimestamps:true,errorOnExist:true,force:false});await applyGitConfigPlan(configPlans.get(repository.commonDir),path.join(content,target));
+    const target='.canopy-git/'+copyName(path.basename(repository.commonDir)==='.git'?path.dirname(repository.commonDir):repository.commonDir,metadataNames);metadata.set(repository.commonDir,target);await cp(repository.commonDir,path.join(content,target),{recursive:true,dereference:false,verbatimSymlinks:true,preserveTimestamps:true,errorOnExist:true,force:false});await applyGitConfigPlan(configPlans.get(repository.commonDir),path.join(content,target));
    }
    const commonTarget=path.join(content,metadata.get(repository.commonDir));let gitTarget;
    if(inside(repository.commonDir,repository.gitDir))gitTarget=path.join(commonTarget,path.relative(repository.commonDir,repository.gitDir));
-   else{if(!gitCopies.has(repository.gitDir)){gitTarget=path.join(content,'.canopy-git/worktree-'+(gitCopies.size+1));gitCopies.set(repository.gitDir,gitTarget);await cp(repository.gitDir,gitTarget,{recursive:true,dereference:false,verbatimSymlinks:true,preserveTimestamps:true,errorOnExist:true,force:false});await applyGitConfigPlan(configPlans.get(repository.gitDir),gitTarget);}else gitTarget=gitCopies.get(repository.gitDir);}
+   else{if(!gitCopies.has(repository.gitDir)){gitTarget=path.join(content,'.canopy-git/'+copyName(path.basename(repository.gitDir)+'-worktree',metadataNames,'worktree'));gitCopies.set(repository.gitDir,gitTarget);await cp(repository.gitDir,gitTarget,{recursive:true,dereference:false,verbatimSymlinks:true,preserveTimestamps:true,errorOnExist:true,force:false});await applyGitConfigPlan(configPlans.get(repository.gitDir),gitTarget);}else gitTarget=gitCopies.get(repository.gitDir);}
    await unlink(path.join(to,'.git'));await writeFile(path.join(to,'.git'),'gitdir: '+path.relative(to,gitTarget)+'\n');
    if(repository.commonDir!==repository.gitDir){await replaceGitFile(path.join(gitTarget,'commondir'),path.relative(gitTarget,commonTarget)+'\n');await replaceGitFile(path.join(gitTarget,'gitdir'),path.join(worktree,'.git')+'\n');await appendGitConfig(path.join(commonTarget,'config'),'\n[extensions]\n\tworktreeConfig = true\n');await appendGitConfig(path.join(gitTarget,'config.worktree'),`\n[core]\n\tworktree = ${JSON.stringify(worktree)}\n\tbare = false\n`);}
    else await appendGitConfig(path.join(commonTarget,'config'),`\n[core]\n\tworktree = ${JSON.stringify(worktree)}\n`);

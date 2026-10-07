@@ -26,10 +26,18 @@ function missingImage(error){
  // classification. Direct CLI callers retain the daemon's missing-image line.
  return error?.missingResource===true||/^Error(?: response from daemon)?: No such (?:image|object):/mi.test(String(error?.stderr??''));
 }
+// A containerd restart under a running dockerd (package maintenance on a fresh
+// host, canopy-ws-...-17 on 2026-10-07) breaks the pull's in-flight content
+// write: "failed to copy: failed to send write: EOF". Only this connection loss
+// is retried, once, and only after containerd and Docker are active again.
+export function containerdConnectionLost(error){
+ return /failed to (?:send|copy|write|receive)[^\n]*\bEOF\b|error reading from server: EOF|transport is closing|containerd\.sock[^\n]*(?:connection refused|no such file)/i.test(`${error?.stderr??''}\n${error?.message??''}`);
+}
 // `space` ({freeBytes,cleanup,reserveBytes}) enables the free-space preflight:
 // a pull that cannot fit fails with WorkspaceDiskFullError before it starts,
 // and a mid-pull ENOSPC is reported the same way, never as a generic failure.
-export async function pullWorkspaceImage(reference,{docker,space}){
+// `retry` ({runtimeReady,log}) enables the single containerd-loss retry.
+export async function pullWorkspaceImage(reference,{docker,space,retry}){
  const requested=workspaceImageReference(reference);
  if(requested.includes('@')){
   let cached,missing=false;
@@ -42,7 +50,15 @@ export async function pullWorkspaceImage(reference,{docker,space}){
  // Mutable channels must contact the registry on every explicit resume.
  let preflight;
  if(space)preflight=await ensurePullSpace(requested,{docker,...space});
- try{await docker(['pull','--quiet',requested]);}
+ const pull=()=>docker(['pull','--quiet',requested]);
+ try{
+  try{await pull();}
+  catch(error){
+   if(!retry||!containerdConnectionLost(error)||!await retry.runtimeReady())throw error;
+   retry.log?.('Workspace image pull lost its containerd connection; retrying once');
+   await pull();
+  }
+ }
  catch(error){
   if(!space||!noSpaceError(error))throw error;
   try{await space.cleanup?.();}catch{}
@@ -62,7 +78,10 @@ if(process.argv[1]===new URL(import.meta.url).pathname){
  const log=message=>console.error(message);
  const cleanup=()=>removeStaleWorkspaceImages({docker,keep:[requested],protectWorkspaces,log});
  let release;
- try{release=await pullWorkspaceImage(requested,{docker,space:{cleanup}});}
+ // Wait (bounded) until both runtimes are active before the single retry.
+ const active=async unit=>{try{await exec('systemctl',['is-active','--quiet',unit],{timeout:5000});return true;}catch{return false;}};
+ const runtimeReady=async()=>{for(let attempt=0;attempt<30;attempt++){if(await active('containerd.service')&&await active('docker.service'))return true;await new Promise(resolve=>setTimeout(resolve,2000));}return false;};
+ try{release=await pullWorkspaceImage(requested,{docker,space:{cleanup},retry:{runtimeReady,log}});}
  catch(error){
   if(!(error instanceof WorkspaceDiskFullError))throw error;
   console.error(error.message);

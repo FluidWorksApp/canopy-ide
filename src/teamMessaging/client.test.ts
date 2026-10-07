@@ -46,3 +46,35 @@ it('restored ciphertext for a revoked recipient is discarded before any relay or
  const client=new PeerClient({user:'alice',team:'team',identity:async()=>({id,keys:alice}),outbox:{load:async()=>[{envelope,messageId:'pending'}],put:async()=>{},remove},request:request as PeerRequest,message:()=>{},receipt:()=>{},status:()=>{}});
  clients.push(client);await client.start();expect(remove).toHaveBeenCalledWith([envelope.id]);expect(request.mock.calls.some(([body])=>(body as any).action==='relay')).toBe(false);
 });
+
+it('keeps the client-generated id through the encrypted history and the pending-delivery queue',async()=>{
+ const {publicIdentity}=await import('./crypto');const alice=await createIdentity(),bob=await createIdentity();
+ const aliceId='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',bobId='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+ const devices=[{id:aliceId,user_id:'alice',public_keys:await publicIdentity(alice)},{id:bobId,user_id:'bob',public_keys:await publicIdentity(bob)}];
+ const rows:{envelope:any;messageId:string}[]=[];const persisted:ChatMessage[]=[];const echoed:ChatMessage[]=[];
+ const request=(async<T,>(value:unknown)=>{const body=value as any;if(body.action==='directory')return {devices} as T;if(body.action==='poll')return {envelopes:[]} as T;if(body.action==='relay')throw Error('Offline');return {} as T;}) as PeerRequest;
+ const outbox={load:async()=>[...rows],put:async(row:{envelope:any;messageId:string})=>{rows.push(row);},remove:async(ids:string[])=>{for(const id of ids){const i=rows.findIndex(r=>r.envelope.id===id);if(i>=0)rows.splice(i,1);}}};
+ const client=new PeerClient({user:'alice',team:'team',identity:async()=>({id:aliceId,keys:alice}),outbox,request,persist:async m=>{persisted.push(m);},message:m=>echoed.push(m),receipt:()=>{},status:()=>{}});
+ clients.push(client);await client.start();
+ const draft={id:'cccccccc-cccc-4ccc-8ccc-cccccccccccc',created:Date.now()};
+ const result=await client.send('Queued while the relay is down','bob',draft);
+ expect(result).toEqual({id:draft.id,queued:true,partial:true});
+ expect(persisted.map(m=>[m.id,m.created])).toEqual([[draft.id,draft.created]]);
+ expect(rows.map(r=>r.messageId)).toEqual([draft.id]);expect(echoed.map(m=>m.id)).toEqual([draft.id]);
+ await expect(client.send('bad','bob',{id:'not-a-uuid',created:Date.now()})).rejects.toThrow('Invalid message');
+ client.stop();
+ // After a restart the queued ciphertext reports the same message id.
+ const pending=vi.fn();
+ const restarted=new PeerClient({user:'alice',team:'team',identity:async()=>({id:aliceId,keys:alice}),outbox,request,pending,message:()=>{},receipt:()=>{},status:()=>{}});
+ clients.push(restarted);await restarted.start();
+ expect(pending).toHaveBeenCalledWith([draft.id]);
+ await restarted.discard(draft.id);expect(rows).toEqual([]);
+},10000);
+
+it('reports a message whose last pending delivery can no longer be sent',async()=>{
+ const {seal,publicIdentity}=await import('./crypto');const alice=await createIdentity(),bob=await createIdentity(),id='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+ const envelope=await seal(alice,await publicIdentity(bob),{team:'team',user:'alice',device:id},{team:'team',user:'bob',device:'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'},JSON.stringify({kind:'message',message:{id:'pending',sender:'alice',recipient:'bob',text:'Synthetic pending',created:Date.now()}}));
+ const expired=vi.fn(),request=(async<T,>(value:unknown)=>{const body=value as any;if(body.action==='directory')return {devices:[{id,user_id:'alice',public_keys:await publicIdentity(alice)}]} as T;if(body.action==='poll')return {envelopes:[]} as T;return {} as T;}) as PeerRequest;
+ const client=new PeerClient({user:'alice',team:'team',identity:async()=>({id,keys:alice}),outbox:{load:async()=>[{envelope,messageId:'pending'}],put:async()=>{},remove:async()=>{}},request,expired,message:()=>{},receipt:()=>{},status:()=>{}});
+ clients.push(client);await client.start();expect(expired).toHaveBeenCalledWith('pending');
+});

@@ -29,12 +29,18 @@ test('real gateway isolates collaborative input, prevents private terminal contr
   allowed=false;assert.equal((await call(member,'/shared-sessions')).status,401);
  }finally{socket?.terminate();for(const socket of wss.clients)socket.terminate();wss.close();await close(gateway);await close(runner);}
 });
-test('sharing setup is owner-only and blocks execution while storage migration is active',async()=>{
- const id='ws-11111111-1111-4111-8111-111111111111',key='x'.repeat(48),called=[];let active=false;
+test('sharing attestation is control-plane only and reports a fixed reason when the host is not ready',async()=>{
+ const id='ws-11111111-1111-4111-8111-111111111111',key='x'.repeat(48),called=[];let reason=null;
  const token=claims=>{const payload=Buffer.from(JSON.stringify({workspaceId:id,expires:Math.floor(Date.now()/1000)+120,...claims})).toString('base64url');return payload+'.'+createHmac('sha256',key).update(payload).digest('base64url');};
- const setup={active:()=>active,status:async()=>({status:'not-enabled'}),start:async(_w,input)=>{called.push(input);active=true;return {status:'running'};},attest:async()=>{called.push('attest');return {proof:'synthetic'};}};
- const server=createGateway({config:{workspaces:[{id,accounts:[],memoryMiB:1024,cpus:1}],principals:[{id:'managed-account',scope:'drive',workspaces:[id],tokenSha256:'0'.repeat(64)}],managedSession:{workspaceId:id,key}},workspaces:{open:()=>assert.fail('No runtime may open during migration')},authorizeMember:async()=>true,sharingSetup:setup});const base=await listen(server);
+ const attest={attest:async(_w,input)=>{called.push(input.nonce);if(reason)throw Object.assign(Error(reason),{reason});return {proof:'synthetic'};}};
+ const server=createGateway({config:{workspaces:[{id,accounts:[],memoryMiB:1024,cpus:1}],principals:[{id:'managed-account',scope:'drive',workspaces:[id],tokenSha256:'0'.repeat(64)}],managedSession:{workspaceId:id,key}},workspaces:{open:()=>assert.fail('Attestation routing never opens a runtime itself')},authorizeMember:async()=>true,sharingAttest:attest});const base=await listen(server);
  const call=(claims,route,input)=>fetch(base+'/v1/workspaces/'+id+route,{method:input?'POST':'GET',headers:{authorization:'Bearer '+token(claims),'content-type':'application/json'},...(input?{body:JSON.stringify(input)}:{})});
- try{const member={version:2,memberId:'alice',accessVersion:1,scope:'drive'};assert.equal((await call(member,'/sharing-setup',{action:'start',confirmInterrupt:true})).status,403);assert.equal(called.length,0);assert.equal((await call({},'/sharing-setup',{action:'attest'})).status,200);assert.deepEqual(called,['attest']);assert.equal((await call({},'/sharing-setup',{action:'start',confirmInterrupt:true})).status,202);assert.equal((await call({},'/sharing-setup')).status,200);assert.equal((await call({},'/native',{command:'fs_read_file'})).status,400);assert.equal((await call({},'/sessions')).status,400);}
- finally{await close(server);}
+ try{
+  const member={version:2,memberId:'alice',accessVersion:1,scope:'drive'};
+  assert.equal((await call(member,'/sharing-attest',{nonce:'a'})).status,403);assert.equal(called.length,0);
+  const ok=await call({},'/sharing-attest',{nonce:'a'});assert.equal(ok.status,200);assert.deepEqual(await ok.json(),{proof:'synthetic'});
+  reason='Member capacity is not configured on this machine yet. Restart the workspace to finish setup';
+  const refused=await call({},'/sharing-attest',{nonce:'b'});assert.equal(refused.status,409);assert.equal((await refused.json()).reason,reason);
+  assert.equal((await call({},'/sharing-setup',{action:'start'})).status,400,'the project-copy setup route is gone');
+ }finally{await close(server);}
 });

@@ -1,7 +1,8 @@
 import {invoke} from '@tauri-apps/api/core';
 import {teamSession} from './session';
+import {rememberTeamName} from './unread';
 
-type Directory={selfId:string;teams:{id:string}[]};
+type Directory={selfId:string;teams:{id:string;name?:string}[]};
 type Dependencies={
  request:()=>Promise<Directory>;
  retain:(team:string,user:string)=>()=>void;
@@ -22,6 +23,7 @@ export function startBackgroundTeams(dependencies:Dependencies={
    if(typeof directory.selfId!=='string'||!directory.selfId||!Array.isArray(directory.teams))throw Error('Invalid team directory');
    if(user!==directory.selfId){release();user=directory.selfId;}
    const next=new Set(directory.teams.map(team=>team.id).filter(id=>typeof id==='string'&&id.length>0));
+   for(const team of directory.teams)if(typeof team.id==='string')rememberTeamName(team.id,team.name);
    for(const [id,stop] of held)if(!next.has(id)){stop();held.delete(id);}
    // Acquire before releasing: healthy sessions stay alive, while a session
    // invalidated by failed authentication can be recreated on the next refresh.

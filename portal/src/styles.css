@@ -235,6 +235,23 @@ select {
  * it holds the keyboard — otherwise a click that landed on the list instead
  * leaves typing going nowhere, silently. AgentTerminal sets the class from
  * xterm's focus events; see the note there for why this is not `:has()`. */
+.term-host {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+/* Input that is waiting on the connection, or was refused, says so here
+ * instead of vanishing. */
+.term-notice {
+  flex: none;
+  padding: 7px 10px;
+  border-radius: 9px;
+  font-size: 12.5px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--warn) 16%, var(--bg-alt));
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+}
 .term-focused {
   border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
 }

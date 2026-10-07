@@ -31,3 +31,14 @@ test('migration rejects traversal and overlapping component destinations',()=>{
  for(const invalid of ['/home/agent','../private','web/../private','web\\private','web//private'])for(const key of ['source','relativePath'])assert.throws(()=>validateMigrationComponents([{...component,[key]:invalid}]));
  for(const relativePath of ['web','web/nested','.'])assert.throws(()=>validateMigrationComponents([component,{...component,id:'two',relativePath}]),/Overlapping/);
 });
+import {copyName} from './project-migration.mjs';
+test('copy names are sanitized basenames with -2/-3 only on collision',()=>{
+ const taken=new Set();
+ assert.equal(copyName('/workspace/coraa-voice',taken),'coraa-voice');
+ assert.equal(copyName('/workspace/a/coraa-voice',taken),'coraa-voice-2');
+ assert.equal(copyName('/workspace/b/Coraa-Voice',taken),'Coraa-Voice-3','collisions ignore case');
+ assert.equal(copyName('/workspace/my repo (old)',taken),'my-repo-old-');
+ assert.equal(copyName('/workspace/.hidden',taken),'hidden');
+ assert.equal(copyName('/workspace/..',new Set()),'repository');
+ assert.equal(copyName('/workspace/tally.git',new Set()),'tally');
+});

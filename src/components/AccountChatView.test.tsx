@@ -1,9 +1,9 @@
 import {render,screen,fireEvent,waitFor,cleanup} from '@testing-library/react';
 import {afterEach,beforeEach,it,expect,vi} from 'vitest';
-const mock=vi.hoisted(()=>({send:vi.fn(async()=>({partial:false})),snapshot:{members:{ada:'Ada Lovelace'},messages:[{id:'m',sender:'ada',recipient:null,text:'Hello team',created:1}],receipts:{},status:'Connected · end-to-end encrypted'} as {members:Record<string,string>;messages:{id:string;sender:string;recipient:string|null;text:string;created:number}[];receipts:Record<string,string[]>;status:string}}));
-vi.mock('../teamMessaging/session',()=>({teamSession:()=>({retain:()=>()=>{},markRead:vi.fn(),subscribe:()=>()=>{},getSnapshot:()=>mock.snapshot,send:mock.send})}));
+const mock=vi.hoisted(()=>({markRead:vi.fn(),send:vi.fn(async(..._args:unknown[])=>({id:'new'})),retry:vi.fn(async(..._args:unknown[])=>({id:'retried'})),discard:vi.fn(),snapshot:{members:{ada:'Ada Lovelace'},messages:[{id:'m',sender:'ada',recipient:null,text:'Hello team',created:1}],receipts:{},status:'Connected · end-to-end encrypted'} as {members:Record<string,string>;messages:{id:string;sender:string;recipient:string|null;text:string;created:number}[];receipts:Record<string,string[]>;delivery?:Record<string,{state:string;detail?:string}>;status:string}}));
+vi.mock('../teamMessaging/session',()=>({teamSession:()=>({retain:()=>()=>{},markRead:mock.markRead,subscribe:()=>()=>{},getSnapshot:()=>mock.snapshot,send:mock.send,retry:mock.retry,discard:mock.discard})}));
 import {AccountChatView} from './AccountChatView';
-beforeEach(()=>mock.send.mockClear());
+beforeEach(()=>{mock.markRead.mockClear();mock.send.mockClear();mock.retry.mockClear();mock.discard.mockClear();});
 afterEach(cleanup);
 const channel={teamId:'engineering',userId:'me',peer:null,name:'Engineering'};
 const box=()=>screen.getByRole('textbox',{name:'Message'});
@@ -60,4 +60,72 @@ it('groups consecutive messages from one sender under a single header',()=>{
   expect(screen.getAllByText('Ada Lovelace')).toHaveLength(1);
   expect(screen.getByText('Delivered')).toBeTruthy();
  }finally{mock.snapshot=prev;}
+});
+function withSnapshot(change:Partial<typeof mock.snapshot>,body:()=>void){const prev=mock.snapshot;mock.snapshot={...prev,...change};try{body();}finally{mock.snapshot=prev;}}
+it('clears the composer at once, before the send settles, and keeps the composer usable',()=>{
+ mock.send.mockReturnValueOnce(new Promise(()=>{}));
+ render(<AccountChatView conversation={channel}/>);
+ fireEvent.change(box(),{target:{value:'Instant'}});fireEvent.keyDown(box(),{key:'Enter'});
+ expect(mock.send).toHaveBeenCalledWith('Instant',null);
+ expect((box() as HTMLTextAreaElement).value).toBe('');
+ expect(document.activeElement).toBe(box());
+ fireEvent.change(box(),{target:{value:'Next'}});
+ expect((screen.getByRole('button',{name:'Send'}) as HTMLButtonElement).disabled).toBe(false);
+});
+it('puts the text back when the message is refused outright',async()=>{
+ mock.send.mockRejectedValueOnce(Error('Write a message under 16 KB'));
+ render(<AccountChatView conversation={channel}/>);
+ fireEvent.change(box(),{target:{value:'Too long'}});fireEvent.keyDown(box(),{key:'Enter'});
+ await waitFor(()=>expect(screen.getByRole('alert').textContent).toBe('Write a message under 16 KB'));
+ expect((box() as HTMLTextAreaElement).value).toBe('Too long');
+});
+it('shows each delivery state on your own messages',()=>{
+ const own=(id:string,created:number)=>({id,sender:'me',recipient:null,text:`text ${id}`,created});
+ withSnapshot({messages:['sending','sent','queued','waiting','expired'].map((id,i)=>own(id,1000+i)),receipts:{},delivery:{sending:{state:'sending'},sent:{state:'sent'},queued:{state:'queued'},waiting:{state:'waiting'},expired:{state:'expired'}}},()=>{
+  render(<AccountChatView conversation={channel}/>);
+  for(const label of ['Sending…','Awaiting delivery','Saved on this device','Waiting for connection','Not delivered · expired'])expect(screen.getByText(label,{exact:false})).toBeTruthy();
+  expect(screen.getByText('text sending').closest('article')?.className).toContain('pending');
+  expect(screen.getByText('text expired').closest('article')?.className).toContain('failed');
+ });
+});
+it('offers Retry and Discard on a message that was not sent',()=>{
+ withSnapshot({messages:[{id:'f',sender:'me',recipient:null,text:'Keep this text',created:5}],receipts:{},delivery:{f:{state:'failed',detail:'Team not found'}}},()=>{
+  render(<AccountChatView conversation={channel}/>);
+  expect(screen.getByText('Keep this text')).toBeTruthy();
+  const status=screen.getByText('Not sent',{exact:false});expect(status.getAttribute('title')).toBe('Team not found');
+  fireEvent.click(screen.getByRole('button',{name:'Retry'}));expect(mock.retry).toHaveBeenCalledWith('f');
+  fireEvent.click(screen.getByRole('button',{name:'Discard'}));expect(mock.discard).toHaveBeenCalledWith('f');
+ });
+});
+
+it('marks the conversation read only while it is in front of a focused window',()=>{
+ const focus=vi.spyOn(document,'hasFocus').mockReturnValue(false);
+ const {rerender}=render(<AccountChatView conversation={channel} active/>);
+ expect(mock.markRead).not.toHaveBeenCalled();
+ focus.mockReturnValue(true);fireEvent.focus(window);
+ expect(mock.markRead).toHaveBeenCalledWith(null);
+ mock.markRead.mockClear();
+ rerender(<AccountChatView conversation={channel} active={false}/>);fireEvent.focus(window);
+ expect(mock.markRead).not.toHaveBeenCalled();
+ focus.mockRestore();
+});
+it('leaves messages unread while scrolled away from the newest ones',()=>{
+ const focus=vi.spyOn(document,'hasFocus').mockReturnValue(false);
+ render(<AccountChatView conversation={channel} active/>);
+ const log=screen.getByRole('log');
+ Object.defineProperties(log,{scrollHeight:{configurable:true,value:2000},clientHeight:{configurable:true,value:400}});
+ log.scrollTop=200;focus.mockReturnValue(true);fireEvent.focus(window);
+ expect(mock.markRead).not.toHaveBeenCalled();
+ log.scrollTop=1600;fireEvent.scroll(log);
+ expect(mock.markRead).toHaveBeenCalledWith(null);
+ focus.mockRestore();
+});
+it('reports the conversation as on screen only while active',async()=>{
+ const {conversationShown}=await import('../teamMessaging/unread');
+ const {rerender,unmount}=render(<AccountChatView conversation={channel} active/>);
+ expect(conversationShown('engineering','me',null)).toBe(true);
+ rerender(<AccountChatView conversation={channel} active={false}/>);
+ expect(conversationShown('engineering','me',null)).toBe(false);
+ rerender(<AccountChatView conversation={channel} active/>);unmount();
+ expect(conversationShown('engineering','me',null)).toBe(false);
 });

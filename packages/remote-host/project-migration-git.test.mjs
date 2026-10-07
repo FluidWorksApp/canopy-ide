@@ -47,3 +47,10 @@ test('canonical SSH and SCP remotes retain their SSH identity while passwords an
  const repo=join(f.sourceRoot,'repo');await f.init(repo);const config=join(repo,'.git','config'),token='SYNTHETIC_SSH_PASSWORD';await writeFile(config,(await readFile(config,'utf8'))+`\n[remote "ssh"]\n url = ssh://git:${token}@github.com/example/repository.git?token=${token}\n[remote "scp"]\n url = git@github.com:example/repository.git\n`);const original=await readFile(config,'utf8');
  const migrated=await copyProjectComponents({...f,components:[{id:'web',label:'Web',source:'repo/web',relativePath:'.'}]}),folder=join(f.destinationRoot,migrated[0].relativePath);assert.equal(await f.git(folder,'remote','get-url','ssh'),'ssh://git@github.com/example/repository.git');assert.equal(await f.git(folder,'remote','get-url','scp'),'git@github.com:example/repository.git');assert.ok(!(await gitMetadataText(join(dirname(folder),'.git'))).includes(token));assert.equal(await readFile(config,'utf8'),original);
 }));
+test('copied repositories keep their real folder names, de-duplicated only on collision',()=>fixture(async f=>{
+ for(const name of ['coraa-agent','dashboard','nested/dashboard'])await f.init(join(f.sourceRoot,name));
+ const components=[{id:'agent',label:'Agent',source:'coraa-agent',relativePath:'agent'},{id:'dash',label:'Dashboard',source:'dashboard',relativePath:'dash'},{id:'dash2',label:'Dashboard 2',source:'nested/dashboard',relativePath:'dash2'}];
+ const migrated=await copyProjectComponents({...f,components});
+ assert.deepEqual((await readdir(join(f.destinationRoot,'content','.canopy-repositories'))).sort(),['coraa-agent','dashboard','dashboard-2']);
+ assert.deepEqual(migrated.map(c=>c.relativePath),['content/.canopy-repositories/coraa-agent','content/.canopy-repositories/dashboard','content/.canopy-repositories/dashboard-2']);
+}));

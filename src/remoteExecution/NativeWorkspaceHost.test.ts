@@ -307,3 +307,24 @@ it('parks terminal reconnects and heartbeats while the workspace is intentionall
   expect(Socket.all).toHaveLength(2);
  }finally{host.dispose();reportWorkspaceLifecycle(key,null);vi.useRealTimers();}
 });
+
+it('sends keystrokes over the stream socket once the gateway offers it and falls back to HTTP across a reconnect',async()=>{
+ const {host,fetcher}=setup();
+ class Socket {
+  static all:Socket[]=[];readyState=1;sent:Array<{t:string;id:string;seq:number;data:string}>=[];onmessage?:(event:{data:string})=>void;onclose?:()=>void;onopen?:()=>void;
+  constructor(){Socket.all.push(this);}close(){this.readyState=3;this.onclose?.();}send(text:string){this.sent.push(JSON.parse(text));}frame(value:unknown){this.onmessage?.({data:JSON.stringify(value)});}
+ }
+ vi.stubGlobal('WebSocket',Socket);
+ fetcher.mockImplementation(async(url:string,options:RequestInit)=>({ok:true,json:async()=>url.endsWith('/ticket')?{ticket:'synthetic-ticket'}:url.endsWith('/sessions')&&options.method==='GET'?[{id:7,title:'shell',cols:40,rows:10,exitCode:null}]:url.endsWith('/sessions')?{id:7,title:'shell',cols:40,rows:10,exitCode:null}:url.endsWith('/input')?{ok:true}:{result:null}}));
+ await host.invoke('pty_spawn_attached_argv',{cwd:'/workspace',argv:['bash'],onData:{onmessage:vi.fn()}});
+ const socket=Socket.all[0];socket.frame({t:'hello',input:1});
+ const inputs=()=>fetcher.mock.calls.filter(([url])=>String(url).endsWith('/input'));
+ const typed=host.invoke('pty_write',{id:7,data:'l'});await new Promise(r=>setTimeout(r,0));
+ const second=host.invoke('pty_write',{id:7,data:'s'});await new Promise(r=>setTimeout(r,0));
+ expect(socket.sent.map(f=>[f.seq,f.data])).toEqual([[1,'l'],[2,'s']]);expect(inputs()).toHaveLength(0);
+ socket.frame({t:'input-ack',id:socket.sent[0].id,seq:1});await typed;
+ // The socket drops before acknowledging 's': it is resent once over HTTP with its identity.
+ socket.close();await second;
+ expect(inputs().map(([,options])=>JSON.parse(String((options as RequestInit).body)))).toEqual([{data:'s',id:socket.sent[0].id,seq:2}]);
+ host.dispose();
+});

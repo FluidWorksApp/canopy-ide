@@ -38,6 +38,14 @@ or an execution service are shared across members.
 - Stream tickets carry the originating credential fingerprint and expiry.
   Gateway rechecks active streams every second and disconnects expired/revoked
   grants. Tickets remain single-use.
+- Terminal input may travel on the session's stream socket. The gateway offers
+  it (`hello` frame) only when the stream's principal holds the same grant the
+  HTTP input route requires (drive scope; for shared sessions a live interact
+  grant on a collaboration shell), re-evaluates that grant with the per-second
+  stream check, and refuses input from view-only streams by closing them.
+  Socket batches are size-limited (16 KiB), paced (64 KiB/s, 200 frames/s),
+  backlog-bounded (128 KiB per socket) and deduplicated with HTTP resends by
+  (principal, session, queue id, sequence).
 - Host service crash restart budget: five starts in 120 seconds. Intentional
   systemd stop does not trigger Restart=on-failure. This is NOT redundancy,
   and does not yet provide hang detection or external recovery.

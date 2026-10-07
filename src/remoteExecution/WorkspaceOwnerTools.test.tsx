@@ -3,7 +3,6 @@ import {afterEach,it,expect,vi} from 'vitest';
 const invoke=vi.hoisted(()=>vi.fn());
 vi.mock('@tauri-apps/api/core',()=>({invoke}));
 vi.mock('../components/SharedAccountsPanel',()=>({SharedAccountsPanel:({projects}:{projects:{name:string}[]})=><div>Shared accounts {projects.map(p=>p.name).join(', ')}</div>}));
-vi.mock('../components/SharingSetupPanel',()=>({SharingSetupPanel:()=> <div>Sharing preparation</div>}));
 import {WorkspaceOwnerTools} from './WorkspaceOwnerTools';
 afterEach(()=>{cleanup();invoke.mockReset();});
 it('loads project metadata only after the server confirms owner access without starting compute',async()=>{
@@ -13,14 +12,14 @@ it('loads project metadata only after the server confirms owner access without s
 });
 it('a stale owner flag in the parent cannot expose shared account tools to a member',async()=>{
  invoke.mockResolvedValue({yourAccess:[{role:'member'}]});render(<WorkspaceOwnerTools workspaceId="synthetic"/>);await act(async()=>{});
- expect(screen.queryByText('Sharing preparation')).toBeNull();expect(invoke).toHaveBeenCalledOnce();
+ expect(screen.queryByText(/Shared accounts/)).toBeNull();expect(invoke).toHaveBeenCalledOnce();
 });
 it('reloads permission metadata after an account change and discards the old response',async()=>{
  let resolve!:(value:unknown)=>void;invoke.mockImplementationOnce(()=>new Promise(r=>{resolve=r;})).mockResolvedValue({yourAccess:[{role:'member'}]});render(<WorkspaceOwnerTools workspaceId="synthetic"/>);
  await act(async()=>{window.dispatchEvent(new Event('canopy:account-changed'));resolve({yourAccess:[{role:'owner'}]});});
- expect(screen.queryByText('Sharing preparation')).toBeNull();expect(screen.queryByText('Loading account settings…')).toBeNull();expect(invoke).toHaveBeenCalledTimes(2);
+ expect(screen.queryByText(/Shared accounts/)).toBeNull();expect(screen.queryByText('Loading account settings…')).toBeNull();expect(invoke).toHaveBeenCalledTimes(2);
 });
-it('keeps owner sharing preparation available with an explicit project error when metadata is unavailable',async()=>{
+it('keeps shared accounts available with an explicit project error when metadata is unavailable; sharing setup lives in Access',async()=>{
  invoke.mockResolvedValueOnce({yourAccess:[{role:'owner'}]}).mockRejectedValueOnce(Error('VM off'));render(<WorkspaceOwnerTools workspaceId="synthetic"/>);await act(async()=>{});
- expect(screen.getByText('Sharing preparation')).toBeInTheDocument();expect(screen.getByText(/Project details are unavailable/)).toBeInTheDocument();expect(screen.getByText('Shared accounts')).toBeInTheDocument();
+ expect(screen.queryByText(/Turn on sharing$/)).toBeNull();expect(screen.getByText(/Project details are unavailable/)).toBeInTheDocument();expect(screen.getByText('Shared accounts')).toBeInTheDocument();
 });
