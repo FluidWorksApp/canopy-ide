@@ -2879,13 +2879,26 @@ export const onTerminalGovernor = (
 ): Promise<UnlistenFn> =>
   listen<TerminalGovernorEvent>("terminal:governor", (event) => cb(event.payload));
 
+export interface AppStatsPart {
+  cpu: number;
+  mem_bytes: number;
+  procs: number;
+}
+
 export interface AppStats {
   cpu: number;
   mem_bytes: number;
   procs: number;
-  /** False when the OS hosts WebView helpers outside Canopy's process tree.
-   *  The native total is then a lower bound, not whole-app usage. */
+  /** False when WebView helpers could not be attributed to Canopy (macOS
+   *  hosts them outside the process tree; they are matched by responsible
+   *  pid). The total is then a lower bound, not whole-app usage. */
   includes_webviews: boolean;
+  /** The total, split: the Canopy process, WebView helpers (macOS WebKit XPC
+   *  services charged to Canopy), and everything Canopy spawned. Absent on
+   *  remote workspaces and older cores. */
+  core?: AppStatsPart;
+  webviews?: AppStatsPart;
+  children?: AppStatsPart;
   /** Remote totals cover the workspace container, rather than the local app. */
   workspace?: { available: boolean; memoryLimitBytes: number | null; cpus: number | null; elasticMemory?: ElasticWorkspaceMemory | null; elasticCpu?: ElasticWorkspaceCpu | null };
 }
@@ -2923,8 +2936,9 @@ function workspaceAppStats(sample: WorkspaceResourceStats | null): AppStats {
     workspace: { available: sample !== null, memoryLimitBytes: sample?.memoryLimitBytes ?? null, cpus: sample?.cpus ?? null, elasticMemory: sample?.elasticMemory ?? null, elasticCpu: sample?.elasticCpu ?? null } };
 }
 
-/** Native process-tree footprint, sampled every 2s. `includes_webviews` says
- * whether that tree is also a whole-app footprint on the current platform. */
+/** Whole-app footprint, sampled every 2s. `includes_webviews` says whether the
+ * WebView helpers are in it (always off the tree on macOS; attributed there by
+ * responsible pid). */
 export const onAppStats = (cb: (stats: AppStats) => void): Promise<UnlistenFn> => {
   appStatsSubscribers.add(cb);
   if (latestAppStats) cb(latestAppStats);

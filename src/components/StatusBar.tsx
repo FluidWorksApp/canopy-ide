@@ -57,6 +57,24 @@ import type { SyncMergePayload } from "../microTasks";
  *  what it wouldn't show you and naming a panel to go open instead. */
 const BRANCH_MENU_PREVIEW = 12;
 
+/** The chip tooltip's split of the total, one line per slice. Empty when the
+ *  core predates the breakdown (or for a remote workspace). */
+function appBreakdownLines(app: ipc.AppStats): string {
+  const parts: [string, ipc.AppStatsPart | undefined][] = [
+    ["Core", app.core],
+    ["UI (WebKit)", app.webviews],
+    ["Terminals & agents", app.children],
+  ];
+  return parts
+    .map(([label, part]) =>
+      part
+        ? `${label}: ${fmtMem(part.mem_bytes)} · ${fixedNumber(part.cpu, 0)}% cpu · ` +
+          `${part.procs} process${part.procs === 1 ? "" : "es"}\n`
+        : "",
+    )
+    .join("");
+}
+
 const fmtMem = (bytes: number) =>
   bytes >= 1024 * 1024 * 1024
     ? `${(bytes / 1024 ** 3).toFixed(1)} GB`
@@ -946,16 +964,18 @@ export const StatusBar = memo(function StatusBar({
               ? `Remote workspace: ${app.workspace.available ? "agents, shells, builds and desktop" : "resources unavailable"}. CPU is a percentage of the workspace CPU allocation. Click for workspace resources.`
               : withLoadNote(
               `${app.includes_webviews ? "canopy" : "canopy lower bound"}: ` +
-                `${app.procs} process${app.procs === 1 ? "" : "es"} — ` +
-                `Rust core, language servers, terminals and everything they spawned. ` +
+                `${app.procs} process${app.procs === 1 ? "" : "es"}. ` +
                 `Memory is charged physical footprint on macOS (resident memory elsewhere). ` +
-                `Click for the per-project breakdown.\n\n` +
+                `Click for the per-project breakdown.\n` +
+                appBreakdownLines(app) +
+                "\n" +
                 (app.includes_webviews
-                  ? `Includes WebView helper processes on this platform.`
+                  ? `Includes WebView helper processes (on macOS: WebContent, ` +
+                    `Graphics and Networking, which Activity Monitor lists as separate rows).`
                   : `Does not include WebContent, Graphics or Networking: macOS runs ` +
-                    `those as system-owned WebKit processes parented to launchd. ` +
-                    `Activity Monitor shows them as separate rows; add them to this ` +
-                    `lower bound for the OS-level Canopy total.`),
+                    `those as separate WebKit processes, and they could not be ` +
+                    `attributed to Canopy in this launch. Activity Monitor shows them ` +
+                    `as separate rows; add them to this lower bound for the OS-level Canopy total.`),
               appLoad ? loadNote("app", appLoad) : "",
             )}
             onClick={(e) => {
@@ -1045,10 +1065,29 @@ export const StatusBar = memo(function StatusBar({
                     {!app.includes_webviews && (
                       <div
                         className="bd-head"
-                        title="macOS WebContent, Graphics and Networking are XPC processes outside Canopy's native process tree. Activity Monitor reports those rows separately."
+                        title="macOS WebContent, Graphics and Networking are XPC processes outside Canopy's native process tree, and this launch could not attribute them. Activity Monitor reports those rows separately."
                       >
                         <span>WebKit layers</span>
                         <span className="bd-nums">OS-owned · add separately</span>
+                      </div>
+                    )}
+                    {app.includes_webviews && app.webviews && app.webviews.procs > 0 && (
+                      <div
+                        className="bd-head"
+                        title={withLoadNote(
+                          "The interface itself: WebKit's WebContent, Graphics and Networking processes (and small system helpers macOS runs for Canopy)",
+                          loadNote(
+                            "group",
+                            loadFlags("group", app.webviews.cpu, app.webviews.mem_bytes),
+                          ),
+                        )}
+                      >
+                        <span>UI (WebKit)</span>
+                        <Nums
+                          scope="group"
+                          cpu={app.webviews.cpu}
+                          mem={app.webviews.mem_bytes}
+                        />
                       </div>
                     )}
                     {/* Memory and CPU are what this popup has always shown, and
@@ -1202,8 +1241,16 @@ export const StatusBar = memo(function StatusBar({
                       );
                     })}
                     {(() => {
-                      const coreCpu = Math.max(0, app.cpu - termCpu);
-                      const coreMem = Math.max(0, app.mem_bytes - termMem);
+                      // What is left once terminals and the WebView helpers
+                      // (listed above) are taken out.
+                      const coreCpu = Math.max(
+                        0,
+                        app.cpu - termCpu - (app.webviews?.cpu ?? 0),
+                      );
+                      const coreMem = Math.max(
+                        0,
+                        app.mem_bytes - termMem - (app.webviews?.mem_bytes ?? 0),
+                      );
                       return (
                         <div
                           className="bd-head"

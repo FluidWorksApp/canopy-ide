@@ -64,20 +64,9 @@ fn process_memory_bytes(_pid: u32, rss_bytes: u64) -> u64 {
     rss_bytes
 }
 
-/// App resource usage from the native process tree.
-///
-/// On Windows and Linux the webview helpers are descendants and land in this
-/// tree. macOS launches WKWebView's WebContent/GPU/Networking helpers as XPC
-/// services parented to launchd; there is no public WKWebView API that lists
-/// all of their pids. `includes_webviews` makes that missing layer explicit so
-/// the frontend never presents this lower bound as an exact app total.
-#[derive(Serialize, Clone)]
-pub struct AppStats {
-    pub cpu: f32,
-    pub mem_bytes: u64,
-    pub procs: u32,
-    pub includes_webviews: bool,
-}
+/// App resource usage: the native process tree plus, on macOS, the WebKit XPC
+/// helpers macOS charges to Canopy. See app_footprint.rs.
+pub use crate::app_footprint::AppStats;
 
 /// A live terminal as the monitor sees it before it walks any processes.
 struct SessionMeta {
@@ -406,6 +395,7 @@ pub fn start_monitor(app: AppHandle) {
             // Lives across ticks: identification is filesystem work, and the
             // answer for a given binary only changes when it is reinstalled.
             let mut resolver = crate::agentid::Resolver::default();
+            let mut responsible = crate::app_footprint::ResponsibleCache::default();
             loop {
                 thread::sleep(POLL_INTERVAL);
                 tick = tick.wrapping_add(1);
@@ -482,35 +472,44 @@ pub fn start_monitor(app: AppHandle) {
                     }
                 }
 
-                // Our native process-tree footprint: core, language servers,
-                // PTY children and every descendant. Windows/Linux webview
-                // helpers are descendants too. macOS WKWebView helpers are XPC
-                // services parented to launchd, so this is a lower bound there.
-                let mut app_cpu = 0.0_f32;
-                let mut app_mem = 0_u64;
-                let mut app_procs = 0_u32;
-                let mut queue = vec![std::process::id()];
-                let mut seen: Vec<u32> = Vec::new();
-                while let Some(pid) = queue.pop() {
-                    if seen.contains(&pid) {
-                        continue; // cycles are impossible in theory, cheap to rule out
-                    }
-                    seen.push(pid);
-                    if let Some(p) = sys.process(Pid::from_u32(pid)) {
-                        app_cpu += p.cpu_usage();
-                        app_mem += process_memory_bytes(pid, p.memory());
-                        app_procs += 1;
-                    }
-                    if let Some(kids) = children.get(&pid) {
-                        queue.extend(kids);
-                    }
-                }
-                let app_stats = AppStats {
-                    cpu: app_cpu,
-                    mem_bytes: app_mem,
-                    procs: app_procs,
-                    includes_webviews: !cfg!(target_os = "macos"),
-                };
+                // The whole app's footprint: core, language servers, PTY
+                // children and every descendant, plus the WebView helpers.
+                // Windows/Linux helpers are descendants; macOS WKWebView
+                // helpers are XPC services parented to launchd, attributed by
+                // their responsible pid (cached per process, so this stays a
+                // map lookup per process per tick).
+                let self_pid = std::process::id();
+                let listing: Vec<crate::app_footprint::AppProc> = sys
+                    .processes()
+                    .iter()
+                    .map(|(pid, p)| {
+                        let pid = pid.as_u32();
+                        crate::app_footprint::AppProc {
+                            pid,
+                            parent: p.parent().map(|p| p.as_u32()),
+                            name: p.name().to_str().unwrap_or(""),
+                            cpu: p.cpu_usage(),
+                            mem_bytes: p.memory(),
+                            responsible: if cfg!(target_os = "macos") {
+                                responsible.get(
+                                    pid,
+                                    p.start_time(),
+                                    crate::app_footprint::responsible_pid,
+                                )
+                            } else {
+                                None
+                            },
+                        }
+                    })
+                    .collect();
+                responsible.retain(|pid| sys.process(Pid::from_u32(pid)).is_some());
+                let app_stats = crate::app_footprint::aggregate(
+                    self_pid,
+                    &listing,
+                    cfg!(target_os = "macos"),
+                    |p| process_memory_bytes(p.pid, p.mem_bytes),
+                );
+                drop(listing);
                 if let Some(cache) = app.try_state::<AppStatsCache>() {
                     *cache.0.lock().unwrap() = Some(app_stats);
                 }

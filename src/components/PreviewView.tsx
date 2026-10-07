@@ -709,15 +709,22 @@ export function PreviewView({
   useEffect(() => {
     if (!native) return;
     let un: (() => void) | undefined;
+    let cancelled = false;
     void ipc
       .onBrowserEvents((e) => {
         if (e.tabId !== tabId) return;
         for (const ev of e.events) handleMessage(ev);
       })
       .then((u) => {
-        un = u;
+        // Torn down before the listener landed: drop it now, or it (and the
+        // closure it holds) outlives this effect.
+        if (cancelled) u();
+        else un = u;
       });
-    return () => un?.();
+    return () => {
+      cancelled = true;
+      un?.();
+    };
   }, [native, tabId, handleMessage]);
 
   // Real navigations, straight from the platform: the URL bar must be right
@@ -725,6 +732,7 @@ export function PreviewView({
   useEffect(() => {
     if (!native) return;
     let un: (() => void) | undefined;
+    let cancelled = false;
     void ipc
       .onBrowserNav((n) => {
         if (n.tabId !== tabId) return;
@@ -738,9 +746,15 @@ export function PreviewView({
         }
       })
       .then((u) => {
-        un = u;
+        // Torn down before the listener landed: drop it now, or it (and the
+        // closure it holds) outlives this effect.
+        if (cancelled) u();
+        else un = u;
       });
-    return () => un?.();
+    return () => {
+      cancelled = true;
+      un?.();
+    };
   }, [native, tabId]);
 
   // target=_blank and window.open. A second OS window would be a webview
@@ -749,14 +763,21 @@ export function PreviewView({
   useEffect(() => {
     if (!native) return;
     let un: (() => void) | undefined;
+    let cancelled = false;
     void ipc
       .onBrowserPopup((p) => {
         if (p.tabId === tabId) navigate(p.url);
       })
       .then((u) => {
-        un = u;
+        // Torn down before the listener landed: drop it now, or it (and the
+        // closure it holds) outlives this effect.
+        if (cancelled) u();
+        else un = u;
       });
-    return () => un?.();
+    return () => {
+      cancelled = true;
+      un?.();
+    };
   }, [native, tabId, navigate]);
 
   // Receive agent ops for this tab. Every op carries its own timer, which is
