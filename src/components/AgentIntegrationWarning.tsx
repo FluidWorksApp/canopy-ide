@@ -16,8 +16,13 @@ export function AgentIntegrationWarning({ agents,targets }: { agents: string[];t
   const [missing, setMissing] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [awaitingEvents, setAwaitingEvents] = useState<string[]>([]);
+  // Optimistic: a session is presumed integrated. Only sessions that were
+  // already running when the user just ran setup can be missing it, so only
+  // those are awaited, until each sends an event or closes.
+  const [restartPending, setRestartPending] = useState<string[]>([]);
   const observedAgents = useRef(new Set<string>());
+  const pendingAgent = (pending: string) => pending.split(":")[0];
+  const awaitingEvents = [...new Set(restartPending.map(pendingAgent))];
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -32,7 +37,7 @@ export function AgentIntegrationWarning({ agents,targets }: { agents: string[];t
           seen.add(event.agent);
         } } catch { /* Ignore malformed telemetry. */ }
       }
-      setAwaitingEvents(current => current.filter(agent => !seen.has(agent)||(targetsRef.current?.filter(target=>target.agent===agent).some(target=>!observedAgents.current.has(targetKey(target)))??false)));
+      setRestartPending(current => current.filter(pending => !observedAgents.current.has(pending) && !(pending.indexOf(":") < 0 && seen.has(pending))));
     }).then(stop => { if (disposed) stop(); else unlisten = stop; }).catch(() => {});
     return () => { disposed = true; unlisten?.(); };
   }, []);
@@ -53,7 +58,8 @@ export function AgentIntegrationWarning({ agents,targets }: { agents: string[];t
     if(targetsRef.current){const live=new Set(targetsRef.current.map(targetKey));for(const observed of observedAgents.current)if(!live.has(observed))observedAgents.current.delete(observed);}
     setError("");
     setMissing(pending);
-    setAwaitingEvents(candidates.filter(agent => key.split(",").includes(agent) && !pending.some(value => value === agent) && !(targetsRef.current?targetsRef.current.filter(target=>target.agent===agent).every(target=>observedAgents.current.has(targetKey(target))):observedAgents.current.has(agent))));
+    // A session that closed no longer needs a restart.
+    if(targetsRef.current){const live=new Set(targetsRef.current.map(targetKey));setRestartPending(current=>current.filter(pending=>pending.indexOf(":")<0||live.has(pending)));}
     return pending;
   }, [key,targetsKey,profileEpoch]);
   useEffect(() => {
@@ -75,7 +81,8 @@ export function AgentIntegrationWarning({ agents,targets }: { agents: string[];t
         : result.value.ok ? [] : [result.value.summary]);
       const pending = await check();
       const configured = targets.filter((agent, i) => reports[i].status === "fulfilled" && (reports[i] as PromiseFulfilledResult<ipc.SetupReport>).value.ok && !pending.some(value => value === agent) && key.split(",").includes(agent));
-      setAwaitingEvents(current => [...new Set([...current, ...configured])]);
+      const openSessions = configured.flatMap(agent => targetsRef.current ? targetsRef.current.filter(target => target.agent === agent).map(targetKey) : [agent]);
+      setRestartPending(current => [...new Set([...current, ...openSessions.filter(pending => !observedAgents.current.has(pending))])]);
       if (failures.length) setError(failures.join("\n"));
       else if (pending.length) setError("Setup finished, but integration is not verified yet. Retry setup.");
     } catch (e) { setError(String(e)); }
