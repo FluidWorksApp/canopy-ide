@@ -4,18 +4,44 @@ import {randomUUID} from 'node:crypto';
 // The owner's project list, as members see it. Members share the owner's
 // project volume at the same /workspace path, but the owner's project store
 // lives in the owner's private home. The host keeps a sanitized copy whenever
-// the owner loads or saves it: only ids, names, labels and paths inside
-// /workspace. Commands, environment, accounts and anything outside /workspace
-// never leave the owner's home.
+// the owner loads or saves it: ids, names, labels, roles, paths inside
+// /workspace and each component's run commands (so members get the same
+// Servers list). Commands never run automatically for a member. Environment,
+// accounts, Build configuration and anything outside /workspace never leave
+// the owner's home.
 const identifier=value=>typeof value==='string'&&/^[a-zA-Z0-9_-]{1,128}$/.test(value);
 const label=value=>typeof value==='string'&&value.trim().length>0&&value.length<=200&&!/[\x00-\x1f]/.test(value);
 const workspacePath=value=>typeof value==='string'&&value.length<=1024&&(value==='/workspace'||value.startsWith('/workspace/'))&&!/[\\\x00-\x1f]/.test(value)&&value.split('/').slice(2).every(part=>part&&part!=='.'&&part!=='..')&&!value.startsWith('/workspace/projects/');
+const roles=new Set(['web','api','worker','database','mobile','library','tooling','other']);
+const purposes=new Set(['serve','check','worker','setup']);
+const text=(value,max)=>typeof value==='string'&&value.trim().length>0&&value.length<=max&&!/[\x00-\x08\x0b-\x1f\x7f]/.test(value);
+const timeout=value=>value===undefined||Number.isSafeInteger(value)&&value>0&&value<=3_600_000;
+function readiness(value){
+ if(!value||typeof value!=='object')return undefined;
+ if(value.kind==='http'&&typeof value.path==='string'&&value.path.startsWith('/')&&value.path.length<=512&&!/[\x00-\x1f]/.test(value.path)&&timeout(value.timeoutMs))return {kind:'http',path:value.path,...(value.timeoutMs?{timeoutMs:value.timeoutMs}:{})};
+ if((value.kind==='port'||value.kind==='process-alive')&&timeout(value.timeoutMs))return {kind:value.kind,...(value.timeoutMs?{timeoutMs:value.timeoutMs}:{})};
+ if(value.kind==='one-shot'&&timeout(value.timeoutMs)&&value.timeoutMs!==undefined)return {kind:'one-shot',timeoutMs:value.timeoutMs};
+ return undefined;
+}
+function commands(list){
+ if(!Array.isArray(list))return [];
+ const ids=new Set();const result=[];
+ for(const c of list.slice(0,32)){
+  if(!c||!identifier(c.id)||ids.has(c.id)||!label(c.name)||!text(c.command,4096))continue;
+  if(c.argv!==undefined&&!(Array.isArray(c.argv)&&c.argv.length>0&&c.argv.length<=64&&c.argv.every(a=>typeof a==='string'&&a.length<=4096&&!/[\x00]/.test(a))))continue;
+  if(c.cwd!==undefined&&!workspacePath(c.cwd))continue;
+  ids.add(c.id);
+  const ready=readiness(c.readiness);
+  result.push({id:c.id,name:c.name,command:c.command,...(c.argv?{argv:[...c.argv]}:{}),...(c.cwd?{cwd:c.cwd}:{}),...(purposes.has(c.purpose)?{purpose:c.purpose}:{}),...(ready?{readiness:ready}:{})});
+ }
+ return result;
+}
 export function sanitizeOwnerProjects(store){
  const projects=Array.isArray(store?.projects)?store.projects:[];const seen=new Set();const result=[];
  for(const project of projects.slice(0,128)){
   if(!project||project.sharedWorkspaceId||!identifier(project.id)||seen.has(project.id)||!label(project.name)||!Array.isArray(project.components))continue;
   const ids=new Set();
-  const components=project.components.slice(0,64).filter(c=>c&&identifier(c.id)&&!ids.has(c.id)&&label(c.label??c.id)&&workspacePath(c.path)&&ids.add(c.id)).map(c=>({id:c.id,label:c.label??c.id,path:c.path}));
+  const components=project.components.slice(0,64).filter(c=>c&&identifier(c.id)&&!ids.has(c.id)&&label(c.label??c.id)&&workspacePath(c.path)&&ids.add(c.id)).map(c=>{const run=commands(c.commands);return {id:c.id,label:c.label??c.id,path:c.path,...(roles.has(c.role)?{role:c.role}:{}),...(run.length?{commands:run}:{})};});
   if(!components.length)continue;
   seen.add(project.id);result.push({id:project.id,name:project.name,components});
  }

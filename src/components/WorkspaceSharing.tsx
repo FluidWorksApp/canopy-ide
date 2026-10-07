@@ -3,21 +3,24 @@ import {invoke} from '@tauri-apps/api/core';
 import {Button} from './ui';
 import {WorkspaceSharingStatus} from './WorkspaceSharingStatus';
 import './workspaceSharing.css';
-// Sharing works like sharing a document: who, Can view or Can edit, and three
+// Sharing works like sharing a document: who, Can view or Can edit, and four
 // switches. Saving is the share; members can connect once the running
 // workspace is ready (the status line above the list says when).
 export type Level='view'|'edit';
 export type Subject={type:'person'|'team'|'everyone';id:string;name?:string;email?:string};
-export type Share={subject:Subject;level:Level;projects:boolean;sessions:boolean;accounts:boolean;via:string[]};
+export type Share={subject:Subject;level:Level;projects:boolean;sessions:boolean;agents:boolean;git:boolean;via:string[]};
 type Listing={organizationId:string|null;organizationName:string|null;people:{id:string;name:string;email:string}[];teams:{id:string;name:string}[];shares:Share[]};
-type Draft={subject:Subject|null;level:Level;projects:boolean;sessions:boolean;accounts:boolean};
+type Draft={subject:Subject|null;level:Level;projects:boolean;sessions:boolean;agents:boolean;git:boolean};
 const request=<T,>(body:Record<string,unknown>)=>invoke<T>('canopy_account_request',{route:'/api/teams',body});
 export const SWITCHES=[
  {key:'projects',label:'Projects',hint:'Every project in this workspace, including new ones'},
  {key:'sessions',label:'Agent sessions',hint:'See and join agent sessions you publish'},
- {key:'accounts',label:'Accounts',hint:'Use the provider accounts you share in Tools & accounts'},
+ {key:'agents',label:'Agents',hint:'Use the agent accounts you share in Tools & accounts'},
+ {key:'git',label:'Git',hint:'Use the Git accounts you share in Tools & accounts'},
 ] as const;
-const newDraft=():Draft=>({subject:null,level:'edit',projects:true,sessions:false,accounts:false});
+const newDraft=():Draft=>({subject:null,level:'edit',projects:true,sessions:false,agents:false,git:false});
+// A control plane from before the split reports one `accounts` switch.
+const splitAccounts=(share:Share&{accounts?:boolean}):Share=>({...share,agents:share.agents??share.accounts??false,git:share.git??share.accounts??false});
 const sameSubject=(a:Subject,b:Subject)=>a.type===b.type&&a.id===b.id;
 const subjectKey=(s:Subject)=>`${s.type}:${s.id}`;
 
@@ -30,7 +33,7 @@ export function WorkspaceSharing({workspaceId,workspaceName}:{workspaceId:string
   const current=epoch.current;setLoading(true);setError('');
   try{
    const data=await request<Listing>({action:'workspace-share-list',workspaceId});if(current!==epoch.current)return;
-   setListing(data);setOwnerOnly(false);
+   setListing({...data,shares:data.shares.map(splitAccounts)});setOwnerOnly(false);
    if(!data.organizationId){const list=await request<{organizations:{id:string;name:string}[]}>({action:'organization-list'});if(current===epoch.current)setOrganizations(list.organizations);}
   }catch(e){if(current!==epoch.current)return;if(/Only the workspace owner/.test(String(e)))setOwnerOnly(true);else setError(String(e));}
   finally{if(current===epoch.current)setLoading(false);}
@@ -41,7 +44,7 @@ export function WorkspaceSharing({workspaceId,workspaceName}:{workspaceId:string
   try{await request({...body,workspaceId});if(current!==epoch.current)return;setDraft(null);setNotice(message);setRefresh(n=>n+1);await load();}
   catch(e){if(current===epoch.current)setError(String(e));}finally{if(current===epoch.current)setBusy(false);}
  }
- const save=(share:Omit<Share,'via'>,message:string)=>act({action:'workspace-share-set',subject:{type:share.subject.type,id:share.subject.id},level:share.level,projects:share.projects,sessions:share.sessions,accounts:share.accounts},message);
+ const save=(share:Omit<Share,'via'>,message:string)=>act({action:'workspace-share-set',subject:{type:share.subject.type,id:share.subject.id},level:share.level,projects:share.projects,sessions:share.sessions,agents:share.agents,git:share.git,accounts:share.agents&&share.git},message);
  const shares=listing?.shares??[];
  const choices:Subject[]=listing?[
   ...(listing.organizationId&&!shares.some(s=>s.subject.type==='everyone')?[{type:'everyone' as const,id:listing.organizationId,name:`Everyone in ${listing.organizationName??'your organization'}`}]:[]),
@@ -71,7 +74,7 @@ export function WorkspaceSharing({workspaceId,workspaceName}:{workspaceId:string
   </ul>}
  </section>;
 }
-function ShareControls({share,onChange,disabled,compact=false}:{share:Pick<Share,'level'|'projects'|'sessions'|'accounts'>;onChange:(next:Partial<Share>)=>void;disabled:boolean;compact?:boolean}){
+function ShareControls({share,onChange,disabled,compact=false}:{share:Pick<Share,'level'|'projects'|'sessions'|'agents'|'git'>;onChange:(next:Partial<Share>)=>void;disabled:boolean;compact?:boolean}){
  const uid=useId();
  return <div className={`workspace-share-controls${compact?' compact':''}`}>
   <select aria-label="Access" value={share.level} disabled={disabled} onChange={e=>onChange({level:e.target.value as Level})}><option value="view">Can view</option><option value="edit">Can edit</option></select>

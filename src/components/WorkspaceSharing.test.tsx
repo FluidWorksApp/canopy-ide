@@ -21,14 +21,14 @@ it('shares like a document: who, Can view / Can edit, and three switches with Pr
  expect(within(dialog).getByRole('combobox',{name:'Access'})).toHaveValue('edit');
  expect(within(dialog).getByRole('checkbox',{name:'Projects'})).toBeChecked();
  expect(within(dialog).getByRole('checkbox',{name:'Agent sessions'})).not.toBeChecked();
- expect(within(dialog).getByRole('checkbox',{name:'Accounts'})).not.toBeChecked();
+ expect(within(dialog).getByRole('checkbox',{name:'Agents'})).not.toBeChecked();expect(within(dialog).getByRole('checkbox',{name:'Git'})).not.toBeChecked();
  const options=within(within(dialog).getByRole('combobox',{name:'Share with'})).getAllByRole('option').map(o=>o.textContent);
  expect(options).toEqual(['Choose a person, team or everyone','Everyone in Canopy Labs','Team · Core','Ada · ada@example.invalid','Bo · bo@example.invalid']);
  for(const jargon of [/Admin/,/Developer/,/Viewer/,/projects:all/,/agents:shared/,/Enable workspace sharing/,/Prepare shared storage/])expect(screen.queryByText(jargon)).toBeNull();
  fireEvent.change(within(dialog).getByRole('combobox',{name:'Share with'}),{target:{value:'team:core'}});
  fireEvent.click(within(dialog).getByRole('checkbox',{name:'Agent sessions'}));
  fireEvent.click(within(dialog).getByRole('button',{name:'Share'}));
- await waitFor(()=>expect(calls('workspace-share-set')).toEqual([{action:'workspace-share-set',workspaceId:'ws',subject:{type:'team',id:'core'},level:'edit',projects:true,sessions:true,accounts:false}]));
+ await waitFor(()=>expect(calls('workspace-share-set')).toEqual([{action:'workspace-share-set',workspaceId:'ws',subject:{type:'team',id:'core'},level:'edit',projects:true,sessions:true,agents:false,git:false,accounts:false}]));
  expect(await screen.findByText('Shared with Core.')).toBeInTheDocument();
 });
 it('lists each share once with its level and switches editable inline, and removes in one click',async()=>{
@@ -38,10 +38,12 @@ it('lists each share once with its level and switches editable inline, and remov
  expect(within(list).getAllByRole('listitem')).toHaveLength(2);
  expect(within(list).getByText('ada@example.invalid · also via team Core')).toBeInTheDocument();
  const ada=within(list).getByText('Ada').closest('li')!;
+ // A control plane from before the split lists one accounts switch: it reads as both.
+ const core=within(list).getByText('Core').closest('li')!;expect(within(core).getByRole('checkbox',{name:'Agents'})).toBeChecked();expect(within(core).getByRole('checkbox',{name:'Git'})).toBeChecked();
  fireEvent.change(within(ada).getByRole('combobox',{name:'Access'}),{target:{value:'edit'}});
- await waitFor(()=>expect(calls('workspace-share-set').at(-1)).toEqual({action:'workspace-share-set',workspaceId:'ws',subject:{type:'person',id:'ada'},level:'edit',projects:true,sessions:false,accounts:false}));
- fireEvent.click(within(ada).getByRole('checkbox',{name:'Accounts'}));
- await waitFor(()=>expect(calls('workspace-share-set').at(-1)).toMatchObject({subject:{type:'person',id:'ada'},accounts:true}));
+ await waitFor(()=>expect(calls('workspace-share-set').at(-1)).toEqual({action:'workspace-share-set',workspaceId:'ws',subject:{type:'person',id:'ada'},level:'edit',projects:true,sessions:false,agents:false,git:false,accounts:false}));
+ fireEvent.click(within(ada).getByRole('checkbox',{name:'Agents'}));
+ await waitFor(()=>expect(calls('workspace-share-set').at(-1)).toMatchObject({subject:{type:'person',id:'ada'},agents:true,git:false,accounts:false}));
  fireEvent.click(within(list).getByRole('button',{name:'Stop sharing with Core'}));
  await waitFor(()=>expect(calls('workspace-share-remove')).toEqual([{action:'workspace-share-remove',workspaceId:'ws',subject:{type:'team',id:'core'}}]));
 });
