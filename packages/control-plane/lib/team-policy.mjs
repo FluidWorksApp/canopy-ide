@@ -2,7 +2,8 @@
 export const roles = ['owner', 'admin', 'member', 'viewer'];
 const actions = {
  owner: ['view','connect','resume','stop','invite','revoke','delete','billing','resize'],
- admin: ['view','connect','resume','stop','invite','revoke','resize'],
+ // Stop, resize, delete and billing stay with the owner, who pays for compute.
+ admin: ['view','connect','resume','invite','revoke'],
  member: ['view','connect','resume'],
  viewer: ['view'],
 };

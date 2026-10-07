@@ -20,10 +20,13 @@ export function sharedProjectDefinitions(workspace){
   })};
  });
 }
-export function mergeSharedProjects(serialized,workspace){
+// `owner` adds the owner's projects on the shared /workspace volume (from the
+// host's sanitized catalog) for a member of a whole-workspace share.
+export function mergeSharedProjects(serialized,workspace,owner=[]){
  const store=JSON.parse(serialized);
  if(!store||!Array.isArray(store.projects))throw Error('Invalid workspace project store');
- const shared=sharedProjectDefinitions(workspace),ids=new Set(shared.map(p=>p.id));
+ const legacy=sharedProjectDefinitions(workspace),legacyIds=new Set(legacy.map(p=>p.id));
+ const shared=[...legacy,...owner.filter(p=>!legacyIds.has(p.id))],ids=new Set(shared.map(p=>p.id));
  // Drop previously discovered shared projects that are no longer granted.
  const projects=[...store.projects.filter(p=>p&&!p.sharedWorkspaceId&&!ids.has(p.id)),...shared];
  const available=new Set(projects.map(p=>p.id));
