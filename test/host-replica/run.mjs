@@ -360,6 +360,38 @@ async function connect(workspaceId){
  const result=await api('POST','/api/operations',{workspaceId,action:'connect',clientId:randomUUID()});
  if(!result.connection?.endpoint||!result.connection?.token)throw new ScenarioFailure('connect returned no workspace connection',{result});
  say('desktop connect ok:',result.connection.endpoint);
+ await terminalCheck(workspaceId,result.connection);
+ return result.connection;
+}
+// Typing in a terminal as the app does: create a shell session, take a stream
+// ticket, open the stream socket and send input frames over it (socket input
+// protocol 1; the HTTP input route when the gateway does not announce it),
+// then wait for the shell's echo. Run on the host against the gateway's
+// loopback listener, which is what Caddy proxies the socket to.
+const TERMINAL_CHECK=`const [id,token]=process.argv.slice(1);const base='http://127.0.0.1:8787/v1/workspaces/'+id;const h={authorization:'Bearer '+token,'content-type':'application/json'};
+const call=async(path,body)=>{const r=await fetch(base+path,{method:'POST',headers:h,body:JSON.stringify(body)});const t=await r.text();if(!r.ok)throw Error(path+' '+r.status+' '+t.slice(0,200));return JSON.parse(t);};
+process.on('uncaughtException',e=>{console.log(JSON.stringify({echoed:false,error:String(e.message)}));process.exit(0);});process.on('unhandledRejection',e=>{console.log(JSON.stringify({echoed:false,error:String(e?.message??e)}));process.exit(0);});
+const session=await call('/sessions',{command:'bash',kind:'terminal',requestId:crypto.randomUUID()});
+const {ticket}=await call('/ticket',{stream:'/sessions/'+session.id+'/stream'});
+const ws=new WebSocket('ws://127.0.0.1:8787/v1/stream?ticket='+encodeURIComponent(ticket));ws.binaryType='arraybuffer';
+const result={session:session.id,hello:null,acks:[],errors:[],transport:null,echoed:false};let out='';
+const line='echo REPLICA_$((40+2))_TYPED\\r';
+const typed=new Promise(resolve=>{
+ ws.onmessage=e=>{const t=typeof e.data==='string'?e.data:Buffer.from(e.data).toString();let m=null;try{m=JSON.parse(t);}catch{}
+  if(m?.t==='hello'){result.hello=m;if(m.input===1){result.transport='socket';ws.send(JSON.stringify({t:'input',id:'replica-check-1',seq:1,data:line}));}return;}
+  if(m?.t==='input-ack'){result.acks.push(m);return;}if(m?.t==='input-error'){result.errors.push(m);return;}
+  out+=typeof m?.b64==='string'?Buffer.from(m.b64,'base64').toString():typeof m?.data==='string'?m.data:t;if(out.includes('REPLICA_42_TYPED')){result.echoed=true;resolve();}};
+ ws.onerror=e=>{result.errors.push(String(e.message??e.type));resolve();};
+ setTimeout(async()=>{if(!result.transport){result.transport='http';try{await call('/sessions/'+session.id+'/input',{data:line});}catch(error){result.errors.push(error.message);}}},5000);
+ setTimeout(resolve,30000);
+});
+await typed;ws.close();result.sample=out.slice(-400);console.log(JSON.stringify(result));process.exit(0);`;
+async function terminalCheck(workspaceId,connection){
+ const host=await hostContainer(workspaceId);
+ const {stdout,stderr}=await docker(['exec',host,'node','--input-type=module','-e',TERMINAL_CHECK,workspaceId,connection.token],{allowFail:true});
+ let result;try{result=JSON.parse(stdout.trim().split('\n').at(-1));}catch{throw new ScenarioFailure(`terminal check could not run: ${(stderr||stdout).slice(-400)}`);}
+ if(!result.echoed)throw new ScenarioFailure(`typing in a terminal failed: ${JSON.stringify(result).slice(0,400)}`,{result});
+ say(`terminal typing ok over ${result.transport} input (hello ${JSON.stringify(result.hello)}, acks ${result.acks.length}, errors ${result.errors.length})`);
 }
 async function startAndCheck(id,label,{aptDuringPull=false}={}){await operate(id,'resume');await waitFor(id,'ready',{aptDuringPull});await connect(id);say(`${label}: ready`);}
 async function stopAndCheck(id,label){await operate(id,'hibernate',{confirmInterrupt:true});await waitFor(id,'stopped');say(`${label}: stopped`);}
