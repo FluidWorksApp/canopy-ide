@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Wire } from "./wire";
+import { HEARTBEAT_MS, STALE_MS, Wire } from "./wire";
 
 class FakeSocket {
   static OPEN = 1;
@@ -56,6 +56,67 @@ describe("authenticated host wire", () => {
     rejectOld({ status: 401 });
     await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
     expect(wire.onAuthFail).not.toHaveBeenCalled();
+    wire.close();
+  });
+
+  const ticketed = () => {
+    vi.useFakeTimers();
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ ticket: "t" }) });
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("WebSocket", FakeSocket);
+    return fetch;
+  };
+  const sent = (socket: FakeSocket) => socket.send.mock.calls.map(([raw]) => JSON.parse(raw as string));
+
+  it("notices a socket that went silent (sleep, network switch) and reconnects instead of sending into it", async () => {
+    const fetch = ticketed();
+    const wire = new Wire("bearer"), status = vi.fn();
+    wire.onStatus = status;
+    wire.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    const first = FakeSocket.instances[0]; first.open();
+    // Half-open: the browser still reports OPEN, but nothing comes back.
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_MS);
+    expect(sent(first)).toContainEqual({ t: "ping" });
+    await vi.advanceTimersByTimeAsync(STALE_MS + HEARTBEAT_MS);
+    expect(status).toHaveBeenLastCalledWith(false);
+    expect(wire.connected).toBe(false);
+    expect(wire.send({ t: "input", pty: 1, data: "x" })).toBe(false);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(FakeSocket.instances).toHaveLength(2);
+    wire.close();
+  });
+
+  it("keeps a quiet socket that answers its heartbeat", async () => {
+    const fetch = ticketed();
+    const wire = new Wire("bearer");
+    wire.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    const socket = FakeSocket.instances[0]; socket.open();
+    socket.send.mockImplementation((raw: string) => {
+      if (JSON.parse(raw).t === "ping") queueMicrotask(() => socket.onmessage?.({ data: '{"t":"pong"}' }));
+    });
+    await vi.advanceTimersByTimeAsync(STALE_MS * 4);
+    expect(wire.connected).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    wire.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("reconnects at once when the page comes back rather than waiting out a long backoff", async () => {
+    const fetch = ticketed();
+    fetch.mockRejectedValue(new Error("offline"));
+    const wire = new Wire("bearer");
+    wire.connect();
+    // Several failed attempts while the phone was asleep: the backoff is now long.
+    await vi.advanceTimersByTimeAsync(60_000);
+    const before = fetch.mock.calls.length;
+    fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ ticket: "t" }) });
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetch.mock.calls.length).toBe(before + 1);
     wire.close();
   });
 });

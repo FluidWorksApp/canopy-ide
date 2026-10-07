@@ -6,7 +6,8 @@ export function fakeWire() {
   const statuses = new Set<(up: boolean) => void>();
   const wire = {
     connected: true,
-    send: vi.fn((_message: Msg) => true),
+    // Like the real Wire: a send while the socket is down is refused.
+    send: vi.fn((_message: Msg) => wire.connected),
     on(handler: (message: Msg) => void) { messages.add(handler); return () => messages.delete(handler); },
     onConnection(handler: (up: boolean) => void) { statuses.add(handler); return () => statuses.delete(handler); },
   };
