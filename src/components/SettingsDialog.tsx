@@ -3,6 +3,7 @@
 // long labels into slivers and pushed wide control groups out of the modal).
 // Skins render as rich choices — a palette is a thing you look at, not a word
 // you read.
+import { accountSummary, cliLoginText, signedInClis } from "../accountState";
 import {
   Fragment,
   useCallback,
@@ -808,7 +809,7 @@ function AgentFleetReadout({
  * own browser flow, against the profile's config dir. Hence no "paste your
  * key" field here. Only CLIs with a config-home variable can hold one.
  */
-function AgentAccounts({
+export function AgentAccounts({
   onRunInTerminal,
 }: {
   onRunInTerminal: (
@@ -926,7 +927,16 @@ function AgentAccounts({
         // Folded by default: four CLI rows per account is a page of settings,
         // and the summary line already answers "who is in this one".
         const isOpen = expanded[p.id] ?? false;
-        const signedIn = (accounts[p.id] ?? []).filter((a) => a.state === "in");
+        // Emails where the store names one, else the CLI — the same CLIs the
+        // status-bar switcher lists (src/accountState.ts).
+        const held = signedInClis(accounts[p.id]);
+        const summary = held.length
+          ? held
+              .map((agent) => accounts[p.id]?.find((a) => a.agent === agent)?.account ?? agent)
+              .join(" · ")
+          : accounts[p.id]
+            ? accountSummary(accounts[p.id])
+            : "checking…";
         return (
         <div key={p.id} className={`cli-account-row ${isOpen ? "is-open" : ""}`}>
           <div
@@ -948,11 +958,7 @@ function AgentAccounts({
             <span className="cli-account-name">{p.label}</span>
             {/* Who is in this account, without expanding it. */}
             <span className="cli-account-summary">
-              {signedIn.length
-                ? signedIn
-                    .map((a) => a.account ?? a.agent)
-                    .join(" · ")
-                : "no logins yet"}
+              {summary}
             </span>
             {!p.removable && <span className="cli-account-tag">in use everywhere</span>}
             {p.removable && (
@@ -979,26 +985,17 @@ function AgentAccounts({
           <div className="cli-account-clis">
             {capable.map((cli) => {
               const st = (accounts[p.id] ?? []).find((a) => a.agent === cli.id);
-              const signedIn = st?.state === "in";
+              const login = cliLoginText(st, cli.name);
+              const signedIn = login.signedIn;
               return (
                 <div key={cli.id} className="cli-account-cli">
                   <AgentIcon id={cli.id} size={13} />
                   <span className="cli-account-cli-name">{cli.name}</span>
                   <span
                     className={`cli-account-who ${signedIn ? "" : "cli-account-who-out"}`}
-                    title={
-                      signedIn
-                        ? `${cli.name} is signed in as ${st?.account ?? "this account"}`
-                        : st?.state === "unknown"
-                          ? `Canopy can't read ${cli.name}'s sign-in state — it keeps credentials somewhere we haven't verified`
-                          : `No ${cli.name} login in this account yet`
-                    }
+                    title={login.title}
                   >
-                    {signedIn
-                      ? (st?.account ?? "signed in")
-                      : st?.state === "unknown"
-                        ? "—"
-                        : "not signed in"}
+                    {login.text}
                   </span>
                   <Button
                     size="sm"

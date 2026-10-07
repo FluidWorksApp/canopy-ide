@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { PlanUsage } from "./ipc";
 import {
+  chipLabel,
+  planStale,
   chipText,
   planFor,
   planLabel,
@@ -141,5 +143,36 @@ describe("planFor", () => {
   it("returns null for a CLI that reports nothing", () => {
     expect(planFor(plans, "amp")).toBeNull();
     expect(planFor(plans, null)).toBeNull();
+  });
+});
+
+describe("a reading that no longer describes the plan", () => {
+  const now = Date.UTC(2026, 9, 7, 5, 0) ;
+  const secs = Math.floor(now / 1000);
+  // The incident: Default's file, last written two days earlier.
+  const old = {
+    agent: "claude",
+    profile: "default",
+    plan: null,
+    observed: secs - 2 * 86400,
+    windows: [
+      { label: "5h", used_percent: 4, resets_at: secs - 86400 },
+      { label: "7d", used_percent: 77, resets_at: secs + 86400 },
+    ],
+  } as PlanUsage;
+
+  it("is marked stale with its age, and names the account it belongs to", () => {
+    expect(planStale(old, now)).toBe(true);
+    expect(chipLabel(old, { now, accountLabel: "Default" })).toBe("Default · 7d 77% · 5h 4% · 2d ago");
+  });
+
+  it("is stale once a window has reset, however recent", () => {
+    expect(planStale({ ...old, observed: secs - 60 }, now)).toBe(true);
+  });
+
+  it("stays plain while fresh", () => {
+    const fresh = { ...old, observed: secs - 60, windows: [old.windows[1]] } as PlanUsage;
+    expect(planStale(fresh, now)).toBe(false);
+    expect(chipLabel(fresh, { now })).toBe("7d 77%");
   });
 });

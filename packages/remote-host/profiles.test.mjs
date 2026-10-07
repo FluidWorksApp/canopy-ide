@@ -27,13 +27,18 @@ test('copies named credentials and refreshes an existing cloud account on re-syn
  assert.match(await readFile(home+'/.canopy/profiles/work/.codex/auth.json','utf8'),/synthetic-next/);
  assert.equal(await readFile(home+'/.canopy/profiles/work/.codex/history.jsonl','utf8'),'kept');
  assert.deepEqual(JSON.parse(await readFile(home+'/.canopy/profiles/work/.claude/.claude.json','utf8')).oauthAccount,{emailAddress:'work@example.com'});
- assert.deepEqual((await p.accounts('work')).find(a=>a.agent==='claude'),{agent:'claude',state:'in',account:'work@example.com'});
+ assert.deepEqual((await p.accounts('work')).find(a=>a.agent==='claude'),{agent:'claude',state:'in',account:'work@example.com',reason:null});
  assert.equal((await p.list())[1].label,'Work');assert.equal((await p.list()).length,2);
  await p.remove('work');assert.match(await readFile(home+'/.canopy/profiles/work/.codex/auth.json','utf8'),/synthetic-next/);
 }));
 test('a Claude login without a recorded identity still reads as signed in',()=>fixture(async(home,p)=>{
  await mkdir(home+'/.claude');await writeFile(home+'/.claude/.credentials.json',JSON.stringify({claudeAiOauth:{accessToken:'synthetic-a',refreshToken:'synthetic-r'}}));
- assert.deepEqual((await p.accounts('default')).find(a=>a.agent==='claude'),{agent:'claude',state:'in',account:null});
+ assert.deepEqual((await p.accounts('default')).find(a=>a.agent==='claude'),{agent:'claude',state:'in',account:null,reason:null});
+}));
+test('a recorded identity without a usable login reads as signed out, not ready',()=>fixture(async(home,p)=>{
+ await mkdir(home+'/.claude');await writeFile(home+'/.claude/.claude.json',JSON.stringify({oauthAccount:{emailAddress:'me@example.com'}}));
+ await writeFile(home+'/.claude/.credentials.json',JSON.stringify({claudeAiOauth:{accessToken:'',refreshToken:''}}));
+ assert.deepEqual((await p.accounts('default')).find(a=>a.agent==='claude'),{agent:'claude',state:'out',account:'me@example.com',reason:'signed-out'});
 }));
 test('invalid import and symlink roots cannot write outside a profile',()=>fixture(async(home,p)=>{
  await assert.rejects(importAccountProfiles([{id:'../escape',label:'Bad',accounts:{}}],home));

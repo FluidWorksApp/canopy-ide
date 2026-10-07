@@ -1855,6 +1855,10 @@ body.resizing-side * {
    time — and only takes colour as a window fills, so the tray does not cry
    wolf at 20%. Colour is never the only signal: the percentage is right there
    in the text, which is what makes this readable to a colour-blind user. */
+.status-plan.is-stale {
+  opacity: 0.6;
+  font-style: italic;
+}
 .status-plan {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
@@ -28685,3 +28689,10 @@ a.btn-sm {
 .agent-integration-warning button { flex: 0 1 auto; max-width: 100%; white-space: normal; background: #ffadb1; color: #301018; border: 0; border-radius: 6px; padding: 10px 14px; font-weight: 700; cursor: pointer; }
 .agent-integration-warning button:disabled { opacity: .7; cursor: wait; }
 .hook-nudge button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+
+/* A terminal waiting for its account's env (see tabAccount.ts). */
+.term-account-pending {
+  padding: 12px 16px;
+  color: var(--text-dim, inherit);
+  font-size: 12px;
+}

@@ -150,6 +150,8 @@ import {
   supportsProfiles,
   PROFILE_CHANGE_EVENT,
 } from "../../profiles";
+import { signedInClis } from "../../accountState";
+import { profileFromEnv, tabAccount, unresolvedLaunchAccount } from "../../tabAccount";
 import { fleetGate, type FleetKind } from "../../fleetState";
 import {
   inspectFleetRoute,
@@ -1147,10 +1149,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
     if (activeProfileId === "default") return null;
     const label =
       profiles.find((p) => p.id === activeProfileId)?.label ?? activeProfileId;
+    // Same reading as the switcher and Settings (src/accountState.ts).
+    const held = signedInClis(activeAccounts);
     const missing = AGENT_CLIS.filter(
       (c) =>
         supportsProfiles(c.id) &&
-        activeAccounts.find((a) => a.agent === c.id)?.state === "out",
+        activeAccounts.some((a) => a.agent === c.id) &&
+        !held.includes(c.id) &&
+        activeAccounts.find((a) => a.agent === c.id)?.state !== "unknown",
     ).map((c) => c.id);
     return { label, missing };
   }, [activeProfileId, profiles, activeAccounts]);
@@ -1825,10 +1831,17 @@ const ProjectViewBody = memo(function ProjectViewBody({
       const launchedCli = agentIdForCommand(command);
       const accountEnv =
         extraEnv ?? (launchedCli ? launchEnvSync(launchedCli) : []);
-      const accountProfile =
-        profile ??
-        (launchedCli && accountEnv.length ? launchProfile(launchedCli) : undefined) ??
-        undefined;
+      // Before the env is primed (the first launches after start-up) a named
+      // account has no env to hand yet. Launching anyway put the CLI on the
+      // Default login: it ran, renewed and was billed as an account the user
+      // had not chosen. Hold the terminal until the account's env resolves.
+      const pendingAccount = unresolvedLaunchAccount({
+        cli: launchedCli,
+        extraEnv,
+        profile,
+        syncEnv: accountEnv,
+        active: activeProfile(),
+      });
       const managedEnv = runIdentity ? [...MANAGED_PROCESS_ENV] : [];
       // A task's unattended mode, where its CLI needs environment as well as a
       // flag for it (opencode's permission pin, omp's approval overlay).
@@ -1838,6 +1851,14 @@ const ProjectViewBody = memo(function ProjectViewBody({
         ...accountEnv,
         ...unattendedEnvFor(command),
       ];
+      // The account is what the process is actually given, not what a caller
+      // remembered: the badge, the plan chip and a later restore all read it.
+      const accountProfile = tabAccount({
+        env,
+        pending: pendingAccount,
+        cli: launchedCli,
+        requested: profile,
+      });
       setTabs((prev) => [
         ...prev,
         {
@@ -1850,6 +1871,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           icon,
           env: env.length ? env : undefined,
           profile: accountProfile,
+          ...(pendingAccount ? { accountPending: true as const } : {}),
           run: run !== false,
           chore: run === "chore" || undefined,
           paneGroup,
@@ -1859,6 +1881,29 @@ const ProjectViewBody = memo(function ProjectViewBody({
         },
       ]);
       if (activate) setActiveTabId(id);
+      if (pendingAccount && launchedCli) {
+        void ipc
+          .profileEnv(launchedCli, pendingAccount)
+          .then((resolved) => {
+            if (!envReachesProfile(pendingAccount, resolved))
+              throw new Error("the account's environment is unavailable");
+            setTabs((prev) =>
+              prev.map((t) =>
+                t.id === id && t.type === "terminal"
+                  ? { ...t, env: [...(t.env ?? []), ...resolved], accountPending: undefined }
+                  : t,
+              ),
+            );
+          })
+          .catch((error: unknown) => {
+            // Never fall back to another account's login.
+            setTabs((prev) => prev.filter((t) => t.id !== id));
+            onNotice(
+              `Did not start ${agentCliFor(launchedCli)?.name ?? launchedCli} as ${profilesRef.current.find((p) => p.id === pendingAccount)?.label ?? pendingAccount}: ${String(error)}`,
+              "warn",
+            );
+          });
+      }
       // A resume the CLI refuses leaves a dead shell in this tab and a row that
       // will offer the same doomed button tomorrow. The command carries the
       // session id, so nothing has to be passed in for this to know which
@@ -8716,7 +8761,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const s = projectStats.find((x) => x.id === active.ptyId);
     return {
       id: s ? (identifyAgent(s.agent_hint)?.id ?? null) : null,
-      profile: active.profile ?? null,
+      // The env is what the CLI was given; a tab from an older build may
+      // carry it without having recorded the account.
+      profile: profileFromEnv(active.env) ?? active.profile ?? null,
     };
   }, [tabs, activeTabId, projectStats]);
   const activeAgentId = activeAgent.id;
@@ -12782,6 +12829,11 @@ const ProjectViewBody = memo(function ProjectViewBody({
                 stats={stats}
                 onPreview={openPreview}
               />
+              {tab.accountPending ? (
+                <div className="term-account-pending" role="status">
+                  Starting under {profileLabels[tab.profile ?? ""] ?? tab.profile}…
+                </div>
+              ) : (
               <Term
                 // epoch remounts the Term (fresh PTY) when a run tab restarts
                 key={`${tab.id}:${tab.epoch ?? 0}`}
@@ -12993,6 +13045,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
                   }
                 }}
               />
+              )}
               {livePips
                 .filter((pip) => pip.ptyId === tab.ptyId)
                 .map(({ tabId, ptyId }) => {

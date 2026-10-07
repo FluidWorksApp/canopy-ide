@@ -50,6 +50,9 @@ export interface TermSubTab extends TabNames {
   /** The non-default account this terminal was launched under. Display only —
    *  `env` carries the isolation — but restored with the tab. */
   profile?: string;
+  /** Waiting for its account's env before the terminal is spawned. Never
+   *  persisted: a restore resolves its env before it opens the tab. */
+  accountPending?: true;
   /** Launched from a component run command — lives in the run rail, not the
    *  terminal strip. */
   run?: boolean;

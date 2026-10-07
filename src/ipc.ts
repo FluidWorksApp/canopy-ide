@@ -2256,6 +2256,10 @@ export interface AccountStatus {
   /** The account as the CLI recorded it, usually an email. Null when the
    *  sign-in carries no identity (an API key). */
   account: string | null;
+  /** "signed-out": the CLI cleared a login it held; "unverified": the login
+   *  store could not be read, so `state` is the CLI's last record. Older
+   *  workspace hosts omit it. Read through src/accountState.ts. */
+  reason?: "signed-out" | "unverified" | null;
 }
 export const profileAccounts = (id: string) =>
   invoke<AccountStatus[]>("profile_accounts", { id });
