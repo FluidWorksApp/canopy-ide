@@ -28,6 +28,7 @@ import {listWorkspaceFiles,searchWorkspaceFiles} from './file-search.mjs';
 import {agentWorkspaceAt} from './agent-workspace.mjs';
 import {workspaceActivity} from './activity.mjs';
 import {sessionProcessReader} from './session-processes.mjs';
+import {McpRegistry} from './mcp-servers.mjs';
 const sessionProcesses=sessionProcessReader();
 const workspaceMetrics=metricsReader();
 const execute=promisify(execFile);
@@ -48,6 +49,7 @@ export async function scoped(value,create=false){
   return resolved;
 }
 const cloneJobs=new CloneJobs({scoped});
+const mcpRegistry=new McpRegistry({home:HOME,workspace:ROOT,scoped,profiles});
 let children=0;
 let metadataWrites=Promise.resolve();
 let desktopStarted;
@@ -206,6 +208,8 @@ export async function nativeInvoke(command,args={}){
   if(command==='session_digests')return sessionDigests();
   if(command==='workspace_chrome_stream_open')return browsers.open(args);
   if(command==='workspace_chrome_stream_close'){await browsers.close(args.id);return;}
+  if(command==='mcp_servers')return mcpRegistry.servers(args.projectDirs??[]);
+  if(command==='mcp_update_sources')return mcpRegistry.update(args.projectDirs??[],args.changes);
   if(command==='agent_integration_health')return Promise.all(['claude','codex'].map(agent=>integrations.health(agent)));
   if(command==='agent_session_summaries'||command==='session_history'||command==='pr_watch_list')return [];
   if(command==='agent_events_poll')return readAgentEvents(HOME+'/.canopy/agent-events.jsonl',args.cursor);
