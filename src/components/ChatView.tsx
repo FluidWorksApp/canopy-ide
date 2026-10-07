@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as ipc from "../ipc";
 import type { Notify, RelayHandle } from "../types";
 import { TeamIcon } from "./icons";
+import { isSendKey } from "./chatComposerKeys";
 import { offerFileTo } from "./TeamPanel";
 import { Button } from "./ui";
 import { basename } from "../paths";
@@ -206,7 +207,7 @@ export function ChatView({ peer, title, relay, onNotice }: ChatViewProps) {
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") {
+            if (isSendKey(e)) {
               e.preventDefault();
               void send();
             }
