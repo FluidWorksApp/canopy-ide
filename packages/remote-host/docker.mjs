@@ -1,4 +1,4 @@
-import {pullWorkspaceImage,workspaceImageReference} from './image-release.mjs';
+import {pullWorkspaceImage,workspaceImageReference,dockerTimeout} from './image-release.mjs';
 import {imageUpgradeJournal,upgradeRuntimeImage} from './image-upgrade.mjs';
 import {waitForRuntimeReady} from './runtime-readiness.mjs';
 import {hostResources} from './host-resources.mjs';
@@ -24,7 +24,7 @@ export function safeDockerError(error, operation) {
   return safe;
 }
 async function dockerCommand(args) {
-  try { return await exec('docker', args, { timeout: args[0]==='pull'?600_000:120_000, maxBuffer: 1024 * 1024 }); }
+  try { return await exec('docker', args, { timeout: dockerTimeout(args), maxBuffer: 1024 * 1024 }); }
   catch (error) { throw safeDockerError(error, args[0]); }
 }
 
