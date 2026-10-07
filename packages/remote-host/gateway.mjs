@@ -38,6 +38,7 @@ import { body, json } from './http.mjs';
 import {startReleasePrepull} from './release-prepull.mjs';
 import {PREPULL_RESERVE_BYTES} from './image-retention.mjs';
 import {hostStorage as createHostStorage} from './host-storage.mjs';
+import {InputLedger,SocketInput,TERMINAL_INPUT_PROTOCOL,forwardInput,inputKey,sequencedInput} from './terminal-input.mjs';
 
 export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingSetup, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage() }) {
   validateConfig(config);
@@ -48,6 +49,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
     return access.projectAccess?{...access.projectAccess,...(access.gitIdentity?{gitIdentity:access.gitIdentity}:{})}:undefined;
   };
   const tickets = new Tickets();
+  const inputLedger=new InputLedger({now});
   const sessionViewLeases=new SessionViewLeases({now});
   const leases=new MemberLeases({authorize:checkMember,stop:runtime=>workspaces.suspendMember(runtime),renew:renewMember,inspectRunning:async runtime=>{const inspected=await workspaces.inspectRuntime(runtime);return inspected?.State?.Running===true&&!inspected.State.Paused;}});
   const sharedSessions=new SharedSessions({authorizeMember,stop:runtime=>workspaces.suspendMember(runtime)});
@@ -199,10 +201,12 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       }
       const sharedInput=operation.match(/^\/shared-sessions\/([a-f0-9-]{36})\/input$/);
       if(sharedInput){
-        if(request.method!=='POST')throw Error('Forbidden');const input=await body(request,20000);
-        if(typeof input.data!=='string'||Buffer.byteLength(input.data)>16384||Object.keys(input).some(k=>k!=='data'))throw Error('Invalid session input');
+        if(request.method!=='POST')throw Error('Forbidden');const input=await body(request,120000);
+        const sequenced=Object.hasOwn(input,'seq')||Object.hasOwn(input,'id')?sequencedInput(input):null;
+        if(!sequenced&&(typeof input.data!=='string'||Buffer.byteLength(input.data)>16384||Object.keys(input).some(k=>k!=='data')))throw Error('Invalid session input');
         const entry=await resolveShared(workspace,principal,request.headers.authorization,sharedInput[1],'interact');if(!entry.runtime)throw Error('Forbidden');
         const runtime=await workspaces.open(entry.runtime);await resolveShared(workspace,principal,request.headers.authorization,entry.id,'interact');
+        if(sequenced){const applied=await inputLedger.apply(inputKey(principal,workspace.id,`shared:${entry.id}`,sequenced.id),sequenced.seq,()=>forwardInput(runtime,entry.sessionId,sequenced.data));return json(response,200,{ok:true,seq:sequenced.seq,duplicate:applied.duplicate});}
         const result=await fetch(`${runtime.url}/sessions/${entry.sessionId}/input`,{method:'POST',redirect:'error',headers:{authorization:`Bearer ${runtime.token}`,'content-type':'application/json'},body:JSON.stringify(input),signal:AbortSignal.timeout(5000)});
         return json(response,result.status,{ok:result.ok});
       }
@@ -280,6 +284,13 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         if(Object.hasOwn(payload??{},'sharedAgents'))throw Error('Shared agent configuration is administrator-managed');
         if(cliSessions&&payload?.projectId){const launch=await cliSessions.prepare(workspace,principal,payload.projectId,payload.requestId);if(Object.keys(launch).length)payload.sharedAgents=launch;}
       }
+      const sessionInput=request.method==='POST'&&operation.match(/^\/sessions\/(\d+)\/input$/);
+      if(sessionInput&&(Object.hasOwn(payload??{},'seq')||Object.hasOwn(payload??{},'id'))){
+        // Same queue identity and ledger as socket input: a resend applies once.
+        const input=sequencedInput(payload);
+        const applied=await inputLedger.apply(inputKey(principal,workspace.id,`session:${sessionInput[1]}`,input.id),input.seq,()=>forwardInput(runtime,Number(sessionInput[1]),input.data));
+        return json(response,200,{ok:true,seq:input.seq,duplicate:applied.duplicate});
+      }
       if(principal.memberId&&operation==='/native'&&payload?.command==='git_commit'){
         if(!projectAccess?.gitIdentity)throw Error('Member Git identity is unavailable');
         payload.args={...payload.args,gitIdentity:projectAccess.gitIdentity};
@@ -350,6 +361,15 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       const publication=shared?await resolveShared(workspace,principal,grant.bearer,shared[1]):null;
       const runtime = publication?await workspaces.open(publication.runtime??workspace):await openRuntime(workspace,principal,grant.bearer,projectAccess);
       if(publication)await resolveShared(workspace,principal,grant.bearer,publication.id);
+      const terminal=grant.stream!=='/desktop/ws'&&!grant.stream.startsWith('/browsers/');
+      const inputSession=publication?publication.sessionId:Number(grant.stream.match(/^\/sessions\/(\d+)\/stream$/)?.[1]);
+      // Exactly the HTTP input route's grants: drive scope, and for a shared
+      // session a live interact grant on a collaboration shell.
+      const mayInput=async(current,bearer)=>{
+        if(!terminal||!Number.isSafeInteger(inputSession)||current.memberId&&current.scope==='view')return false;
+        try{authorize(config,current,workspace.id,'drive');if(publication){const entry=await resolveShared(workspace,current,bearer,publication.id,'interact');if(!entry.runtime)return false;}return true;}catch{return false;}
+      };
+      let inputAllowed=await mayInput(principal,grant.bearer);
       if (socket.destroyed) { release(); return; }
       wss.handleUpgrade(request, socket, head, client => {
         const upstreamStream=publication?`/sessions/${publication.sessionId}/stream`:grant.stream;
@@ -358,15 +378,27 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         const authorizationTimer = setInterval(async () => {
           if(checkingAuthorization)return;
           checkingAuthorization=true;
-          try { const renewed=publication?sessionViewLeases.renewedGrant(leases.renewedGrant(grant)):leases.renewedGrant(grant);const current=authorizeStream(config, renewed); await checkMember(current.principal,renewed.bearer);if(publication)await resolveShared(workspace,current.principal,renewed.bearer,publication.id); }
+          try { const renewed=publication?sessionViewLeases.renewedGrant(leases.renewedGrant(grant)):leases.renewedGrant(grant);const current=authorizeStream(config, renewed); await checkMember(current.principal,renewed.bearer);if(inputAllowed)inputAllowed=await mayInput(current.principal,renewed.bearer);if(publication&&!inputAllowed)await resolveShared(workspace,current.principal,renewed.bearer,publication.id); }
           catch { client.close(1008, 'Access expired'); upstream.terminate(); client.terminate(); }
           finally { checkingAuthorization=false; }
         }, 1000);
         authorizationTimer.unref();
         client.once('close', () => clearInterval(authorizationTimer));
-        // Client input before the upstream opens is refused, never buffered.
+        // Terminal input is written to the PTY by the runner's input route (as
+        // HTTP input is), so it does not wait for the output upstream.
+        const input=terminal?new SocketInput({
+          key:id=>inputKey(principal,workspace.id,publication?`shared:${publication.id}`:`session:${inputSession}`,id),
+          apply:(key,seq,data)=>inputLedger.apply(key,seq,()=>forwardInput(runtime,inputSession,data)),
+          allowed:async()=>!inputAllowed?'Forbidden':idleAttestation?.reserved(workspace.id)?'Workspace idle shutdown is reserved. Retry after it finishes.':sharingSetup?.active(workspace.id)?'Sharing setup is moving project storage. Reconnect after it finishes.':null,
+          send:message=>{if(client.readyState===1)client.send(JSON.stringify(message));},
+          close:(code,reason)=>client.close(code,reason),
+        }):null;
+        // Capability handshake; older clients ignore unknown frame types.
+        const announced=inputAllowed;
+        if(terminal)client.send(JSON.stringify({t:'hello',input:announced?TERMINAL_INPUT_PROTOCOL:0}));
+        // Desktop/browser input before the upstream opens is refused, never buffered.
         client.on('message', (data, binary) => {
-          if (grant.stream !== '/desktop/ws'&&!grant.stream.startsWith('/browsers/')) return; // terminals use scoped REST input
+          if (input) { if (!announced) return client.close(1008, 'Terminal input is not permitted'); return input.receive(data, binary); }
           if (upstream.readyState !== 1 || upstream.bufferedAmount > 1024 * 1024) return client.close(1013);
           upstream.send(data, { binary });
         });

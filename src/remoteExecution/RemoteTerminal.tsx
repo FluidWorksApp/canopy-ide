@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { coalesced } from "./coalesced";
+import { TerminalInput } from "./terminalInput";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type { RemoteExecutionClient } from "./client";
@@ -27,24 +28,17 @@ export function RemoteTerminal({ client, workspaceId, sessionId, sharedSessionId
       if (writable&&!sharedSessionId) geometry.push({ cols: Math.min(512, Math.max(1, term.cols)), rows: Math.min(256, Math.max(1, term.rows)) });
     };
     const observer = new ResizeObserver(resize); observer.observe(surface.current!);
-    // Serialize input and bound the pending paste. Never retain a growing list
+    // Ordered, bounded input: over the stream socket when the gateway offers
+    // it, otherwise one HTTP request at a time. Never retain a growing list
     // of HTTP promises while a VM is unavailable.
-    let pendingInput = "";
-    let sending = false;
-    const sendInput = async () => {
-      if (sending || !pendingInput || disposed) return;
-      sending = true; const data = pendingInput; pendingInput = "";
-      try { await client.workspace(workspaceId, `${sessionRoute}/input`, { data }); }
-      catch { if (!disposed) setStatus("Input failed; check the connection before retrying"); pendingInput = ""; }
-      finally { sending = false; if (pendingInput) void sendInput(); }
-    };
+    const sender = new TerminalInput(body => client.workspace(workspaceId, `${sessionRoute}/input`, body), 16 * 1024);
     const input = term.onData(data => {
       if(!writable)return;
       if (document.hidden || socket?.readyState !== WebSocket.OPEN || exited) {
         setStatus("Terminal is reconnecting; input was not sent"); return;
       }
-      if (pendingInput.length + data.length > 16 * 1024) { setStatus("Input queue full"); return; }
-      pendingInput += data; void sendInput();
+      if (sender.queued + data.length > 16 * 1024) { setStatus("Input queue full"); return; }
+      sender.write(data).catch(() => { if (!disposed && !document.hidden) setStatus("Input failed; check the connection before retrying"); });
     });
     const connect = async () => {
       if (disposed || document.hidden || exited) return;
@@ -61,6 +55,9 @@ export function RemoteTerminal({ client, workspaceId, sessionId, sharedSessionId
           let message;
           try { message = JSON.parse(event.data); }
           catch { connectedSocket.close(); return; }
+          if (message.t === "hello") { sender.hello(connectedSocket, message.input); return; }
+          if (message.t === "input-ack") { sender.acknowledge(message.id, message.seq); return; }
+          if (message.t === "input-error") { sender.rejected(message.id, message.error); return; }
           if (message.t === "exit") { exited = true; setStatus(`Exited (${message.exitCode})`); return; }
           if (message.t !== "snapshot" && message.t !== "data") return;
           let bytes: Uint8Array;
@@ -78,6 +75,7 @@ export function RemoteTerminal({ client, workspaceId, sessionId, sharedSessionId
           term.write(bytes, () => { parsing -= bytes.length; });
         };
         socket.onclose = () => {
+          sender.closed(connectedSocket);
           if (!current() || exited) return;
           setStatus("Disconnected — agents continue on the host");
           retry = window.setTimeout(() => void connect(), 1500);
@@ -89,13 +87,14 @@ export function RemoteTerminal({ client, workspaceId, sessionId, sharedSessionId
     const visibilityChanged = () => {
       window.clearTimeout(retry);
       ++connectionEpoch;
+      if (socket) sender.closed(socket);
       socket?.close(); socket = undefined;
-      pendingInput = "";
+      sender.fail(Error("Terminal hidden"));
       if (!document.hidden && !exited) { setStatus("Reconnecting…"); void connect(); }
     };
     document.addEventListener("visibilitychange", visibilityChanged);
     void connect();
-    return () => { disposed = true; ++connectionEpoch; document.removeEventListener("visibilitychange", visibilityChanged); window.clearTimeout(retry); socket?.close(); observer.disconnect(); geometry.stop(); input.dispose(); term.dispose(); };
+    return () => { disposed = true; ++connectionEpoch; sender.dispose(); document.removeEventListener("visibilitychange", visibilityChanged); window.clearTimeout(retry); socket?.close(); observer.disconnect(); geometry.stop(); input.dispose(); term.dispose(); };
   }, [client, workspaceId, sessionId, sharedSessionId, writable]);
   return <div className="remote-terminal"><div className="remote-status" role="status">{status}</div><div ref={surface} className="remote-terminal-surface" /></div>;
 }
