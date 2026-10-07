@@ -569,3 +569,34 @@ export function LiveShareIcon({ size = 14, className }: IconProps) {
     </svg>
   );
 }
+
+/** A padlock — an end-to-end encrypted conversation. */
+export function LockIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <rect x="5" y="11" width="14" height="10" rx="2" />
+      <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+    </svg>
+  );
+}
+
+/** A paper plane pointing up — send the composed message. */
+export function SendIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M12 19V5" />
+      <path d="m5 12 7-7 7 7" />
+    </svg>
+  );
+}
+
+/** An "i" in a circle — more detail lives in the tooltip. */
+export function InfoIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v5" />
+      <path d="M12 8h.01" />
+    </svg>
+  );
+}

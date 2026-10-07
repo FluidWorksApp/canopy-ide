@@ -38,7 +38,7 @@ export function TeamHub({onOpenChat}:{onOpenChat?:(conversation:AccountConversat
   </div>}
   {team&&!manage&&<nav className="team-directory" aria-label="Conversations">
    <small>CHANNEL</small><button disabled={!onOpenChat} onClick={()=>onOpenChat?.({teamId:selected,userId:selfId,peer:null,name:team.name})}><span aria-hidden="true" className="team-avatar">#</span><span><strong>{team.name}</strong><small>Everyone in this team</small></span></button>
-   <small>PEOPLE · {members.length}</small>{members.filter(m=>m.id!==selfId).map(m=><button key={m.id} disabled={!onOpenChat} onClick={()=>onOpenChat?.({teamId:selected,userId:selfId,peer:m.id,name:m.name})}><span aria-hidden="true" className="team-avatar">{m.name.slice(0,1).toUpperCase()}</span><span><strong>{m.name}</strong><small>{m.email}</small></span></button>)}
+   <small>PEOPLE · {members.length}</small>{members.filter(m=>m.id!==selfId).map(m=><button key={m.id} disabled={!onOpenChat} onClick={()=>onOpenChat?.({teamId:selected,userId:selfId,peer:m.id,name:m.name,email:m.email})}><span aria-hidden="true" className="team-avatar">{m.name.slice(0,1).toUpperCase()}</span><span><strong>{m.name}</strong><small>{m.email}</small></span></button>)}
    {!onOpenChat&&<p className="team-hub-muted">Open Teams in the sidebar to start a conversation.</p>}
   </nav>}
  </section>;
