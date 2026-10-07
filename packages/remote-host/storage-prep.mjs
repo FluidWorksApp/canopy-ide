@@ -13,9 +13,10 @@
 // before anything is trimmed, swap is emptied before it is released. A failed
 // step is reported, never fatal: the snapshot after StopInstance is still
 // consistent (the OS shuts down cleanly), only possibly larger.
-import {open,readFile,rename,rm,writeFile,mkdir,statfs} from 'node:fs/promises';
+import {open,readFile,rm,statfs} from 'node:fs/promises';
 import {constants} from 'node:fs';
 import {runner,MOUNT_POINT,storageUsage} from './user-storage.mjs';
+import {publishRuntimeFile} from './runtime-dir.mjs';
 
 export const REQUEST_FILE='/srv/canopy/host-state/storage-prep-request.json';
 export const STATUS_FILE='/run/canopy/storage-prep.json';
@@ -114,8 +115,7 @@ export async function readRequest(file=REQUEST_FILE){
  finally{await handle.close();await rm(file,{force:true});}
 }
 export async function writeStatus(status,file=STATUS_FILE){
- await mkdir('/run/canopy',{recursive:true,mode:0o755});
- const temp=`${file}.${process.pid}.tmp`;await writeFile(temp,JSON.stringify(status),{mode:0o644});await rename(temp,file);
+ await publishRuntimeFile(file,status);
 }
 export async function runRequested({read=readRequest,write=writeStatus,current=async()=>{try{return JSON.parse(await readFile(STATUS_FILE,'utf8'));}catch{return null;}},prepare=prepareForSnapshot,now=Date.now}={}){
  const {requestId}=await read();

@@ -22,7 +22,7 @@ for file in "$source_dir"/*.mjs; do
   [[ $file == *.test.mjs ]] && continue
   cp "$file" "$bundle/"
 done
-for file in install.sh network-isolation.sh package.json package-lock.json agents.lock.json canopy-host.service canopy-network.service; do
+for file in install.sh network-isolation.sh package.json package-lock.json agents.lock.json canopy-host.service canopy-network.service canopy-runtime.tmpfiles.conf; do
   cp "$source_dir/$file" "$bundle/"
 done
 mkdir "$bundle/chrome-stream"

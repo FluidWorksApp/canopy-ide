@@ -10,6 +10,9 @@ Type=simple
 User=canopy-host
 SupplementaryGroups=docker
 WorkingDirectory=/opt/canopy-host
+# Root-owned shared runtime files are created (or their owner and mode repaired)
+# here, never by whichever process runs first. '+' runs this one step as root.
+ExecStartPre=+/usr/bin/systemd-tmpfiles --create /opt/canopy-host/canopy-runtime.tmpfiles.conf
 Environment=CANOPY_HOST_CONFIG=/etc/canopy-host/host.json
 Environment=CANOPY_HOST_STATE=/var/lib/canopy-host
 ExecStart=/usr/bin/node /opt/canopy-host/gateway.mjs
