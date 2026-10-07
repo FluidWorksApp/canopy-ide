@@ -281,3 +281,29 @@ it('view-only workspace cannot start or request interactive remote browser ticke
  await expect(host.invoke('chrome_stream_open',{sessionId:'readonly',url:'http://localhost:3000'})).rejects.toThrow('read-only');
  await expect(host.invoke('chrome_stream_ticket',{sessionId:'readonly'})).rejects.toThrow('read-only');expect(fetcher).not.toHaveBeenCalled();host.dispose();
 });
+it('parks terminal reconnects and heartbeats while the workspace is intentionally stopping',async()=>{
+ vi.useFakeTimers();vi.setSystemTime(1000000);
+ const {connectionKey,reportWorkspaceLifecycle}=await import('./connectionState');
+ const managed={...connection,endpoint:'https://alice.workspaces.canopyide.dev'},key=connectionKey(managed.endpoint,'alice');
+ const invoke=vi.fn().mockImplementation(async(command:string)=>command==='canopy_account_request'?{connection:{...managed,token:'renewed'},expiresAt:new Date(Date.now()+3600000).toISOString()}:undefined);
+ const desktop={kind:'native',invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ class Socket {static CONNECTING=0;static all:Socket[]=[];readyState=0;onopen?:()=>void;onclose?:()=>void;onmessage?:()=>void;onerror?:()=>void;constructor(){Socket.all.push(this);}close(){this.onclose?.();}}
+ vi.stubGlobal('WebSocket',Socket);
+ const fetcher=vi.fn().mockImplementation(async(url:string,options:RequestInit)=>({ok:true,json:async()=>url.endsWith('/ticket')?{ticket:'synthetic-ticket'}:url.endsWith('/sessions')&&options.method!=='GET'?{id:7,title:'shell',cols:40,rows:10,exitCode:null}:{result:null}}));
+ vi.stubGlobal('fetch',fetcher);
+ const host=new NativeWorkspaceHost(managed,desktop);
+ try{
+  await host.invoke('pty_spawn_attached_argv',{cwd:'/workspace',argv:['bash'],onData:{onmessage:vi.fn()}});
+  expect(Socket.all).toHaveLength(1);
+  reportWorkspaceLifecycle(key,'stopping');
+  const requests=fetcher.mock.calls.length;
+  Socket.all[0].close();
+  await vi.advanceTimersByTimeAsync(120000);
+  // No ticket requests, sockets or heartbeats against compute that is stopping.
+  expect(Socket.all).toHaveLength(1);expect(fetcher.mock.calls.length).toBe(requests);
+  // Waking the workspace clears the lifecycle and the terminal reconnects.
+  reportWorkspaceLifecycle(key,null);
+  await vi.advanceTimersByTimeAsync(2500);
+  expect(Socket.all).toHaveLength(2);
+ }finally{host.dispose();reportWorkspaceLifecycle(key,null);vi.useRealTimers();}
+});
