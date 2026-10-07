@@ -148,7 +148,7 @@ interface SettingsDialogProps {
  *  half turns that face into a companion that runs a CLI, which is a question
  *  about agents rather than about colours. */
 const TABS: { id: SettingsTab; label: string; group: string }[] = [
-  { id: "account", label: "Account & balance", group: "Your account" },
+  { id: "account", label: "Accounts", group: "Your account" },
   { id: "teams", label: "Teams", group: "Your account" },
   { id: "appearance", label: "Appearance", group: "Look" },
   { id: "editor", label: "Editor", group: "Look" },
@@ -1408,7 +1408,7 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
             ))}
           </nav>
           <div className="settings-content">
-            {tab === "account" && <Item name="Canopy account" desc="Your workspace plans and usage."><AccountSettings onTeams={()=>setTab("teams")} onWorkspaces={()=>{onClose();window.dispatchEvent(new Event("canopy:open-workspaces"));}} /></Item>}
+            {tab === "account" && <Item name="Accounts" desc="Your balance and workspace usage."><AccountSettings onTeams={()=>setTab("teams")} onWorkspaces={()=>{onClose();window.dispatchEvent(new Event("canopy:open-workspaces"));}} /></Item>}
             {tab === "teams" && <OrganizationSettings />}
             {tab === "appearance" && (
               <>
