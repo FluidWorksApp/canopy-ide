@@ -26,3 +26,9 @@ test('workspace preview cannot launch arbitrary URLs or embedded credentials',as
 });
 
 test('OpenCode footer handler is registered and rejects path-like session selectors before any store access',async()=>{await assert.rejects(nativeInvoke('opencode_session_stats',{sessionId:'../other-member'}),/Invalid OpenCode session/);});
+
+test('Tools panel discovery is served by the workspace and keeps project roots inside it',async()=>{
+ assert.ok(Array.isArray(await nativeInvoke('mcp_servers',{projectDirs:[]})));
+ await assert.rejects(nativeInvoke('mcp_servers',{projectDirs:['/etc']}),/outside selected workspace/);
+ await assert.rejects(nativeInvoke('mcp_update_sources',{projectDirs:[],changes:[{agent:'cursor',name:'x',configPath:'/etc/passwd',scope:'global',enabled:false}]}),/no longer configures/);
+});
