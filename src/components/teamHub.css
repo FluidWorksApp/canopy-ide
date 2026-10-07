@@ -59,6 +59,10 @@ button.team-row{cursor:pointer;}button.team-row:hover:not(:disabled){background:
 .account-chat-msg.own{background:color-mix(in srgb,var(--accent) 16%,transparent);border-radius:var(--r-md);border-top-right-radius:var(--r-xs)}
 .account-chat-msg.own.grouped{border-top-right-radius:var(--r-md)}
 .account-chat-msg.pending{opacity:.75}
+.account-chat-msg.failed small{color:var(--warn)}
+.account-chat-action{padding:0;border:0;background:none;font:inherit;color:inherit;text-decoration:underline;cursor:pointer}
+.account-chat-action:hover{color:var(--text)}
+.account-chat-action:focus-visible{outline:1px solid var(--accent);outline-offset:1px;border-radius:var(--r-xs)}
 .account-chat-msg header{display:flex;gap:var(--sp-2);align-items:baseline;font-size:var(--fs-xs);margin-bottom:2px}
 .account-chat-msg.own header strong{display:none}
 .account-chat-msg time,.account-chat-msg small{font-size:10px;color:var(--text-muted)}

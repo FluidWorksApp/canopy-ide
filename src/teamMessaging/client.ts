@@ -5,7 +5,17 @@ export type Device={id:string;user_id:string;public_keys:PublicIdentity};
 export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number};
 type Payload={kind:'message';message:ChatMessage}|{kind:'receipt';id:string}|{kind:'signal';description:RTCSessionDescriptionInit};
 export type PeerRequest=<T>(body:unknown)=>Promise<T>;
-type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerRequest;team:string;user:string;message:(message:ChatMessage)=>void;receipt:(id:string,user:string)=>void;status:(value:string)=>void;identity?:()=>Promise<DeviceIdentity>;remember?:typeof rememberMessage;rtc?:(config:RTCConfiguration)=>RTCPeerConnection;outbox?:MessageOutbox;persist?:(message:ChatMessage)=>Promise<void>};
+type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerRequest;team:string;user:string;message:(message:ChatMessage)=>void;receipt:(id:string,user:string)=>void;status:(value:string)=>void;identity?:()=>Promise<DeviceIdentity>;remember?:typeof rememberMessage;rtc?:(config:RTCConfiguration)=>RTCPeerConnection;outbox?:MessageOutbox;persist?:(message:ChatMessage)=>Promise<void>;
+ /** Message ids with ciphertext still waiting in the restored outbox. */
+ pending?:(messageIds:string[])=>void;
+ /** A message's last pending delivery expired or became undeliverable. */
+ expired?:(messageId:string)=>void;
+ /** A pending delivery reached the relay or a direct channel on retry. */
+ relayed?:(messageId:string)=>void};
+/** Client-chosen identity for an optimistic message: the same id is kept in the
+ * encrypted history and the pending-delivery queue, so echoes and restarts reconcile. */
+export type MessageDraft={id:string;created:number};
+export type SendResult={id:string;queued:boolean;partial:boolean};
 export class PeerClient {
  private identity?:DeviceIdentity;private devices=new Map<string,Device>();private peers=new Map<string,{pc:RTCPeerConnection;channel?:RTCDataChannel}>();
  private timer?:ReturnType<typeof setTimeout>;private stopped=false;private directoryAt=0;private tail=Promise.resolve();private watchdog?:ReturnType<typeof setInterval>;
@@ -29,6 +39,7 @@ export class PeerClient {
    const users=this.sent.get(row.messageId)??new Set<string>();users.add(row.envelope.to.user);this.sent.set(row.messageId,users);
   }
   if(this.stopped)return;
+  this.options.pending?.([...new Set([...this.pending.values()].map(row=>row.messageId))]);
   this.watchdog=setInterval(()=>{if(Date.now()-this.directoryAt>10000){this.closePeers();this.options.status('Reconnecting securely…');}},1000);
   await this.poll();
  }
@@ -87,12 +98,23 @@ export class PeerClient {
    if(row.envelope.expires<=Date.now()||!device||device.user_id!==row.envelope.to.user){discard.push(id);continue;}
    if(Date.now()-(this.attempted.get(id)??0)<5000)continue;
    this.attempted.set(id,Date.now());
-   await this.transmit(device,row.envelope,row.messageId).catch(()=>{});
+   if(await this.transmit(device,row.envelope,row.messageId).then(()=>true,()=>false))this.options.relayed?.(row.messageId);
   }
-  if(discard.length){await this.outbox.remove(discard);for(const id of discard){this.pending.delete(id);this.attempted.delete(id);const prior=this.fallbacks.get(id);if(prior)clearTimeout(prior.timer);this.fallbacks.delete(id);}}
+  if(discard.length){
+   const messages=new Set(discard.map(id=>this.pending.get(id)!.messageId));
+   await this.outbox.remove(discard);this.forgetPending(discard);
+   for(const messageId of messages)if(![...this.pending.values()].some(row=>row.messageId===messageId))this.options.expired?.(messageId);
+  }
+ }
+ private forgetPending(ids:string[]){for(const id of ids){this.pending.delete(id);this.attempted.delete(id);const prior=this.fallbacks.get(id);if(prior)clearTimeout(prior.timer);this.fallbacks.delete(id);}}
+ /** Drops every pending delivery of a message the sender discarded. */
+ async discard(messageId:string){
+  const ids=[...this.pending].filter(([,row])=>row.messageId===messageId).map(([id])=>id);
+  this.sent.delete(messageId);if(!ids.length)return;
+  await this.outbox.remove(ids);this.forgetPending(ids);
  }
 
- async send(text:string,recipient:string|null){
+ async send(text:string,recipient:string|null,draft?:MessageDraft):Promise<SendResult>{
   if(!text.trim()||new TextEncoder().encode(text).length>16000)throw Error('Write a message under 16 KB');
   if(this.fallbacks.size>=500)throw Error('Wait for pending messages to finish sending');
   try{await this.directory();}catch(error){
@@ -103,7 +125,8 @@ export class PeerClient {
   }
   const devices=[...this.devices.values()].filter(d=>d.user_id!==this.options.user&&(!recipient||d.user_id===recipient));
   if(!devices.length)throw Error('No recipient devices are registered yet. Ask your teammate to sign in to Canopy.');
-  const message:ChatMessage={id:crypto.randomUUID(),sender:this.options.user,recipient,text,created:Date.now()};
+  const message:ChatMessage={id:draft?.id??crypto.randomUUID(),sender:this.options.user,recipient,text,created:draft?.created??Date.now()};
+  if(!validChatMessage(message))throw Error('Invalid message');
   if(new TextEncoder().encode(JSON.stringify({kind:'message',message})).length>32000)throw Error('This message is too large after encoding. Split it into smaller messages.');
   await this.options.persist?.(message);
   this.sent.set(message.id,new Set(devices.map(d=>d.user_id)));if(this.sent.size>500)this.sent.delete(this.sent.keys().next().value!);
