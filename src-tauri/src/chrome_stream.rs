@@ -263,10 +263,7 @@ mod tests {
 
     #[test]
     fn a_pasted_token_is_trimmed_and_an_env_assignment_is_unwrapped() {
-        assert_eq!(
-            normalize_token("  aaaa-bbbb\n").unwrap(),
-            "aaaa-bbbb"
-        );
+        assert_eq!(normalize_token("  aaaa-bbbb\n").unwrap(), "aaaa-bbbb");
         assert_eq!(
             normalize_token("PLAYWRIGHT_MCP_EXTENSION_TOKEN=aaaa-bbbb").unwrap(),
             "aaaa-bbbb"
