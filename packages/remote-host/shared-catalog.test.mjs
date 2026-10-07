@@ -58,6 +58,12 @@ test('shared projects open once as tabs and replace the raw /workspace root proj
  // A project the owner adds later opens once.
  const added=JSON.parse(mergeSharedProjects(JSON.stringify(closed),member,[...owner,{id:'relay',name:'The Relay',sharedWorkspaceId:'ws-a',readOnly:false,components:[{id:'r',label:'Web',path:'/workspace/p_3/repo-1'}]}]));
  assert.deepEqual(added.openIds,['canopy','relay']);
+ // The owner's own root project in the catalog is dropped too (it was the active tab).
+ const ownerRoot={...root('remote-ws-a'),sharedWorkspaceId:'ws-a',readOnly:false};
+ const withOwnerRoot=JSON.parse(mergeSharedProjects(JSON.stringify(before),member,[ownerRoot,...owner]));
+ assert.deepEqual(withOwnerRoot.projects.map(p=>p.id),['mine','coraa','canopy']);assert.equal(withOwnerRoot.activeId,'coraa');
+ // An owner with only the root project still shares it.
+ assert.deepEqual(JSON.parse(mergeSharedProjects(null,member,[ownerRoot])).projects.map(p=>p.id),['remote-ws-a']);
  // Without owner projects the root project is the member's only view and stays.
  assert.deepEqual(JSON.parse(mergeSharedProjects(JSON.stringify(before),member,[])).projects.map(p=>p.id),['remote-member-1','remote-ws-a','mine']);
 });

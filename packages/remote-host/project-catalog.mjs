@@ -24,19 +24,22 @@ export function sharedProjectDefinitions(workspace){
 // host's sanitized catalog) for a member of a whole-workspace share.
 // A shared project opens as a tab the first time a member sees it; the
 // `sharedOpened` mark travels with the member's saved copy, so a tab they
-// close stays closed. With owner projects present, the default `/workspace`
-// root projects are dropped: on a whole-workspace share that root is the
-// owner's volume, which those projects show as raw id folders.
+// close stays closed. The default `/workspace` root projects (the member's,
+// and the owner's own copy in the catalog) are dropped whenever the owner has
+// named projects: on a whole-workspace share that root is the owner's volume,
+// which those projects show as raw id folders.
 export function mergeSharedProjects(serialized,workspace,owner=[]){
  // A member's own store is empty until their first save.
  const parsed=serialized==null||serialized===''?null:JSON.parse(serialized);
  const store=parsed??{projects:[],openIds:[],activeId:null};
  if(!Array.isArray(store.projects))throw Error('Invalid workspace project store');
  const legacy=sharedProjectDefinitions(workspace),legacyIds=new Set(legacy.map(p=>p.id));
- const ownerShared=owner.filter(p=>!legacyIds.has(p.id)).map(p=>({...p,sharedOpened:true}));
+ const root=p=>typeof p.id==='string'&&p.id.startsWith('remote-')&&Array.isArray(p.components)&&p.components.length===1&&p.components[0]?.path==='/workspace';
+ const named=owner.filter(p=>!legacyIds.has(p.id)&&!root(p));
+ const ownerShared=(named.length?named:owner.filter(p=>!legacyIds.has(p.id))).map(p=>({...p,sharedOpened:true}));
  const shared=[...legacy,...ownerShared],ids=new Set(shared.map(p=>p.id));
  const seen=new Set(store.projects.filter(p=>p?.sharedWorkspaceId&&p.sharedOpened===true).map(p=>p.id));
- const rawRoot=p=>ownerShared.length>0&&typeof p.id==='string'&&p.id.startsWith('remote-')&&Array.isArray(p.components)&&p.components.length===1&&p.components[0]?.path==='/workspace';
+ const rawRoot=p=>named.length>0&&root(p);
  // Drop previously discovered shared projects that are no longer granted.
  const projects=[...store.projects.filter(p=>p&&!p.sharedWorkspaceId&&!ids.has(p.id)&&!rawRoot(p)),...shared];
  const available=new Set(projects.map(p=>p.id));
