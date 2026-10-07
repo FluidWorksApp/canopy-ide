@@ -85,14 +85,20 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Name tested architecture
+        id: publish-name
+        run: echo "image=ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/canopy-workspace:sha-${{ github.sha }}-${{ matrix.arch }}" >> "$GITHUB_OUTPUT"
+      # Same build as the tested image (every step is a cache hit), published
+      # with zstd layers: hosts decompress zstd several times faster than gzip.
       - name: Publish tested architecture
-        env:
-          ARCH: ${{ matrix.arch }}
-          REVISION: ${{ github.sha }}
-        run: |
-          image="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/canopy-workspace"
-          docker tag canopy-workspace:0.1.0 "$image:sha-$REVISION-$ARCH"
-          docker push "$image:sha-$REVISION-$ARCH"
+        uses: docker/build-push-action@v6
+        with:
+          context: packages/remote-host
+          cache-from: type=gha,scope=workspace-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          outputs: type=image,name=${{ steps.publish-name.outputs.image }},push=true,oci-mediatypes=true,compression=zstd,compression-level=3,force-compression=true
 
   release:
     name: Publish multi-platform release
