@@ -21,7 +21,7 @@ export function workspaceStartupProblem(w:ManagedWorkspace){
 }
 // Once the host is starting its services, readiness is seconds away: the server
 // checks it as soon as the host reports in, so look every second, not every 5.
-export function startupPollDelay(w:ManagedWorkspace){return w.operation?.bootstrap_report?.stage==='host-services'||w.operation?.phase==='connecting-workspace'?1000:5000;}
+function startupPollDelay(w:ManagedWorkspace){return w.operation?.bootstrap_report?.stage==='host-services'||w.operation?.phase==='connecting-workspace'?1000:5000;}
 function bootstrapProgress(w:ManagedWorkspace){const report=w.operation?.bootstrap_report;return report?.status==='progress'?report.stage==='packages'&&w.operation?.bootstrap_mode==='prebuilt'?'Verifying prebuilt host tools':reportStages[report.stage]:undefined;}
 
 const stepFor=(w:ManagedWorkspace)=>w.state==='ready'?4:({'creating-storage':0,'creating-compute':0,'starting':0,'attaching-storage':1,'preparing-workspace':2,'connecting-workspace':3,'retiring-previous-compute':3}[w.operation?.phase??'']??0);
