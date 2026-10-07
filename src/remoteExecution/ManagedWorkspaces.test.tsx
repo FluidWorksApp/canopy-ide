@@ -122,6 +122,17 @@ it('shows a step that keeps failing instead of an unchanged starting state',asyn
  expect(screen.getByText('The last setup step failed (Workspace operation will retry). Retrying automatically…')).toBeTruthy();expect(mocks.switchMode).not.toHaveBeenCalled();
 });
 
+it('shows copied and total gigabytes while a retained disk moves to snapshot storage',async()=>{
+ vi.useFakeTimers();mocks.canSwitch.mockReturnValue(true);let state='stopped',report:{stage:string;status:string;copiedBytes?:number;totalBytes?:number}|undefined;
+ const w=()=>({id:'ws-test',name:'My workspace',provider:'lightsail',state,cpu_max:2,memory_max_mib:8192,operation:{phase:'preparing-workspace',status:'running',bootstrap_report:report}});
+ mocks.invoke.mockImplementation(async(command,args)=>{if(command!=='canopy_account_request')return;if(args.route==='/api/workspaces')return {workspaces:[w()]};if(args.body.action==='resume'){state='starting';return {};}return {};});
+ render(<ManagedWorkspaces/>);await act(async()=>{});fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
+ report={stage:'migrating-files',status:'progress'};await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+ expect(screen.getByText(/Moving your files…/)).toBeTruthy();
+ report={stage:'migrating-files',status:'progress',copiedBytes:12_345_000_000,totalBytes:40_000_000_000};await act(async()=>{await vi.advanceTimersByTimeAsync(5000);});
+ expect(screen.getByText(/Moving your files… 12\.3 \/ 40\.0 GB/)).toBeTruthy();
+});
+
 it('checks every second once the host is starting its services, and connects within that second of readiness',async()=>{
  vi.useFakeTimers();mocks.canSwitch.mockReturnValue(true);let state='stopped',report:{stage:string;status:string}|undefined;
  const w=()=>({id:'ws-test',name:'My workspace',provider:'lightsail',state,cpu_max:2,memory_max_mib:8192,operation:{phase:'preparing-workspace',status:'running',bootstrap_report:report}});

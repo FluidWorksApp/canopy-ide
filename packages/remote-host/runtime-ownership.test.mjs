@@ -4,7 +4,7 @@
 // left a root 0700 directory, and canopy-host crash-looped with EACCES opening
 // /run/canopy/resource-admission.lock.
 import test from 'node:test';import assert from 'node:assert/strict';
-import {readFile,readdir,mkdtemp,mkdir,writeFile,rm,stat,chmod,chown} from 'node:fs/promises';
+import {readFile,readdir,mkdtemp,writeFile,rm,stat,chmod} from 'node:fs/promises';
 import {spawnSync} from 'node:child_process';import {tmpdir} from 'node:os';import {join} from 'node:path';
 import {acquireResourceAdmission} from './resource-admission.mjs';
 import {publishRuntimeFile} from './runtime-dir.mjs';
@@ -75,5 +75,4 @@ test('gateway uid opens the lock only after tmpfiles ownership; the old umask-07
  // A root tool that runs first cannot take ownership away: it only opens.
  const rootRelease=await acquireResourceAdmission(lock,{timeoutMs:2000});await rootRelease();
  assert.equal((await stat(lock)).uid,0);assert.equal((await stat(lock)).gid,gatewayGid);
- void mkdir;void chown;
 });

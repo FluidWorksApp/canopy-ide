@@ -45,3 +45,36 @@ test('image pulls get the startup phase budget and quiet output',async()=>{
  // Inside the control plane's 15-minute phase budget, well above a 13 GB first pull's typical time.
  assert.ok(WORKSPACE_IMAGE_PULL_TIMEOUT_MS>=10*60*1000&&WORKSPACE_IMAGE_PULL_TIMEOUT_MS<15*60*1000);
 });
+
+test('a pull that loses containerd mid-write is retried once, only after the runtimes are active again',async()=>{
+ const {containerdConnectionLost}=await import('./image-release.mjs');
+ const digest='ghcr.io/fluidworksapp/canopy-workspace@sha256:'+'5e'.repeat(32);
+ const eof=Object.assign(Error('Command failed: docker pull'),{stderr:'failed to copy: failed to send write: EOF'});
+ assert.equal(containerdConnectionLost(eof),true);
+ for(const other of [Error('registry unavailable'),{stderr:'no space left on device'},{stderr:'manifest unknown'}])assert.equal(containerdConnectionLost(other),false);
+ const inspect={stdout:JSON.stringify([{Id:'sha256:'+'c'.repeat(64),RepoDigests:[digest]}])};
+ const script=pulls=>{const calls=[];let failures=pulls;return {calls,docker:async args=>{calls.push(args.join(' '));if(args[0]==='image'&&calls.filter(c=>c.startsWith('pull')).length===0)throw Object.assign(Error('missing'),{stderr:'Error: No such image: '+digest});if(args[0]==='pull'&&failures-->0)throw eof;return args[0]==='image'?inspect:{stdout:''};}};};
+ // Restart observed, runtimes active again: one retry succeeds.
+ let ready=0;const once=script(1),logged=[];
+ assert.equal((await pullWorkspaceImage(digest,{docker:once.docker,retry:{runtimeReady:async()=>{ready++;return true;},log:m=>logged.push(m)}})).reference,digest);
+ assert.equal(once.calls.filter(c=>c.startsWith('pull')).length,2);assert.equal(ready,1);assert.equal(logged.length,1);
+ // Never more than one retry.
+ const twice=script(2);
+ await assert.rejects(pullWorkspaceImage(digest,{docker:twice.docker,retry:{runtimeReady:async()=>true}}),/docker pull/);
+ assert.equal(twice.calls.filter(c=>c.startsWith('pull')).length,2);
+ // containerd not back: the original failure, no blind retry.
+ const down=script(1);
+ await assert.rejects(pullWorkspaceImage(digest,{docker:down.docker,retry:{runtimeReady:async()=>false}}),/docker pull/);
+ assert.equal(down.calls.filter(c=>c.startsWith('pull')).length,1);
+ // Other failures and callers without `retry` (the gateway) are unchanged.
+ const plain=script(1);
+ await assert.rejects(pullWorkspaceImage(digest,{docker:plain.docker}),/docker pull/);
+ assert.equal(plain.calls.filter(c=>c.startsWith('pull')).length,1);
+});
+
+test('the bootstrap CLI checks containerd and Docker before its retry',async()=>{
+ const {readFile}=await import('node:fs/promises');
+ const source=await readFile(new URL('./image-release.mjs',import.meta.url),'utf8');
+ assert.match(source,/active\('containerd\.service'\)&&await active\('docker\.service'\)/);
+ assert.match(source,/retry:\{runtimeReady,log\}/);
+});

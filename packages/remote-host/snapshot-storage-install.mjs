@@ -2,7 +2,7 @@
 // storage. Run as root by the bootstrap (snapshot storage mode only), with
 // Docker and containerd stopped. Idempotent: every unit is rewritten, the
 // quota image is created once and only ever grown.
-import {mkdir,writeFile} from 'node:fs/promises';
+import {chmod,mkdir,writeFile} from 'node:fs/promises';
 import {BINARIES} from './warmup.mjs';
 import {IMAGE_PATH,MOUNT_POINT,ensureUserStorage,runner,validStorageGib} from './user-storage.mjs';
 import {REQUEST_FILE} from './storage-prep.mjs';
@@ -88,9 +88,14 @@ export const ENABLE=Object.freeze(['canopy-user-storage.service','canopy-warmup-
 // Retained-disk layout (today): warm-up, stop preparation and periodic trim
 // only. No quota image, no ordering change for Docker or containerd.
 export const UNITS_ONLY=Object.freeze(['canopy-warmup-early.service','canopy-warmup.service','canopy-storage-prep.path','canopy-storage-prep.service']);
-export async function installUnits({run=runner(),write=writeFile,root='/etc/systemd/system',node=process.execPath,startWarmup=false}={}){
+// Unit files hold no secrets: 0644 like every packaged unit. The bootstrap runs
+// with umask 077, which would turn writeFile's 0644 into 0600 and make systemd
+// warn "marked world-inaccessible" on every reload, so the mode is set
+// explicitly. Drop-in directories likewise get 0755.
+async function writeUnit(path,text,{write,setMode}){await write(path,text,{mode:0o644});await setMode(path,0o644);}
+export async function installUnits({run=runner(),write=writeFile,setMode=chmod,root='/etc/systemd/system',node=process.execPath,startWarmup=false}={}){
  const files=units(node);
- for(const name of UNITS_ONLY)await write(`${root}/${name}`,files[name],{mode:0o644});
+ for(const name of UNITS_ONLY)await writeUnit(`${root}/${name}`,files[name],{write,setMode});
  const must=async args=>{const r=await run('systemctl',args,{timeout:60000});if(r.code!==0)throw Error(`systemctl ${args[0]} failed`);};
  await must(['daemon-reload']);
  await must(['enable','canopy-warmup-early.service','canopy-warmup.service','canopy-storage-prep.path','fstrim.timer']);
@@ -98,10 +103,13 @@ export async function installUnits({run=runner(),write=writeFile,root='/etc/syst
  if(startWarmup)await must(['start','--no-block','canopy-warmup.service']);
  return {units:[...UNITS_ONLY]};
 }
-export async function install(storageGib,{run=runner(),write=writeFile,makeDir=mkdir,root='/etc/systemd/system',node=process.execPath,ensure=ensureUserStorage}={}){
+export async function install(storageGib,{run=runner(),write=writeFile,makeDir=mkdir,setMode=chmod,root='/etc/systemd/system',node=process.execPath,ensure=ensureUserStorage}={}){
  const gib=validStorageGib(storageGib);
  const files=units(node);
- for(const [name,text] of Object.entries(files)){if(name.includes('/'))await makeDir(`${root}/${name.split('/')[0]}`,{recursive:true});await write(`${root}/${name}`,text,{mode:0o644});}
+ for(const [name,text] of Object.entries(files)){
+  if(name.includes('/')){const dir=`${root}/${name.split('/')[0]}`;await makeDir(dir,{recursive:true,mode:0o755});await setMode(dir,0o755);}
+  await writeUnit(`${root}/${name}`,text,{write,setMode});
+ }
  const storage=await ensure(gib,{run});
  const must=async args=>{const r=await run('systemctl',args,{timeout:60000});if(r.code!==0)throw Error(`systemctl ${args[0]} failed`);};
  await must(['daemon-reload']);

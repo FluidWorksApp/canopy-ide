@@ -17,8 +17,15 @@ fail() { echo "HOST BOOT GATE FAILED: $*" >&2; journalctl -u canopy-host --no-pa
 cleanup() { docker rm -f canopy-gate-registry >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-# 1. Runtime archive and service identity, exactly like the bootstrap.
-mkdir -p /srv/canopy/host-state /opt/canopy-host /etc/canopy-host
+# 1. A sparse 64 GB ext4 disk at /srv/canopy stands in for the retained data
+# disk: the image step's free-space preflight measures /srv/canopy/containerd,
+# and a runner's root disk is smaller than a workspace image needs.
+truncate -s 64G /var/tmp/canopy-gate-disk.img
+mkfs.ext4 -q -F /var/tmp/canopy-gate-disk.img
+mkdir -p /srv/canopy
+mountpoint -q /srv/canopy || mount -o loop /var/tmp/canopy-gate-disk.img /srv/canopy
+# Runtime archive and service identity, exactly like the bootstrap.
+mkdir -p /srv/canopy/containerd /srv/canopy/docker /srv/canopy/host-state /opt/canopy-host /etc/canopy-host
 tar -xzf "$archive" -C /opt/canopy-host
 (cd /opt/canopy-host && npm ci --omit=dev --ignore-scripts)
 id canopy-host >/dev/null 2>&1 || useradd --system --home-dir /srv/canopy/host-state --shell /usr/sbin/nologin canopy-host
