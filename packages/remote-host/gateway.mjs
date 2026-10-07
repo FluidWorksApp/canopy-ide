@@ -36,6 +36,7 @@ import {ElasticMemory, memoryRange} from './elastic-memory.mjs';
 import {ElasticCpu, cpuRange} from './elastic-cpu.mjs';
 import { body, json } from './http.mjs';
 import {startReleasePrepull} from './release-prepull.mjs';
+import {PREPULL_RESERVE_BYTES} from './image-retention.mjs';
 
 export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingSetup, brokerOptions={}, renewMember, now=Date.now }) {
   validateConfig(config);
@@ -389,11 +390,16 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   const credentialTickets=credentialVault?await CredentialTickets.initialize(path.join(state,'credential-ticket-journal'),secret):undefined;
   const sharedAccounts=credentialVault?new SharedAccounts(credentialVault):undefined;
   const authority=runtimeAuthority(config.managedSession?.runtimePolicyUrl,config.managedSession);
-  const workspaces = new DockerWorkspaces({ secret, image: process.env.CANOPY_WORKSPACE_IMAGE, registry: config.workspaces,releaseChannel:process.env.CANOPY_WORKSPACE_IMAGE,resolveRelease:authority?workspace=>authority.release({...workspace,id:workspace.parentWorkspaceId??workspace.id}):undefined,upgradeDirectory:path.join(state,'image-upgrades'),authorizeAdmission:config.managedSession?runtime=>{const parent=config.workspaces.find(w=>w.id===(runtime.parentWorkspaceId??runtime.id));return !!parent&&!!authority&&authority(parent);}:undefined,resourceAdmission:process.env.CANOPY_RESOURCE_ADMISSION_LOCK?hostResourceAdmission(process.env.CANOPY_RESOURCE_ADMISSION_LOCK,{timeoutMs:45000}):action=>action() });
+  const workspaces = new DockerWorkspaces({ secret, image: process.env.CANOPY_WORKSPACE_IMAGE, registry: config.workspaces,releaseChannel:process.env.CANOPY_WORKSPACE_IMAGE,resolveRelease:authority?workspace=>authority.release({...workspace,id:workspace.parentWorkspaceId??workspace.id}):undefined,upgradeDirectory:path.join(state,'image-upgrades'),authorizeAdmission:config.managedSession?runtime=>{const parent=config.workspaces.find(w=>w.id===(runtime.parentWorkspaceId??runtime.id));return !!parent&&!!authority&&authority(parent);}:undefined,resourceAdmission:process.env.CANOPY_RESOURCE_ADMISSION_LOCK?hostResourceAdmission(process.env.CANOPY_RESOURCE_ADMISSION_LOCK,{timeoutMs:45000}):action=>action(),retainImages:!!config.managedSession&&!!process.env.CANOPY_WORKSPACE_IMAGE });
   await quarantineImageUpgrades(path.join(state,'image-upgrades'),workspaces);
   // Managed hosts keep the current workspace release on the retained disk, so a
   // container start never waits for a multi-gigabyte pull.
-  if(authority)startReleasePrepull({workspace:config.workspaces.find(w=>w.id===config.managedSession?.workspaceId),release:authority.release,docker:workspaces.docker,onResult:r=>{if(!r.ok)console.warn(`Release pre-pull skipped: ${r.error}`);}});
+  // Its cleanups take the resource lock, so they never race a resume/upgrade.
+  if(authority)startReleasePrepull({workspace:config.workspaces.find(w=>w.id===config.managedSession?.workspaceId),release:authority.release,docker:workspaces.docker,
+    target:reference=>{workspaces.prepullTarget=reference;},
+    space:reference=>workspaces.pullSpace(reference,{reserveBytes:PREPULL_RESERVE_BYTES,cleanup:()=>workspaces.withResourceLock(()=>workspaces.cleanupWorkspaceImages({keep:[reference]}))}),
+    retain:result=>workspaces.withResourceLock(()=>workspaces.cleanupWorkspaceImages({keep:[result.reference]})),
+    onResult:r=>{if(!r.ok)console.warn(`Release pre-pull skipped: ${r.error}`);}});
   await workspaces.recoverMigrations();
   await quarantineInterruptedMigrations({directory:path.join(state, 'migrations'),config,host:workspaces});
   // Host restart loses in-memory leases. Quarantine member processes before

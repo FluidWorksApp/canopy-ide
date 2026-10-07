@@ -8,7 +8,7 @@ vi.mock('../executionMode',()=>({canSwitchExecutionMode:mocks.canSwitch,setExecu
 vi.mock('../links',()=>({openInOsBrowser:vi.fn()}));
 vi.mock('./workspace',()=>({activeWorkspace:()=>null}));
 vi.mock('./client',()=>({RemoteExecutionClient:class{workspace=mocks.open;}}));
-import {ManagedWorkspaces} from './ManagedWorkspaces';
+import {ManagedWorkspaces,workspaceStartupProblem} from './ManagedWorkspaces';
 import {resetWorkspaceLifecycle} from './workspaceLifecycle';
 afterEach(()=>{cleanup();resetWorkspaceLifecycle();vi.useRealTimers();vi.clearAllMocks();});
 function setup(){vi.useFakeTimers();mocks.canSwitch.mockReturnValue(true);let state='stopped';const w=()=>({id:'ws-test',name:'My workspace',provider:'lightsail',state,cpu_max:2,memory_max_mib:8192,operation:{phase:'preparing-workspace'}});mocks.invoke.mockImplementation(async(command,args)=>{if(command!=='canopy_account_request')return;if(args.route==='/api/workspaces')return {workspaces:[w()]};if(args.body.action==='resume'){state='starting';return {};}if(args.body.action==='connect')return {connection:{workspaceId:'ws-test',workspaceName:'My workspace',endpoint:'https://ws-test.workspaces.canopyide.dev',token:'synthetic'}};return {};});return {ready:()=>{state='ready';}};}
@@ -124,4 +124,11 @@ it('checks every second once the host is starting its services, and connects wit
  const later=advances();await act(async()=>{await vi.advanceTimersByTimeAsync(1000);});expect(advances()).toBe(later+1);
  state='ready';await act(async()=>{await vi.advanceTimersByTimeAsync(1000);});
  expect(mocks.open).toHaveBeenCalledWith('ws-test','/open',{resume:true});expect(mocks.switchMode).toHaveBeenCalledWith('remote');
+});
+
+it('shows the specific disk-full startup failure instead of a generic image-stage message',()=>{
+ const message='Workspace disk is full: 3.2 GB free, 17.2 GB needed for the workspace image. Old workspace images were already removed and your saved files are retained. The workspace disk needs more space before it can start; contact support.';
+ const w={id:'ws-test',name:'My workspace',state:'error',memory_max_mib:8192,cpu_max:2,operation:{phase:'preparing-workspace',status:'failed',last_error:message,bootstrap_report:{stage:'image',status:'failed',reason:'disk-full' as const,freeGB:3.2,neededGB:17.2}}};
+ expect(workspaceStartupProblem(w)).toBe(message);
+ expect(workspaceStartupProblem({...w,operation:{...w.operation,last_error:'Workspace startup failed during image. Saved files are retained.'}})).toBe('Preparing the workspace image failed. Your saved files are retained. Retry preparation, or stop the workspace to keep compute off.');
 });
