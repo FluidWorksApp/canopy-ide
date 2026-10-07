@@ -90,7 +90,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
           REVISION: ${{ github.sha }}
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/canopy-workspace"
+          image="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/canopy-workspace"
           docker tag canopy-workspace:0.1.0 "$image:sha-$REVISION-$ARCH"
           docker push "$image:sha-$REVISION-$ARCH"
 
@@ -110,19 +110,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Assemble release and promote only after both platforms pass
+      - name: Assemble immutable release after both platforms pass
         env:
           REVISION: ${{ github.sha }}
-          PROMOTE: ${{ github.event_name == 'push' || inputs.promote }}
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/canopy-workspace"
-          tags=(--tag "$image:sha-$REVISION")
-          if [[ "$PROMOTE" == true && "$GITHUB_REF" == refs/heads/main ]]; then
-            tags+=(--tag "$image:stable")
-          fi
-          docker buildx imagetools create "${tags[@]}" "$image:sha-$REVISION-amd64" "$image:sha-$REVISION-arm64"
+          image="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/canopy-workspace"
+          docker buildx imagetools create --tag "$image:sha-$REVISION" "$image:sha-$REVISION-amd64" "$image:sha-$REVISION-arm64"
           docker buildx imagetools inspect "$image:sha-$REVISION" --format '{{json .Manifest}}' > image-manifest.json
-          IMAGE="$image" node --input-type=module -e 'import fs from "node:fs";import {runtimeReleaseKey} from "./packages/remote-host/runtime-release-key.mjs";const m=JSON.parse(fs.readFileSync("image-manifest.json"));if(!/^sha256:[a-f0-9]{64}$/.test(m.digest))throw Error("Missing image digest");fs.writeFileSync("workspace-release.json",JSON.stringify({revision:process.env.REVISION,runtimeKey:runtimeReleaseKey(process.env.REVISION),image:process.env.IMAGE+"@"+m.digest,channel:process.env.IMAGE+":stable",platforms:["linux/amd64","linux/arm64"]},null,2));'
+          IMAGE="$image" node --input-type=module -e 'import fs from "node:fs";import {createHash} from "node:crypto";import {runtimeReleaseKey} from "./packages/remote-host/runtime-release-key.mjs";const m=JSON.parse(fs.readFileSync("image-manifest.json"));if(!/^sha256:[a-f0-9]{64}$/.test(m.digest))throw Error("Missing image digest");fs.writeFileSync("workspace-release.json",JSON.stringify({revision:process.env.REVISION,runtimeLockSha256:createHash("sha256").update(fs.readFileSync("packages/remote-host/package-lock.json")).digest("hex"),checks:{linuxAmd64:true,linuxArm64:true},runtimeKey:runtimeReleaseKey(process.env.REVISION),image:process.env.IMAGE+"@"+m.digest,channel:process.env.IMAGE+":stable",platforms:["linux/amd64","linux/arm64"]},null,2));'
           cat workspace-release.json >> "$GITHUB_STEP_SUMMARY"
       - name: Package matching trusted host runtime
         run: |
@@ -137,3 +132,13 @@ jobs:
             workspace-host.tar.gz
             workspace-host.tar.gz.sha256
           retention-days: 90
+          if-no-files-found: error
+      - name: Promote stable only after host validation and artifact upload succeed
+        env:
+          PROMOTE: ${{ github.event_name == 'push' || inputs.promote }}
+        run: |
+          if [[ "$PROMOTE" == true && "$GITHUB_REF" == refs/heads/main ]]; then
+            image="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/canopy-workspace"
+            release=$(IMAGE="$image" node --input-type=module -e 'import fs from "node:fs";const m=JSON.parse(fs.readFileSync("workspace-release.json"));if(!m.image?.startsWith(process.env.IMAGE+"@sha256:")||!/^sha256:[a-f0-9]{64}$/.test(m.image.split("@")[1]))throw Error("Missing verified release digest");process.stdout.write(m.image);')
+            docker buildx imagetools create --tag "$image:stable" "$release"
+          fi

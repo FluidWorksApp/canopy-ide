@@ -1,13 +1,15 @@
 const bundles=['medium_3_0','large_3_0','xlarge_3_0','2xlarge_3_0'];
 const fail=()=>{throw Error('Prebuilt management snapshot is not verified for this location and package');};
-export function selectHostSnapshot(value,region,bundle,expectedRuntimeSha256){
+export function selectHostSnapshot(value,region,bundle,expectedRuntimeSha256,expectedLockSha256){
  if(!value)return null;
  let catalog;try{catalog=typeof value==='string'?JSON.parse(value):value;}catch{fail();}
  if(!catalog||catalog.version!==1||!Array.isArray(catalog.entries)||catalog.entries.length>16)fail();
  const candidates=catalog.entries.filter(entry=>entry?.region===region);if(!candidates.length)return null;if(candidates.length!==1)fail();
  const record=candidates[0];
  if(!/^22\.\d+\.\d+$/.test(record.nodeVersion??'')||!/^\d[\w.+:~-]*$/.test(record.dockerVersion??'')||!/^\d[\w.+:~-]*$/.test(record.caddyVersion??'')||record.architecture!=='amd64'||record.sourceBundle!=='medium_3_0'||!Array.isArray(record.targetBundles)||!record.targetBundles.includes(bundle)||record.targetBundles.some(id=>!bundles.includes(id))||!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(record.snapshotName??'')||!/^arn:aws:lightsail:[a-z0-9-]+:\d{12}:InstanceSnapshot\/[A-Za-z0-9-]+$/.test(record.snapshotArn??'')||record.snapshotArn.split(':')[3]!==region||!/^[a-f0-9]{40}$/.test(record.revision??'')||!/^[a-f0-9]{64}$/.test(record.runtimeSha256??'')||!/^[a-f0-9]{64}$/.test(record.lockSha256??'')||!Number.isFinite(Date.parse(record.verifiedAt))||!record.proof||['docker','http','sanitized','bootFenced'].some(key=>record.proof[key]!==true))fail();
- if(expectedRuntimeSha256!==undefined&&record.runtimeSha256!==expectedRuntimeSha256)fail();
+ if(expectedRuntimeSha256!==undefined&&(typeof expectedRuntimeSha256!=='string'||!/^[a-f0-9]{64}$/.test(expectedRuntimeSha256)))fail();
+ if(expectedLockSha256!==undefined&&(typeof expectedLockSha256!=='string'||!/^[a-f0-9]{64}$/.test(expectedLockSha256)||record.lockSha256!==expectedLockSha256))fail();
+ if(expectedRuntimeSha256!==undefined&&record.runtimeSha256!==expectedRuntimeSha256&&(expectedLockSha256===undefined||record.lockSha256!==expectedLockSha256))fail();
  return record;
 }
 // Debian package versions may contain '~', which Lightsail tags reject.

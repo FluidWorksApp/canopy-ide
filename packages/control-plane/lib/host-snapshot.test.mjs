@@ -15,3 +15,4 @@ test('Ubuntu tilde versions produce legal tags while exact catalog versions and 
  assert.throws(()=>verifyHostSnapshot({...pinned,dockerVersion:pinned.dockerVersion.replace('~','-')},provider));
  provider.tags=tags.map(t=>t.key==='canopy-docker-version'?{...t,value:t.value+'tampered'}:t);assert.throws(()=>verifyHostSnapshot(pinned,provider));
 });
+test('active code updates reuse only the declared matching base dependency lock',()=>{const catalog={version:1,entries:[record]},next='f'.repeat(64);assert.equal(selectHostSnapshot(catalog,record.region,'medium_3_0',next,record.lockSha256),record);for(const lock of [undefined,'e'.repeat(64),'bad'])assert.throws(()=>selectHostSnapshot(catalog,record.region,'medium_3_0',next,lock));const changed=snapshot();changed.tags=changed.tags.map(tag=>tag.key==='canopy-runtime-sha256'?{...tag,value:next}:tag);assert.throws(()=>verifyHostSnapshot(record,changed));});
