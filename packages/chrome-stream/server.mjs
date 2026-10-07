@@ -3,10 +3,16 @@ import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { connectChrome, pageSession, WebSocketServer } from './playwright.mjs';
-import { FRAME_POLL_MS, FrameGate, refreshBackoff, shouldRefreshStream, viewportSize, websiteUrl } from './protocol.mjs';
+import { connectChrome, connectWorkspace, pageSession, WebSocketServer } from './playwright.mjs';
+import { FRAME_POLL_MS, FrameGate, ScreencastLifecycle, refreshBackoff, shouldRefreshStream, viewportSize, websiteUrl } from './protocol.mjs';
 
-export async function startBridge(config, connectBrowser = connectChrome) {
+export async function waitForPicker(page,timeoutMs=10000){
+  const deadline=Date.now()+timeoutMs;
+  await page.waitForLoadState('domcontentloaded',{timeout:timeoutMs});
+  await page.waitForFunction(() => !!window.__canopyBrowser,undefined,{timeout:Math.max(1,deadline-Date.now())});
+}
+
+export async function startBridge(config, connectBrowser = config.workspace?()=>connectWorkspace(config.profileDirectory):connectChrome) {
   const lines = createInterface({ input: process.stdin });
   const initialUrl = websiteUrl(config.url);
   const picker = await readFile(new URL('./preview_picker.js', import.meta.url), 'utf8');
@@ -42,7 +48,7 @@ export async function startBridge(config, connectBrowser = connectChrome) {
   const tabs = () => send({ type: 'tabs', active: active?.id, tabs: [...pages.values()].map(p => ({ id: p.id, url: p.page.url() })) });
 
   async function select(entry) {
-    if (active?.session) await active.session.send('Page.stopScreencast').catch(() => {});
+    if (active?.frames) await active.frames.stop().catch(() => {});
     active = entry;
     gate.reset();
     tabs();
@@ -53,12 +59,7 @@ export async function startBridge(config, connectBrowser = connectChrome) {
   }
 
   async function startFrames(entry) {
-    // Chrome throttles a tab it considers backgrounded: frozen timers, and a
-    // renderer that may stop painting. Neither is wanted while its pixels are
-    // the preview, and both are best-effort — an older Chrome simply refuses.
-    await entry.session.send('Page.setWebLifecycleState', { state: 'active' }).catch(() => {});
-    await entry.session.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => {});
-    await entry.session.send('Page.startScreencast', { format: 'jpeg', quality: 75, maxWidth: 1920, maxHeight: 1200, everyNthFrame: 1 });
+    await entry.frames.start();
   }
 
   /** Chrome delivers screencast frames only while it is compositing the tab,
@@ -76,9 +77,7 @@ export async function startBridge(config, connectBrowser = connectChrome) {
     refreshDelay = refreshBackoff(refreshDelay);
     nextRefreshAt = Date.now() + refreshDelay;
     try {
-      await entry.session.send('Page.stopScreencast');
-      if (entry !== active || !visible) return;
-      await startFrames(entry);
+      await entry.frames.restart();
     } catch {
       // A restart races navigation and tab closure; the next tick retries.
     } finally {
@@ -91,7 +90,8 @@ export async function startBridge(config, connectBrowser = connectChrome) {
   async function attach(page) {
     ownedPages.add(page);
     if (closing || page.isClosed()) return;
-    const entry = { id: ++serial, page, session: pageSession(page) };
+    const entry = { id: ++serial, page, session: config.workspace?await page.context().newCDPSession(page):pageSession(page) };
+    entry.frames = new ScreencastLifecycle(entry.session, () => entry === active && visible && !closing && viewer?.readyState === 1);
     pages.set(entry.id, entry);
     page.setDefaultTimeout(10_000);
     page.setDefaultNavigationTimeout(30_000);
@@ -141,7 +141,7 @@ export async function startBridge(config, connectBrowser = connectChrome) {
 
   async function connect() {
     if (connecting || (browser && active)) return;
-    status('Approve the Playwright connection in Chrome. Canopy will open a new project tab.');
+    status(config.workspace?'Opening your workspace browser…':'Approve the Playwright connection in Chrome. Canopy will open a new project tab.');
     connecting = (async () => {
       if (!browser) {
         browser = await connectBrowser();
@@ -176,7 +176,7 @@ export async function startBridge(config, connectBrowser = connectChrome) {
     if (message.type === 'visible') {
       visible = !!message.visible;
       gate.reset();
-      if (active) await (visible ? startFrames(active) : active.session.send('Page.stopScreencast'));
+      if (active) await (visible ? startFrames(active) : active.frames.stop());
       return;
     }
     if (message.type === 'resize') {
@@ -240,6 +240,7 @@ export async function startBridge(config, connectBrowser = connectChrome) {
       const image = await page.screenshot({ type: 'png' });
       send({ canopy: 'capture-result', id: message.id, image: image.toString('base64'), width: size.width, height: size.height });
     } else if (['mode', 'sync', 'region', 'agent'].includes(message.canopy)) {
+      await waitForPicker(page);
       await page.evaluate(d => {
         if (!window.__canopyBrowser) throw new Error('The page is still loading.');
         window.__canopyBrowser.cmd(d);
@@ -291,7 +292,7 @@ export async function startBridge(config, connectBrowser = connectChrome) {
     ws.on('close', () => {
       if (viewer !== ws) return;
       visible = false;
-      if (active) void active.session.send('Page.stopScreencast').catch(() => {});
+      if (active) void active.frames.stop().catch(() => {});
       idleTimer = setTimeout(() => void shutdown(), 15_000);
     });
     if (browser && active) {

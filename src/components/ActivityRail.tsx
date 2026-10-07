@@ -1,6 +1,5 @@
 import { memo } from "react";
 import {
-  AgentsIcon,
   FilesIcon,
   GitBranchIcon,
   GlobeIcon,
@@ -9,23 +8,18 @@ import {
   PlugIcon,
   PullRequestIcon,
   ResearchIcon,
-  ServersIcon,
   SettingsIcon,
-  SidebarIcon,
   TasksIcon,
   TeamIcon,
 } from "./icons";
 import {
-  PixelAgentsIcon,
   PixelFilesIcon,
   PixelGitIcon,
   PixelIntegrationsIcon,
   PixelIssuesIcon,
   PixelNotesIcon,
-  PixelPanelIcon,
   PixelResearchIcon,
   PixelReviewsIcon,
-  PixelRunsIcon,
   PixelSettingsIcon,
   PixelTasksIcon,
   PixelTeamIcon,
@@ -69,13 +63,7 @@ const RAIL_GROUPS: { id: string; name: string; tabs: RailTab[] }[] = [
         key: "files",
         Icon: FilesIcon,
         Pixel: PixelFilesIcon,
-        title: "Components & files",
-      },
-      {
-        key: "servers",
-        Icon: ServersIcon,
-        Pixel: PixelRunsIcon,
-        title: "Servers — every component you can run, start and manage",
+        title: "Components, files & servers",
       },
       {
         key: "integrations",
@@ -111,17 +99,11 @@ const RAIL_GROUPS: { id: string; name: string; tabs: RailTab[] }[] = [
   },
   {
     id: "agents",
-    name: "Agents",
+    name: "Work",
     tabs: [
       // Agents leads its own group: it is the one the group is named for and
       // the one that carries the pending badge, so it should be the icon the
       // eye lands on when it crosses the boundary.
-      {
-        key: "agents",
-        Icon: AgentsIcon,
-        Pixel: PixelAgentsIcon,
-        title: "Agents",
-      },
       {
         key: "tasks",
         Icon: TasksIcon,
@@ -200,6 +182,7 @@ interface ActivityRailProps {
   onHoverLeave: (prompt?: boolean) => void;
   onOpenSettings: () => void;
   onToggleSidebar: () => void;
+  onOpenAccount?: () => void;
 }
 
 function ActivityRailImpl({
@@ -220,16 +203,17 @@ function ActivityRailImpl({
   onHoverCancel,
   onHoverLeave,
   onOpenSettings,
-  onToggleSidebar,
+  onOpenAccount,
 }: ActivityRailProps) {
   // Asked once for the whole rail, not once per button: it is one question
   // about the window, and the answer is the same for every icon in it.
   const pixel = usePixelSkin();
+  const selectedTab = sideTab === "servers" ? "files" : sideTab;
   const tabButton = (t: RailTab, groupName?: string) => (
     <button
       key={t.key}
-      className={`rail-btn ${open && sideTab === t.key ? "rail-btn-active" : ""} ${
-        pinned && sideTab === t.key ? "rail-btn-pinned" : ""
+      className={`rail-btn ${open && selectedTab === t.key ? "rail-btn-active" : ""} ${
+        pinned && selectedTab === t.key ? "rail-btn-pinned" : ""
       }`}
       /* No `title` while hover-to-peek is on: the same gesture slides the
          panel out, and the tooltip would land on top of the thing it was
@@ -253,7 +237,7 @@ function ActivityRailImpl({
       {t.key === "git" && changeBadge > 0 && (
         <span className="rail-badge">{Math.min(changeBadge, 99)}</span>
       )}
-      {t.key === "servers" && serversBadge > 0 && (
+      {t.key === "files" && serversBadge > 0 && (
         <span className="rail-badge rail-badge-live">
           {Math.min(serversBadge, 99)}
         </span>
@@ -331,21 +315,12 @@ function ActivityRailImpl({
         {pixel ? <PixelSettingsIcon size={22} /> : <SettingsIcon size={22} />}
       </button>
       <button
-        className={`rail-btn ${pinned ? "rail-btn-pinned" : ""}`}
-        title={pinned ? "Unpin sidebar (Cmd+B)" : "Pin sidebar open (Cmd+B)"}
-        onClick={onToggleSidebar}
+        className="rail-btn"
+        title="Account & balance"
+        onClick={onOpenAccount ?? (() => window.dispatchEvent(new CustomEvent("canopy:open-settings", { detail: { tab: "account" } })))}
         onMouseEnter={() => onHoverLeave(true)}
       >
-        {/* The twin has no collapsed variant: SidebarIcon points its chevron
-            the way the panel is about to move, and a two-pixel arrowhead on
-            this grid is a smudge. The pinned marker beside it already says
-            which way it goes, and it is the only icon here whose state was
-            ever in the glyph. */}
-        {pixel ? (
-          <PixelPanelIcon size={22} />
-        ) : (
-          <SidebarIcon size={22} collapsed={!pinned} />
-        )}
+        {pixel ? <svg width="22" height="22" viewBox="0 0 8 8" fill="currentColor" aria-hidden="true"><path d="M3 0h2v1h1v3H5v1H3V4H2V1h1zM2 5h4v1h1v2H6V7H2v1H1V6h1z"/></svg> : <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><circle cx="12" cy="7" r="4"/><path d="M4 22v-3a8 8 0 0 1 16 0v3"/></svg>}
       </button>
     </div>
   );

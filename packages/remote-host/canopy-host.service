@@ -1,0 +1,26 @@
+[Unit]
+Description=Canopy shared execution host
+After=network-online.target docker.service canopy-network.service
+Requires=docker.service canopy-network.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=canopy-host
+SupplementaryGroups=docker
+WorkingDirectory=/opt/canopy-host
+Environment=CANOPY_HOST_CONFIG=/etc/canopy-host/host.json
+Environment=CANOPY_HOST_STATE=/var/lib/canopy-host
+ExecStart=/usr/bin/node /opt/canopy-host/gateway.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+MemoryMax=512M
+TasksMax=128
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/canopy-host
+
+[Install]
+WantedBy=multi-user.target

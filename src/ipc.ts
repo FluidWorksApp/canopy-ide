@@ -1,6 +1,7 @@
 // Typed feature API shared by IDE clients. Host adapters carry commands,
 // events and channels; native work (PTYs, LSP, files) remains in the Rust core.
 import { createChannel, invoke } from "./host";
+import { startRendererHeartbeat } from "./rendererHeartbeat";
 import { isRemoteHost, listen as hostListen, type UnlistenFn } from "./host";
 import type { HostEvent } from "./host/contract";
 import type { ShortcutProfile } from "./shortcuts";
@@ -70,8 +71,8 @@ const releaseRendererListeners = () => {
 
 // ---------- App shell ----------
 
-export const chromeStreamOpen = (sessionId: string, url: string) =>
-  invoke<string>("chrome_stream_open", { sessionId, url });
+export const chromeStreamOpen = (sessionId: string, url: string, profileId?:string) =>
+  invoke<string>("chrome_stream_open", { sessionId, url, profileId });
 export const chromeStreamClose = (sessionId: string) =>
   invoke<void>("chrome_stream_close", { sessionId });
 
@@ -170,6 +171,9 @@ export interface RendererRegistration {
 }
 
 export interface PtyChunk {
+  reset?: boolean;
+  cols?: number;
+  rows?: number;
   bytes: Uint8Array;
   /** Absolute byte range in the native session output stream. */
   start: number;
@@ -183,6 +187,10 @@ export const decodePtyChunk = (payload: ArrayBuffer | number[]): PtyChunk => {
   const framed = payload instanceof ArrayBuffer
     ? new Uint8Array(payload)
     : Uint8Array.from(payload);
+  if(framed.length>=32 && framed[0]===0x43 && framed[1]===0x50 && framed[2]===0x54 && framed[3]===0x32){
+    const view=new DataView(framed.buffer,framed.byteOffset,framed.byteLength);
+    return {bytes:framed.subarray(32),start:Number(view.getBigUint64(8,true)),end:Number(view.getBigUint64(16,true)),gap:(framed[4]&1)!==0,reset:(framed[4]&2)!==0,cols:view.getUint16(6,true),rows:view.getUint16(24,true)};
+  }
   if (
     framed.length < PTY_HEADER ||
     framed[0] !== 0x43 || framed[1] !== 0x50 ||
@@ -402,7 +410,7 @@ export async function ptyAttachDesktop(
     rendererGeneration: rendererGenerationAtAttach,
     after,
   });
-  type DesktopRead = { start: number; gap: boolean; bytes: number[] };
+  type DesktopRead = { start:number;end?:number;gap:boolean;bytes:number[];reset?:boolean;cols?:number;rows?:number };
   const pull = async (): Promise<void> => {
     try {
       const chunk = await invoke<DesktopRead | null>("pty_read_desktop", {
@@ -415,8 +423,8 @@ export async function ptyAttachDesktop(
         onData({
           bytes,
           start: chunk.start,
-          end: chunk.start + bytes.length,
-          gap: chunk.gap,
+          end: chunk.end ?? chunk.start + bytes.length,
+          gap: chunk.gap,reset:chunk.reset,cols:chunk.cols,rows:chunk.rows,
         });
       }
       // One in-flight renderer-owned read per attachment. A destroyed page
@@ -1272,6 +1280,14 @@ export const fsReadDir = (path: string) =>
       () => invoke<DirEntry[]>("fs_read_dir", { path }),
     ),
   );
+export interface RemoteUploadProgress {
+  id:string; destination:string; name:string; bytes:number; totalBytes:number;
+  files:number; totalFiles:number; skipped:number; cancelled:boolean;
+}
+export const remoteUpload=(destination:string,kind:'files'|'folder',id:string)=>invoke<RemoteUploadProgress>('execution_remote_upload',{destination,kind,id});
+export const remoteUploadCancel=(id:string)=>invoke<void>('execution_remote_upload_cancel',{id});
+export const onRemoteUploadProgress=(cb:(progress:RemoteUploadProgress)=>void)=>listen<RemoteUploadProgress>('remote:upload-progress',event=>cb(event.payload));
+
 export const fsWriteFile = (path: string, content: string) =>
   invoke<void>("fs_write_file", { path, content });
 export const fsStat = (path: string) =>
@@ -2648,13 +2664,19 @@ const pollResourceStats = async () => {
   }
   if (appStatsSubscribers.size > 0) {
     try {
-      const stats = await invoke<AppStats | null>("app_stats");
+      const stats = isRemoteHost()
+        ? await invoke<WorkspaceResourceStats>("workspace_metrics").then(workspaceAppStats)
+        : await invoke<AppStats | null>("app_stats");
       if (stats) {
         latestAppStats = stats;
         for (const subscriber of [...appStatsSubscribers]) subscriber(stats);
       }
     } catch {
-      // A replacement renderer invalidates this page's generation and heap.
+      if (isRemoteHost()) {
+        const unavailable = workspaceAppStats(null);
+        latestAppStats = unavailable;
+        for (const subscriber of [...appStatsSubscribers]) subscriber(unavailable);
+      }
     }
   }
   if (resourceStatsPolling) {
@@ -2864,12 +2886,46 @@ export interface AppStats {
   /** False when the OS hosts WebView helpers outside Canopy's process tree.
    *  The native total is then a lower bound, not whole-app usage. */
   includes_webviews: boolean;
+  /** Remote totals cover the workspace container, rather than the local app. */
+  workspace?: { available: boolean; memoryLimitBytes: number | null; cpus: number | null; elasticMemory?: ElasticWorkspaceMemory | null; elasticCpu?: ElasticWorkspaceCpu | null };
+}
+
+export interface ElasticWorkspaceCpu {
+  minCpus: number;
+  maxCpus: number;
+  currentCpus: number | null;
+  availableMaxCpus: number;
+  status: ElasticWorkspaceMemory['status'];
+  sampledAt: number;
+}
+
+export interface ElasticWorkspaceMemory {
+  minMiB: number;
+  maxMiB: number;
+  currentMiB: number | null;
+  availableMaxMiB: number;
+  status: 'steady' | 'growing' | 'shrinking' | 'maximum' | 'host_capacity' | 'update_failed' | 'fixed';
+  sampledAt: number;
+}
+
+interface WorkspaceResourceStats {
+  cpuPercent: number | null;
+  memoryBytes: number;
+  memoryLimitBytes: number | null;
+  cpus: number | null;
+  elasticMemory?: ElasticWorkspaceMemory | null;
+  elasticCpu?: ElasticWorkspaceCpu | null;
+}
+
+function workspaceAppStats(sample: WorkspaceResourceStats | null): AppStats {
+  return { cpu: sample?.cpuPercent ?? NaN, mem_bytes: sample?.memoryBytes ?? NaN,
+    procs: 0, includes_webviews: true,
+    workspace: { available: sample !== null, memoryLimitBytes: sample?.memoryLimitBytes ?? null, cpus: sample?.cpus ?? null, elasticMemory: sample?.elasticMemory ?? null, elasticCpu: sample?.elasticCpu ?? null } };
 }
 
 /** Native process-tree footprint, sampled every 2s. `includes_webviews` says
  * whether that tree is also a whole-app footprint on the current platform. */
 export const onAppStats = (cb: (stats: AppStats) => void): Promise<UnlistenFn> => {
-  if (isRemoteHost()) return listen<AppStats>("app:stats", (event) => cb(event.payload));
   appStatsSubscribers.add(cb);
   if (latestAppStats) cb(latestAppStats);
   ensureResourceStatsPolling();
@@ -2898,11 +2954,8 @@ export const watchdogAck = () =>
 /** Install liveness before Monaco/React startup can delay the App effect.
  *  The renderer drives acknowledgements so native recovery never has to
  *  evaluate a ping event into the WebView it may be about to replace. */
-export const installEarlyWatchdogHeartbeat = async (): Promise<UnlistenFn> => {
-  await watchdogAck();
-  const timer = window.setInterval(() => void watchdogAck(), 3_000);
-  return () => window.clearInterval(timer);
-};
+export const installEarlyWatchdogHeartbeat = async (): Promise<UnlistenFn> =>
+  startRendererHeartbeat(watchdogAck);
 
 export interface RecoveryIncident {
   at_ms: number;
@@ -4714,3 +4767,26 @@ export const companionStatus = () =>
   invoke<CompanionStatus>("companion_status").catch(
     (): CompanionStatus => ({ running: false, generation: 0 }),
   );
+
+
+export interface GitCloneProgress {id:string;state:string;stage:string;percent:number|null;path:string;name:string;parent:string;url:string;elapsedSeconds:number;error:string|null}
+export const onGitCloneProgress=(cb:(progress:GitCloneProgress)=>void)=>listen<GitCloneProgress>('git:clone-progress',event=>cb(event.payload));
+export const gitCloneCancel=(id:string)=>invoke('git_clone_cancel',{id});
+
+/** Make a selected conversation available to another own CLI account. */
+export const profilePrepareSession = (agent: string, sessionId: string, sourceProfile: string, targetProfile: string) => invoke<void>("profile_prepare_session", { agent, sessionId, sourceProfile, targetProfile });
+
+export const clipboardImagePng = () => invoke<string | null>("clipboard_image_png");
+
+/** Account transfer must wait for transcript writers to exit before copying. */
+export async function ptyStopAndWait(id: number): Promise<void> {
+  await invoke<void>("pty_kill", { id });
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    if (!(await ptyStats()).some(session => session.id === id)) return;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error("Agent has not stopped yet. Its conversation was not transferred.");
+}
+
+export const chromeStreamTicket = (sessionId:string) => invoke<string>('chrome_stream_ticket',{sessionId});

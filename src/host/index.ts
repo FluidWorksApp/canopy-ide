@@ -13,6 +13,7 @@ export function installHost(connection: Host): () => void {
   };
 }
 
+export const isReadOnlyHost = () => host.readOnly===true;
 export const isRemoteHost = () => host.kind === "socket";
 export const invoke = <T>(command: string, args?: Record<string, unknown>): Promise<T> =>
   args === undefined ? host.invoke<T>(command) : host.invoke<T>(command, args);

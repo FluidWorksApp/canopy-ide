@@ -32,6 +32,27 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run test
+      - run: node --test scripts/release-assets.test.mjs
+      - name: Install runtime search dependency
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - run: npm run test --workspace @canopy/remote-host
+
+  remote-host-linux:
+    name: Portable Linux host (real PTY · isolation · desktop · LSP)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node packages/remote-host/prepare-hook-build.mjs
+      - run: node packages/remote-host/prepare-browser-build.mjs
+      - run: docker build -t canopy-workspace:0.1.0 packages/remote-host
+      - run: docker run --rm --network none -v "$PWD/packages/remote-host/browser-smoke.mjs:/opt/canopy/browser-smoke.mjs:ro" --entrypoint node canopy-workspace:0.1.0 /opt/canopy/browser-smoke.mjs
+      - run: node packages/remote-host/smoke-linux.mjs
 
   # THIRD-PARTY-NOTICES.md is what discharges the attribution conditions of the
   # MIT/BSD/ISC/Apache dependencies Canopy redistributes, so letting it go stale
@@ -147,4 +168,8 @@ jobs:
 
       - name: Run containment unit contract
         working-directory: src-tauri
+        # Unit-only Windows binaries need Common Controls v6. Keep this
+        # explicit opt-in out of application and sidecar release builds.
+        env:
+          CANOPY_WINDOWS_TEST_MANIFEST: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: cargo test --no-default-features --lib containment::tests

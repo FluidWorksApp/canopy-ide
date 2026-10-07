@@ -842,7 +842,7 @@ terms govern use of the model:
 
 - **foldhash 0.2.0** — Copyright (c) 2024 Orson Peters
 
-## npm packages (237)
+## npm packages (238)
 
 ### MIT — 174
 
@@ -1106,6 +1106,10 @@ terms govern use of the model:
 ### MIT AND Zlib — 1
 
 - **pako 1.0.11** — Copyright (C) 2014-2017 by Vitaly Puzrin and Andrei Tuputcyn
+
+### MPL-2.0 — 1
+
+- **@novnc/novnc 1.7.0** — Copyright Joel Martin (per package manifest; the distributed license file carries no copyright line)
 
 ### Unlicense — 1
 

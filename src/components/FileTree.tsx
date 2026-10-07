@@ -43,11 +43,11 @@ type Props = Omit<
   "fs" | "iconUrl" | "folderIcon"
 >;
 
-export function FileTree(props: Props) {
+export function FileTree({onUpload,...props}: Props & {onUpload?: (directory:string,kind:"files"|"folder")=>Promise<unknown>}) {
   return (
     <SharedFileTree
       {...props}
-      fs={localFs}
+      fs={onUpload ? {...localFs,upload:onUpload} : localFs}
       iconUrl={fileIconUrl}
       folderIcon={folderIcon}
     />

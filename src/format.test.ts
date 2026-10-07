@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fmtTokens } from "./format";
+import { fmtTokens, fixedNumber } from "./format";
 
 describe("fmtTokens", () => {
   it("scales past M into B and T instead of printing five-digit millions", () => {
@@ -27,5 +27,18 @@ describe("fmtTokens", () => {
 
   it("keeps negatives signed rather than formatting the minus into the number", () => {
     expect(fmtTokens(-1_500_000)).toBe("-1.5M");
+  });
+});
+
+describe("numeric IPC formatting", () => {
+  it("renders numbers and numeric strings without crashing", () => {
+    expect(fixedNumber(16.4)).toBe("16");
+    expect(fixedNumber("16.4")).toBe("16");
+    expect(fixedNumber("136.25", 2)).toBe("136.25");
+  });
+  it("shows unknown readings rather than a fabricated zero", () => {
+    for (const value of [null, undefined, "", " ", {}, [], true, "bad", NaN, Infinity]) {
+      expect(fixedNumber(value)).toBe("—");
+    }
   });
 });

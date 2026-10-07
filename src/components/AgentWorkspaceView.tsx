@@ -1,3 +1,4 @@
+import { fixedNumber } from "../format";
 // An agent opened as a tab: everything the session produced, in one place —
 // the branch it works on, its uncommitted changes, the commits it added, and
 // the PR raised from that branch. Same split as BranchView: metadata paints
@@ -41,7 +42,7 @@ import { sizeLimitFor } from "../fileOpen";
 import { type IoBudget, rendererIoBudget } from "../ioBudget";
 
 const fmtCost = (n: number) =>
-  n >= 100 ? `$${n.toFixed(0)}` : `$${n.toFixed(2)}`;
+  n >= 100 ? `$${fixedNumber(n, 0)}` : `$${fixedNumber(n, 2)}`;
 /** Tokens Canopy sent the model — fresh input plus both cache legs. */
 const sentTokens = (u: ipc.AgentSessionUsage) =>
   u.input_tokens + u.cache_read_tokens + u.cache_creation_tokens;

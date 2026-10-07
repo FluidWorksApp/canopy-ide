@@ -10,6 +10,8 @@ for (const file of ['package.json', 'server.mjs', 'protocol.mjs', 'playwright.mj
   await cp(resolve(root, 'packages/chrome-stream', file), resolve(target, file));
 }
 await cp(resolve(root, 'src-tauri/src/preview_picker.js'), resolve(target, 'preview_picker.js'));
+const viewerTarget=resolve(root,'public/chrome-stream');await mkdir(viewerTarget,{recursive:true});
+for(const file of ['viewer.html','viewer.js','protocol.mjs'])await cp(resolve(root,'packages/chrome-stream',file),resolve(viewerTarget,file));
 await rm(resolve(target, 'node_modules/playwright-core'), { recursive: true, force: true });
 await cp(dirname(require.resolve('playwright-core/package.json')), resolve(target, 'node_modules/playwright-core'), { recursive: true });
 console.log('Chrome streaming bridge staged.');

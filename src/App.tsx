@@ -1,3 +1,9 @@
+import {hibernateWorkspaceProjects,type HibernateProgressListener} from './remoteExecution/hibernateWorkspace';
+import {activeWorkspace} from './remoteExecution/workspace';
+import {startBackgroundTeams} from "./teamMessaging/background";
+import {ensureProjectWorkspace,ProjectWorkspaceProgress} from "./remoteExecution/projectWorkspace";
+import {stopIdleProjectWorkspace} from "./remoteExecution/projectIdle";
+import {selectAllFocused} from './selectAll';
 // Shell: project tabs on top; each open project is a fully mounted (hidden
 // when inactive) ProjectView so its terminals keep running across switches.
 import {
@@ -250,6 +256,7 @@ function publishScopes(state: WorkspaceState) {
 }
 
 export default function App() {
+  useEffect(() => startBackgroundTeams(), []);
   const [ws, setWs] = useState<WorkspaceState>(emptyWorkspace);
   const [loaded, setLoaded] = useState(false);
   const [workspaceLoadError, setWorkspaceLoadError] = useState<string | null>(null);
@@ -1159,7 +1166,9 @@ export default function App() {
       // visible ProjectView handles tab-level ones; close-project is ours.
       import("./host").then(({ listen }) =>
         listen<string>("menu", (e) => {
-          if (e.payload === "close-project") {
+          if (e.payload === "select-all") {
+            selectAllFocused();
+          } else if (e.payload === "close-project") {
             const active = wsRef.current.activeId;
             if (active) void closeProjectRef.current(active);
           } else if (
@@ -1609,6 +1618,7 @@ export default function App() {
     async (id: string) => {
       const project = wsRef.current.projects.find((p) => p.id === id);
       if (!project) return;
+      try{await ensureProjectWorkspace();}catch(error){notify(String(error),"error");return;}
       if (!wsRef.current.openIds.includes(id)) {
         // Nothing to watch while it sleeps: opening a hibernating project lands
         // on the wake screen, and waking is what registers its paths.
@@ -1632,7 +1642,8 @@ export default function App() {
    *  Shared by closing a project and by putting one to sleep, which differ only
    *  in whether the tab goes with it. A sleeping project is not counted as a
    *  user of its paths: it registered none. */
-  const releaseProject = useCallback(async (id: string, keepIds: string[]) => {
+  const releaseProject = useCallback(async (id: string, keepIds: string[], cancelled:()=>boolean=()=>false) => {
+    const targetWorkspace=activeWorkspace();
     const state = wsRef.current;
     const project = state.projects.find((p) => p.id === id);
     const stillUsed = new Set(
@@ -1644,8 +1655,10 @@ export default function App() {
       ),
     );
     for (const c of project?.components ?? []) {
+      if(cancelled()||activeWorkspace()!==targetWorkspace)return;
       if (!stillUsed.has(c.path)) {
         await ipc.workspaceRemove(c.path).catch(() => {});
+        if(cancelled()||activeWorkspace()!==targetWorkspace)return;
         await stopWorkspaceServers(c.path);
       }
     }
@@ -1653,6 +1666,16 @@ export default function App() {
   const releaseProjectRef = useRef(releaseProject);
   releaseProjectRef.current = releaseProject;
 
+  const workspaceHibernationBatch = useRef(false);
+  const workspaceHibernationEpoch = useRef(0);
+  const stopIfNoProjects = useCallback(() => {
+    if(workspaceHibernationBatch.current)return;
+    const epoch=workspaceHibernationEpoch.current;
+    void stopIdleProjectWorkspace(
+      () => epoch===workspaceHibernationEpoch.current && !workspaceHibernationBatch.current && wsRef.current.openIds.every(id => isHibernating(id)),
+      message => notify(message, "info"),
+    );
+  }, [notify]);
   const closeProject = useCallback(
     async (id: string) => {
       const state = wsRef.current;
@@ -1668,8 +1691,9 @@ export default function App() {
             ? (openIds[openIds.length - 1] ?? null)
             : state.activeId,
       });
+      if(openIds.every(id=>isHibernating(id)))stopIfNoProjects();
     },
-    [update, releaseProject],
+    [update, releaseProject, stopIfNoProjects],
   );
   closeProjectRef.current = closeProject;
   openProjectRef.current = openProject;
@@ -1747,7 +1771,7 @@ export default function App() {
           void releaseProjectRef.current(
             id,
             wsRef.current.openIds.filter((x) => x !== id && !isHibernating(x)),
-          );
+          ).then(()=>stopIfNoProjects());
           notify(
             `${project.name} is hibernating — its tab is still there, wake it when you need it.`,
             "success",
@@ -1774,13 +1798,44 @@ export default function App() {
         new CustomEvent(HIBERNATE_EVENT, { detail: { projectId: id } }),
       );
     },
-    [notify, update],
+    [notify, update, stopIfNoProjects],
   );
+
+  const hibernateWorkspace = useCallback(async (onProgress?:HibernateProgressListener) => {
+    if(workspaceHibernationBatch.current)throw Error("Workspace hibernation is already running.");
+    workspaceHibernationBatch.current=true;
+    workspaceHibernationEpoch.current++;
+    const batchEpoch=workspaceHibernationEpoch.current;
+    try {
+    const ids = [...wsRef.current.openIds];
+    await hibernateWorkspaceProjects(ids, id => {
+      if (isHibernating(id)) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        const listener = (event: Event) => {
+          const detail = (event as CustomEvent).detail;
+          if (detail?.projectId !== id) return;
+          window.clearTimeout(timer);
+          window.removeEventListener(HIBERNATED_EVENT, listener);
+          if (detail.ok && isHibernating(id)) resolve();
+          else reject(new Error(`Could not save the project snapshot. Review the project and workspace status.`));
+        };
+        const timer = window.setTimeout(() => {
+          window.removeEventListener(HIBERNATED_EVENT, listener);
+          reject(new Error('Project snapshot timed out. Review the project and workspace status.'));
+        }, 5000);
+        window.addEventListener(HIBERNATED_EVENT, listener);
+        window.dispatchEvent(new CustomEvent(HIBERNATE_EVENT, {detail: {projectId: id}}));
+      });
+    }, id => releaseProjectRef.current(id, [],()=>!workspaceHibernationBatch.current||workspaceHibernationEpoch.current!==batchEpoch), () => ids.length===wsRef.current.openIds.length && ids.every(id=>wsRef.current.openIds.includes(id)&&isHibernating(id)),onProgress);
+    notify('Workspace hibernated. Compute is stopped; wake a project to resume it.', 'success');
+    } finally {workspaceHibernationBatch.current=false;}
+  }, [notify]);
 
   /** Hand the snapshot to a freshly mounted ProjectView and let it rebuild
    *  underneath the wake screen. Clearing the store is what mounts the view —
    *  the project stops being asleep the moment its restore begins. */
-  const wakeProject = useCallback((id: string) => {
+  const wakeProject = useCallback(async (id: string) => {
+    try{await ensureProjectWorkspace();}catch(error){notify(String(error),"error");return;}
     const snapshot = hibernationOf(id);
     if (!snapshot) return;
     // Its paths went back when it fell asleep; the tree, the search and the
@@ -2676,12 +2731,22 @@ export default function App() {
 
   const saveProject = useCallback(
     async (project: Project) => {
+      try{await ensureProjectWorkspace();}catch(error){notify(String(error),"error");return;}
       const state = wsRef.current;
       const exists = state.projects.some((p) => p.id === project.id);
       const projects = exists
         ? state.projects.map((p) => (p.id === project.id ? project : p))
         : [...state.projects, project];
+      // A project is not saved until its owning host has durably accepted it.
+      // Keep the editor open on failure instead of dropping cloned components.
+      try {
+        await saveWorkspaceStrict({ ...state, projects });
+      } catch (error) {
+        notify("Project was not saved", "error", { body: String(error) });
+        return;
+      }
       update({ projects });
+      wsRef.current = { ...wsRef.current, projects };
       setDialog(null);
       if (state.openIds.includes(project.id)) {
         // components may have changed; ensure scopes exist
@@ -2694,7 +2759,7 @@ export default function App() {
         await openProject(project.id);
       }
     },
-    [update, openProject],
+    [update, openProject, notify],
   );
 
   saveProjectRef.current = saveProject;
@@ -2747,7 +2812,7 @@ export default function App() {
     collab.current?.stopAll();
     notify("Collaboration ended.");
   }, [notify]);
-  const newProject = useCallback(() => setDialog({ mode: "new" }), []);
+  const newProject = useCallback(async () => {try{await ensureProjectWorkspace();setDialog({mode:"new"});}catch(error){notify(String(error),"error");}}, [notify]);
   const editProject = useCallback(
     (p: Project) => setDialog({ mode: "edit", project: p }),
     [],
@@ -3652,6 +3717,7 @@ export default function App() {
         ))}
         </div>
       )}
+      <ProjectWorkspaceProgress/>
       <TitleBar
         projects={ws.projects}
         openProjects={openProjects}
@@ -3670,12 +3736,14 @@ export default function App() {
         onSelectProject={selectProject}
         onCloseProject={handleCloseProject}
         onHibernateProject={hibernateProject}
+        onHibernateWorkspace={hibernateWorkspace}
         onWakeProject={wakeProject}
         onToggleVibe={toggleVibe}
         onEditProject={editProject}
         onStopCollab={stopCollab}
         onNewProject={newProject}
         onManageProjects={openManager}
+
       />
 
       <div className="app-body">
@@ -3921,7 +3989,7 @@ export default function App() {
       {dialog && (
         <ProjectDialog
           existing={dialog.mode === "edit" ? dialog.project : undefined}
-          onSave={(p) => void saveProject(p)}
+          onSave={saveProject}
           onCancel={() => setDialog(null)}
         />
       )}

@@ -48,7 +48,7 @@ export interface GitStatusResult {
 export interface FileTreeFs {
   readDir(path: string): Promise<DirEntry[]>;
   gitStatus?(root: string): Promise<GitStatusResult>;
-  onFsChange?(cb: (e: { paths: string[] }) => void): Promise<() => void>;
+  onFsChange?(cb: (e: { paths: string[]; overflow?: boolean }) => void): Promise<() => void>;
   onGitChange?(cb: () => void): Promise<() => void>;
   createFile?(path: string): Promise<unknown>;
   createDir?(path: string): Promise<unknown>;
@@ -56,6 +56,7 @@ export interface FileTreeFs {
   duplicate?(path: string): Promise<unknown>;
   trash?(path: string): Promise<unknown>;
   reveal?(path: string): Promise<unknown>;
+  upload?(directory: string, kind: "files" | "folder"): Promise<unknown>;
 }
 
 /** Mirrors `Notify` in src/types.ts. Duplicated rather than imported because
@@ -93,6 +94,8 @@ interface FileTreeProps {
   onNotice?: Notify;
   /** Render root contents directly (the caller already shows a labeled header). */
   hideRootHeader?: boolean;
+  /** Explicit refresh without losing expanded folders or selection. */
+  refreshRevision?: number;
   /** The filesystem behind this tree: local disk on the desktop, a WebSocket
    *  RPC in the portal, a relayed snapshot for a shared project. */
   fs: FileTreeFs;
@@ -175,6 +178,7 @@ export function FileTree({
   onRemoveRoot,
   onNotice,
   hideRootHeader,
+  refreshRevision,
   fs,
   readDir,
   iconUrl,
@@ -491,6 +495,14 @@ export function FileTree({
     }
   }, [roots, toggleDir, loadGit, readOnly]);
 
+  useEffect(() => {
+    if (refreshRevision === undefined) return;
+    for (const [dir, state] of Object.entries(dirsRef.current)) {
+      if (state.entries) void loadDir(dir);
+    }
+    for (const root of roots) void loadGit(root);
+  }, [refreshRevision, loadDir, loadGit]);
+
   // Refresh loaded directories touched by external changes (debounced). A
   // shared project isn't on this disk, so there is nothing local to watch.
   useEffect(() => {
@@ -498,6 +510,9 @@ export function FileTree({
     let pending = new Set<string>();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const unlisten = fsRef.current.onFsChange?.((e) => {
+      if (e.overflow) {
+        for (const [dir, state] of Object.entries(dirsRef.current)) if (state.entries) pending.add(dir);
+      }
       for (const p of e.paths) {
         const parent = p.slice(0, p.lastIndexOf("/"));
         if (dirsRef.current[parent]?.entries) pending.add(parent);
@@ -535,9 +550,14 @@ export function FileTree({
       await fn();
       await loadDir(refreshDir);
     } catch (err) {
-      onNotice?.(`${label} failed: ${String(err)}`);
+      onNotice?.(`${label} failed: ${String(err)}`, "error");
     }
   };
+
+  const uploadItems = (dir: string): MenuItem[] => fs.upload ? [
+    {label:"Upload files…",onClick:()=>void run("Upload",()=>fs.upload!(dir,"files"),dir)},
+    {label:"Upload folder…",onClick:()=>void run("Upload",()=>fs.upload!(dir,"folder"),dir)},
+  ] : [];
 
   const itemsFor = (path: string, isDir: boolean, name: string): MenuItem[] => {
     const dir = isDir ? path : parentOf(path);
@@ -550,6 +570,7 @@ export function FileTree({
         label: "New Folder…",
         onClick: () => setPrompt({ kind: "new-dir", dir, value: "" }),
       },
+      ...uploadItems(dir),
       { separator: true, label: "" },
       {
         label: "Rename…",
@@ -604,6 +625,7 @@ export function FileTree({
       label: "New Folder…",
       onClick: () => setPrompt({ kind: "new-dir", dir, value: "" }),
     },
+    ...uploadItems(dir),
     ...(taskMenuFor ? [taskMenuFor(dir)] : []),
     { separator: true, label: "" },
     {
@@ -620,6 +642,7 @@ export function FileTree({
           key={`header:${item.root}`}
           className="tree-root-header"
           onClick={() => toggleDir(item.root)}
+          onContextMenu={!readOnly ? (e) => open(e, emptyItems(item.root)) : undefined}
         >
           <span className="tree-icon">
             {dirs[item.root]?.expanded ? "▾" : "▸"}

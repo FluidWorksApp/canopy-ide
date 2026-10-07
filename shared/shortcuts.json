@@ -110,6 +110,15 @@
   },
   "shortcuts": [
     {
+      "id": "select-all",
+      "label": "Select all",
+      "surface": "menu",
+      "chord": {"mods": ["Mod"], "key": "KeyA"},
+      "platform": {"windows": {"mods": ["Mod", "Shift"], "key": "KeyA"}, "linux": {"mods": ["Mod", "Shift"], "key": "KeyA"}},
+      "scoped": true,
+      "note": "Native Mac menu selection targets the focused editor or terminal. Other platforms retain editor Ctrl+A and terminal readline Ctrl+A."
+    },
+    {
       "id": "new-launcher",
       "label": "New tab — shell, preview or an agent here (type to filter, ↵ to open)",
       "surface": "menu",

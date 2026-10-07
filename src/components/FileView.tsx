@@ -31,6 +31,7 @@ import { Button } from "./ui";
 const decoder = new TextDecoder();
 
 interface FileViewProps {
+  readOnly?: boolean;
   /** Only the foreground document owns decoded/viewer/editor surfaces. The
    *  OpenFile bytes and Monaco model remain the rehydration source. */
   active: boolean;
@@ -228,6 +229,7 @@ export function FileView(props: FileViewProps) {
     const model = modelFor(file.path, text);
     return (
       <MonacoEditor
+        readOnly={props.readOnly}
         model={model}
         onSave={props.onSave}
         onDirty={props.onDirty}

@@ -16,7 +16,7 @@
 # Notarisation uses the keychain profile rather than raw env credentials, so no
 # Apple password is needed in the environment or in this repo.
 #
-# Usage: ./scripts/release-macos.sh [aarch64|x86_64|both]
+# Usage: ./scripts/release-macos.sh [aarch64|x86_64|both] [--skip-notarization]
 # =============================================================================
 set -euo pipefail
 
@@ -28,12 +28,23 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 
 ARCH="${1:-aarch64}"
+NOTARIZE=true
+if [ "${2:-}" = "--skip-notarization" ]; then
+  NOTARIZE=false
+elif [ -n "${2:-}" ] || [ "$#" -gt 2 ]; then
+  echo "usage: $0 [aarch64|x86_64|both] [--skip-notarization]" >&2
+  exit 2
+fi
+# Keep build outputs in the same location the packaging checks inspect.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_DIR/src-tauri/target}"
+# Notarization is performed explicitly below, never implicitly by Tauri.
+unset APPLE_ID APPLE_PASSWORD APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH
 case "$ARCH" in
   aarch64) TARGETS=("aarch64-apple-darwin") ;;
   x86_64)  TARGETS=("x86_64-apple-darwin") ;;
   # arm64 first so its ONNX staging can't leak into the Intel bundle.
   both)    TARGETS=("aarch64-apple-darwin" "x86_64-apple-darwin") ;;
-  *) echo "usage: $0 [aarch64|x86_64|both]" >&2; exit 2 ;;
+  *) echo "usage: $0 [aarch64|x86_64|both] [--skip-notarization]" >&2; exit 2 ;;
 esac
 
 # --- preflight: fail here, with a clear reason, rather than 10 minutes in -----
@@ -50,7 +61,7 @@ fi
 # Apple returns 403 here when a Developer Program agreement is unsigned or has
 # expired — an account-level problem that no amount of rebuilding fixes, so
 # catch it before spending a full release build on it.
-if ! xcrun notarytool history --keychain-profile "$NOTARIZE_PROFILE" >/dev/null 2>&1; then
+if $NOTARIZE && ! xcrun notarytool history --keychain-profile "$NOTARIZE_PROFILE" >/dev/null 2>&1; then
   echo "error: notary credentials unusable for profile '$NOTARIZE_PROFILE'." >&2
   echo "       Common cause: an unsigned/expired agreement — check" >&2
   echo "       https://appstoreconnect.apple.com -> Business/Agreements." >&2
@@ -111,7 +122,7 @@ for target in "${TARGETS[@]}"; do
   fi
   npm run tauri build -- "${BUILD_ARGS[@]}"
 
-  BUNDLE="src-tauri/target/$target/release/bundle"
+  BUNDLE="$CARGO_TARGET_DIR/$target/release/bundle"
   APP="$BUNDLE/macos/Canopy.app"
   DMG=$(find "$BUNDLE/dmg" -name "*.dmg" | head -1)
 
@@ -128,15 +139,19 @@ for target in "${TARGETS[@]}"; do
   # runtime; if it isn't signed, that copy is what Gatekeeper kills.
   codesign --verify --strict "$APP/Contents/MacOS/canopy-hook"
 
-  echo "==> notarising $(basename "$DMG")"
-  xcrun notarytool submit "$DMG" --keychain-profile "$NOTARIZE_PROFILE" --wait
+  if $NOTARIZE; then
+    echo "==> notarising $(basename "$DMG")"
+    xcrun notarytool submit "$DMG" --keychain-profile "$NOTARIZE_PROFILE" --wait
 
-  echo "==> stapling"
-  xcrun stapler staple "$DMG"
-  xcrun stapler staple "$APP"
+    echo "==> stapling"
+    xcrun stapler staple "$DMG"
+    xcrun stapler staple "$APP"
 
-  echo "==> gatekeeper assessment (what a user's Mac will decide)"
-  spctl -a -vvv -t install "$DMG" || true
+    echo "==> gatekeeper assessment (what a user's Mac will decide)"
+    spctl -a -vvv -t install "$DMG" || true
+  else
+    echo "==> local signed build: notarization skipped; not approved for public distribution"
+  fi
 
   echo "built: $DMG"
 done

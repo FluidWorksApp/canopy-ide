@@ -368,6 +368,13 @@ fn now_ms() -> u64 {
 
 /// The webview answers every ping with this. When the answers stop, the
 /// renderer is gone (jetsam-killed, crashed, or wedged) and the loop reloads.
+/// Startup liveness can read this atomic generation without waiting for the
+/// PTY registration mutex or a remote workspace connection.
+#[tauri::command]
+pub fn watchdog_generation(state: tauri::State<'_, Arc<WatchdogState>>) -> u64 {
+    state.renderer_generation.load(Ordering::SeqCst)
+}
+
 #[tauri::command]
 pub fn watchdog_ack(state: tauri::State<'_, Arc<WatchdogState>>, generation: u64) {
     state.acknowledge(generation);

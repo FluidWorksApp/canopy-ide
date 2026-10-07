@@ -1,0 +1,33 @@
+{
+  "npm": {
+    "@ampcode/cli": "0.0.1790913650-g48ed1c",
+    "opencode-ai": "1.18.34",
+    "@oh-my-pi/pi-coding-agent": "18.4.10"
+  },
+  "aider": "0.86.2",
+  "bun": "1.3.14",
+  "cursor": "2026.10.01-e373342",
+  "grok": "1.0.46",
+  "agy": {
+    "arm64": {
+      "version": "1.2.14",
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.2.14-4571742832820224/linux-arm/cli_linux_arm64.tar.gz",
+      "sha512": "d96a67d6952a8ec1da16c8b6515f1393ed0260658cf104d9b57b8d13c92c591322ed5e08a62894842be81888116da0f5f80def7971c913d1f462300103426954"
+    },
+    "amd64": {
+      "version": "1.2.14",
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.2.14-4571742832820224/linux-x64/cli_linux_x64.tar.gz",
+      "sha512": "fd771dfc74ddd07b61c8b0a6fd7a238f53a3a098a51052583a01d97ab84ee60db741ce5f041e87a9da3c1a9aabe95b053113374437df1e231773552781edaf09"
+    }
+  },
+  "installers": {
+    "cursor": {
+      "url": "https://cursor.com/install",
+      "sha256": "dd6677f33cb7efa34809557b1c6df3a11e389b76ce4e56ce5751db13dd7260e6"
+    },
+    "grok": {
+      "url": "https://x.ai/cli/install.sh",
+      "sha256": "7fd6fdc75d9418b2e58356726fcbf1ae849416f773925da07d0ccc7a60d3e791"
+    }
+  }
+}

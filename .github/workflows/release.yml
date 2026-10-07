@@ -13,13 +13,43 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      skip_notarization:
+        description: 'Build signed macOS installers without notarization (release notes must disclose this)'
+        type: boolean
+        default: false
+      publish:
+        description: 'Publish only after all platforms and updater signatures have been verified'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 # tauri-action creates the release and uploads assets.
 permissions:
   contents: write
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Release boundary regression checks
+        run: node --test scripts/release-assets.test.mjs
+      - name: Reject published or immutable release targets
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANOPY_RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-assets.mjs --preflight
+
   build:
+    needs: preflight
     strategy:
       # One platform failing shouldn't bin the artifacts of the others.
       fail-fast: false
@@ -206,6 +236,18 @@ jobs:
           codesign -dvvv src-tauri/onnxruntime/libonnxruntime.dylib 2>&1 \
             | grep -E "Authority=Developer ID|Timestamp=|flags=.*runtime" || true
 
+      - name: Read rolled-up release notes
+        id: release-notes
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {readFileSync, existsSync, appendFileSync} from 'node:fs';
+          const {version} = JSON.parse(readFileSync('package.json', 'utf8'));
+          const path = `docs/releases/${version}.md`;
+          const body = existsSync(path) ? readFileSync(path, 'utf8').trim() : 'See the assets below to download and install.';
+          appendFileSync(process.env.GITHUB_OUTPUT, `body<<CANOPY_RELEASE_NOTES\n${body}\nCANOPY_RELEASE_NOTES\n`);
+          NODE
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -221,13 +263,13 @@ jobs:
           # When these are unset the mac build is unsigned: it runs here, but
           # Gatekeeper blocks it on other people's machines.
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_ID: ${{ !inputs.skip_notarization && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ !inputs.skip_notarization && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
           releaseName: "Canopy __VERSION__"
-          releaseBody: "See the assets below to download and install."
+          releaseBody: ${{ steps.release-notes.outputs.body }}
           # Draft: a release is public the moment it publishes, and the tag is
           # the only gate. Review before it reaches anyone.
           releaseDraft: true
@@ -256,6 +298,16 @@ jobs:
           fi
           echo "$sigs updater signature(s) present"
 
+      - name: Preserve verified installer and updater artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: canopy-${{ matrix.target }}-${{ github.sha }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/**
+            src-tauri/target/release/bundle/**
+          if-no-files-found: error
+          retention-days: 30
+
       # Tauri versions its filenames (Canopy_0.1.0_aarch64.dmg), but
       # `releases/latest/download/<name>` only resolves names that are identical
       # in every release. So each release also carries a version-less alias of
@@ -273,15 +325,16 @@ jobs:
           root="src-tauri/target/${{ matrix.target }}/release/bundle"
           [ -d "$root" ] || root="src-tauri/target/release/bundle"
           stage="$(mktemp -d)"
+          version="$(node -p 'require("./package.json").version')"
           case "${{ matrix.target }}" in
             aarch64-apple-darwin)
               cp "$root"/dmg/Canopy_*.dmg "$stage/Canopy-macos-arm64.dmg" ;;
             x86_64-apple-darwin)
               cp "$root"/dmg/Canopy_*.dmg "$stage/Canopy-macos-intel.dmg" ;;
             x86_64-unknown-linux-gnu)
-              cp "$root"/appimage/*.AppImage "$stage/Canopy-linux-x86_64.AppImage"
-              cp "$root"/deb/*.deb          "$stage/Canopy-linux-x86_64.deb"
-              cp "$root"/rpm/*.rpm          "$stage/Canopy-linux-x86_64.rpm" ;;
+              cp "$root/appimage/Canopy_${version}_amd64.AppImage" "$stage/Canopy-linux-x86_64.AppImage"
+              cp "$root/deb/Canopy_${version}_amd64.deb"          "$stage/Canopy-linux-x86_64.deb"
+              cp "$root/rpm/Canopy-${version}-1.x86_64.rpm"          "$stage/Canopy-linux-x86_64.rpm" ;;
             x86_64-pc-windows-msvc)
               cp "$root"/nsis/*-setup.exe   "$stage/Canopy-windows-x86_64-setup.exe" ;;
             *) echo "::error::unmapped target ${{ matrix.target }} — no stable-name alias"; exit 1 ;;
@@ -291,3 +344,20 @@ jobs:
           # tag name. --clobber makes a re-run of the workflow idempotent.
           gh release upload "${{ github.ref_name }}" "$stage"/* --clobber
           rm -rf "$stage"
+
+  finalize:
+    name: Verify complete release before publication
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify all assets, repair complete updater manifest, then optionally publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CANOPY_RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/release-assets.mjs ${{ inputs.publish && '--publish' || '' }}

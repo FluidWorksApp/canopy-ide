@@ -4,7 +4,7 @@
   "workspaces": [
     "packages/*"
   ],
-  "version": "0.3.4",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,7 +16,7 @@
     "test:coverage": "vitest run --coverage",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev --config '{\"productName\":\"Canopy — DEV\"}'",
+    "tauri:dev": "tauri dev --config '{\"productName\":\"Canopy \u2014 DEV\"}'",
     "build:hook": "node scripts/prepare-chrome-stream.mjs && node scripts/prepare-sidecar.mjs",
     "build:hook:release": "node scripts/prepare-chrome-stream.mjs && node scripts/prepare-sidecar.mjs --release",
     "build:portal": "vite build --config portal/vite.config.ts",
@@ -31,6 +31,7 @@
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@fontsource/vt323": "^5.3.0",
     "@git-diff-view/react": "0.1.7",
+    "@novnc/novnc": "1.7.0",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-notification": "^2.3.3",

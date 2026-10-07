@@ -1,3 +1,7 @@
+import {subscribeTeamUnread,getTeamUnread} from "../../teamMessaging/session";
+import {isReadOnlyHost} from "../../host";
+import { AgentIntegrationWarning } from "../AgentIntegrationWarning";
+import {AccountChatView,type AccountConversation} from "../AccountChatView";
 // One open project: icon rail + collapsible side panel (components / source
 // control / agents) + the main area where the AGENT is the hero. Agents and reference
 // docs are sub-tabs; plain shells and long-running commands sit in compact
@@ -17,6 +21,7 @@ import {
 } from "react";
 import { Panel, PanelGroup } from "react-resizable-panels";
 import * as ipc from "../../ipc";
+import { EditorDiskState } from "../../editorDiskState";
 import { format, matches, matchesModifierClick } from "../../shortcuts";
 import {
   equalizeSplits,
@@ -176,6 +181,7 @@ import {
   currentPlatform,
   PREREQS,
   restoreCommand,
+  rememberedAgentCommand,
   resumeSessionId,
   componentForPath,
   launchCommand,
@@ -231,6 +237,7 @@ import {
   type MicroRun,
 } from "../../microRuns";
 import { renderPtyText } from "../../ptyText";
+import { registerExecutionModeGuard } from "../../executionMode";
 import { scheduleReap } from "../../runReap";
 import {
   INITIAL_VIBE_SERVER_HEALTH,
@@ -369,6 +376,7 @@ import { ensureLanguageServer } from "../../lsp/client";
 import { Term, type TermHandle } from "../Term";
 import { ContextMenu, useContextMenu, type MenuItem } from "../ContextMenu";
 import { FileTree } from "../FileTree";
+import {useRemoteUpload} from "../../remoteExecution/useRemoteUpload";
 import { FileView, hasDiffToolbar } from "../FileView";
 import { ChangesPanel, type ChangeGroup } from "../ChangesPanel";
 import { Dialog } from "../Dialog";
@@ -790,6 +798,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // — once, at the seam the whole tree receives — rather than asking each of
   // the dozens of call sites below to remember, which is how the notification
   // list filled with rows that couldn't say which project they were about.
+  const readOnly=project.readOnly===true||isReadOnlyHost();
   const onNotice = useCallback<Notify>(
     (text, kind, opts) =>
       onNoticeRaw(text, kind, { projectId: project.id, ...opts }),
@@ -1095,6 +1104,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         agentId: a.agentId,
         cwd: a.cwd,
         label: a.title,
+        sessionId: liveSessionByPtyRef.current.get(a.ptyId)
+          || resumeSessionId((tabsRef.current.find(t => t.id === a.tabId) as TermSubTab | undefined)?.command) || undefined,
+        profile: (tabsRef.current.find(t => t.id === a.tabId) as TermSubTab | undefined)?.profile,
       }));
       if (open.length === 0) return;
       void Promise.all([
@@ -1287,7 +1299,10 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const wakeWorktreeEnvRef = useRef(wakeWorktreeEnv);
   wakeWorktreeEnvRef.current = wakeWorktreeEnv;
 
-  const recentSaves = useRef(new Map<string, number>());
+  const editorDisk = useRef(new EditorDiskState());
+  useEffect(() => {
+    editorDisk.current.retain(new Set(tabs.filter((tab): tab is FileSubTab => tab.type === 'file').map(tab => tab.file.path)));
+  }, [tabs]);
   const viewerByteReads = useRef(
     new Map<string, Promise<Uint8Array | null>>(),
   );
@@ -1338,6 +1353,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const contentRef = useRef<HTMLDivElement>(null);
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  useEffect(() => registerExecutionModeGuard(
+    () => !tabsRef.current.some(tab => tab.type === "file" && tab.file.dirty),
+  ), []);
   const governorByPty = useMemo(
     () => terminalGovernorByPty(terminalGovernor),
     [terminalGovernor],
@@ -1369,6 +1387,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   useEffect(() => {
     return () => onTerminalQuotaGroupsChange?.(project.id, []);
   }, [onTerminalQuotaGroupsChange, project.id]);
+  const accountTeamUnread = useSyncExternalStore(subscribeTeamUnread, getTeamUnread);
   const showTerminalMemoryPrompts = useSyncExternalStore(
     subscribeTerminalMemoryPromptVisibility,
     terminalMemoryPromptsVisible,
@@ -1618,6 +1637,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   // routine stats tick, which cleared a half-typed composer and orphaned the
   // turn the person had just sent. Only the project/worktree inputs may replace
   // the component view and therefore the session that owns it.
+  const [treeRefreshRevision, setTreeRefreshRevision] = useState(0);
   const components = useMemo(
     () =>
       project.components.map((c) => {
@@ -1791,6 +1811,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       runIdentity?: { componentId: string; runCommandId: string },
       spawnedTask?: TermSubTab["spawnedTask"],
     ) => {
+      if(project.readOnly||isReadOnlyHost()){onNotice("This project is read-only. Terminal and agent execution is unavailable.");return "";}
       const id = tabId();
       // Every terminal opened inside a workspace gets that workspace's port,
       // not just the ones started from the Servers panel — an agent told to
@@ -2093,7 +2114,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
    *  null) or a DM — reusing one already open for it. */
   const openChat = useCallback((peer: string | null, name: string) => {
     const existing = tabsRef.current.find(
-      (t): t is ChatSubTab => t.type === "chat" && t.peer === peer,
+      (t): t is ChatSubTab => t.type === "chat" && !t.accountConversation && t.peer === peer,
     );
     if (existing) {
       setActiveTabId(existing.id);
@@ -2102,6 +2123,15 @@ const ProjectViewBody = memo(function ProjectViewBody({
     const id = tabId();
     setTabs((prev) => [...prev, { id, type: "chat", peer, name }]);
     setActiveTabId(id);
+  }, []);
+
+  const openAccountChat = useCallback((conversation: AccountConversation) => {
+    const existing = tabsRef.current.find(t => t.type === "chat" && t.accountConversation?.teamId === conversation.teamId && t.accountConversation?.userId === conversation.userId && t.peer === conversation.peer);
+    if (existing) { setActiveTabId(existing.id); return; }
+    const id = tabId();
+    setTabs(prev => [...prev, {id, type:"chat", peer:conversation.peer, name:conversation.name, accountConversation:conversation}]);
+    setActiveTabId(id);
+    dismissPeekRef.current();
   }, []);
 
   // ---- live editing ----
@@ -2635,15 +2665,34 @@ const ProjectViewBody = memo(function ProjectViewBody({
   );
 
   const reopenTerminal = useCallback(
-    (t: RememberedTerminal, activate = true) => {
+    async (t: RememberedTerminal, activate = true): Promise<string | null> => {
+      const agent = !t.run && agentIdForCommand(t.command);
+      let env: [string, string][] | undefined;
+      let profile = t.profile || "default";
+      if (agent) {
+        const sessionId = t.sessionId || resumeSessionId(t.command);
+        const target = agentCliFor(agent)?.capabilities?.conversationTransfer
+          ? activeProfile() : profile;
+        try {
+          if (sessionId && target !== profile) {
+            await ipc.profilePrepareSession(agent, sessionId, profile, target);
+          }
+          env = await ipc.profileEnv(agent, target);
+          if (!envReachesProfile(target, env)) throw new Error("Selected account is unavailable");
+          profile = target;
+        } catch (error) {
+          void ipc.notifyNative("Could not reopen terminal", String(error));
+          return null;
+        }
+      }
       const id = addTerminal(
         t.cwd,
-        t.command,
+        t.run ? t.command : rememberedAgentCommand(t.command, t.sessionId),
         t.title,
         t.icon,
         t.run,
-        undefined,
-        undefined,
+        env,
+        profile !== "default" ? profile : undefined,
         activate,
         undefined,
         t.componentId && t.runCommandId
@@ -2677,27 +2726,37 @@ const ProjectViewBody = memo(function ProjectViewBody({
         if (activate) setActiveTabId(open.id);
         return open.id;
       }
-      // Hide it immediately rather than waiting for the next poll; the mark
-      // is a bridge until the agent shows up in the process list, after which
-      // the row's presence tracks whether that terminal is still open.
+      const sourceProfile = r.profile || "default";
+      const targetProfile = agentCliFor(r.agentId)?.capabilities?.conversationTransfer
+        ? activeProfile()
+        : sourceProfile;
+      let env: [string, string][];
+      try {
+        // Prepare only this conversation; account credentials stay separate.
+        // Do not hide the restore card or launch under a fallback account on failure.
+        if (targetProfile !== sourceProfile) {
+          await ipc.profilePrepareSession(r.agentId, r.digest.session_id, sourceProfile, targetProfile);
+        }
+        env = await ipc.profileEnv(r.agentId, targetProfile);
+        if (targetProfile !== "default" && !env.length) {
+          throw new Error("The selected account environment is unavailable");
+        }
+      } catch (error) {
+        void ipc.notifyNative("Could not resume conversation", String(error));
+        return null;
+      }
       markRestored(r.digest.session_id);
       setRestorable((prev) =>
         prev.filter((x) => x.digest.session_id !== r.digest.session_id),
       );
-      // The account that owns the conversation, not the one selected now:
-      // `--resume <id>` resolves inside the CLI's own config dir.
-      const env =
-        r.profile && r.profile !== "default"
-          ? await ipc.profileEnv(r.agentId, r.profile).catch(() => [])
-          : [];
       const id = addTerminal(
         r.cwd,
-        r.command,
+        restoreCommand(r.agentId, r.digest.session_id) || r.command,
         r.digest.agent ?? "agent",
         agentCliFor(r.agentId)?.icon,
         false,
         env,
-        env.length ? r.profile : undefined,
+        targetProfile !== "default" ? targetProfile : undefined,
         activate,
       );
       return id;
@@ -2717,7 +2776,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         const id = leaf.restorable
           ? await resumeSession(leaf.restorable, false)
           : leaf.remembered
-            ? reopenTerminal(leaf.remembered, false)
+            ? await reopenTerminal(leaf.remembered, false)
             : null;
         opened.push(id);
         if (id && leaf.remembered?.tabId) ids.set(leaf.remembered.tabId, id);
@@ -2757,30 +2816,35 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   /** Carry out an accepted reload: each eligible agent's terminal is replaced
    *  by one running under the new account, in the same directory. The old
-   *  session is not lost — its transcript stays in the account that made it,
-   *  and it comes back on that account's restorable list. */
+   *  conversation is prepared under the new profile only after its writer exits.
+   *  A failed transfer leaves the source transcript and tab available. */
   const runReload = useCallback(async (ask: NonNullable<typeof reloadAsk>) => {
     setReloadAsk(null);
-    await primeLaunchEnv();
     for (const item of reloading(ask.plan)) {
       const cli = agentCliFor(item.agent.agentId);
       if (!cli || !item.action) continue;
-      const env = launchEnvSync(cli.id);
-      // No env means the account could not be resolved after all; leaving the
-      // agent where it is beats moving it somewhere we cannot name. The default
-      // account is the exception: it carries no env by design.
-      if (!envReachesProfile(ask.profile, env)) continue;
-      closeTabRef.current(item.agent.tabId);
-      if (item.action.kind === "resume") markRestored(item.action.sessionId);
-      addTerminal(
-        item.action.kind === "resume" ? item.action.cwd : item.agent.cwd,
-        item.action.kind === "resume" ? item.action.command : launchCommand(cli),
-        cli.name,
-        cli.icon,
-        false,
-        env,
-        ask.profile === DEFAULT_PROFILE ? undefined : ask.profile,
-      );
+      try {
+        // Resolve the explicitly confirmed account, even if the global picker
+        // changed again while the confirmation was open.
+        const env = await ipc.profileEnv(cli.id, ask.profile);
+        if (!envReachesProfile(ask.profile, env)) throw new Error("Selected account is unavailable");
+        const tab = tabsRef.current.find(t => t.id === item.agent.tabId && t.type === "terminal") as TermSubTab | undefined;
+        if (!tab) continue;
+        if (item.action.kind === "resume" && item.action.sourceProfile) {
+          if (tab.ptyId != null) await ipc.ptyStopAndWait(tab.ptyId);
+          await ipc.profilePrepareSession(cli.id, item.action.sessionId, item.action.sourceProfile, ask.profile);
+        }
+        closeTabRef.current(item.agent.tabId);
+        if (item.action.kind === "resume") markRestored(item.action.sessionId);
+        addTerminal(
+          item.action.kind === "resume" ? item.action.cwd : item.agent.cwd,
+          item.action.kind === "resume" ? item.action.command : launchCommand(cli),
+          cli.name, cli.icon, false, env,
+          ask.profile === DEFAULT_PROFILE ? undefined : ask.profile,
+        );
+      } catch (error) {
+        void ipc.notifyNative("Account switch could not finish", String(error));
+      }
     }
   }, [addTerminal]);
 
@@ -6975,6 +7039,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       }
       if (bytes && (kind === "code" || diffOriginal != null)) {
         const text = decoder.decode(bytes);
+        await editorDisk.current.remember(path, text);
         modelFor(path, text);
         const root = roots.find((r) => path.startsWith(r + "/"));
         if (root && kind === "code") void ensureLanguageServer(path, root);
@@ -7072,18 +7137,20 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const saveFile = useCallback(
     async (path: string) => {
+      if(project.readOnly||isReadOnlyHost()){onNotice("This project is read-only.");return false;}
       const model = monaco.editor.getModel(monaco.Uri.file(path));
-      if (!model) return;
+      if (!model) return false;
       const content = model.getValue();
-      recentSaves.current.set(path, Date.now());
       try {
-        await ipc.fsWriteFile(path, content);
-        patchFile(path, { dirty: false });
+        await editorDisk.current.write(path, content, () => ipc.fsWriteFile(path, content));
+        patchFile(path, { dirty: model.getValue() !== content, external: null });
+        return true;
       } catch (err) {
-        console.error("save failed", path, err);
+        onNotice(`Can't save ${basename(path)} — ${String(err)}`, "error");
+        return false;
       }
     },
-    [patchFile],
+    [patchFile, onNotice],
   );
 
   const findFile = (path: string): OpenFile | undefined => {
@@ -7145,7 +7212,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const acceptExternal = useCallback(
     (path: string) => {
       const file = findFile(path);
-      if (!file?.external) return;
+      if (file?.external == null) return;
       monaco.editor.getModel(monaco.Uri.file(path))?.setValue(file.external);
       patchFile(path, { external: null, dirty: false });
     },
@@ -7155,7 +7222,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
   const keepMine = useCallback(
     (path: string) => {
       const file = findFile(path);
-      if (!file?.external) return;
+      if (file?.external == null) return;
       patchFile(path, { external: null, dirty: true });
     },
     [patchFile],
@@ -7257,7 +7324,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
       if (mine) void refreshChanges();
     });
     const unlisten = ipc.onFsChange(async (e) => {
-      const now = Date.now();
       // A huge watcher burst deliberately stops retaining every native path.
       // Re-read only this view's already-open files in that root — a bounded
       // owner set — instead of asking Rust to queue the whole directory storm.
@@ -7283,17 +7349,18 @@ const ProjectViewBody = memo(function ProjectViewBody({
             );
           })
         ) continue;
-        const saved = recentSaves.current.get(path);
-        if (saved && now - saved < 1500) continue;
         const file = findFile(path);
         if (!file || e.kind === "remove") continue;
         // A tab that refused to load the file in the first place must not
         // re-read it every time something touches it on disk.
         if (file.blocked) continue;
+        const revision = editorDisk.current.beginRead(path);
+        if (revision == null) continue;
         try {
           const bytes = await ipc.fsReadFile(path, sizeLimitFor(file.kind));
           if (file.kind === "code") {
             const newText = decoder.decode(bytes);
+            if (!await editorDisk.current.changed(path, newText, revision)) continue;
             const model = monaco.editor.getModel(monaco.Uri.file(path));
             const currentText =
               model?.getValue() ??
@@ -8850,7 +8917,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
   /** The launcher list — shell plus every agent CLI — for a given directory.
    *  Shared by the ＋ menu, the empty-state grid and the component right-click
    *  menu so the three can't drift apart. */
+  const upload = useRemoteUpload(onNotice,()=>setTreeRefreshRevision(v=>v+1));
+  const uploadItems = (dir:string,chooseDestination=false):MenuItem[] => upload.startUpload ? [
+    {label:"Upload files…",onClick:()=>void (chooseDestination?upload.chooseUploadDestination!:upload.startUpload!)(dir,"files")},
+    {label:"Upload folder…",onClick:()=>void (chooseDestination?upload.chooseUploadDestination!:upload.startUpload!)(dir,"folder")},
+  ] : [];
   const launcherItems = (cwd: string): MenuItem[] => [
+    ...uploadItems(cwd),
     {
       label: "Shell",
       icon: <TerminalIcon size={15} />,
@@ -12151,6 +12224,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           />
         );
       case "chat":
+        if (tab.accountConversation) return <AccountChatView conversation={tab.accountConversation} active={active && visible}/>;
         return (
           <ChatView
             peer={tab.peer}
@@ -12207,6 +12281,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             {!inToolbar && cta}
             <FileView
             active={active}
+            readOnly={readOnly}
             modelOwnerId={`${project.id}:${tab.id}`}
             toolbarExtra={inToolbar ? cta : undefined}
             file={tab.file}
@@ -12405,6 +12480,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
 
   const mainArea = (
     <div className="project-main">
+      {readOnly?<div className="workspace-readonly-notice" role="status">Read-only access · Browse project files and Git history. Editing and terminal execution are unavailable.</div>:<AgentIntegrationWarning agents={agentTargets.map(a => a.agentId)} targets={agentTargets.map(a=>({agent:a.agentId,ptyId:a.ptyId,profile:(tabs.find(t=>t.id===a.tabId) as TermSubTab|undefined)?.profile||"default"}))} />}
       {tabMenu.menu && (
         <ContextMenu
           x={tabMenu.menu.x}
@@ -13393,8 +13469,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
     new Map<SideTab, { active: boolean; el: ReactNode }>(),
   );
   const sidePane = (key: SideTab, build: () => ReactNode) => {
-    if (!sideSeen.includes(key)) return null;
-    const active = sideTab === key;
+    if (!sideSeen.includes(key) && !(key === "files" && sideSeen.includes("servers"))) return null;
+    const active = sideTab === key || (key === "files" && sideTab === "servers");
     const cached = sidePanes.current.get(key);
     // Rebuilt while in front, and once more on the way out — that last build is
     // what hands a polling panel `visible: false`. After that it sits still.
@@ -13450,7 +13526,8 @@ const ProjectViewBody = memo(function ProjectViewBody({
           })
       }
       onSaveCollab={(p) =>
-        void saveFile(p).then(() => {
+        void saveFile(p).then((saved) => {
+          if (!saved) return;
           relay.collab.markOwnerSaved(p);
           void refreshChanges();
         })
@@ -13495,7 +13572,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
         <Dialog
           variant="accent"
           title={`Reload agents as ${reloadAsk.label}?`}
-          body="An agent keeps the account it started on until it is reloaded. Reloading picks up this account's own work in the same folder — the conversations already open stay where they are, on the account that made them."
+          body="Restart the eligible agents with this account. Claude and Codex continue the same conversation after their current process stops. Credentials stay separate. Agents without a verified conversation or sign-in are left running."
           meta={`${reloading(reloadAsk.plan).length} of ${reloadAsk.plan.length} agents in this project`}
           dismissLabel="Leave them"
           onDismiss={() => setReloadAsk(null)}
@@ -13550,6 +13627,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
           />
         </Dialog>
       )}
+      {upload.uploadDialog}
       {sidePane("files", () => (
         <div
           className="components-panel"
@@ -13560,6 +13638,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             const dir = components[components.length - 1]?.path;
             if (!dir) return;
             compMenu.open(e, [
+              ...uploadItems(dir),
               {
                 label: "New File…",
                 onClick: () => setRootCreate({ dir, kind: "file", value: "" }),
@@ -13572,11 +13651,34 @@ const ProjectViewBody = memo(function ProjectViewBody({
           }}
         >
           <div className="side-panel-head">
-            <span>Components</span>
-            <Button icon title="Edit project" onClick={onEdit}>
-              ⚙
-            </Button>
+            <span>Components & files</span>
+            <span className="side-head-actions">
+              {upload.startUpload&&<Button size="sm" variant="ghost" disabled={upload.busy} onClick={e=>compMenu.open(e,uploadItems(components[0]?.path??'/workspace',true))}>Upload…</Button>}
+              <Button icon size="sm" variant="ghost" title="Refresh files" onClick={() => setTreeRefreshRevision(v => v + 1)}><RestartIcon size={14}/></Button>
+              <Button icon size="sm" variant="ghost" title="Edit project" onClick={onEdit}><SettingsIcon size={14}/></Button>
+            </span>
           </div>
+          <details className="component-servers">
+            <summary>Servers <span>{serversRunning > 0 ? `${serversRunning} running` : "Start and manage"}</span></summary>
+        <ServersPanel
+          groups={serverGroups}
+          onStart={startServer}
+          onRestart={restartRun}
+          onStop={(ptyId) => void ipc.ptyKill(ptyId)}
+          onOpenRun={setActiveTabId}
+          onOpenPreview={(url) => openPreview(url)}
+          onNewTerminal={(path) => addTerminal(path)}
+          // The agent named on a workspace row is a terminal this project
+          // already owns, so this focuses it rather than attaching a new view.
+          onOpenAgent={(ptyId) => {
+            const tab = tabs.find(
+              (t): t is TermSubTab => t.type === "terminal" && t.ptyId === ptyId,
+            );
+            if (tab) setActiveTabId(tab.id);
+          }}
+          onEdit={onEdit}
+        />
+          </details>
           {/* Which checkout these files come from. Always visible while a
               worktree is active, so you can never edit the wrong tree without
               knowing it. */}
@@ -13749,6 +13851,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
                     </div>
                   )}
                   <FileTree
+                    readOnly={readOnly}
+                    onUpload={readOnly?undefined:upload.startUpload}
+                    refreshRevision={treeRefreshRevision}
                     roots={[c.path]}
                     changedPaths={changedPaths}
                     selectedPath={activeFileTab?.file.path ?? null}
@@ -13762,26 +13867,6 @@ const ProjectViewBody = memo(function ProjectViewBody({
             </div>
           ))}
         </div>
-      ))}
-      {sidePane("servers", () => (
-        <ServersPanel
-          groups={serverGroups}
-          onStart={startServer}
-          onRestart={restartRun}
-          onStop={(ptyId) => void ipc.ptyKill(ptyId)}
-          onOpenRun={setActiveTabId}
-          onOpenPreview={(url) => openPreview(url)}
-          onNewTerminal={(path) => addTerminal(path)}
-          // The agent named on a workspace row is a terminal this project
-          // already owns, so this focuses it rather than attaching a new view.
-          onOpenAgent={(ptyId) => {
-            const tab = tabs.find(
-              (t): t is TermSubTab => t.type === "terminal" && t.ptyId === ptyId,
-            );
-            if (tab) setActiveTabId(tab.id);
-          }}
-          onEdit={onEdit}
-        />
       ))}
       {sidePane("integrations", () => (
         <IntegrationsPanel
@@ -13879,6 +13964,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
       ))}
       {sidePane("team", () => (
         <TeamPanel
+              onOpenAccountChat={openAccountChat}
           relay={relay}
           onOpenChat={openChat}
           onOpenInboxItem={(item) => void openInboxItem(item)}
@@ -13996,7 +14082,7 @@ const ProjectViewBody = memo(function ProjectViewBody({
             tasksBadge={runningMicro.length}
             pendingCount={pending.length}
             urgentCount={urgentCount}
-            teamBadge={teamBadge}
+            teamBadge={teamBadge + accountTeamUnread}
             relayRole={relay.status.role}
             onSelectTab={selectSideTab}
             onHoverTab={hoverSideTab}

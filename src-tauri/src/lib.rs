@@ -11,6 +11,7 @@ mod change;
 mod chrome_stream;
 mod cleanup;
 mod cli;
+mod client_mode;
 mod clipboard;
 mod companion;
 mod containment;
@@ -19,6 +20,7 @@ mod crash;
 #[cfg(feature = "dictation")]
 mod dictation;
 mod execution;
+mod remote_upload;
 // Intel macOS builds compile dictation out (no compatible ONNX Runtime); a stub
 // keeps the command surface identical so the rest of this file is unchanged.
 #[cfg(not(feature = "dictation"))]
@@ -49,6 +51,7 @@ mod remind;
 mod remote;
 mod research;
 mod selftest;
+mod session_transfer;
 mod shortcuts;
 mod snapshot;
 mod spot;
@@ -74,6 +77,7 @@ use tauri::{Emitter, Manager};
 /// and Linux too, not just on the Mac it was written on.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const MENU_SHORTCUT_IDS: &[&str] = &[
+    "select-all",
     "settings",
     "new-launcher",
     "new-agent-workspace",
@@ -149,7 +153,13 @@ fn build_menu(app: &tauri::AppHandle, profile: &str) -> tauri::Result<Menu<tauri
             &PredefinedMenuItem::cut(app, None)?,
             &PredefinedMenuItem::copy(app, None)?,
             &PredefinedMenuItem::paste(app, None)?,
-            &PredefinedMenuItem::select_all(app, None)?,
+            &MenuItem::with_id(
+                app,
+                "select-all",
+                "Select All",
+                true,
+                accel("select-all").as_deref(),
+            )?,
         ],
     )?;
     let tabs = Submenu::with_items(
@@ -364,6 +374,21 @@ fn set_shortcut_profile(app: tauri::AppHandle, profile: String) -> Result<(), St
 /// Frontend error bridge: WebView console/errors surface in the dev terminal.
 #[tauri::command]
 fn js_log(level: String, message: String) {
+    // Release diagnostics accept stage codes only: no paths, URLs, tokens or
+    // application error contents are retained in the resilience log.
+    if level == "boot" {
+        if matches!(
+            message.as_str(),
+            "startup-stage:begin"
+                | "startup-stage:unavailable"
+                | "startup-stage:selector-error"
+                | "startup-stage:local-choice"
+                | "startup-stage:connected"
+        ) {
+            log::info!(target: "canopy::watchdog::startup", "{message}");
+        }
+        return;
+    }
     match level.as_str() {
         "error" => log::error!(target: "webview", "{message}"),
         "warn" => log::warn!(target: "webview", "{message}"),
@@ -386,6 +411,44 @@ fn raise_file_descriptor_limit() {
             let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
         }
     }
+}
+
+static LOCAL_SERVICES_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn start_local_services(app: &tauri::AppHandle) {
+    if LOCAL_SERVICES_STARTED.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    // Refresh the capability-neutral context used by CLIs without MCP.
+    // It lives in Canopy's own state, never in the repository, so a CLI
+    // opened outside this IDE does not inherit IDE-specific rules.
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        if let Err(e) = agent_instructions::install_context(&home) {
+            log::warn!("agent context not installed: {e}");
+        }
+        if let Err(e) = agent_instructions::install_omp_task_overlay(&home) {
+            log::warn!("omp task overlay not installed: {e}");
+        }
+    }
+    // Install the hook helper before hooks are (re)written, so the
+    // path they point at exists.
+    if let Err(e) = agents::install_hook_helper() {
+        log::warn!("hook helper not installed: {e}");
+    }
+    // Then re-apply the integrations this machine already opted into.
+    // Every launch is also every update, which is when a generated hook
+    // file goes stale or a newly shipped step (the MCP registration was
+    // one) is missing from a config set up by an older version. Off the
+    // main thread: it shells out to find the CLIs.
+    agents::heal_integrations(app.clone());
+    // The login PATH every shell-less spawn needs, resolved before the
+    // first one asks for it.
+    procenv::warm();
+    agents::start_monitor(app.clone());
+    agents::start_hook_bridge(app.clone());
+    maintenance::start(app.clone());
+    context::start(app.clone());
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -470,6 +533,7 @@ pub fn run() {
         .manage(prwatch::PrWatcher::default())
         .manage(dictation::DictationManager::default())
         .manage(selftest::SelftestState::default())
+        .manage(client_mode::RemoteConnectionState::default())
         .manage(spot::SpotIndex::default())
         .manage(research::ResearchStore::default())
         .manage(notes::NotesStore::default())
@@ -547,35 +611,11 @@ pub fn run() {
             for w in app.webview_windows().values() {
                 webview_keys::disable_browser_accelerators(w);
             }
-            // Refresh the capability-neutral context used by CLIs without MCP.
-            // It lives in Canopy's own state, never in the repository, so a CLI
-            // opened outside this IDE does not inherit IDE-specific rules.
-            if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-                if let Err(e) = agent_instructions::install_context(&home) {
-                    log::warn!("agent context not installed: {e}");
-                }
-                if let Err(e) = agent_instructions::install_omp_task_overlay(&home) {
-                    log::warn!("omp task overlay not installed: {e}");
-                }
+            // Cold remote-only launches must not install local CLI hooks or start
+            // local agent monitors. A deliberate switch back initializes them.
+            if !client_mode::is_remote(app.handle()) {
+                start_local_services(app.handle());
             }
-            // Install the hook helper before hooks are (re)written, so the
-            // path they point at exists.
-            if let Err(e) = agents::install_hook_helper() {
-                log::warn!("hook helper not installed: {e}");
-            }
-            // Then re-apply the integrations this machine already opted into.
-            // Every launch is also every update, which is when a generated hook
-            // file goes stale or a newly shipped step (the MCP registration was
-            // one) is missing from a config set up by an older version. Off the
-            // main thread: it shells out to find the CLIs.
-            agents::heal_integrations(app.handle().clone());
-            // The login PATH every shell-less spawn needs, resolved before the
-            // first one asks for it.
-            procenv::warm();
-            agents::start_monitor(app.handle().clone());
-            agents::start_hook_bridge(app.handle().clone());
-            maintenance::start(app.handle().clone());
-            context::start(app.handle().clone());
             // Webview heartbeat + memory-pressure watchdogs (issue #488).
             watchdog::start(app.handle().clone());
             // Only does anything when this launch asked to test itself.
@@ -643,6 +683,21 @@ pub fn run() {
             workflow::workflow_run_list,
             workflow::workflow_run_get,
             execution::environment_identity,
+            client_mode::execution_mode_get,
+            client_mode::execution_mode_set,
+            client_mode::execution_remote_get,
+            client_mode::canopy_account_request,
+            client_mode::canopy_account_cache_key,
+            client_mode::execution_remote_set,
+            client_mode::execution_remote_list,
+            client_mode::execution_remote_forget,
+            client_mode::execution_remote_activate,
+            client_mode::execution_remote_import_accounts,
+            client_mode::execution_remote_import_git,
+            client_mode::execution_remote_login_prepare,
+            remote_upload::execution_remote_upload,
+            remote_upload::execution_remote_upload_cancel,
+            remote_upload::execution_remote_stage_images,
             pty::pty_spawn,
             pty::pty_spawn_detached,
             pty::pty_spawn_argv,
@@ -682,6 +737,7 @@ pub fn run() {
             clipboard::clipboard_watch_set,
             clipboard::clipboard_recent,
             clipboard::clipboard_read,
+            clipboard::clipboard_image_png,
             clipboard::clipboard_forget,
             clipboard::clipboard_clear,
             clipboard::clipboard_status,
@@ -891,6 +947,7 @@ pub fn run() {
             profiles::profile_accounts,
             profiles::profile_activate,
             profiles::profile_env,
+            session_transfer::profile_prepare_session,
             profiles::profile_setup,
             relay::relay_host_start,
             relay::relay_host_stop,
@@ -961,6 +1018,7 @@ pub fn run() {
             dictation::dictation_stop,
             dictation::dictation_cancel,
             dictation::dictation_supported,
+            watchdog::watchdog_generation,
             watchdog::watchdog_ack,
             watchdog::memory_info,
             watchdog::watchdog_incidents,

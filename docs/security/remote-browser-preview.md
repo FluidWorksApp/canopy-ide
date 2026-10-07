@@ -1,0 +1,11 @@
+# Remote localhost browser previews
+
+Workspace localhost previews now reuse the IDE Chrome/CDP viewer protocol: back/forward/reload, element annotations, visible screenshots, region selection and agent DOM commands all run against a real Chromium page in the selected actor's development runtime. The general workspace Desktop remains available separately.
+
+Each actor runtime owns its Chromium process and persistent profile under its private HOME. The profile key hashes the IDE tab ID; reconnecting/reopening that tab reuses cookies without importing an owner's or another member's profile. Four concurrent preview bridges are allowed. Closing a bridge waits for the old process to exit before reusing its profile, with bounded forced termination.
+
+The runtime returns only a random browser ID. Management connects to its fixed native runtime endpoint; a runtime reply cannot choose a management host or upstream URL. Initial preview URLs must be workspace loopback HTTP(S), without embedded credentials. The bridge's internal loopback capability address stays inside the development runtime. Short-lived one-use gateway tickets require drive permission, and open streams recheck membership and revocation. Read-only members cannot launch or interact with this transport.
+
+The iframe loads reviewed viewer JavaScript from the packaged IDE's own origin. It requests scoped tickets from its parent; screenshots, DOM-picker events and navigation use the existing protocol. The viewer waits for an upstream message before sending initialization, preventing early input from racing the two proxy connections. Input/output queues and payload sizes are bounded.
+
+`prepare-browser-build.mjs` stages six canonical bridge/picker files into the Docker build context. Both Linux/image CI jobs execute `browser-smoke.mjs` inside the candidate image with network disabled and a read-only synthetic test-script mount. The smoke uses an empty temporary profile and a synthetic local page, exercises actual navigation/back/reload, PNG capture, DOM snapshot, element annotation and region drag, then deletes the test profile. This verifies the actual Chromium/CDP behavior, separately from registry/policy tests. It does not establish a deployed VM result.

@@ -62,3 +62,10 @@ src-tauri/onnxruntime/*.dll
 # Inside the workspace because fs_read_file only reads registered roots; never
 # part of the repo. See prArtifactPath in src/microTasks.ts.
 .canopy/
+
+# Reviewed helper sources staged into the Docker build context
+/packages/remote-host/hook-build/
+
+# Canonical browser bridge/viewer sources staged for runtime/app builds
+/packages/remote-host/chrome-stream/
+/public/chrome-stream/

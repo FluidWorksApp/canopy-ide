@@ -13,6 +13,7 @@ import {
   exportProject,
   importFile,
   launchCommand,
+  rememberedAgentCommand,
   loadWorkspace,
   normalizeProjectStructure,
   newCustomCliId,
@@ -1283,4 +1284,23 @@ describe("componentForPath", () => {
     expect(componentForPath(comps, "/elsewhere/thing")).toBeNull();
     expect(componentForPath([], "/w/canopy")).toBeNull();
   });
+});
+
+describe("remembered agent permission settings", () => {
+ afterEach(()=>updateSettings({dangerouslySkipPermissions:false}));
+ it.each(["claude", "codex"])("uses current permission choice when restoring %s", agent => {
+  updateSettings({dangerouslySkipPermissions:false});
+  const saved=restoreCommand(agent,"session-123")!;
+  updateSettings({dangerouslySkipPermissions:true});
+  const bypass=rememberedAgentCommand(saved);
+  expect(bypass).toBe(restoreCommand(agent,"session-123"));
+  expect(bypass).toContain("--dangerously-");
+  updateSettings({dangerouslySkipPermissions:false});
+  expect(rememberedAgentCommand(bypass)).toBe(saved);
+ });
+ it("does not rewrite shell commands or build scripts",()=>{
+  updateSettings({dangerouslySkipPermissions:true});
+  expect(rememberedAgentCommand("npm run build")).toBe("npm run build");
+  expect(rememberedAgentCommand("bash -lc 'codex'")).toBe("bash -lc 'codex'");
+ });
 });

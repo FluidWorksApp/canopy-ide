@@ -15,6 +15,9 @@ let decoding = false;
 let dialogPage;
 let resizeTimer;
 let latestPageMessage;
+const parameters=new URLSearchParams(location.search),remote=parameters.get('remote')==='1';
+let requestingTicket=false;
+if(remote)$('welcome').textContent='Connecting to your workspace browser…';
 const heldKeys = new Map();
 const post = message => { if (parentOrigin) parent.postMessage(message, parentOrigin === 'null' ? '*' : parentOrigin); };
 const send = message => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message)); };
@@ -41,11 +44,18 @@ function layout() {
 }
 function connect() {
   if (socket && socket.readyState < 2) { send({ type: 'connect' }); return; }
-  socket = new WebSocket(`${location.origin.replace('http:', 'ws:')}${location.pathname}socket`);
-  socket.onopen = () => { visibility(); resize(); post({ canopy: 'stream-ready' }); };
+  if(remote){if(parentOrigin&&!requestingTicket){requestingTicket=true;post({canopy:'remote-stream-ticket-request',sessionId:parameters.get('sessionId')});}return;}
+  connectSocket(`${location.origin.replace('http:', 'ws:')}${location.pathname}socket`);
+}
+function connectSocket(url){
+  socket = new WebSocket(url);
+  let initialized=false;
+  const initialize=()=>{if(initialized)return;initialized=true;visibility();resize();post({canopy:'stream-ready'});};
+  socket.onopen = () => {if(!remote)initialize();};
   socket.onclose = () => { connected = false; $('status').textContent = 'Preview disconnected. Reconnect to continue.'; };
   socket.onmessage = async event => {
     const message = JSON.parse(event.data);
+    if(remote)initialize();
     if (message.type === 'frame') {
       if (decoding) { send({ type: 'ack' }); return; }
       decoding = true;
@@ -107,13 +117,18 @@ $('dialog-cancel').onclick = () => answerDialog(false);
 $('dialog').oncancel = event => { event.preventDefault(); answerDialog(false); };
 $('reconnect').onclick = connect;
 $('tabs').onchange = () => send({ type: 'select', id: Number($('tabs').value) });
-$('install').onclick = event => { event.preventDefault(); post({ canopy: 'install-extension' }); };
+$('install')?.addEventListener('click',event => { event.preventDefault(); post({ canopy: 'install-extension' }); });
 window.addEventListener('message', event => {
   if (event.source !== parent || !event.data || typeof event.data !== 'object') return;
   if (parentOrigin && event.origin !== parentOrigin) return;
   parentOrigin = event.origin;
+  if(remote&&event.data.canopy==='remote-stream-ticket'){
+    requestingTicket=false;
+    try{const target=new URL(event.data.url);if(!['wss:','ws:'].includes(target.protocol)||target.username||target.password)throw Error();if(socket&&socket.readyState<2)return;connectSocket(target.href);}catch{$('status').textContent='Workspace stream connection is unavailable';}return;
+  }
   if (event.data.canopy === 'stream-init') {
     wanted = !!event.data.visible;
+    if(remote)connect();
     if (event.data.url) send({ canopy: 'navigate', url: event.data.url });
     visibility();
     if (latestPageMessage) post(latestPageMessage);

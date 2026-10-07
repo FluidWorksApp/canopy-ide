@@ -7,6 +7,8 @@
 -->
 <plist version="1.0">
 <dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Canopy uses local-network access for direct, encrypted connections to teammates. When a direct connection is unavailable, encrypted messages use the relay.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Canopy uses the microphone for voice dictation. Audio is transcribed locally on this device and never uploaded.</string>
 </dict>
