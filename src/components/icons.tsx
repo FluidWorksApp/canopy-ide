@@ -318,6 +318,26 @@ export function GlobeIcon({ size = 14, className }: IconProps) {
   );
 }
 
+/** A desktop: a monitor on a stand. The remote workspace's graphical desktop. */
+export function DesktopIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <rect x="3" y="4" width="18" height="12" rx="2" />
+      <path d="M12 16v4M8 20h8" />
+    </svg>
+  );
+}
+
+/** A camera: capture a screenshot. */
+export function CameraIcon({ size = 14, className }: IconProps) {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M4 8a2 2 0 0 1 2-2h2l1.5-2h5L16 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
+      <circle cx="12" cy="12.5" r="3.5" />
+    </svg>
+  );
+}
+
 /** A clipboard — the ⌘K section, and Settings' tab. */
 export function ClipboardIcon({ size = 14, className }: IconProps) {
   return (

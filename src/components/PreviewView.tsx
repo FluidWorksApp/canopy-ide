@@ -64,7 +64,7 @@ import {
 } from "../vibePreviewContext";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
-import { LiveDot } from "./icons";
+import { CameraIcon, LiveDot } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 import { Button } from "./ui";
 
@@ -1388,7 +1388,7 @@ export function PreviewView({
             title={remotePreview ? "Screenshot workspace browser" : `Screenshot — ${captureModeLabel(captureMode).toLowerCase()}`}
             disabled={capturing}
             onClick={() => runCapture(captureMode)}>
-            ▣ Screenshot{shots.length > 0 ? ` (${shots.length})` : ""}
+            <CameraIcon size={12} /> Screenshot{shots.length > 0 ? ` (${shots.length})` : ""}
           </Button>
           <Button size="sm" className="split-btn-caret"
             title="Choose what to capture"
