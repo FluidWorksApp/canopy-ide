@@ -45,6 +45,15 @@ function serveRuntime(req,res,url){
  createReadStream(env.REPLICA_RUNTIME_FILE).pipe(res);
  console.log('[s3] GET',url.pathname,'from',req.socket.remoteAddress);
 }
+// Replica only (--pending-upgrade): a flat apt repository with one package.
+function serveApt(req,res,url){
+ const name=decodeURIComponent(url.pathname.slice('/__apt/'.length)).replace(/^(\.\/)+/,'');
+ if(req.method!=='GET'&&req.method!=='HEAD'||!/^[A-Za-z0-9._+~-]*$/.test(name)||!name||!existsSync(`/replica-apt/${name}`)){res.statusCode=404;return res.end();}
+ res.setHeader('Content-Length',statSync(`/replica-apt/${name}`).size);
+ if(req.method==='HEAD')return res.end();
+ createReadStream(`/replica-apt/${name}`).pipe(res);
+ console.log('[apt] GET',name,'from',req.socket.remoteAddress);
+}
 async function replicaRoute(req,res,url){
  const lightsail=await import('./local-lightsail.mjs');
  res.setHeader('Content-Type','application/json');
@@ -58,6 +67,7 @@ const server=createServer(tls,async(req,res)=>{
  const started=Date.now();
  try{
   if(host===S3_HOST)return serveRuntime(req,res,url);
+  if(url.pathname.startsWith('/__apt/'))return serveApt(req,res,url);
   if(url.pathname.startsWith('/__replica/')&&req.headers['x-replica-token']===env.REPLICA_ADMIN_TOKEN)return await replicaRoute(req,res,url);
   const match=url.pathname.match(/^\/api\/([a-z0-9-]+)$/);
   const handler=match&&await handlerFor(match[1]);

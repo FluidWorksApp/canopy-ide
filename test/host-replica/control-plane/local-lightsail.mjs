@@ -101,6 +101,7 @@ async function launch(record,bootSource,userData){
  writeFileSync(`${dir}/seed/user-data`,userData||'#cloud-config\n{}\n');
  writeAttached(record.name);
  if(env.REPLICA_STALE_APT_TIMERS==='1')writeFileSync(`${dir}/stale-apt-timers`,'');
+ if(env.REPLICA_PENDING_UPGRADE==='1')writeFileSync(`${dir}/pending-upgrade`,'');
  const bundle=BUNDLES[record.bundleId];
  const memory=Math.min(bundle.memoryGiB*1024,Number(env.REPLICA_MAX_MEMORY_MIB??bundle.memoryGiB*1024));
  const hosts=(env.REPLICA_ADD_HOSTS??'').split(',').filter(Boolean).flatMap(entry=>['--add-host',entry]);
@@ -273,6 +274,7 @@ export async function collectJournal(instanceName,label){
  await capture('cloud-init-output.log',['cat','/var/log/cloud-init-output.log']);
  await capture('units.txt',['systemctl','list-units','--all','--no-pager','--plain']);
  await capture('bootstrap.sh',['cat','/var/log/canopy-replica/bootstrap.sh']);
+ await capture('apt.txt',['sh','-c','for f in /var/log/unattended-upgrades/unattended-upgrades.log /var/log/dpkg.log /var/log/apt/history.log; do echo "== $f"; tail -n 80 "$f" 2>&1; done; apt-cache policy containerd 2>&1']);
 }
 export async function collectAll(label){for(const name of Object.keys(load().instances))if((await inspect(name))?.state?.Running)await collectJournal(name,label);}
 

@@ -36,6 +36,12 @@ if [ -f "$dir/stale-apt-timers" ]; then
  mkdir -p /newroot/var/lib/systemd/timers
  for t in apt-daily apt-daily-upgrade; do touch -d '-2 days' "/newroot/var/lib/systemd/timers/stamp-$t.timer"; done
 fi
+# Harness option --pending-upgrade: an extra apt source (served by the local
+# control plane, Origin Ubuntu / Suite noble-security) offers a newer
+# containerd, as a security update published after the host snapshot would.
+if [ -f "$dir/pending-upgrade" ]; then
+ printf 'deb [trusted=yes] https://canopyide.dev/__apt/ ./\n' > /newroot/etc/apt/sources.list.d/canopy-replica-security.list
+fi
 # Docker's embedded DNS and the --add-host entries (control plane, S3 and
 # registry stand-ins) are the instance's resolver configuration.
 cat /etc/resolv.conf > /newroot/etc/resolv.conf

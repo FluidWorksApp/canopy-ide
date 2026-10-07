@@ -42,4 +42,18 @@ RUN update-ca-certificates >/dev/null \
  && mkdir -p /.replica/disks /.replica/oldroot \
  && systemctl enable canopy-replica-observer.service apt-daily.timer apt-daily-upgrade.timer \
  && systemctl mask systemd-firstboot.service console-getty.service getty@tty1.service 2>/dev/null || true
+# --prebuilt-like: Docker, containerd, runc and Caddy preinstalled and left
+# disabled, as the host factory leaves them in its snapshot (amd64-only
+# factory verification aside), so a retained-disk start runs no package
+# installs of its own and first-boot apt jobs find the runtimes installed.
+ARG PREBUILT=0
+RUN if [ "$PREBUILT" = 1 ]; then \
+      apt-get update && apt-get install -y --no-install-recommends docker.io containerd runc caddy xfsprogs \
+      && systemctl disable docker.service docker.socket containerd.service caddy.service \
+      && rm -rf /var/lib/apt/lists/* /var/lib/docker /var/lib/containerd && apt-get clean; \
+    fi
+# Undo the Docker base image's container tweaks that a cloud image does not
+# have: policy-rc.d (stops package scripts from starting or restarting
+# services), the apt periodic disable, and the minimised-docs dpkg excludes.
+RUN rm -f /usr/sbin/policy-rc.d /etc/apt/apt.conf.d/docker-* /etc/dpkg/dpkg.cfg.d/excludes
 STOPSIGNAL SIGRTMIN+3

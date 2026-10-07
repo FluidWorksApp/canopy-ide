@@ -58,6 +58,30 @@ The scenarios are driven through the same API calls the desktop app makes
 | `resume` | Create, start, stop, then start again: the daily path of an existing retained-disk workspace. |
 | `retry` | Create and start; if the start fails, use Retry, which replaces the host. |
 | `migrate` | Start and stop with the flags off. Restart the control plane with the flags on. Then start (moves to snapshot storage), stop (TRIM and snapshot), and start from the snapshot (warm-up). |
+| `share` | Whole-workspace sharing. The owner shares with a team, and the member connects. The member never sees the owner's home. A viewer is read-only. After an owner restart the member reconnects with no owner action. An attestation failure is shown to the owner and member, and Retry recovers it. |
+
+The `retry` scenario takes `--first-runtime`, `--first-website` and
+`--first-image`. With them, the first start runs on another release (for
+example the broken production pair), and the control plane switches to the
+fixed release before Retry, as a rollout would.
+
+`--prebuilt-like`, `--pending-upgrade`, `--apt-during-pull` and
+`--resume-image <digest>` model first-boot package maintenance on a factory
+snapshot host:
+
+- `--prebuilt-like` preinstalls Docker, containerd, runc and Caddy and leaves
+  them disabled.
+- `--pending-upgrade` adds an apt source that publishes this machine's
+  containerd package with a higher version as an Ubuntu `noble-security`
+  update.
+- `--apt-during-pull` lets the apt upgrade timer elapse when the start reaches
+  the image stage, if the host left the timer armed.
+- `--resume-image <digest>` ships a new image between the stop and the resume,
+  so the resumed host really pulls.
+
+`--stale-apt-timers` backdates the apt timer stamps. systemd then catches
+apt-daily and apt-daily-upgrade up at boot, as on a host restored from an
+older snapshot.
 
 Every scenario except `new` pre-formats a new data disk as `mkfs.ext4 -L
 canopy-data`, the same command the bootstrap's own first-boot branch would run.
@@ -115,6 +139,7 @@ disks blank.
 | NVMe disks seen by `lsblk` | `lsblk` is diverted to `host/bin/lsblk`. It answers the bootstrap's three queries from the instance's own loop devices and passes every other query to the real lsblk. | Loop devices have TYPE `loop`, and the Docker VM's other devices are visible. |
 | Swap | `swapon` and `swapoff` are diverted to shims that validate the signature and account for the swap without activating it. `mkswap` and `fallocate` are real. | Swap is kernel-global and would leak into the shared Docker VM. |
 | udev | Absent (`/dev/disk/by-uuid` is missing). | The VM owns device events. |
+| Docker base-image tweaks | Removed: `policy-rc.d` (which blocks service restarts from package scripts), the apt periodic disable and the dpkg doc excludes, so package maintenance behaves as on a cloud image. | Fidelity. |
 | Instance memory and CPU | Container limits sized from the bundle and capped by the Docker VM. `/proc/meminfo` shows the VM total. | Shared kernel. |
 | `vm.swappiness` | Set for real by the bootstrap. Restored on cleanup. | Global sysctl. |
 | Prebuilt host snapshot (factory) | On arm64 the cold bootstrap path runs (`apt-get install docker.io caddy`, NodeSource Node 22, `npm ci`). Package versions are Ubuntu noble-updates on the day, not the factory pins. | `factory-metadata.mjs` and `selectHostSnapshot` accept amd64 and x64 only. |
@@ -144,6 +169,19 @@ bootstrap script, so the evidence shows the exact script and ordering.
   `bootstrapScriptFor` regenerates the script from that row when the host
   fetches it later. As a result, the `mkfs` branch for a blank disk
   (`w.disk_name` unset) is never taken. Reproduce with `--scenario new`.
+  canopy-website #56 (12d2b3b) fixes it: `new` passes, and a resume still
+  refuses to format a retained disk.
+- **A containerd security update applied by unattended-upgrades during the
+  image pull restarts containerd under dockerd, and the pull fails.** The
+  error is "failed to extract layer … Unavailable" or "failed to send write:
+  EOF". Reproduce with `--prebuilt-like --stale-apt-timers --pending-upgrade
+  --apt-during-pull --resume-image <other digest> --scenario resume`. It
+  fails on website main ac9a4e2 and passes on canopy-website #58, which stops
+  the apt timers, waits for apt jobs and starts containerd and Docker once.
+- **First-boot package maintenance overlaps the image stage.** With stale
+  timer stamps, `apt-daily-upgrade.service` started 65 s after boot, 0.3 s
+  before containerd and dockerd started for the image pull. A containerd
+  upgrade at that point restarts containerd under dockerd.
 - **`database/ORDER` omits `migrations/shared-runtime.sql`.** That migration
   adds `workspace.sharing_generation`, and every worker pass reads it, so a
   database built from `ORDER` alone fails every operation.

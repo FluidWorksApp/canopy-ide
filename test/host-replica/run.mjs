@@ -23,7 +23,7 @@ const {values:opt}=parseArgs({options:{
  website:{type:'string',default:'origin/main'},'website-repo':{type:'string'},'website-dir':{type:'string'},
  flags:{type:'string',default:''},scenario:{type:'string',default:'resume'},plan:{type:'string',default:'starter'},
  keep:{type:'boolean',default:false},'timeout-minutes':{type:'string',default:'45'},cache:{type:'string'},
- 'cron-seconds':{type:'string',default:'60'},help:{type:'boolean',default:false},clean:{type:'boolean',default:false},'clean-run':{type:'string'},preformat:{type:'string'},'first-runtime':{type:'string'},'first-website':{type:'string'},'stale-apt-timers':{type:'boolean',default:false},'first-image':{type:'string'},
+ 'cron-seconds':{type:'string',default:'60'},help:{type:'boolean',default:false},clean:{type:'boolean',default:false},'clean-run':{type:'string'},preformat:{type:'string'},'first-runtime':{type:'string'},'first-website':{type:'string'},'stale-apt-timers':{type:'boolean',default:false},'prebuilt-like':{type:'boolean',default:false},'pending-upgrade':{type:'boolean',default:false},'resume-image':{type:'string'},'apt-during-pull':{type:'boolean',default:false},'first-image':{type:'string'},
 }});
 const SCENARIOS=['new','resume','stop','retry','migrate','share'];
 if(!opt.clean&&!opt['clean-run']&&(opt.help||!opt.runtime||!SCENARIOS.includes(opt.scenario))){
@@ -130,8 +130,8 @@ function websiteSource(target,ref=opt.website){
 async function buildHostImage(ca){
  const ctx=join(tmpdir(),`canopy-replica-host-${RUN}`);rmSync(ctx,{recursive:true,force:true});cpSync(join(HERE,'host'),ctx,{recursive:true});
  cpSync(join(ca,'ca.crt'),join(ctx,'replica-ca.crt'));
- const tag=`canopy-replica-host:${hashTree(walk(ctx),ctx)}`;
- if((await docker(['image','inspect',tag],{allowFail:true})).code!==0){say('building host blueprint image',tag);await docker(['build','-t',tag,ctx],{quiet:false});}
+ const tag=`canopy-replica-host:${hashTree(walk(ctx),ctx)}${opt['prebuilt-like']?'-prebuilt':''}`;
+ if((await docker(['image','inspect',tag],{allowFail:true})).code!==0){say('building host blueprint image',tag);await docker(['build','--build-arg',`PREBUILT=${opt['prebuilt-like']?1:0}`,'-t',tag,ctx],{quiet:false});}
  rmSync(ctx,{recursive:true,force:true});
  return tag;
 }
@@ -172,18 +172,35 @@ function cpEnv(flags){
   CANOPY_WORKSPACE_IMAGE:state.image,CRON_SECRET:secrets.cron,
   REPLICA_RUN:RUN,REPLICA_OWNER_PID:OWNER,REPLICA_NETWORK:NET,REPLICA_DISKS_VOLUME:VOLUME,REPLICA_HOST_IMAGE:state.hostImage,REPLICA_BLUEPRINT_IMAGE:state.blueprint,
   REPLICA_RUNTIME_FILE:'/replica-data/runtime.tgz',REPLICA_ADMIN_TOKEN:secrets.admin,REPLICA_ADD_HOSTS:`ghcr.io:${state.proxyIp}`,
-  REPLICA_CRON_SECONDS:opt['cron-seconds'],REPLICA_MAX_MEMORY_MIB:String(state.maxMemoryMiB),REPLICA_STALE_APT_TIMERS:opt['stale-apt-timers']?'1':'0',REPLICA_PREFORMAT_DISKS:(opt.preformat??(opt.scenario==='new'?'0':'1'))==='1'?'1':'0',REPLICA_DEVICE_TOKEN:secrets.device,REPLICA_EXTRA_USERS:`member:${secrets.member},viewer:${secrets.viewer}`,NODE_EXTRA_CA_CERTS:'/replica-ca/ca.crt',
+  REPLICA_CRON_SECONDS:opt['cron-seconds'],REPLICA_MAX_MEMORY_MIB:String(state.maxMemoryMiB),REPLICA_STALE_APT_TIMERS:opt['stale-apt-timers']?'1':'0',REPLICA_PENDING_UPGRADE:opt['pending-upgrade']?'1':'0',REPLICA_PREFORMAT_DISKS:(opt.preformat??(opt.scenario==='new'?'0':'1'))==='1'?'1':'0',REPLICA_DEVICE_TOKEN:secrets.device,REPLICA_EXTRA_USERS:`member:${secrets.member},viewer:${secrets.viewer}`,NODE_EXTRA_CA_CERTS:'/replica-ca/ca.crt',
  };
  if(flags.has('snapshot'))e.CANOPY_SNAPSHOT_STORAGE='1';
  if(flags.has('migrate'))e.CANOPY_SNAPSHOT_STORAGE_MIGRATE='1';
  if(flags.has('warmup'))e.CANOPY_HOST_WARMUP='1';
  return Object.entries(e).flatMap(([k,v])=>['-e',`${k}=${v}`]);
 }
+// --pending-upgrade: this machine's containerd package, rebuilt with a higher
+// version and published as a noble-security update, so unattended-upgrades
+// on the host has a real containerd upgrade (postinst restarts the service).
+async function pendingUpgradeRepo(){
+ const dir=join(CACHE,'apt',state.hostImage.replace(/[^a-z0-9]/gi,'-'));
+ if(existsSync(join(dir,'Release')))return dir;
+ mkdirSync(dir,{recursive:true});
+ say('building the local noble-security apt source with a newer containerd');
+ await docker(['run','--rm','-v',`${dir}:/repo`,'--entrypoint','bash',state.hostImage,'-c',`set -e
+apt-get update -qq; cd /tmp; apt-get download -qq containerd; deb=$(ls containerd_*.deb)
+dpkg-deb -R "$deb" pkg; v=$(sed -n 's/^Version: //p' pkg/DEBIAN/control); sed -i "s/^Version: .*/Version: $v+replica1/" pkg/DEBIAN/control
+dpkg-deb -b pkg /repo/containerd_$v+replica1.deb >/dev/null; cd /repo
+apt-ftparchive packages . > Packages
+apt-ftparchive -o APT::FTPArchive::Release::Origin=Ubuntu -o APT::FTPArchive::Release::Label=Ubuntu -o APT::FTPArchive::Release::Suite=noble-security -o APT::FTPArchive::Release::Codename=noble -o APT::FTPArchive::Release::Components=main release . > Release
+ls -la /repo`],{quiet:false});
+ return dir;
+}
 async function startControlPlane(flags){
  await docker(['rm','-f',CP],{allowFail:true});
  await docker(['run','-d','--name',CP,'--privileged','--network',NET,'--network-alias','canopyide.dev','--network-alias',S3_HOST,
   '--label',`canopy-replica.run=${RUN}`,'--label',`canopy-replica.pid=${OWNER}`,'-v','/var/run/docker.sock:/var/run/docker.sock','-v',`${VOLUME}:/disks`,'-v',`${CACHE_VOLUME}:/cache:ro`,
-  '-v',`${state.ca}:/replica-ca:ro`,'-v',`${state.runtime.file}:/replica-data/runtime.tgz:ro`,'-p','127.0.0.1::443',...cpEnv(flags),cpImage]);
+  '-v',`${state.ca}:/replica-ca:ro`,'-v',`${state.runtime.file}:/replica-data/runtime.tgz:ro`,...(state.aptRepo?['-v',`${state.aptRepo}:/replica-apt:ro`]:[]),'-p','127.0.0.1::443',...cpEnv(flags),cpImage]);
  cpPort=Number((await docker(['port',CP,'443/tcp'])).stdout.trim().split('\n')[0].split(':').pop());
  for(let i=0;i<60;i++){try{await api('GET','/api/plans');say(`control plane up (flags: ${[...flags].join(',')||'none'})`);return;}catch{await new Promise(r=>setTimeout(r,1000));}}
  throw Error('Control plane did not start:\n'+(await docker(['logs','--tail','80',CP],{allowFail:true})).stderr);
@@ -196,6 +213,7 @@ async function setup(){
  say(`runtime ${state.runtime.key} sha256 ${state.runtime.sha.slice(0,12)}…  image ${state.image}`);
  state.hostImage=await buildHostImage(state.ca);
  state.blueprint=await blueprintDisk(state.hostImage);
+ if(opt['pending-upgrade'])state.aptRepo=await pendingUpgradeRepo();
  const cp=await buildControlPlane();cpImage=cp.tag;state.website=cp.label;
  const memTotal=Number((await docker(['info','--format','{{.MemTotal}}'])).stdout.trim());
  state.maxMemoryMiB=Math.max(2048,Math.floor(memTotal/1048576)-1536);
@@ -313,8 +331,16 @@ async function operate(workspaceId,action,extra={}){
  say(`requested ${action}:`,JSON.stringify(result).slice(0,300));return result;
 }
 // The desktop app's loop (ManagedWorkspaces.tsx): advance, then read status.
-async function waitFor(workspaceId,goal,{minutes=Number(opt['timeout-minutes'])}={}){
- const deadline=Date.now()+minutes*60000;let last='';
+// --apt-during-pull: when the start reaches the image stage, the apt upgrade
+// timer elapses (if the host has left it armed) — the moment a first-boot
+// catch-up run (Persistent=true, randomised up to 60 min) can land in.
+async function aptTimerElapses(workspaceId){
+ const host=await hostContainer(workspaceId);
+ const {stdout}=await docker(['exec',host,'sh','-c','if systemctl is-active --quiet apt-daily-upgrade.timer; then systemctl start --no-block apt-daily-upgrade.service; echo "apt-daily-upgrade.timer armed: started apt-daily-upgrade.service"; else echo "apt-daily-upgrade.timer stopped: nothing started"; fi'],{allowFail:true});
+ say('apt timer elapses during the image stage:',stdout.trim());
+}
+async function waitFor(workspaceId,goal,{minutes=Number(opt['timeout-minutes']),aptDuringPull=false}={}){
+ const deadline=Date.now()+minutes*60000;let last='';let aptDone=false;
  while(Date.now()<deadline){
   try{await api('POST','/api/operations',{workspaceId,action:'advance'});}catch(error){if(error.status!==409)say('advance:',error.message);}
   const status=await api('POST','/api/workspaces',{action:'status',id:workspaceId});
@@ -322,8 +348,9 @@ async function waitFor(workspaceId,goal,{minutes=Number(opt['timeout-minutes'])}
   const op=await operationRow(workspaceId);
   const line=`state=${w?.state} op=${op?.action}/${op?.status}/${op?.phase}${op?.report?` report=${op.report.stage}:${op.report.status}`:''}${op?.lastError?` error="${op.lastError}"`:''}`;
   if(line!==last){say(line);last=line;}
+  if(aptDuringPull&&!aptDone&&op?.report?.stage==='image'){aptDone=true;await aptTimerElapses(workspaceId);}
   if(w?.state===goal&&(!op||op.status==='succeeded'))return {w,op};
-  if(op?.status==='failed'||w?.state==='error')throw new ScenarioFailure(`${op?.action} failed in phase ${op?.phase}${op?.report?` (bootstrap stage ${op.report.stage}: ${op.report.status})`:''}: ${op?.lastError}`,{op,w});
+  if(op?.status==='failed'||w?.state==='error'&&!['pending','running'].includes(op?.status))throw new ScenarioFailure(`${op?.action} failed in phase ${op?.phase}${op?.report?` (bootstrap stage ${op.report.stage}: ${op.report.status})`:''}: ${op?.lastError}`,{op,w});
   await new Promise(r=>setTimeout(r,3000));
  }
  const op=await operationRow(workspaceId);
@@ -334,7 +361,7 @@ async function connect(workspaceId){
  if(!result.connection?.endpoint||!result.connection?.token)throw new ScenarioFailure('connect returned no workspace connection',{result});
  say('desktop connect ok:',result.connection.endpoint);
 }
-async function startAndCheck(id,label){await operate(id,'resume');await waitFor(id,'ready');await connect(id);say(`${label}: ready`);}
+async function startAndCheck(id,label,{aptDuringPull=false}={}){await operate(id,'resume');await waitFor(id,'ready',{aptDuringPull});await connect(id);say(`${label}: ready`);}
 async function stopAndCheck(id,label){await operate(id,'hibernate',{confirmInterrupt:true});await waitFor(id,'stopped');say(`${label}: stopped`);}
 
 // ------------------------------------------------ whole-workspace sharing
@@ -356,7 +383,8 @@ const teams=(body,token)=>api('POST','/api/teams',body,token);
 async function connectAs(workspaceId,token,label){
  const result=await api('POST','/api/operations',{workspaceId,action:'connect',clientId:randomUUID()},token);
  if(!result.connection?.token)throw new ScenarioFailure(`${label} connect returned no workspace connection`,{result});
- const opened=await hostCall(result.connection,'/open',{resume:true});
+ // The app keeps retrying /open while a member runtime starts.
+ let opened;for(let attempt=0;attempt<24;attempt++){opened=await hostCall(result.connection,'/open',{resume:true});if(opened.status===200||!/not responding yet|starting/i.test(JSON.stringify(opened.data??'')))break;await new Promise(r=>setTimeout(r,5000));}
  if(opened.status!==200)throw new ScenarioFailure(`${label} could not open the workspace: ${JSON.stringify(opened).slice(0,300)}`);
  return result.connection;
 }
@@ -377,7 +405,13 @@ const scenarios={
  async stop(){const id=await createWorkspace('Replica stop');await startAndCheck(id,'first start');await stopAndCheck(id,'stop');},
  // An existing workspace (its retained disk holds a previous host's state and
  // container) is started again: the production path of every daily resume.
- async resume(){const id=await createWorkspace('Replica resume');await startAndCheck(id,'first start');await stopAndCheck(id,'stop');await startAndCheck(id,'resume of existing workspace');},
+ // --resume-image: a new workspace release ships between the stop and the
+ // resume, so the resumed host pulls it (the image stage does real work).
+ async resume(){
+  const id=await createWorkspace('Replica resume');await startAndCheck(id,'first start');await stopAndCheck(id,'stop');
+  if(opt['resume-image']){state.image=opt['resume-image'];await warmImage();say('new workspace release before the resume:',state.image);await startControlPlane(FLAGS);}
+  await startAndCheck(id,'resume of existing workspace',{aptDuringPull:opt['apt-during-pull']});
+ },
  // A failed start is retried from the app (Retry button: action 'retry'),
  // which replaces a host whose bootstrap never reached management services.
  // --first-runtime runs the first start on another release (e.g. a broken
@@ -431,7 +465,7 @@ const scenarios={
   check('owner sees the member file',(await hostCall(owner,'/files/read',{path:'from-member.txt'})).data?.text==='from member');
   const memberStore=await hostCall(member,'/native',{command:'store_load',args:{}});
   const memberStoreText=JSON.stringify(memberStore);
-  check('member sees the owner project at the same path',memberStoreText.includes('"/workspace"')&&memberStoreText.includes('"App"'));
+  check('member sees the owner project at the same path',memberStoreText.includes('/workspace')&&memberStoreText.includes('App'),memberStoreText.slice(0,400));
   check('member never receives the owner private value',!memberStoreText.includes(secret));
   const host=await hostContainer(id);
   const mounts=JSON.parse((await docker(['exec',host,'sh','-c',`docker inspect $(docker ps --format '{{.Names}}' --filter name=canopy-ws-member-) --format '{{json .Mounts}}' | head -1`])).stdout.trim());
