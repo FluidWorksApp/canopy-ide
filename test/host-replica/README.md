@@ -125,6 +125,19 @@ bootstrap script, so the evidence shows the exact script and ordering.
 
 ## Findings the replica surfaced
 
+- **canopy-host crash-loops at bootstrap stage `host-services` with `EACCES`
+  on `/run/canopy/resource-admission.lock`** (production, 2026-10-07).
+  - The bootstrap ran `mkdir -p /run/canopy` under `umask 077`, which leaves
+    the directory root 0700. The observer records `/run/canopy 700 root:root`
+    before canopy-host starts.
+  - Runtimes from #557 (5fc6fa8) onward open the lock as the `canopy-host` user
+    at gateway start (`recoverMigrations` → `withResourceLock`), and the
+    website bootstrap has set `CANOPY_RESOURCE_ADMISSION_LOCK` since #32.
+  - It reproduces identically with website 9d9db31 and a6f8b33, with runtimes
+    7b23e25 and 34d0550, and on the first start as well as a resume.
+  - It is fixed by website 8bad4d3 (`systemd-tmpfiles` creates the directory
+    0755) and runtime 63e3f84 (`ExecStartPre=+systemd-tmpfiles`).
+
 - **A new workspace always fails at bootstrap stage `storage` with "Retained
   storage has no filesystem; refusing to format".** The worker records
   `workspace.disk_name` in the `creating-compute` pass, and

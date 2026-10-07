@@ -25,7 +25,7 @@ const {values:opt}=parseArgs({options:{
  keep:{type:'boolean',default:false},'timeout-minutes':{type:'string',default:'45'},cache:{type:'string'},
  'cron-seconds':{type:'string',default:'60'},help:{type:'boolean',default:false},clean:{type:'boolean',default:false},'clean-run':{type:'string'},preformat:{type:'string'},'first-runtime':{type:'string'},'first-website':{type:'string'},'stale-apt-timers':{type:'boolean',default:false},'first-image':{type:'string'},
 }});
-const SCENARIOS=['new','resume','stop','retry','migrate'];
+const SCENARIOS=['new','resume','stop','retry','migrate','share'];
 if(!opt.clean&&!opt['clean-run']&&(opt.help||!opt.runtime||!SCENARIOS.includes(opt.scenario))){
  console.log(`Usage: npm run replica -- --runtime <sha|ref|workspace-host.tar.gz|artifact dir> [--image ghcr.io/...@sha256:...]
   [--website <git ref, default origin/main>] [--website-repo <canopy-website checkout>] [--website-dir <working tree>]
@@ -161,7 +161,7 @@ async function buildControlPlane(ref=opt.website){
 }
 
 // ---------------------------------------------------------------- stack
-const secrets={auth:randomBytes(32).toString('hex'),signing:randomBytes(32).toString('hex'),cron:randomBytes(24).toString('hex'),admin:randomBytes(24).toString('hex'),device:randomBytes(48).toString('base64url')};
+const secrets={auth:randomBytes(32).toString('hex'),signing:randomBytes(32).toString('hex'),cron:randomBytes(24).toString('hex'),admin:randomBytes(24).toString('hex'),device:randomBytes(48).toString('base64url'),member:randomBytes(48).toString('base64url'),viewer:randomBytes(48).toString('base64url')};
 let cpPort,caPem,cpImage,state={};
 function cpEnv(flags){
  const e={
@@ -172,7 +172,7 @@ function cpEnv(flags){
   CANOPY_WORKSPACE_IMAGE:state.image,CRON_SECRET:secrets.cron,
   REPLICA_RUN:RUN,REPLICA_OWNER_PID:OWNER,REPLICA_NETWORK:NET,REPLICA_DISKS_VOLUME:VOLUME,REPLICA_HOST_IMAGE:state.hostImage,REPLICA_BLUEPRINT_IMAGE:state.blueprint,
   REPLICA_RUNTIME_FILE:'/replica-data/runtime.tgz',REPLICA_ADMIN_TOKEN:secrets.admin,REPLICA_ADD_HOSTS:`ghcr.io:${state.proxyIp}`,
-  REPLICA_CRON_SECONDS:opt['cron-seconds'],REPLICA_MAX_MEMORY_MIB:String(state.maxMemoryMiB),REPLICA_STALE_APT_TIMERS:opt['stale-apt-timers']?'1':'0',REPLICA_PREFORMAT_DISKS:(opt.preformat??(opt.scenario==='new'?'0':'1'))==='1'?'1':'0',REPLICA_DEVICE_TOKEN:secrets.device,NODE_EXTRA_CA_CERTS:'/replica-ca/ca.crt',
+  REPLICA_CRON_SECONDS:opt['cron-seconds'],REPLICA_MAX_MEMORY_MIB:String(state.maxMemoryMiB),REPLICA_STALE_APT_TIMERS:opt['stale-apt-timers']?'1':'0',REPLICA_PREFORMAT_DISKS:(opt.preformat??(opt.scenario==='new'?'0':'1'))==='1'?'1':'0',REPLICA_DEVICE_TOKEN:secrets.device,REPLICA_EXTRA_USERS:`member:${secrets.member},viewer:${secrets.viewer}`,NODE_EXTRA_CA_CERTS:'/replica-ca/ca.crt',
  };
  if(flags.has('snapshot'))e.CANOPY_SNAPSHOT_STORAGE='1';
  if(flags.has('migrate'))e.CANOPY_SNAPSHOT_STORAGE_MIGRATE='1';
@@ -241,10 +241,13 @@ async function warmImage(){
 // restore is a copy-on-write clone, as on EBS, instead of a full copy of a
 // multi-gigabyte boot disk on the Docker VM's small disk.
 const LOOP_NODES='[ -e /dev/loop-control ] || mknod /dev/loop-control c 10 237; for i in $(seq 0 511); do [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i; done';
+const RELEASE_DELETED_LOOPS=`${'[ -e /dev/loop-control ] || mknod /dev/loop-control c 10 237; for i in $(seq 0 511); do [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i; done'}; for pass in 1 2 3; do for f in /sys/block/loop*/loop/backing_file; do case "$(cat "$f" 2>/dev/null)" in *'(deleted)') d=/dev/$(basename "$(dirname "$(dirname "$f")")"); losetup -d "$d" 2>/dev/null || true;; esac; done; done`;
 async function createDisksVolume(){
  await docker(['volume','create','--label',`canopy-replica.run=${RUN}`,'--label',`canopy-replica.pid=${OWNER}`,`${VOLUME}-backing`]);
- const dev=(await docker(['run','--rm','--privileged','-v',`${VOLUME}-backing:/b`,'--entrypoint','bash',cpImage,'-c',
-  `set -e; ${LOOP_NODES}; truncate -s 2T /b/disks.img; mkfs.xfs -q -m reflink=1 /b/disks.img; losetup --find --show /b/disks.img`])).stdout.trim();
+ const dev=(await docker(['run','--rm','--privileged','-v',`${VOLUME}-backing:/b-${RUN}`,'--entrypoint','bash',cpImage,'-c',
+  // losetup -j matches on the backing path string, so every run's backing
+  // file has a unique path: one run's cleanup can never detach another's.
+  `set -e; ${LOOP_NODES}; f=/b-${RUN}/disks-${RUN}.img; truncate -s 2T "$f"; mkfs.xfs -q -m reflink=1 "$f"; losetup --find --show "$f"`])).stdout.trim();
  if(!/^\/dev\/loop\d+$/.test(dev))throw Error(`Could not attach the disks filesystem: ${dev}`);
  await docker(['volume','create','--label',`canopy-replica.run=${RUN}`,'--label',`canopy-replica.pid=${OWNER}`,'--driver','local','--opt','type=xfs','--opt',`device=${dev}`,'--opt','o=discard',VOLUME]);
 }
@@ -260,9 +263,12 @@ async function cleanup(run=RUN){
    'for f in $(find /disks -name "*.img" 2>/dev/null); do for d in $(losetup -j "$f" | cut -d: -f1); do n=${d#/dev/loop}; [ -e "$d" ] || mknod "$d" b 7 "$n"; losetup -d "$d" || true; done; done'],{allowFail:true});
   if(state.swappiness)await docker(['run','--rm','--privileged','--entrypoint','sh',state.hostImage,'-c',`echo ${state.swappiness} > /proc/sys/vm/swappiness`],{allowFail:true});
  }
+ // Loops the hosts created themselves (e.g. snapshot storage's user image)
+ // outlive a removed container and pin deleted files; release them.
+ if(state.hostImage)await docker(['run','--rm','--privileged','--entrypoint','bash',state.hostImage,'-c',RELEASE_DELETED_LOOPS],{allowFail:true});
  await docker(['volume','rm',`canopy-replica-${run}`],{allowFail:true});
- if(state.hostImage||cpImage)await docker(['run','--rm','--privileged','-v',`canopy-replica-${run}-backing:/b`,'--entrypoint','bash',cpImage??state.hostImage,'-c',
-  `${LOOP_NODES}; for d in $(losetup -j /b/disks.img | cut -d: -f1); do losetup -d "$d" || true; done`],{allowFail:true});
+ if(state.hostImage||cpImage)await docker(['run','--rm','--privileged','-v',`canopy-replica-${run}-backing:/b-${run}`,'--entrypoint','bash',cpImage??state.hostImage,'-c',
+  `${LOOP_NODES}; for d in $(losetup -j /b-${run}/disks-${run}.img | cut -d: -f1); do losetup -d "$d" || true; done`],{allowFail:true});
  await docker(['volume','rm',`canopy-replica-${run}-backing`],{allowFail:true});
  await docker(['network','rm',`canopy-replica-${run}`],{allowFail:true});
  say('cleaned up run',run);
@@ -280,10 +286,10 @@ async function cleanStale(){
 }
 
 // ---------------------------------------------------------------- API (desktop app calls)
-function api(method,path,body){
+function api(method,path,body,token=secrets.device){
  return new Promise((res,rej)=>{
   const data=body===undefined?undefined:JSON.stringify(body);
-  const req=request({host:'127.0.0.1',port:cpPort,path,method,servername:'canopyide.dev',ca:caPem,timeout:120000,headers:{host:'canopyide.dev',authorization:`Bearer ${secrets.device}`,...(data?{'content-type':'application/json','content-length':Buffer.byteLength(data)}:{})}},r=>{
+  const req=request({host:'127.0.0.1',port:cpPort,path,method,servername:'canopyide.dev',ca:caPem,timeout:120000,headers:{host:'canopyide.dev',authorization:`Bearer ${token}`,...(data?{'content-type':'application/json','content-length':Buffer.byteLength(data)}:{})}},r=>{
    let text='';r.on('data',c=>text+=c);r.on('end',()=>{let json;try{json=JSON.parse(text);}catch{json=text;}if(r.statusCode>=400)rej(Object.assign(Error(`${method} ${path} ${r.statusCode}: ${text.slice(0,500)}`),{status:r.statusCode,body:json}));else res(json);});
   });req.on('error',rej);req.on('timeout',()=>req.destroy(Error('API timeout')));if(data)req.write(data);req.end();
  });
@@ -331,6 +337,41 @@ async function connect(workspaceId){
 async function startAndCheck(id,label){await operate(id,'resume');await waitFor(id,'ready');await connect(id);say(`${label}: ready`);}
 async function stopAndCheck(id,label){await operate(id,'hibernate',{confirmInterrupt:true});await waitFor(id,'stopped');say(`${label}: stopped`);}
 
+// ------------------------------------------------ whole-workspace sharing
+// Workspace host calls as the desktop app makes them, sent from inside the
+// control plane container (it trusts the host's Caddy CA) pinned to the
+// address the stand-in Route 53 recorded, as readiness does.
+const HOST_CALL=`import {workspaceRequest} from '/website/lib/canopy/workspace-http.mjs';import {readFileSync} from 'node:fs';import {setDefaultCACertificates,getCACertificates} from 'node:tls';
+const [endpoint,id,route,token,body,caddy]=process.argv.slice(1);setDefaultCACertificates([...getCACertificates('default'),caddy]);const name=new URL(endpoint).hostname+'.';
+const address=JSON.parse(readFileSync('/disks/route53-records.json','utf8'))[name]?.ResourceRecords?.[0]?.Value;
+const r=await workspaceRequest(endpoint+'/v1/workspaces/'+id+route,{method:body?'POST':'GET',headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:body||undefined,signal:AbortSignal.timeout(60000),address,maxBytes:4194304});
+let data;try{data=await r.json();}catch{data=null;}console.log(JSON.stringify({status:r.status,data}));`;
+async function hostCall(connection,route,body){
+ const host=await hostContainer(connection.workspaceId);
+ const caddy=(await docker(['exec',host,'cat','/srv/canopy/caddy-state/data/caddy/pki/authorities/local/root.crt'])).stdout.trim();
+ const {stdout}=await docker(['exec',CP,'node','--input-type=module','-e',HOST_CALL,connection.endpoint,connection.workspaceId,route,connection.token,body===undefined?'':JSON.stringify(body),caddy]);
+ return JSON.parse(stdout.trim().split('\n').at(-1));
+}
+const teams=(body,token)=>api('POST','/api/teams',body,token);
+async function connectAs(workspaceId,token,label){
+ const result=await api('POST','/api/operations',{workspaceId,action:'connect',clientId:randomUUID()},token);
+ if(!result.connection?.token)throw new ScenarioFailure(`${label} connect returned no workspace connection`,{result});
+ const opened=await hostCall(result.connection,'/open',{resume:true});
+ if(opened.status!==200)throw new ScenarioFailure(`${label} could not open the workspace: ${JSON.stringify(opened).slice(0,300)}`);
+ return result.connection;
+}
+async function sharingStatus(workspaceId){return (await api('POST','/api/operations',{workspaceId,action:'sharing-status'})).sharing;}
+async function waitForSharing(workspaceId,goal,{minutes=5}={}){
+ const deadline=Date.now()+minutes*60000;let last;
+ while(Date.now()<deadline){const sharing=await sharingStatus(workspaceId);const line=JSON.stringify(sharing);if(line!==last){say('sharing',line);last=line;}if(sharing.state===goal)return sharing;await new Promise(r=>setTimeout(r,5000));}
+ throw new ScenarioFailure(`sharing did not reach ${goal}; last ${last}`);
+}
+async function memberReason(workspaceId,token){
+ let status;try{status=await api('POST','/api/workspaces',{action:'status',id:workspaceId},token);}catch(error){if(error.status===404)return {canConnect:false,reason:'not visible'};throw error;}
+ const w=(status.workspaces??[]).find(x=>x.id===workspaceId);return {canConnect:w?.access?.canConnect,reason:w?.access?.connectionUnavailable??null};
+}
+const results=[];const check=(name,ok,detail='')=>{results.push({name,ok,detail});say(`${ok?'PASS':'FAIL'} ${name}${detail?` · ${detail}`:''}`);if(!ok)throw new ScenarioFailure(`${name}: ${detail}`);};
+async function hostContainer(workspaceId){const instance=await psql(`SELECT instance_name FROM workspace WHERE id='${workspaceId}'`);return `canopy-replica-${RUN}-${instance}`;}
 const scenarios={
  async new(){const id=await createWorkspace('Replica new');await startAndCheck(id,'new workspace');},
  async stop(){const id=await createWorkspace('Replica stop');await startAndCheck(id,'first start');await stopAndCheck(id,'stop');},
@@ -356,6 +397,73 @@ const scenarios={
  },
  // Retained-disk workspace (flags off) moves to snapshot storage when started
  // with the flags on; then a stop saves the first snapshot and a start restores.
+ // Whole-workspace sharing: grant → member connects; restart → member
+ // reconnects with no owner action; viewer read-only; member never sees the
+ // owner's home; an attestation failure is recorded and shown, then Retry.
+ async share(){
+  const id=await createWorkspace('Replica share');await startAndCheck(id,'first start');
+  const owner=await connectAs(id,secrets.device,'owner');
+  const users=Object.fromEntries((await psql("SELECT split_part(email,'@',1),id FROM \"user\" WHERE email LIKE '%@replica.invalid'")).split('\n').map(l=>l.split('\t')));
+  // Owner's private data, a shared file and a project on the shared volume.
+  const wrote=await hostCall(owner,'/files/write',{path:'hello.txt',text:'from owner'});check('owner writes a shared file',wrote.status===200,JSON.stringify(wrote).slice(0,300));
+  const secret='replica-owner-secret-'+randomBytes(6).toString('hex');
+  const store={projects:[{id:'app',name:'App',components:[{id:'app',label:'App',path:'/workspace'}],env:{TOKEN:secret}}],openIds:['app'],activeId:'app'};
+  const saved=await hostCall(owner,'/native',{command:'store_save',args:{data:JSON.stringify(store)}});check('owner saves a project list with a private value',saved.status===200,JSON.stringify(saved).slice(0,300));
+  // Organization, team (member) and a direct viewer grant.
+  const {organization}=await teams({action:'organization-create',name:'Replica org'});
+  for(const who of ['member','viewer']){const {invitation}=await teams({action:'organization-invite',organizationId:organization.id,email:`${who}@replica.invalid`});await teams({action:'organization-accept',invitationId:invitation.id},secrets[who]);}
+  await teams({action:'organization-workspace-attach',organizationId:organization.id,workspaceId:id});
+  const {team}=await teams({action:'organization-team-create',organizationId:organization.id,name:'Core'});
+  await teams({action:'organization-team-member-add',organizationId:organization.id,teamId:team.id,userId:users.member});
+  check('member is not offered a connection before any grant',(await memberReason(id,secrets.member)).canConnect!==true);
+  await teams({action:'workspace-share-set',workspaceId:id,subject:{type:'team',id:team.id},level:'edit',projects:true,sessions:false,accounts:false});
+  await teams({action:'workspace-share-set',workspaceId:id,subject:{type:'person',id:users.viewer},level:'view',projects:true,sessions:true,accounts:false});
+  const listed=await teams({action:'workspace-share-list',workspaceId:id});
+  check('shares list one entry per team and person with level and switches',JSON.stringify(listed.shares.map(s=>[s.subject.type,s.level,s.projects,s.sessions,s.accounts]))===JSON.stringify([['team','edit',true,false,false],['person','view',true,true,false]]),JSON.stringify(listed.shares));
+  let refused=null;try{await teams({action:'workspace-share-set',workspaceId:id,subject:{type:'person',id:users.member},level:'edit',projects:true,sessions:false,accounts:false},secrets.member);}catch(error){refused=error;}
+  check('a member cannot share or change their own access',refused?.status===403,refused?.message);
+  await waitForSharing(id,'ready');
+  // Member (Developer) connects and shares /workspace.
+  const member=await connectAs(id,secrets.member,'member');
+  const read=await hostCall(member,'/files/read',{path:'hello.txt'});
+  check('member reads the owner file on the shared project volume',read.data?.text==='from owner',JSON.stringify(read).slice(0,200));
+  check('member writes to the shared project volume',(await hostCall(member,'/files/write',{path:'from-member.txt',text:'from member'})).status===200);
+  check('owner sees the member file',(await hostCall(owner,'/files/read',{path:'from-member.txt'})).data?.text==='from member');
+  const memberStore=await hostCall(member,'/native',{command:'store_load',args:{}});
+  const memberStoreText=JSON.stringify(memberStore);
+  check('member sees the owner project at the same path',memberStoreText.includes('"/workspace"')&&memberStoreText.includes('"App"'));
+  check('member never receives the owner private value',!memberStoreText.includes(secret));
+  const host=await hostContainer(id);
+  const mounts=JSON.parse((await docker(['exec',host,'sh','-c',`docker inspect $(docker ps --format '{{.Names}}' --filter name=canopy-ws-member-) --format '{{json .Mounts}}' | head -1`])).stdout.trim());
+  check('member container mounts the shared project volume and its own home only',mounts.some(m=>m.Destination==='/workspace'&&m.Name===`canopy-project-${id}`)&&mounts.every(m=>m.Name!==`canopy-home-${id}`&&!m.Destination.startsWith('/accounts')),JSON.stringify(mounts.map(m=>[m.Destination,m.Name,m.RW])));
+  const ownerHome=await docker(['exec',host,'sh','-c',`docker exec $(docker ps --format '{{.Names}}' --filter name=canopy-ws-member- | head -1) sh -c 'grep -rl ${secret} /home/agent /workspace 2>/dev/null | head -1'`],{allowFail:true});
+  check('member cannot read the owner home',!ownerHome.stdout.trim(),ownerHome.stdout.trim());
+  // Viewer: read-only.
+  const viewer=await connectAs(id,secrets.viewer,'viewer');
+  check('viewer reads the shared project',(await hostCall(viewer,'/files/read',{path:'hello.txt'})).data?.text==='from owner');
+  const denied=await hostCall(viewer,'/files/write',{path:'viewer.txt',text:'nope'});
+  check('viewer cannot write',denied.status>=400,JSON.stringify(denied).slice(0,200));
+  // Restart: members reconnect with no owner action.
+  await stopAndCheck(id,'owner stop');
+  check('stopped workspace gives members a reason',/stopped/.test((await memberReason(id,secrets.member)).reason??''),(await memberReason(id,secrets.member)).reason);
+  await operate(id,'resume');await waitFor(id,'ready');
+  let again=null;const deadline=Date.now()+5*60000;
+  while(!again&&Date.now()<deadline){try{again=await connectAs(id,secrets.member,'member after restart');}catch(error){say('member waiting:',error.message.slice(0,160));await new Promise(r=>setTimeout(r,10000));}}
+  check('member reconnects after a restart without any owner action',!!again);
+  check('member still reads shared files after restart',(await hostCall(again,'/files/read',{path:'from-member.txt'})).data?.text==='from member');
+  // Attestation failure is recorded and surfaced, then Retry recovers.
+  const newHost=await hostContainer(id);
+  await psql(`UPDATE workspace SET sharing_ready_generation=NULL WHERE id='${id}'`);
+  await docker(['exec',newHost,'systemctl','stop','canopy-host']);
+  const failed=(await api('POST','/api/operations',{workspaceId:id,action:'sharing-retry'})).sharing;
+  check('owner sees Not ready with a reason',failed.state==='failed'&&!!failed.error,JSON.stringify(failed));
+  const reason=(await memberReason(id,secrets.member)).reason??'';
+  check('member sees the specific reason',reason.includes(failed.error),reason);
+  await docker(['exec',newHost,'systemctl','start','canopy-host']);await new Promise(r=>setTimeout(r,10000));
+  const retried=(await api('POST','/api/operations',{workspaceId:id,action:'sharing-retry'})).sharing;
+  check('Retry makes sharing ready again',retried.state==='ready',JSON.stringify(retried));
+  writeFileSync(join(OUT,'share-results.json'),JSON.stringify(results,null,1));
+ },
  async migrate(){
   if(!FLAGS.has('snapshot')||!FLAGS.has('migrate'))throw Error('--scenario migrate needs --flags snapshot,migrate');
   await startControlPlane(new Set());

@@ -113,6 +113,10 @@ jobs:
     permissions:
       contents: read
     steps:
+      # The amd64 workspace image is ~13 GB unpacked; the replica holds it in
+      # its local registry and on the host's disks.
+      - name: Free runner disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:

@@ -20,4 +20,12 @@ await pool.query('INSERT INTO "user"(id,name,email,"emailVerified") VALUES($1,$2
 const user=(await pool.query('SELECT id FROM "user" WHERE email=$1',['owner@replica.invalid'])).rows[0];
 await pool.query("INSERT INTO device_token(token_hash,user_id,device_id,device_name,expires_at) VALUES($1,$2,'replica-desktop','Replica desktop',now()+interval '30 days') ON CONFLICT(user_id,device_id) DO UPDATE SET token_hash=EXCLUDED.token_hash,expires_at=EXCLUDED.expires_at",[createHash('sha256').update(token).digest('hex'),user.id]);
 console.log('[db] seeded user',user.id);
+// Extra people for sharing scenarios: REPLICA_EXTRA_USERS="name:token,...".
+for(const entry of (process.env.REPLICA_EXTRA_USERS??'').split(',').filter(Boolean)){
+ const [name,extra]=entry.split(':');if(!/^[a-z]+$/.test(name)||!/^[A-Za-z0-9_-]{64}$/.test(extra??''))throw Error('Invalid REPLICA_EXTRA_USERS');
+ await pool.query('INSERT INTO "user"(id,name,email,"emailVerified") VALUES($1,$2,$3,true) ON CONFLICT(email) DO NOTHING',[randomUUID(),'Replica '+name,name+'@replica.invalid']);
+ const person=(await pool.query('SELECT id FROM "user" WHERE email=$1',[name+'@replica.invalid'])).rows[0];
+ await pool.query("INSERT INTO device_token(token_hash,user_id,device_id,device_name,expires_at) VALUES($1,$2,$3,$4,now()+interval '30 days') ON CONFLICT(user_id,device_id) DO UPDATE SET token_hash=EXCLUDED.token_hash,expires_at=EXCLUDED.expires_at",[createHash('sha256').update(extra).digest('hex'),person.id,'replica-'+name,'Replica '+name]);
+ console.log('[db] seeded',name,person.id);
+}
 await pool.end();
