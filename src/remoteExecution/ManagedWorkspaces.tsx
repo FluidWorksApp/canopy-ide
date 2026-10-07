@@ -19,6 +19,9 @@ export function workspaceStartupProblem(w:ManagedWorkspace){
  if(stage&&(!provided||provided.startsWith('Workspace startup failed during ')))return `${stage} failed. Your saved files are retained. Retry preparation, or stop the workspace to keep compute off.`;
  return provided||'Workspace preparation stopped. Your saved files are retained. Retry preparation, or stop the workspace to keep compute off.';
 }
+// Once the host is starting its services, readiness is seconds away: the server
+// checks it as soon as the host reports in, so look every second, not every 5.
+function startupPollDelay(w:ManagedWorkspace){return w.operation?.bootstrap_report?.stage==='host-services'||w.operation?.phase==='connecting-workspace'?1000:5000;}
 function bootstrapProgress(w:ManagedWorkspace){const report=w.operation?.bootstrap_report;return report?.status==='progress'?report.stage==='packages'&&w.operation?.bootstrap_mode==='prebuilt'?'Verifying prebuilt host tools':reportStages[report.stage]:undefined;}
 
 const stepFor=(w:ManagedWorkspace)=>w.state==='ready'?4:({'creating-storage':0,'creating-compute':0,'starting':0,'attaching-storage':1,'preparing-workspace':2,'connecting-workspace':3,'retiring-previous-compute':3}[w.operation?.phase??'']??0);
@@ -91,7 +94,7 @@ export function ManagedWorkspaces({workspaceId,onList,showAccount=true,showList=
     // presenting an unchanged "Starting" for the whole startup deadline.
     const retrying=typeof latest.operation?.last_error==='string'?latest.operation.last_error.replace(/[\u0000-\u001f\u007f]/g,' ').slice(0,300).trim():'';
     setMessage(retrying?`The last setup step failed (${retrying}). Retrying automatically…`:advanceError?'Could not reach Canopy to continue setup. Retrying automatically…':bootstrapProgress(latest)?`${bootstrapProgress(latest)}… Your saved files stay with this workspace.`:'We’ll connect you automatically when ready. Your saved files and setup stay with this workspace.');
-    await new Promise(resolve=>setTimeout(resolve,5000));
+    await new Promise(resolve=>setTimeout(resolve,startupPollDelay(latest)));
    }
    if(current===generation.current)throw Error('The workspace is still preparing. You can retry here or stop the workspace.');
   }catch(error){if(current===generation.current){setMessage(error instanceof Error?error.message:String(error));fail();}}

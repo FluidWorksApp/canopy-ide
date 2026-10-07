@@ -111,3 +111,16 @@ it('shows a step that keeps failing instead of an unchanged starting state',asyn
  render(<ManagedWorkspaces/>);await act(async()=>{});fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
  expect(screen.getByText('The last setup step failed (Workspace operation will retry). Retrying automatically…')).toBeTruthy();expect(mocks.switchMode).not.toHaveBeenCalled();
 });
+
+it('checks every second once the host is starting its services, and connects within that second of readiness',async()=>{
+ vi.useFakeTimers();mocks.canSwitch.mockReturnValue(true);let state='stopped',report:{stage:string;status:string}|undefined;
+ const w=()=>({id:'ws-test',name:'My workspace',provider:'lightsail',state,cpu_max:2,memory_max_mib:8192,operation:{phase:'preparing-workspace',status:'running',bootstrap_report:report}});
+ mocks.invoke.mockImplementation(async(command,args)=>{if(command!=='canopy_account_request')return;if(args.route==='/api/workspaces')return {workspaces:[w()]};if(args.body.action==='resume'){state='starting';return {};}if(args.body.action==='connect')return {connection:{workspaceId:'ws-test',workspaceName:'My workspace',endpoint:'https://ws-test.workspaces.canopyide.dev',token:'synthetic'}};return {};});
+ const advances=()=>mocks.invoke.mock.calls.filter(([,args])=>args?.body?.action==='advance').length;
+ render(<ManagedWorkspaces/>);await act(async()=>{});fireEvent.click(screen.getByRole('button',{name:'Resume workspace'}));await act(async()=>{});
+ const early=advances();await act(async()=>{await vi.advanceTimersByTimeAsync(1000);});expect(advances()).toBe(early);
+ report={stage:'host-services',status:'progress'};await act(async()=>{await vi.advanceTimersByTimeAsync(4000);});
+ const later=advances();await act(async()=>{await vi.advanceTimersByTimeAsync(1000);});expect(advances()).toBe(later+1);
+ state='ready';await act(async()=>{await vi.advanceTimersByTimeAsync(1000);});
+ expect(mocks.open).toHaveBeenCalledWith('ws-test','/open',{resume:true});expect(mocks.switchMode).toHaveBeenCalledWith('remote');
+});
