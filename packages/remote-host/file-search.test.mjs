@@ -3,6 +3,12 @@ import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,writeFile,symlink,rm} from 'node:fs/promises';
 import os from 'node:os';import path from 'node:path';
 import {listWorkspaceFiles,searchWorkspaceFiles} from './file-search.mjs';
+import {spawnSync} from 'node:child_process';
+// Workspace search runs the ripgrep binary (installed on hosts and in CI).
+// A shell alias or function named rg is not visible to child processes.
+test('ripgrep is installed for workspace search',()=>{
+ assert.equal(spawnSync('rg',['--version']).error,undefined,'Workspace search needs the ripgrep binary on PATH (macOS: brew install ripgrep; Ubuntu: apt-get install ripgrep).');
+});
 test('search scopes multiple components, includes hidden source and Canopy artifacts, and honors ignore rules',async()=>{
  const dir=await mkdtemp(path.join(os.tmpdir(),'canopy-search-test-'));
  try{
