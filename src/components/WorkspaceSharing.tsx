@@ -1,91 +1,80 @@
 import {useEffect,useId,useRef,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
-import {canDelegateWorkspacePolicy} from '../../packages/control-plane/lib/delegation.mjs';
-// @ts-expect-error Shared policy module has no TypeScript declaration.
-import {sharingPolicy,canRevoke} from '../../packages/control-plane/lib/team-policy.mjs';
 import {Button} from './ui';
 import {WorkspaceSharingStatus} from './WorkspaceSharingStatus';
 import './workspaceSharing.css';
-type ShareProject={id:string;name:string;components:{id:string;name:string}[]};
-type Policy={projects:string;projectIds:string[];git:string;agents:string;sessions:string};
-type Access={role:string;permissions?:Partial<Policy>};
-type TeamGrant=Access&{team_id:string;name:string};
-type PersonGrant=Access&{user_id:string;name:string;email:string};
-type OrgGrant=Access&{organization_id:string;name:string};
-type Detail={organizationId:string|null;teams:{id:string;name:string}[];grants:TeamGrant[];yourAccess?:Access[]};
-type People={people:{id:string;name:string;email:string}[];grants:PersonGrant[]};
-type OrganizationAccess={organizationId:string|null;organizationName:string|null;grant:OrgGrant|null};
-type Tab='team'|'person'|'organization';
-type Entry={id:string;name:string;subtitle?:string;email?:string;role:string;permissions?:Partial<Policy>};
-type Editor={id:string;role:string;permissions:Policy;existing:Entry|null};
-const request=<T,>(body:unknown)=>invoke<T>('canopy_account_request',{route:'/api/teams',body});
-const normalize=(permissions?:Partial<Policy>):Policy=>sharingPolicy(permissions??{});
-const roleName=(role:string)=>role==='member'?'Developer':role==='admin'?'Admin':'Viewer';
-const noun:Record<Tab,string>={team:'team',person:'person',organization:'organization'};
+// Sharing works like sharing a document: who, Can view or Can edit, and three
+// switches. Saving is the share; members can connect once the running
+// workspace is ready (the status line above the list says when).
+export type Level='view'|'edit';
+export type Subject={type:'person'|'team'|'everyone';id:string;name?:string;email?:string};
+export type Share={subject:Subject;level:Level;projects:boolean;sessions:boolean;accounts:boolean;via:string[]};
+type Listing={organizationId:string|null;organizationName:string|null;people:{id:string;name:string;email:string}[];teams:{id:string;name:string}[];shares:Share[]};
+type Draft={subject:Subject|null;level:Level;projects:boolean;sessions:boolean;accounts:boolean};
+const request=<T,>(body:Record<string,unknown>)=>invoke<T>('canopy_account_request',{route:'/api/teams',body});
+export const SWITCHES=[
+ {key:'projects',label:'Projects',hint:'Every project in this workspace, including new ones'},
+ {key:'sessions',label:'Agent sessions',hint:'See and join agent sessions you publish'},
+ {key:'accounts',label:'Accounts',hint:'Use the provider accounts you share in Tools & accounts'},
+] as const;
+const newDraft=():Draft=>({subject:null,level:'edit',projects:true,sessions:false,accounts:false});
+const sameSubject=(a:Subject,b:Subject)=>a.type===b.type&&a.id===b.id;
+const subjectKey=(s:Subject)=>`${s.type}:${s.id}`;
+
 export function WorkspaceSharing({workspaceId,workspaceName}:{workspaceId:string;workspaceName?:string}){
- const [detail,setDetail]=useState<Detail|null>(null),[people,setPeople]=useState<People>({people:[],grants:[]});
- const [orgAccess,setOrgAccess]=useState<OrganizationAccess|null>(null),[organizations,setOrganizations]=useState<{id:string;name:string}[]>([]),[organization,setOrganization]=useState('');
- const [tab,setTab]=useState<Tab>('team'),[editor,setEditor]=useState<Editor|null>(null),[remove,setRemove]=useState<Entry|null>(null);
- const [loading,setLoading]=useState(true),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
- const [projects,setProjects]=useState<ShareProject[]>([]),[projectError,setProjectError]=useState(''),[projectsLoading,setProjectsLoading]=useState(false);
- const epoch=useRef(0),refreshVersion=useRef(0),formId=useId();
- const [sharingRefresh,setSharingRefresh]=useState(0);
- const grants=detail?.yourAccess??[];
- const isOwner=grants.some(g=>g.role==='owner');
- const admins=grants.filter(g=>g.role==='admin');
- const fullDelegation=isOwner||admins.some(g=>normalize(g.permissions).projects==='all');
- const canManage=isOwner||admins.length>0;
- const defaultPolicy:Policy={projects:fullDelegation?'all':'selected',projectIds:fullDelegation?[]:[...new Set(admins.flatMap(g=>normalize(g.permissions).projectIds))].sort(),git:'personal',agents:'personal',sessions:'private'};
- const canDelegate=(policy:Partial<Policy>)=>{try{return canDelegateWorkspacePolicy(grants,policy);}catch{return false;}};
- const canChange=(entry:Entry)=>canManage&&canRevoke(isOwner?'owner':'admin',entry.role)&&canDelegate(normalize(entry.permissions));
- const entries:Entry[]=tab==='team'?(detail?.grants??[]).map(g=>({id:g.team_id,...g})):tab==='person'?people.grants.map(g=>({id:g.user_id,...g})):orgAccess?.grant?[{id:orgAccess.grant.organization_id,...orgAccess.grant,subtitle:'All current and future organization members'}]:[];
- const targets=tab==='team'?(detail?.teams??[]):tab==='person'?people.people:orgAccess?.organizationId?[{id:orgAccess.organizationId,name:orgAccess.organizationName??'Your organization'}]:[];
- // Access covers the whole workspace: its project folder is shared as one.
- const policySummary=(raw?:Partial<Policy>)=>{const p=normalize(raw);return ['Whole workspace',p.git==='shared'?'Shared Git':null,p.agents==='shared'?'Shared agents':null,p.sessions==='view'?'View published sessions':p.sessions==='interact'?'Interact with published sessions':null].filter(Boolean).join(' · ');};
- async function refreshProjects(){const current=epoch.current;setProjectsLoading(true);setProjectError('');try{const data=await request<{projects:ShareProject[]}>({action:'workspace-project-list',workspaceId});if(current===epoch.current)setProjects(Array.isArray(data.projects)?data.projects:[]);}catch(e){if(current===epoch.current)setProjectError(String(e));}finally{if(current===epoch.current)setProjectsLoading(false);}}
- async function refresh(){const current=epoch.current,version=++refreshVersion.current;setLoading(true);try{const data=await request<Detail>({action:'workspace-team-list',workspaceId});if(current!==epoch.current||version!==refreshVersion.current)return;const [persons,orgs]=data.organizationId?await Promise.all([request<People>({action:'workspace-person-list',workspaceId}),request<OrganizationAccess>({action:'workspace-organization-list',workspaceId})]):[{people:[],grants:[]},null];if(current!==epoch.current||version!==refreshVersion.current)return;setDetail(data);setPeople(persons);setOrgAccess(orgs);if(!data.organizationId){const list=await request<{organizations:{id:string;name:string}[]}>({action:'organization-list'});if(current!==epoch.current||version!==refreshVersion.current)return;setOrganizations(list.organizations);}else void refreshProjects();}catch(e){if(current===epoch.current&&version===refreshVersion.current)setError(String(e));}finally{if(current===epoch.current&&version===refreshVersion.current)setLoading(false);}}
- useEffect(()=>{const reload=()=>{epoch.current++;refreshVersion.current++;setDetail(null);setPeople({people:[],grants:[]});setOrgAccess(null);setOrganizations([]);setOrganization('');setTab('team');setEditor(null);setRemove(null);setProjects([]);setProjectError('');setError('');setNotice('');setBusy(false);void refresh();};reload();window.addEventListener('canopy:account-changed',reload);return()=>{epoch.current++;refreshVersion.current++;window.removeEventListener('canopy:account-changed',reload);};},[workspaceId]);
- async function action(body:Record<string,unknown>,message:string){const current=epoch.current;setBusy(true);setError('');setNotice('');try{await request({...body,workspaceId});if(current!==epoch.current)return;setSharingRefresh(n=>n+1);setEditor(null);setRemove(null);setNotice(message);await refresh();}catch(e){if(current===epoch.current)setError(String(e));}finally{if(current===epoch.current)setBusy(false);}}
- function switchTab(next:Tab){setTab(next);setEditor(null);setRemove(null);setError('');setNotice('');}
- const wholeWorkspace=(policy:Policy):Policy=>fullDelegation?{...policy,projects:'all',projectIds:[]}:policy;
- function edit(entry?:Entry){setRemove(null);setError('');setNotice('');setEditor({id:entry?.id??(tab==='organization'?orgAccess?.organizationId??'':''),role:entry?.role??(tab==='team'?'member':'viewer'),permissions:wholeWorkspace(entry?normalize(entry.permissions):defaultPolicy),existing:entry??null});}
- function selectTarget(id:string){const entry=entries.find(item=>item.id===id)??null;setEditor({id,role:entry?.role??(tab==='team'?'member':'viewer'),permissions:wholeWorkspace(entry?normalize(entry.permissions):defaultPolicy),existing:entry});}
- const blockedExisting=editor?.existing&&!canChange(editor.existing);
+ const [listing,setListing]=useState<Listing|null>(null),[loading,setLoading]=useState(true),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState('');
+ const [ownerOnly,setOwnerOnly]=useState(false),[draft,setDraft]=useState<Draft|null>(null),[refresh,setRefresh]=useState(0);
+ const [organizations,setOrganizations]=useState<{id:string;name:string}[]>([]),[organization,setOrganization]=useState('');
+ const epoch=useRef(0),uid=useId();
+ async function load(){
+  const current=epoch.current;setLoading(true);setError('');
+  try{
+   const data=await request<Listing>({action:'workspace-share-list',workspaceId});if(current!==epoch.current)return;
+   setListing(data);setOwnerOnly(false);
+   if(!data.organizationId){const list=await request<{organizations:{id:string;name:string}[]}>({action:'organization-list'});if(current===epoch.current)setOrganizations(list.organizations);}
+  }catch(e){if(current!==epoch.current)return;if(/Only the workspace owner/.test(String(e)))setOwnerOnly(true);else setError(String(e));}
+  finally{if(current===epoch.current)setLoading(false);}
+ }
+ useEffect(()=>{const reload=()=>{epoch.current++;setListing(null);setDraft(null);setNotice('');setError('');setBusy(false);setOrganizations([]);setOrganization('');void load();};reload();window.addEventListener('canopy:account-changed',reload);return()=>{epoch.current++;window.removeEventListener('canopy:account-changed',reload);};},[workspaceId]);
+ async function act(body:Record<string,unknown>,message:string){
+  const current=epoch.current;setBusy(true);setError('');setNotice('');
+  try{await request({...body,workspaceId});if(current!==epoch.current)return;setDraft(null);setNotice(message);setRefresh(n=>n+1);await load();}
+  catch(e){if(current===epoch.current)setError(String(e));}finally{if(current===epoch.current)setBusy(false);}
+ }
+ const save=(share:Omit<Share,'via'>,message:string)=>act({action:'workspace-share-set',subject:{type:share.subject.type,id:share.subject.id},level:share.level,projects:share.projects,sessions:share.sessions,accounts:share.accounts},message);
+ const shares=listing?.shares??[];
+ const choices:Subject[]=listing?[
+  ...(listing.organizationId&&!shares.some(s=>s.subject.type==='everyone')?[{type:'everyone' as const,id:listing.organizationId,name:`Everyone in ${listing.organizationName??'your organization'}`}]:[]),
+  ...listing.teams.filter(t=>!shares.some(s=>sameSubject(s.subject,{type:'team',id:t.id}))).map(t=>({type:'team' as const,id:t.id,name:t.name})),
+  ...listing.people.filter(p=>!shares.some(s=>sameSubject(s.subject,{type:'person',id:p.id}))).map(p=>({type:'person' as const,id:p.id,name:p.name||p.email,email:p.email})),
+ ]:[];
+ if(ownerOnly)return <section className="workspace-sharing-access" aria-label="Workspace access"><header className="workspace-sharing-access-heading"><div><h2>Sharing</h2><p>Only the owner of {workspaceName??'this workspace'} can change who it is shared with.</p></div></header></section>;
  return <section className="workspace-sharing-access" aria-label="Workspace access">
-  <header className="workspace-sharing-access-heading"><div><h2>Workspace access</h2><p>{workspaceName?`Choose who can work in ${workspaceName}.`:'Choose who can work in this workspace.'}</p></div><span className="workspace-sharing-access-private-note">Personal accounts stay private</span></header>
-  {isOwner&&<WorkspaceSharingStatus workspaceId={workspaceId} hasAccess={(detail?.grants.length??0)+people.grants.length+(orgAccess?.grant?1:0)>0} refreshKey={sharingRefresh}/>}
-  {error&&<div className="workspace-sharing-access-error" role="alert"><span>{error}</span><Button size="sm" disabled={busy||loading} onClick={()=>{setError('');void refresh();}}>Retry</Button></div>}
+  <header className="workspace-sharing-access-heading"><div><h2>Sharing</h2><p>{workspaceName?`Share ${workspaceName} like a document: who, and whether they can view or edit.`:'Share this workspace like a document: who, and whether they can view or edit.'}</p></div>{listing?.organizationId&&!draft&&<Button size="sm" variant="accent" disabled={busy||loading||!choices.length} onClick={()=>{setDraft(newDraft());setNotice('');setError('');}}>Share</Button>}</header>
+  {listing?.organizationId&&<WorkspaceSharingStatus workspaceId={workspaceId} hasAccess={shares.length>0} refreshKey={refresh}/>}
+  {error&&<div className="workspace-sharing-access-error" role="alert"><span>{error}</span><Button size="sm" disabled={busy} onClick={()=>{setError('');void load();}}>Retry</Button></div>}
   {notice&&<p className="workspace-sharing-access-notice" role="status">{notice}</p>}
-  {loading&&!detail&&<div className="workspace-sharing-access-loading" role="status">Loading workspace access…<div/><div/></div>}
-  {detail&&!detail.organizationId&&<div className="workspace-sharing-access-empty"><span className="workspace-sharing-access-avatar" aria-hidden="true">+</span><h3>Share with your organization</h3><p>Choose an organization to bring its teams and people into this workspace.</p><div className="workspace-sharing-access-attach"><label>Organization<select value={organization} onChange={e=>setOrganization(e.target.value)}><option value="">Choose an organization</option>{organizations.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}</select></label><Button disabled={busy||loading||!organization} onClick={()=>void action({action:'organization-workspace-attach',organizationId:organization},'Workspace added to organization.')}>Add to organization</Button></div></div>}
-  {detail?.organizationId&&<>
-   <div className="workspace-sharing-access-toolbar"><div role="tablist" aria-label="Access recipients">{(['team','person','organization'] as const).map(value=><button key={value} type="button" role="tab" aria-selected={tab===value} onClick={()=>switchTab(value)} disabled={busy}>{value==='team'?'Teams':value==='person'?'People':'Everyone'}<span>{value==='team'?detail.grants.length:value==='person'?people.grants.length:orgAccess?.grant?1:0}</span></button>)}</div>{!editor&&<Button size="sm" disabled={!canManage||busy||loading||tab==='organization'&&!!orgAccess?.grant} onClick={()=>edit()}>+ Add access</Button>}</div>
-   {!fullDelegation&&canManage&&<p className="workspace-sharing-access-scope-note">You can manage access within the projects and resources assigned to you.</p>}
-   {!editor&&<>
-    {entries.length>0?<div className="workspace-sharing-access-roster">{entries.map(entry=><div className="workspace-sharing-access-row" key={entry.id}><span className={`workspace-sharing-access-avatar workspace-sharing-access-avatar-${tab}`} aria-hidden="true">{tab==='organization'?'◎':entry.name.charAt(0).toUpperCase()}</span><div className="workspace-sharing-access-identity"><strong>{entry.name}</strong>{(entry.subtitle||'email' in entry)&&<small>{entry.subtitle||String(entry.email)}</small>}<p>{policySummary(entry.permissions)}</p></div><span className={`workspace-sharing-access-role workspace-sharing-access-role-${entry.role}`}>{roleName(entry.role)}</span><div className="workspace-sharing-access-row-actions"><Button size="sm" disabled={busy||!canChange(entry)} onClick={()=>edit(entry)}>Edit</Button><Button size="sm" disabled={busy||!canChange(entry)} onClick={()=>setRemove(entry)}>Remove</Button></div>{remove?.id===entry.id&&<div className="workspace-sharing-access-confirm"><div><strong>Remove access for {entry.name}?</strong><p>Access granted through other teams or directly stays in place.</p></div><Button variant="danger" size="sm" disabled={busy} onClick={()=>void action({action:`workspace-${noun[tab]}-revoke`,[tab==='team'?'teamId':tab==='person'?'userId':'organizationId']:entry.id},'Access removed.')}>Confirm removal</Button><Button size="sm" disabled={busy} onClick={()=>setRemove(null)}>Cancel</Button></div>}</div>)}</div>:<div className="workspace-sharing-access-empty"><span className={`workspace-sharing-access-avatar workspace-sharing-access-avatar-${tab}`} aria-hidden="true">{tab==='organization'?'◎':'+'}</span><h3>{tab==='team'?'No teams have access':tab==='person'?'No direct access yet':'Everyone starts without access'}</h3><p>{tab==='team'?'Give a team access once. Its members inherit the same permissions.':tab==='person'?'Add an organization member without changing their team membership.':`Grant one policy to everyone in ${orgAccess?.organizationName??'your organization'}, including future members.`}</p><Button size="sm" disabled={!canManage||busy||loading||!targets.length} onClick={()=>edit()}>{tab==='team'?'Add a team':tab==='person'?'Add a person':'Give everyone access'}</Button>{!targets.length&&tab!=='organization'&&<small>Create {tab==='team'?'a team':'an organization member'} in Teams first.</small>}</div>}
-    <p className="workspace-sharing-access-footnote">Develop and Admin members can resume the workspace. Running time is billed to its owner.</p>
-   </>}
-   {editor&&<form className="workspace-sharing-access-editor" onSubmit={event=>{event.preventDefault();if(!editor.id||blockedExisting||!canDelegate(editor.permissions)||!isOwner&&editor.role==='admin')return;void action({action:`workspace-${noun[tab]}-grant`,[tab==='team'?'teamId':tab==='person'?'userId':'organizationId']:editor.id,role:editor.role,permissions:editor.permissions},editor.existing?'Access updated.':'Access granted.');}}>
-    <header><h3>{editor.existing?'Edit access':tab==='organization'?'Give everyone access':'Add access'}</h3><p>{tab==='organization'?'Applies to all current and future organization members.':'Choose a recipient and the work they can access.'}</p></header>
-    {editor.existing?<div className="workspace-sharing-access-fixed-recipient"><span className={`workspace-sharing-access-avatar workspace-sharing-access-avatar-${tab}`} aria-hidden="true">{tab==='organization'?'◎':editor.existing.name.charAt(0).toUpperCase()}</span><div><strong>{editor.existing.name}</strong><small>{editor.existing.email??(tab==='organization'?'All current and future members':'Team access')}</small></div></div>:<label className="workspace-sharing-access-recipient" htmlFor={`${formId}-recipient`}>{tab==='team'?'Team':tab==='person'?'Person':'Organization'}<select id={`${formId}-recipient`} aria-label={tab==='team'?'Team':tab==='person'?'Person':'Organization'} value={editor.id} disabled={busy||tab==='organization'} onChange={e=>selectTarget(e.target.value)}><option value="">Choose a {noun[tab]}</option>{targets.map(target=><option key={target.id} value={target.id}>{target.name?.trim()?`${target.name}${'email' in target&&target.email?` · ${target.email}`:''}`:'email' in target?String(target.email):'Unnamed team'}</option>)}</select></label>}
-    <fieldset className="workspace-sharing-access-role-choices" disabled={busy}><legend>Role</legend><div>{[{value:'viewer',name:'Viewer',description:'Browse permitted files and view explicitly shared sessions.'},{value:'member',name:'Developer',description:'Edit files, run tools and resume the workspace.'},...(isOwner||editor.role==='admin'?[{value:'admin',name:'Admin',description:'Developer access plus permission management within assigned scope.'}]:[])].map(choice=><label key={choice.value} className={editor.role===choice.value?'selected':''}><input type="radio" name={`${formId}-role`} aria-label={choice.name} value={choice.value} checked={editor.role===choice.value} disabled={choice.value==='admin'&&!isOwner} onChange={()=>setEditor({...editor,role:choice.value})}/><strong>{choice.name}</strong><small>{choice.description}</small></label>)}</div></fieldset>
-    <ProjectAccessEditor value={editor.permissions} onChange={permissions=>setEditor({...editor,permissions})} projects={projects} allowAll={fullDelegation} busy={busy} loading={projectsLoading} error={projectError} onReload={()=>void refreshProjects()} canShare={canDelegate}/>
-    {blockedExisting&&<p className="workspace-sharing-access-error" role="alert">This existing grant exceeds your administrative access. Ask the workspace owner to change it.</p>}
-    <footer><Button type="button" disabled={busy} onClick={()=>setEditor(null)}>Cancel</Button><Button variant="accent" type="submit" disabled={busy||!editor.id||!!blockedExisting||!canDelegate(editor.permissions)||!isOwner&&editor.role==='admin'}>{busy?'Saving…':editor.existing?'Save changes':'Grant access'}</Button></footer>
-   </form>}
-  </>}
+  {loading&&!listing&&<div className="workspace-sharing-access-loading" role="status">Loading sharing…<div/><div/></div>}
+  {listing&&!listing.organizationId&&<div className="workspace-sharing-access-empty"><h3>Share with your organization</h3><p>Add this workspace to an organization to share it with its people and teams.</p><div className="workspace-sharing-access-attach"><label>Organization<select value={organization} onChange={e=>setOrganization(e.target.value)}><option value="">Choose an organization</option>{organizations.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}</select></label><Button disabled={busy||!organization} onClick={()=>void act({action:'organization-workspace-attach',organizationId:organization},'Workspace added to organization.')}>Add to organization</Button></div></div>}
+  {draft&&<form className="workspace-share-dialog" aria-label="Share workspace" onSubmit={event=>{event.preventDefault();if(draft.subject)void save({...draft,subject:draft.subject},`Shared with ${draft.subject.name}.`);}}>
+   <label className="workspace-share-who" htmlFor={`${uid}-who`}>Share with<select id={`${uid}-who`} aria-label="Share with" value={draft.subject?subjectKey(draft.subject):''} disabled={busy} onChange={e=>setDraft({...draft,subject:choices.find(c=>subjectKey(c)===e.target.value)??null})}><option value="">Choose a person, team or everyone</option>{choices.map(c=><option key={subjectKey(c)} value={subjectKey(c)}>{c.type==='team'?`Team · ${c.name}`:c.type==='person'?`${c.name}${c.email&&c.email!==c.name?` · ${c.email}`:''}`:c.name}</option>)}</select></label>
+   <ShareControls share={draft} disabled={busy} onChange={next=>setDraft({...draft,...next})}/>
+   <footer><Button type="button" disabled={busy} onClick={()=>setDraft(null)}>Cancel</Button><Button variant="accent" type="submit" disabled={busy||!draft.subject||!draft.projects&&!draft.sessions}>{busy?'Sharing…':'Share'}</Button></footer>
+  </form>}
+  {listing?.organizationId&&<ul className="workspace-share-list" aria-label="Shared with">
+   {shares.map(share=><li key={subjectKey(share.subject)} className="workspace-share-row">
+    <span className="workspace-share-identity"><strong>{share.subject.name}</strong><small>{share.subject.type==='team'?'Team':share.subject.type==='everyone'?'Current and future members':share.subject.email}{share.via.length?` · also via team ${share.via.join(', ')}`:''}</small></span>
+    <ShareControls share={share} disabled={busy} compact onChange={next=>void save({...share,...next},'Sharing updated.')}/>
+    <Button size="sm" variant="ghost" disabled={busy} aria-label={`Stop sharing with ${share.subject.name}`} onClick={()=>void act({action:'workspace-share-remove',subject:{type:share.subject.type,id:share.subject.id}},`Stopped sharing with ${share.subject.name}.`)}>Remove</Button>
+   </li>)}
+   {!shares.length&&!draft&&<li className="workspace-share-empty">Not shared with anyone yet.</li>}
+  </ul>}
  </section>;
 }
-function ProjectAccessEditor({value,onChange,projects,allowAll,busy,loading,error,onReload,canShare}:{value:Policy;onChange:(value:Policy)=>void;projects:ShareProject[];allowAll:boolean;busy:boolean;loading:boolean;error:string;onReload:()=>void;canShare:(policy:Policy)=>boolean}){
- const uid=useId(),selected=new Set(value.projectIds),available=new Set(projects.map(p=>p.id)),missing=[...selected].filter(id=>!available.has(id));
- const toggle=(id:string,checked:boolean)=>{const next=new Set(selected);if(checked)next.add(id);else next.delete(id);onChange({...value,projectIds:[...next].sort()});};
- if(allowAll)return <fieldset className="workspace-sharing-access-policy" disabled={busy}><legend>Projects</legend><p className="workspace-sharing-access-help">The whole workspace: every project folder, including ones added later. Viewers can read; Developers and Admins can change files.</p><SharedResources value={value} onChange={onChange} canShare={canShare}/></fieldset>;
- return <fieldset className="workspace-sharing-access-policy" disabled={busy}><legend>Projects</legend><label className="workspace-sharing-access-project-mode"><span className="sr-only">Project scope</span><select aria-label="Project scope" value={value.projects} onChange={e=>onChange({...value,projects:e.target.value})}><option value="selected">Selected projects</option>{(allowAll||value.projects==='all')&&<option value="all" disabled={!allowAll}>All projects</option>}</select></label>
- {value.projects==='all'?<p className="workspace-sharing-access-help">Includes current and future projects in this workspace.</p>:<div className="workspace-sharing-access-project-list">{loading&&<p role="status">Loading projects…</p>}{error&&<div className="workspace-sharing-access-catalog-error"><p>Project details are unavailable. Saved selections are preserved.</p><small>{error}</small><Button type="button" size="sm" onClick={onReload}>Reload projects</Button></div>}{projects.map(project=><label className="workspace-sharing-access-project" key={project.id}><input type="checkbox" aria-label={project.name} aria-describedby={`${uid}-${project.id}`} checked={selected.has(project.id)} onChange={e=>toggle(project.id,e.target.checked)}/><span><strong>{project.name}</strong><small id={`${uid}-${project.id}`}>{project.components.map(c=>c.name).join(' · ')}</small></span></label>)}{missing.map(id=><label className="workspace-sharing-access-project" key={id}><input type="checkbox" aria-label={id} checked onChange={e=>toggle(id,e.target.checked)}/><span><strong>{id}</strong><small>Saved selection · details unavailable</small></span></label>)}{!loading&&!error&&!projects.length&&!missing.length&&<p>No projects are available to share.</p>}{!selected.size&&<p className="workspace-sharing-access-help">No project access will be granted.</p>}</div>}
- <SharedResources value={value} onChange={onChange} canShare={canShare}/>
- </fieldset>;
-}
-
-function SharedResources({value,onChange,canShare}:{value:Policy;onChange:(value:Policy)=>void;canShare:(policy:Policy)=>boolean}){
- return <details className="workspace-sharing-access-resources"><summary><span>Shared resources</span><small>{value.git==='personal'&&value.agents==='personal'&&value.sessions==='private'?'Members bring their own accounts':'Custom sharing policy'}</small></summary><div className="workspace-sharing-access-resource-fields">{(['git','agents'] as const).map(resource=><label key={resource}>{resource==='git'?'Git accounts':'Agent accounts'}<select aria-label={resource==='git'?'Git access':'Agent access'} value={value[resource]} onChange={e=>onChange({...value,[resource]:e.target.value})}><option value="personal">Use personal accounts</option><option value="shared" disabled={!canShare({...value,[resource]:'shared'})}>Use shared workspace accounts</option></select></label>)}<label>Published sessions<select aria-label="Session access" value={value.sessions} onChange={e=>onChange({...value,sessions:e.target.value})}><option value="private">Keep sessions private</option><option value="view" disabled={!canShare({...value,sessions:'view'})}>View published sessions</option><option value="interact" disabled={!canShare({...value,sessions:'interact'})}>Interact with published sessions</option></select></label></div><p className="workspace-sharing-access-help">Only explicitly published sessions are shared. Typing also requires Develop access. Removing access disconnects shared terminals.</p></details>;
+function ShareControls({share,onChange,disabled,compact=false}:{share:Pick<Share,'level'|'projects'|'sessions'|'accounts'>;onChange:(next:Partial<Share>)=>void;disabled:boolean;compact?:boolean}){
+ const uid=useId();
+ return <div className={`workspace-share-controls${compact?' compact':''}`}>
+  <select aria-label="Access" value={share.level} disabled={disabled} onChange={e=>onChange({level:e.target.value as Level})}><option value="view">Can view</option><option value="edit">Can edit</option></select>
+  {SWITCHES.map(item=><label key={item.key} className="workspace-share-switch" title={item.hint}><input type="checkbox" aria-label={item.label} aria-describedby={compact?undefined:`${uid}-${item.key}`} checked={share[item.key]} disabled={disabled||item.key==='projects'&&share.projects&&!share.sessions||item.key==='sessions'&&share.sessions&&!share.projects} onChange={e=>onChange({[item.key]:e.target.checked})}/><span>{item.label}</span>{!compact&&<small id={`${uid}-${item.key}`}>{item.hint}</small>}</label>)}
+ </div>;
 }

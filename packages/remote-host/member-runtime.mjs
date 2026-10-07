@@ -13,6 +13,9 @@ export function memberRuntime(workspace,principal,access){
  const key=createHash('sha256').update(JSON.stringify([workspace.id,principal.memberId])).digest('hex').slice(0,40);
  const {ownerImage,...shared}=workspace;
  const mounts=grantedProjects(workspace,access).map(project=>({...project,writable:principal.scope==='drive'&&project.writable}));
- const version=createHash('sha256').update(JSON.stringify(['shared-workspace-volume',key,principal.accessVersion??0,principal.scope,mounts.map(p=>[p.id,p.writable]).sort()])).digest('hex').slice(0,40);
- return {...shared,id:`member-${version}`,storageId:`member-${key}`,readOnly:principal.scope==='view',accounts:[],projectMounts:mounts,parentWorkspaceId:workspace.id,memberId:principal.memberId};
+ // The share's Projects switch: the workspace project volume, read-write only
+ // for Can edit; without it the member gets a private, empty /workspace.
+ const sharedProjects=access?.allRead===true?(principal.scope==='drive'&&access.allWrite===true?'rw':'ro'):null;
+ const version=createHash('sha256').update(JSON.stringify(['shared-workspace-volume',sharedProjects,key,principal.accessVersion??0,principal.scope,mounts.map(p=>[p.id,p.writable]).sort()])).digest('hex').slice(0,40);
+ return {...shared,id:`member-${version}`,storageId:`member-${key}`,readOnly:principal.scope==='view',sharedProjects,accounts:[],projectMounts:mounts,parentWorkspaceId:workspace.id,memberId:principal.memberId};
 }

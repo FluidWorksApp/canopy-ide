@@ -23,3 +23,7 @@ test('the catalog persists privately and feeds member stores with the same paths
   assert.deepEqual(member.projects.map(p=>p.id),['mine','agent']);assert.equal(member.projects[1].readOnly,true);
  }finally{await rm(directory,{recursive:true,force:true});}
 });
+test('a member without a saved store still sees the owner projects',()=>{
+ const owner=[{id:'agent',name:'coraa-agent',sharedWorkspaceId:'ws-a',readOnly:false,components:[{id:'api',label:'API',path:'/workspace/coraa-agent'}]}];
+ for(const empty of [null,'','null'])assert.deepEqual(JSON.parse(mergeSharedProjects(empty,{id:'member-x',parentWorkspaceId:'ws-a',projectMounts:[]},owner)).projects.map(p=>p.id),['agent']);
+});

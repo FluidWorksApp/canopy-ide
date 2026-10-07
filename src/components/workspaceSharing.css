@@ -19,3 +19,21 @@
 .workspace-sharing-status-error{flex-basis:100%;color:var(--danger,#e5534b);overflow-wrap:anywhere}
 .workspace-sharing-access-heading{flex-wrap:wrap;gap:8px 24px}
 .workspace-sharing-access-heading>div{min-width:0}
+
+/* Share dialog and list: who, Can view / Can edit, three switches. */
+.workspace-share-dialog{display:grid;gap:12px;min-width:0;margin:0 0 16px;padding:14px;border:1px solid var(--accent,#ffaa00);border-radius:8px;background:var(--surface,#172128)}
+.workspace-share-who{display:grid;gap:6px;font-size:12px;min-width:0}
+.workspace-share-who select,.workspace-share-controls select{min-width:0;max-width:100%;padding:6px 8px;background:var(--bg,#0d1419);color:var(--text,#e3e9ed);border:1px solid var(--border,#2b3942);border-radius:5px;font:inherit;font-size:12px}
+.workspace-share-dialog footer{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px}
+.workspace-share-controls{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;min-width:0}
+.workspace-share-dialog .workspace-share-controls{display:grid;gap:10px}
+.workspace-share-switch{display:flex!important;align-items:center;gap:6px;margin:0!important;font-size:12px;min-width:0;cursor:pointer}
+.workspace-share-dialog .workspace-share-switch{display:grid!important;grid-template-columns:auto minmax(0,1fr);row-gap:2px}
+.workspace-share-switch input{margin:0;flex-shrink:0;accent-color:var(--accent,#ffaa00)}
+.workspace-share-switch small{grid-column:2;color:var(--text-muted,#93a3ae);font-size:11px;overflow-wrap:anywhere}
+.workspace-share-list{list-style:none;margin:0;padding:0;display:grid;gap:2px;min-width:0}
+.workspace-share-row{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;min-width:0;padding:8px 4px;border-bottom:1px solid var(--border,#2b3942)}
+.workspace-share-identity{display:grid;flex:1 1 180px;min-width:0}
+.workspace-share-identity strong{font-size:13px;overflow-wrap:anywhere}
+.workspace-share-identity small{font-size:11px;color:var(--text-muted,#93a3ae);overflow-wrap:anywhere}
+.workspace-share-empty{padding:12px 4px;color:var(--text-muted,#93a3ae);font-size:12px}

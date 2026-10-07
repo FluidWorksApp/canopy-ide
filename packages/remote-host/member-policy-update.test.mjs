@@ -23,7 +23,7 @@ test('grant replacement stops old processes before changing mounts and preserves
  assert.ok(update.findIndex(a=>a[0]==='stop')<update.findIndex(a=>a[0]==='run'&&a.includes('-d')));
  assert.equal(e.containers.has('canopy-ws-'+a.id),false);assert.equal(e.containers.get('canopy-ws-'+b.id).State.Running,true);
  const mounts=e.containers.get('canopy-ws-'+narrowed.id).Mounts;
- assert.ok(mounts.some(m=>m.Name==='canopy-home-'+a.storageId));assert.ok(mounts.some(m=>m.Name==='canopy-project-'+a.parentWorkspaceId&&m.Destination==='/workspace'));assert.ok(!mounts.some(m=>m.Name==='canopy-home-'+b.storageId));assert.ok(!mounts.some(m=>m.Destination==='/workspace/projects/two'));
+ assert.ok(mounts.some(m=>m.Name==='canopy-home-'+a.storageId));assert.ok(mounts.some(m=>m.Name==='canopy-project-'+a.storageId));assert.ok(!mounts.some(m=>m.Name==='canopy-home-'+b.storageId));assert.ok(!mounts.some(m=>m.Destination==='/workspace/projects/two'));
  assert.ok(e.volumes.has('canopy-home-'+a.storageId));assert.ok(e.volumes.has('canopy-home-'+b.storageId));
  const viewer=memberRuntime(parent,principal('alice',3,'view'),access(['one']));await host.open(viewer,{resume:true});assert.equal(viewer.storageId,a.storageId);assert.equal(projectMounts(viewer)[0][2],false);
  assert.equal(e.containers.has('canopy-ws-'+narrowed.id),false);assert.equal(e.containers.get('canopy-ws-'+viewer.id).Mounts.find(m=>m.Destination==='/workspace/projects/one').RW,false);

@@ -249,8 +249,9 @@ export class DockerWorkspaces {
     const storageId=workspace.storageId??workspace.id;
     // Members share the owning workspace's project volume (read-only for
     // viewers); everything else they use is their own.
-    const projectVolume=workspace.parentWorkspaceId&&workspace.memberId&&!workspace.memberId.startsWith('collaboration:')?`canopy-project-${workspace.parentWorkspaceId}`:`canopy-project-${storageId}`;
-    const projectWritable=!(projectVolume!==`canopy-project-${storageId}`&&workspace.readOnly);
+    const sharedVolume=workspace.parentWorkspaceId&&workspace.memberId&&!workspace.memberId.startsWith('collaboration:')&&['rw','ro'].includes(workspace.sharedProjects);
+    const projectVolume=sharedVolume?`canopy-project-${workspace.parentWorkspaceId}`:`canopy-project-${storageId}`;
+    const projectWritable=!sharedVolume||workspace.sharedProjects==='rw'&&!workspace.readOnly;
     let image=releaseImage??workspace.ownerImage??this.image;
     const projects=projectMounts(workspace);
     if(workspace.cgroupParent!=null&&!/^canopy-[a-z0-9]+\.slice$/.test(workspace.cgroupParent))throw Error('Invalid capacity group');

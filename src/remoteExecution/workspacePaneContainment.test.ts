@@ -24,3 +24,7 @@ it('the sharing status line wraps inside the pane',()=>{
  expect(body(sharing,'.workspace-sharing-status>span')).toContain('overflow-wrap:anywhere');
  expect(body(sharing,'.workspace-sharing-access-heading')).toContain('flex-wrap:wrap');
 });
+it('share rows and switches wrap instead of widening the pane',()=>{
+ expect(body(sharing,'.workspace-share-row')).toContain('flex-wrap:wrap');expect(sharing).toMatch(/\n\.workspace-share-controls\{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;min-width:0\}/);
+ expect(body(sharing,'.workspace-share-identity')).toContain('min-width:0');
+});
