@@ -51,6 +51,7 @@ import { useEscape } from "../useEscape";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
 import { VaultSettings } from "./VaultSettings";
+import { PlaywrightTokenSetting } from "./PlaywrightTokenSetting";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
 import {
   AgentIcon,
@@ -2051,9 +2052,13 @@ export function SettingsDialog({ onClose, initialTab = "appearance" }: SettingsD
                         label="Playwright"
                         hint="Your Chrome logins, streamed into Canopy. Requires Chrome, the Playwright extension and Node.js 20+."
                       />
-                      <p className="set-item-desc">
-                        Reopen preview tabs after changing engines. Chrome asks you to approve its connection.
-                      </p>
+                      {s.browserEngine === "chrome" ? (
+                        <PlaywrightTokenSetting />
+                      ) : (
+                        <p className="set-item-desc">
+                          Reopen preview tabs after changing engines.
+                        </p>
+                      )}
                     </div>
                 </Item>
                 {/* The vault is the browser's other half: it exists to fill
