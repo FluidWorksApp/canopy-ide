@@ -176,6 +176,22 @@
     tree-opening-spin 0.8s linear infinite;
 }
 
+/* The placeholder row under a folder that is still loading. Not a treeitem:
+   the keyboard cursor skips it. */
+.tree-row-loading {
+  cursor: default;
+  pointer-events: none;
+}
+
+.tree-row-loading .tree-file {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.tree-loading-spinner {
+  margin: 0;
+}
+
 @keyframes tree-opening-in {
   to { opacity: 1; }
 }

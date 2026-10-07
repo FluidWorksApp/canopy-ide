@@ -195,3 +195,27 @@ describe("FileTree opening state", () => {
     expect(screen.queryByRole("status", { name: "Opening README.md" })).toBeNull();
   });
 });
+
+describe("FileTree loading rows", () => {
+  it("shows a loading row under a folder until its listing arrives", async () => {
+    let release!: (entries: ipc.DirEntry[]) => void;
+    await renderTree();
+    vi.mocked(ipc.fsReadDir).mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    fireEvent.click(rowOf("src"));
+    const loading = await screen.findByRole("status", { name: "Loading src" });
+    expect(loading).toHaveTextContent("Loading…");
+    expect(loading).not.toHaveAttribute("role", "treeitem");
+    await act(async () => release(TREE["/proj/src"]));
+    expect(screen.queryByRole("status", { name: "Loading src" })).toBeNull();
+    expect(screen.getByText("app.ts")).toBeInTheDocument();
+  });
+
+  it("shows a loading row for a root that hasn't listed yet", async () => {
+    let release!: (entries: ipc.DirEntry[]) => void;
+    vi.mocked(ipc.fsReadDir).mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    render(<FileTree roots={[ROOT]} changedPaths={new Set()} onOpenFile={vi.fn()} hideRootHeader />);
+    expect(await screen.findByRole("status", { name: "Loading proj" })).toBeInTheDocument();
+    await act(async () => release(TREE["/proj"]));
+    expect(await screen.findByText("README.md")).toBeInTheDocument();
+  });
+});

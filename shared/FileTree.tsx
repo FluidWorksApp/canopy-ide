@@ -72,6 +72,9 @@ const ROW_H = 26;
  *  list can be windowed — only rows near the viewport are mounted. */
 type TreeItem =
   | { kind: "header"; root: string }
+  /** An expanded folder whose listing hasn't arrived (a remote read can take
+   *  seconds); without it the folder, or a whole root, just looked empty. */
+  | { kind: "loading"; dir: string; depth: number }
   | {
       kind: "entry";
       path: string;
@@ -276,6 +279,10 @@ export function FileTree({
     const out: TreeItem[] = [];
     const walk = (dirPath: string, parent: string | null, depth: number) => {
       const state = dirs[dirPath];
+      if (state?.expanded && !state.entries) {
+        out.push({ kind: "loading", dir: dirPath, depth });
+        return;
+      }
       if (!state?.expanded || !state.entries) return;
       for (const entry of state.entries) {
         out.push({
@@ -640,6 +647,20 @@ export function FileTree({
   ];
 
   const renderItem = (item: TreeItem) => {
+    if (item.kind === "loading") {
+      return (
+        <div key={`loading:${item.dir}`} className="tree-row tree-row-loading" role="status" aria-label={`Loading ${item.dir.split("/").pop() || item.dir}`}>
+          {Array.from({ length: item.depth }, (_, d) => (
+            <span key={d} className="tree-guide" aria-hidden />
+          ))}
+          <span className="tree-chevron" />
+          <span className="tree-file-icon">
+            <span className="tree-opening-spinner tree-loading-spinner" aria-hidden />
+          </span>
+          <span className="tree-file">Loading…</span>
+        </div>
+      );
+    }
     if (item.kind === "header") {
       return (
         <div
