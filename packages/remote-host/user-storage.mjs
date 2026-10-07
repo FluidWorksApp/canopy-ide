@@ -134,11 +134,23 @@ export async function ensureUserStorage(gib,{run=runner(),image=IMAGE_PATH,mount
 }
 
 // One-time move of a legacy retained data disk (mounted read-only at `source`)
-// onto the boot disk: Docker volumes into the quota image, everything else
-// (containerd and Docker images/containers, host and Caddy state) onto the
-// root filesystem. The source is never written; the control plane deletes the
-// old disk only after the first verified user snapshot.
-export async function migrateLegacyStorage(source,{run=runner(),mountPoint=MOUNT_POINT,root='/srv/canopy',marker=MIGRATION_MARKER,fs={readdir,readFile,writeFile,mkdir,statfs},now=()=>new Date()}={}){
+// onto the boot disk. Only the user's files move: Docker volumes (home,
+// projects, accounts) into the quota image, and host state (management
+// metadata, Caddy certificates, recovery journal) onto the root filesystem.
+// Images, containers and the containerd store are never copied: the configured
+// release is pulled fresh and the gateway recreates the workspace container on
+// it with the same volumes (an image upgrade replaces the writable layer the
+// same way). Copying them cost minutes for ~13 GB of an old release, and a
+// copied container came back up on that old image. The source is never
+// written; the control plane deletes the old disk only after the first
+// verified user snapshot.
+export const MIGRATION_SKIP=Object.freeze(['lost+found','containerd','docker']);
+// Host-state entries that describe the old host's containers or a pending stop:
+// rollback containers of an upgrade journal are not carried, and a copied stop
+// request would trigger stop preparation on the new host.
+export const HOST_STATE_SKIP=Object.freeze(['image-upgrades','storage-prep-request.json']);
+const usedOf=s=>Math.max(0,(Number(s.blocks)-Number(s.bfree))*Number(s.bsize));
+export async function migrateLegacyStorage(source,{run=runner(),mountPoint=MOUNT_POINT,root='/srv/canopy',marker=MIGRATION_MARKER,fs={readdir,readFile,writeFile,mkdir,statfs},now=()=>new Date(),progress=null,progressIntervalMs=5000,timers={setInterval,clearInterval}}={}){
  const uuid=(await must(run,'findmnt',['--noheadings','--output','UUID','--mountpoint',source])).stdout.trim();
  if(!/^[0-9a-f-]{36}$/i.test(uuid))throw Error('Legacy storage is not mounted');
  const options=(await must(run,'findmnt',['--noheadings','--output','OPTIONS','--mountpoint',source])).stdout.trim().split(',');
@@ -148,32 +160,50 @@ export async function migrateLegacyStorage(source,{run=runner(),mountPoint=MOUNT
  const free=async path=>{const s=await fs.statfs(path);return Number(s.bavail)*Number(s.bsize);};
  const volumes=join(source,'docker','volumes');
  const hasVolumes=(await fs.readdir(join(source,'docker')).catch(()=>[])).includes('volumes');
- const volumeBytes=hasVolumes?await used(volumes):0,totalBytes=await used(source);
- if(volumeBytes>await free(mountPoint))throw Object.assign(Error('Your files do not fit in this package’s storage'),{exitCode:28});
- if(totalBytes-volumeBytes>await free(root))throw Object.assign(Error('The workspace system data does not fit on the boot disk'),{exitCode:28});
+ // Host state: everything else at the top level, host-state entry by entry.
+ const copies=[];
  for(const entry of await fs.readdir(source)){
-  if(entry==='lost+found')continue;
-  if(entry==='docker'){
-   for(const child of await fs.readdir(join(source,'docker'))){
-    if(child==='volumes')continue;
-    await fs.mkdir(join(root,'docker'),{recursive:true});
-    await must(run,'cp',['-a','--sparse=always',join(source,'docker',child),join(root,'docker')+'/'],{timeout:60*60000});
-   }
+  if(MIGRATION_SKIP.includes(entry))continue;
+  if(entry==='host-state'){
+   for(const child of await fs.readdir(join(source,entry)))if(!HOST_STATE_SKIP.includes(child))copies.push({from:join(source,entry,child),to:join(root,entry)+'/'});
    continue;
   }
-  await must(run,'cp',['-a','--sparse=always',join(source,entry),root+'/'],{timeout:60*60000});
+  copies.push({from:join(source,entry),to:root+'/'});
  }
- if(hasVolumes)await must(run,'cp',['-a','--sparse=always',`${volumes}/.`,`${mountPoint}/`],{timeout:60*60000});
- await must(run,'sync',[]);
- await fs.writeFile(marker,JSON.stringify({version:1,sourceUuid:uuid,volumeBytes,totalBytes,migratedAt:now().toISOString()}),{mode:0o600});
- return {copied:true,sourceUuid:uuid,volumeBytes,totalBytes};
+ const volumeBytes=hasVolumes?await used(volumes):0;
+ let hostBytes=0;for(const copy of copies)hostBytes+=await used(copy.from);
+ const totalBytes=volumeBytes+hostBytes;
+ if(volumeBytes>await free(mountPoint))throw Object.assign(Error('Your files do not fit in this package’s storage'),{exitCode:28});
+ if(hostBytes>await free(root))throw Object.assign(Error('The workspace system data does not fit on the boot disk'),{exitCode:28});
+ // Copied bytes = growth of the root filesystem, which holds both the host
+ // state and the quota image file. Cheap (statfs), unlike walking the copy.
+ let report=async()=>{};
+ if(progress){
+  const baseline=usedOf(await fs.statfs(root));
+  report=async(final=false)=>{let copiedBytes=totalBytes;if(!final){try{copiedBytes=Math.min(totalBytes,Math.max(0,usedOf(await fs.statfs(root))-baseline));}catch{return;}}try{await progress({copiedBytes,totalBytes});}catch{}};
+  await report();
+ }
+ const timer=progress?timers.setInterval(()=>void report(),progressIntervalMs):null;
+ try{
+  if(copies.some(copy=>copy.to.startsWith(join(root,'host-state'))))await fs.mkdir(join(root,'host-state'),{recursive:true});
+  for(const copy of copies)await must(run,'cp',['-a','--sparse=always',copy.from,copy.to],{timeout:60*60000});
+  if(hasVolumes)await must(run,'cp',['-a','--sparse=always',`${volumes}/.`,`${mountPoint}/`],{timeout:6*60*60000});
+  await must(run,'sync',[]);
+ }finally{if(timer)timers.clearInterval(timer);}
+ await report(true);
+ await fs.writeFile(marker,JSON.stringify({version:2,sourceUuid:uuid,volumeBytes,hostBytes,totalBytes,migratedAt:now().toISOString()}),{mode:0o600});
+ return {copied:true,sourceUuid:uuid,volumeBytes,hostBytes,totalBytes};
 }
 
 if(process.argv[1]===new URL(import.meta.url).pathname){
  const [command,arg]=process.argv.slice(2);
  try{
-  const result=command==='ensure'?await ensureUserStorage(arg):command==='mount'?await mountUserStorage():command==='migrate'?await migrateLegacyStorage(arg):command==='usage'?await storageUsage():null;
-  if(!result)throw Error('Usage: user-storage.mjs ensure <gib> | mount | migrate <legacy-mount> | usage');
+  // migrate --progress FILE: "copied total" bytes, for the bootstrap's reports.
+  const progressFile=command==='migrate'&&process.argv[4]==='--progress'?process.argv[5]:null;
+  if(progressFile&&!/^\/run\/canopy\/[a-z0-9-]+$/.test(progressFile))throw Error('Invalid progress file');
+  const progress=progressFile?async({copiedBytes,totalBytes})=>{const {publishRuntimeFile}=await import('./runtime-dir.mjs');await publishRuntimeFile(progressFile,`${copiedBytes} ${totalBytes}\n`);}:null;
+  const result=command==='ensure'?await ensureUserStorage(arg):command==='mount'?await mountUserStorage():command==='migrate'?await migrateLegacyStorage(arg,{progress}):command==='usage'?await storageUsage():null;
+  if(!result)throw Error('Usage: user-storage.mjs ensure <gib> | mount | migrate <legacy-mount> [--progress /run/canopy/<name>] | usage');
   process.stdout.write(JSON.stringify(result)+'\n');
  }catch(error){process.stderr.write(`${error.message}\n`);process.exit(error.exitCode??1);}
 }

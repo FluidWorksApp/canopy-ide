@@ -65,22 +65,45 @@ test('mount refuses a filesystem that needs a manual repair and never stacks a s
  assert.deepEqual(await mountUserStorage({run:same.run,fs:{mkdir:async()=>{}}}),{device:'/dev/loop2',mounted:false});
 });
 
-test('legacy disk migration copies volumes into the quota image and the rest onto root, read-only source, once',async()=>{
+test('legacy disk migration moves only user files: volumes into the quota image and host state onto root, never images or containers',async()=>{
  const uuid='0c8a1b2e-0000-4000-8000-000000000001';
- const {run,calls}=fakeRun({'findmnt --noheadings --output UUID':{stdout:uuid+'\n'},'findmnt --noheadings --output OPTIONS':{stdout:'ro,relatime\n'},'du -sx --block-size=1 /mnt/legacy/docker/volumes':{stdout:'1000\t/x\n'},'du -sx --block-size=1 /mnt/legacy':{stdout:'5000\t/x\n'}});
- let marker=null;
- const fs={readdir:async dir=>dir==='/mnt/legacy'?['containerd','docker','host-state','lost+found']:['overlay2','volumes','image'],readFile:async()=>{if(!marker)throw enoent();return marker;},writeFile:async(_,text)=>{marker=text;},mkdir:async()=>{},statfs:async()=>({bavail:1e9,bsize:4096})};
+ const {run,calls}=fakeRun({'findmnt --noheadings --output UUID':{stdout:uuid+'\n'},'findmnt --noheadings --output OPTIONS':{stdout:'ro,relatime\n'},'du -sx --block-size=1 /mnt/legacy/docker/volumes':{stdout:'1000\t/x\n'},'du -sx --block-size=1 /mnt/legacy/':{stdout:'10\t/x\n'}});
+ let marker=null;const made=[];
+ const listing={'/mnt/legacy':['containerd','docker','host-state','caddy-state','recovery-state','lost+found'],'/mnt/legacy/docker':['overlay2','volumes','image','containers','network','buildkit'],'/mnt/legacy/host-state':['host-config.json','host.key','projects','image-upgrades','storage-prep-request.json','migrations']};
+ const fs={readdir:async dir=>listing[dir]??[],readFile:async()=>{if(!marker)throw enoent();return marker;},writeFile:async(_,text)=>{marker=text;},mkdir:async dir=>{made.push(dir);},statfs:async()=>({blocks:1e9,bfree:5e8,bavail:1e9,bsize:4096})};
  const result=await migrateLegacyStorage('/mnt/legacy',{run,fs});
  assert.equal(result.copied,true);
  const copies=calls.filter(c=>c.startsWith('cp '));
- assert.deepEqual(copies,['cp -a --sparse=always /mnt/legacy/containerd /srv/canopy/','cp -a --sparse=always /mnt/legacy/docker/overlay2 /srv/canopy/docker/','cp -a --sparse=always /mnt/legacy/docker/image /srv/canopy/docker/','cp -a --sparse=always /mnt/legacy/host-state /srv/canopy/',`cp -a --sparse=always /mnt/legacy/docker/volumes/. ${MOUNT_POINT}/`]);
- assert.equal(JSON.parse(marker).sourceUuid,uuid);
+ assert.deepEqual(copies,[
+  'cp -a --sparse=always /mnt/legacy/host-state/host-config.json /srv/canopy/host-state/',
+  'cp -a --sparse=always /mnt/legacy/host-state/host.key /srv/canopy/host-state/',
+  'cp -a --sparse=always /mnt/legacy/host-state/projects /srv/canopy/host-state/',
+  'cp -a --sparse=always /mnt/legacy/host-state/migrations /srv/canopy/host-state/',
+  'cp -a --sparse=always /mnt/legacy/caddy-state /srv/canopy/',
+  'cp -a --sparse=always /mnt/legacy/recovery-state /srv/canopy/',
+  `cp -a --sparse=always /mnt/legacy/docker/volumes/. ${MOUNT_POINT}/`]);
+ assert.equal(copies.some(c=>/containerd|overlay2|\/image |containers|network|buildkit|image-upgrades|storage-prep-request/.test(c)),false,'no image store, container or stale host request is carried');
+ assert.deepEqual(made,['/srv/canopy/host-state']);
+ assert.equal(result.volumeBytes,1000);assert.equal(result.hostBytes,60);assert.equal(result.totalBytes,1060);
+ assert.equal(JSON.parse(marker).sourceUuid,uuid);assert.equal(JSON.parse(marker).totalBytes,1060);
+ assert.equal(calls.some(c=>c==='du -sx --block-size=1 /mnt/legacy'),false,'the image store is never even measured');
  const again=fakeRun({'findmnt --noheadings --output UUID':{stdout:uuid+'\n'},'findmnt --noheadings --output OPTIONS':{stdout:'ro\n'}});
  assert.equal((await migrateLegacyStorage('/mnt/legacy',{run:again.run,fs})).copied,false);assert.equal(again.calls.some(c=>c.startsWith('cp ')),false);
  const writable=fakeRun({'findmnt --noheadings --output UUID':{stdout:uuid+'\n'},'findmnt --noheadings --output OPTIONS':{stdout:'rw\n'}});
  await assert.rejects(migrateLegacyStorage('/mnt/legacy',{run:writable.run,fs}),/read-only/);
  const full=fakeRun({'findmnt --noheadings --output UUID':{stdout:'0c8a1b2e-0000-4000-8000-000000000002\n'},'findmnt --noheadings --output OPTIONS':{stdout:'ro\n'},'du':{stdout:'99999999999999\t/x\n'}});
  await assert.rejects(migrateLegacyStorage('/mnt/legacy',{run:full.run,fs:{...fs,readFile:async()=>{throw enoent();}}}),e=>e.exitCode===28);assert.equal(full.calls.some(c=>c.startsWith('cp ')),false);
+});
+
+test('migration progress reports copied/total bytes from root growth while copying, then completion',async()=>{
+ const uuid='0c8a1b2e-0000-4000-8000-000000000003';
+ let usedBlocks=1000;const reports=[];let tick=null;
+ const {run}=fakeRun({'findmnt --noheadings --output UUID':{stdout:uuid+'\n'},'findmnt --noheadings --output OPTIONS':{stdout:'ro\n'},'du -sx --block-size=1 /mnt/legacy/docker/volumes':{stdout:String(40*4096)+'\t/x\n'},'du -sx --block-size=1 /mnt/legacy/host-state':{stdout:'0\t/x\n'},
+  'cp':async()=>{usedBlocks+=25;await tick();return {code:0,stdout:'',stderr:''};}});
+ const fs={readdir:async dir=>dir==='/mnt/legacy'?['docker','host-state']:dir==='/mnt/legacy/docker'?['volumes']:[],readFile:async()=>{throw enoent();},writeFile:async()=>{},mkdir:async()=>{},statfs:async()=>({blocks:1e6,bfree:1e6-usedBlocks,bavail:1e6,bsize:4096})};
+ const timers={setInterval:fn=>{tick=async()=>{fn();await new Promise(r=>setImmediate(r));};return 1;},clearInterval:()=>{tick=async()=>{};}};
+ await migrateLegacyStorage('/mnt/legacy',{run,fs,timers,progress:async p=>{reports.push(p);}});
+ assert.deepEqual(reports,[{copiedBytes:0,totalBytes:40*4096},{copiedBytes:25*4096,totalBytes:40*4096},{copiedBytes:40*4096,totalBytes:40*4096}]);
 });
 
 test('stop preparation stops containers before trimming, empties swap before trimming, trims the image before root',async()=>{
@@ -245,11 +268,13 @@ test('installed units order user storage before the runtimes and keep warm-up of
  assert.match(text['canopy-storage-prep.path'],/PathExists=\/srv\/canopy\/host-state\/storage-prep-request\.json/);
  assert.doesNotMatch(Object.values(text).join('\n'),/discard/);
  assert.throws(()=>units('/usr/bin/node; reboot'));
- const written=new Map();const {run,calls}=fakeRun();
- await install(100,{run,write:async(f,t)=>written.set(f,t),makeDir:async()=>{},root:'/etc/systemd/system',node:'/usr/bin/node',ensure:async gib=>({gib})});
+ const written=new Map(),modes=new Map();const {run,calls}=fakeRun();
+ await install(100,{run,write:async(f,t)=>written.set(f,t),makeDir:async()=>{},setMode:async(f,m)=>modes.set(f,m),root:'/etc/systemd/system',node:'/usr/bin/node',ensure:async gib=>({gib})});
+ for(const file of written.keys())assert.equal(modes.get(file),0o644,`${file} is not world-readable`);
+ assert.equal(modes.get('/etc/systemd/system/containerd.service.d'),0o755);
  assert.ok(written.has('/etc/systemd/system/canopy-warmup.service'));assert.deepEqual(calls,['systemctl daemon-reload',`systemctl enable ${ENABLE.join(' ')}`,'systemctl start canopy-storage-prep.path']);
  assert.ok(ENABLE.includes('fstrim.timer'));
- await assert.rejects(install(64,{run,write:async()=>{},makeDir:async()=>{},ensure:async()=>{}}),/Invalid workspace storage size/);
+ await assert.rejects(install(64,{run,write:async()=>{},makeDir:async()=>{},setMode:async()=>{},ensure:async()=>{}}),/Invalid workspace storage size/);
  void mkdir;void SWAP_FILE;
 });
 
@@ -271,7 +296,7 @@ test('on today\'s retained-disk layout the preparation trims the data disk and r
 test('units-only install (retained-disk layout) adds warm-up, stop preparation and fstrim.timer without touching Docker ordering',async()=>{
  const {installUnits,UNITS_ONLY}=await import('./snapshot-storage-install.mjs');
  const written=new Map();const {run,calls}=fakeRun();
- await installUnits({run,write:async(f,t)=>written.set(f,t),root:'/etc/systemd/system',node:'/usr/bin/node',startWarmup:true});
+ await installUnits({run,write:async(f,t)=>written.set(f,t),setMode:async()=>{},root:'/etc/systemd/system',node:'/usr/bin/node',startWarmup:true});
  assert.deepEqual([...written.keys()].map(f=>f.split('/').pop()),[...UNITS_ONLY]);
  assert.equal([...written.keys()].some(f=>/user-storage|docker\.service\.d|containerd\.service\.d/.test(f)),false);
  assert.deepEqual(calls,['systemctl daemon-reload','systemctl enable canopy-warmup-early.service canopy-warmup.service canopy-storage-prep.path fstrim.timer','systemctl start canopy-storage-prep.path','systemctl start --no-block canopy-warmup.service']);
@@ -281,4 +306,30 @@ test('warm-up detects the retained-disk layout so only the lazily loaded root vo
  const {retainedDiskLayout}=await import('./warmup.mjs');
  assert.equal(await retainedDiskLayout(fakeRun({'findmnt':{code:0}}).run),true);
  assert.equal(await retainedDiskLayout(fakeRun({'findmnt':{code:1}}).run),false);
+});
+
+test('unit files are 0644 on disk even when installed under the bootstrap umask 077 (no "world-inaccessible" warnings)',async()=>{
+ const {mkdtemp,rm,stat}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const {join}=await import('node:path');
+ const root=await mkdtemp(join(tmpdir(),'canopy-units-'));const previous=process.umask(0o077);
+ try{
+  await install(100,{run:fakeRun().run,root,node:'/usr/bin/node',ensure:async gib=>({gib})});
+  for(const name of Object.keys(units('/usr/bin/node')))assert.equal((await stat(join(root,name))).mode&0o777,0o644,name);
+  for(const dir of ['docker.service.d','containerd.service.d'])assert.equal((await stat(join(root,dir))).mode&0o777,0o755,dir);
+  for(const text of Object.values(units('/usr/bin/node')))assert.doesNotMatch(text,/token|secret|password|key=/i,'units carry no secrets');
+ }finally{process.umask(previous);await rm(root,{recursive:true,force:true});}
+});
+
+// Pinned by canopy-website tests/runtime-start-order.test.mjs (its systemd
+// model mirrors these dependencies): nothing installed here can stop, restart
+// or start containerd or Docker on its own.
+test('snapshot-storage units never restart the runtimes: drop-ins only require/order user storage, nothing binds or restarts them',async()=>{
+ const text=units('/usr/bin/node');
+ for(const runtime of ['docker','containerd'])assert.equal(text[`${runtime}.service.d/canopy-user-storage.conf`],'[Unit]\nRequires=canopy-user-storage.service\nAfter=canopy-user-storage.service\n');
+ const all=Object.values(text).join('\n');
+ assert.doesNotMatch(all,/BindsTo=|PartOf=|PropagatesReloadTo=|ReloadPropagatedFrom=|Conflicts=/);
+ assert.doesNotMatch(all,/systemctl|\bkill\b|Restart=always/);
+ assert.match(text['canopy-user-storage.service'],/Wants=canopy-warmup-early\.service/);assert.doesNotMatch(text['canopy-user-storage.service'],/Requires=/);
+ const {run,calls}=fakeRun();
+ await install(100,{run,write:async()=>{},makeDir:async()=>{},setMode:async()=>{},ensure:async gib=>({gib})});
+ assert.equal(calls.some(c=>/containerd|docker/.test(c)&&/start|restart|stop/.test(c)),false,calls.join('\n'));
 });

@@ -130,6 +130,14 @@ jobs:
           node packages/remote-host/prepare-browser-build.mjs
           bash packages/remote-host/package-host-release.sh workspace-host.tar.gz workspace-release.json
           sha256sum workspace-host.tar.gz > workspace-host.tar.gz.sha256
+      # The archive is uploaded (and can reach S3/production) only after this
+      # exact archive booted like a managed host: root image step, then
+      # canopy-host as its own user under the shipped units, staying active.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Boot the packaged runtime like a managed host
+        run: sudo env "PATH=$PATH" bash packages/remote-host/smoke-host-boot.sh workspace-host.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: workspace-release-${{ github.sha }}

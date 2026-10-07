@@ -18,6 +18,7 @@ import {constants} from 'node:fs';
 import {lstat,mkdir,open,readFile,readdir,rename,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {runner} from './user-storage.mjs';
+import {publishRuntimeFile} from './runtime-dir.mjs';
 
 export const STATE_DIR='/var/lib/canopy-warmup';
 export const STARTUP_LIST=`${STATE_DIR}/startup-files.json`;
@@ -223,7 +224,7 @@ export async function main({run=runner(),sleep=ms=>new Promise(r=>setTimeout(r,m
   if(/^\/dev\/[a-z0-9]+$/.test(source)){const dump=await run('dumpe2fs',[source],{timeout:120000});if(dump.code===0){device=source;extents=usedExtents(dump.stdout).extents;}}
  }catch{}
  const phases=planWarmup({binaries:BINARIES,startup,recent,device,extents});
- const publish=async view=>{await mkdir('/run/canopy',{recursive:true,mode:0o755});const temp=`${PROGRESS_FILE}.tmp`;await writeFile(temp,JSON.stringify(view),{mode:0o644});await rename(temp,PROGRESS_FILE);};
+ const publish=view=>publishRuntimeFile(PROGRESS_FILE,view);
  // Record what this start reads, once per boot, after the workspace runs.
  const capture=(async()=>{
   if(retainedDisk)return;

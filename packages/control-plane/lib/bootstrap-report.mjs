@@ -1,6 +1,9 @@
 import {createHmac,timingSafeEqual} from 'node:crypto';
 const ttl=20*60*1000;
-export const BOOTSTRAP_STAGES=Object.freeze(['packages','storage','artifact','image','host-services']);
+export const BOOTSTRAP_STAGES=Object.freeze(['packages','storage','migrating-files','artifact','image','host-services']);
+// A moved workspace reports copied/total bytes every 20 s (up to 240 reports).
+export const MAX_BOOTSTRAP_REPORTS=256;
+const MAX_COPY_BYTES=2**50;
 const reject=code=>{throw Object.assign(new Error('Bootstrap report rejected'),{code});};
 const uuid=value=>typeof value==='string'&&/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
 const keyFor=(key,workspaceId)=>createHmac('sha256',key).update(`bootstrap-report:v1:${workspaceId}`).digest();
@@ -26,6 +29,12 @@ export function verifyBootstrapReportToken(token,keyForWorkspace,now=Date.now())
 export const BOOTSTRAP_FAILURE_REASONS=Object.freeze({'disk-full':{stage:'image',fields:['freeGB','neededGB']}});
 const gigabytes=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<1e6;
 export function validateBootstrapReport(body){
+ if(body&&!Array.isArray(body)&&typeof body==='object'&&(Object.hasOwn(body,'copiedBytes')||Object.hasOwn(body,'totalBytes'))){
+  const bytes=value=>Number.isSafeInteger(value)&&value>=0&&value<=MAX_COPY_BYTES;
+  if(body.stage!=='migrating-files'||body.status!=='progress'||Object.keys(body).length!==5||!bytes(body.copiedBytes)||!bytes(body.totalBytes)||body.copiedBytes>body.totalBytes)reject(400);
+  const {copiedBytes:_c,totalBytes:_t,...base}=body;validateBootstrapReport(base);
+  return body;
+ }
  const reason=body&&!Array.isArray(body)&&typeof body==='object'?body.reason:undefined;
  if(reason!==undefined){
   const rule=Object.hasOwn(BOOTSTRAP_FAILURE_REASONS,reason)?BOOTSTRAP_FAILURE_REASONS[reason]:null;
@@ -33,7 +42,7 @@ export function validateBootstrapReport(body){
   const {reason:_,...base}=body;for(const field of rule.fields)delete base[field];validateBootstrapReport(base);
   return body;
  }
- if(!body||Array.isArray(body)||Object.keys(body).length!==3||!BOOTSTRAP_STAGES.includes(body.stage)||!['progress','failed','succeeded'].includes(body.status)||(body.status==='succeeded'&&body.stage!=='host-services')||!Number.isSafeInteger(body.sequence)||body.sequence<1||body.sequence>64)reject(400);
+ if(!body||Array.isArray(body)||Object.keys(body).length!==3||!BOOTSTRAP_STAGES.includes(body.stage)||!['progress','failed','succeeded'].includes(body.status)||(body.status==='succeeded'&&body.stage!=='host-services')||!Number.isSafeInteger(body.sequence)||body.sequence<1||body.sequence>MAX_BOOTSTRAP_REPORTS)reject(400);
  return body;
 }
 // Caller owns a transaction. A shared worker advisory lock prevents a callback
