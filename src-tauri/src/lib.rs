@@ -693,6 +693,7 @@ pub fn run() {
             client_mode::execution_remote_forget,
             client_mode::execution_remote_activate,
             client_mode::execution_remote_import_accounts,
+            client_mode::execution_remote_account_candidates,
             client_mode::execution_remote_import_git,
             client_mode::execution_remote_login_prepare,
             remote_upload::execution_remote_upload,

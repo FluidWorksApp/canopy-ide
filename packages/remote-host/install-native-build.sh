@@ -22,3 +22,5 @@ done
 rustc --version
 cargo --version
 pkg-config --modversion gtk+-3.0 webkit2gtk-4.1 alsa
+# Package lists and rustup's download cache are not part of the toolchain.
+rm -rf /var/lib/apt/lists/* /opt/canopy/rustup/downloads /opt/canopy/rustup/tmp
