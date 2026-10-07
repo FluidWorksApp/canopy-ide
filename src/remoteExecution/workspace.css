@@ -327,3 +327,13 @@
 .workspace-panel-backdrop[hidden] {display:none;}
 .workspace-panel-backdrop > .workspace-panel {position:relative;inset:auto;right:auto;top:auto;left:auto;margin:0;max-height:calc(100dvh - 48px);}
 @media(max-width:600px){.workspace-panel-backdrop{padding:12px;}.workspace-panel-backdrop > .workspace-panel{width:100%;}}
+/* Snapshot storage: usage meter (80% / 95% warnings) and warm-up progress. */
+.workspace-storage {display:grid;gap:4px;margin-top:8px;max-width:320px;}
+.workspace-storage-meter {height:6px;border-radius:999px;background:var(--border-strong,var(--border));overflow:hidden;}
+.workspace-storage-fill {display:block;height:100%;border-radius:inherit;background:var(--accent);}
+.workspace-storage-fill.warning {background:var(--warn);}
+.workspace-storage-fill.critical {background:var(--danger);}
+.workspace-storage-text,.workspace-storage-warmup {font-size:var(--fs-xs);color:var(--text-dim);}
+.workspace-storage-warning {font-size:var(--fs-xs);}
+.workspace-storage-warning.warning {color:var(--warn);}
+.workspace-storage-warning.critical {color:var(--danger);}
