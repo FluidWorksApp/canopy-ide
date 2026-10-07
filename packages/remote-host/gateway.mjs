@@ -37,8 +37,9 @@ import {ElasticCpu, cpuRange} from './elastic-cpu.mjs';
 import { body, json } from './http.mjs';
 import {startReleasePrepull} from './release-prepull.mjs';
 import {PREPULL_RESERVE_BYTES} from './image-retention.mjs';
+import {hostStorage as createHostStorage} from './host-storage.mjs';
 
-export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingSetup, brokerOptions={}, renewMember, now=Date.now }) {
+export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingSetup, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage() }) {
   validateConfig(config);
   const checkMember = async (principal, bearer) => {
     if (!principal.memberId) return;
@@ -142,16 +143,28 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       const match = route.match(/^\/v1\/workspaces\/([a-z][a-z0-9-]{0,47})(\/.*)$/);
       if (!match) return json(response, 404, { error: 'Unknown operation' });
       const [, workspaceId, operation] = match;
-      const reads = new Set(['/shared-ticket', '/shared-execute', '/shared-sessions', '/projects', '/sessions', '/files/list', '/files/read', '/git/status', '/git/diff']);
+      const reads = new Set(['/storage', '/shared-ticket', '/shared-execute', '/shared-sessions', '/projects', '/sessions', '/files/list', '/files/read', '/git/status', '/git/diff']);
       const write = operation !== '/sessions' || request.method !== 'GET';
       const scope = operation === '/open' || operation === '/resources' || operation === '/ticket' || operation === '/native' || (reads.has(operation) && (operation !== '/sessions' || !write)) ? 'view' : 'drive';
       const workspace = authorize(config, principal, workspaceId, scope);
-      if(!['/idle-attestation','/close-attestation'].includes(operation)&&idleAttestation?.reserved(workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
+      if(!['/idle-attestation','/close-attestation','/storage','/storage-prep'].includes(operation)&&idleAttestation?.reserved(workspace.id))throw Error('Workspace idle shutdown is reserved. Retry after it finishes.');
       if(operation!=='/sharing-setup'&&sharingSetup?.active(workspace.id))throw Error('Sharing setup is moving project storage. Reconnect after it finishes.');
       if (!['GET', 'POST'].includes(request.method)) throw new Error('Unsupported method');
       if(['/idle-attestation','/close-attestation'].includes(operation)){
         if(!idleAttestation||request.method!=='POST'||principal.memberId||principal.id!=='managed-account'||config.managedSession?.workspaceId!==workspace.id)throw Error('Forbidden');
         return json(response,200,await idleAttestation.attest(workspace,await body(request,4096),{ownerClosing:operation==='/close-attestation'}));
+      }
+      // Storage usage and warm-up progress (any viewer); stop preparation only
+      // for the control plane's managed owner session.
+      if(operation==='/storage'){
+        if(request.method!=='GET')throw Error('Forbidden');
+        return json(response,200,await hostStorage.status(workspace));
+      }
+      if(operation==='/storage-prep'){
+        if(principal.memberId||principal.id!=='managed-account'||config.managedSession?.workspaceId!==workspace.id)throw Error('Forbidden');
+        if(request.method==='GET')return json(response,200,await hostStorage.prepStatus(new URL(request.url,'http://gateway').searchParams.get('requestId')));
+        const input=await body(request,1024);
+        return json(response,202,await hostStorage.requestPrep(input.requestId));
       }
       if(operation==='/sharing-setup'){
         if(!sharingSetup||principal.memberId||principal.id!=='managed-account'||config.managedSession?.workspaceId!==workspace.id)throw Error('Forbidden');
