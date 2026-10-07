@@ -16,3 +16,10 @@ it('selector render failure remains inside its boundary and local requires an ex
  const consoleError=vi.spyOn(console,'error').mockImplementation(()=>{});mocks.throwSelector=true;
  try{render(<StartupShell message="Connection unavailable" chooseWorkspace/>);await act(async()=>{});fireEvent.click(screen.getByRole('button',{name:'Choose workspace'}));expect(screen.getByRole('alert')).toHaveTextContent('Workspace selection could not load');expect(screen.getByRole('status')).toHaveTextContent('Connection unavailable');expect(mocks.setMode).not.toHaveBeenCalled();fireEvent.click(screen.getByRole('button',{name:'Use this Mac'}));await act(async()=>{});expect(mocks.setMode).toHaveBeenCalledExactlyOnceWith('local');}finally{consoleError.mockRestore();}
 });
+it('groups the waiting status, progress and workspace action without repeating the status',async()=>{
+ const {container}=render(<StartupShell message="Checking your saved workspace connection…"/>);await act(async()=>{});
+ const group=container.querySelector('.startup-launcher-wait')!;const status=screen.getByRole('status');
+ expect(group).toContainElement(status);expect(status).toHaveTextContent('Checking your saved workspace connection…');expect(status).not.toHaveClass('startup-launcher-status-hidden');
+ expect(group.querySelector('.startup-launcher-loader')).not.toBeNull();expect(group).toContainElement(screen.getByRole('button',{name:'Choose workspace'}));
+ expect(screen.getAllByText('Checking your saved workspace connection…')).toHaveLength(1);
+});

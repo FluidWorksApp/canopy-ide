@@ -1,2 +1,63 @@
+/* Startup launcher: one centred column with a single left edge. Spacing uses
+   one scale (8 / 12 / 16 / 24 / 32) so every group keeps the same rhythm. */
 .startup-launcher{box-sizing:border-box;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:48px 24px;background:var(--bg);color:var(--text);font-family:"Archivo Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.5}
-.startup-launcher *{box-sizing:border-box}.startup-launcher-content{width:100%;max-width:620px}.startup-launcher-brand{display:flex;align-items:center;gap:11px;font-size:16px;font-weight:650;margin-bottom:32px}.startup-launcher-brand svg{width:29px;height:29px;color:var(--accent)}.startup-launcher h1{margin:0;font-size:32px;line-height:1.18;font-weight:650;letter-spacing:-.7px}.startup-launcher-intro{margin:12px 0 26px;color:var(--text-dim);font-size:15px;max-width:52ch}.startup-launcher-remote{padding:22px;border:1px solid var(--border-strong);border-radius:10px;background:var(--bg-overlay)}.startup-launcher-workspace{display:flex;align-items:center;gap:14px}.startup-launcher-icon{display:grid;place-items:center;width:44px;height:44px;border-radius:8px;background:var(--bg);color:var(--text-dim);flex-shrink:0}.startup-launcher-icon svg{width:24px;height:24px}.startup-launcher-identity{flex:1;min-width:0}.startup-launcher-identity strong{display:block;font-size:18px;font-weight:600;overflow-wrap:anywhere}.startup-launcher-identity span{display:block;margin-top:2px;font-size:12px;color:var(--text-dim)}.startup-launcher-badge{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--warn);white-space:nowrap}.startup-launcher-badge i{width:6px;height:6px;background:currentColor;border-radius:50%}.startup-launcher-remote footer{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:23px;padding-top:18px;border-top:1px solid var(--border)}.startup-launcher-remote footer small{font-size:12px;color:var(--text-dim);max-width:29ch}.startup-launcher .btn{font:550 14px/1.3 "Archivo Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:40px;padding:10px 16px}.startup-launcher-local{display:flex;align-items:center;gap:14px;padding:24px 0;border-bottom:1px solid var(--border)}.startup-launcher-local .startup-launcher-identity strong{font-size:14px}.startup-launcher-local .startup-launcher-identity span{font-size:12px}.startup-launcher-details{margin-top:18px;font-size:12px;color:var(--text-dim)}.startup-launcher-details summary{cursor:pointer;display:list-item}.startup-launcher-details p{margin:12px 0;max-width:62ch}.startup-launcher-details button{margin-top:3px}.startup-launcher-error{margin-top:16px;font-size:13px;color:var(--danger)}.startup-launcher-status{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}.startup-launcher-wait{margin-top:24px;padding:20px 0;border-top:1px solid var(--border);color:var(--text-dim);font-size:14px}.startup-launcher-loader{height:3px;overflow:hidden;background:var(--border);margin-top:18px;max-width:240px;border-radius:2px}.startup-launcher-loader:before{content:"";display:block;height:100%;width:40%;background:var(--accent);animation:startup-launcher-loading 1.8s ease-in-out infinite}@keyframes startup-launcher-loading{0%{transform:translateX(-100%)}100%{transform:translateX(350%)}}@media(prefers-reduced-motion:reduce){.startup-launcher-loader:before{animation:none;transform:translateX(70%)}}@media(max-width:600px){.startup-launcher{padding:28px 20px;align-items:flex-start}.startup-launcher-brand{margin-bottom:24px}.startup-launcher h1{font-size:27px}.startup-launcher-workspace{flex-wrap:wrap}.startup-launcher-badge{margin-left:58px}.startup-launcher-remote{padding:18px}.startup-launcher-remote footer{align-items:flex-start;flex-direction:column}.startup-launcher-remote footer .btn{width:100%}.startup-launcher-local{flex-wrap:wrap}.startup-launcher-local>.btn{margin-left:58px}.startup-launcher-intro{font-size:14px}}
+.startup-launcher *{box-sizing:border-box}
+.startup-launcher-content{width:100%;max-width:480px;margin:0 auto}
+/* The mark's viewBox is cropped to its drawn bounds so it sits flush with the text edge. */
+.startup-launcher-brand{display:flex;align-items:center;gap:12px;font-size:16px;font-weight:650;margin-bottom:32px}
+.startup-launcher-brand svg{width:24px;height:24px;color:var(--accent);flex-shrink:0}
+.startup-launcher h1{margin:0;font-size:32px;line-height:1.18;font-weight:650;letter-spacing:-.7px}
+.startup-launcher-intro{margin:12px 0 0;color:var(--text-dim);font-size:15px}
+.startup-launcher .btn{font:550 14px/1.3 "Archivo Variable",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:40px;padding:10px 16px}
+
+/* Waiting: status, progress and action as one group between dividers. */
+.startup-launcher-wait{display:flex;flex-direction:column;align-items:stretch;margin-top:32px;padding:24px 0;border-top:1px solid var(--border)}
+.startup-launcher-status{margin:0;color:var(--text-dim);font-size:14px}
+.startup-launcher-status-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+.startup-launcher-loader{width:100%;height:3px;overflow:hidden;background:var(--border);margin-top:16px;border-radius:2px}
+.startup-launcher-loader:before{content:"";display:block;height:100%;width:40%;background:var(--accent);animation:startup-launcher-loading 1.8s ease-in-out infinite}
+.startup-launcher-wait>.btn{align-self:flex-start;margin-top:24px}
+@keyframes startup-launcher-loading{0%{transform:translateX(-100%)}100%{transform:translateX(250%)}}
+@media(prefers-reduced-motion:reduce){.startup-launcher-loader:before{animation:none;transform:translateX(70%)}}
+
+/* Shared row pieces: a 40px tile with a visible surface marks the column edge. */
+.startup-launcher-icon{display:grid;place-items:center;width:40px;height:40px;border-radius:8px;background:var(--bg);color:var(--text-dim);flex-shrink:0}
+.startup-launcher-icon svg{width:22px;height:22px}
+.startup-launcher-identity{flex:1;min-width:0}
+.startup-launcher-identity strong{display:block;font-size:18px;font-weight:600;overflow-wrap:anywhere}
+.startup-launcher-identity span{display:block;margin-top:2px;font-size:12px;color:var(--text-dim)}
+
+/* Remote workspace card (recovery). */
+.startup-launcher-remote{margin-top:32px;padding:24px;border:1px solid var(--border-strong);border-radius:10px;background:var(--bg-overlay)}
+.startup-launcher-workspace{display:flex;align-items:center;gap:16px}
+.startup-launcher-badge{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--warn);white-space:nowrap}
+.startup-launcher-badge i{width:6px;height:6px;background:currentColor;border-radius:50%}
+.startup-launcher-remote footer{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:24px;padding-top:16px;border-top:1px solid var(--border)}
+.startup-launcher-remote footer small{font-size:12px;color:var(--text-dim);max-width:29ch}
+
+/* This Mac row. */
+.startup-launcher-local{display:flex;align-items:center;gap:16px;padding:16px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.startup-launcher-remote+.startup-launcher-local{margin-top:24px}
+.startup-launcher-local .startup-launcher-icon{background:var(--bg-overlay);box-shadow:inset 0 0 0 1px var(--border)}
+.startup-launcher-local .startup-launcher-identity strong{font-size:14px}
+
+.startup-launcher-details{margin-top:16px;font-size:12px;color:var(--text-dim)}
+.startup-launcher-details summary{cursor:pointer;display:list-item}
+.startup-launcher-details p{margin:12px 0}
+.startup-launcher-details button{margin-top:4px}
+.startup-launcher-error{margin:16px 0 0;font-size:13px;color:var(--danger)}
+
+@media(max-width:600px){
+ .startup-launcher{padding:32px 16px;align-items:flex-start}
+ .startup-launcher-brand{margin-bottom:24px}
+ .startup-launcher h1{font-size:27px}
+ .startup-launcher-intro{font-size:14px}
+ .startup-launcher-wait,.startup-launcher-remote{margin-top:24px}
+ .startup-launcher-remote{padding:16px}
+ .startup-launcher-workspace{flex-wrap:wrap}
+ .startup-launcher-badge{margin-left:56px}
+ .startup-launcher-remote footer{align-items:flex-start;flex-direction:column}
+ .startup-launcher-remote footer .btn{width:100%}
+ .startup-launcher-local{flex-wrap:wrap}
+ .startup-launcher-local>.btn{margin-left:56px}
+}
