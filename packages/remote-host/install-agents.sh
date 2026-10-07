@@ -3,7 +3,9 @@
 # One component per call so each CLI is its own image layer, keyed only by its
 # own entry in agents.lock.json (the Dockerfile splits the lock per component).
 # Usage: install-agents.sh <component> [lock-fragment.json]
-#   components: bun, npm, aider, agy, cursor, grok, verify
+#   components: bun, npm, lazy-npm, aider, agy, cursor, grok, verify
+#   lazy-npm <fragment> <bin>: install only a pinned launcher; the package
+#   installs into the agent's home on first use (for very large CLIs).
 set -euo pipefail
 [[ $EUID == 0 ]] || { echo 'Install workspace tools as root.' >&2; exit 1; }
 component=${1:?component required}
@@ -23,6 +25,28 @@ case $component in
     # Fragment: {"name":"version"}. The download cache never enters the layer.
     mapfile -t packages < <(jq -r 'to_entries[] | .key + "@" + .value' "$lock")
     npm install -g --cache "$scratch/npm-cache" --no-audit --no-fund "${packages[@]}"
+    ;;
+  lazy-npm)
+    bin=${3:?bin name required}
+    spec=$(jq -r 'to_entries[0] | .key + "@" + .value' "$lock")
+    version=$(jq -r 'to_entries[0].value' "$lock")
+    [[ $bin =~ ^[a-z][a-z0-9-]*$ && $spec =~ ^@?[a-z0-9][a-z0-9._/-]*@[0-9][0-9A-Za-z.+-]*$ ]] || { echo 'Invalid lazy npm package' >&2; exit 1; }
+    cat > "/usr/local/bin/$bin" <<LAUNCHER
+#!/bin/sh
+# $spec is large, so the image carries only this launcher. The first real run
+# installs that exact version into the agent's npm prefix (persistent home),
+# which is ahead of /usr/local/bin on PATH, so later runs never reach here.
+set -e
+prefix="\${NPM_CONFIG_PREFIX:-\$HOME/.local}"
+real="\$prefix/bin/$bin"
+if [ ! -x "\$real" ]; then
+  case "\${1:-}" in --version|-v|-V) echo "$version"; exit 0;; esac
+  echo "Installing $spec on first use..." >&2
+  npm install -g --prefix "\$prefix" --no-audit --no-fund "$spec" >&2
+fi
+exec "\$real" "\$@"
+LAUNCHER
+    chmod 755 "/usr/local/bin/$bin"
     ;;
   aider)
     python3 -m venv /opt/canopy/tools/aider
@@ -52,7 +76,8 @@ case $component in
     rm -rf "/opt/canopy/vendor/$component/.cache" "/opt/canopy/vendor/$component/.npm"
     ;;
   verify)
-    for cli in claude codex amp aider agy opencode omp cursor-agent grok git gh; do
+    command -v omp
+    for cli in claude codex amp aider agy opencode cursor-agent grok git gh; do
       command -v "$cli"
       timeout 30 "$cli" --version
     done
