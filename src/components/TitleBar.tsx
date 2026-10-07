@@ -9,7 +9,7 @@ import {
   useSyncExternalStore,
   type MouseEvent,
 } from "react";
-import { BellIcon, CloseIcon, FrostIcon } from "./icons";
+import { BellIcon, CameraIcon, CloseIcon, FrostIcon } from "./icons";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
 import type { Urgency } from "../attention";
 import type { Project } from "../projects";
@@ -179,7 +179,7 @@ function BuildBrowserControls({ projectId }: {
         onClick={() => preview.capture(preview.captureMode)}
         onContextMenu={openCaptureOptions}
       >
-        ▣
+        <CameraIcon size={14} />
       </Button>
       <Button
         icon
