@@ -14,6 +14,8 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StructuredRunnerEvent } from "../structuredEvents";
 import {
+  capBuilderItems,
+  MAX_BUILDER_ITEMS,
   requestsProjectDiscovery,
   VibeBuilderPane,
   vibeStarterIdeas,
@@ -856,5 +858,17 @@ describe("the builder pane boundary", () => {
     expect(build).toContain("saturate(");
     expect(build).toContain("prefers-reduced-motion: reduce");
     expect(build).not.toMatch(/#[0-9a-f]{3,8}/i);
+  });
+});
+
+describe("the builder conversation's bound", () => {
+  it("keeps the newest items once a long build passes the cap", () => {
+    const items = Array.from({ length: MAX_BUILDER_ITEMS + 25 }, (_, i) => i);
+    const kept = capBuilderItems(items);
+    expect(kept).toHaveLength(MAX_BUILDER_ITEMS);
+    expect(kept[0]).toBe(25);
+    expect(kept.at(-1)).toBe(MAX_BUILDER_ITEMS + 24);
+    const short = [1, 2, 3];
+    expect(capBuilderItems(short)).toBe(short);
   });
 });

@@ -62,9 +62,8 @@ describe("AgentBrowserPip", () => {
     );
 
     const image = await screen.findByAltText("Live read-only view of localhost:5173");
-    // JPEG is what the pip asks for; the mock omits mimeType and the fallback
-    // matches the request.
-    expect(image).toHaveAttribute("src", "data:image/jpeg;base64,cG5n");
+    // A blob URL with an owner, never a data URL (see the release test below).
+    expect(image.getAttribute("src")).toMatch(/^blob:/);
     expect(image.parentElement).toHaveStyle({ aspectRatio: "1.5" });
 
     fireEvent.click(screen.getByLabelText("Minimize browser picture in picture"));
@@ -121,11 +120,59 @@ describe("AgentBrowserPip", () => {
         await vi.advanceTimersByTimeAsync(250);
       });
       expect(snapshots).toBe(1);
-      expect(screen.getByAltText("Live read-only view of localhost:5173")).toHaveAttribute(
-        "src",
-        "data:image/jpeg;base64,cG5n",
-      );
+      expect(
+        screen.getByAltText("Live read-only view of localhost:5173").getAttribute("src"),
+      ).toMatch(/^blob:/);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("streams through blob URLs and releases each frame once replaced", async () => {
+    // Four frames a second as data URLs was an unbounded WebKit image-cache
+    // growth path; each frame must now be a blob URL with an owner.
+    vi.useFakeTimers();
+    let made = 0;
+    const revoked: string[] = [];
+    const create = vi.fn(() => `blob:frame-${++made}`);
+    const revoke = vi.fn((url: string) => void revoked.push(url));
+    const originalCreate = URL.createObjectURL;
+    const originalRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = create;
+    URL.revokeObjectURL = revoke;
+    mockCommands({
+      browser_here: { url: "http://localhost:5173/form", title: "Form" },
+      browser_snapshot: { image: "cG5n", width: 1200, height: 800 },
+    });
+    try {
+      const view = render(
+        <AgentBrowserPip
+          tabId="preview-1"
+          url="http://localhost:5173/form"
+          agentId="opencode"
+          agentTitle="Fix the form"
+          supported
+          onClose={() => {}}
+        />,
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const image = screen.getByAltText("Live read-only view of localhost:5173");
+      expect(image).toHaveAttribute("src", "blob:frame-1");
+      expect(revoked).toEqual([]);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(250);
+      });
+      expect(image).toHaveAttribute("src", "blob:frame-2");
+      expect(revoked).toEqual(["blob:frame-1"]);
+
+      view.unmount();
+      expect(revoked).toEqual(["blob:frame-1", "blob:frame-2"]);
+    } finally {
+      URL.createObjectURL = originalCreate;
+      URL.revokeObjectURL = originalRevoke;
       vi.useRealTimers();
     }
   });

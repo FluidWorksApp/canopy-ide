@@ -600,6 +600,33 @@ describe("the app resource boundary", () => {
     expect(chip.textContent).not.toContain("≥");
     expect(chip.getAttribute("title")).toContain("Includes WebView helper processes");
   });
+
+  it("splits the total into core, WebKit UI and terminals", async () => {
+    const MB = 1024 ** 2;
+    vi.mocked(ipc.onAppStats).mockImplementation(async (cb) => {
+      cb({
+        cpu: 30,
+        mem_bytes: 1500 * MB,
+        procs: 10,
+        includes_webviews: true,
+        core: { cpu: 10, mem_bytes: 140 * MB, procs: 1 },
+        webviews: { cpu: 15, mem_bytes: 1160 * MB, procs: 4 },
+        children: { cpu: 5, mem_bytes: 200 * MB, procs: 5 },
+      });
+      return () => {};
+    });
+    render(<StatusBar {...base} events={[]} />);
+
+    const chip = await screen.findByTitle(/^canopy:/);
+    const title = chip.getAttribute("title") ?? "";
+    expect(title).toContain("Core: 140 MB");
+    expect(title).toContain("UI (WebKit): 1.1 GB · 15% cpu · 4 processes");
+    expect(title).toContain("Terminals & agents: 200 MB");
+
+    fireEvent.click(chip);
+    expect(screen.getByText("UI (WebKit)")).toBeTruthy();
+    expect(screen.queryByText("WebKit layers")).toBeNull();
+  });
 });
 
 // The tray is one line, and this is the only chip whose length is set by how
