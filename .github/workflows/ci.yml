@@ -21,7 +21,7 @@ permissions:
 jobs:
   frontend:
     name: Frontend (typecheck · lint · test)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -39,7 +39,7 @@ jobs:
 
   remote-host-linux:
     name: Portable Linux host (real PTY · isolation · desktop · LSP)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +65,7 @@ jobs:
   # regardless of host, so a file generated on macOS still matches here.
   licenses:
     name: Third-party notices (up to date)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -78,7 +78,7 @@ jobs:
 
   rust:
     name: Rust (cargo test)
-    runs-on: ubuntu-22.04
+    runs-on: blacksmith-4vcpu-ubuntu-2204
     steps:
       - uses: actions/checkout@v4
 

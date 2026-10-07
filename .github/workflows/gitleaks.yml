@@ -15,7 +15,7 @@ permissions:
 jobs:
   scan:
     name: Secret scan
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
       GITLEAKS_VERSION: 8.30.1
     steps:

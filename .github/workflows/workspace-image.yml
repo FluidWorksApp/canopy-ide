@@ -37,9 +37,9 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-24.04
+            runner: blacksmith-4vcpu-ubuntu-2404
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -55,15 +55,17 @@ jobs:
       - run: node --test packages/remote-host/*.test.mjs
       - run: node packages/remote-host/prepare-hook-build.mjs
       - run: node packages/remote-host/prepare-browser-build.mjs
-      - uses: docker/setup-buildx-action@v3
+      # Blacksmith keeps BuildKit's layer cache on a sticky disk per cache-key,
+      # so no cache-from/cache-to export is needed. One key per architecture.
+      - uses: useblacksmith/setup-docker-builder@v2
+        with:
+          cache-key: canopy-workspace-${{ matrix.arch }}
       - name: Build candidate locally
-        uses: docker/build-push-action@v6
+        uses: useblacksmith/build-push-action@v2
         with:
           context: packages/remote-host
           load: true
           tags: canopy-workspace:0.1.0
-          cache-from: type=gha,scope=workspace-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=workspace-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -91,10 +93,9 @@ jobs:
       # Same build as the tested image (every step is a cache hit), published
       # with zstd layers: hosts decompress zstd several times faster than gzip.
       - name: Publish tested architecture
-        uses: docker/build-push-action@v6
+        uses: useblacksmith/build-push-action@v2
         with:
           context: packages/remote-host
-          cache-from: type=gha,scope=workspace-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -103,7 +104,7 @@ jobs:
   release:
     name: Publish multi-platform release
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     permissions:
       contents: read
