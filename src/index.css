@@ -10679,6 +10679,13 @@ body.dragging-tab * {
   gap: 10px;
 }
 
+/* Settings → Browser → Playwright: one compact row for the extension token. */
+.set-pw-token {
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+
 /* A callsign deck, not another settings form row: names are the thing being
    selected, so the preview reads like four quiet terminal tabs. The stepped
    accent is the one playful note; everything around it keeps Settings' normal

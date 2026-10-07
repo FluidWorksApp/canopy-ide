@@ -14,6 +14,9 @@ const LOCAL_UI = new Set(['js_log','watchdog_ack','watchdog_incidents','memory_i
 // The clipboard and microphone belong to the computer displaying the IDE.
 // Remote execution must not redirect their native services into the VM.
 for(const command of ['clipboard_image_png','clipboard_watch_set','clipboard_recent','clipboard_read','clipboard_forget','clipboard_clear','clipboard_status','dictation_models','dictation_status','dictation_download','dictation_delete_model','dictation_start','dictation_stop','dictation_cancel'])LOCAL_UI.add(command);
+// The Playwright extension token unlocks this computer's Chrome, which is the
+// one the desktop's Chrome bridge connects to; it never belongs in the VM.
+for(const command of ['chrome_extension_token_status','chrome_extension_token_set','chrome_extension_token_clear','chrome_extension_open_status'])LOCAL_UI.add(command);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 /** Immutable execution ownership for one renderer. Every execution/file request
