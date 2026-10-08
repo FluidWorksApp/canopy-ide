@@ -68,6 +68,8 @@ test('container reuse rejects a changed project volume, network or added capabil
   workspace.cpusMax=4;current=structuredClone(original);current.HostConfig.NanoCpus=3e9;
   assert.ok((await host.ensure(workspace)).url);
   for(const invalid of [undefined,1e9,5e9]){current.HostConfig.NanoCpus=invalid;await assert.rejects(host.ensure(workspace),/configuration differs/);}
+  for(const valid of [1024,4096,8192]){current=structuredClone(original);current.HostConfig.PidsLimit=valid;assert.ok((await host.ensure(workspace)).url);}
+  for(const invalid of [undefined,0,-1,512,8193,1024.5]){current=structuredClone(original);current.HostConfig.PidsLimit=invalid;await assert.rejects(host.ensure(workspace),/configuration differs/);}
   for (const change of [c => { c.Mounts[0].Name = 'canopy-project-bob'; }, c => { c.HostConfig.NetworkMode = 'host'; }, c => { c.HostConfig.CapAdd = ['SYS_ADMIN']; },...['PidMode','IpcMode','UTSMode'].flatMap(key=>['host','container:other','shareable','unknown'].map(value=>c=>{c.HostConfig[key]=value;})),...['no-new-privileges:false','no-new-privileges=false','no-new-privileges:1','no-new-privileges-not-enabled'].map(value=>c=>{c.HostConfig.SecurityOpt=[value];}),c=>{c.HostConfig.SecurityOpt=['no-new-privileges:true','no-new-privileges:false'];}]) {
     current = structuredClone(original); change(current);
     await assert.rejects(host.ensure(workspace), /configuration differs/);

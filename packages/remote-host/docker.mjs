@@ -32,6 +32,9 @@ async function dockerCommand(args) {
 }
 
 export {memorySwapMiB};
+// Threads count against the pids cgroup, so browsers, agents and dev servers exhaust 1024 quickly.
+// Containers created before the raise keep 1024 and remain valid.
+const WORKSPACE_PIDS_LIMIT=8192, LEGACY_WORKSPACE_PIDS_LIMIT=1024;
 function privateNamespace(mode){return mode==null||mode===''||mode==='private';}
 function hasNoNewPrivileges(options){
   if(!Array.isArray(options))return false;
@@ -296,7 +299,9 @@ export class DockerWorkspaces {
           !Number.isInteger(existing.HostConfig.NanoCpus) ||
           existing.HostConfig.NanoCpus < workspace.cpus * 1_000_000_000 ||
           existing.HostConfig.NanoCpus > cpuRange(workspace).max * 1_000_000_000 ||
-          existing.HostConfig.PidsLimit !== 1024 ||
+          !Number.isInteger(existing.HostConfig.PidsLimit) ||
+          existing.HostConfig.PidsLimit < LEGACY_WORKSPACE_PIDS_LIMIT ||
+          existing.HostConfig.PidsLimit > WORKSPACE_PIDS_LIMIT ||
           ((existing.HostConfig.RestartPolicy?.Name!=='on-failure'||existing.HostConfig.RestartPolicy?.MaximumRetryCount!==3)&&!(workspace.memberId&&resume&&existing.State?.Running===false&&existing.HostConfig.RestartPolicy?.Name==='no')) ||
           (workspace.cgroupParent!=null && existing.HostConfig.CgroupParent!==workspace.cgroupParent) ||
           existing.HostConfig.Privileged || existing.HostConfig.CapAdd?.length ||
@@ -345,7 +350,7 @@ export class DockerWorkspaces {
         ...(workspace.cgroupParent?['--cgroup-parent',workspace.cgroupParent]:[]),
         '--network', network, '--init', '--restart', 'on-failure:3', '--user', '1000:1000',
         '--memory', `${workspace.memoryMiB}m`, '--memory-swap', `${memorySwapMiB(workspace,workspace.memoryMiB)}m`,
-        '--cpus', String(workspace.cpus), '--pids-limit', '1024', '--cap-drop', 'ALL',
+        '--cpus', String(workspace.cpus), '--pids-limit', String(WORKSPACE_PIDS_LIMIT), '--cap-drop', 'ALL',
         '--security-opt', 'no-new-privileges:true', '--shm-size', '256m',
         '--publish', '127.0.0.1::8080', '--env', `CANOPY_RUNNER_TOKEN=${this.token(workspace.id)}`,
         '--env', `CANOPY_WORKSPACE_ID=${workspace.id}`, '--env', `CANOPY_ACCOUNTS=${workspace.accounts.join(',')}`,
