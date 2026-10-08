@@ -1,5 +1,5 @@
 import {execFileSync} from 'node:child_process';import test from 'node:test';import assert from 'node:assert/strict';
-import {expectedRelease,requireDraft,requireAssets,releaseManifest,requireReleaseTag,releaseMetadataQuery} from './release-assets.mjs';
+import {expectedRelease,requireDraft,requireAssets,releaseManifest,requireReleaseTag,releaseMetadataQuery,parseReleaseMetadata} from './release-assets.mjs';
 const version='0.4.1';
 const complete=()=>({draft:true,immutable:false,assets:expectedRelease(version).names.map(name=>({name,state:'uploaded',size:42,digest:'sha256:'+'a'.repeat(64)}))});
 test('published or immutable targets are rejected before building or uploading',()=>{assert.doesNotThrow(()=>requireDraft(undefined));assert.throws(()=>requireDraft({...complete(),draft:false}),/published/);assert.throws(()=>requireDraft({...complete(),immutable:true}),/immutable/);});
@@ -23,4 +23,13 @@ test('large release history is filtered before the subprocess output buffer',()=
  assert.equal(selected.id,42);assert.equal(selected.body,undefined);requireAssets(selected,version);
  assert.equal(JSON.parse(execFileSync('jq',[releaseMetadataQuery('v9.9.9')],{input,encoding:'utf8'})),null);
  assert.equal(JSON.parse(execFileSync('jq',[releaseMetadataQuery('v0.4.1" | .[]')],{input,encoding:'utf8'})),null);
+});
+
+test('a tag with no release yet is an eligible target, as gh prints it (nothing, not "null")',()=>{
+ // jq prints null for a missing release; `gh api --jq` prints an empty line.
+ // v0.4.3's first release run died on JSON.parse('') before any draft existed.
+ for(const output of ['','\n','null\n'])assert.equal(parseReleaseMetadata(output),null);
+ requireDraft(parseReleaseMetadata(''));
+ assert.deepEqual(parseReleaseMetadata('{"id":1,"draft":true}\n'),{id:1,draft:true});
+ assert.throws(()=>requireDraft(parseReleaseMetadata('{"id":1,"draft":false}')),/already published/);
 });
