@@ -134,11 +134,11 @@ describe("startCommand", () => {
 
 describe("restoreCommand", () => {
   it("builds a resume command for agents that support it", () => {
-    expect(restoreCommand("claude", "abc123")).toBe("claude --resume abc123");
-    expect(restoreCommand("codex", "s-1")).toBe("codex resume s-1 --no-daemon");
+    expect(restoreCommand("claude", "abc123")).toBe("claude --resume abc123 --permission-mode auto");
+    expect(restoreCommand("codex", "s-1")).toBe("codex resume s-1 --no-daemon --approve-for-me -c sandbox_workspace_write.network_access=true");
     expect(restoreCommand("amp", "T-9")).toBe("amp threads continue T-9");
-    expect(restoreCommand("cursor", "cur-1")).toBe("cursor-agent --resume cur-1");
-    expect(restoreCommand("grok", "grok-1")).toBe("grok --resume grok-1");
+    expect(restoreCommand("cursor", "cur-1")).toBe("cursor-agent --resume cur-1 --auto-review");
+    expect(restoreCommand("grok", "grok-1")).toBe("grok --resume grok-1 --permission-mode auto");
   });
 
   it("resumes a task in the same unattended mode it was launched in", () => {
@@ -151,8 +151,8 @@ describe("restoreCommand", () => {
     expect(restoreCommand("grok", "g-1", { task: true })).toBe(
       "grok --resume g-1 --permission-mode auto",
     );
-    // A session opened by hand keeps the mode its owner chose.
-    expect(restoreCommand("claude", "abc123")).toBe("claude --resume abc123");
+    // Manual restores use the same automatic default.
+    expect(restoreCommand("claude", "abc123")).toBe("claude --resume abc123 --permission-mode auto");
     // ...and the session id still reads back out of the task spelling.
     expect(resumeSessionId("claude --resume abc123 --permission-mode auto")).toBe("abc123");
   });
@@ -172,12 +172,24 @@ describe("remoteCliMetadata", () => {
     rebind({ claude: "/opt/Acme CLI/claude" });
     const rows = remoteCliMetadata({ "/opt/Acme CLI/claude": true });
     expect(rows.find((row) => row.id === "claude")).toMatchObject({
-      command: "'/opt/Acme CLI/claude'",
+      command: "'/opt/Acme CLI/claude' --permission-mode auto",
       available: true,
-      resumeTemplate: "'/opt/Acme CLI/claude' --resume __CANOPY_SESSION_ID__",
+      resumeTemplate: "'/opt/Acme CLI/claude' --resume __CANOPY_SESSION_ID__ --permission-mode auto",
     });
     expect(rows.find((row) => row.id === "aider")?.resumeTemplate).toBeUndefined();
     expect(rows.find((row) => row.id === "agy")?.resumeTemplate).toContain("--conversation");
+  });
+
+  it("shares automatic launch, resume, and overlay defaults with the remote portal", () => {
+    for (const row of remoteCliMetadata({})) {
+      const cli = AGENT_CLIS.find(cli => cli.id === row.id)!;
+      expect(row.command).toBe(launchCommand(cli));
+      expect(row.resumeTemplate).toBe(restoreCommand(cli.id, "__CANOPY_SESSION_ID__") ?? undefined);
+      expect(row.launchEnv).toEqual(cli.unattendedEnv);
+    }
+    updateSettings({ dangerouslySkipPermissions: true });
+    for (const row of remoteCliMetadata({})) expect(row.launchEnv).toBeUndefined();
+    updateSettings({ dangerouslySkipPermissions: false });
   });
 
   it("includes custom CLIs without exposing an installer", () => {
@@ -193,9 +205,9 @@ describe("remoteCliMetadata", () => {
 
 describe("resumeSessionId (inverse of restoreCommand)", () => {
   it("recovers the session id from a resume command", () => {
-    expect(resumeSessionId("claude --resume abc123")).toBe("abc123");
-    expect(resumeSessionId("codex resume s-1 --no-daemon")).toBe("s-1");
-    // A Codex terminal remembered from before --no-daemon still names its session.
+    expect(resumeSessionId("claude --resume abc123 --permission-mode auto")).toBe("abc123");
+    expect(resumeSessionId("codex resume s-1 --no-daemon --approve-for-me -c sandbox_workspace_write.network_access=true")).toBe("s-1");
+    // Older Codex commands still identify their session.
     expect(resumeSessionId("codex resume s-1")).toBe("s-1");
     expect(resumeSessionId("codex resume s-1 --dangerously-bypass-approvals-and-sandbox")).toBe("s-1");
     expect(resumeSessionId("opencode --session xyz")).toBe("xyz");
@@ -224,12 +236,12 @@ describe("dangerouslySkipPermissions", () => {
   const skipping = (on: boolean) => updateSettings({ dangerouslySkipPermissions: on });
   afterEach(() => skipping(false));
 
-  it("changes nothing while off — the default", () => {
+  it("uses automatic working modes while bypass is off", () => {
     // The working mode a task pins is a separate rung and is still there; the
     // dangerous flag is what's absent.
     expect(startCommand("claude", "hi")?.command).toBe("claude 'hi' --permission-mode auto");
-    expect(restoreCommand("claude", "abc")).toBe("claude --resume abc");
-    expect(launchCommand(AGENT_CLIS.find((c) => c.id === "codex")!)).toBe("codex --no-daemon");
+    expect(restoreCommand("claude", "abc")).toBe("claude --resume abc --permission-mode auto");
+    expect(launchCommand(AGENT_CLIS.find((c) => c.id === "codex")!)).toBe("codex --no-daemon --approve-for-me -c sandbox_workspace_write.network_access=true");
   });
 
   it("appends each CLI's own verified flag to fresh starts, and only that flag", () => {
@@ -288,7 +300,7 @@ describe("dangerouslySkipPermissions", () => {
     expect(startCommand("agy", "build", { model: "gemini-3.1-pro-preview", effort: "high" })?.command)
       .toBe("agy --mode accept-edits --model 'gemini-3.1-pro-preview' --effort 'high'");
     expect(startCommand("aider", "build", { model: "opus", effort: "medium" })?.command)
-      .toBe("aider --model 'opus' --reasoning-effort 'medium'");
+      .toBe("aider --yes-always --model 'opus' --reasoning-effort 'medium'");
     expect(startCommand("omp", "build", { provider: "anthropic", model: "opus", effort: "max" })?.command)
       .toBe("omp --approval-mode=write --model 'opus' --provider 'anthropic' --thinking 'max'");
     expect(startCommand("cursor", "build", { model: "composer-1" })?.command)
@@ -371,10 +383,10 @@ describe("unattended working mode", () => {
     expect(startCommand("cursor", "hi")?.command).toBe("cursor-agent 'hi' --auto-review");
   });
 
-  it("names no mode where the CLI has no rung below skip-permissions", () => {
-    // aider: nothing between "confirm everything" and --yes-always.
+  it("automates Aider confirmations and leaves Amp on its automatic default", () => {
+    // aider has confirmation automation rather than a classifier.
     // amp: does not ask in the first place.
-    expect(startCommand("aider", "hi")).toEqual({ command: "aider", typePrompt: true });
+    expect(startCommand("aider", "hi")).toEqual({ command: "aider --yes-always", typePrompt: true });
     expect(startCommand("amp", "hi")).toEqual({ command: "amp", typePrompt: true });
   });
 
@@ -383,13 +395,13 @@ describe("unattended working mode", () => {
   const modeOf = (cli: (typeof AGENT_CLIS)[number]) =>
     typeof cli.unattended === "function" ? cli.unattended({}) : cli.unattended;
 
-  it("leaves the bare launcher and hand-opened resumes alone — those are sessions someone opened", () => {
+  it("pins automatic mode on the bare launcher and manual restores", () => {
     for (const cli of AGENT_CLIS) {
       const mode = modeOf(cli);
       if (!mode) continue;
-      expect(launchCommand(cli)).not.toContain(mode);
+      expect(launchCommand(cli)).toContain(mode);
       const resumed = restoreCommand(cli.id, "SID42");
-      if (resumed) expect(resumed).not.toContain(mode);
+      if (resumed) expect(resumed).toContain(mode);
     }
   });
 
@@ -558,7 +570,7 @@ describe("binary overrides", () => {
       command: "acme-claude 'fix it' --permission-mode auto",
       typePrompt: false,
     });
-    expect(restoreCommand("claude", "abc123")).toBe("acme-claude --resume abc123");
+    expect(restoreCommand("claude", "abc123")).toBe("acme-claude --resume abc123 --permission-mode auto");
   });
 
   it("round-trips resume ids for a rebound CLI, and for commands spawned before", () => {
@@ -595,9 +607,9 @@ describe("binary overrides", () => {
       typePrompt: false,
     });
     expect(restoreCommand("claude", "abc123")).toBe(
-      "'/Applications/Acme CLI/bin/claude' --resume abc123",
+      "'/Applications/Acme CLI/bin/claude' --resume abc123 --permission-mode auto",
     );
-    expect(restoreCommand("codex", "abc123")).toBe("/opt/acme/codex resume abc123 --no-daemon");
+    expect(restoreCommand("codex", "abc123")).toBe("/opt/acme/codex resume abc123 --no-daemon --approve-for-me -c sandbox_workspace_write.network_access=true");
   });
 
   it("still reads the session id back out of a quoted resume command", () => {
@@ -1300,6 +1312,18 @@ describe("remembered agent permission settings", () => {
   expect(bypass).toContain("--dangerously-");
   updateSettings({dangerouslySkipPermissions:false});
   expect(rememberedAgentCommand(bypass)).toBe(saved);
+ });
+ it.each(["claude", "codex", "opencode", "omp", "aider"])("rebuilds remembered bare and automatic %s launches", agent => {
+  const cli = AGENT_CLIS.find(cli => cli.id === agent)!;
+  updateSettings({dangerouslySkipPermissions:false});
+  const automatic = launchCommand(cli);
+  expect(rememberedAgentCommand(cli.bin)).toBe(automatic);
+  if (cli.sessionArgs) expect(rememberedAgentCommand(`${cli.bin} ${cli.sessionArgs}`)).toBe(automatic);
+  updateSettings({dangerouslySkipPermissions:true});
+  const bypass = launchCommand(cli);
+  expect(rememberedAgentCommand(automatic)).toBe(bypass);
+  updateSettings({dangerouslySkipPermissions:false});
+  expect(rememberedAgentCommand(bypass)).toBe(automatic);
  });
  it("does not rewrite shell commands or build scripts",()=>{
   updateSettings({dangerouslySkipPermissions:true});

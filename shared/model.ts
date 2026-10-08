@@ -197,6 +197,8 @@ export interface RemoteCli {
   icon?: string
   brandColor?: string
   resumeTemplate?: string
+  /** Host-provided environment for the registry's automatic launch mode. */
+  launchEnv?: [string, string][]
   available: boolean
   custom?: boolean
   restoreRequiresHumanPrompt?: true
