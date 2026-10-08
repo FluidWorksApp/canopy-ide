@@ -135,7 +135,7 @@ describe("startCommand", () => {
 describe("restoreCommand", () => {
   it("builds a resume command for agents that support it", () => {
     expect(restoreCommand("claude", "abc123")).toBe("claude --resume abc123");
-    expect(restoreCommand("codex", "s-1")).toBe("codex resume s-1");
+    expect(restoreCommand("codex", "s-1")).toBe("codex resume s-1 --no-daemon");
     expect(restoreCommand("amp", "T-9")).toBe("amp threads continue T-9");
     expect(restoreCommand("cursor", "cur-1")).toBe("cursor-agent --resume cur-1");
     expect(restoreCommand("grok", "grok-1")).toBe("grok --resume grok-1");
@@ -146,7 +146,7 @@ describe("restoreCommand", () => {
       "claude --resume abc123 --permission-mode auto",
     );
     expect(restoreCommand("codex", "s-1", { task: true })).toBe(
-      "codex resume s-1 --approve-for-me -c sandbox_workspace_write.network_access=true",
+      "codex resume s-1 --no-daemon --approve-for-me -c sandbox_workspace_write.network_access=true",
     );
     expect(restoreCommand("grok", "g-1", { task: true })).toBe(
       "grok --resume g-1 --permission-mode auto",
@@ -194,7 +194,10 @@ describe("remoteCliMetadata", () => {
 describe("resumeSessionId (inverse of restoreCommand)", () => {
   it("recovers the session id from a resume command", () => {
     expect(resumeSessionId("claude --resume abc123")).toBe("abc123");
+    expect(resumeSessionId("codex resume s-1 --no-daemon")).toBe("s-1");
+    // A Codex terminal remembered from before --no-daemon still names its session.
     expect(resumeSessionId("codex resume s-1")).toBe("s-1");
+    expect(resumeSessionId("codex resume s-1 --dangerously-bypass-approvals-and-sandbox")).toBe("s-1");
     expect(resumeSessionId("opencode --session xyz")).toBe("xyz");
   });
 
@@ -226,7 +229,7 @@ describe("dangerouslySkipPermissions", () => {
     // dangerous flag is what's absent.
     expect(startCommand("claude", "hi")?.command).toBe("claude 'hi' --permission-mode auto");
     expect(restoreCommand("claude", "abc")).toBe("claude --resume abc");
-    expect(launchCommand(AGENT_CLIS.find((c) => c.id === "codex")!)).toBe("codex");
+    expect(launchCommand(AGENT_CLIS.find((c) => c.id === "codex")!)).toBe("codex --no-daemon");
   });
 
   it("appends each CLI's own verified flag to fresh starts, and only that flag", () => {
@@ -237,7 +240,7 @@ describe("dangerouslySkipPermissions", () => {
       "claude 'hi' --dangerously-skip-permissions",
     );
     expect(startCommand("codex", "hi")?.command).toBe(
-      "codex 'hi' --dangerously-bypass-approvals-and-sandbox",
+      "codex 'hi' --no-daemon --dangerously-bypass-approvals-and-sandbox",
     );
     // No prompt builder: the flag still reaches the bare launch.
     expect(startCommand("opencode", "hi")).toEqual({
@@ -254,7 +257,7 @@ describe("dangerouslySkipPermissions", () => {
     );
     // Verified against `codex resume --help`: resume takes the same flag.
     expect(restoreCommand("codex", "s-1")).toBe(
-      "codex resume s-1 --dangerously-bypass-approvals-and-sandbox",
+      "codex resume s-1 --no-daemon --dangerously-bypass-approvals-and-sandbox",
     );
     for (const cli of AGENT_CLIS) {
       const cmd = restoreCommand(cli.id, "SID42");
@@ -279,7 +282,7 @@ describe("dangerouslySkipPermissions", () => {
     expect(startCommand("claude", "review", { model: "opus", effort: "high" })?.command)
       .toBe("claude 'review' --permission-mode auto --model 'opus' --effort 'high'");
     expect(startCommand("codex", "build", { model: "gpt-5.6-sol", effort: "xhigh" })?.command)
-      .toBe("codex 'build' --approve-for-me -c sandbox_workspace_write.network_access=true -m 'gpt-5.6-sol' -c 'model_reasoning_effort=\"xhigh\"'");
+      .toBe("codex 'build' --no-daemon --approve-for-me -c sandbox_workspace_write.network_access=true -m 'gpt-5.6-sol' -c 'model_reasoning_effort=\"xhigh\"'");
     expect(startCommand("opencode", "build", { provider: "anthropic", model: "claude-opus-5" }))
       .toEqual({ command: "opencode --agent build --model 'anthropic/claude-opus-5'", typePrompt: true });
     expect(startCommand("agy", "build", { model: "gemini-3.1-pro-preview", effort: "high" })?.command)
@@ -348,7 +351,7 @@ describe("unattended working mode", () => {
     // Each of these is read off that CLI's own --help; see the entry comments.
     expect(startCommand("claude", "hi")?.command).toBe("claude 'hi' --permission-mode auto");
     expect(startCommand("codex", "hi")?.command).toBe(
-      "codex 'hi' --approve-for-me -c sandbox_workspace_write.network_access=true",
+      "codex 'hi' --no-daemon --approve-for-me -c sandbox_workspace_write.network_access=true",
     );
     // No prompt builder: the mode still reaches the bare launch that gets the
     // brief typed into it.
@@ -448,7 +451,7 @@ describe("unattended working mode", () => {
       "claude 'hi' --dangerously-skip-permissions",
     );
     expect(startCommand("codex", "hi")?.command).toBe(
-      "codex 'hi' --dangerously-bypass-approvals-and-sandbox",
+      "codex 'hi' --no-daemon --dangerously-bypass-approvals-and-sandbox",
     );
     expect(startCommand("opencode", "hi")?.command).toBe("opencode --auto");
   });
@@ -594,7 +597,7 @@ describe("binary overrides", () => {
     expect(restoreCommand("claude", "abc123")).toBe(
       "'/Applications/Acme CLI/bin/claude' --resume abc123",
     );
-    expect(restoreCommand("codex", "abc123")).toBe("/opt/acme/codex resume abc123");
+    expect(restoreCommand("codex", "abc123")).toBe("/opt/acme/codex resume abc123 --no-daemon");
   });
 
   it("still reads the session id back out of a quoted resume command", () => {
