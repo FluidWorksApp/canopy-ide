@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,mkdir,rm,symlink,writeFile,readFile,stat} from 'node:fs/promises';
+import {mkdtemp,mkdir,rm,symlink,writeFile,readFile,stat,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {scratchVolume,prepareScratchVolume,clearScratch} from './scratch-storage.mjs';
@@ -9,7 +9,7 @@ import {DockerWorkspaces} from './docker.mjs';
 import {createRunner} from './runner.mjs';
 import {prepareForSnapshot} from './storage-prep.mjs';
 
-async function fixture(t){const root=await mkdtemp(path.join(tmpdir(),'canopy-scratch-'));t.after(()=>rm(root,{recursive:true,force:true}));return root;}
+async function fixture(t){const root=await realpath(await mkdtemp(path.join(tmpdir(),'canopy-scratch-')));t.after(()=>rm(root,{recursive:true,force:true}));return root;}
 function engine(){
  const calls=[],volumes=new Map();let current;
  const option=(args,key)=>args[args.indexOf(key)+1];

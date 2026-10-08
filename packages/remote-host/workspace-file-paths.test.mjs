@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,mkdir,writeFile,readFile,rm,symlink} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,rm,symlink,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {resolveWorkspacePath} from './workspace-file-paths.mjs';
 
 async function fixture(t){
- const root=await mkdtemp(path.join(tmpdir(),'canopy-file-links-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const root=await realpath(await mkdtemp(path.join(tmpdir(),'canopy-file-links-')));t.after(()=>rm(root,{recursive:true,force:true}));
  const workspace=path.join(root,'workspace'),scratch=path.join(root,'scratch'),outside=path.join(root,'outside');
  for(const dir of [workspace,scratch,outside])await mkdir(dir);
  return {workspace,scratch,outside};
