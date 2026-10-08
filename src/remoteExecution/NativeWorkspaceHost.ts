@@ -17,6 +17,11 @@ for(const command of ['clipboard_image_png','clipboard_watch_set','clipboard_rec
 // The Playwright extension token unlocks this computer's Chrome, which is the
 // one the desktop's Chrome bridge connects to; it never belongs in the VM.
 for(const command of ['chrome_extension_token_status','chrome_extension_token_set','chrome_extension_token_clear','chrome_extension_open_status'])LOCAL_UI.add(command);
+// The scratchpad is the person's own thoughts and screenshots, kept on the
+// computer showing the IDE like the clipboard; the workspace has no notes store
+// (it answered "does not support notes_create"). Attaching a file stays with the
+// workspace: its path names a workspace file this computer cannot read.
+for(const command of ['notes_list','notes_due','notes_get','notes_create','notes_update','notes_add_attachment','notes_set_status','notes_link','notes_read_file','notes_read_image','notes_dir','notes_remind','notes_search','notes_delete'])LOCAL_UI.add(command);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 /** Immutable execution ownership for one renderer. Every execution/file request
