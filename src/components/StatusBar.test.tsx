@@ -5,7 +5,7 @@ import { BranchSwitchProvider } from "../useBranchSwitch";
 import * as ipc from "../ipc";
 import { modelSwitchFor } from "../agentModels";
 import type { AgentEventEntry } from "../types";
-import { getSettings } from "../settings";
+import { getSettings, updateSettings } from "../settings";
 
 vi.mock("../ipc", () => ({
   gitStatus: vi.fn(),
@@ -290,6 +290,26 @@ describe("the tray's plan chip", () => {
     render(<StatusBar {...base} events={[]} agentId="amp" />);
     await screen.findByText(/main/);
     expect(screen.queryByText(/52%/)).toBeNull();
+  });
+
+  // The incident: the front terminal ran under Default, whose reading was
+  // days old, while VJ was the selected account. The chip showed Default's
+  // numbers with "2d ago".
+  it("shows the selected account only, and -- when it has no reading", async () => {
+    updateSettings({ activeProfile: "vj" });
+    try {
+      const old = { ...claudePlan, profile: "default", observed: Math.floor(Date.now() / 1000) - 2 * 86400 };
+      vi.mocked(ipc.planUsage).mockResolvedValue([old] as never);
+      const { unmount } = render(<StatusBar {...base} events={[]} agentId="claude" agentProfile="default" />);
+      expect(await screen.findByText("--")).toBeTruthy();
+      expect(screen.queryByText(/52%|ago/)).toBeNull();
+      unmount();
+      vi.mocked(ipc.planUsage).mockResolvedValue([old, { ...claudePlan, profile: "vj", windows: [{ label: "7d", used_percent: 44, resets_at: null }] }] as never);
+      render(<StatusBar {...base} events={[]} agentId="claude" agentProfile="default" />);
+      expect(await screen.findByText("7d 44%")).toBeTruthy();
+    } finally {
+      updateSettings({ activeProfile: "default" });
+    }
   });
 
   it("escalates once a window is nearly spent", async () => {

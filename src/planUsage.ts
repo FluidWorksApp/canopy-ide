@@ -126,16 +126,16 @@ export function planStale(plan: PlanUsage, now = Date.now()): boolean {
   return plan.windows.some((w) => !!w.resets_at && w.resets_at <= secs);
 }
 
-/** The chip as shown: the account it belongs to when that is not the one new
- *  agents launch as (the front tab runs under another login), and the age of
- *  a stale reading. Never another account's numbers under this one's name. */
-export function chipLabel(
-  plan: PlanUsage,
-  opts: { now?: number; accountLabel?: string | null } = {},
-): string {
-  const now = opts.now ?? Date.now();
-  const parts = [chipText(plan)];
-  if (opts.accountLabel) parts.unshift(opts.accountLabel);
-  if (planStale(plan, now)) parts.push(stalenessText(plan, now)?.replace(/^as of /, "") ?? "stale");
-  return parts.join(" · ");
+/** The chip as shown, for the selected account only. No reading for it is
+ *  "--", and a window that has reset since its reading is "--" too: an old
+ *  percentage, or another account's, under this account reads as fact. The
+ *  reading's age stays in the tooltip, not the chip. */
+export function chipLabel(plan: PlanUsage | null, now = Date.now()): string {
+  if (!plan || plan.windows.length === 0) return "--";
+  const secs = Math.floor(now / 1000);
+  const reset = (w: PlanWindow) => !!w.resets_at && w.resets_at <= secs;
+  return [...plan.windows]
+    .sort((a, b) => Number(reset(a)) - Number(reset(b)) || b.used_percent - a.used_percent)
+    .map((w) => `${w.label} ${reset(w) ? "--" : `${Math.round(w.used_percent)}%`}`)
+    .join(" · ");
 }
