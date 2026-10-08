@@ -14,7 +14,10 @@ describe("Build previews a live page rather than a black rectangle", () => {
     // when anything overlaps — so Build's floating island blanked the entire
     // preview, and the person saw black where their app should be.
     // Chrome is also a DOM iframe; only the native engine needs substitution.
-    expect(preview).toContain('buildMode && chosenEngine === "webview" ? "proxy" : chosenEngine');
+    // The choice lives in previewEngine (behaviour-tested there); the view must
+    // still route through it with Build mode.
+    expect(read("src/previewEngine.ts")).toContain('opts.buildMode && opts.chosen === "webview" ? "proxy" : opts.chosen');
+    expect(preview).toContain("previewEngine({ remote: !!remoteWorkspace, url, buildMode, chosen: chosenEngine })");
   });
 });
 
