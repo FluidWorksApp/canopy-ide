@@ -70,15 +70,20 @@ pub fn canopy_account_cache_key() -> Result<Option<String>, String> {
 // The native process outlives renderer reloads. Reuse its TLS/HTTP pool;
 // authentication is still read and applied separately on every request.
 fn account_http_client() -> Result<&'static reqwest::Client, String> {
-    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(20))
-        .pool_idle_timeout(std::time::Duration::from_secs(300))
-        .pool_max_idle_per_host(2)
-        .build()
-        .map_err(|_| "Account connection unavailable".to_string()))
-        .as_ref().map_err(Clone::clone)
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(20))
+                .pool_idle_timeout(std::time::Duration::from_secs(300))
+                .pool_max_idle_per_host(2)
+                .build()
+                .map_err(|_| "Account connection unavailable".to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 #[tauri::command]
@@ -1075,7 +1080,8 @@ mod account_import_tests {
         let legacy: super::RemoteConnection = serde_json::from_value(serde_json::json!({
             "endpoint": "https://workspace.example.invalid", "token": "synthetic",
             "workspaceId": "workspace", "workspaceName": "Workspace"
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(legacy.expires_at.is_none());
         assert!(legacy.credential_account_key.is_none());
         assert!(legacy.client_id.is_none());
