@@ -351,3 +351,6 @@
 .workspace-hero-right {flex-shrink:1;min-width:0;}
 .workspace-hero-actions {flex-wrap:wrap;justify-content:flex-end;}
 .workspace-hero-unavailable {color:var(--text-dim);}
+/* Grow storage: the one-way acknowledgement sits on one line with its box. */
+.workspace-stop-confirm label.workspace-grow-ack {flex-direction:row;align-items:flex-start;gap:8px;}
+.workspace-stop-confirm label.workspace-grow-ack input {margin-top:3px;}

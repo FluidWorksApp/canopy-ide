@@ -38,6 +38,25 @@ export function savePhaseLabel(phase:string|null|undefined,progress?:string|null
  const label=phase?SAVE_PHASES[phase]:undefined;if(!label)return null;
  return phase==='saving-snapshot'&&progress&&/^\d{1,3}%$/.test(progress)?`${label} (${progress})`:label;
 }
+// Server phases of growing a retained disk (canopy-website reconciler, grow-storage).
+const GROW_PHASES:Record<string,string>={
+ 'stopping':'Growing storage… stopping the workspace',
+ 'retaining-storage':'Growing storage… stopping the workspace',
+ 'saving-storage':'Growing storage… saving your files',
+ 'growing-storage':'Growing storage… creating the larger disk',
+ 'creating-compute':'Growing storage… starting the workspace on the larger disk',
+ 'starting':'Growing storage… starting the workspace on the larger disk',
+ 'attaching-storage':'Growing storage… connecting the larger disk',
+ 'preparing-workspace':'Growing storage… preparing your tools',
+ 'connecting-workspace':'Growing storage… checking the connection',
+ 'retiring-previous-compute':'Growing storage… finishing up',
+ 'retiring-previous-storage':'Growing storage… removing the old disk',
+};
+export function growPhaseLabel(operation:{action?:string|null;phase?:string|null;target_storage_gib?:number|null}|null|undefined){
+ if(operation?.action!=='grow-storage'||!operation.phase)return null;
+ const label=GROW_PHASES[operation.phase];if(!label)return null;
+ return operation.target_storage_gib?label.replace('Growing storage…',`Growing storage to ${operation.target_storage_gib} GB…`):label;
+}
 export function warmupLabel(warmup:HostStorage['warmup']){
  if(!warmup||warmup.state==='done')return null;
  return `Warming up files… ${Math.max(0,Math.min(99,Math.round(warmup.percent)))}%`;
