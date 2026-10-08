@@ -218,6 +218,11 @@ export class DockerWorkspaces {
     const names=new Set(found.stdout.trim().split('\n').filter(Boolean));names.add(`canopy-ws-${stable}`);
     for(const name of names){
       if(name===`canopy-ws-${workspace.id}`)continue;
+      // A runtime moved to a new image keeps its stopped predecessor, labels
+      // and all, for rollback (image-upgrade.mjs). That container belongs to
+      // the upgrade journal, not to this retirement: matching it here as an
+      // "unexpected" name locked the member out after every image release.
+      if(/^canopy-previous-member-[a-f0-9]{40}-[a-f0-9]{12}(?:-failed|-recovery-[a-f0-9]{12})?$/.test(name))continue;
       if(!/^canopy-ws-member-[a-f0-9]{40}$/.test(name))throw Error('Unexpected member runtime name');
       let current;try{current=JSON.parse((await this.docker(['inspect',name])).stdout)[0];}catch(error){if(error.missingResource)continue;throw error;}
       const id=name.slice('canopy-ws-'.length),labels=current?.Config?.Labels;
