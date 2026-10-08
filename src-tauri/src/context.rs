@@ -94,6 +94,8 @@ const SUPPORTED_TOOLS: &[&str] = &[
     "canopy_job_done",
     "canopy_mesh",
     "canopy_mesh_send",
+    "canopy_mesh_submit",
+    "canopy_mesh_targets",
     "canopy_message_agent",
     "canopy_name_task",
     "canopy_notes",
@@ -1024,6 +1026,60 @@ pub fn browser_result(state: tauri::State<'_, ContextBridge>, id: u64, ok: bool,
         let value = serde_json::from_str(&data).unwrap_or(serde_json::Value::String(data));
         let _ = tx.send((ok, value));
     }
+}
+
+/// One step of a mesh job (approved, declined, started, done…) reported back to
+/// the agent that submitted it: kept on the mesh under `ref {kind: "job", id}`
+/// so canopy_mesh can list the whole job, and announced in its terminal the
+/// way any mesh message is. Only the frontend calls this — it is the layer
+/// that hears from the other workspace or machine — and it can only name the
+/// terminal the bridge stamped on the submission, in this app run.
+#[tauri::command]
+pub fn context_mesh_job_update(
+    app: tauri::AppHandle,
+    pty_id: u32,
+    instance: String,
+    job_id: String,
+    text: String,
+) -> Result<String, String> {
+    if instance != crate::pty::instance_token() {
+        return Err("the submitting terminal belongs to an earlier Canopy run".into());
+    }
+    let job_id = job_id.trim();
+    if job_id.is_empty() || job_id.len() > 64 {
+        return Err("a job update needs its job id".into());
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("a job update needs text".into());
+    }
+    let text: String = text.chars().take(MAX_MESH_TEXT).collect();
+    let Some(target) = app.state::<crate::pty::PtyManager>().get(pty_id) else {
+        return Err(format!("terminal {pty_id} has exited"));
+    };
+    let target_cwd = target.cwd.clone();
+    may_message_terminal(pty_id, terminal_role(&app, pty_id))?;
+    let bridge = app.state::<ContextBridge>();
+    let record = bridge
+        .mesh
+        .record(new_message(
+            &app,
+            &Caller::Root,
+            pty_id,
+            target_cwd.clone(),
+            text,
+            Vec::new(),
+            None,
+            Some(crate::mesh::MeshRef {
+                kind: "job".into(),
+                id: job_id.to_string(),
+            }),
+        ))
+        .map_err(|_| "the mesh refused this job update".to_string())?;
+    let notice = format!("[canopy: mesh job {job_id}] {}", mesh_notice_for(&record));
+    deliver_line(&app, pty_id, target_cwd, record.id.clone(), &notice)?;
+    bridge.mesh.note_delivery(&record.id, &notice);
+    Ok(record.id)
 }
 
 /// Bind a newly spawned PTY into the caller's delegation tree before its brief
@@ -4548,7 +4604,16 @@ struct UiOp {
     enable: Option<bool>,
     #[serde(rename = "deleteBranch")]
     delete_branch: Option<bool>,
+    /// mesh_submit: who on the team the job goes to ("me" for this account's
+    /// other machine), and optionally which of their devices. Absent means a
+    /// workspace in this window, named by `project`.
+    member: Option<String>,
+    device: Option<String>,
 }
+
+/// The longest job brief the mesh carries. A team envelope holds 32 KB of
+/// payload, and the brief shares it with the job's routing fields.
+const MAX_MESH_JOB_BRIEF: usize = 16 * 1024;
 
 const UI_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 /// PR reads shell out to GitHub and failing logs may require several downloads.
@@ -4568,10 +4633,40 @@ async fn ui_op(
     headers: HeaderMap,
     Json(op): Json<UiOp>,
 ) -> (StatusCode, String) {
-    if !authorized(&app, &headers) {
+    let Some(who) = caller(&app, &headers) else {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
-    }
+    };
+    // The terminal a mesh job reports back to. Taken from the credential, never
+    // the body: every later step of the job is typed into this terminal.
+    let mut submitter: Option<u32> = None;
     let deadline = match op.op.as_str() {
+        "mesh_targets" => UI_OP_TIMEOUT,
+        "mesh_submit" => {
+            let Some(agent) = who.agent() else {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Only a Canopy agent terminal can submit a mesh job — its updates are delivered back to that terminal."
+                        .into(),
+                );
+            };
+            let brief = op.prompt.as_deref().map(str::trim).unwrap_or_default();
+            if brief.is_empty() {
+                return (StatusCode::BAD_REQUEST, "mesh_submit needs a brief".into());
+            }
+            if brief.len() > MAX_MESH_JOB_BRIEF {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "a job brief is capped at {} KB — put the detail in a file the receiver can reach, or split the job",
+                        MAX_MESH_JOB_BRIEF / 1024
+                    ),
+                );
+            }
+            submitter = Some(agent.pty_id);
+            // Starting a local job waits on a launch (bounded at 60s by the
+            // frontend); a remote one only on the encrypted send.
+            std::time::Duration::from_secs(90)
+        }
         "diagnostics" | "tickets" => UI_OP_TIMEOUT,
         // Shells out to GitHub once per repo, and for a caller that is in no
         // project that is every repo in the workspace.
@@ -4683,7 +4778,10 @@ async fn ui_op(
             "id": id,
             "op": op.op,
             "route": op.cwd.clone().unwrap_or_default(),
-            "ptyId": op.pty_id,
+            "ptyId": submitter.or(op.pty_id),
+            "instance": crate::pty::instance_token(),
+            "member": op.member,
+            "device": op.device,
             "path": op.path,
             "line": op.line,
             "column": op.column,

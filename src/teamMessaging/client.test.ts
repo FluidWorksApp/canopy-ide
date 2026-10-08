@@ -78,3 +78,38 @@ it('reports a message whose last pending delivery can no longer be sent',async()
  const client=new PeerClient({user:'alice',team:'team',identity:async()=>({id,keys:alice}),outbox:{load:async()=>[{envelope,messageId:'pending'}],put:async()=>{},remove:async()=>{}},request,expired,message:()=>{},receipt:()=>{},status:()=>{}});
  clients.push(client);await client.start();expect(expired).toHaveBeenCalledWith('pending');
 });
+
+it('carries mesh jobs to a teammate or this account\'s other device, and their status back, end to end encrypted',async()=>{
+ const devices=new Map<string,{id:string;user_id:string;public_keys:ReturnType<typeof registrationProof>;last_seen_at:string}>();
+ const queue:{id:string;recipient:string;envelope:unknown}[]=[];const wire:unknown[]=[];const stale=new Set<string>();
+ const api=(user:string)=>async<T,>(value:unknown):Promise<T>=>{
+  const b=value as Record<string,any>;wire.push(value);
+  if(b.action==='register'){devices.set(b.deviceId,{id:b.deviceId,user_id:user,public_keys:registrationProof(user,b),last_seen_at:new Date().toISOString()});return {} as T;}
+  const self=devices.get(b.deviceId);if(self)self.last_seen_at=new Date(stale.has(self.id)?Date.now()-120_000:Date.now()).toISOString();
+  if(b.action==='directory')return {devices:[...devices.values()]} as T;
+  if(b.action==='poll')return {envelopes:queue.filter(e=>e.recipient===b.deviceId)} as T;
+  if(b.action==='ack'){for(let i=queue.length-1;i>=0;i--)if(b.ids.includes(queue[i].id)&&queue[i].recipient===b.deviceId)queue.splice(i,1);return {} as T;}
+  if(b.action==='relay'){const sender=devices.get(b.deviceId)!,recipient=devices.get(b.recipientDevice)!;queue.push({id:crypto.randomUUID(),recipient:recipient.id,envelope:relayEnvelope(b,user,sender,recipient)});return {} as T;}
+  throw Error('Unexpected peer operation');
+ };
+ const jobs:{at:string;job:any;from:string}[]=[],statuses:{at:string;status:any;from:string}[]=[];
+ async function endpoint(user:string,id:string){const keys=await createIdentity(),seen=new Set<string>();const client=new PeerClient({user,team:'team',identity:async()=>({id,keys}),request:api(user),outbox:{load:async()=>[],put:async()=>{},remove:async()=>{}},remember:async key=>{if(seen.has(key))return false;seen.add(key);return true;},rtc:()=>{throw Error('Direct transport unavailable');},message:()=>{},receipt:()=>{},status:()=>{},job:(job,sender)=>jobs.push({at:id,job,from:sender.user_id}),jobStatus:(status,sender)=>statuses.push({at:id,status,from:sender.user_id})});clients.push(client);await client.start();return client;}
+ const laptop='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',desktop='aaaaaaaa-aaaa-aaaa-aaaa-bbbbbbbbbbbb',bobId='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+ const alice=await endpoint('alice',laptop);await endpoint('alice',desktop);const bob=await endpoint('bob',bobId);
+ const job={id:'job-0001-teammate',title:'Fix the flaky test',brief:'Secret brief only the endpoints read',workspace:'api',created:Date.now()};
+ expect((await alice.sendJob(job,'bob')).id).toBe(bobId);
+ await waitFor(()=>expect(jobs).toHaveLength(1),{timeout:4000});
+ expect(jobs[0]).toMatchObject({at:bobId,from:'alice',job:{id:job.id,brief:job.brief}});
+ expect(JSON.stringify(wire)).not.toContain('Secret brief');
+ // "Same account" reaches the other machine, never the sending one.
+ expect((await alice.sendJob({...job,id:'job-0002-own-device'},'alice')).id).toBe(desktop);
+ await waitFor(()=>expect(jobs).toHaveLength(2),{timeout:4000});
+ expect(jobs[1]).toMatchObject({at:desktop,from:'alice'});
+ await bob.sendJobStatus({jobId:job.id,state:'accepted',detail:'Approved',created:Date.now()},laptop);
+ await waitFor(()=>expect(statuses).toHaveLength(1),{timeout:4000});
+ expect(statuses[0]).toMatchObject({at:laptop,from:'bob',status:{state:'accepted'}});
+ // A member whose devices have stopped polling is not connected.
+ stale.add(bobId);await waitFor(()=>expect(Date.now()-Date.parse(devices.get(bobId)!.last_seen_at)).toBeGreaterThan(60_000),{timeout:4000});
+ await expect(alice.sendJob({...job,id:'job-0003-offline'},'bob')).rejects.toThrow('Not connected');
+ await expect(alice.sendJob({...job,id:'bad id!'},'bob')).rejects.toThrow('Invalid job');
+},15000);

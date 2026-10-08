@@ -92,6 +92,10 @@ IDE the user is watching, and their results stay inspectable:\n\
   be able to find again -> canopy_mesh_send (persistent, by message id); \
   what you've sent and received, or a message id someone gave you -> \
   canopy_mesh\n\
+- Work that belongs in another workspace, on your other machine, or with a \
+  teammate -> canopy_mesh_targets, then canopy_mesh_submit with a complete \
+  brief. A teammate approves before it runs; its steps come back to you as \
+  mesh notices tagged ref kind \"job\"\n\
 - If available, delegating a bounded, independent slice -> canopy_spawn_agent with a complete \
   brief. The child has no memory of this conversation; it opens as a pane beside \
   you, and autoClose: true makes it a one-shot that reports and closes itself. \

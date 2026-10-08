@@ -996,6 +996,7 @@ pub fn run() {
             context::context_messages,
             context::context_mesh_severed,
             context::context_mesh_sever,
+            context::context_mesh_job_update,
             context::context_agent_spawn_ready,
             context::browser_result,
             snapshot::webview_snapshot,

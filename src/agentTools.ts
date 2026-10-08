@@ -124,6 +124,16 @@ export const AGENT_TOOL_GROUPS: AgentToolGroup[] = [
         note: "A kept message with files attached; the target gets a one-line notice",
       },
       {
+        name: "canopy_mesh_submit",
+        label: "Mesh jobs",
+        note: "Submit a job to another workspace, machine or teammate; teammates approve first",
+      },
+      {
+        name: "canopy_mesh_targets",
+        label: "Mesh targets",
+        note: "Workspaces, own machines and teammates a job can go to",
+      },
+      {
         name: "canopy_mesh",
         label: "Mesh history",
         note: "Its own sent and received messages, by id",

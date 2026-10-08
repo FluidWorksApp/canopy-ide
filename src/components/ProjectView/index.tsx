@@ -5918,10 +5918,13 @@ const ProjectViewBody = memo(function ProjectViewBody({
       };
       if (d?.projectId !== project.id || seen.has(d.ticket)) return;
       seen.add(d.ticket);
+      // The run's id, so a caller that must hear how it ends (a mesh job
+      // reporting back to its submitter) can match canopy_job_done to it.
+      let runId: string | undefined;
       const answer = (started: boolean, note: string) =>
         window.dispatchEvent(
           new CustomEvent("canopy:start-session-result", {
-            detail: { ticket: d.ticket, started, note },
+            detail: { ticket: d.ticket, started, note, runId: started ? runId : undefined },
           }),
         );
       void startMicroTask(
@@ -5929,6 +5932,9 @@ const ProjectViewBody = memo(function ProjectViewBody({
         { dir: d.dir },
         "",
         d.agent,
+        (ids) => {
+          runId = ids.runId;
+        },
       ).then(
         (ok) =>
           answer(

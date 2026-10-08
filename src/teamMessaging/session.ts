@@ -1,6 +1,7 @@
 import {loadChatHistory,saveChatMessage,forgetChatMessage,loadChatReadState,saveChatReadState} from './history';
 import {invoke} from '@tauri-apps/api/core';
-import {PeerClient,type ChatMessage} from './client';
+import {PeerClient,type ChatMessage,type Device} from './client';
+import type {JobRequest,JobStatus} from './jobSchema';
 import {countUnread,type ConversationUnread} from './unread';
 
 /** Local lifecycle of a message this account sent. A delivery receipt (tracked
@@ -37,6 +38,12 @@ export const getTeamUnread=()=>Object.values(getUnreadSummary()).reduce((sum,cou
 export type TeamMessageEvent={team:string;user:string;message:ChatMessage;senderName?:string};
 const messageListeners=new Set<(event:TeamMessageEvent)=>void>();
 export const subscribeTeamMessages=(listener:(event:TeamMessageEvent)=>void)=>{messageListeners.add(listener);return()=>{messageListeners.delete(listener);};};
+/** Who sent a job or job status, as the envelope proved it: `user` is the
+ * server-authenticated account, `device` the signing device. */
+export type TeamJobSender={user:string;device:string;name?:string};
+export type TeamJobEvent={team:string;user:string;sender:TeamJobSender}&({kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus});
+const jobListeners=new Set<(event:TeamJobEvent)=>void>();
+export const subscribeTeamJobs=(listener:(event:TeamJobEvent)=>void)=>{jobListeners.add(listener);return()=>{jobListeners.delete(listener);};};
 export class TeamSession {
  private listeners=new Set<()=>void>();
  private client:PeerClient;
@@ -67,6 +74,8 @@ export class TeamSession {
     this.update({unreadIds:incoming?[...this.snapshot.unreadIds.slice(-499),message.id]:this.snapshot.unreadIds,messages:fresh?[...this.snapshot.messages.slice(-499),message]:this.snapshot.messages});this.persistReadState();
     if(incoming){const event={team:this.team,user:this.user,message,senderName:this.snapshot.members[message.sender]};messageListeners.forEach(fn=>{try{fn(event);}catch{/* a listener never breaks delivery */}});}
    },
+   job:(job,sender)=>this.emitJob(sender,{kind:'job',job}),
+   jobStatus:(status,sender)=>this.emitJob(sender,{kind:'job-status',status}),
    receipt:(id,user)=>{if(this.invalid||!this.snapshot.messages.some(m=>m.id===id))return;this.update({receipts:{...this.snapshot.receipts,[id]:[...new Set([...(this.snapshot.receipts[id]??[]),user])].slice(-512)}});this.persistReadState();},
    status:status=>{this.update({status});if(status.startsWith('Connected'))this.resendWaiting();},
    pending:ids=>{
@@ -93,6 +102,23 @@ export class TeamSession {
    this.update({messages:[...history,...live].slice(-500),restoredIds:[...ids],unreadIds:[...new Set([...state.unreadIds.filter(id=>ids.has(id)),...this.snapshot.unreadIds])],receipts:{...Object.fromEntries(Object.entries(state.receipts).filter(([id])=>ids.has(id))),...this.snapshot.receipts}});
   }catch{this.update({status:'Local history could not be restored.'});}
   if(!this.invalid)await this.client.start().catch(e=>this.update({status:String(e)}));
+ }
+ private emitJob(sender:Device,body:{kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus}){
+  if(this.invalid)return;
+  const event:TeamJobEvent={team:this.team,user:this.user,sender:{user:sender.user_id,device:sender.id,name:this.snapshot.members[sender.user_id]},...body};
+  jobListeners.forEach(fn=>{try{fn(event);}catch{/* a listener never breaks delivery */}});
+ }
+ /** Team members by account id, as the directory last named them. */
+ members(){return this.snapshot.members;}
+ devices(){return this.invalid?[]:this.client.directoryDevices();}
+ deviceId(){return this.client.deviceId();}
+ async submitJob(job:JobRequest,recipient:string,device?:string){
+  if(this.invalid)throw Error('Sign in again to submit jobs');
+  await this.ready;return this.client.sendJob(job,recipient,device);
+ }
+ async sendJobStatus(status:JobStatus,device:string){
+  if(this.invalid)throw Error('Signed out of this team');
+  await this.ready;return this.client.sendJobStatus(status,device);
  }
  private persistReadState(){
   if(this.invalid)return;
@@ -189,5 +215,8 @@ export class TeamSession {
 
 }
 export function teamSession(team:string,user:string){const key=`${user}:${team}`;let session=sessions.get(key);if(!session){session=new TeamSession(team,user);sessions.set(key,session);}return session;}
+
+/** Every team transport this IDE holds open (the background keeps one per team). */
+export function liveTeamSessions(){return [...sessions.values()];}
 
 export function clearTeamSessions(){for(const session of [...sessions.values()])session.clear();}
