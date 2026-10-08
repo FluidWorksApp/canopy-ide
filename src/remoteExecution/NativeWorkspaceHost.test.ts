@@ -23,6 +23,20 @@ it('routes workspace localhost through a private remote browser and scoped ticke
  await expect(host.invoke('chrome_stream_ticket',{sessionId:'dev'})).rejects.toThrow('Unknown');
  expect(desktop.invoke).not.toHaveBeenCalled();host.dispose();
 });
+it('keeps the scratchpad on the viewing computer, but attaches workspace files through the workspace',async()=>{
+ const {host,desktop,fetcher}=setup();
+ vi.mocked(desktop.invoke).mockResolvedValue({id:'n1'});
+ const note={projectId:'p_1',title:'Number Vandurucha'};
+ expect(await host.invoke('notes_create',note)).toEqual({id:'n1'});
+ await host.invoke('notes_list',{projectId:'p_1',status:null,limit:50});
+ expect(desktop.invoke).toHaveBeenCalledWith('notes_create',note);
+ expect(desktop.invoke).toHaveBeenCalledWith('notes_list',{projectId:'p_1',status:null,limit:50});
+ expect(fetcher).not.toHaveBeenCalled();
+ await host.invoke('notes_attach_file',{projectId:'p_1',id:'n1',path:'/workspace/a.txt'});
+ expect(desktop.invoke).not.toHaveBeenCalledWith('notes_attach_file',expect.anything());
+ expect(fetcher.mock.calls.at(-1)![0]).toContain('/workspaces/alice/native');
+ host.dispose();
+});
 const connection = {endpoint:'http://127.0.0.1:8787',token:'synthetic-token',workspaceId:'alice',workspaceName:'Alice'};
 function setup() {
   const desktop = {kind:'native',invoke:vi.fn(),listen:vi.fn(),channel:vi.fn()} as unknown as Host;
