@@ -35,7 +35,7 @@ import { formatDeepLink } from "../deepLinks";
 import { setBounded } from "../boundedMap";
 import * as ipc from "../ipc";
 import { estimateCost, sessionCost } from "../pricing";
-import { chipLabel, planFor, planStale, planTone, tooltip } from "../planUsage";
+import { chipLabel, planFor, planTone, tooltip } from "../planUsage";
 import { accountSummary } from "../accountState";
 import {
   loadFlags,
@@ -410,13 +410,16 @@ export const StatusBar = memo(function StatusBar({
       clearInterval(timer);
     };
   }, [visible, agentId, activeSessionId]);
-  const plan = useMemo(
-    () => planFor(plans, agentId, agentProfile || "default"),
-    [plans, agentId, agentProfile],
-  );
-  // The chip reports the front terminal's account. When that is not the
-  // account new agents launch as, it says whose numbers these are.
+  // The chip reports the selected account (the switcher beside it), never the
+  // front terminal's other account or its days-old reading.
   const [launchAccount, setLaunchAccount] = useState(activeProfile());
+  const plan = useMemo(
+    () => planFor(plans, agentId, launchAccount),
+    [plans, agentId, launchAccount],
+  );
+  // This CLI reports limits for some account, so the selected one gets a
+  // chip even without a reading ("--"); a CLI with no plan concept gets none.
+  const reportsPlan = Boolean(agentId && plans.some((p) => p.agent === agentId));
   const [accountLabels, setAccountLabels] = useState<Record<string, string>>({});
   useEffect(() => {
     const pull = () => {
@@ -430,9 +433,6 @@ export const StatusBar = memo(function StatusBar({
     window.addEventListener(PROFILE_CHANGE_EVENT, pull);
     return () => window.removeEventListener(PROFILE_CHANGE_EVENT, pull);
   }, []);
-  const chipProfile = agentProfile || "default";
-  const chipAccount =
-    chipProfile !== launchAccount ? (accountLabels[chipProfile] ?? chipProfile) : null;
 
   // The transcript whose model/tokens the tray shows. Per-TAB first: prefer
   // the latest event stamped with the active terminal's pty, so switching
@@ -1453,12 +1453,12 @@ export const StatusBar = memo(function StatusBar({
           only the CLIs that genuinely report limits get a chip. A CLI with no
           plan concept, or one that has not seen an API response yet, shows
           nothing rather than a 0% that would read as "plenty left". */}
-      {plan && plan.windows.length > 0 && (
+      {reportsPlan && (
         <span
-          className={`status-item status-plan is-${planTone(plan)}${planStale(plan) ? " is-stale" : ""}`}
-          title={`${chipAccount ? `${chipAccount}'s plan (this terminal's account)\n` : ""}${tooltip(plan)}`}
+          className={`status-item status-plan is-${plan ? planTone(plan) : "normal"}`}
+          title={`${accountLabels[launchAccount] ?? launchAccount}'s plan\n${plan ? tooltip(plan) : "No reading for this account yet"}`}
         >
-          {chipLabel(plan, { accountLabel: chipAccount })}
+          {chipLabel(plan)}
         </span>
       )}
       {/* Beside the plan chip: that headroom belongs to this account. Hidden

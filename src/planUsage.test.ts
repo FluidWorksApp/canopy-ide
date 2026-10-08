@@ -161,9 +161,14 @@ describe("a reading that no longer describes the plan", () => {
     ],
   } as PlanUsage;
 
-  it("is marked stale with its age, and names the account it belongs to", () => {
+  it("is marked stale, but the chip shows a reset window as -- and no age", () => {
     expect(planStale(old, now)).toBe(true);
-    expect(chipLabel(old, { now, accountLabel: "Default" })).toBe("Default · 7d 77% · 5h 4% · 2d ago");
+    expect(chipLabel(old, now)).toBe("7d 77% · 5h --");
+  });
+
+  it("shows -- when the selected account has no reading", () => {
+    expect(chipLabel(null, now)).toBe("--");
+    expect(chipLabel({ ...old, windows: [] }, now)).toBe("--");
   });
 
   it("is stale once a window has reset, however recent", () => {
@@ -173,6 +178,6 @@ describe("a reading that no longer describes the plan", () => {
   it("stays plain while fresh", () => {
     const fresh = { ...old, observed: secs - 60, windows: [old.windows[1]] } as PlanUsage;
     expect(planStale(fresh, now)).toBe(false);
-    expect(chipLabel(fresh, { now })).toBe("7d 77%");
+    expect(chipLabel(fresh, now)).toBe("7d 77%");
   });
 });
