@@ -795,6 +795,41 @@ async fn ws_conn(
     }
 }
 
+/// Approval overlays come from the desktop registry, never from client input.
+/// Only the registry's launch/resume commands receive their mode environment.
+fn cli_launch_env(clis: &Value, agent: Option<&str>, command: Option<&str>) -> Vec<(String, String)> {
+    let (Some(agent), Some(command)) = (agent, command) else {
+        return Vec::new();
+    };
+    let Some(cli) = clis.as_array().and_then(|rows| {
+        rows.iter()
+            .find(|cli| cli["id"].as_str() == Some(agent))
+    }) else {
+        return Vec::new();
+    };
+    let launch = cli["command"].as_str() == Some(command);
+    let resume = cli["resumeTemplate"]
+        .as_str()
+        .and_then(|template| template.split_once("__CANOPY_SESSION_ID__"))
+        .and_then(|(prefix, suffix)| command.strip_prefix(prefix)?.strip_suffix(suffix))
+        .is_some_and(|id| !id.is_empty() && !id.chars().any(char::is_whitespace));
+    if !launch && !resume {
+        return Vec::new();
+    }
+    cli["launchEnv"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let pair = entry.as_array()?;
+            if pair.len() != 2 {
+                return None;
+            }
+            Some((pair[0].as_str()?.to_owned(), pair[1].as_str()?.to_owned()))
+        })
+        .collect()
+}
+
 fn handle_client_msg(
     text: &str,
     p: &Portal,
@@ -867,6 +902,11 @@ fn handle_client_msg(
             let command = v.get("command").and_then(|x| x.as_str()).map(String::from);
             let agent = v.get("agent").and_then(|x| x.as_str()).map(String::from);
             let profile = v.get("profile").and_then(|x| x.as_str()).map(String::from);
+            let launch_env = cli_launch_env(
+                &p.clis.lock().unwrap(),
+                agent.as_deref(),
+                command.as_deref(),
+            );
             let project_id = v
                 .get("projectId")
                 .and_then(|x| x.as_str())
@@ -899,6 +939,10 @@ fn handle_client_msg(
                     _ => Err("a restored profile requires its agent id".into()),
                 };
                 let msg = match account.and_then(|account| {
+                    let mut account = account;
+                    if !launch_env.is_empty() {
+                        account.get_or_insert_with(Vec::new).extend(launch_env);
+                    }
                     app.state::<PtyManager>().spawn_headless_bound(
                         app.clone(),
                         cwd,
@@ -1552,6 +1596,40 @@ fn local_ips() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portal_launch_modes_use_only_trusted_registry_environment() {
+        let clis = json!([{
+            "id": "opencode", "command": "opencode --agent build",
+            "resumeTemplate": "opencode --session __CANOPY_SESSION_ID__ --agent build",
+            "launchEnv": [["OPENCODE_PERMISSION", "trusted"]]
+        }]);
+        let expected = vec![("OPENCODE_PERMISSION".to_string(), "trusted".to_string())];
+        for command in [
+            "opencode --agent build",
+            "opencode --session sid-42 --agent build",
+        ] {
+            assert_eq!(
+                cli_launch_env(&clis, Some("opencode"), Some(command)),
+                expected
+            );
+        }
+        for command in [
+            "opencode",
+            "opencode --auto",
+            "opencode --session sid extra --agent build",
+            "opencode --agent build; sh",
+        ] {
+            assert!(cli_launch_env(&clis, Some("opencode"), Some(command)).is_empty());
+        }
+        assert!(
+            cli_launch_env(&clis, Some("unknown"), Some("opencode --agent build")).is_empty()
+        );
+        assert!(cli_launch_env(&clis, None, None).is_empty());
+        assert!(
+            cli_launch_env(&json!([]), Some("opencode"), Some("opencode --agent build")).is_empty()
+        );
+    }
 
     #[tokio::test]
     async fn portal_outbound_queue_is_bounded_by_bytes() {

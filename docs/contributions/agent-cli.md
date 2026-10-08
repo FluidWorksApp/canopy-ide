@@ -50,7 +50,13 @@ docs/agent-parity.md                    capability audit
    resume syntax, hook support, MCP support, session store, and model listing.
 2. Record the evidence in the agent parity documentation.
 3. Add a stable CLI ID and browser-safe display metadata.
-4. Add launch command construction without shell-specific assumptions.
+4. Add launch command construction without shell-specific assumptions. Declare
+   the CLI's verified automatic working mode in `unattended`; Canopy applies it
+   to fresh, prompted, restored, and remote portal launches. Prefer reviewed or
+   scoped approval modes. Record limitations when the CLI has only confirmation
+   automation or edit approval. Keep unknown custom CLI flags untouched.
+   Use `unattendedEnv` when that mode also requires an environment overlay;
+   desktop terminals and trusted portal registry launches both apply it.
 5. Add resume only if a stable session token and verified command exist.
 6. Extend process identity through executable, package, script, or wrapper
    evidence rather than tab labels.

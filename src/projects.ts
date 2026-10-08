@@ -715,54 +715,15 @@ export interface AgentCli {
   sessionArgs?: string;
 
   /**
-   * The CLI's least-intrusive *working* mode: the flag that starts it able to
-   * do the work, for a run nobody is sitting in front of.
-   *
-   * Appended to task launches only — a ticket, a PR, a diff surface, a
-   * micro-task (see startCommand) — never to the bare launcher, because a
-   * session someone opened by hand is a session someone is watching, and the
-   * mode they cycle to there is theirs to choose.
-   *
-   * This exists because a launched task inherits the CLI's *configured* mode,
-   * and the usual configurations stop it dead: Claude Code's default Manual
-   * mode asks before the first edit, and a repo or user that sets
-   * `defaultMode: "plan"` gets an agent that writes a plan and waits for an
-   * approval no one will give. The brief was handed over, the terminal is
-   * detached, and the work simply never happens. Pinning the mode at launch is
-   * the only place that can be fixed — a mode set in the CLI's own settings is
-   * otherwise the mode it keeps.
-   *
-   * Deliberately NOT the same rung as `skipPermissions`. Each flag here is the
-   * most autonomous mode that still leaves that CLI's own safety net standing —
-   * claude's classifier, codex's workspace sandbox, agy's edits-only mode,
-   * omp's write-scoped approvals — so a task that was launched, not authorised
-   * in front of a warning, never quietly gains the powers that warning is
-   * about. A CLI whose only rung above "ask about everything" is that warning's
-   * rung (aider: `--yes-always` and nothing between) is left undefined on
-   * purpose: it launches exactly as it does today and keeps asking, which is
-   * the honest answer, and the setting is there for someone who wants more.
-   *
-   * Same verification rule as the fields above: only syntax read off the CLI's
-   * own --help goes in here.
-   *
-   * A function when the mode depends on where the run lands. Codex's sandbox is
-   * the case: `workspace-write` grants the cwd and nothing else, and a task
-   * Canopy isolates runs in a git worktree whose `.git` is a pointer *out* of
-   * that cwd — so `git add` in the one place we deliberately put agents was
-   * denied by the sandbox, with the CLI reporting it as a sandbox error rather
-   * than as anything the agent could fix. The launcher knows the repo; the
-   * registry entry says what to do with it.
+   * Default automatic working mode for every Canopy launch and restore.
+   * Prefer the CLI's reviewed/scoped mode; `skipPermissions` remains the
+   * explicit override. Only verified CLI syntax belongs here.
+   * A function can add sandbox roots for an isolated worktree.
    */
   unattended?: string | ((ctx: UnattendedContext) => string);
 
-  /**
-   * Environment a task terminal also needs for `unattended` to mean "auto",
-   * where a flag alone cannot say it. Attached by addTerminal only when the
-   * command carries this CLI's `unattended` flag — i.e. only to task launches
-   * and task resumes, never to a session someone opened by hand. Kept out of
-   * the command line on purpose: the first token is how a terminal's agent is
-   * recognised, and an `X=… cli` prefix would hide it.
-   */
+  /** Environment required by the automatic mode. Applied whenever the
+   * command carries `unattended`, including manual and remote launches. */
   unattendedEnv?: [string, string][];
 
   /**
@@ -1114,11 +1075,9 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // halves against one installed release.
     // Verified: `--yes-always  Always say yes to every confirmation`.
     skipPermissions: "--yes-always",
-    // No `unattended`, and not for want of looking: aider has no mode,
-    // allowlist or classifier. `--yes-always` is not even a clean bypass — it
-    // auto-*declines* shell commands (asked with explicit_yes_required) while
-    // auto-accepting everything else, pip installs included — so it is no auto
-    // rung either. A task launches it as a person would, and it asks.
+    // No classifier mode: confirmation automation is the closest equivalent.
+    // Explicit-yes shell confirmations may still be declined by Aider.
+    unattended: "--yes-always",
     execution: {
       fields: [
         providerField(),
@@ -1598,13 +1557,16 @@ export function remoteCliMetadata(installed: Record<string, boolean>): RemoteCli
   return AGENT_CLIS.map((cli) => ({
     id: cli.id,
     name: cli.name,
-    // Through launchCommand/withSkipPermissions, so an agent started from the
-    // remote portal honours the skip-permissions setting like a local one —
+    // Shared launch defaults and the explicit skip-permissions override apply
+    // to the remote portal just as they do locally —
     // re-sent on each metadata push, which is when the setting is re-read.
     command: launchCommand(cli),
     icon: cli.icon,
     brandColor: cli.brandColor,
-    resumeTemplate: cli.resume && withSkipPermissions(cli.resume(SESSION_ID_TOKEN), cli),
+    resumeTemplate: (cli.resume && restoreCommand(cli.id, SESSION_ID_TOKEN)) || undefined,
+    launchEnv: cli.unattendedEnv && !(cli.skipPermissions && getSettings().dangerouslySkipPermissions)
+      ? cli.unattendedEnv
+      : undefined,
     available: !!installed[cli.bin],
     custom: cli.custom,
     restoreRequiresHumanPrompt: cli.capabilities?.restoreRequiresHumanPrompt,
@@ -1869,33 +1831,6 @@ export async function checkCliUpdates(): Promise<Record<string, CliUpdate>> {
  *  installer (idempotent for npm -g and pip -U). */
 export const updateCommand = (cli: AgentCli) => cli.update ?? cli.install;
 
-/**
- * The command that reopens `sessionId` for `agentId`, or null when that agent
- * can't reopen a specific session (gemini resumes by list index; aider only
- * restores per-directory history).
- *
- * The empty-id check is not defensive padding. `amp threads continue` with no
- * id silently continues the *most recent* thread, and `codex resume` with no id
- * opens an interactive picker that hangs forever in a PTY nobody is watching.
- * Both would look like "restore worked" while doing something else entirely.
- */
-/**
- * How to start `agentId` working on `text`.
- *
- * Returns the command to run, plus whether the prompt still needs typing in
- * afterwards. Every agent can be started this way — the ones without verified
- * prompt syntax simply launch bare and get the text typed into them, rather
- * than being excluded from the feature (which is what hardcoding one CLI
- * amounted to).
- *
- * This is the task path, and only the task path: its four callers (a ticket, a
- * PR, a diff surface, a micro-task — see startCommandParked) all hand an agent
- * a brief and walk away. So the launch also pins the CLI's least-intrusive
- * working mode, because the alternative is what it used to do — inherit
- * whatever mode that CLI is configured for, which is Manual on a fresh Claude
- * Code and `plan` in any repo that set it, and hand the brief to an agent that
- * asks a question nobody is there to answer. See withUnattendedMode.
- */
 /** `command` with `cli`'s skip-permissions flag appended — only while the
  *  dangerouslySkipPermissions setting is on and the CLI has a verified flag.
  *
@@ -1914,25 +1849,13 @@ function withSkipPermissions(command: string, cli: AgentCli | undefined): string
   return flag && getSettings().dangerouslySkipPermissions ? `${withSession} ${flag}` : withSession;
 }
 
-/** The command that launches `cli` bare — the resolved binary plus, while the
- *  setting is on, its skip-permissions flag. Launch sites read this instead of
- *  shellBin(cli.bin) so "skip permissions" reaches every way an agent starts,
- *  not just the ones with a prompt in hand. */
-export function launchCommand(cli: AgentCli): string {
-  return withSkipPermissions(shellBin(cli.bin), cli);
+/** Shared default for local launches and the remote portal's registry. */
+export function launchCommand(cli: AgentCli, ctx?: UnattendedContext): string {
+  return withUnattendedMode(withSkipPermissions(shellBin(cli.bin), cli), cli, ctx);
 }
 
-/** `command` with `cli`'s least-intrusive working mode pinned on — see
- *  AgentCli.unattended for what each flag is and why it is that one.
- *
- *  Task launches only. The bare launcher (launchCommand) deliberately does not
- *  go through here: someone opening a CLI by hand is present, and the mode they
- *  set in that CLI's own settings is the mode they meant.
- *
- *  Skipped entirely while the skip-permissions setting is on and this CLI has a
- *  flag for it, because that flag is strictly more autonomous than anything
- *  here — and two mode flags on one line is a question about precedence that
- *  every CLI answers differently. One rung or the other, never both. */
+/** Pin automatic mode unless the explicit skip-permissions override applies.
+ * Never combine two permission modes: CLI precedence differs by provider. */
 function withUnattendedMode(
   command: string,
   cli: AgentCli,
@@ -1961,6 +1884,7 @@ function withAgentLaunchOptions(
   return args.length > 0 ? `${command} ${args.join(" ")}` : command;
 }
 
+/** Start work with a positional prompt when supported, otherwise type it into the TUI. */
 export function startCommand(
   agentId: string,
   text: string,
@@ -1982,7 +1906,7 @@ export function startCommand(
       }
     : {
         command: withAgentLaunchOptions(
-          withUnattendedMode(launchCommand(cli), cli, ctx),
+          launchCommand(cli, ctx),
           cli,
           options,
         ),
@@ -1990,15 +1914,8 @@ export function startCommand(
       };
 }
 
-/** How to reopen a conversation by id.
- *
- *  A session a person picks off the restore list is theirs, in the mode their
- *  CLI is configured for. A task picked back up is still a task, and a resume
- *  Canopy makes on its own account — handing a finished review's comments to
- *  the agent that raised the PR — has nobody in front of it either: both resume
- *  in the same unattended mode the launch had (withUnattendedMode) rather than
- *  whatever the CLI is configured for (Manual, plan, or omp's yolo). `task` and
- *  `unattended` are the two callers' names for that one request. */
+/** Reopen a conversation with the same automatic defaults as a fresh launch.
+ * `task` and `unattended` remain accepted for existing callers. */
 export function restoreCommand(
   agentId: string,
   sessionId: string,
@@ -2009,10 +1926,7 @@ export function restoreCommand(
   const cli = agentCliFor(agentId);
   const cmd = cli?.resume?.(id);
   if (!cmd || !cli) return null;
-  const resumed = withSkipPermissions(cmd, cli);
-  return opts.task || opts.unattended
-    ? withUnattendedMode(resumed, cli, opts.ctx)
-    : resumed;
+  return withUnattendedMode(withSkipPermissions(cmd, cli), cli, opts.ctx);
 }
 
 /** Rebuild remembered agent launches with today's permission preference. */
@@ -2026,8 +1940,14 @@ export function rememberedAgentCommand(command: string | undefined, sessionId?: 
   const id = sessionId || resumeSessionId(command);
   if (id) return restoreCommand(cli.id, id) || command;
   const bin = shellBin(cli.bin);
-  if (command === bin || (cli.skipPermissions && command === bin + " " + cli.skipPermissions))
-    return launchCommand(cli);
+  const mode = typeof cli.unattended === "function" ? cli.unattended({}) : cli.unattended;
+  const bases = [bin, ...(cli.sessionArgs ? [`${bin} ${cli.sessionArgs}`] : [])];
+  const launches = bases.flatMap(base => [
+    base,
+    ...(mode ? [`${base} ${mode}`] : []),
+    ...(cli.skipPermissions ? [`${base} ${cli.skipPermissions}`] : []),
+  ]);
+  if (launches.includes(command)) return launchCommand(cli);
   return command;
 }
 

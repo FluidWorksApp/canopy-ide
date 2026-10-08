@@ -197,11 +197,10 @@ export function agentIdForCommand(command?: string | null): string | null {
 }
 
 /**
- * The extra environment a task terminal needs for its CLI's unattended mode
+ * The extra environment a terminal needs for its CLI's automatic mode
  * (AgentCli.unattendedEnv), or none.
  *
- * Keyed on the unattended flag being in the command, which only task launches
- * and task resumes carry — so a CLI opened by hand never gets it. Leading
+ * Keyed on the automatic flag being in the command. Leading
  * `K='v'` assignments (a micro-task's CANOPY_MICRO_TASK prefix) are skipped
  * before the agent is identified.
  */
