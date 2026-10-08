@@ -1,4 +1,4 @@
-const bundles=['medium_3_0','large_3_0','xlarge_3_0','2xlarge_3_0'];
+const bundles=['medium_3_0','large_3_0','xlarge_3_0','2xlarge_3_0','4xlarge_3_0'];
 const fail=()=>{throw Error('Prebuilt management snapshot is not verified for this location and package');};
 export function selectHostSnapshot(value,region,bundle,expectedRuntimeSha256,expectedLockSha256){
  if(!value)return null;
