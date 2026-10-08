@@ -4341,6 +4341,26 @@ body.resizing-side * {
   padding: 4px;
 }
 
+/* Agent names and update/account badges determine the launcher's width. */
+.cli-launcher-menu {
+  width: max-content;
+  min-width: min(320px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  overflow-x: auto;
+}
+.cli-launcher-menu .cli-item > :first-child {
+  flex-shrink: 0;
+  white-space: nowrap;
+  margin-right: auto;
+}
+.cli-launcher-menu .cli-signin,
+.cli-launcher-menu .cli-install,
+.cli-launcher-menu .cli-update,
+.cli-launcher-menu .launch-current {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 /* A plain row in a .cli-menu popover — the launcher's teammate list, the task
  * menu, the confirm buttons. Was referenced before it was styled, so those
  * rows rendered as unpadded, unhoverable text. */

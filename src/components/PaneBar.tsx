@@ -814,7 +814,7 @@ function PaneBarImpl({
             ＋ ▾
           </Button>
           {cliMenuOpen && (
-            <div className="cli-menu" onMouseLeave={() => setCliMenuOpen(false)}>
+            <div className="cli-menu cli-launcher-menu" onMouseLeave={() => setCliMenuOpen(false)}>
               <div className="cli-item" onClick={() => { setCliMenuOpen(false); onNewShell(); }}>
                 <span><TerminalIcon size={15} className="cli-icon" /> Shell</span>
               </div>
