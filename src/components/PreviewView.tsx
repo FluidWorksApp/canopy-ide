@@ -37,6 +37,7 @@ import {
   useBrowserEngine,
   useBrowserPane,
 } from "../browserHost";
+import { isWorkspaceLocalPage, previewEngine } from "../previewEngine";
 import { transportFor } from "../browserTransport";
 import * as ipc from "../ipc";
 import {
@@ -201,8 +202,8 @@ export function PreviewView({
   // now provides.
   const chromeSession = useRef<string | null>(null);
   const remoteWorkspace = activeWorkspace();
-  const remotePreview = !!remoteWorkspace && (() => { try { const target = new URL(url); return ['http:', 'https:'].includes(target.protocol) && (['localhost','127.0.0.1','0.0.0.0','[::1]'].includes(target.hostname) || target.hostname.endsWith('.localhost')); } catch { return false; } })();
-  const engine = remotePreview ? "chrome" : buildMode && chosenEngine === "webview" ? "proxy" : chosenEngine;
+  const remotePreview = !!remoteWorkspace && isWorkspaceLocalPage(url);
+  const engine = previewEngine({ remote: !!remoteWorkspace, url, buildMode, chosen: chosenEngine });
   const native = engine === "webview";
   // What the placeholder stands in with while the native view is out of the
   // way: a still of the page, or the app's own background — never a white hole.
