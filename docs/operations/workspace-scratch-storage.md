@@ -45,6 +45,12 @@ separate per session, including for commands typed later into a bare shell.
 sandbox. User or managed policies that exclude TMPDIR still apply; this does not
 remove sandboxing or bypass approval restrictions.
 
+Absolute terminal file paths under `/scratch` open directly in the Canopy editor,
+including line references. File reads, stats, and editor writes permit the private
+scratch root with realpath checks; symlinks into `/home`, `/accounts`, or `/etc`
+remain blocked. Project execution and repository operations stay workspace-only.
+Remote links do not use the local image-staging route.
+
 npm cache configuration does not move `node_modules`; Python cache settings do
 not move virtual environments. Build systems with repository-relative outputs
 still need their output-directory configuration. Do not move a live database.

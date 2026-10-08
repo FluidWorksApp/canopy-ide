@@ -1,9 +1,10 @@
+import {resolveWorkspacePath} from './workspace-file-paths.mjs';
 import {BrowserStreams} from './browser-streams.mjs';
 import {safeGitRead,GIT_READ_COMMANDS} from './git-read.mjs';
 import {gitIdentityEnvironment} from './git-identity.mjs';
 // Native IDE command boundary for a Linux workspace. Files and subprocesses
 // never escape the selected container; no host Docker/cloud credential API.
-import {readFile,writeFile,open,readdir,stat,realpath,mkdir,rename,cp,unlink,rm,lstat} from 'node:fs/promises';
+import {readFile,writeFile,open,readdir,stat,mkdir,rename,cp,unlink,rm,lstat} from 'node:fs/promises';
 import {execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
 import path from 'node:path';
@@ -40,14 +41,12 @@ const sessionDigests=sessionDigestReader(HOME);
 const uploads=new WorkspaceUploads(ROOT);
 const agentUsage=agentUsageReader(HOME);
 export async function scoped(value,create=false){
-  if(typeof value!=='string'||value.includes('\0'))throw Error('Invalid workspace path');
-  const candidate=path.resolve(ROOT,value);
-  if(candidate!==ROOT&&!candidate.startsWith(ROOT+'/'))throw Error('Path outside selected workspace');
-  let resolved;
-  try{resolved=await realpath(candidate);}catch(error){if(!create||error.code!=='ENOENT')throw error;resolved=path.join(await realpath(path.dirname(candidate)),path.basename(candidate));}
-  if(resolved!==ROOT&&!resolved.startsWith(ROOT+'/'))throw Error('Symlink outside selected workspace');
-  return resolved;
+ return resolveWorkspacePath(value,{create});
 }
+async function scopedFile(value,create=false){
+ return resolveWorkspacePath(value,{scratch:'/scratch',create});
+}
+
 const cloneJobs=new CloneJobs({scoped});
 const mcpRegistry=new McpRegistry({home:HOME,workspace:ROOT,scoped,profiles});
 let children=0;
@@ -139,8 +138,8 @@ export async function nativeInvoke(command,args={}){
   }
   if(command==='store_save'){const parsed=JSON.parse(args.data);if(!Array.isArray(parsed.projects))throw Error('Invalid projects');for(const project of parsed.projects)for(const component of project.components??[])await scoped(component.path);await saveMetadata('ide-projects.json',parsed);return;}
   if(command==='fs_read_dir'){const directory=await scoped(target);const entries=await readdir(directory,{withFileTypes:true});if(entries.length>4096)throw Error('Directory too large');return entries.map(e=>({name:e.name,path:path.join(directory,e.name),is_dir:e.isDirectory(),is_symlink:e.isSymbolicLink()}));}
-  if(command==='fs_read_file'){const bytes=await boundedRead(await scoped(target),Math.min(args.maxBytes??1048576,1048576));return {b64:bytes.toString('base64')};}
-  if(command==='fs_write_file'||command==='fs_create_file'){const text=command==='fs_create_file'?'':args.content;if(typeof text!=='string'||Buffer.byteLength(text)>1048576)throw Error('Invalid file content');const destination=await scoped(target,true);if(command==='fs_create_file')await writeFile(destination,text,{flag:'wx',mode:0o600});else await writeWorkspaceFile(destination,text);return target;}
+  if(command==='fs_read_file'){const bytes=await boundedRead(await scopedFile(target),Math.min(args.maxBytes??1048576,1048576));return {b64:bytes.toString('base64')};}
+  if(command==='fs_write_file'||command==='fs_create_file'){const text=command==='fs_create_file'?'':args.content;if(typeof text!=='string'||Buffer.byteLength(text)>1048576)throw Error('Invalid file content');const destination=await scopedFile(target,true);if(command==='fs_create_file')await writeFile(destination,text,{flag:'wx',mode:0o600});else await writeWorkspaceFile(destination,text);return target;}
   if(command==='fs_create_dir'){await mkdir(await scoped(target,true));return target;}
   if(command==='fs_trash'){
     const source=await scoped(args.path);
@@ -155,7 +154,7 @@ export async function nativeInvoke(command,args={}){
   }
   if(command==='fs_rename'){await rename(await scoped(args.from??args.oldPath),await scoped(args.to??args.newPath,true));return args.to??args.newPath;}
   if(command==='fs_duplicate'){const destination=args.destination??args.path+'.copy';await cp(await scoped(args.path),await scoped(destination,true),{recursive:true,dereference:false,errorOnExist:true,force:false});return destination;}
-  if(command==='fs_stat'||command==='fs_stat_many'){const inspect=async p=>{const x=await stat(await scoped(p));return {path:p,is_dir:x.isDirectory(),size:x.size,modified_ms:x.mtimeMs};};return command==='fs_stat'?inspect(target):Promise.all((args.paths??[]).slice(0,512).map(inspect));}
+  if(command==='fs_stat'||command==='fs_stat_many'){const inspect=async p=>{const x=await stat(await scopedFile(p));return {path:p,is_dir:x.isDirectory(),size:x.size,modified_ms:x.mtimeMs};};return command==='fs_stat'?inspect(target):Promise.all((args.paths??[]).slice(0,512).map(inspect));}
   if(command==='fs_list_files'||command==='fs_search'){
     if(!Array.isArray(args.roots)||args.roots.length>64)throw Error('Choose project component folders');
     const roots=[...new Set(await Promise.all(args.roots.map(root=>scoped(root))))];
