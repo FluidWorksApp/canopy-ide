@@ -37,3 +37,15 @@
 .workspace-share-identity strong{font-size:13px;overflow-wrap:anywhere}
 .workspace-share-identity small{font-size:11px;color:var(--text-muted,#93a3ae);overflow-wrap:anywhere}
 .workspace-share-empty{padding:12px 4px;color:var(--text-muted,#93a3ae);font-size:12px}
+/* Compact access: each share fits one line (who, level, switches, remove) and
+   wraps only when the pane is narrow. The older .workspace-sharing-access
+   label/select rules would stack and stretch them. */
+.workspace-sharing-access-heading{margin-bottom:10px;flex-wrap:wrap}
+.workspace-sharing-access-heading h2{font-size:14px}
+.workspace-sharing-access-heading p{font-size:12px;margin-top:2px}
+.workspace-share-row{flex-wrap:wrap;min-width:0;padding:5px 2px;gap:6px 10px}
+.workspace-share-identity{flex:1 1 140px;min-width:0}
+.workspace-share-controls.compact{gap:6px 10px}
+.workspace-share-controls.compact select{width:auto;height:28px;min-height:0;padding:3px 24px 3px 8px;font-size:12px;background-position:right 7px center}
+.workspace-share-controls.compact .workspace-share-switch{flex-direction:row;gap:4px;white-space:nowrap;font-weight:500}
+.workspace-share-controls.compact .workspace-share-switch input{width:14px;height:14px}
