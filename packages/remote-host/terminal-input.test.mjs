@@ -7,7 +7,7 @@ import {WebSocket,WebSocketServer} from 'ws';
 import {createGateway} from './gateway.mjs';
 import {createRunner} from './runner.mjs';
 import {digest} from './policy.mjs';
-import {InputLedger,RateLimit,SocketInput,sequencedInput} from './terminal-input.mjs';
+import {InputLedger,RateLimit,SocketInput,sequencedInput,decodeTerminalInput,forwardInput} from './terminal-input.mjs';
 import {startLatencyFixture} from './test-support/latency-fixture.mjs';
 
 const listen=async server=>{server.listen(0,'127.0.0.1');await once(server,'listening');return `http://127.0.0.1:${server.address().port}`;};
@@ -193,4 +193,28 @@ test('per-keystroke echo over the stream socket costs about one round trip',asyn
   console.info(`[latency] socket keystroke echo at ${rtt} ms RTT: median ${samples[7].toFixed(1)} ms, max ${samples[14].toFixed(1)} ms`);
   assert.ok(samples[7]<rtt*1.5,`median ${samples[7]} ms`);assert.ok(samples[14]<rtt*2,`max ${samples[14]} ms`);
  }finally{socket?.terminate();await fixture.close();}
+});
+
+
+test('raw mouse reports preserve high bytes and binary writes use a separate runner endpoint',async()=>{
+ const data='\x1b[M`'+String.fromCharCode(163,255);
+ assert.deepEqual([...decodeTerminalInput(data,'latin1')],[27,91,77,96,163,255]);
+ assert.throws(()=>decodeTerminalInput('界','latin1'),/Invalid binary/);
+ assert.throws(()=>decodeTerminalInput('x','unknown'),/Invalid binary/);
+ const sent=[];await forwardInput({url:'http://runner',token:'synthetic'},7,data,{encoding:'latin1',fetchImpl:async(url,args)=>{sent.push([url,JSON.parse(args.body)]);return {ok:true};}});
+ assert.deepEqual(sent,[['http://runner/sessions/7/input-binary',{data}]]);
+ assert.deepEqual(sequencedInput({id:ID,seq:1,data,encoding:'latin1'}),{id:ID,seq:1,data,encoding:'latin1'});
+});
+test('runner binary input writes bytes, while text keeps its existing UTF-8 behavior',async()=>{
+ const received=[],secret='x'.repeat(64),runner=createRunner({secret,spawnPty:()=>({onData(){},onExit(){},write:data=>received.push(data),resize(){},kill(){}})});
+ const url=await listen(runner),headers={authorization:'Bearer '+secret,'content-type':'application/json'};
+ try{
+  const created=await (await fetch(url+'/sessions',{method:'POST',headers,body:JSON.stringify({command:'shell',requestId:'binary-mouse-session'})})).json();
+  assert.equal(created.inputProtocol,2);
+  const data='\x1b[M`'+String.fromCharCode(163,255);
+  const post=(route,data)=>fetch(`${url}/sessions/${created.id}/${route}`,{method:'POST',headers,body:JSON.stringify({data})});
+  assert.equal((await post('input-binary',data)).status,200);assert.deepEqual([...received[0]],[27,91,77,96,163,255]);
+  assert.equal((await post('input','é')).status,200);assert.equal(received[1],'é');
+  assert.equal((await post('input-binary','界')).status,400);assert.equal(received.length,2);
+ }finally{await close(runner);}
 });

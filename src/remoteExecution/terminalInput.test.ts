@@ -116,3 +116,23 @@ describe('TerminalInput', () => {
     expect(socket.frames.map(f => f.data).join('')).toBe('a'.repeat(2047) + '😀' + 'b');
   });
 });
+
+
+it('keeps text and raw mouse bytes ordered and preserves encoding on HTTP retry',async()=>{
+ const frames:any[]=[],posts:InputBody[]=[];
+ const sender=new TerminalInput(async body=>{posts.push(body);});
+ const socket={readyState:1,send:(raw:string)=>frames.push(JSON.parse(raw))};
+ sender.hello(socket,2);
+ const report='\x1b[M`'+String.fromCharCode(163,255);
+ const a=sender.write('a'),b=sender.writeBinary(report),c=sender.write('c');await flush();
+ expect(frames.map(frame=>[frame.seq,frame.data,frame.encoding])).toEqual([[1,'a',undefined],[2,report,'latin1'],[3,'c',undefined]]);
+ sender.acknowledge(frames[0].id,1);await a;sender.closed(socket);await flush();await flush();
+ await Promise.all([b,c]);expect(posts.map(body=>[body.seq,body.data,body.encoding])).toEqual([[2,report,'latin1'],[3,'c',undefined]]);
+ sender.dispose();
+});
+it('refuses binary events until the runtime advertises support and rejects non-byte input',async()=>{
+ const sender=new TerminalInput(async()=>{}),socket={readyState:1,send:()=>{}};
+ sender.hello(socket,1);await expect(sender.writeBinary('mouse')).rejects.toThrow('updated workspace runtime');
+ sender.hello(socket,2);await expect(sender.writeBinary('界')).rejects.toThrow('Invalid binary');
+ expect(sender.queued).toBe(0);sender.dispose();
+});

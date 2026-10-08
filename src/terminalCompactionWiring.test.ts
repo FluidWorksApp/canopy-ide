@@ -9,7 +9,8 @@ describe("terminal idle-compaction wiring", () => {
     const end = source.indexOf("// No WebGL renderer", start);
     const setup = source.slice(start, end);
     expect(setup).toContain('drain: (done) => term.write("", done)');
-    expect(setup).toContain("serializer.serialize({ scrollback: settings.scrollback })");
+    // Full state includes the mouse report encoding, which xterm's serializer drops.
+    expect(setup).toContain("mouseModes.serialize(serializer, { scrollback: settings.scrollback })");
     expect(setup.indexOf("serialize:")).toBeLessThan(setup.indexOf("term.reset()"));
     expect(setup.indexOf("term.reset()")).toBeLessThan(setup.indexOf("term.clear()"));
     expect(setup).toContain("term.scrollToLine(");

@@ -40,6 +40,10 @@ export function RemoteTerminal({ client, workspaceId, sessionId, sharedSessionId
       if (sender.queued + data.length > 16 * 1024) { setStatus("Input queue full"); return; }
       sender.write(data).catch(() => { if (!disposed && !document.hidden) setStatus("Input failed; check the connection before retrying"); });
     });
+    const binary = term.onBinary(data => {
+      if(!writable||document.hidden||socket?.readyState!==WebSocket.OPEN||exited)return;
+      sender.writeBinary(data).catch(()=>{if(!disposed)setStatus('Mouse input requires an updated workspace runtime');});
+    });
     const connect = async () => {
       if (disposed || document.hidden || exited) return;
       const epoch = ++connectionEpoch;
@@ -94,7 +98,7 @@ export function RemoteTerminal({ client, workspaceId, sessionId, sharedSessionId
     };
     document.addEventListener("visibilitychange", visibilityChanged);
     void connect();
-    return () => { disposed = true; ++connectionEpoch; sender.dispose(); document.removeEventListener("visibilitychange", visibilityChanged); window.clearTimeout(retry); socket?.close(); observer.disconnect(); geometry.stop(); input.dispose(); term.dispose(); };
+    return () => { disposed = true; ++connectionEpoch; sender.dispose(); document.removeEventListener("visibilitychange", visibilityChanged); window.clearTimeout(retry); socket?.close(); observer.disconnect(); geometry.stop(); input.dispose(); binary.dispose(); term.dispose(); };
   }, [client, workspaceId, sessionId, sharedSessionId, writable]);
   return <div className="remote-terminal"><div className="remote-status" role="status">{status}</div><div ref={surface} className="remote-terminal-surface" /></div>;
 }

@@ -6,6 +6,7 @@ const state=vi.hoisted(()=>({input:undefined as undefined|((s:string)=>void),wri
 vi.mock('@xterm/xterm',()=>({Terminal:class {
  cols=80;rows=24;loadAddon(){}open(){}reset(){}resize(){}dispose(){}
  onData(fn:(s:string)=>void){state.input=fn;return {dispose(){}};}
+ onBinary(){return {dispose(){}};}
  write(bytes:Uint8Array,done:()=>void){state.writes.push(bytes);done();}
 }}));
 vi.mock('@xterm/addon-fit',()=>({FitAddon:class {fit(){}}}));

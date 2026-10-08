@@ -18,7 +18,11 @@ vi.mock("@xterm/xterm", () => {
     cols = 80;
     rows = 24;
     unicode = { activeVersion: "" };
-    parser = { registerOscHandler: () => ({ dispose() {} }) };
+    parser = {
+      registerOscHandler: () => ({ dispose() {} }),
+      registerCsiHandler: () => ({ dispose() {} }),
+      registerEscHandler: () => ({ dispose() {} }),
+    };
     buffer = {
       active: { length: 0, getLine: () => undefined },
       normal: { length: 0, getLine: () => undefined },
@@ -62,6 +66,9 @@ vi.mock("@xterm/xterm", () => {
       return { dispose() {} };
     }
     onTitleChange() {
+      return { dispose() {} };
+    }
+    onBinary() {
       return { dispose() {} };
     }
   }

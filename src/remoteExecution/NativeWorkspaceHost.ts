@@ -273,6 +273,7 @@ export class NativeWorkspaceHost implements Host {
     else if(command==='pty_read_desktop'){const stream=this.streams.get(Number(args.id));if(!stream||stream.generation!==args.generation)throw Error('Remote terminal attachment ended');const frame=this.take(stream);value=frame?{...frame,bytes:[...frame.bytes]}:null;}
     else if(command==='pty_detach_desktop'){const stream=this.streams.get(Number(args.id));if(stream && (args.generation==null||stream.generation===args.generation))this.detach(Number(args.id));}
     else if(command==='pty_ack'){const stream=this.streams.get(Number(args.id));if(stream && stream.generation===args.generation){stream.busy=false;this.deliver(stream);}value=null;}
+    else if(command==='pty_write_binary'){await this.input(Number(args.id)).writeBinary(String(args.data));}
     else if(command==='pty_write'){await this.write(Number(args.id),String(args.data));}
     else if(command==='pty_resize'){await this.call(`/sessions/${args.id}/resize`,{cols:args.cols,rows:args.rows});value={cols:args.cols,rows:args.rows};}
     else if(command==='pty_kill'){await this.call(`/sessions/${args.id}/stop`,{});}

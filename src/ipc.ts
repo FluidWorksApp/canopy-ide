@@ -313,6 +313,9 @@ export async function ptySpawn(
 // sites, where one missed `void` becomes an unhandled rejection in the log.
 // ptyResize is not in this set: it resolves with data its caller uses.
 const gone = (p: Promise<void>) => p.catch(() => {});
+/** xterm legacy mouse reports are byte strings, not UTF-8 text. */
+export const ptyWriteBinary = (id: number, data: string) =>
+  gone(invoke<void>("pty_write_binary", { id, data }));
 export const ptyWrite = (id: number, data: string) =>
   gone(invoke<void>("pty_write", { id, data }));
 export const ptyAck = (id: number, generation: number, bytes: number) =>

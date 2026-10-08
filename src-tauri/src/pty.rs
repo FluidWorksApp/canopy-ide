@@ -2157,6 +2157,20 @@ pub fn pty_write(state: State<'_, PtyManager>, id: u32, data: String) -> Result<
     state.write(id, &data)
 }
 
+/// xterm binary events contain Latin-1 code points representing raw bytes.
+#[tauri::command]
+pub fn pty_write_binary(state: State<'_, PtyManager>, id: u32, data: String) -> Result<(), String> {
+    let bytes = decode_binary_input(&data)?;
+    let session = state.get(id).ok_or_else(|| format!("no pty session {id}"))?;
+    session.enqueue_input(&bytes)
+}
+
+fn decode_binary_input(data: &str) -> Result<Vec<u8>, String> {
+    if data.len() > 32768 { return Err("Binary terminal input is too large".into()); }
+    data.chars().map(|value| u8::try_from(value as u32)
+        .map_err(|_| "Invalid binary terminal input".to_string())).collect()
+}
+
 /// Attach the current desktop page to a PTY that survived its predecessor.
 /// Unlike the remote viewer path above, this stream participates in bounded
 /// backpressure and every ack is scoped to the returned attachment generation.
@@ -2691,6 +2705,13 @@ fn canopy_omp_task_overlay(home: Option<&str>) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_mouse_input_is_not_utf8_encoded() {
+        assert_eq!(decode_binary_input("\u{1b}[M`\u{a3}\u{ff}").unwrap(), vec![27, 91, 77, 96, 163, 255]);
+        assert!(decode_binary_input("界").is_err());
+        assert!(decode_binary_input(&"x".repeat(32769)).is_err());
+    }
 
     #[test]
     fn omp_task_overlay_is_named_only_once_it_exists() {

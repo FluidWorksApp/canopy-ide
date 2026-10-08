@@ -1,3 +1,4 @@
+import {trackMouseEncoding} from '../../packages/remote-host/terminal-mouse-modes.mjs';
 import {registerSelectAll} from '../selectAll';
 import { pastedImages } from '../spotCompose';
 import { MAX_CONTEXT_IMAGE_BYTES, readFileBase64 } from '../fileData';
@@ -156,6 +157,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
   const killAttachedOnCloseRef = useRef(killAttachedOnClose);
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const mouseModesRef = useRef<ReturnType<typeof trackMouseEncoding> | null>(null);
   const ptyIdRef = useRef<number | null>(null);
   /** Attach/detach the native output viewer as this pane becomes visible/hidden. */
   const streamVisibilityRef = useRef<((visible: boolean) => void) | null>(null);
@@ -208,6 +210,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     clearScrollback: () => termRef.current?.clear(),
     releaseMemory: () => releaseMemoryRef.current(),
     hardReset: () => {
+      mouseModesRef.current?.reset();
       termRef.current?.reset();
       // \x0c: ask the shell to repaint its prompt after the hard reset
       if (ptyIdRef.current != null) void ipc.ptyWrite(ptyIdRef.current, "\x0c");
@@ -258,6 +261,8 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       theme: themeFor(settings),
     });
     termRef.current = term;
+    const mouseModes = trackMouseEncoding(term);
+    mouseModesRef.current = mouseModes;
 
     // Everything else recolors for free via CSS custom properties when the
     // skin changes; xterm renders its own surface and needs the theme object
@@ -390,9 +395,10 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
         drain: (done) => term.write("", done),
         serialize: () => {
           compactedViewportY = term.buffer.active.viewportY;
-          return serializer.serialize({ scrollback: settings.scrollback });
+          return mouseModes.serialize(serializer, { scrollback: settings.scrollback });
         },
         clearCells: () => {
+          mouseModes.reset();
           term.reset();
           term.clear();
           updateRetention();
@@ -678,7 +684,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       el.dataset.streamEnd = String(chunk.end);
       // Remote frames are parser-acknowledged one at a time. Their geometry
       // belongs to these bytes, not to a later HTTP resize response.
-      if(chunk.reset)term.reset();
+      if(chunk.reset){mouseModes.reset();term.reset();}
       if(chunk.cols && chunk.rows)applyGeometry({cols:chunk.cols,rows:chunk.rows});
       // xterm owns the bytes as soon as write() accepts them into its ordered
       // parser queue. Advancing here (rather than in the completion callback)
@@ -812,7 +818,7 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
             finishProcess({ id, session_generation: ipc.rendererSessionGeneration(), exit_code: null, requested: false });
             const output = await ipc.ptyOutput(id, 8000);
             if (!disposed) {
-              if (output) { term.reset(); term.write(output); }
+              if (output) { mouseModes.reset(); term.reset(); term.write(output); }
               term.writeln("\r\n\x1b[33mThis process has ended. Restart the run to continue.\x1b[0m");
             }
             return;
@@ -969,6 +975,9 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
     const dataSub = term.onData((data) => {
       if (ptyIdRef.current != null) void ipc.ptyWrite(ptyIdRef.current, data);
     });
+    const binarySub = term.onBinary((data) => {
+      if (ptyIdRef.current != null) void ipc.ptyWriteBinary(ptyIdRef.current, data);
+    });
     const titleSub = term.onTitleChange((title) => {
       onTitle?.(title);
       if (ptyIdRef.current != null) void ipc.ptySetTitle(ptyIdRef.current, title);
@@ -1101,6 +1110,9 @@ export const Term = forwardRef<TermHandle, TermProps>(function Term(
       fileLinkProvider.dispose();
       linkHint.dispose();
       dataSub.dispose();
+      binarySub.dispose();
+      mouseModes.dispose();
+      mouseModesRef.current = null;
       titleSub.dispose();
       unregisterPressureShedder();
       releaseMemoryRef.current = () => "unavailable";
