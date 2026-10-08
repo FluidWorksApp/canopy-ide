@@ -7,7 +7,7 @@ import {connectionKey,reportConnection,reportStream,workspaceLifecyclePhase} fro
 import {saveRemoteContextImage} from './saveContextImage';
 import {TerminalInput} from './terminalInput';
 
-export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive'; clientId?: string }
+export interface WorkspaceConnection { endpoint: string; token: string; workspaceId: string; workspaceName: string; scope?: 'view'|'drive'; clientId?: string; expiresAt?: string; credentialAccountKey?: string }
 type Args = Record<string, unknown>;
 type Stream = { id:number; receivedSnapshot:boolean; pendingExit?:number; socket?: WebSocket; generation: number; cursor: number; frames:OutputFrame[]; queuedBytes:number; busy:boolean; retry?: ReturnType<typeof setTimeout>; handshake?: ReturnType<typeof setTimeout>; channel?: HostChannel<ArrayBuffer>; closed: boolean };
 const LOCAL_UI = new Set(['js_log','watchdog_ack','watchdog_incidents','memory_info','selftest_config','set_shortcut_profile','notify_native','set_window_zoom','window_zoom','crash_pending','crash_clear','crash_upload','take_pending_crash','dictation_supported','remote_set_theme','remote_set_clis','remote_set_companion','remote_set_hibernated','remote_set_attention','execution_mode_get','execution_mode_set','execution_remote_get','execution_remote_set']);
@@ -60,8 +60,17 @@ export class NativeWorkspaceHost implements Host {
     this.connection = connection; this.desktop = desktop;
     const managed = connection.endpoint === `https://${connection.workspaceId}.workspaces.canopyide.dev`;
     let refreshing: Promise<string> | undefined;
+    let savedFreshness: Promise<void> | undefined;
+    const checkSavedFreshness = () => savedFreshness ??= (async () => {
+      const expires=Date.parse(connection.expiresAt??'');
+      if(!connection.credentialAccountKey||!Number.isFinite(expires)||expires-60_000<=Date.now())return;
+      const key=await this.desktop.invoke<string|null>('canopy_account_cache_key');
+      if(this.disposed)throw Error('Workspace disconnected');
+      if(key===connection.credentialAccountKey)this.tokenFreshUntil=expires-60_000;
+    })();
     const resolveToken = async () => {
       if(this.disposed)throw Error('Workspace disconnected. Reopen it from your account.');
+      await checkSavedFreshness();
       if (this.projectIdle || Date.now() < this.tokenFreshUntil) return connection.token;
       if (!refreshing) refreshing = this.desktop.invoke<{connection:WorkspaceConnection;expiresAt:string}>('canopy_account_request', {
         route:'/api/operations', body:{action:'connect',workspaceId:connection.workspaceId,clientId:this.connectionClientId},
@@ -70,7 +79,10 @@ export class NativeWorkspaceHost implements Host {
         if (result.connection.endpoint !== connection.endpoint || result.connection.workspaceId !== connection.workspaceId) throw Error('Workspace connection changed. Reopen it from your account.');
         const expires=Date.parse(result.expiresAt);
         if(!Number.isFinite(expires)||expires<=Date.now()||typeof result.connection.token!=='string'||!result.connection.token)throw Error('Workspace returned an invalid credential');
+        const accountKey=await this.desktop.invoke<string|null>('canopy_account_cache_key');
+        if(this.disposed)throw Error('Workspace disconnected');
         connection.token = result.connection.token;connection.scope=result.connection.scope;
+        connection.expiresAt=result.expiresAt;connection.credentialAccountKey=accountKey??undefined;
         await this.desktop.invoke('execution_remote_set',{connection});
         this.tokenFreshUntil = expires - 60_000;
         return connection.token;

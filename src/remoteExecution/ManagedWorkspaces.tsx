@@ -98,11 +98,15 @@ export function ManagedWorkspaces({workspaceId,onList,showAccount=true,showList=
     setStartup({workspace:latest,name:w.name,step:stepFor(latest)});
     if(latest.state==='ready'){
      setMessage('Connecting securely to your workspace…');
-     const clientId=crypto.randomUUID();const {connection:issued}=await request<{connection:WorkspaceConnection}>('/api/operations',{workspaceId:w.id,action:'connect',clientId});const connection={...issued,clientId};
+     const clientId=crypto.randomUUID();const {connection:issued,expiresAt}=await request<{connection:WorkspaceConnection;expiresAt?:string}>('/api/operations',{workspaceId:w.id,action:'connect',clientId});const connection={...issued,clientId};
      if(connection.workspaceId!==w.id||connection.endpoint!==`https://${w.id}.workspaces.canopyide.dev`)throw Error('Invalid managed connection');
      await new RemoteExecutionClient(connection.endpoint,connection.token).workspace(w.id,'/open',{resume:connection.scope!=='view'});
      if(current!==generation.current)return;
      if(!canSwitchExecutionMode())throw Error('Your workspace is ready. Save or close unsaved files, then choose Open to connect.');
+     if(expiresAt){
+      connection.expiresAt=expiresAt;
+      connection.credentialAccountKey=await invoke<string|null>('canopy_account_cache_key')??undefined;
+     }
      await invoke('execution_remote_set',{connection});await setExecutionMode('remote');return;
     }
     // A step that keeps failing is retried by the server; say so instead of
