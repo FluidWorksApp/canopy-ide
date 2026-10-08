@@ -710,6 +710,9 @@ export interface AgentCli {
    * did and keeps asking (amp: its help names no such flag).
    */
   skipPermissions?: string;
+  /** Arguments every interactive session of this CLI carries (bare launch,
+   *  prompt, resume), whatever the permission settings. */
+  sessionArgs?: string;
 
   /**
    * The CLI's least-intrusive *working* mode: the flag that starts it able to
@@ -1005,6 +1008,14 @@ export const BUILTIN_AGENT_CLIS: AgentCliDef[] = [
     // confirmation prompts and execute commands without sandboxing`, and
     // `codex resume --help` lists the same flag, so resumes carry it too.
     skipPermissions: "--dangerously-bypass-approvals-and-sandbox",
+    // Verified against codex-cli 0.160.1 `codex --help` and `codex resume
+    // --help` on 2026-10-08: `--no-daemon  Run without the shared background
+    // server, even if it is already running`. Each Canopy terminal runs its
+    // own Codex; sharing one background server across them meant a session
+    // from a different Codex version (the workspace image's vs one updated
+    // into ~/.local) stopped at "Background server has incompatible feature
+    // settings" and offered to restart a server another session was using.
+    sessionArgs: "--no-daemon",
     // Verified against codex-cli 0.159.1 --help on 2026-10-01:
     // `--approve-for-me  Route approval requests through automatic review using
     // the workspace-write sandbox` — the TUI's "Approve for me" preset, i.e.
@@ -1898,8 +1909,9 @@ export const updateCommand = (cli: AgentCli) => cli.update ?? cli.install;
  *  after other options (agy, opencode, omp) — whereas inserting before a
  *  subcommand is exactly the unverified-syntax gamble these entries ban. */
 function withSkipPermissions(command: string, cli: AgentCli | undefined): string {
+  const withSession = cli?.sessionArgs ? `${command} ${cli.sessionArgs}` : command;
   const flag = cli?.skipPermissions;
-  return flag && getSettings().dangerouslySkipPermissions ? `${command} ${flag}` : command;
+  return flag && getSettings().dangerouslySkipPermissions ? `${withSession} ${flag}` : withSession;
 }
 
 /** The command that launches `cli` bare — the resolved binary plus, while the
@@ -2045,12 +2057,14 @@ export function resumeSessionId(command: string | null | undefined): string | nu
       // must still yield its session id after the setting is switched off,
       // or every such session stops being resumable the moment it's disabled.
       // Likewise the unattended spelling a resumed task carries.
+      // With and without the CLI's session arguments: a command remembered
+      // from before they were added still names its session.
       return tmpl
-        ? [
-            tmpl,
-            ...(d.skipPermissions ? [`${tmpl} ${d.skipPermissions}`] : []),
-            ...(d.unattended ? [`${tmpl} ${d.unattended}`] : []),
-          ]
+        ? [tmpl, ...(d.sessionArgs ? [`${tmpl} ${d.sessionArgs}`] : [])].flatMap((base) => [
+            base,
+            ...(d.skipPermissions ? [`${base} ${d.skipPermissions}`] : []),
+            ...(d.unattended ? [`${base} ${d.unattended}`] : []),
+          ])
         : [tmpl];
     });
   });

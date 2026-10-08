@@ -266,7 +266,7 @@ describe("terminalLaunch", () => {
 
   it("starts a live-identified CLI whose shell had no launch command", () => {
     expect(terminalLaunch(t({ agentId: "codex", command: undefined }))).toEqual({
-      command: "codex",
+      command: "codex --no-daemon",
       resumed: false,
     });
   });
