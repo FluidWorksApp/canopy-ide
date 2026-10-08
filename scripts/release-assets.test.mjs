@@ -1,5 +1,5 @@
 import {execFileSync} from 'node:child_process';import test from 'node:test';import assert from 'node:assert/strict';
-import {expectedRelease,requireDraft,requireAssets,releaseManifest,requireReleaseTag,releaseMetadataQuery,parseReleaseMetadata} from './release-assets.mjs';
+import {expectedRelease,requireDraft,requireAssets,releaseManifest,requireReleaseTag,releaseMetadataQuery,parseReleaseMetadata,draftCreateArgs} from './release-assets.mjs';
 const version='0.4.1';
 const complete=()=>({draft:true,immutable:false,assets:expectedRelease(version).names.map(name=>({name,state:'uploaded',size:42,digest:'sha256:'+'a'.repeat(64)}))});
 test('published or immutable targets are rejected before building or uploading',()=>{assert.doesNotThrow(()=>requireDraft(undefined));assert.throws(()=>requireDraft({...complete(),draft:false}),/published/);assert.throws(()=>requireDraft({...complete(),immutable:true}),/immutable/);});
@@ -32,4 +32,12 @@ test('a tag with no release yet is an eligible target, as gh prints it (nothing,
  requireDraft(parseReleaseMetadata(''));
  assert.deepEqual(parseReleaseMetadata('{"id":1,"draft":true}\n'),{id:1,draft:true});
  assert.throws(()=>requireDraft(parseReleaseMetadata('{"id":1,"draft":false}')),/already published/);
+});
+
+test('preflight creates the single draft every build uploads into',()=>{
+ // v0.4.3-rebuild.1: no draft existed, each build job created one, and two
+ // raced into existence with half the assets each.
+ assert.deepEqual(draftCreateArgs('v0.4.4','0.4.4','/r/docs/releases/0.4.4.md'),['release','create','v0.4.4','--repo','FluidWorksApp/canopy-ide','--draft','--verify-tag','--title','Canopy 0.4.4','--notes-file','/r/docs/releases/0.4.4.md']);
+ assert.equal(draftCreateArgs('v0.4.4-rebuild.1','0.4.4','n.md')[2],'v0.4.4-rebuild.1');
+ assert.throws(()=>draftCreateArgs('v0.4.5','0.4.4','n.md'),/disagree/);
 });

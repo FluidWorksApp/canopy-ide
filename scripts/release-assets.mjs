@@ -45,6 +45,13 @@ export function releaseManifest(version,notes,payloads,signatures,now=new Date()
 export function releaseMetadataQuery(tag) {
  return `[.[] | select(.tag_name == ${JSON.stringify(tag)}) | {id,tag_name,draft,immutable,assets:[.assets[] | {name,state,size,digest}]}][0]`;
 }
+// The one draft every build job uploads into. Created by preflight, before the
+// matrix starts: when each job's tauri-action created its own on a new tag, two
+// raced into existence and v0.4.3-rebuild.1 split its assets across them.
+export function draftCreateArgs(tag,version,notesFile) {
+ requireReleaseTag(tag,version);
+ return ['release','create',tag,'--repo','FluidWorksApp/canopy-ide','--draft','--verify-tag','--title',`Canopy ${version}`,'--notes-file',notesFile];
+}
 export function parseReleaseMetadata(output) {
  const text=String(output??'').trim();
  return text?JSON.parse(text):null;
@@ -58,7 +65,10 @@ async function main(){
  // gh prints nothing (not "null") when no release has this tag yet: the first
  // run for a new tag, before any draft exists. That is an eligible target.
  const release=parseReleaseMetadata(gh('api','repos/FluidWorksApp/canopy-ide/releases?per_page=100','--jq',releaseMetadataQuery(tag)));requireDraft(release);
- if(process.argv.includes('--preflight')){console.log('Release target is unpublished and eligible for uploads.');return;}
+ if(process.argv.includes('--preflight')){
+  if(!release){gh(...draftCreateArgs(tag,version,path.join(root,`docs/releases/${version}.md`)));console.log(`Created the draft release for ${tag}; every build uploads into it.`);return;}
+  console.log('Release target is unpublished and eligible for uploads.');return;
+ }
  const {expected,assets}=requireAssets(release,version),stage=fs.mkdtempSync(path.join(os.tmpdir(),'canopy-release-complete-'));
  try{
   const config=JSON.parse(fs.readFileSync(path.join(root,'src-tauri/tauri.conf.json'),'utf8'));
