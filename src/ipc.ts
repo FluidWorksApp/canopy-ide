@@ -2351,7 +2351,9 @@ const pollStoreChanges = async () => {
     // A replacement renderer invalidates this page; its successor handshakes
     // at the native cursor before subscribing to new store changes.
   }
-  if (storeChangePolling) {
+  // The page can be gone by the time the request settles (a torn-down test
+  // environment, or a renderer being replaced); then stop instead of throwing.
+  if (storeChangePolling && typeof window !== "undefined") {
     storeChangeTimer = window.setTimeout(() => void pollStoreChanges(), 100);
   }
 };
