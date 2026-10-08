@@ -1,5 +1,5 @@
 import path from 'node:path';
-export const peerSmokeSources=['src/teamMessaging/client.ts','src/teamMessaging/crypto.ts','src/teamMessaging/store.ts','src/teamMessaging/history.ts','src/teamMessaging/messageSchema.ts'];
+export const peerSmokeSources=['src/teamMessaging/client.ts','src/teamMessaging/crypto.ts','src/teamMessaging/store.ts','src/teamMessaging/history.ts','src/teamMessaging/messageSchema.ts','src/teamMessaging/jobSchema.ts'];
 export function peerSmokeBridge(name){if(!/^canopy-peer-smoke-[a-f0-9]{10}$/.test(name))throw Error("Invalid peer bridge name");return "cpv"+name.slice(-10);}
 export function peerSmokeFirewallRules(name){const bridge=peerSmokeBridge(name);return [["DOCKER-USER","-i",bridge,"!","-o",bridge,"-j","DROP"],["INPUT","-i",bridge,"-j","DROP"]];}
 const privateIp=value=>{const pieces=String(value).split(".");return pieces.length===4&&pieces.every(piece=>/^(0|[1-9][0-9]{0,2})$/.test(piece)&&Number(piece)<=255)&&(pieces[0]==="10"||pieces[0]==="172"&&Number(pieces[1])>=16&&Number(pieces[1])<=31||pieces[0]==="192"&&pieces[1]==="168");};
