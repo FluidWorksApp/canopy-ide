@@ -2,6 +2,10 @@ import {hibernateWorkspaceProjects,type HibernateProgressListener} from './remot
 import {activeWorkspace} from './remoteExecution/workspace';
 import {startBackgroundTeams} from "./teamMessaging/background";
 import {startTeamMessageNotifications} from "./teamMessaging/notifications";
+import {liveTeamSessions,subscribeTeamJobs} from "./teamMessaging/session";
+import {teamName} from "./teamMessaging/unread";
+import {createMeshJobs,type MeshJobs} from "./meshJobs";
+import {MeshJobInbox} from "./components/MeshJobInbox";
 import {ensureProjectWorkspace,ProjectWorkspaceProgress} from "./remoteExecution/projectWorkspace";
 import {stopIdleProjectWorkspace} from "./remoteExecution/projectIdle";
 import {selectAllFocused} from './selectAll';
@@ -237,6 +241,10 @@ const PROJECTLESS_OPS = new Set([
   "open_project",
   "recall",
   "remember",
+  // Mesh jobs address workspaces and teammates by name, so where the caller
+  // stands decides nothing.
+  "mesh_targets",
+  "mesh_submit",
 ]);
 
 /** Ticket for one companion-requested session launch, so the ProjectView that
@@ -819,6 +827,25 @@ export default function App() {
 
   const wsRef = useRef(ws);
   wsRef.current = ws;
+  // Mesh jobs across workspaces, this account's machines and teammates
+  // (meshJobs.ts). One coordinator for the window's lifetime: it holds the
+  // approval inbox and which runs report back to which submitter, and every
+  // input it reads goes through a ref so it never needs rebuilding.
+  const meshJobsRef = useRef<MeshJobs | null>(null);
+  meshJobsRef.current ??= createMeshJobs({
+    workspaces: () => wsRef.current.projects.map((p) => ({ name: p.name })),
+    // Declared further down; read at call time, long after the first render.
+    start: (req) => startSessionRef.current(req),
+    sessions: liveTeamSessions,
+    teamName,
+    report: ipc.meshJobUpdate,
+    post: postAttention,
+    resolve: resolveAttention,
+    now: Date.now,
+    newId: () => crypto.randomUUID(),
+  });
+  const meshJobs = meshJobsRef.current;
+  useEffect(() => subscribeTeamJobs((event) => meshJobs.receive(event)), [meshJobs]);
   // One press can reach us from both the menu accelerator and the webview key
   // handler; without this they'd cancel each other and focus mode would look
   // stuck. First one wins, the echo inside the window is ignored.
@@ -2406,6 +2433,8 @@ export default function App() {
                   : { kind: "panel", panel: "tasks", path: a.route },
             ...(ok ? {} : { dedupeKey: taskKey }),
           });
+          // A run that was a mesh job owes its submitter the outcome.
+          meshJobsRef.current?.runEnded(attributed.runId, ok ? "done" : "blocked", summary);
           window.dispatchEvent(
             new CustomEvent("canopy:agent-action", {
               detail: { projectId: null, action: attributed },
@@ -2692,6 +2721,7 @@ export default function App() {
             // honestly for a coding agent instead of answering for one project
             // as though it were all of them.
             ...(companionOpsRef.current ?? {}),
+            meshJobs: meshJobsRef.current ?? undefined,
             // The page an agent's browser ops are driving, for the vault ops.
             // The tab id comes from the activeView channel; the URL comes from
             // the page itself, because a redirect (every login flow has one)
@@ -3164,17 +3194,18 @@ export default function App() {
       // agent is background work, and the user is looking at something else.
       await prepareProjectForAgentAction(projectId, false);
       const ticket = nextSessionTicket();
-      const answer = new Promise<{ started: boolean; note: string }>((resolve) => {
+      const answer = new Promise<{ started: boolean; note: string; runId?: string }>((resolve) => {
         const done = (e: Event) => {
           const d = (e as CustomEvent).detail as {
             ticket: number;
             started: boolean;
             note: string;
+            runId?: string;
           };
           if (d?.ticket !== ticket) return;
           window.removeEventListener("canopy:start-session-result", done);
           window.clearTimeout(timer);
-          resolve({ started: d.started, note: d.note });
+          resolve({ started: d.started, note: d.note, runId: d.runId });
         };
         // A ProjectView that has just mounted may not be listening yet, and a
         // launch can genuinely take a while (a worktree, a cold CLI). Bounded
@@ -3206,10 +3237,11 @@ export default function App() {
           }),
         );
       const retries = [80, 1200, 4000].map((ms) => window.setTimeout(send, ms));
-      const { started, note } = await answer;
+      const { started, note, runId } = await answer;
       for (const t of retries) window.clearTimeout(t);
       return {
         started,
+        runId,
         project: target?.name ?? projectId,
         dir,
         note: started
@@ -3976,6 +4008,8 @@ export default function App() {
           ]}
         />
       )}
+
+      <MeshJobInbox jobs={meshJobs} workspaces={ws.projects.map((p) => p.name)} />
 
       {ask && (
         <AskDialog

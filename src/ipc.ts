@@ -792,10 +792,20 @@ export interface AgentUiOp {
     | "open_project"
     | "confirm"
     | "recall"
-    | "remember";
+    | "remember"
+    // Mesh jobs, open to every agent: where a job can go, and sending one.
+    | "mesh_targets"
+    | "mesh_submit";
   route: string;
-  /** Agent terminal that initiated the operation, when there is one. */
+  /** Agent terminal that initiated the operation, when there is one. For
+   *  mesh_submit the bridge stamps it from the caller's credential. */
   ptyId?: number | null;
+  /** The app run that terminal belongs to. */
+  instance?: string | null;
+  /** mesh_submit: the teammate ("me" for this account's other machine) and,
+   *  optionally, which of their devices. */
+  member?: string | null;
+  device?: string | null;
   path?: string | null;
   line?: number | null;
   column?: number | null;
@@ -848,6 +858,12 @@ export interface AgentUiOp {
 }
 export const onAgentUi = (cb: (op: AgentUiOp) => void): Promise<UnlistenFn> =>
   listen<AgentUiOp>("agent:ui", (event) => cb(event.payload));
+
+/** Report one step of a mesh job to the terminal that submitted it: kept on
+ *  the mesh under ref {kind: "job"} and announced in that terminal. Resolves
+ *  with the mesh message id. */
+export const meshJobUpdate = (ptyId: number, instance: string, jobId: string, text: string) =>
+  invoke<string>("context_mesh_job_update", { ptyId, instance, jobId, text });
 
 /** Which canopy_* tools are switched off (Settings → Agents), pushed to the
  *  bridge so the sidecar can hide them from the agent entirely. */

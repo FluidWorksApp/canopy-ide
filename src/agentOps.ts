@@ -29,6 +29,7 @@ import { positionOf, type LspPosition } from "./lspPosition";
 import { TRACKERS } from "./trackers";
 import { readBoundedFile } from "./boundedFileRead";
 import { sizeLimitFor } from "./fileOpen";
+import type { MeshJobs } from "./meshJobs";
 import { rendererIoBudget } from "./ioBudget";
 import {
   leaseEditorModel,
@@ -458,7 +459,10 @@ export interface UiOpContext {
     prompt?: string | null;
     label?: string | null;
     agent?: string | null;
-  }) => Promise<{ started: boolean; project: string; dir: string; note: string }>;
+  }) => Promise<{ started: boolean; project: string; dir: string; note: string; runId?: string }>;
+  /** Mesh jobs (meshJobs.ts): where a job can go, and submitting one. Open to
+   *  every agent, not just the companion. */
+  meshJobs?: Pick<MeshJobs, "targets" | "submit">;
   /** The preview tab an agent's browser ops are driving, for the vault ops:
    *  filling a credential needs to know which page is being logged in to. */
   preview: () => Promise<PreviewTarget | null>;
@@ -614,6 +618,11 @@ function needCompanion<T>(handler: T | undefined, tool: string): T {
   return handler;
 }
 
+function needMeshJobs(ctx: UiOpContext) {
+  if (!ctx.meshJobs) throw new Error("Mesh jobs aren't available in this Canopy window yet — try again in a moment.");
+  return ctx.meshJobs;
+}
+
 /** Run one UI op and produce the tool's result. Throwing is how an op reports
  *  a problem the agent should read — App turns it into the error payload. */
 export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unknown> {
@@ -682,6 +691,18 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
         prompt: op.prompt,
         label: op.label,
         agent: op.agent,
+      });
+    case "mesh_targets":
+      return needMeshJobs(ctx).targets();
+    case "mesh_submit":
+      return needMeshJobs(ctx).submit({
+        brief: op.prompt ?? "",
+        title: op.label,
+        workspace: op.project,
+        member: op.member,
+        device: op.device,
+        ptyId: op.ptyId,
+        instance: op.instance,
       });
     case "pr_details":
       return prDetails(op, ctx);

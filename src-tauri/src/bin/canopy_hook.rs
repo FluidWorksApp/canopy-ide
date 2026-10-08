@@ -3059,6 +3059,7 @@ const COMPANION_MUTATING_TOOLS: &[&str] = &[
     "canopy_restart_server",
     "canopy_message_agent",
     "canopy_mesh_send",
+    "canopy_mesh_submit",
     "canopy_claim",
     "canopy_notes_write",
     "canopy_research_write",
@@ -3243,6 +3244,7 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "canopy_reviews",
     "canopy_agents",
     "canopy_mesh",
+    "canopy_mesh_targets",
     "canopy_research",
     "canopy_notes",
     "canopy_wait_for",
@@ -3373,6 +3375,22 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
                     "id": { "type": "string" }
                 }, "required": ["kind", "id"], "additionalProperties": false, "description": "A typed reference this message is about, for canopy_mesh refKind/refId queries" }
             }, "required": ["ptyId", "text"], "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_mesh_targets",
+            "description": "Where a mesh job can go: the user's other workspaces in this Canopy window, this account's other signed-in machines, and teammates on the user's Canopy teams, each marked online or not. Call this before canopy_mesh_submit to pick a target by name.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "canopy_mesh_submit",
+            "description": "Submit a job to an agent in another workspace, on another of this account's machines, or on a teammate's machine — the mesh across workspaces and team members. Give `workspace` alone to start it in another workspace here; add `member` (\"me\" for this account's other machine, or a teammate's name or id from canopy_mesh_targets) to send it to another machine. Jobs to this account start automatically; a job to a teammate waits until they approve it in Canopy. Returns at once with a job id: every later step (approved, declined, started, done, blocked) arrives in this terminal as a mesh notice tagged ref {kind: \"job\", id}, and canopy_mesh history refKind \"job\" lists them. The brief is all the receiving agent knows — make it complete.",
+            "inputSchema": { "type": "object", "properties": {
+                "brief": { "type": "string", "description": "The complete job: goal, context, constraints, and what to report back. The receiving agent has no memory of this conversation" },
+                "title": { "type": "string", "description": "A short name for the job, shown to whoever approves it" },
+                "workspace": { "type": "string", "description": "The target workspace by name (from canopy_mesh_targets). Required for a job in this window; for another machine, optional — the receiver picks when omitted" },
+                "member": { "type": "string", "description": "Send to another machine: \"me\" (this account's other machine) or a teammate's name or id" },
+                "device": { "type": "string", "description": "A specific device id from canopy_mesh_targets, when the member has several online" }
+            }, "required": ["brief"], "additionalProperties": false }
         }),
     ]
 }
@@ -4104,6 +4122,15 @@ fn describe_action(name: &str, args: &serde_json::Value) -> (String, Option<Stri
             },
             arg("prompt").map(|p| p.chars().take(240).collect()),
         ),
+        "canopy_mesh_submit" => (
+            match (arg("member"), arg("workspace")) {
+                (Some(member), Some(ws)) => format!("Submit a job to {member} in {ws}"),
+                (Some(member), None) => format!("Submit a job to {member}"),
+                (None, Some(ws)) => format!("Start a job in {ws}"),
+                (None, None) => "Submit a mesh job".into(),
+            },
+            arg("brief").map(|b| b.chars().take(240).collect()),
+        ),
         "canopy_stop_server" => ("Stop a server".into(), arg("ptyId")),
         "canopy_restart_server" => ("Restart a server".into(), arg("ptyId")),
         "canopy_spawn_agent" => (
@@ -4771,6 +4798,34 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 "replyTo": args.get("replyTo"),
                 "ref": args.get("ref"),
             })))
+        }
+        "canopy_mesh_targets" => text(ui_op("mesh_targets", &serde_json::json!({}), 25)),
+        "canopy_mesh_submit" => {
+            let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::trim);
+            let brief = arg("brief")
+                .filter(|b| !b.is_empty())
+                .ok_or("missing required argument: brief (the complete job)")?;
+            if arg("workspace").map_or(true, str::is_empty)
+                && arg("member").map_or(true, str::is_empty)
+            {
+                return Err(
+                    "canopy_mesh_submit needs a workspace, a member, or both (see canopy_mesh_targets)"
+                        .into(),
+                );
+            }
+            // Mapped onto the bridge's existing start_session vocabulary so the
+            // UI op struct grows by only the fields that are actually new.
+            text(ui_op(
+                "mesh_submit",
+                &serde_json::json!({
+                    "prompt": brief,
+                    "label": arg("title"),
+                    "project": arg("workspace"),
+                    "member": arg("member"),
+                    "device": arg("device"),
+                }),
+                95,
+            ))
         }
         "canopy_claim" => {
             let action = args

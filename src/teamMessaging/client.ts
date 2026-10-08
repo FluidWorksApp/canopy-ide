@@ -1,11 +1,25 @@
 import {validChatMessage} from './messageSchema';
 import {open,seal,registration,MessageReplayError,type Envelope,type PublicIdentity,type Address} from './crypto';
 import {deviceIdentity,rememberMessage,messageOutbox,type MessageOutbox,type PendingEnvelope,type DeviceIdentity} from './store';
-export type Device={id:string;user_id:string;public_keys:PublicIdentity};
+import {validJobRequest,validJobStatus,type JobRequest,type JobStatus} from './jobSchema';
+/** `last_seen_at` is bumped by every poll the device makes, so it is the
+ * directory's only "online" signal. */
+export type Device={id:string;user_id:string;public_keys:PublicIdentity;last_seen_at?:string|null};
 export type ChatMessage={id:string;sender:string;recipient:string|null;text:string;created:number};
-type Payload={kind:'message';message:ChatMessage}|{kind:'receipt';id:string}|{kind:'signal';description:RTCSessionDescriptionInit};
+type Payload={kind:'message';message:ChatMessage}|{kind:'receipt';id:string}|{kind:'signal';description:RTCSessionDescriptionInit}|{kind:'job';job:JobRequest}|{kind:'job-status';status:JobStatus};
 export type PeerRequest=<T>(body:unknown)=>Promise<T>;
+/** A device polls every 2s; one quiet for longer than this is not online. */
+export const DEVICE_ONLINE_MS=60_000;
+export const deviceOnline=(device:Device,now=Date.now())=>{
+ // A directory that predates `last_seen_at` cannot say; it does not refuse.
+ if(device.last_seen_at==null)return true;
+ const seen=Date.parse(device.last_seen_at);return Number.isFinite(seen)&&now-seen<=DEVICE_ONLINE_MS;
+};
 type Options={members?:(members:{id:string;name:string}[])=>void;request:PeerRequest;team:string;user:string;message:(message:ChatMessage)=>void;receipt:(id:string,user:string)=>void;status:(value:string)=>void;identity?:()=>Promise<DeviceIdentity>;remember?:typeof rememberMessage;rtc?:(config:RTCConfiguration)=>RTCPeerConnection;outbox?:MessageOutbox;persist?:(message:ChatMessage)=>Promise<void>;
+ /** A mesh job from a team device, or this account's other device. */
+ job?:(job:JobRequest,sender:Device)=>void;
+ /** A step of a job this device submitted, from the device running it. */
+ jobStatus?:(status:JobStatus,sender:Device)=>void;
  /** Message ids with ciphertext still waiting in the restored outbox. */
  pending?:(messageIds:string[])=>void;
  /** A message's last pending delivery expired or became undeliverable. */
@@ -135,6 +149,30 @@ export class PeerClient {
   if(outcomes.every(result=>result.status==='rejected')&&!queued)throw Error('Message could not be saved or sent. Try again.');
   this.options.message(message);return {id:message.id,queued:outcomes.every(result=>result.status==='rejected'),partial:outcomes.some(result=>result.status==='rejected')};
  }
+ /** This team's devices as of the last directory refresh, this one included. */
+ directoryDevices():Device[]{return [...this.devices.values()];}
+ deviceId(){return this.identity?.id;}
+ /** Sends a job to one online device of `recipient` (this account's own user id
+  * reaches its other machines). One device, never a fan-out: two machines
+  * running the same job is the failure a job must not have. */
+ async sendJob(job:JobRequest,recipient:string,device?:string):Promise<Device>{
+  if(!validJobRequest(job))throw Error('Invalid job');
+  if(new TextEncoder().encode(JSON.stringify({kind:'job',job})).length>32000)throw Error('This job is too large after encoding. Shorten the brief.');
+  await this.directory();
+  const candidates=[...this.devices.values()].filter(d=>d.user_id===recipient&&d.id!==this.identity!.id&&(!device||d.id===device));
+  if(!candidates.length)throw Error(device?`Device ${device} is not on this team.`:recipient===this.options.user?'This account has no other device on this team.':'That teammate has no device registered on this team yet.');
+  const online=candidates.filter(d=>deviceOnline(d)).sort((a,b)=>Date.parse(b.last_seen_at??'')-Date.parse(a.last_seen_at??''));
+  if(!online.length)throw Error('Not connected: no device of that member is online in Canopy right now.');
+  await this.deliver(online[0],{kind:'job',job});
+  return online[0];
+ }
+ /** Reports a job's progress to the device that submitted it. */
+ async sendJobStatus(status:JobStatus,device:string){
+  if(!validJobStatus(status))throw Error('Invalid job status');
+  if(Date.now()-this.directoryAt>10000)await this.directory();
+  const target=this.devices.get(device);if(!target)throw Error('The submitting device is no longer on this team.');
+  await this.deliver(target,{kind:'job-status',status});
+ }
  private receive(envelope:Envelope):Promise<void>{
   const task=this.tail.catch(()=>{}).then(async()=>{
    if(this.stopped||Date.now()-this.directoryAt>10000)throw Error('Team access expired');
@@ -145,7 +183,9 @@ export class PeerClient {
     const payload=JSON.parse(decoded) as Payload;
     if(payload.kind==='message'){this.validateMessage(payload.message,sender,envelope);await this.options.persist?.(payload.message);}
    });}
-   catch(error){if(error instanceof MessageReplayError){const prior=JSON.parse(error.plaintext) as Payload;if(prior.kind==='message'){this.validateMessage(prior.message,sender,envelope);await this.deliver(sender,{kind:'receipt',id:prior.message.id});return;}if(prior.kind==='receipt'){await this.acceptReceipt(prior.id,sender);return;}}throw error;}
+   catch(error){if(error instanceof MessageReplayError){const prior=JSON.parse(error.plaintext) as Payload;if(prior.kind==='message'){this.validateMessage(prior.message,sender,envelope);await this.deliver(sender,{kind:'receipt',id:prior.message.id});return;}if(prior.kind==='receipt'){await this.acceptReceipt(prior.id,sender);return;}
+    // The same job arriving twice (direct channel and relay) acts once.
+    if(prior.kind==='job'||prior.kind==='job-status')return;}throw error;}
    if(this.stopped||Date.now()-this.directoryAt>10000||!this.currentSender(sender))return;
    const payload=JSON.parse(text) as Payload;
    if(payload.kind==='message'){
@@ -153,6 +193,8 @@ export class PeerClient {
     this.options.message(m);await this.deliver(sender,{kind:'receipt',id:m.id});
    }else if(payload.kind==='receipt'){await this.acceptReceipt(payload.id,sender);}
    else if(payload.kind==='signal')await this.signal(sender,payload.description);
+   else if(payload.kind==='job'){this.validateTimed(payload.job,validJobRequest,envelope);this.options.job?.(payload.job,sender);}
+   else if(payload.kind==='job-status'){this.validateTimed(payload.status,validJobStatus,envelope);this.options.jobStatus?.(payload.status,sender);}
    else throw Error('Unknown peer message');
   });this.tail=task;return task;
  }
@@ -169,6 +211,10 @@ export class PeerClient {
  private currentSender(sender:Device){const current=this.devices.get(sender.id);return current?.user_id===sender.user_id&&JSON.stringify(current.public_keys)===JSON.stringify(sender.public_keys);}
  private validateMessage(m:ChatMessage,sender:Device,envelope:Envelope){
   if(!validChatMessage(m)||m.sender!==sender.user_id||(m.recipient!==null&&m.recipient!==this.options.user)||typeof m.text!=='string'||new TextEncoder().encode(m.text).length>16000||!Number.isSafeInteger(m.created)||m.created<envelope.created-300000||m.created>envelope.expires)throw Error('Invalid peer message');
+ }
+ /** Same freshness rule as a chat message: created inside the envelope's window. */
+ private validateTimed<T extends {created:number}>(value:unknown,valid:(value:unknown)=>value is T,envelope:Envelope){
+  if(!valid(value)||value.created<envelope.created-300000||value.created>envelope.expires)throw Error('Invalid peer message');
  }
  private connection(device:Device,iceServers:RTCIceServer[]=this.iceServers){
   const pc=this.options.rtc?.({iceServers})??new RTCPeerConnection({iceServers});const peer:{pc:RTCPeerConnection;channel?:RTCDataChannel}={pc};this.peers.set(device.id,peer);
