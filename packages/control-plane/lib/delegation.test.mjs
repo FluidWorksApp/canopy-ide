@@ -26,7 +26,7 @@ test('owner retains full delegation and non-admins cannot delegate empty grants'
  assert.equal(allows([grant('member',{projects:'all'})],{}),false);
 });
 
-test('team and person grant mutations apply bounded admin delegation before saving',async()=>{
+test('team and person grants by an admin are refused before saving; only the owner shares',async()=>{
  const {changeWorkspaceTeamGrant}=await import('./workspace-team-grants.mjs');
  const {changeWorkspacePersonGrant}=await import('./workspace-person-grants.mjs');
  for(const change of [changeWorkspaceTeamGrant,changeWorkspacePersonGrant]){
@@ -41,11 +41,10 @@ test('team and person grant mutations apply bounded admin delegation before savi
    return {rows:[]};
   }};
   const input={workspaceId:'workspace',teamId:'team',userId:'person',action:'grant',role:'member',permissions:{projectIds:['app']}};
-  assert.deepEqual(await change(db,'admin',input),{ok:true});
-  assert.equal(mutations.length,2,'grant and audit must both be written');
-  assert.deepEqual(JSON.parse(mutations[0][1][3]).projectIds,['app']);
-  mutations.length=0;
-  await assert.rejects(change(db,'admin',{...input,permissions:{projects:'all'}}),e=>e.status===403);
+  // Shares are owner-set (team-policy invitationRole); admins no longer grant.
+  await assert.rejects(change(db,'admin',input),e=>e.status===400||e.status===403);
+  assert.equal(mutations.length,0,'a refused grant must never be saved');
+  await assert.rejects(change(db,'admin',{...input,permissions:{projects:'all'}}),e=>e.status===400||e.status===403);
   assert.equal(mutations.length,0,'out-of-scope delegation must never be saved');
  }
 });
