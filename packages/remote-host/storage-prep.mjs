@@ -1,3 +1,4 @@
+import {clearScratch} from './scratch-storage.mjs';
 // Stop preparation for snapshot-backed workspaces. The control plane asks the
 // gateway for it before StopInstance; a root-only systemd unit performs it (the
 // gateway runs unprivileged and can only drop a request file). Goal: a
@@ -38,7 +39,7 @@ export const CACHE_CLEANUP=Object.freeze([
 ]);
 
 export const DATA_DISK_MOUNT='/srv/canopy';
-export async function prepareForSnapshot({dataDiskMounted=null,run=runner(),now=Date.now,deadlineMs=DEADLINE_MS,captureRecent=async()=>null,cleanTmp=defaultCleanTmp,usage=defaultUsage,userMounted=null}={}){
+export async function prepareForSnapshot({dataDiskMounted=null,run=runner(),now=Date.now,deadlineMs=DEADLINE_MS,captureRecent=async()=>null,cleanTmp=defaultCleanTmp,cleanScratch=clearScratch,usage=defaultUsage,userMounted=null}={}){
  const started=now(),steps=[],warnings=[];
  const remaining=()=>Math.max(1000,deadlineMs-(now()-started));
  const step=async(name,action,{critical=false,limit=120000}={})=>{
@@ -48,11 +49,16 @@ export async function prepareForSnapshot({dataDiskMounted=null,run=runner(),now=
  };
  const ok=async(command,args,timeout)=>{const result=await run(command,args,{timeout});if(result.code!==0)throw Error(`${command} exited ${result.code}${result.timedOut?' (timeout)':''}`);return result;};
  // 1. Quiesce: stop workspace containers cleanly so their files are closed.
- await step('stop-containers',async timeout=>{
+ const containersStopped=await step('stop-containers',async timeout=>{
   const names=(await ok('docker',['ps','--format','{{.Names}}'],Math.min(timeout,30000))).stdout.split('\n').map(s=>s.trim()).filter(name=>/^canopy-[A-Za-z0-9_.-]+$/.test(name));
   if(names.length)await ok('docker',['stop','--time','30',...names],timeout);
   return {stopped:names.length};
  },{limit:120000});
+ if(containersStopped)await step('clean-scratch',async timeout=>{
+  const running=(await ok('docker',['ps','--format','{{.Names}}'],Math.min(timeout,30000))).stdout.split('\n');
+  if(running.some(name=>/^canopy-[A-Za-z0-9_.-]+$/.test(name.trim())))throw Error('Workspace containers still running; scratch retained');
+  await cleanScratch();
+ });
  // 2. Remember what the user worked on, for the next start's warm-up.
  await step('record-recent-files',async timeout=>captureRecent(timeout),{limit:60000});
  // 3. Drop caches that never need to persist.

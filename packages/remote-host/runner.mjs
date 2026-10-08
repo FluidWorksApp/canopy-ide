@@ -1,3 +1,4 @@
+import {initializeScratch,scratchSessionEnv} from './scratch-environment.mjs';
 import {prepareSharedAgentLaunch} from './shared-agent-launch.mjs';
 import { nativeInvoke, startNativeServer } from "./native.mjs";
 import http from 'node:http';
@@ -32,7 +33,7 @@ export async function scopedPath(value, writing = false) {
   return resolved;
 }
 
-export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'workspace', historyFile = null }) {
+export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'workspace', historyFile = null, environment = process.env }) {
   if (!secret || secret.length < 32) throw new Error('Runner secret required');
   const sessions = new Map();
   const receipts = new Map();
@@ -96,11 +97,12 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
         await cp(template, accountHome, { recursive: true, dereference: true });
       }
       const sharedBin=args.sharedAgents?await prepareSharedAgentLaunch(accountHome,args.requestId,args.sharedAgents):null;
+      const scratchEnv=await scratchSessionEnv(args.requestId,environment);
       const cols = 120, rows = 40;
       const pty = spawnPty('/bin/bash', ['-lc', 'export PATH="'+(sharedBin?sharedBin+':':'')+'/home/agent/.local/bin:$PATH" NPM_CONFIG_PREFIX=/home/agent/.local; '+args.command], { name: 'xterm-256color', cols, rows, cwd: ROOT,
         env: { CANOPY:'1', CANOPY_PTY:String(id), CANOPY_INSTANCE:'remote-'+workspaceId, PATH: process.env.PATH, HOME: accountHome, USER: 'agent', NPM_CONFIG_PREFIX:'/home/agent/.local', TERM: 'xterm-256color',
-          CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests',BROWSER:'/opt/canopy/open-url.mjs',GH_CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests',BROWSER:'/opt/canopy/open-url.mjs', LANG: 'C.UTF-8', DISPLAY: ':99', CODEX_HOME: `${accountHome}/.codex`,
-          CLAUDE_CONFIG_DIR: `${accountHome}/.claude`, CANOPY_WORKSPACE_ID: workspaceId, CANOPY_SESSION_REQUEST_ID:args.requestId,...gitEnvironment } });
+          CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests',BROWSER:'/opt/canopy/open-url.mjs',GH_CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests', LANG: 'C.UTF-8', DISPLAY: ':99', CODEX_HOME: `${accountHome}/.codex`,
+          CLAUDE_CONFIG_DIR: `${accountHome}/.claude`, CANOPY_WORKSPACE_ID: workspaceId, CANOPY_SESSION_REQUEST_ID:args.requestId,...scratchEnv,...gitEnvironment } });
       const session = { id, pty, kind: args.kind ?? 'terminal', title: args.command.slice(0, 80), cols, rows, accountId: args.accountId ?? null, output: Buffer.alloc(0), exitCode: null };
       sessions.set(id, session);
       pty.onData(text => {
@@ -225,6 +227,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
 }
 
 if (process.argv[1] === new URL(import.meta.url).pathname) {
+  Object.assign(process.env,await initializeScratch());
   startNativeServer();
   const { spawn } = await import('node-pty');
   createRunner({ secret: process.env.CANOPY_RUNNER_TOKEN, spawnPty: spawn, accounts: (process.env.CANOPY_ACCOUNTS ?? '').split(',').filter(Boolean), workspaceId: process.env.CANOPY_WORKSPACE_ID, historyFile: '/home/agent/.canopy/session-history.json' })

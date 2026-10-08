@@ -23,6 +23,17 @@ unless the user explicitly names another component. Read and follow the \
 repository's applicable agent-instruction files and keep unexpected existing \
 changes intact because other sessions may share this checkout.\n\
 \n\
+If CANOPY_SCRATCH_DIR is set in the environment, its path is private VM scratch \
+storage, separate from persistent workspace storage. Use it for large build \
+outputs, temporary files, package caches, and reproducible development data. \
+TMPDIR and package cache defaults already point there; CARGO_TARGET_DIR is \
+provided for remote terminal sessions. Check free space with df before large \
+writes. Scratch can be cleared on workspace stop or VM replacement: keep source changes, \
+credentials, agent history, unique artifacts, and irreplaceable database data \
+on persistent storage. Never move a running database or delete another job's \
+files to free space. If CANOPY_SCRATCH_DIR is absent, do not assume scratch is \
+available.\n\
+\n\
 Canopy integrations are available only when they appear in your actual tool \
 inventory. Never invent a Canopy tool or imitate one through an unrelated \
 shell command. A hooks-only client whose inventory has no Canopy integration \
@@ -192,6 +203,16 @@ mod tests {
         assert!(!SESSION_CONTEXT.contains("canopy_mesh"));
         assert!(SESSION_CONTEXT.contains("only when they appear in your actual tool inventory"));
         assert!(SESSION_CONTEXT.contains("cannot publish live status"));
+    }
+
+    #[test]
+    fn scratch_guidance_is_conditional_and_preserves_durable_data() {
+        assert!(SESSION_CONTEXT.contains("If CANOPY_SCRATCH_DIR is set"));
+        assert!(SESSION_CONTEXT.contains("CARGO_TARGET_DIR"));
+        assert!(SESSION_CONTEXT.contains("source changes"));
+        assert!(SESSION_CONTEXT.contains("irreplaceable database data"));
+        assert!(SESSION_CONTEXT.contains("do not assume scratch is available"));
+        assert!(mcp_instructions().contains("private VM scratch"));
     }
 
     #[test]
