@@ -797,14 +797,18 @@ async fn ws_conn(
 
 /// Approval overlays come from the desktop registry, never from client input.
 /// Only the registry's launch/resume commands receive their mode environment.
-fn cli_launch_env(clis: &Value, agent: Option<&str>, command: Option<&str>) -> Vec<(String, String)> {
+fn cli_launch_env(
+    clis: &Value,
+    agent: Option<&str>,
+    command: Option<&str>,
+) -> Vec<(String, String)> {
     let (Some(agent), Some(command)) = (agent, command) else {
         return Vec::new();
     };
-    let Some(cli) = clis.as_array().and_then(|rows| {
-        rows.iter()
-            .find(|cli| cli["id"].as_str() == Some(agent))
-    }) else {
+    let Some(cli) = clis
+        .as_array()
+        .and_then(|rows| rows.iter().find(|cli| cli["id"].as_str() == Some(agent)))
+    else {
         return Vec::new();
     };
     let launch = cli["command"].as_str() == Some(command);
@@ -1622,9 +1626,7 @@ mod tests {
         ] {
             assert!(cli_launch_env(&clis, Some("opencode"), Some(command)).is_empty());
         }
-        assert!(
-            cli_launch_env(&clis, Some("unknown"), Some("opencode --agent build")).is_empty()
-        );
+        assert!(cli_launch_env(&clis, Some("unknown"), Some("opencode --agent build")).is_empty());
         assert!(cli_launch_env(&clis, None, None).is_empty());
         assert!(
             cli_launch_env(&json!([]), Some("opencode"), Some("opencode --agent build")).is_empty()

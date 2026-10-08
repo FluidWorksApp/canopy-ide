@@ -251,7 +251,7 @@ describe("terminalLaunch", () => {
   it("comes back mid-conversation when there is one to resume", () => {
     expect(t({ agentId: "claude", sessionId: "s1" })).toBeTruthy();
     expect(terminalLaunch(t({ agentId: "claude", sessionId: "s1", command: "claude" }))).toEqual({
-      command: "claude --resume s1",
+      command: "claude --resume s1 --permission-mode auto",
       resumed: true,
     });
   });
@@ -266,7 +266,7 @@ describe("terminalLaunch", () => {
 
   it("starts a live-identified CLI whose shell had no launch command", () => {
     expect(terminalLaunch(t({ agentId: "codex", command: undefined }))).toEqual({
-      command: "codex --no-daemon",
+      command: "codex --no-daemon --approve-for-me -c sandbox_workspace_write.network_access=true",
       resumed: false,
     });
   });
