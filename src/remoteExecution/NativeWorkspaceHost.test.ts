@@ -342,3 +342,32 @@ it('sends keystrokes over the stream socket once the gateway offers it and falls
  expect(inputs().map(([,options])=>JSON.parse(String((options as RequestInit).body)))).toEqual([{data:'s',id:socket.sent[0].id,seq:2}]);
  host.dispose();
 });
+
+
+it('reuses saved managed credentials on return only for the same account and before the renewal margin',async()=>{
+ const managed={...connection,endpoint:'https://alice.workspaces.canopyide.dev',expiresAt:new Date(Date.now()+300000).toISOString(),credentialAccountKey:'account-a',clientId:'same-lease'};
+ const invoke=vi.fn().mockResolvedValue('account-a');
+ const desktop={kind:'native',invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ const fetcher=vi.fn().mockResolvedValue({ok:true,json:async()=>({result:null})});vi.stubGlobal('fetch',fetcher);
+ const host=new NativeWorkspaceHost(managed,desktop);
+ try{
+  await host.invoke('fs_read_file',{path:'/workspace/file'});
+  await host.invoke('fs_stat',{path:'/workspace/file'});
+  expect(invoke).toHaveBeenCalledTimes(1);expect(invoke).toHaveBeenCalledWith('canopy_account_cache_key');
+  expect(host.connectionClientId).toBe('same-lease');
+ }finally{host.dispose();}
+});
+it.each(['different-account','expired'])('refreshes a saved connection with %s and persists server-issued freshness',async scenario=>{
+ const managed={...connection,endpoint:'https://alice.workspaces.canopyide.dev',expiresAt:new Date(Date.now()+(scenario==='expired'?30000:300000)).toISOString(),credentialAccountKey:'account-a'};
+ const expiration=new Date(Date.now()+300000).toISOString();
+ const invoke=vi.fn().mockImplementation(async(command:string)=>command==='canopy_account_cache_key'?'account-b':command==='canopy_account_request'?{connection:{...managed,token:'renewed'},expiresAt:expiration}:undefined);
+ const desktop={kind:'native',invoke,listen:vi.fn(),channel:vi.fn()} as unknown as Host;
+ const fetcher=vi.fn().mockResolvedValue({ok:true,json:async()=>({result:null})});vi.stubGlobal('fetch',fetcher);
+ const host=new NativeWorkspaceHost(managed,desktop);
+ try{
+  await host.invoke('fs_read_file',{path:'/workspace/file'});
+  expect(invoke).toHaveBeenCalledWith('canopy_account_request',expect.anything());
+  expect(invoke).toHaveBeenCalledWith('execution_remote_set',{connection:expect.objectContaining({token:'renewed',expiresAt:expiration,credentialAccountKey:'account-b',clientId:expect.any(String)})});
+  expect(fetcher.mock.calls[0][1].headers.authorization).toBe('Bearer renewed');
+ }finally{host.dispose();}
+});

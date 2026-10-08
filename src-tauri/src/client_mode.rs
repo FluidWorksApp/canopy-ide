@@ -13,6 +13,12 @@ pub struct RemoteConnection {
     pub workspace_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_account_key: Option<String>,
 }
 #[derive(Default)]
 pub struct RemoteConnectionState(pub Mutex<Option<RemoteConnection>>);
@@ -61,6 +67,25 @@ pub fn canopy_account_cache_key() -> Result<Option<String>, String> {
     }))
 }
 
+// The native process outlives renderer reloads. Reuse its TLS/HTTP pool;
+// authentication is still read and applied separately on every request.
+fn account_http_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(20))
+                .pool_idle_timeout(std::time::Duration::from_secs(300))
+                .pool_max_idle_per_host(2)
+                .build()
+                .map_err(|_| "Account connection unavailable".to_string())
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
 #[tauri::command]
 pub async fn canopy_account_request(
     route: String,
@@ -79,11 +104,7 @@ pub async fn canopy_account_request(
     ) {
         return Err("Invalid account request".into());
     }
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|_| "Account connection unavailable")?;
+    let client = account_http_client()?;
     let url = format!("https://canopyide.dev{route}");
     let mut request = if let Some(ref value) = body {
         client
@@ -1046,6 +1067,26 @@ mod remote_login_tests {
 
 #[cfg(test)]
 mod account_import_tests {
+    #[test]
+    fn saved_connection_retains_freshness_and_lease_identity() {
+        let value = serde_json::json!({
+            "endpoint": "https://workspace.example.invalid", "token": "synthetic",
+            "workspaceId": "workspace", "workspaceName": "Workspace",
+            "clientId": "same-lease", "expiresAt": "2026-10-08T10:00:00Z",
+            "credentialAccountKey": "account-fingerprint"
+        });
+        let connection: super::RemoteConnection = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(connection).unwrap(), value);
+        let legacy: super::RemoteConnection = serde_json::from_value(serde_json::json!({
+            "endpoint": "https://workspace.example.invalid", "token": "synthetic",
+            "workspaceId": "workspace", "workspaceName": "Workspace"
+        }))
+        .unwrap();
+        assert!(legacy.expires_at.is_none());
+        assert!(legacy.credential_account_key.is_none());
+        assert!(legacy.client_id.is_none());
+    }
+
     use super::*;
     #[test]
     fn profile_keys_are_scoped_and_default_is_never_a_named_fallback() {
