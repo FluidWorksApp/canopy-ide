@@ -30,6 +30,7 @@ test('workspace start is single-flight and mandates cgroup limits, private volum
   const command = run[0];
   assert.equal(command[command.indexOf('--restart')+1],'on-failure:3');
   for (const flag of ['--memory', '--memory-swap', '--cpus', '--pids-limit', '--cap-drop', '--security-opt']) assert.ok(command.includes(flag));
+  assert.equal(command[command.indexOf('--pids-limit')+1],'8192','a config without pidsLimit keeps the default');
   assert.ok(command.includes('127.0.0.1::8080'));
   assert.ok(command.includes('type=volume,source=canopy-account-shared,target=/accounts/shared,readonly'));
   assert.ok(!command.some(arg => arg.includes('docker.sock')));
@@ -70,6 +71,11 @@ test('container reuse rejects a changed project volume, network or added capabil
   for(const invalid of [undefined,1e9,5e9]){current.HostConfig.NanoCpus=invalid;await assert.rejects(host.ensure(workspace),/configuration differs/);}
   for(const valid of [1024,4096,8192]){current=structuredClone(original);current.HostConfig.PidsLimit=valid;assert.ok((await host.ensure(workspace)).url);}
   for(const invalid of [undefined,0,-1,512,8193,1024.5]){current=structuredClone(original);current.HostConfig.PidsLimit=invalid;await assert.rejects(host.ensure(workspace),/configuration differs/);}
+  // The plan catalog's pidsLimit raises the ceiling; containers below it stay valid.
+  workspace.pidsLimit=16384;
+  for(const valid of [1024,8192,16384]){current=structuredClone(original);current.HostConfig.PidsLimit=valid;assert.ok((await host.ensure(workspace)).url);}
+  current=structuredClone(original);current.HostConfig.PidsLimit=16385;await assert.rejects(host.ensure(workspace),/configuration differs/);
+  delete workspace.pidsLimit;
   for (const change of [c => { c.Mounts[0].Name = 'canopy-project-bob'; }, c => { c.HostConfig.NetworkMode = 'host'; }, c => { c.HostConfig.CapAdd = ['SYS_ADMIN']; },...['PidMode','IpcMode','UTSMode'].flatMap(key=>['host','container:other','shareable','unknown'].map(value=>c=>{c.HostConfig[key]=value;})),...['no-new-privileges:false','no-new-privileges=false','no-new-privileges:1','no-new-privileges-not-enabled'].map(value=>c=>{c.HostConfig.SecurityOpt=[value];}),c=>{c.HostConfig.SecurityOpt=['no-new-privileges:true','no-new-privileges:false'];}]) {
     current = structuredClone(original); change(current);
     await assert.rejects(host.ensure(workspace), /configuration differs/);

@@ -19,7 +19,8 @@ export function validateConfig(config) {
         workspace.memoryMaxMiB < workspace.memoryMiB || workspace.memoryMaxMiB > 65536)) throw new Error('Invalid elastic memory maximum');
     if(workspace.swapMiB!=null&&(!Number.isInteger(workspace.swapMiB)||workspace.swapMiB<0||workspace.swapMiB>16384))throw Error('Invalid workspace swap size');
     // Snapshot storage: the advertised user storage (quota image size) in GiB.
-    if(workspace.storageGiB!=null&&![50,100,200,500].includes(workspace.storageGiB))throw Error('Invalid workspace storage size');
+    if(workspace.storageGiB!=null&&(!Number.isSafeInteger(workspace.storageGiB)||workspace.storageGiB<1||workspace.storageGiB>16384))throw Error('Invalid workspace storage size');
+    if(workspace.pidsLimit!=null&&(!Number.isSafeInteger(workspace.pidsLimit)||workspace.pidsLimit<1024||workspace.pidsLimit>65536))throw Error('Invalid workspace process limit');
     if(workspace.swapRatio!=null&&(!Number.isFinite(workspace.swapRatio)||workspace.swapRatio<0||workspace.swapRatio>4))throw Error('Invalid workspace swap ratio');
     if (!Array.isArray(workspace.accounts) || !workspace.accounts.every(validId)) throw new Error('Invalid account pool');
   }

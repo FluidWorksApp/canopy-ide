@@ -278,11 +278,14 @@ test('installed units order user storage before the runtimes and keep warm-up of
  void mkdir;void SWAP_FILE;
 });
 
-test('host configuration accepts only advertised storage sizes',async()=>{
+test('host configuration accepts any whole storage size the plan catalog sets, and a sane process limit',async()=>{
  const {validateConfig}=await import('./policy.mjs');
  const config=gib=>({workspaces:[{id:'w1',accounts:[],memoryMiB:1024,cpus:1,storageGiB:gib}],principals:[]});
- for(const gib of [50,100,200,500,undefined])assert.doesNotThrow(()=>validateConfig(config(gib)));
- for(const gib of [0,64,'50',1e6])assert.throws(()=>validateConfig(config(gib)),/storage size/);
+ for(const gib of [50,100,200,500,1000,undefined])assert.doesNotThrow(()=>validateConfig(config(gib)));
+ for(const gib of [0,-1,64.5,'50',1e6])assert.throws(()=>validateConfig(config(gib)),/storage size/);
+ const pids=limit=>({workspaces:[{id:'w1',accounts:[],memoryMiB:1024,cpus:1,pidsLimit:limit}],principals:[]});
+ for(const limit of [1024,8192,undefined])assert.doesNotThrow(()=>validateConfig(pids(limit)));
+ for(const limit of [0,512,100000,'8192',8192.5])assert.throws(()=>validateConfig(pids(limit)),/process limit/);
 });
 
 test('on today\'s retained-disk layout the preparation trims the data disk and root, and is harmless without a snapshot',async()=>{
