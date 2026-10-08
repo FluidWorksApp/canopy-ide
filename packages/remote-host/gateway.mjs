@@ -41,7 +41,7 @@ import { body, json } from './http.mjs';
 import {startReleasePrepull} from './release-prepull.mjs';
 import {PREPULL_RESERVE_BYTES} from './image-retention.mjs';
 import {hostStorage as createHostStorage} from './host-storage.mjs';
-import {InputLedger,SocketInput,TERMINAL_INPUT_PROTOCOL,forwardInput,inputKey,sequencedInput} from './terminal-input.mjs';
+import {InputLedger,SocketInput,TERMINAL_INPUT_PROTOCOL,BINARY_TERMINAL_INPUT_PROTOCOL,forwardInput,inputKey,sequencedInput} from './terminal-input.mjs';
 
 export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage() }) {
   validateConfig(config);
@@ -53,6 +53,8 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
   };
   const tickets = new Tickets();
   const inputLedger=new InputLedger({now});
+  const binaryRuntimes=new Set();
+  const requireBinary=(runtime,input)=>{if(input.encoding&&!binaryRuntimes.has(runtime.url))throw Error('Terminal input requires an updated workspace runtime');};
   const sessionViewLeases=new SessionViewLeases({now});
   const leases=new MemberLeases({authorize:checkMember,stop:runtime=>workspaces.suspendMember(runtime),renew:renewMember,inspectRunning:async runtime=>{const inspected=await workspaces.inspectRuntime(runtime);return inspected?.State?.Running===true&&!inspected.State.Paused;}});
   const sharedSessions=new SharedSessions({authorizeMember,stop:runtime=>workspaces.suspendMember(runtime)});
@@ -205,7 +207,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         if(!sequenced&&(typeof input.data!=='string'||Buffer.byteLength(input.data)>16384||Object.keys(input).some(k=>k!=='data')))throw Error('Invalid session input');
         const entry=await resolveShared(workspace,principal,request.headers.authorization,sharedInput[1],'interact');if(!entry.runtime)throw Error('Forbidden');
         const runtime=await workspaces.open(entry.runtime);await resolveShared(workspace,principal,request.headers.authorization,entry.id,'interact');
-        if(sequenced){const applied=await inputLedger.apply(inputKey(principal,workspace.id,`shared:${entry.id}`,sequenced.id),sequenced.seq,()=>forwardInput(runtime,entry.sessionId,sequenced.data));return json(response,200,{ok:true,seq:sequenced.seq,duplicate:applied.duplicate});}
+        if(sequenced){requireBinary(runtime,sequenced);const applied=await inputLedger.apply(inputKey(principal,workspace.id,`shared:${entry.id}`,sequenced.id),sequenced.seq,()=>forwardInput(runtime,entry.sessionId,sequenced.data,{encoding:sequenced.encoding}));return json(response,200,{ok:true,seq:sequenced.seq,duplicate:applied.duplicate});}
         const result=await fetch(`${runtime.url}/sessions/${entry.sessionId}/input`,{method:'POST',redirect:'error',headers:{authorization:`Bearer ${runtime.token}`,'content-type':'application/json'},body:JSON.stringify(input),signal:AbortSignal.timeout(5000)});
         return json(response,result.status,{ok:result.ok});
       }
@@ -289,7 +291,8 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       if(sessionInput&&(Object.hasOwn(payload??{},'seq')||Object.hasOwn(payload??{},'id'))){
         // Same queue identity and ledger as socket input: a resend applies once.
         const input=sequencedInput(payload);
-        const applied=await inputLedger.apply(inputKey(principal,workspace.id,`session:${sessionInput[1]}`,input.id),input.seq,()=>forwardInput(runtime,Number(sessionInput[1]),input.data));
+        requireBinary(runtime,input);
+        const applied=await inputLedger.apply(inputKey(principal,workspace.id,`session:${sessionInput[1]}`,input.id),input.seq,()=>forwardInput(runtime,Number(sessionInput[1]),input.data,{encoding:input.encoding}));
         return json(response,200,{ok:true,seq:input.seq,duplicate:applied.duplicate});
       }
       if(principal.memberId&&operation==='/native'&&payload?.command==='git_commit'){
@@ -390,9 +393,11 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         client.once('close', () => clearInterval(authorizationTimer));
         // Terminal input is written to the PTY by the runner's input route (as
         // HTTP input is), so it does not wait for the output upstream.
+        let binaryReady=false,checkedInputProtocol=false;
         const input=terminal?new SocketInput({
           key:id=>inputKey(principal,workspace.id,publication?`shared:${publication.id}`:`session:${inputSession}`,id),
-          apply:(key,seq,data)=>inputLedger.apply(key,seq,()=>forwardInput(runtime,inputSession,data)),
+          apply:(key,seq,data,encoding)=>inputLedger.apply(key,seq,()=>forwardInput(runtime,inputSession,data,{encoding})),
+          allowBinary:()=>binaryReady,
           allowed:async()=>!inputAllowed?'Forbidden':idleAttestation?.reserved(workspace.id)?'Workspace idle shutdown is reserved. Retry after it finishes.':null,
           send:message=>{if(client.readyState===1)client.send(JSON.stringify(message));},
           close:(code,reason)=>client.close(code,reason),
@@ -408,6 +413,15 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         });
         upstream.on('message', (data, binary) => {
           if (client.readyState !== 1) return;
+          if(terminal&&!checkedInputProtocol&&!binary){
+            try{const frame=JSON.parse(data.toString());if(frame.t==='snapshot'){
+              checkedInputProtocol=true;
+              if(frame.inputProtocol===BINARY_TERMINAL_INPUT_PROTOCOL&&inputAllowed){
+                binaryReady=true;if(binaryRuntimes.size>=64)binaryRuntimes.delete(binaryRuntimes.values().next().value);binaryRuntimes.add(runtime.url);
+                client.send(JSON.stringify({t:'hello',input:BINARY_TERMINAL_INPUT_PROTOCOL}));
+              }
+            }}catch{/* Existing frame forwarding handles the payload. */}
+          }
           if (client.bufferedAmount > 4 * 1024 * 1024) return client.close(1013, 'Slow consumer');
           client.send(data, { binary });
         });

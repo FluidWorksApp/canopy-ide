@@ -1,4 +1,5 @@
 import {initializeScratch,scratchSessionEnv} from './scratch-environment.mjs';
+import {decodeTerminalInput,BINARY_TERMINAL_INPUT_PROTOCOL} from './terminal-input.mjs';
 import {prepareSharedAgentLaunch} from './shared-agent-launch.mjs';
 import { nativeInvoke, startNativeServer } from "./native.mjs";
 import http from 'node:http';
@@ -57,7 +58,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
     const expected = Buffer.from(`Bearer ${secret}`);
     return received.length === expected.length && timingSafeEqual(received, expected);
   };
-  const summarize = session => ({ id: session.id, pid:session.pty?.pid??null, title: session.title, cols: session.cols, rows: session.rows, exitCode: session.exitCode, accountId: session.accountId, kind: session.kind ?? "terminal" });
+  const summarize = session => ({ inputProtocol:BINARY_TERMINAL_INPUT_PROTOCOL, id: session.id, pid:session.pty?.pid??null, title: session.title, cols: session.cols, rows: session.rows, exitCode: session.exitCode, accountId: session.accountId, kind: session.kind ?? "terminal" });
   const broadcast = (session, message) => {
     for (const socket of sockets) if (socket.sessionId === session.id) sendBounded(socket, message);
   };
@@ -181,13 +182,13 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
         const result = await safeGitRead(exec,route === '/git/diff'?['diff','--','.']:['status','--short'],{allowedRoot:ROOT,cwd:ROOT,env:process.env,maxBuffer:1024*1024,timeout:10000});
         return json(response, 200, { text: result.stdout });
       }
-      const match = route.match(/^\/sessions\/(\d+)\/(input|resize|stop)$/);
+      const match = route.match(/^\/sessions\/(\d+)\/(input|input-binary|resize|stop)$/);
       if (match && request.method === 'POST') {
         const session = sessions.get(Number(match[1]));
         if (!session || session.exitCode != null) throw new Error('Session not running');
         const args = await body(request, 64 * 1024);
         if (match[2] === 'stop') session.pty.kill();
-        if (match[2] === 'input') { if (typeof args.data !== 'string') throw new Error('Invalid input'); session.pty.write(args.data); }
+        if (match[2] === 'input' || match[2] === 'input-binary') { if (typeof args.data !== 'string') throw new Error('Invalid input'); session.pty.write(decodeTerminalInput(args.data,match[2]==='input-binary'?'latin1':undefined)); }
         if (match[2] === 'resize') {
           if (!Number.isInteger(args.cols) || args.cols < 1 || args.cols > 512 || !Number.isInteger(args.rows) || args.rows < 1 || args.rows > 256) throw new Error('Invalid geometry');
           session.pty.resize(args.cols, args.rows); session.cols = args.cols; session.rows = args.rows;

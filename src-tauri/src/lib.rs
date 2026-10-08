@@ -712,6 +712,7 @@ pub fn run() {
             pty::pty_renderer_sessions,
             pty::pty_renderer_events,
             pty::pty_write,
+            pty::pty_write_binary,
             pty::pty_ack,
             pty::pty_resize,
             pty::pty_kill,

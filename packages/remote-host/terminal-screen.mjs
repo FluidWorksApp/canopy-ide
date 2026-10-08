@@ -1,3 +1,4 @@
+import {trackMouseEncoding} from './terminal-mouse-modes.mjs';
 // One bounded server-side terminal per live PTY. Reattachments restore cells,
 // never replay an arbitrary tail of cursor-motion escape sequences.
 import headless from '@xterm/headless';
@@ -9,7 +10,7 @@ export class TerminalScreen {
   constructor(cols=120,rows=40){
     this.term=new Terminal({cols,rows,scrollback:1000,allowProposedApi:true});
     this.term.loadAddon(new unicode.Unicode11Addon());this.term.unicode.activeVersion='11';
-    this.serializer=new SerializeAddon();this.term.loadAddon(this.serializer);
+    this.mouseModes=trackMouseEncoding(this.term);this.serializer=new SerializeAddon();this.term.loadAddon(this.serializer);
     this.end=0;this.pending=0;this.operations=0;this.tail=Promise.resolve();this.disposed=false;
   }
   enqueue(bytes,action){
@@ -19,16 +20,16 @@ export class TerminalScreen {
     this.tail=next.catch(()=>{}).finally(()=>{this.pending-=bytes;this.operations--;});return next;
   }
   write(bytes,reset=false,cols=this.term.cols,rows=this.term.rows){return this.enqueue(bytes.length,async()=>{
-    if(reset)this.term.reset();this.term.resize(cols,rows);
+    if(reset){this.mouseModes.reset();this.term.reset();}this.term.resize(cols,rows);
     const start=this.end;await new Promise(resolve=>this.term.write(bytes,resolve));this.end+=bytes.length;
     return {t:'data',b64:Buffer.from(bytes).toString('base64'),start,end:this.end,cols,rows};
   });}
   serialize(){
-    for(const scrollback of [1000,500,250,125,0]){const bytes=Buffer.from(this.serializer.serialize({scrollback}));if(bytes.length<=512*1024)return Buffer.concat([Buffer.from([0]),bytes]).toString('base64');}
+    for(const scrollback of [1000,500,250,125,0]){const bytes=Buffer.from(this.mouseModes.serialize(this.serializer,{scrollback}));if(bytes.length<=512*1024)return Buffer.concat([Buffer.from([0]),bytes]).toString('base64');}
     throw Error('Terminal screen exceeds restore capacity');
   }
   snapshot(){return this.enqueue(0,()=>({t:'snapshot',reset:true,gap:false,b64:this.serialize(),start:this.end,end:this.end,cols:this.term.cols,rows:this.term.rows}));}
-  dispose(){this.disposed=true;this.term.dispose();}
+  dispose(){this.disposed=true;this.mouseModes.dispose();this.term.dispose();}
 }
 export function terminalScreens(secret){
   const screens=new Map();
