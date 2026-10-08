@@ -1,3 +1,5 @@
+import {prepareScratchVolume,scratchVolume} from './scratch-storage.mjs';
+import {scratchDockerEnv} from './scratch-environment.mjs';
 import {pullWorkspaceImage,workspaceImageReference,dockerTimeout} from './image-release.mjs';
 import {removeStaleWorkspaceImages,containerdFreeBytes} from './image-retention.mjs';
 import {memorySwapMiB} from './workspace-swap.mjs';
@@ -63,10 +65,11 @@ export class DockerWorkspaces {
   runtimes = new Map();
   migrationCleanupRequired = new Set();
   migrationHelperCleanupRequired = new Set();
-  constructor({ secret, image = 'canopy-workspace:0.1.0', docker = dockerCommand, registry = [], readHost = hostMemory, verifyCapacity = verifyCapacityGroup, readResources = hostResources, releaseChannel, resolveRelease, upgradeDirectory,resourceAdmission=action=>action(),authorizeAdmission,retainImages=false,freeBytes=containerdFreeBytes,log=message=>console.warn(message) }) {
+  constructor({ scratchRoot, secret, image = 'canopy-workspace:0.1.0', docker = dockerCommand, registry = [], readHost = hostMemory, verifyCapacity = verifyCapacityGroup, readResources = hostResources, releaseChannel, resolveRelease, upgradeDirectory,resourceAdmission=action=>action(),authorizeAdmission,retainImages=false,freeBytes=containerdFreeBytes,log=message=>console.warn(message) }) {
     // retainImages (managed hosts): pull space preflight plus removal of old
     // workspace images and settled rollback containers. Off for local hosts,
     // whose locally built image cannot be pulled again.
+    this.scratchRoot=scratchRoot;
     this.retainImages=retainImages;this.freeBytes=freeBytes;this.log=log;this.prepullTarget=undefined;
     this.secret = secret; this.image = image; this.docker = docker; this.registry = registry; this.readHost = readHost; this.verifyCapacity = verifyCapacity; this.readResources = readResources;
     this.releaseChannel=releaseChannel;this.resolveRelease=resolveRelease;this.upgradeDirectory=upgradeDirectory;
@@ -262,6 +265,7 @@ export class DockerWorkspaces {
     const projectWritable=!sharedVolume||workspace.sharedProjects==='rw'&&!workspace.readOnly;
     let image=releaseImage??workspace.ownerImage??this.image;
     const projects=projectMounts(workspace);
+    const scratch=this.scratchRoot?scratchVolume(workspace,this.scratchRoot):null;
     if(workspace.cgroupParent!=null&&!/^canopy-[a-z0-9]+\.slice$/.test(workspace.cgroupParent))throw Error('Invalid capacity group');
     if(workspace.cgroupParent)await this.verifyCapacity(workspace);
     const name = `canopy-ws-${workspace.id}`;
@@ -288,6 +292,15 @@ export class DockerWorkspaces {
     // memory x (1 + swapRatio) limit until normalized below.
     const legacySwap=!!existing&&workspace.swapMiB!=null&&Number.isInteger(existing.HostConfig?.Memory)&&existing.HostConfig.MemorySwap===Math.round(existing.HostConfig.Memory/1048576*(1+(workspace.swapRatio??0.75)))*1048576;
     if (existing) {
+      // Older running containers keep their original mounts and environment.
+      // Normal image replacement adds scratch without interrupting live jobs.
+      const mountedScratch=existing.Mounts?.filter(m=>m.Destination==='/scratch')??[];
+      const hasScratch=mountedScratch.length===1;
+      if(mountedScratch.length>1||hasScratch&&(!scratch||mountedScratch[0].Type!=='volume'||mountedScratch[0].Name!==scratch.name||mountedScratch[0].RW!==true)||
+         !hasScratch&&existing.Config.Env?.some(e=>e.startsWith('CANOPY_SCRATCH_DIR=')))throw Error('Workspace scratch configuration differs');
+      if(hasScratch){
+        for(let i=1,args=scratchDockerEnv();i<args.length;i+=2)if(!existing.Config.Env?.includes(args[i]))throw Error('Workspace scratch environment differs');
+      }
       if (existing.Config.Labels?.['canopy.workspace'] !== workspace.id ||
           existing.Config.Image !== image ||
           !existing.Config.Env?.includes(`CANOPY_RUNNER_TOKEN=${this.token(workspace.id)}`) ||
@@ -311,8 +324,9 @@ export class DockerWorkspaces {
           !hasNoNewPrivileges(existing.HostConfig.SecurityOpt) ||
           existing.Mounts?.some(mount => mount.Type !== 'volume') ||
           JSON.stringify(existing.Mounts?.map(m => [m.Destination, m.Name, m.RW]).sort()) !==
-            JSON.stringify([['/workspace', projectVolume, projectWritable], ['/home/agent', `canopy-home-${storageId}`, true], ...workspace.accounts.map(id => [`/accounts/${id}`, `canopy-account-${id}`, false]), ...projects].sort())) throw new Error('Workspace container configuration differs; administrator action required');
+            JSON.stringify([['/workspace', projectVolume, projectWritable], ['/home/agent', `canopy-home-${storageId}`, true], ...workspace.accounts.map(id => [`/accounts/${id}`, `canopy-account-${id}`, false]), ...projects, ...(hasScratch?[['/scratch',scratch.name,true]]:[])].sort())) throw new Error('Workspace container configuration differs; administrator action required');
       if(!existing.State.Running&&!resume)throw Error('Workspace runtime is stopped. Resume the workspace to continue');
+      if(hasScratch)await prepareScratchVolume(workspace,{root:this.scratchRoot,docker:this.docker,image});
       if(release&&existing.Image!==release.imageId){
         try{return await upgradeRuntimeImage(workspace,existing,release,{docker:this.docker,journal:imageUpgradeJournal(this.upgradeDirectory,workspace.id),launch:reference=>this.ensure(workspace,{releaseImage:reference}),verify:waitForRuntimeReady});}
         catch(error){this.runtimes.delete(workspace.id);if(!error.imageUpgradeRolledBack)this.migrationCleanupRequired.add(workspace.id);throw error;}
@@ -335,6 +349,7 @@ export class DockerWorkspaces {
       }
       if (!existing.State.Running) await this.docker(['start', name]);
     } else {
+      if(scratch)await prepareScratchVolume(workspace,{root:this.scratchRoot,docker:this.docker,image});
       await prepareProjectVolumes(workspace,{docker:this.docker,image:this.image});
       if (this.registry.length && !workspace.cgroupParent && workspace.memoryMiB > growthCapacity(workspace, await this.resourceSnapshot(this.registry, false), await this.readHost())) throw Error('Workspace minimum exceeds available host capacity');
       const network = `canopy-net-${workspace.id}`;
@@ -354,6 +369,7 @@ export class DockerWorkspaces {
         '--security-opt', 'no-new-privileges:true', '--shm-size', '256m',
         '--publish', '127.0.0.1::8080', '--env', `CANOPY_RUNNER_TOKEN=${this.token(workspace.id)}`,
         '--env', `CANOPY_WORKSPACE_ID=${workspace.id}`, '--env', `CANOPY_ACCOUNTS=${workspace.accounts.join(',')}`,
+        ...(scratch?[...scratchDockerEnv(),'--mount',`type=volume,source=${scratch.name},target=/scratch,volume-nocopy`]:[]),
         '--mount', `type=volume,source=${projectVolume},target=/workspace${projectWritable?'':',readonly'}`,
         '--mount', `type=volume,source=canopy-home-${storageId},target=/home/agent`,
         ...accounts, ...projects.flatMap(([target,source,writable])=>['--mount',`type=volume,source=${source},target=${target}${writable?'':',readonly'}`]), image]);

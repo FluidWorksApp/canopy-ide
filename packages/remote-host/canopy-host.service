@@ -15,6 +15,11 @@ WorkingDirectory=/opt/canopy-host
 ExecStartPre=+/usr/bin/systemd-tmpfiles --create /opt/canopy-host/canopy-runtime.tmpfiles.conf
 Environment=CANOPY_HOST_CONFIG=/etc/canopy-host/host.json
 Environment=CANOPY_HOST_STATE=/var/lib/canopy-host
+Environment=CANOPY_WORKSPACE_SCRATCH_ROOT=/var/lib/canopy-scratch
+# Lives on the VM root disk, outside /srv/canopy. StateDirectory remains
+# writable under ProtectSystem even when managed bootstrap resets ReadWritePaths.
+StateDirectory=canopy-scratch
+StateDirectoryMode=0711
 ExecStart=/usr/bin/node /opt/canopy-host/gateway.mjs
 Restart=on-failure
 RestartSec=5

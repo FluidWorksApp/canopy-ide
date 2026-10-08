@@ -59,6 +59,13 @@ describe("opensLink", () => {
 });
 
 describe("terminalFileLinks", () => {
+  it("finds a scratch log path inside the displayed shell command", () => {
+    const path = "/scratch/relay-android-env/build-fix.log";
+    const prefix = "grep -E '^> Task|^BUILD|^e:' ";
+    expect(terminalFileLinks(`${prefix}${path} | tail -12; git diff --check`))
+      .toEqual([{ path, start: prefix.length, end: prefix.length + path.length, line: undefined }]);
+  });
+
   it("finds a quoted screenshot path containing spaces", () => {
     const path =
       "/var/folders/x/T/TemporaryItems/Screenshot 2026-08-18 at 6.28.15 PM.png";

@@ -53,7 +53,7 @@ RUN bash /usr/local/lib/canopy/install-agents.sh verify && rm -rf /tmp/locks
 # Canopy's own runtime and code change most often.
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --cache /tmp/npm-cache --no-audit --no-fund && rm -rf /tmp/npm-cache
-COPY browser-streams.mjs opencode-usage.mjs shared-git-launch.mjs shared-agent-launch.mjs git-identity.mjs activity.mjs agent-workspace.mjs agent-usage.mjs runner.mjs http.mjs history.mjs language.mjs native.mjs git-read.mjs terminal-screen.mjs agent-accounts.mjs profiles.mjs workspace-metrics.mjs open-url.mjs git-source.mjs git-clone.mjs file-write.mjs file-upload.mjs file-search.mjs session-processes.mjs session-digests.mjs session-transfer.mjs agent-integrations.mjs agent-events.mjs agent-mcp.mjs mcp-servers.mjs ./
+COPY workspace-file-paths.mjs scratch-environment.mjs browser-streams.mjs opencode-usage.mjs shared-git-launch.mjs shared-agent-launch.mjs git-identity.mjs activity.mjs agent-workspace.mjs agent-usage.mjs runner.mjs http.mjs history.mjs language.mjs native.mjs git-read.mjs terminal-screen.mjs agent-accounts.mjs profiles.mjs workspace-metrics.mjs open-url.mjs git-source.mjs git-clone.mjs file-write.mjs file-upload.mjs file-search.mjs session-processes.mjs session-digests.mjs session-transfer.mjs agent-integrations.mjs agent-events.mjs agent-mcp.mjs mcp-servers.mjs ./
 COPY chrome-stream/ ./chrome-stream/
 RUN chmod 755 /opt/canopy/open-url.mjs && ln -sf /opt/canopy/open-url.mjs /usr/local/bin/xdg-open
 RUN usermod --login agent --home /home/agent --move-home node && groupmod --new-name agent node && mkdir /workspace && chown agent:agent /workspace

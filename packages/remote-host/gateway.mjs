@@ -1,3 +1,4 @@
+import {SCRATCH_ROOT} from './scratch-storage.mjs';
 import {hostResourceAdmission,RESOURCE_ADMISSION_PROTOCOL} from './resource-admission.mjs';
 import {quarantineImageUpgrades} from './image-upgrade.mjs';
 import {quarantineInterruptedMigrations} from './migration-startup.mjs';
@@ -438,7 +439,7 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   const credentialTickets=credentialVault?await CredentialTickets.initialize(path.join(state,'credential-ticket-journal'),secret):undefined;
   const sharedAccounts=credentialVault?new SharedAccounts(credentialVault):undefined;
   const authority=runtimeAuthority(config.managedSession?.runtimePolicyUrl,config.managedSession);
-  const workspaces = new DockerWorkspaces({ secret, image: process.env.CANOPY_WORKSPACE_IMAGE, registry: config.workspaces,releaseChannel:process.env.CANOPY_WORKSPACE_IMAGE,resolveRelease:authority?workspace=>authority.release({...workspace,id:workspace.parentWorkspaceId??workspace.id}):undefined,upgradeDirectory:path.join(state,'image-upgrades'),authorizeAdmission:config.managedSession?runtime=>{const parent=config.workspaces.find(w=>w.id===(runtime.parentWorkspaceId??runtime.id));return !!parent&&!!authority&&authority(parent);}:undefined,resourceAdmission:process.env.CANOPY_RESOURCE_ADMISSION_LOCK?hostResourceAdmission(process.env.CANOPY_RESOURCE_ADMISSION_LOCK,{timeoutMs:45000}):action=>action(),retainImages:!!config.managedSession&&!!process.env.CANOPY_WORKSPACE_IMAGE });
+  const workspaces = new DockerWorkspaces({ scratchRoot:process.env.CANOPY_WORKSPACE_SCRATCH_ROOT??(config.managedSession?SCRATCH_ROOT:undefined), secret, image: process.env.CANOPY_WORKSPACE_IMAGE, registry: config.workspaces,releaseChannel:process.env.CANOPY_WORKSPACE_IMAGE,resolveRelease:authority?workspace=>authority.release({...workspace,id:workspace.parentWorkspaceId??workspace.id}):undefined,upgradeDirectory:path.join(state,'image-upgrades'),authorizeAdmission:config.managedSession?runtime=>{const parent=config.workspaces.find(w=>w.id===(runtime.parentWorkspaceId??runtime.id));return !!parent&&!!authority&&authority(parent);}:undefined,resourceAdmission:process.env.CANOPY_RESOURCE_ADMISSION_LOCK?hostResourceAdmission(process.env.CANOPY_RESOURCE_ADMISSION_LOCK,{timeoutMs:45000}):action=>action(),retainImages:!!config.managedSession&&!!process.env.CANOPY_WORKSPACE_IMAGE });
   await quarantineImageUpgrades(path.join(state,'image-upgrades'),workspaces);
   // Managed hosts keep the current workspace release on the retained disk, so a
   // container start never waits for a multi-gigabyte pull.
