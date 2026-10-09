@@ -278,8 +278,11 @@ organization move, deletion or `team_delivery` change.
 
 What `canopy-serviced` does where the sections above leave a choice open.
 
-- **Credentials.** `POST .../terminals` returns `{token, ptyId}`. `ptyId` is a
-  service-assigned number, stable per `requestId`. Re-minting an unbound
+- **Credentials.** `POST .../terminals` returns `{token, ptyId:0}`; `bind`
+  returns `{ptyId}`, which is the runner session id — the number the agent's
+  `CANOPY_PTY` and the IDE already use. Unbound credentials are not
+  addressable. `GET /ctx/snapshot` lists the bound live terminals as the one
+  project `canopy_agents` reads. Re-minting an unbound
   `requestId` replaces its token, and bind is idempotent for the same
   `{sessionId, pid}`. Only SHA-256 hashes of tokens are stored
   (`ws/<ws>/terminals.json`, 0600). At startup and whenever `runnerUrl`

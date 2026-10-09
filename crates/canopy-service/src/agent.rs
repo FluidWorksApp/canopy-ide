@@ -34,6 +34,7 @@ pub struct AgentState {
 pub fn router(state: AgentState) -> Router {
     Router::new()
         .route("/ctx/identity", get(identity))
+        .route("/ctx/snapshot", get(snapshot))
         .route("/ctx/tools", get(tools))
         .route("/ctx/claims", get(claims_list).post(claims_post))
         .route("/ctx/mesh", post(mesh_op))
@@ -102,6 +103,43 @@ async fn identity(State(state): State<AgentState>, headers: HeaderMap) -> Respon
             "attemptId": null,
             "workspace": state.workspace.id,
             "project": state.workspace.project_id(),
+        }),
+    )
+}
+
+/// The workspace as the one project canopy_agents reads: its live, bound
+/// agent terminals, keyed by the runner session id their CANOPY_PTY carries.
+async fn snapshot(State(state): State<AgentState>, headers: HeaderMap) -> Response {
+    if caller(&state, &headers).is_none() {
+        return unauthorized();
+    }
+    let ws = &state.workspace;
+    let agents: Vec<serde_json::Value> = ws
+        .terminals
+        .all()
+        .into_iter()
+        .filter(|t| t.live() && t.session_id.is_some())
+        .map(|t| {
+            serde_json::json!({
+                "ptyId": t.pty_id,
+                "instance": ws.instance,
+                "dir": WORKSPACE_ROOT,
+                "name": t.name,
+                "agent": t.agent,
+                "task": t.task,
+                "status": t.status,
+            })
+        })
+        .collect();
+    json(
+        200,
+        serde_json::json!({
+            "projects": [{
+                "id": ws.project_id(),
+                "name": ws.registration.read().unwrap().name,
+                "roots": [WORKSPACE_ROOT],
+                "agents": agents,
+            }],
         }),
     )
 }
@@ -552,7 +590,19 @@ fn send_error(error: SendError) -> Response {
     }
 }
 
+/// No terminal is addressable until the runner exists to bind it.
+fn runner_ready(ws: &Workspace) -> Result<(), Response> {
+    if ws.runner_terminals.runner.read().unwrap().url.is_none() {
+        return Err(unavailable(
+            "not-ready",
+            "this workspace's container is not running yet",
+        ));
+    }
+    Ok(())
+}
+
 fn target_by_id(ws: &Workspace, id: u32) -> Result<TerminalRecord, Response> {
+    runner_ready(ws)?;
     ws.terminals.by_pty(id).ok_or_else(|| {
         reply(
             404,
@@ -680,6 +730,9 @@ async fn message_agent(ws: &Arc<Workspace>, who: &TerminalRecord, act: Action) -
             Err(response) => return response,
         }
     } else if let Some(name) = act.name.as_deref() {
+        if let Err(response) = runner_ready(ws) {
+            return response;
+        }
         match ws.terminals.by_name(name) {
             Ok(t) => t,
             Err(error) => return reply(404, error),

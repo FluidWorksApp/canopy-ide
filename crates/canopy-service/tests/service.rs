@@ -57,6 +57,27 @@ async fn the_credential_is_the_caller_and_everything_else_is_503() {
     assert_eq!(me["ptyId"], ada_pty);
     assert_eq!(me["instance"], format!("remote-{WS}"));
     assert_eq!(me["cwd"], "/workspace");
+    assert_eq!((ada_pty, bob_pty), (11, 12));
+
+    let (status, roster) = daemon.agent(WS, &ada, "GET", "/ctx/snapshot", None).await;
+    assert_eq!(status, 200);
+    let project = &roster["projects"][0];
+    assert_eq!(project["id"], format!("ws:{WS}"));
+    let agents: Vec<_> = project["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["ptyId"].as_u64().unwrap(),
+                a["name"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        agents,
+        vec![(11, "Ada".to_string()), (12, "Bob".to_string())]
+    );
 
     let (_, tools) = daemon.agent(WS, &ada, "GET", "/ctx/tools", None).await;
     let supported = tools["supportedTools"].as_array().unwrap();
@@ -101,7 +122,6 @@ async fn the_credential_is_the_caller_and_everything_else_is_503() {
             Some(serde_json::json!({"op":"list"})),
             "laptop-only",
         ),
-        ("/ctx/snapshot", None, "not-implemented"),
         (
             "/ctx/ui",
             Some(serde_json::json!({"op":"workspace"})),

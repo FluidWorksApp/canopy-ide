@@ -204,7 +204,7 @@ async fn bind(
         Ok(record) => {
             ws.events
                 .publish("mesh", "terminals", &record.pty_id.to_string());
-            json(200, serde_json::json!({}))
+            json(200, serde_json::json!({ "ptyId": record.pty_id }))
         }
         Err((status, message)) => error(status, message),
     }

@@ -82,7 +82,6 @@ impl TerminalRecord {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TerminalFile {
-    next_pty_id: u32,
     terminals: Vec<TerminalRecord>,
 }
 
@@ -125,7 +124,8 @@ impl TerminalRegistry {
     }
 
     /// Mint (or, for a retried request id that never bound, re-mint) the
-    /// credential a spawn will carry. The pty id is stable per request id.
+    /// credential a spawn will carry. Its pty id is 0 until bind adopts the
+    /// runner's session id, the number the agent's CANOPY_PTY and the IDE use.
     pub fn mint(&self, request: MintRequest) -> Result<(String, TerminalRecord), (u16, String)> {
         if !valid_request_id(&request.request_id) {
             return Err((400, "requestId must be 8-128 of [A-Za-z0-9:-]".into()));
@@ -152,11 +152,10 @@ impl TerminalRegistry {
                 existing.clone()
             }
             None => {
-                file.next_pty_id += 1;
                 let record = TerminalRecord {
                     request_id: request.request_id,
                     token_sha256: hash,
-                    pty_id: file.next_pty_id,
+                    pty_id: 0,
                     agent: request.agent,
                     name: request.name,
                     task: request.task,
@@ -198,6 +197,10 @@ impl TerminalRegistry {
             (Some(_), _) => return Err((409, "that terminal is bound to another session".into())),
             _ => {}
         }
+        record.pty_id = u32::try_from(session_id)
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or((400, "sessionId must be a positive 32-bit id".to_string()))?;
         record.session_id = Some(session_id);
         record.pid = Some(pid);
         record.bound_ms = Some(now_ms());
@@ -250,7 +253,7 @@ impl TerminalRegistry {
             .unwrap()
             .terminals
             .iter()
-            .find(|t| t.pty_id == pty_id && t.live())
+            .find(|t| t.pty_id == pty_id && t.session_id.is_some() && t.live())
             .cloned()
     }
 
@@ -262,7 +265,7 @@ impl TerminalRegistry {
         let matches: Vec<&TerminalRecord> = file
             .terminals
             .iter()
-            .filter(|t| t.live())
+            .filter(|t| t.live() && t.session_id.is_some())
             .filter(|t| {
                 t.name
                     .as_deref()
@@ -289,7 +292,7 @@ impl TerminalRegistry {
         let Some(record) = file
             .terminals
             .iter_mut()
-            .find(|t| t.pty_id == pty_id && t.live())
+            .find(|t| t.pty_id == pty_id && t.session_id.is_some() && t.live())
         else {
             return false;
         };
@@ -409,10 +412,15 @@ mod tests {
         let registry = TerminalRegistry::open(path.clone(), "remote-w".into());
         let (token, record) = mint(&registry, "req-00001");
         let (other, second) = mint(&registry, "req-00002");
-        assert_ne!(record.pty_id, second.pty_id);
-        assert_eq!(registry.identify(&token).unwrap().pty_id, record.pty_id);
+        assert_eq!((record.pty_id, second.pty_id), (0, 0));
+        assert!(registry.by_pty(0).is_none());
+        assert_eq!(
+            registry.identify(&token).unwrap().request_id,
+            record.request_id
+        );
         assert!(registry.identify("not-a-token").is_none());
-        registry.bind("req-00001", 7, 4242).ok().unwrap();
+        assert_eq!(registry.bind("req-00001", 7, 4242).ok().unwrap().pty_id, 7);
+        assert_eq!(registry.by_pty(7).unwrap().request_id, "req-00001");
         assert!(registry.bind("req-00001", 8, 1).is_err());
         assert!(!std::fs::read_to_string(&path).unwrap().contains(&token));
 
@@ -421,7 +429,7 @@ mod tests {
         reopened.revoke("req-00001", "exit").unwrap();
         assert!(reopened.identify(&token).is_none());
         assert!(reopened.identify(&other).is_some());
-        let (_, third) = mint(&reopened, "req-00003");
-        assert_eq!(third.pty_id, 3);
+        assert!(reopened.by_pty(7).is_none());
+        assert!(reopened.bind("req-00002", 0, 1).is_err());
     }
 }

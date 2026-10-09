@@ -335,9 +335,11 @@ impl Daemon {
             )
             .await;
         assert_eq!(status, 200, "{body}");
+        assert_eq!(minted["ptyId"], 0);
+        assert_eq!(body["ptyId"], session);
         (
             minted["token"].as_str().unwrap().to_string(),
-            minted["ptyId"].as_u64().unwrap() as u32,
+            body["ptyId"].as_u64().unwrap() as u32,
         )
     }
 }
