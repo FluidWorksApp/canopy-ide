@@ -31,6 +31,14 @@ export function remoteItems<T=Record<string,unknown>>(store:HarnessStoreName,pro
 }
 export function subscribeRemoteHarness(listener:(store:HarnessStoreName)=>void){listeners.add(listener);return()=>{listeners.delete(listener);};}
 export function resetRemoteHarnessForTest(){sources.clear();}
+/** Local mesh history plus every remote service's, oldest first. Remote ids and
+ *  reply pointers are namespaced by workspace so they never collide with local ones. */
+export function withRemoteMesh<T extends {id:string;at_ms:number;reply_to?:string|null}>(local:T[]):T[]{
+ const remote=remoteItems<T>('mesh');if(!remote.length)return local;
+ const ns=(workspace:string,id:string)=>`${workspaceProjectId(workspace)}/${id}`;
+ const rows=remote.filter(r=>typeof r.item.at_ms==='number').map(r=>({...r.item,id:ns(r.workspace,r.item.id),...(r.item.reply_to?{reply_to:ns(r.workspace,r.item.reply_to)}:{})}));
+ return [...local,...rows].sort((a,b)=>a.at_ms-b.at_ms);
+}
 /** A project's local rows plus what remote services reported for it; a remote row never replaces a local one with the same id. */
 export function withRemote<T extends {id:string}>(store:HarnessStoreName,projectId:string,local:T[]):T[]{
  const remote=remoteItems<T>(store,projectId);if(!remote.length)return local;
