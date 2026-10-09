@@ -47,14 +47,6 @@ import {
  *  Ember. `migrateTheme` moves anyone still holding the id. */
 export type Theme = "auto" | SkinId;
 
-/** A Slack identity the companion takes requests from. `me` is the owner and
- *  the only one who may approve the companion's actions; a `teammate` may ask. */
-export interface SlackPerson {
-  slackUserId: string;
-  label: string;
-  role: "me" | "teammate";
-}
-
 /** A stored theme id, as a Theme — mapping the retired "custom" onto what it
  *  actually rendered as. Custom was the base skin plus an accent, and the
  *  accent lives on separately, so Gotham is not an approximation of what that
@@ -307,9 +299,6 @@ export interface Settings {
    *  and switching back returns to the right conversation rather than losing
    *  both. */
   companionSessions: Record<string, string>;
-  /** Who may talk to the companion from Slack (slackBridge.ts). Empty means
-   *  nobody, even with Slack connected: an unlinked person is never a guess. */
-  slackPeople: SlackPerson[];
 
   /** Which mascot the app wears (mascots.ts). Stored as an id rather than
    *  anything drawable, so a build that adds or drops one reads an old
@@ -639,7 +628,6 @@ export const DEFAULTS: Settings = {
   // the two stay in agreement.
   companionSpot: { x: 0.97, y: 0.86 },
   companionSessions: {},
-  slackPeople: [],
   // The literal, not `DEFAULT_MASCOT`: mascots.ts reads settings, so importing
   // a *value* back from it would be a live cycle evaluated while this very
   // object is being built. The type import below is erased and safe, and

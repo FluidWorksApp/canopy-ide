@@ -4841,43 +4841,24 @@ export async function ptyStopAndWait(id: number): Promise<void> {
 
 export const chromeStreamTicket = (sessionId:string) => invoke<string>('chrome_stream_ticket',{sessionId});
 
-// ---------- Slack (slack.rs) ----------
+// ---------- Slack (the hub on canopyide.dev; docs/slack-hub-protocol.md) ----------
 
-export interface SlackStatus {
+export interface SlackHubStatus {
   configured: boolean;
-  connected: boolean;
-  team: string | null;
-  botUserId: string | null;
-  error: string | null;
+  installs: { team: string; teamName: string }[];
+  linked: { team: string; teamName: string; slackUser: string }[];
 }
-export interface SlackMessage {
-  channel: string;
-  channelType: string;
-  user: string;
-  text: string;
-  ts: string;
-  threadTs: string | null;
-  mention: boolean;
-}
-export interface SlackAction {
-  actionId: string;
-  value: string;
-  user: string;
-  channel: string;
-  messageTs: string;
-}
-export const slackStatus = () => invoke<SlackStatus>("slack_status");
-export const slackConfigure = (appToken: string, botToken: string) =>
-  invoke<void>("slack_configure", { appToken, botToken });
-export const slackDisconnect = () => invoke<void>("slack_disconnect");
-export const slackPost = (channel: string, threadTs: string | null, text: string, blocks?: unknown[]) =>
-  invoke<string>("slack_post", { channel, threadTs, text, blocks: blocks ?? null });
-export const slackUpdate = (channel: string, ts: string, text: string, blocks?: unknown[]) =>
-  invoke<void>("slack_update", { channel, ts, text, blocks: blocks ?? null });
-export const slackUserName = (user: string) => invoke<string>("slack_user_name", { user });
-export const onSlackStatus = (cb: (s: SlackStatus) => void): Promise<UnlistenFn> =>
-  listen<SlackStatus>("slack:status", (event) => cb(event.payload));
-export const onSlackMessage = (cb: (m: SlackMessage) => void): Promise<UnlistenFn> =>
-  listen<SlackMessage>("slack:message", (event) => cb(event.payload));
-export const onSlackAction = (cb: (a: SlackAction) => void): Promise<UnlistenFn> =>
-  listen<SlackAction>("slack:action", (event) => cb(event.payload));
+export type SlackHubItem =
+  | {
+      id: string;
+      kind: "message";
+      senderLabel: string;
+      senderRole: "me" | "teammate";
+      channelType: "im" | "channel";
+      text: string;
+      created: number;
+    }
+  | { id: string; kind: "answer"; proposalId: string; accepted: boolean; by: string };
+/** One action against the account's Slack hub, with the signed-in device's credential. */
+export const slackHub = <T>(action: string, body: Record<string, unknown> = {}) =>
+  invoke<T>("canopy_account_request", { route: "/api/slack", body: { action, ...body } });

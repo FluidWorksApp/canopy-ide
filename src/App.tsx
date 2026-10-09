@@ -3085,8 +3085,8 @@ export default function App() {
     [],
   );
   const startCompanionRef = useRef(launchCompanion);
-  // Slack reaches the companion only through slackBridge's rules; with no
-  // tokens in the Keychain, slack.rs never connects and this only listens.
+  // Slack requests arrive from the hub on canopyide.dev for the signed-in
+  // account; with nothing linked this only checks every few minutes.
   useEffect(() => startSlack(), []);
   startCompanionRef.current = launchCompanion;
 

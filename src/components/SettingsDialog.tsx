@@ -32,7 +32,6 @@ import {
   type DictationWaveStyle,
   type Hotkey,
   type Settings,
-  type SlackPerson,
   type TabSwitchMode,
   type Theme,
 } from "../settings";
@@ -52,8 +51,7 @@ import { drawWave } from "../waveStyles";
 import { useEscape, useEscapeLayer } from "../useEscape";
 import { TRACKERS, setTrackerKey, trackerKey } from "../trackers";
 import * as ipc from "../ipc";
-import { linkedPeople } from "../slackBridge";
-import { slackManifest } from "../slackManifest";
+import { slackStatusChanged } from "../slackLive";
 import { VaultSettings } from "./VaultSettings";
 import { PlaywrightTokenSetting } from "./PlaywrightTokenSetting";
 import { availableMonoFonts, fontLabel, fontStack } from "../fonts";
@@ -449,181 +447,102 @@ function CompanionSettings({
               </Button>
             </Field>
           </Row>
-          <SlackSettings s={s} patch={patch} companion={name} />
+          <SlackSettings companion={name} />
         </>
       )}
     </Item>
   );
 }
 
-/** The companion in Slack: the app the user creates from our manifest, the two
- *  tokens it hands back (kept in the Keychain by slack.rs, never in settings),
- *  and who may talk to it (slackBridge.ts enforces the list). */
-function SlackSettings({
-  s,
-  patch,
-  companion,
-}: {
-  s: Settings;
-  patch: (p: Partial<Settings>) => void;
-  companion: string;
-}) {
-  const [status, setStatus] = useState<ipc.SlackStatus | null>(null);
-  const [appToken, setAppToken] = useState("");
-  const [botToken, setBotToken] = useState("");
-  const [busy, setBusy] = useState(false);
+/** The companion in Slack, through Canopy's one Slack app (the hub on
+ *  canopyide.dev). Adding it to a Slack workspace and linking a Slack identity
+ *  both happen in the browser, started from this signed-in Canopy, so the hub
+ *  knows the identity is really this account's. No token ever reaches here. */
+function SlackSettings({ companion }: { companion: string }) {
+  const [status, setStatus] = useState<ipc.SlackHubStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [draft, setDraft] = useState<SlackPerson>({ slackUserId: "", label: "", role: "teammate" });
-  useEffect(() => {
-    void ipc.slackStatus().then(setStatus).catch(() => {});
-    const off = ipc.onSlackStatus(setStatus);
-    return () => void off.then((fn) => fn());
+  const [busy, setBusy] = useState(false);
+  const linkedCount = useRef(0);
+  const refresh = useCallback(() => {
+    void ipc
+      .slackHub<ipc.SlackHubStatus>("status")
+      .then((next) => {
+        // A link finished in the browser: start answering without waiting
+        // for the poller's next idle check.
+        if (next.linked.length !== linkedCount.current) slackStatusChanged();
+        linkedCount.current = next.linked.length;
+        setStatus(next);
+        setError(null);
+      })
+      .catch((err) => setError(String(err)));
   }, []);
-  const people = linkedPeople(s.slackPeople);
-  const hasOwner = people.some((p) => p.role === "me");
-  const connect = async () => {
+  useEffect(() => {
+    refresh();
+    // The browser round-trip finishes outside this window; look again when
+    // the user comes back to it.
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [refresh]);
+  const open = async (action: "install-url" | "link-url") => {
     setBusy(true);
-    setError(null);
     try {
-      await ipc.slackConfigure(appToken, botToken);
-      setAppToken("");
-      setBotToken("");
+      const { url } = await ipc.slackHub<{ url: string }>(action);
+      if (!/^https:\/\/(canopyide\.dev|slack\.com)\//.test(url)) throw new Error("Canopy returned an unexpected link");
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      await openUrl(url);
     } catch (err) {
       setError(String(err));
     } finally {
       setBusy(false);
     }
   };
-  const addPerson = () => {
-    const id = draft.slackUserId.trim().toUpperCase();
-    if (!/^[UW][A-Z0-9]{2,30}$/.test(id) || people.some((p) => p.slackUserId === id)) return;
-    patch({ slackPeople: [...people, { ...draft, slackUserId: id, label: draft.label.trim() || id }] });
-    setDraft({ slackUserId: "", label: "", role: "teammate" });
+  const unlink = async () => {
+    setBusy(true);
+    try {
+      await ipc.slackHub("unlink");
+      slackStatusChanged();
+      refresh();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
   };
-  const state = !status?.configured
-    ? "Not connected."
-    : status.connected
-      ? `Connected to ${status.team ?? "Slack"}.`
-      : status.error
-        ? `Not connected: ${status.error}`
-        : "Connecting…";
+  const linked = status?.linked ?? [];
+  const state = error
+    ? error
+    : !status
+      ? "Checking…"
+      : !status.configured
+        ? "Slack is not available yet."
+        : linked.length
+          ? `Linked as you in ${linked.map((l) => l.teamName).join(", ")}. DM or mention ${companion} there.`
+          : "Not linked.";
 
   return (
     <div className="set-gap">
       <div className="set-item-desc">
-        <strong>Slack.</strong> Direct-message or mention {companion} in Slack. Only the people below reach it; a
-        teammate may ask, and only you can approve what it changes.
+        <strong>Slack.</strong> Talk to {companion} from Slack while Canopy is signed in. Teammates you've given
+        session access can mention you and {companion} together; only you can approve what it changes.
       </div>
       <Row>
         <span className="set-hint">{state}</span>
-        {status?.configured && (
-          <Button onClick={() => void ipc.slackDisconnect()} title="Forget the Slack tokens">
-            Disconnect
-          </Button>
-        )}
       </Row>
-      {!status?.configured && (
-        <>
-          <Row>
-            <span className="set-hint">
-              1. At api.slack.com/apps choose Create New App → From a manifest, and paste this.
-            </span>
-            <Button
-              onClick={() => void copyText(slackManifest(companion)).then((ok) => setCopied(ok))}
-            >
-              {copied ? "Copied" : "Copy manifest"}
+      {status?.configured && (
+        <Row>
+          <Button onClick={() => void open("install-url")} disabled={busy} title="Add Canopy to a Slack workspace and link yourself">
+            Add to Slack
+          </Button>
+          <Button onClick={() => void open("link-url")} disabled={busy} title="Canopy is already in your Slack workspace: link your Slack identity">
+            Link my Slack
+          </Button>
+          {linked.length > 0 && (
+            <Button onClick={() => void unlink()} disabled={busy}>
+              Unlink
             </Button>
-          </Row>
-          <Row>
-            <span className="set-hint">
-              2. Install it to your workspace, then paste the two tokens it gives you.
-            </span>
-          </Row>
-          <Row className="set-gap">
-            <Field label="App-level token">
-              <input
-                type="password"
-                className="set-wide"
-                placeholder="xapp-…"
-                aria-label="Slack app-level token"
-                value={appToken}
-                onChange={(e) => setAppToken(e.target.value)}
-              />
-            </Field>
-            <Field label="Bot token">
-              <input
-                type="password"
-                className="set-wide"
-                placeholder="xoxb-…"
-                aria-label="Slack bot token"
-                value={botToken}
-                onChange={(e) => setBotToken(e.target.value)}
-              />
-            </Field>
-            <Field label=" ">
-              <Button onClick={() => void connect()} disabled={busy || !appToken || !botToken}>
-                {busy ? "Checking…" : "Connect"}
-              </Button>
-            </Field>
-          </Row>
-          {error && <div className="set-hint">{error}</div>}
-        </>
-      )}
-      <div className="set-item-desc">
-        People. A Slack member ID is under the person's profile → ⋯ → Copy member ID.
-        {!hasOwner && " Add yourself as Me first: nothing can be approved from Slack without you."}
-      </div>
-      {people.map((p) => (
-        <Row key={p.slackUserId}>
-          <span className="set-hint">
-            {p.label} · {p.slackUserId} · {p.role === "me" ? "Me (can approve)" : "Teammate (can ask)"}
-          </span>
-          <Button
-            onClick={() => patch({ slackPeople: people.filter((x) => x.slackUserId !== p.slackUserId) })}
-            aria-label={`Remove ${p.label}`}
-          >
-            Remove
-          </Button>
+          )}
         </Row>
-      ))}
-      <Row className="set-gap">
-        <Field label="Member ID">
-          <TextInput
-            width="sm"
-            value={draft.slackUserId}
-            placeholder="U0123ABCD"
-            aria-label="Slack member ID"
-            onChange={(e) => setDraft({ ...draft, slackUserId: e.target.value })}
-          />
-        </Field>
-        <Field label="Name">
-          <TextInput
-            width="sm"
-            value={draft.label}
-            aria-label="Their name"
-            onChange={(e) => setDraft({ ...draft, label: e.target.value })}
-          />
-        </Field>
-        <Field label="Role">
-          <Select
-            width="sm"
-            value={draft.role}
-            aria-label="Their role"
-            onChange={(e) => setDraft({ ...draft, role: e.target.value as SlackPerson["role"] })}
-          >
-            <option value="me" disabled={hasOwner}>
-              Me
-            </option>
-            <option value="teammate">Teammate</option>
-          </Select>
-        </Field>
-        <Field label=" ">
-          <Button onClick={addPerson} disabled={!draft.slackUserId.trim()}>
-            Add
-          </Button>
-        </Field>
-      </Row>
+      )}
     </div>
   );
 }

@@ -54,7 +54,6 @@ mod research;
 mod selftest;
 mod session_transfer;
 mod shortcuts;
-mod slack;
 mod snapshot;
 mod spot;
 mod stores;
@@ -545,7 +544,6 @@ pub fn run() {
         .manage(vault::Vault::default())
         .manage(clipboard::Clipboard::default())
         .manage(companion::CompanionManager::default())
-        .manage(slack::SlackManager::default())
         .manage(structured_runner::StructuredRunnerManager::default())
         .manage(tasks::TaskStore::default())
         .manage(workflow::WorkflowStore::default())
@@ -555,7 +553,6 @@ pub fn run() {
             // Before anything writes a store: the change channel needs a handle
             // to speak on, and a write that happens first would be silent.
             change::install(app.handle().clone());
-            slack::start(app.handle());
 
             // ONNX Runtime is loaded dynamically on every platform (Cargo.toml
             // builds ort with `load-dynamic`). Point ort at the libonnxruntime
@@ -652,12 +649,6 @@ pub fn run() {
             selftest::selftest_spawn_remote,
             selftest::selftest_store_contains,
             companion::companion_spawn,
-            slack::slack_status,
-            slack::slack_configure,
-            slack::slack_disconnect,
-            slack::slack_post,
-            slack::slack_update,
-            slack::slack_user_name,
             companion::companion_write,
             companion::companion_kill,
             companion::companion_status,

@@ -1,183 +1,132 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  APPROVE_ACTION,
-  DENY_ACTION,
-  UNLINKED_REPLY_WINDOW_MS,
-  createSlackBridge,
-  linkedPeople,
-  requestText,
-  slackEnvelope,
-} from "./slackBridge";
-import type { SlackPerson } from "./settings";
-import type { SlackMessage } from "./ipc";
+import { createSlackBridge, slackEnvelope } from "./slackBridge";
+import type { SlackHubItem } from "./ipc";
 
-const ME: SlackPerson = { slackUserId: "UOWNER1", label: "Sam", role: "me" };
-const MATE: SlackPerson = { slackUserId: "UMATE01", label: "Priya", role: "teammate" };
-
-function setup(over: { ask?: (shown: string, wire: string) => Promise<{ text: string; failed: boolean }> } = {}) {
-  let clock = 1_000;
+function setup(ask?: (shown: string, wire: string) => Promise<{ text: string; failed: boolean }>) {
   let id = 0;
-  const posts: { channel: string; threadTs: string | null; text: string; blocks?: unknown[] }[] = [];
-  const updates: { channel: string; ts: string; text: string }[] = [];
   const deps = {
-    people: () => [ME, MATE],
-    ownerName: () => "Sam",
     companionName: () => "Ash",
-    ask: vi.fn(over.ask ?? (async () => ({ text: "done", failed: false }))),
-    post: vi.fn(async (channel: string, threadTs: string | null, text: string, blocks?: unknown[]) => {
-      posts.push({ channel, threadTs, text, blocks });
-      return `ts${posts.length}`;
-    }),
-    update: vi.fn(async (channel: string, ts: string, text: string) => {
-      updates.push({ channel, ts, text });
-    }),
-    now: () => clock,
-    newId: () => `p${++id}`,
+    ask: vi.fn(ask ?? (async () => ({ text: "done", failed: false }))),
+    reply: vi.fn(async () => {}),
+    approval: vi.fn(async () => {}),
+    cancel: vi.fn(async () => {}),
+    newId: () => `proposal-${++id}`,
   };
-  const bridge = createSlackBridge(deps);
-  return { bridge, deps, posts, updates, tick: (ms: number) => (clock += ms) };
+  return { bridge: createSlackBridge(deps), deps };
 }
 
-const dm = (user: string, text: string, over: Partial<SlackMessage> = {}): SlackMessage => ({
-  channel: "D1",
+const message = (id: string, text: string, over: Partial<Extract<SlackHubItem, { kind: "message" }>> = {}): SlackHubItem => ({
+  id,
+  kind: "message",
+  senderLabel: "Sam",
+  senderRole: "me",
   channelType: "im",
-  user,
   text,
-  ts: "1.1",
-  threadTs: null,
-  mention: false,
+  created: 1,
   ...over,
 });
+const flush = async () => {
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+};
 
-describe("who reaches the companion", () => {
-  it("forwards a linked person's request and posts the reply back", async () => {
-    const { bridge, deps, posts } = setup();
-    bridge.onMessage(dm(ME.slackUserId, "what is failing in CI?"));
+describe("requests from the Slack hub", () => {
+  it("runs a request and hands the reply back for its item", async () => {
+    const { bridge, deps } = setup();
+    bridge.receive([message("item-0001", "what is failing in CI?")]);
     await bridge.idle();
     expect(deps.ask).toHaveBeenCalledWith("Slack · Sam: what is failing in CI?", expect.stringContaining("the owner of this Canopy"));
-    expect(posts).toEqual([{ channel: "D1", threadTs: null, text: "done", blocks: undefined }]);
+    expect(deps.reply).toHaveBeenCalledWith("item-0001", "done");
   });
 
-  it("tells an unlinked person once per window and forwards nothing", async () => {
-    const { bridge, deps, posts, tick } = setup();
-    bridge.onMessage(dm("USTRANGE", "rm -rf everything"));
-    bridge.onMessage(dm("USTRANGE", "please"));
+  it("never runs an item twice when its lease brings it back", async () => {
+    const { bridge, deps } = setup();
+    bridge.receive([message("item-0001", "hi")]);
+    bridge.receive([message("item-0001", "hi")]);
     await bridge.idle();
-    expect(deps.ask).not.toHaveBeenCalled();
-    expect(posts).toHaveLength(1);
-    expect(posts[0].text).toMatch(/linked in Canopy/);
-    tick(UNLINKED_REPLY_WINDOW_MS);
-    bridge.onMessage(dm("USTRANGE", "again"));
-    expect(posts).toHaveLength(2);
+    expect(deps.ask).toHaveBeenCalledTimes(1);
   });
 
-  it("answers a channel mention in its thread and strips the mention", async () => {
-    const { bridge, deps, posts } = setup();
-    bridge.onMessage(dm(MATE.slackUserId, "<@UBOT123> review PR 12", { channel: "C9", channelType: "channel", ts: "5.5", mention: true }));
+  it("frames a teammate as not the owner", async () => {
+    const { bridge, deps } = setup();
+    bridge.receive([message("item-0002", "deploy staging", { senderLabel: "Priya", senderRole: "teammate", channelType: "channel" })]);
     await bridge.idle();
-    expect(deps.ask.mock.calls[0][1]).toMatch(/a teammate of Sam — not the owner/);
-    expect(deps.ask.mock.calls[0][1]).toMatch(/\n\nreview PR 12$/);
-    expect(posts[0]).toMatchObject({ channel: "C9", threadTs: "5.5" });
+    expect(deps.ask.mock.calls[0][1]).toMatch(/Priya, a teammate — not the owner.*in a Slack channel/);
+    expect(deps.ask.mock.calls[0][1]).toMatch(/\n\ndeploy staging$/);
   });
 
   it("runs requests one at a time", async () => {
     let release!: () => void;
     const order: string[] = [];
-    const { bridge } = setup({
-      ask: async (shown) => {
-        order.push(`start ${shown}`);
-        if (shown.endsWith("one")) await new Promise<void>((r) => (release = r));
-        order.push(`end ${shown}`);
-        return { text: "ok", failed: false };
-      },
+    const { bridge } = setup(async (shown) => {
+      order.push(`start ${shown}`);
+      if (shown.endsWith("one")) await new Promise<void>((r) => (release = r));
+      order.push(`end ${shown}`);
+      return { text: "ok", failed: false };
     });
-    bridge.onMessage(dm(ME.slackUserId, "one"));
-    bridge.onMessage(dm(ME.slackUserId, "two"));
-    await Promise.resolve();
-    await Promise.resolve();
+    bridge.receive([message("item-0001", "one"), message("item-0002", "two")]);
+    await flush();
     release();
     await bridge.idle();
     expect(order).toEqual(["start Slack · Sam: one", "end Slack · Sam: one", "start Slack · Sam: two", "end Slack · Sam: two"]);
   });
 
-  it("says so when the companion cannot be reached", async () => {
-    const { bridge, posts } = setup({ ask: async () => { throw new Error("not running"); } });
-    bridge.onMessage(dm(ME.slackUserId, "hi"));
+  it("answers in Slack when the companion cannot be reached", async () => {
+    const { bridge, deps } = setup(async () => {
+      throw new Error("not running");
+    });
+    bridge.receive([message("item-0003", "hi")]);
     await bridge.idle();
-    expect(posts[0].text).toBe("I couldn't reach Ash: not running");
+    expect(deps.reply).toHaveBeenCalledWith("item-0003", "I couldn't reach Ash: not running");
   });
 });
 
-describe("approvals from Slack", () => {
+describe("approvals in Slack", () => {
   async function midTurn() {
     let finish!: () => void;
-    const ctx = setup({
-      ask: () => new Promise((r) => (finish = () => r({ text: "finished", failed: false }))),
-    });
-    ctx.bridge.onMessage(dm(MATE.slackUserId, "deploy staging"));
-    await Promise.resolve();
-    await Promise.resolve();
+    const ctx = setup(() => new Promise((r) => (finish = () => r({ text: "finished", failed: false }))));
+    ctx.bridge.receive([message("item-0009", "deploy")]);
+    await flush();
     return { ...ctx, finish: () => finish() };
   }
 
   it("is only offered during a Slack turn", () => {
-    const { bridge } = setup();
-    expect(bridge.confirm({ action: "Start a server" })).toBeNull();
+    expect(setup().bridge.confirm({ action: "Start a server" })).toBeNull();
   });
 
-  it("only the owner can approve, even when a teammate asked", async () => {
-    const { bridge, posts, updates, finish } = await midTurn();
+  it("posts to the turn's item and resolves on the hub's answer", async () => {
+    const { bridge, deps, finish } = await midTurn();
     const ask = bridge.confirm({ action: "Start a server", project: "api" })!;
-    expect(posts[0].blocks).toBeDefined();
-    const answered = vi.fn();
-    void ask.answer.then(answered);
-    bridge.onAction({ actionId: APPROVE_ACTION, value: "p1", user: MATE.slackUserId, channel: "D1", messageTs: "ts1" });
-    await Promise.resolve();
-    expect(answered).not.toHaveBeenCalled();
-    expect(posts.at(-1)!.text).toMatch(/Only Sam can approve/);
-    bridge.onAction({ actionId: APPROVE_ACTION, value: "p1", user: ME.slackUserId, channel: "D1", messageTs: "ts1" });
+    expect(deps.approval).toHaveBeenCalledWith("item-0009", "proposal-1", { action: "Start a server", project: "api" });
+    bridge.receive([{ id: "answer-001", kind: "answer", proposalId: "proposal-1", accepted: true, by: "Sam" }]);
     await expect(ask.answer).resolves.toEqual({ accepted: true });
-    await Promise.resolve();
-    expect(updates[0].text).toMatch(/Approved by Sam/);
     finish();
+    await bridge.idle();
+    expect(deps.cancel).not.toHaveBeenCalled();
   });
 
-  it("an answer in Canopy closes the Slack question, and a finished turn denies what is left", async () => {
-    const { bridge, finish, updates } = await midTurn();
+  it("an answer in Canopy closes the Slack question; a finished turn denies what is left", async () => {
+    const { bridge, deps, finish } = await midTurn();
     const first = bridge.confirm({ action: "A" })!;
-    first.cancel(false);
-    await expect(first.answer).resolves.toEqual({ accepted: false });
+    first.cancel(true);
+    await expect(first.answer).resolves.toEqual({ accepted: true });
+    expect(deps.cancel).toHaveBeenCalledWith("proposal-1", true);
     const second = bridge.confirm({ action: "B" })!;
     finish();
     await expect(second.answer).resolves.toEqual({ accepted: false });
     await bridge.idle();
-    await Promise.resolve();
-    expect(updates.map((u) => u.text)).toEqual(["A — Declined in Canopy.", "B — Expired — the request finished without an answer."]);
+    expect(deps.cancel).toHaveBeenCalledWith("proposal-2", false);
   });
 
-  it("a deny press denies, and unknown buttons do nothing", async () => {
+  it("ignores an answer for a question nobody is waiting on", async () => {
     const { bridge, finish } = await midTurn();
-    const ask = bridge.confirm({ action: "X" })!;
-    bridge.onAction({ actionId: "other", value: "p1", user: ME.slackUserId, channel: "D1", messageTs: "t" });
-    bridge.onAction({ actionId: DENY_ACTION, value: "p1", user: ME.slackUserId, channel: "D1", messageTs: "t" });
-    await expect(ask.answer).resolves.toEqual({ accepted: false });
+    bridge.receive([{ id: "answer-002", kind: "answer", proposalId: "proposal-x", accepted: true, by: "Sam" }]);
     finish();
+    await bridge.idle();
   });
 });
 
-describe("helpers", () => {
-  it("never turns a malformed people list into an allow-all", () => {
-    expect(linkedPeople(null)).toEqual([]);
-    expect(linkedPeople([{ slackUserId: "*", role: "me", label: "x" }, { slackUserId: "U1234", role: "admin", label: "y" }, ME])).toEqual([ME]);
-  });
-
-  it("strips mentions and caps a request", () => {
-    expect(requestText("<@U123ABC>  hi <@W99> there ")).toBe("hi  there");
-    expect(requestText("x".repeat(9000))).toHaveLength(8000);
-  });
-
-  it("frames the owner and a teammate differently", () => {
-    expect(slackEnvelope(ME, "im", "Sam")).toMatch(/owner of this Canopy\), in a direct message/);
-    expect(slackEnvelope(MATE, "channel", "Sam")).toMatch(/not the owner.*needs Sam's approval/);
+describe("the envelope", () => {
+  it("names the owner and where they wrote", () => {
+    expect(slackEnvelope({ senderLabel: "Sam", senderRole: "me", channelType: "im" })).toMatch(/Sam, the owner of this Canopy, in a direct message/);
   });
 });
