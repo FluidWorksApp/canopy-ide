@@ -17,6 +17,7 @@ import {projectMounts} from './project-mounts.mjs';
 import {prepareProjectVolumes} from './project-volumes.mjs';
 import {migrateProjectVolume} from './migrate-project-volume.mjs';
 import {checkpointOwner} from './owner-checkpoint.mjs';
+import {serviceMountArgs,verifyServiceMount,volumeMounts} from './service-mount.mjs';
 const exec = promisify(execFile);
 
 
@@ -68,11 +69,14 @@ export class DockerWorkspaces {
   runtimes = new Map();
   migrationCleanupRequired = new Set();
   migrationHelperCleanupRequired = new Set();
-  constructor({ scratchRoot, secret, image = 'canopy-workspace:0.1.0', docker = dockerCommand, registry = [], readHost = hostMemory, verifyCapacity = verifyCapacityGroup, readResources = hostResources, releaseChannel, resolveRelease, upgradeDirectory,resourceAdmission=action=>action(),authorizeAdmission,retainImages=false,freeBytes=containerdFreeBytes,log=message=>console.warn(message) }) {
+  constructor({ scratchRoot, secret, image = 'canopy-workspace:0.1.0', docker = dockerCommand, registry = [], readHost = hostMemory, verifyCapacity = verifyCapacityGroup, readResources = hostResources, releaseChannel, resolveRelease, upgradeDirectory,resourceAdmission=action=>action(),authorizeAdmission,retainImages=false,freeBytes=containerdFreeBytes,log=message=>console.warn(message),serviceMount }) {
     // retainImages (managed hosts): pull space preflight plus removal of old
     // workspace images and settled rollback containers. Off for local hosts,
     // whose locally built image cannot be pulled again.
     this.scratchRoot=scratchRoot;
+    // Owner runtimes only: serviceMount(workspace) prepares the host socket
+    // directory and answers true when the container may bind it.
+    this.serviceMount=serviceMount;
     this.retainImages=retainImages;this.freeBytes=freeBytes;this.log=log;this.prepullTarget=undefined;
     this.secret = secret; this.image = image; this.docker = docker; this.registry = registry; this.readHost = readHost; this.verifyCapacity = verifyCapacity; this.readResources = readResources;
     this.releaseChannel=releaseChannel;this.resolveRelease=resolveRelease;this.upgradeDirectory=upgradeDirectory;
@@ -294,7 +298,9 @@ export class DockerWorkspaces {
     // Containers created before the fixed swap allowance keep the legacy
     // memory x (1 + swapRatio) limit until normalized below.
     const legacySwap=!!existing&&workspace.swapMiB!=null&&Number.isInteger(existing.HostConfig?.Memory)&&existing.HostConfig.MemorySwap===Math.round(existing.HostConfig.Memory/1048576*(1+(workspace.swapRatio??0.75)))*1048576;
+    let harness=false;
     if (existing) {
+      harness=verifyServiceMount(workspace,existing.Mounts);
       // Older running containers keep their original mounts and environment.
       // Normal image replacement adds scratch without interrupting live jobs.
       const mountedScratch=existing.Mounts?.filter(m=>m.Destination==='/scratch')??[];
@@ -325,8 +331,8 @@ export class DockerWorkspaces {
           existing.HostConfig.NetworkMode !== `canopy-net-${workspace.id}` || existing.Config.User !== '1000:1000' ||
           !existing.HostConfig.CapDrop?.includes('ALL') ||
           !hasNoNewPrivileges(existing.HostConfig.SecurityOpt) ||
-          existing.Mounts?.some(mount => mount.Type !== 'volume') ||
-          JSON.stringify(existing.Mounts?.map(m => [m.Destination, m.Name, m.RW]).sort()) !==
+          volumeMounts(existing.Mounts).some(mount => mount.Type !== 'volume') ||
+          JSON.stringify(volumeMounts(existing.Mounts).map(m => [m.Destination, m.Name, m.RW]).sort()) !==
             JSON.stringify([['/workspace', projectVolume, projectWritable], ['/home/agent', `canopy-home-${storageId}`, true], ...workspace.accounts.map(id => [`/accounts/${id}`, `canopy-account-${id}`, false]), ...projects, ...(hasScratch?[['/scratch',scratch.name,true]]:[])].sort())) throw new Error('Workspace container configuration differs; administrator action required');
       if(!existing.State.Running&&!resume)throw Error('Workspace runtime is stopped. Resume the workspace to continue');
       if(hasScratch)await prepareScratchVolume(workspace,{root:this.scratchRoot,docker:this.docker,image});
@@ -361,6 +367,10 @@ export class DockerWorkspaces {
         if (!error.missingResource && !/no such|network .* not found/i.test(String(error.stderr))) throw error;
         await this.docker(['network', 'create', '--opt', `com.docker.network.bridge.name=cnp${createHash('sha256').update(workspace.id).digest('hex').slice(0,12)}`, '--label', `canopy.workspace=${workspace.id}`, network]);
       }
+      if(this.serviceMount&&!workspace.memberId&&!workspace.parentWorkspaceId){
+        try{harness=await this.serviceMount(workspace)===true;}
+        catch(error){this.log(`Canopy service unavailable for ${workspace.id}: ${error.message}`);}
+      }
       const accounts = workspace.accounts.flatMap(account => ['--mount', `type=volume,source=canopy-account-${account},target=/accounts/${account},readonly`]);
       await this.docker(['run', '-d', '--name', name, '--label', `canopy.workspace=${workspace.id}`,
         ...(this.releaseChannel?['--label',`canopy.image-channel=${this.releaseChannel}`]:[]),
@@ -375,13 +385,14 @@ export class DockerWorkspaces {
         ...(scratch?[...scratchDockerEnv(),'--mount',`type=volume,source=${scratch.name},target=/scratch,volume-nocopy`]:[]),
         '--mount', `type=volume,source=${projectVolume},target=/workspace${projectWritable?'':',readonly'}`,
         '--mount', `type=volume,source=canopy-home-${storageId},target=/home/agent`,
-        ...accounts, ...projects.flatMap(([target,source,writable])=>['--mount',`type=volume,source=${source},target=${target}${writable?'':',readonly'}`]), image]);
+        ...accounts, ...projects.flatMap(([target,source,writable])=>['--mount',`type=volume,source=${source},target=${target}${writable?'':',readonly'}`]),
+        ...(harness?serviceMountArgs(workspace):[]), image]);
     }
     const inspected = JSON.parse((await this.docker(['inspect', name])).stdout)[0];
     const port = inspected.NetworkSettings.Ports?.['8080/tcp']?.[0];
     if (port?.HostIp !== '127.0.0.1' || !/^\d+$/.test(port.HostPort)) throw new Error('Workspace endpoint is not private');
     const address = inspected.NetworkSettings.Networks?.[`canopy-net-${workspace.id}`]?.IPAddress;
     if (!address || !/^\d+\.\d+\.\d+\.\d+$/.test(address)) throw new Error('Workspace network unavailable');
-    return { url: `http://127.0.0.1:${port.HostPort}`, nativeUrl: `http://${address}:8081`, token: this.token(workspace.id) };
+    return { url: `http://127.0.0.1:${port.HostPort}`, nativeUrl: `http://${address}:8081`, token: this.token(workspace.id), ...(harness?{harness:true}:{}) };
   }
 }
