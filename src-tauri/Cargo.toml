@@ -47,6 +47,7 @@ dictation = [
 ]
 
 [dependencies]
+canopy-core = { path = "../crates/canopy-core" }
 # io-util: the MCP client reads its stdio servers a line at a time (AsyncBufReadExt).
 # rt-multi-thread: Tauri already builds its shared runtime multi-threaded, but
 # `blocking::io` names `tokio::task::block_in_place`, which only exists behind

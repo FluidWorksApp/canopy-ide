@@ -76,6 +76,20 @@ jobs:
       - run: npm ci
       - run: npm run licenses:check
 
+  canopy-core:
+    name: Harness core (no Tauri or system webview)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./crates/canopy-core -> target"
+      - run: cargo test --locked --manifest-path crates/canopy-core/Cargo.toml
+      - run: cargo fmt --manifest-path crates/canopy-core/Cargo.toml --check
+
   rust:
     name: Rust (cargo test)
     runs-on: ubuntu-22.04

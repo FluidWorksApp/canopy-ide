@@ -36,7 +36,7 @@ const read = (f: string) => readFileSync(join(SRC, f), "utf8");
 const STORES = [
   {
     id: "mesh",
-    file: "mesh.rs",
+    file: "../../crates/canopy-core/src/mesh.rs",
     variant: "Mesh",
     module: "meshLinks.ts",
     boundary: "record",
@@ -136,7 +136,7 @@ describe("the store change channel", () => {
           body,
           `${store.file}: ${fn} is ${store.id}'s write boundary and must call change::pulse, ` +
             `or a write by an agent or the portal reaches no open surface`,
-        ).toContain("change::pulse");
+        ).toContain(store.id === "mesh" ? "self.events.publish" : "change::pulse");
       }
     }
   });
@@ -151,7 +151,7 @@ describe("the store change channel", () => {
   });
 
   it("routes every Rust store variant to a frontend handler", () => {
-    const change = read("change.rs");
+    const change = read("../../crates/canopy-core/src/events.rs");
     const enumBody = change.slice(change.indexOf("pub enum Store"));
     const variants = [...enumBody.slice(0, enumBody.indexOf("}")).matchAll(/^\s{4}(\w+),/gm)].map(
       (m) => m[1],
@@ -188,7 +188,7 @@ describe("the store change channel", () => {
         if (!readVerbs.some((v) => name.includes(v))) continue;
         const body = fnBody(src, name) ?? "";
         expect(
-          body.includes("change::pulse"),
+          body.includes("change::pulse") || body.includes("self.events.publish"),
           `${store.file}: ${name} looks like a read but pulses — that is a refetch loop`,
         ).toBe(false);
       }

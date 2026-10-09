@@ -615,6 +615,7 @@ dependencies = [
  "base64 0.22.1",
  "block2",
  "cairo-rs",
+ "canopy-core",
  "chacha20poly1305",
  "chrono",
  "cpal",
@@ -672,6 +673,17 @@ dependencies = [
  "windows 0.61.3",
  "windows-core 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "canopy-core"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
 ]
 
 [[package]]

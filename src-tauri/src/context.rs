@@ -298,71 +298,7 @@ impl Caller {
     }
 }
 
-/// One agent's advisory claim over a set of paths, and everything that has
-/// happened to it since.
-///
-/// A release used to delete the row, so the two questions the user asks of a
-/// claim after the fact — when did that agent let go, and what did it hold up
-/// while it had it — had no answer anywhere. Ending a claim now writes its
-/// ending down instead.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct Claim {
-    /// Identity for the detail tab. The owner cannot be it: an agent that
-    /// claims, releases and claims again is two claims with one owner, and a
-    /// tab opened on the first must not silently start showing the second.
-    pub id: String,
-    pub paths: Vec<String>,
-    /// Who holds it, for a human to read — the agent's cwd plus whatever name
-    /// it gave itself. Display only: it is supplied by the caller, and every
-    /// agent in a shared checkout writes the same one.
-    pub owner: String,
-    /// Who holds it, for the rules to compare. Derived from the caller's
-    /// credential (see `AgentIdentity::key`), never from the body.
-    ///
-    /// Splitting this from `owner` is the whole fix for the defect that made
-    /// claims useless where they mattered most: the conflict test was
-    /// `owner != owner`, and two agents sharing a checkout had the same owner
-    /// string — so they never collided with each other, and the second one's
-    /// claim silently superseded the first's.
-    pub owner_key: String,
-    /// The terminal behind the claim, so a claim can be swept when its agent
-    /// dies and resolved to a live session without parsing a display string.
-    pub pty_id: Option<u32>,
-    pub instance: Option<String>,
-    #[serde(default)]
-    pub process_id: Option<u32>,
-    #[serde(default)]
-    pub process_started_at: Option<u64>,
-    #[serde(default)]
-    pub run_id: Option<String>,
-    #[serde(default)]
-    pub attempt_id: Option<String>,
-    pub note: Option<String>,
-    pub at_ms: u64,
-    /// None while it is held; this is the only thing that decides whether a
-    /// claim still blocks anyone.
-    pub released_at_ms: Option<u64>,
-    /// How it ended: `agent` (it released), `canopy` (dropped from the UI, for
-    /// an agent that died holding it) or `superseded` (the same owner claimed
-    /// again). The wording is the frontend's business; this is the fact.
-    pub released_by: Option<String>,
-    /// Claims turned away because they overlapped this one, oldest first. The
-    /// collision is the most useful thing a claim ever records — it is the
-    /// moment two agents wanted the same file — and it used to exist only in a
-    /// 409 body the user never saw.
-    pub refusals: Vec<Refusal>,
-}
-
-/// A claim that was refused, recorded against the claim that refused it.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub struct Refusal {
-    pub owner: String,
-    pub paths: Vec<String>,
-    pub note: Option<String>,
-    pub at_ms: u64,
-    #[serde(default)]
-    pub attempt_id: Option<String>,
-}
+pub use canopy_core::claims::{Claim, Refusal};
 
 /// How many refusals one held claim remembers.
 ///
@@ -392,12 +328,12 @@ impl Default for ContextBridge {
             pending: Mutex::new(HashMap::new()),
             pending_spawns: Mutex::new(HashMap::new()),
             next_op: AtomicU64::new(1),
-            claims: crate::mesh::ClaimStore::load(),
+            claims: crate::mesh::load_claims(),
             disabled_tools: Mutex::new(None),
             agents_may_spawn: AtomicBool::new(true),
             mesh_scopes: Mutex::new(Vec::new()),
             worktree_roots: Mutex::new(HashMap::new()),
-            mesh: crate::mesh::MeshStore::load(),
+            mesh: crate::mesh::load_messages(),
         }
     }
 }
@@ -2822,12 +2758,6 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
-/// How long to wait between typing a message into another agent's terminal and
-/// sending the return that submits it. Matches the delay the desktop uses for
-/// every seeded prompt: long enough that the TUI has settled the text as input
-/// rather than folding the CR into a paste, short enough not to feel deferred.
-const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
-
 /// How a message announces where it came from.
 ///
 /// The receiving agent is otherwise being handed something indistinguishable
@@ -3108,29 +3038,21 @@ fn deliver_line(
     msg_id: String,
     line: &str,
 ) -> Result<(), String> {
-    app.state::<crate::pty::PtyManager>().write(id, line)?;
+    let pending = canopy_core::terminals::PendingDelivery::begin(
+        &*app.state::<crate::pty::PtyManager>(),
+        id,
+        target_cwd,
+        msg_id,
+        line,
+    )?;
     let send = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(SUBMIT_DELAY).await;
-        let submitted = send
-            .state::<crate::pty::PtyManager>()
-            .write(id, "\r")
-            .is_ok();
-        if submitted {
-            send.state::<ContextBridge>().mesh.mark_submitted(&msg_id);
-        }
-        // The user is told either way: an agent reaching into another agent's
-        // session is exactly the "something happened over here" the attention
-        // channel exists for, and it used to happen entirely in silence.
-        let _ = send.emit(
-            "agent:message",
-            serde_json::json!({
-                "id": msg_id,
-                "toPtyId": id,
-                "toCwd": target_cwd,
-                "submitted": submitted,
-            }),
-        );
+        let terminals = send.state::<crate::pty::PtyManager>();
+        let bridge = send.state::<ContextBridge>();
+        let receipt = pending.finish(&*terminals, &bridge.mesh).await;
+        // Preserve the desktop attention event whether submission succeeds or
+        // the child exits during the delay. The core owns the two-write rule.
+        let _ = send.emit("agent:message", receipt);
     });
     Ok(())
 }
