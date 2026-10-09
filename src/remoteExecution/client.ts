@@ -64,6 +64,12 @@ export class RemoteExecutionClient {
     if (!/^[a-z][a-z0-9-]{0,47}$/.test(id)) return Promise.reject(new Error("Invalid workspace"));
     return this.request<T>(`/workspaces/${id}${route}`, args);
   }
+  /** A long-lived workspace response (an SSE stream) with this client's credential; outside the request queue and its timeout. */
+  async open(id: string, route: string, signal: AbortSignal): Promise<Response> {
+    if (!/^[a-z][a-z0-9-]{0,47}$/.test(id)) throw new Error("Invalid workspace");
+    const token = this.resolveToken ? await this.resolveToken() : this.token;
+    return fetch(`${this.endpoint}/v1/workspaces/${id}${route}`, { method: "GET", redirect: "error", headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" }, signal });
+  }
   async streamUrl(id: string, stream: string) {
     const { ticket } = await this.workspace<{ ticket: string }>(id, "/ticket", { stream });
     return `${this.endpoint.replace(/^http/, "ws")}/v1/stream?ticket=${encodeURIComponent(ticket)}`;

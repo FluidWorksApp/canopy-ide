@@ -2,6 +2,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { installHost } from '../host';
 import { savedExecutionMode } from '../executionMode';
 import { NativeWorkspaceHost, type WorkspaceConnection } from './NativeWorkspaceHost';
+import { HarnessStream } from './harnessStream';
 import {renderStartupShell,startupDiagnostic} from './StartupShell';
 import {beginStartupWork,currentStartupWork,boundedStartup} from './startupWork';
 
@@ -24,6 +25,7 @@ export async function initializeWorkspace(epoch=beginStartupWork()) {
     return false;
   }
   installHost(active);
+  active.harness = new HarnessStream(active.client, connection!.workspaceId, { name: connection!.workspaceName }).start();
   startupDiagnostic('connected');
   return true;
 }

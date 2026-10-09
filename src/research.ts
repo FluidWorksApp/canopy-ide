@@ -8,6 +8,7 @@
 // first keystroke instead of after a round trip, and refreshes it whenever the
 // store changes.
 import * as ipc from "./ipc";
+import { subscribeRemoteHarness, withRemote } from "./remoteExecution/harnessStores";
 import { refreshPrLinks } from "./prLinkState";
 
 export type ResearchStatus = ipc.ResearchStatus;
@@ -135,7 +136,10 @@ const cache = new Map<string, ipc.ResearchSummary[]>();
 /** The last known entries for a project. Empty until something has loaded them;
  *  callers that need certainty call `refresh`. */
 export const cached = (projectId: string): ipc.ResearchSummary[] =>
-  cache.get(projectId) ?? [];
+  withRemote("research", projectId, cache.get(projectId) ?? []);
+subscribeRemoteHarness((store) => {
+  if (store === "research") announce();
+});
 
 /** Re-read a project's entries and publish them. */
 export async function refresh(projectId: string): Promise<ipc.ResearchSummary[]> {

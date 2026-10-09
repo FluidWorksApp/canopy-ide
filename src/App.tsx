@@ -4,7 +4,8 @@ import {startBackgroundTeams} from "./teamMessaging/background";
 import {startTeamMessageNotifications} from "./teamMessaging/notifications";
 import {liveTeamSessions,subscribeTeamJobs} from "./teamMessaging/session";
 import {teamName} from "./teamMessaging/unread";
-import {createMeshJobs,type MeshJobs} from "./meshJobs";
+import {createMeshJobs,localRemoteJobs,type MeshJobs} from "./meshJobs";
+import {peekWorkspaceList} from "./remoteExecution/workspaceListCache";
 import {MeshJobInbox} from "./components/MeshJobInbox";
 import {ensureProjectWorkspace,ProjectWorkspaceProgress} from "./remoteExecution/projectWorkspace";
 import {stopIdleProjectWorkspace} from "./remoteExecution/projectIdle";
@@ -843,6 +844,8 @@ export default function App() {
     resolve: resolveAttention,
     now: Date.now,
     newId: () => crypto.randomUUID(),
+    cloudWorkspaces: () => (peekWorkspaceList()?.workspaces ?? []).map((w) => ({ id: w.id, name: w.name })),
+    remoteJobs: localRemoteJobs(),
   });
   const meshJobs = meshJobsRef.current;
   useEffect(() => subscribeTeamJobs((event) => meshJobs.receive(event)), [meshJobs]);

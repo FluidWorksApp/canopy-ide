@@ -117,3 +117,87 @@ Delivery rule in the service: same account as owner → deliver; principal with
 `sessionsInteract` and `teamDelivery:true` → deliver; otherwise refuse with a
 sender-visible reason. Expired snapshot ⇒ only the owner is delivered.
 `teamDelivery` defaults to false; the owner enables it per workspace.
+
+### 6.1 Envelope v2 wire format
+
+Workspace ids are control-plane ids (`ws-<uuid>`); `to.workspace` names the
+workspace the traffic concerns in both directions (a host's `job-status` reply
+carries the job's workspace).
+
+```text
+{version:2, id, kind, from:{team,user,device}, to:{team,user,device,workspace?},
+ created, expires, ephemeral, iv, ciphertext, signature}
+header  = JSON.stringify([2, id, [from.team,from.user,from.device],
+                          [to.team,to.user,to.device,to.workspace ?? null],
+                          kind, created, expires, ephemeral.x, ephemeral.y, iv])
+signed  = JSON.stringify([header, ciphertext])      // ECDSA P-256 SHA-256, IEEE-P1363, base64
+key     = HKDF-SHA256(ECDH(ephemeral, recipient.agreement), salt "canopy-im-v1", info header)
+cipher  = AES-256-GCM(key, iv(12 bytes), aad header)
+```
+
+`kind` is one of `chat|mesh|job|job-status`; `to.workspace` is required for
+`mesh`, `job` and `job-status` and must match `^[A-Za-z0-9_-]{1,128}$`. With
+`to.workspace`, `expires - created` is in `(0, 604800000]`; without it the
+envelope keeps the 300000 ms rule. Version 1 is unchanged. Plaintexts:
+
+| Envelope kind | Payload |
+| --- | --- |
+| `chat` | `{kind:"message"\|"receipt"\|"signal", ...}` (person chat stays on v1) |
+| `mesh` | `{kind:"mesh", message:{id, text, target:{ptyId}\|{name}, replyTo?, created}}`; a refusal comes back as `{kind:"mesh-status", status:{messageId, state:"refused", detail, created}}` |
+| `job` | `{kind:"job", job:{id, title, brief, workspace, created, target?:{ptyId}\|{name}}}` |
+| `job-status` | `{kind:"job-status", status:{jobId, state, detail, created}}`; a refused job is `state:"declined"` |
+
+A shared test vector with throwaway keys lives at
+`src/teamMessaging/fixtures/relay-v2-vector.json` (test-only; never real keys).
+
+### 6.2 Host credential and peer actions
+
+Hosts authenticate with the managed workspace key they already hold
+(`managedSession.key`, the control plane's `workspaceSecret(workspaceId)`), using
+the same token shape as `/api/runtime-policy`:
+`base64url(JSON claims) "." base64url(HMAC-SHA256(key, base64url-claims))`,
+claims `{version:1, kind, workspaceId, generation, expires}` (`expires` in Unix
+seconds, at most 120 s ahead). `kind` names the purpose and a token is accepted
+only for it: `workspace-access-snapshot` (snapshot), `peer-host-registration`
+(`register-host`), `peer-relay` (`poll`, `ack`, `directory`, `relay`). The
+workspace's current `generation` must match, which fences a replaced host.
+Endpoints default to `managedSession.runtimePolicyUrl`'s origin; the control
+plane also issues `managedSession.accessSnapshotUrl` and `peersUrl`.
+
+`POST /api/peers` with `Authorization: Bearer <host token>` accepts:
+
+| Action | Body | Result |
+| --- | --- | --- |
+| `register-host` | `{deviceId, keys:{agreement,signing}, workspaceIds:[workspaceId]}`; `workspaceIds` must equal the token's workspace. Optional `{created, proof}` (proof signs `JSON.stringify(["canopy-host-device-v1", workspaceId, deviceId, created, ax, ay, sx, sy])`) is verified when present | `{registered:true}`; the device is owned by the workspace owner, `kind:"host"`, and becomes the only host device serving that workspace (a previous host loses it and is revoked once it serves none) |
+| `poll` | `{deviceId}` | `{envelopes:[{id, envelope, sender:{id,userId,kind,workspaceIds,publicKeys}}]}` (≤100) — only v2 envelopes whose `to.workspace` is the token's workspace, across all teams |
+| `ack` | `{deviceId, ids}` | `{acknowledged:true}` — only that workspace's envelopes |
+| `directory` | `{deviceId, teamId}` | `{members, devices}`; devices carry `kind` and `workspaceIds` |
+| `relay` | `{deviceId, teamId, recipientDevice, envelope}` (v2, `to.workspace` = token workspace) | `{queued:true}` |
+
+Host devices are not team members: their team operations are authorized
+through the workspace owner's active membership of `teamId`, and the token's
+workspace must be in the device's `workspaceIds`. A host relays only to a user
+who currently has access to the workspace.
+
+User-session `directory` returns `devices` (user devices, `kind:"user"`) and
+`hosts`: host devices owned by team members, with `workspaceIds` narrowed to
+workspaces the caller can access (hosts with none are omitted). A user may relay
+to a host device only for a workspace that host serves and the user can access;
+user poll rows carry the same `sender` object. Per-recipient caps are 1000
+envelopes and 32 MiB, checked under the recipient device's row lock (`429`).
+
+### 6.3 Access snapshot wire form
+
+`GET /api/workspace-access-snapshot?workspace=<id>` with the host token returns,
+as the whole body (≤ 64 KiB), `{"payload":"<base64 of the exact UTF-8 JSON
+snapshot bytes>","signature":"<base64 Ed25519 over those bytes>"}`. Verify the
+signature before parsing. The daemon's verify keys are `{"<kid>":"<base64 raw
+32-byte Ed25519 public key>"}`; `GET /api/workspace-access-snapshot?keys=1`
+(no auth) returns exactly that map, and
+`node scripts/access-signing-public-key.mjs` prints it from
+`CANOPY_ACCESS_SIGNING_KEY`/`CANOPY_ACCESS_SIGNING_KID` (website repo).
+`expiresAt - issuedAt` is 15 minutes; refresh every 5 minutes. `projects` is
+`"all"` or the sorted project ids where a single grant allows
+`sessions:interact`. `revision` is `workspace.access_revision`, bumped by
+database triggers on every grant, team/organization membership, ownership,
+organization move, deletion or `team_delivery` change.

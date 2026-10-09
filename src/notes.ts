@@ -14,6 +14,7 @@
 import * as ipc from "./ipc";
 import { refreshPrLinks } from "./prLinkState";
 import { registerStore } from "./stores";
+import { subscribeRemoteHarness, withRemote } from "./remoteExecution/harnessStores";
 
 export type NoteStatus = ipc.NoteStatus;
 
@@ -117,7 +118,10 @@ const cache = new Map<string, ipc.NoteSummary[]>();
 /** The last known notes for a project. Empty until something has loaded them;
  *  callers that need certainty call `refresh`. */
 export const cached = (projectId: string): ipc.NoteSummary[] =>
-  cache.get(projectId) ?? [];
+  withRemote("notes", projectId, cache.get(projectId) ?? []);
+subscribeRemoteHarness((store) => {
+  if (store === "notes") announce();
+});
 
 /** Re-read a project's notes and publish them. */
 export async function refresh(

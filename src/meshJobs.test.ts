@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { createMeshJobs, needsApproval, pickWorkspace, type JobSession, type MeshJobDeps } from "./meshJobs";
+import { createMeshJobs, localRemoteJobs, needsApproval, pickWorkspace, type JobSession, type MeshJobDeps, type RemoteJob } from "./meshJobs";
 import type { Device } from "./teamMessaging/client";
-import type { JobRequest } from "./teamMessaging/jobSchema";
+import type { JobRequest, JobStatus } from "./teamMessaging/jobSchema";
 import type { TeamJobEvent } from "./teamMessaging/session";
 
 const NOW = 1_800_000_000_000;
@@ -177,5 +177,55 @@ describe("targets", () => {
     expect(t.workspaces).toEqual(["api", "web"]);
     expect(t.myMachines).toEqual([{ device: "me-desktop", team: "Core", online: true, lastSeen: seen(1000) }]);
     expect(t.teammates.map((p) => [p.name, p.online])).toEqual([["Bob", true], ["Cara", false]]);
+  });
+});
+
+describe("jobs for a cloud workspace", () => {
+  const WS = "ws-22222222-2222-4222-8222-222222222222";
+  const host = { ...device("host-1", "alice"), kind: "host" as const, workspaceIds: [WS] };
+  const memory = () => {
+    let rows: RemoteJob[] = [];
+    return { load: () => rows, put: (r: RemoteJob) => { rows = [...rows.filter((x) => x.jobId !== r.jobId), r]; }, remove: (id: string) => { rows = rows.filter((x) => x.jobId !== id); }, rows: () => rows };
+  };
+  const cloud = () => [{ id: WS, name: "cloud-api" }];
+  const status = (state: JobStatus["state"], jobId: string, over: Partial<TeamJobEvent> = {}): TeamJobEvent =>
+    ({ kind: "job-status", team: "t1", user: "alice", workspace: WS, sender: { user: "alice", device: "host-1" }, status: { jobId, state, detail: "d", created: NOW }, ...over }) as TeamJobEvent;
+
+  it("sends to the workspace's host device and survives a restart until the final status", async () => {
+    const store = memory();
+    const submitWorkspaceJob = vi.fn(async () => host);
+    const s = session({ hosts: () => [host], submitWorkspaceJob });
+    const { jobs } = setup({ cloudWorkspaces: cloud, remoteJobs: store }, s);
+    const result = await jobs.submit({ brief: "Run the suite", workspace: "cloud-api", agent: "reviewer", ...origin });
+    expect(result).toMatchObject({ status: "sent", workspace: "cloud-api", device: "host-1" });
+    expect(submitWorkspaceJob).toHaveBeenCalledWith(expect.objectContaining({ workspace: WS, target: { name: "reviewer" } }), WS);
+    expect(store.rows()).toHaveLength(1);
+    expect(jobs.targets().cloudWorkspaces).toEqual([{ id: WS, name: "cloud-api", reachable: true }]);
+
+    const restarted = setup({ cloudWorkspaces: cloud, remoteJobs: store }, s);
+    restarted.jobs.receive(status("started", result.jobId, { workspace: "ws-other" }));
+    restarted.jobs.receive(status("started", result.jobId, { sender: { user: "alice", device: "bob-1" } }));
+    expect(restarted.deps.report).not.toHaveBeenCalled();
+    restarted.jobs.receive(status("refused", result.jobId));
+    expect(restarted.deps.report).toHaveBeenCalledWith(7, "inst", result.jobId, expect.stringContaining("refused"));
+    expect(store.rows()).toHaveLength(0);
+  });
+
+  it("ignores jobs that claim to come from a cloud service", () => {
+    const { jobs, deps } = setup({ cloudWorkspaces: cloud });
+    jobs.receive({ ...incoming("alice"), workspace: WS });
+    expect(deps.start).not.toHaveBeenCalled();
+    expect(deps.post).not.toHaveBeenCalled();
+  });
+
+  it("persists records in local storage", () => {
+    const data = new Map<string, string>();
+    const storage = { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => void data.set(k, v) } as Storage;
+    const store = localRemoteJobs("k", () => storage);
+    const row: RemoteJob = { jobId: "job-1234", ptyId: 1, instance: "i", title: "t", workspace: WS, target: "c", team: "t1", device: "host-1", expires: Date.now() + 1000 };
+    store.put(row);
+    expect(localRemoteJobs("k", () => storage).load()).toEqual([row]);
+    store.remove("job-1234");
+    expect(store.load()).toEqual([]);
   });
 });
