@@ -1983,8 +1983,9 @@ fn edit_diagnostics(event: &serde_json::Value) -> Option<String> {
 //
 // A minimal MCP stdio server: one JSON-RPC message per line in, one per line
 // out. Tools proxy to the desktop app's context bridge (context.rs) over
-// loopback HTTP, addressed by the CANOPY_CTX_PORT/CANOPY_CTX_TOKEN env only
-// Canopy's own PTYs export. The registration is user-global, so the server
+// loopback HTTP, or to a host service over a Unix socket, addressed by the
+// CANOPY_CTX_PORT or CANOPY_CTX_SOCKET and CANOPY_CTX_TOKEN env only Canopy's
+// own PTYs export. The registration is user-global, so the server
 // must start cleanly in ANY terminal — outside Canopy the tools simply answer
 // that no IDE is around, instead of the process refusing to run (which the
 // agent CLI would surface as a broken MCP server).
@@ -2202,13 +2203,17 @@ fn relocate_stray_research(session_id: &str, entry_dir: &std::path::Path) {
 /// same machine, the same user, and a value that process was given expressly to
 /// hand to us.
 ///
-/// Bounded, and never a guess: it stops at the first ancestor that has a port,
-/// takes the token from that same process (a port from one instance with a
-/// token from another authenticates against neither), and gives up after a few
-/// levels rather than walking to pid 1.
-fn bridge_env() -> Option<(String, String)> {
-    if let Ok(port) = std::env::var("CANOPY_CTX_PORT") {
-        return Some((port, std::env::var("CANOPY_CTX_TOKEN").unwrap_or_default()));
+/// Bounded, and never a guess: it stops at the first ancestor that has an
+/// address, takes the token from that same process (an address from one
+/// instance with a token from another authenticates against neither), and gives
+/// up after a few levels rather than walking to pid 1.
+fn bridge_env() -> Option<(Endpoint, String)> {
+    if let Some(found) = bridge_from(
+        std::env::var("CANOPY_CTX_SOCKET").ok(),
+        std::env::var("CANOPY_CTX_PORT").ok(),
+        std::env::var("CANOPY_CTX_TOKEN").ok(),
+    ) {
+        return Some(found);
     }
     let mut pid = parent_of(std::process::id())?;
     for _ in 0..8 {
@@ -2291,19 +2296,50 @@ fn parent_of(pid: u32) -> Option<u32> {
     }
 }
 
-/// One process's CANOPY_CTX_PORT/_TOKEN, or None if it has neither.
-fn env_of(pid: u32) -> Option<(String, String)> {
-    let raw = read_environ(pid)?;
+/// Where the bridge listens. A host service hands agents a Unix socket
+/// (`CANOPY_CTX_SOCKET`); the desktop app a loopback port.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Endpoint {
+    Port(String),
+    Socket(String),
+}
+
+/// One process's bridge address and token. The socket wins when both are set:
+/// it is what a service exports, and a stale port beside it is the leftover.
+/// Windows has no socket transport here, so a socket alone is no address.
+fn bridge_from(
+    socket: Option<String>,
+    port: Option<String>,
+    token: Option<String>,
+) -> Option<(Endpoint, String)> {
+    let socket = socket.filter(|path| cfg!(unix) && !path.is_empty());
+    let endpoint = match (socket, port) {
+        (Some(path), _) => Endpoint::Socket(path),
+        (None, Some(port)) => Endpoint::Port(port),
+        (None, None) => return None,
+    };
+    Some((endpoint, token.unwrap_or_default()))
+}
+
+/// One process's CANOPY_CTX_SOCKET/_PORT/_TOKEN, or None if it has no address.
+fn env_of(pid: u32) -> Option<(Endpoint, String)> {
+    bridge_in(read_environ(pid)?)
+}
+
+fn bridge_in(environ: Vec<String>) -> Option<(Endpoint, String)> {
+    let mut socket = None;
     let mut port = None;
     let mut token = None;
-    for entry in raw {
-        if let Some(v) = entry.strip_prefix("CANOPY_CTX_PORT=") {
+    for entry in environ {
+        if let Some(v) = entry.strip_prefix("CANOPY_CTX_SOCKET=") {
+            socket = Some(v.to_string());
+        } else if let Some(v) = entry.strip_prefix("CANOPY_CTX_PORT=") {
             port = Some(v.to_string());
         } else if let Some(v) = entry.strip_prefix("CANOPY_CTX_TOKEN=") {
             token = Some(v.to_string());
         }
     }
-    port.map(|p| (p, token.unwrap_or_default()))
+    bridge_from(socket, port, token)
 }
 
 fn read_environ(pid: u32) -> Option<Vec<String>> {
@@ -5824,9 +5860,9 @@ fn ctx_post(body: serde_json::Value) -> Result<String, String> {
     ctx_request("POST", "/ctx/action", Some(body.to_string()))
 }
 
-/// One request to the app's context bridge. Plain std TCP: it's loopback, the
-/// responses carry Content-Length (Connection: close makes read-to-end
-/// correct), and the hook binary stays dependency-light.
+/// One request to the app's context bridge. Plain std TCP or a Unix socket:
+/// both are local, the responses carry Content-Length (Connection: close makes
+/// read-to-end correct), and the hook binary stays dependency-light.
 fn ctx_request(method: &str, path: &str, body: Option<String>) -> Result<String, String> {
     ctx_request_with_timeout(method, path, body, std::time::Duration::from_secs(5))
 }
@@ -5837,30 +5873,60 @@ fn ctx_request_with_timeout(
     body: Option<String>,
     timeout: std::time::Duration,
 ) -> Result<String, String> {
-    let (port, token) = bridge_env().ok_or(
+    let (endpoint, token) = bridge_env().ok_or(
         "This session isn't running inside a Canopy terminal, so the Canopy \
          context tools are unavailable here.",
     )?;
-    let port: u16 = port.parse().map_err(|_| {
-        "This session isn't running inside a Canopy terminal, so the Canopy \
-         context tools are unavailable here."
-            .to_string()
-    })?;
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).map_err(|e| {
-        format!("Canopy isn't reachable on port {port} ({e}) — is the app still running?")
-    })?;
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
+    request_at(&endpoint, &token, method, path, body, timeout)
+}
+
+fn request_at(
+    endpoint: &Endpoint,
+    token: &str,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
     let body = body.unwrap_or_default();
-    let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\
-         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    std::io::Write::write_all(&mut stream, req.as_bytes()).map_err(|e| e.to_string())?;
-    let mut raw = Vec::new();
-    std::io::Read::read_to_end(&mut stream, &mut raw).map_err(|e| e.to_string())?;
+    let request = |host: &str| {
+        format!(
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    };
+    let raw = match endpoint {
+        Endpoint::Port(port) => {
+            let port: u16 = port.parse().map_err(|_| {
+                "This session isn't running inside a Canopy terminal, so the Canopy \
+                 context tools are unavailable here."
+                    .to_string()
+            })?;
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            let stream = std::net::TcpStream::connect_timeout(&addr, timeout).map_err(|e| {
+                format!("Canopy isn't reachable on port {port} ({e}) — is the app still running?")
+            })?;
+            let _ = stream.set_read_timeout(Some(timeout));
+            let _ = stream.set_write_timeout(Some(timeout));
+            exchange(stream, &request(&format!("127.0.0.1:{port}")))?
+        }
+        #[cfg(unix)]
+        Endpoint::Socket(socket) => {
+            let stream = std::os::unix::net::UnixStream::connect(socket).map_err(|e| {
+                format!("Canopy isn't reachable at {socket} ({e}) — is the service still running?")
+            })?;
+            let _ = stream.set_read_timeout(Some(timeout));
+            let _ = stream.set_write_timeout(Some(timeout));
+            exchange(stream, &request("localhost"))?
+        }
+        #[cfg(not(unix))]
+        Endpoint::Socket(socket) => {
+            return Err(format!(
+                "Canopy is at {socket}, a Unix socket, which this platform cannot reach."
+            ))
+        }
+    };
     let text = String::from_utf8_lossy(&raw);
     let (head, body) = text
         .split_once("\r\n\r\n")
@@ -5872,9 +5938,39 @@ fn ctx_request_with_timeout(
         .unwrap_or("");
     if status == "200" {
         Ok(body.to_string())
+    } else if let Some(message) = unavailable_message(status, body) {
+        Err(message)
     } else {
         Err(format!("Canopy answered {status}: {body}"))
     }
+}
+
+fn exchange<S: std::io::Read + std::io::Write>(
+    mut stream: S,
+    request: &str,
+) -> Result<Vec<u8>, String> {
+    std::io::Write::write_all(&mut stream, request.as_bytes()).map_err(|e| e.to_string())?;
+    let mut raw = Vec::new();
+    std::io::Read::read_to_end(&mut stream, &mut raw).map_err(|e| e.to_string())?;
+    Ok(raw)
+}
+
+/// A service with no IDE behind it refuses a tool it cannot serve with 503 and
+/// `{"error":"unavailable","message":...}`. The message is written for the
+/// agent; the status line and the JSON around it are not.
+fn unavailable_message(status: &str, body: &str) -> Option<String> {
+    if status != "503" {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("error")?.as_str()? != "unavailable" {
+        return None;
+    }
+    value
+        .get("message")?
+        .as_str()
+        .filter(|message| !message.trim().is_empty())
+        .map(str::to_string)
 }
 
 /// Percent-encode a query value (RFC 3986 unreserved characters pass through).
@@ -6124,7 +6220,31 @@ mod tests {
             std::env::set_var("CANOPY_CTX_PORT", "12345");
             std::env::set_var("CANOPY_CTX_TOKEN", "tok");
         }
-        assert_eq!(bridge_env(), Some(("12345".into(), "tok".into())));
+        assert_eq!(
+            bridge_env(),
+            Some((Endpoint::Port("12345".into()), "tok".into()))
+        );
+
+        // A service's socket beside a port is the address to use.
+        unsafe {
+            std::env::set_var("CANOPY_CTX_SOCKET", "/run/canopy-ctx/ctx.sock");
+        }
+        #[cfg(unix)]
+        assert_eq!(
+            bridge_env(),
+            Some((
+                Endpoint::Socket("/run/canopy-ctx/ctx.sock".into()),
+                "tok".into()
+            ))
+        );
+        #[cfg(not(unix))]
+        assert_eq!(
+            bridge_env(),
+            Some((Endpoint::Port("12345".into()), "tok".into()))
+        );
+        unsafe {
+            std::env::remove_var("CANOPY_CTX_SOCKET");
+        }
 
         // A port with no token is still an address worth trying: the token is
         // checked by the bridge, and answering "not inside Canopy" for a
@@ -6132,11 +6252,181 @@ mod tests {
         unsafe {
             std::env::remove_var("CANOPY_CTX_TOKEN");
         }
-        assert_eq!(bridge_env(), Some(("12345".into(), String::new())));
+        assert_eq!(
+            bridge_env(),
+            Some((Endpoint::Port("12345".into()), String::new()))
+        );
 
         unsafe {
             std::env::remove_var("CANOPY_CTX_PORT");
         }
+    }
+
+    /// The ancestor walk reads the same three variables, from one process, so
+    /// a socket and a token never come from two different instances.
+    #[test]
+    fn an_ancestors_socket_and_token_are_taken_together() {
+        let environ = |entries: &[&str]| entries.iter().map(|e| e.to_string()).collect();
+        assert_eq!(
+            bridge_in(environ(&["CANOPY_CTX_PORT=4100", "CANOPY_CTX_TOKEN=t1"])),
+            Some((Endpoint::Port("4100".into()), "t1".into()))
+        );
+        let both = bridge_in(environ(&[
+            "CANOPY_CTX_TOKEN=t2",
+            "CANOPY_CTX_SOCKET=/run/canopy-ctx/ctx.sock",
+            "CANOPY_CTX_PORT=4100",
+        ]));
+        if cfg!(unix) {
+            assert_eq!(
+                both,
+                Some((
+                    Endpoint::Socket("/run/canopy-ctx/ctx.sock".into()),
+                    "t2".into()
+                ))
+            );
+        } else {
+            assert_eq!(both, Some((Endpoint::Port("4100".into()), "t2".into())));
+        }
+        // An empty socket is no address, and nothing at all is not an address.
+        assert_eq!(
+            bridge_in(environ(&["CANOPY_CTX_SOCKET=", "CANOPY_CTX_PORT=4100"])),
+            Some((Endpoint::Port("4100".into()), String::new()))
+        );
+        assert_eq!(bridge_in(environ(&["CANOPY_CTX_TOKEN=t3"])), None);
+        #[cfg(not(unix))]
+        assert_eq!(
+            bridge_in(environ(&["CANOPY_CTX_SOCKET=/run/canopy-ctx/ctx.sock"])),
+            None
+        );
+    }
+
+    /// Reads one HTTP request off `stream` and answers it with `status` and
+    /// `body`, returning what arrived so the test can check it was the same
+    /// request either transport would send.
+    fn answer_one<S: std::io::Read + std::io::Write>(
+        mut stream: S,
+        status: &str,
+        body: &str,
+    ) -> String {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = std::io::Read::read(&mut stream, &mut buf).unwrap();
+            raw.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&raw).to_string();
+            if let Some((head, rest)) = text.split_once("\r\n\r\n") {
+                let length: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Content-Length: "))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if rest.len() >= length || n == 0 {
+                    break;
+                }
+            }
+            if n == 0 {
+                break;
+            }
+        }
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        );
+        std::io::Write::write_all(&mut stream, response.as_bytes()).unwrap();
+        String::from_utf8_lossy(&raw).to_string()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_service_socket_carries_the_same_request_as_the_port() {
+        let dir = std::env::temp_dir().join(format!("canopy-hook-sock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("ctx.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            answer_one(stream, "200 OK", "{\"notes\":[]}")
+        });
+
+        let reply = request_at(
+            &Endpoint::Socket(socket.to_string_lossy().into_owned()),
+            "tok",
+            "POST",
+            "/ctx/notes",
+            Some("{\"action\":\"list\"}".into()),
+            std::time::Duration::from_secs(5),
+        );
+        let seen = server.join().unwrap();
+        assert_eq!(reply, Ok("{\"notes\":[]}".into()));
+        assert!(seen.starts_with("POST /ctx/notes HTTP/1.1\r\n"), "{seen}");
+        assert!(seen.contains("\r\nAuthorization: Bearer tok\r\n"), "{seen}");
+        assert!(seen.contains("\r\nContent-Length: 17\r\n"), "{seen}");
+        assert!(seen.ends_with("\r\n\r\n{\"action\":\"list\"}"), "{seen}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_socket_says_where_it_looked() {
+        let err = request_at(
+            &Endpoint::Socket("/nonexistent/canopy-ctx/ctx.sock".into()),
+            "tok",
+            "GET",
+            "/ctx/tools",
+            None,
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(err.contains("/nonexistent/canopy-ctx/ctx.sock"), "{err}");
+    }
+
+    fn over_tcp(status: &'static str, body: &'static str) -> Result<String, String> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            answer_one(stream, status, body)
+        });
+        let reply = request_at(
+            &Endpoint::Port(port.to_string()),
+            "tok",
+            "POST",
+            "/ctx/action",
+            Some("{}".into()),
+            std::time::Duration::from_secs(5),
+        );
+        let seen = server.join().unwrap();
+        assert!(
+            seen.contains(&format!("\r\nHost: 127.0.0.1:{port}\r\n")),
+            "{seen}"
+        );
+        reply
+    }
+
+    /// A tool the service cannot serve reaches the agent as the service's own
+    /// sentence, not as a status code wrapped around JSON.
+    #[test]
+    fn an_unavailable_tool_is_the_services_message() {
+        assert_eq!(
+            over_tcp(
+                "503 Service Unavailable",
+                "{\"error\":\"unavailable\",\"reason\":\"no-ide\",\"message\":\"canopy_open_file needs the IDE open on this workspace.\"}",
+            ),
+            Err("canopy_open_file needs the IDE open on this workspace.".into())
+        );
+        // Anything else keeps the status, so an unexpected failure still says
+        // what kind of failure it was.
+        assert_eq!(
+            over_tcp("503 Service Unavailable", "{\"error\":\"overloaded\"}"),
+            Err("Canopy answered 503: {\"error\":\"overloaded\"}".into())
+        );
+        assert_eq!(
+            over_tcp("400 Bad Request", "a note needs something in it"),
+            Err("Canopy answered 400: a note needs something in it".into())
+        );
+        assert_eq!(over_tcp("200 OK", "ok"), Ok("ok".into()));
     }
 
     /// Walking up has to terminate, and has to start somewhere real.
