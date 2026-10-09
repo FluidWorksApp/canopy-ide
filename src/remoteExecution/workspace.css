@@ -371,3 +371,11 @@
 .workspace-panel .workspace-startup li {flex:0 0 auto;}
 .workspace-panel .workspace-startup ol {gap:4px 11px;}
 .workspace-panel .workspace-startup li {gap:5px;font-size:11px;}
+/* Configure machine: package and storage side by side, applied in one restart. */
+.workspace-machine-config .workspace-machine-fields {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px;margin:8px 0 4px;}
+.workspace-machine-config .workspace-machine-fields label {margin:0;gap:3px;font-size:var(--fs-xs);color:var(--text-dim);min-width:0;}
+.workspace-machine-config select {min-width:0;width:100%;padding:5px 8px;font-size:var(--fs-sm);}
+.workspace-machine-config p {margin:4px 0;font-size:var(--fs-xs);line-height:1.45;}
+.workspace-machine-config .workspace-machine-note {color:var(--text-dim);}
+.workspace-machine-config .workspace-inline-actions {margin-top:8px;}
+@media (max-width:560px){.workspace-machine-config .workspace-machine-fields {grid-template-columns:1fr;}}
