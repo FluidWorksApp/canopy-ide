@@ -6,12 +6,16 @@
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Store {
     Mesh,
+    Notes,
+    Research,
 }
 
 impl Store {
     pub fn as_str(self) -> &'static str {
         match self {
             Store::Mesh => "mesh",
+            Store::Notes => "notes",
+            Store::Research => "research",
         }
     }
 }

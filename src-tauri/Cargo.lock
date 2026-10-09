@@ -710,6 +710,9 @@ dependencies = [
 name = "canopy-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "ignore",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",
