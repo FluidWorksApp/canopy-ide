@@ -1,5 +1,6 @@
 import {isDeepStrictEqual} from 'node:util';
 import {projectMounts} from './project-mounts.mjs';
+import {verifyServiceMount,volumeMounts} from './service-mount.mjs';
 
 // A completed migration survives later control-plane resume/resize generations.
 // Only lifecycle-owned fields may advance. Project/account/image/capacity-group
@@ -11,7 +12,9 @@ function committedLifecycleMatches(workspace,next,current){
  const before=next.generation??0,after=workspace.generation??0;
  if(!Number.isSafeInteger(before)||before<0||!Number.isSafeInteger(after)||after<before)return false;
  const expected=[['/workspace',`canopy-project-${workspace.id}`,true],['/home/agent',`canopy-home-${workspace.id}`,true],...(workspace.accounts??[]).map(id=>[`/accounts/${id}`,`canopy-account-${id}`,false]),...projectMounts(workspace)].sort();
- if(!Array.isArray(current?.Mounts)||current.Mounts.some(m=>m.Type!=='volume')||!isDeepStrictEqual(current.Mounts.map(m=>[m.Destination,m.Name,m.RW]).sort(),expected)||current.HostConfig?.CgroupParent!==workspace.cgroupParent)return false;
+ if(!Array.isArray(current?.Mounts))return false;
+ try{verifyServiceMount(workspace,current.Mounts);}catch{return false;}
+ if(volumeMounts(current.Mounts).some(m=>m.Type!=='volume')||!isDeepStrictEqual(volumeMounts(current.Mounts).map(m=>[m.Destination,m.Name,m.RW]).sort(),expected)||current.HostConfig?.CgroupParent!==workspace.cgroupParent)return false;
  return true;
 }
 

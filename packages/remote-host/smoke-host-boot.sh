@@ -13,7 +13,7 @@ archive=$(realpath "${1:?Usage: smoke-host-boot.sh workspace-host.tar.gz}")
 [[ $EUID == 0 ]] || { echo 'Run as root on a disposable VM.' >&2; exit 1; }
 [[ $(uname -s) == Linux ]] && command -v systemctl >/dev/null && docker info >/dev/null
 umask 077
-fail() { echo "HOST BOOT GATE FAILED: $*" >&2; journalctl -u canopy-host --no-pager -n 80 >&2 || true; exit 1; }
+fail() { echo "HOST BOOT GATE FAILED: $*" >&2; journalctl -u canopy-service -u canopy-host --no-pager -n 120 >&2 || true; exit 1; }
 cleanup() { docker rm -f canopy-gate-registry >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
@@ -69,6 +69,9 @@ UNIT
 chmod 0644 /etc/systemd/system/canopy-network.service /etc/systemd/system/canopy-host.service /etc/systemd/system/canopy-host.service.d/managed.conf
 systemctl daemon-reload
 systemctl enable --now canopy-network
+# The harness service, from this archive's verified binary, on retained state.
+CANOPY_SERVICE_STATE_ROOT=/srv/canopy/service-state bash /opt/canopy-host/install-service.sh || fail 'canopy-service install'
+systemctl is-active --quiet canopy-service || fail 'canopy-service is not active'
 systemctl restart canopy-host
 
 # 4. canopy-host must answer and stay up (a crash loop restarts every 5 s).
@@ -88,4 +91,13 @@ systemctl is-active --quiet canopy-host || fail 'canopy-host is not active'
 [[ $(stat -c '%U:%G %a' /run/canopy/resource-admission.lock) == 'root:canopy-host 660' ]] || fail "lock is $(stat -c '%U:%G %a' /run/canopy/resource-admission.lock)"
 # The gateway's own lock use, as its user: admission must be granted.
 runuser -u canopy-host -- node --input-type=module -e 'import {acquireResourceAdmission} from "/opt/canopy-host/resource-admission.mjs";const release=await acquireResourceAdmission("/run/canopy/resource-admission.lock",{timeoutMs:5000});await release();' || fail 'gateway user cannot take the resource lock'
+# Admin socket: owned by the service, reachable by the gateway user only.
+[[ $(stat -c '%U:%G %a' /run/canopy-service/admin.sock) == 'canopy-service:canopy-host 660' ]] || fail "admin.sock is $(stat -c '%U:%G %a' /run/canopy-service/admin.sock)"
+runuser -u canopy-host -- curl -fsS --max-time 2 --unix-socket /run/canopy-service/admin.sock http://canopy-service/admin/health | grep -q '"ready":true' || fail 'gateway user cannot reach the service admin API'
+! runuser -u nobody -- curl -fsS --max-time 2 --unix-socket /run/canopy-service/admin.sock http://canopy-service/admin/health >/dev/null 2>&1 || fail 'admin API is reachable by other users'
+[[ $(stat -c '%U:%G %a' /run/canopy-service/ws) == 'canopy-service:canopy-host 755' ]] || fail 'service workspace socket root ownership'
+[[ $(stat -c '%U:%G %a' /run/canopy-relay) == 'canopy-host:canopy-host 750' ]] || fail 'relay credential directory ownership'
+[[ $(stat -c '%U %a' /srv/canopy/service-state) == 'canopy-service 700' ]] || fail 'retained service state ownership'
+systemctl restart canopy-service || fail 'canopy-service restart'
+[[ -d /run/canopy-service/ws ]] || fail 'service restart removed the workspace socket root'
 echo 'Host boot gate passed: image step, canopy-host active, shared runtime files owned correctly.'

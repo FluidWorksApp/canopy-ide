@@ -17,6 +17,7 @@ test('the runtime declares /run/canopy and the admission lock once, root-owned a
  assert.deepEqual(await tmpfilesLines(),[
   ['d','/run/canopy','0755','root','root','-','-'],
   ['f','/run/canopy/resource-admission.lock','0660','root','canopy-host','-','-'],
+  ['d','/run/canopy-relay','0750','canopy-host','canopy-host','-','-'],
  ]);
  const unit=await read('canopy-host.service');
  const pre=unit.indexOf('ExecStartPre=+/usr/bin/systemd-tmpfiles --create /opt/canopy-host/canopy-runtime.tmpfiles.conf');
@@ -67,7 +68,7 @@ test('gateway uid opens the lock only after tmpfiles ownership; the old umask-07
  const denied=asGateway();assert.equal(denied.status,3);assert.match(denied.stdout,/not accessible to this service/);
  // Single owner: the shipped tmpfiles declaration, rooted at the fixture.
  const conf=join(root,'canopy.conf');
- await writeFile(conf,(await read('canopy-runtime.tmpfiles.conf')).split('\n').filter(line=>line&&!line.startsWith('#')).join('\n').replaceAll('/run/canopy',runtime).replaceAll(' canopy-host ',` ${gatewayGid} `)+'\n');
+ await writeFile(conf,(await read('canopy-runtime.tmpfiles.conf')).split('\n').filter(line=>line&&!line.startsWith('#')&&!line.includes('/run/canopy-relay')).join('\n').replaceAll('/run/canopy',runtime).replaceAll(' canopy-host ',` ${gatewayGid} `)+'\n');
  const applied=spawnSync('systemd-tmpfiles',['--create',conf],{encoding:'utf8'});assert.equal(applied.status,0,applied.stderr);
  assert.equal((await stat(runtime)).mode&0o777,0o755);
  const info=await stat(lock);assert.equal(info.uid,0);assert.equal(info.gid,gatewayGid);assert.equal(info.mode&0o777,0o660);
