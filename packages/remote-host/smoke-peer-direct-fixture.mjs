@@ -1,12 +1,13 @@
 import net from 'node:net';
 import {networkInterfaces} from 'node:os';
-import {chromium} from 'playwright-core';import {createRequire} from 'node:module';import {createServer} from 'node:http';import {readFile,mkdir,writeFile,rm,mkdtemp} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';import {registrationProof,relayEnvelope} from '/smoke/peer-messaging.mjs';
+import {chromium} from 'playwright-core';import {createRequire} from 'node:module';import {createServer} from 'node:http';import {readFile,readdir,mkdir,writeFile,rm,mkdtemp} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';import {registrationProof,relayEnvelope} from '/smoke/peer-messaging.mjs';
 const blocked=target=>new Promise(resolve=>{const [host,port]=target.split(':');let settled=false;const socket=net.connect({host,port:Number(port)}),finish=value=>{if(settled)return;settled=true;clearTimeout(timer);socket.destroy();resolve(value);};const timer=setTimeout(()=>finish(true),2000);socket.once('connect',()=>finish(false));socket.once('error',()=>finish(true));});
 assert.equal((await readFile('/proc/sys/net/ipv6/conf/all/disable_ipv6','utf8')).trim(),'1','Fixture namespace IPv6 must be disabled');
 const targets=[process.env.CANOPY_PEER_PROBE_HOST,process.env.CANOPY_PEER_PROBE_EGRESS];if(targets.some(value=>!value))throw Error('Synthetic isolation probes missing');for(const target of targets)assert.equal(await blocked(target),true,'Synthetic host/cross-network canary must be blocked');
 const route=(await readFile('/proc/net/route','utf8')).split('\n').slice(1).some(line=>line.trim().split(/\s+/)[1]==='00000000');assert.equal(route,true,'Fixture needs realistic default route while firewall blocks egress');
 const ts=createRequire(import.meta.url)('/usr/local/lib/node_modules/typescript'),home=await mkdtemp(join(tmpdir(),'canopy-peer-fixture-')),modules=new Map();
-for(const file of ['client','crypto','store','history','messageSchema'])modules.set('/'+file+'.js',ts.transpileModule(await readFile('/smoke/source/'+file+'.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText);
+// Serve exactly the mounted sources (peerSmokeSources), so a new import needs one list.
+for(const file of (await readdir('/smoke/source')).filter(name=>name.endsWith('.ts')).map(name=>name.slice(0,-3)))modules.set('/'+file+'.js',ts.transpileModule(await readFile('/smoke/source/'+file+'.ts','utf8'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText);
 const team=randomUUID(),users=new Set(['synthetic-alice','synthetic-bob']),devices=new Map(),queues=new Map(),revoked=new Set(),relayWire=[];let relayCount=0;
 const server=createServer(async(req,res)=>{
  const respond=(status,value)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(value));};
