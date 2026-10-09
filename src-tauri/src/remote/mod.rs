@@ -304,6 +304,7 @@ pub async fn dispatch(
 
         // ---- the rest of the read surface ----
         "research_list" => crate::research::research_list(
+            app.state(),
             str_arg(args, "projectId")?,
             args.get("status")
                 .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok()),
@@ -311,10 +312,12 @@ pub async fn dispatch(
         )
         .and_then(to_value),
 
-        "research_get" => {
-            crate::research::research_get(str_arg(args, "projectId")?, str_arg(args, "id")?)
-                .and_then(to_value)
-        }
+        "research_get" => crate::research::research_get(
+            app.state(),
+            str_arg(args, "projectId")?,
+            str_arg(args, "id")?,
+        )
+        .and_then(to_value),
 
         "instructions_scan" => crate::instructions::instructions_scan(strs_arg(args, "roots")?)
             .await

@@ -536,8 +536,8 @@ pub fn run() {
         .manage(selftest::SelftestState::default())
         .manage(client_mode::RemoteConnectionState::default())
         .manage(spot::SpotIndex::default())
-        .manage(research::ResearchStore::default())
-        .manage(notes::NotesStore::default())
+        .manage(research::load())
+        .manage(notes::load())
         .manage(provenance::ProvenanceStore::default())
         // Shared with the watchdog loop; see the comment on WatchdogState.
         .manage(std::sync::Arc::new(watchdog::WatchdogState::default()))

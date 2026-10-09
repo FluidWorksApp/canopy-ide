@@ -57,7 +57,7 @@ describe("the status model", () => {
 
 // The test that matters most in this file. NEXT_STATUSES exists so the panel
 // offers only moves the store will accept; the store's own machine is in
-// src-tauri/src/notes.rs and is the authority.
+// crates/canopy-core/src/notes.rs and is the authority.
 //
 // This reads that file and compares, rather than restating the table as a
 // literal the way research.test.ts does. A copied table only catches the
@@ -68,7 +68,7 @@ describe("the transition table mirrored from the Rust state machine", () => {
   const rustNext = (): Record<string, string[]> => {
     // Vitest runs from the repo root; import.meta.url is not a file: URL here
     // (same note as branchSwitchGuard.test.ts).
-    const src = readFileSync(join(process.cwd(), "src-tauri/src/notes.rs"), "utf8");
+    const src = readFileSync(join(process.cwd(), "crates/canopy-core/src/notes.rs"), "utf8");
     const fn = /fn next\(self\) -> &'static \[Status\] \{([\s\S]*?)\n    \}/.exec(src);
     if (!fn) throw new Error("could not find `fn next` in notes.rs");
     const table: Record<string, string[]> = {};

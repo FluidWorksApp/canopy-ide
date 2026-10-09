@@ -1474,70 +1474,10 @@ fn pick_project(candidates: &[ProjectCandidate], cwd: &str) -> Option<ProjectCan
     best.map(|(_, c)| c.clone())
 }
 
-#[derive(serde::Deserialize)]
-struct ResearchReq {
-    action: String,
-    cwd: String,
-    /// Which project this is about, by name. Absent falls back to `cwd`.
-    #[serde(default)]
-    project: Option<String>,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    question: Option<String>,
-    #[serde(default)]
-    query: Option<String>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    statuses: Option<Vec<String>>,
-    #[serde(default)]
-    digest: Option<String>,
-    #[serde(default)]
-    recommendation: Option<String>,
-    #[serde(default)]
-    open_questions: Option<Vec<String>>,
-    #[serde(default)]
-    tags: Option<Vec<String>>,
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    origin: Option<String>,
-    #[serde(default)]
-    note: Option<String>,
-    #[serde(default)]
-    by: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    agent: Option<String>,
-    #[serde(default)]
-    pty_id: Option<u64>,
-    /// Which app launch the calling terminal belongs to — pty ids restart with
-    /// the app, so the session binding is keyed by both.
-    #[serde(default)]
-    instance: Option<String>,
-    #[serde(default)]
-    pr: Option<crate::research::PrLink>,
-    #[serde(default)]
-    ticket: Option<crate::research::TicketLink>,
-    #[serde(default)]
-    branch: Option<String>,
-    #[serde(default)]
-    files: Option<Vec<String>>,
-    #[serde(default)]
-    supersedes: Option<String>,
-    /// import: the markdown file to adopt.
-    #[serde(default)]
-    path: Option<String>,
-}
-
 async fn research_op(
     State(app): State<tauri::AppHandle>,
     headers: HeaderMap,
-    Json(req): Json<ResearchReq>,
+    Json(req): Json<canopy_core::research::ResearchReq>,
 ) -> (StatusCode, String) {
     if !authorized(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
@@ -1556,108 +1496,15 @@ async fn research_op(
             ),
         );
     };
-    let store = app.state::<crate::research::ResearchStore>();
-    let need_id = |r: &ResearchReq| -> Result<String, String> {
-        r.id.clone()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "this action needs an id — call list to see them".to_string())
-    };
-
-    let out: Result<serde_json::Value, String> = (|| match req.action.as_str() {
-        "list" => {
-            crate::research::research_list(project_id.clone(), req.statuses.clone(), req.limit)
-                .map(|rows| serde_json::json!({ "research": rows }))
-        }
-        "search" => crate::research::research_search(
-            project_id.clone(),
-            req.query.clone().unwrap_or_default(),
-            req.limit,
-        )
-        .map(|rows| serde_json::json!({ "research": rows })),
-        "get" => crate::research::research_get(project_id.clone(), need_id(&req)?)
-            .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
-        "start" => crate::research::research_start(
-            app.clone(),
-            store.clone(),
-            project_id.clone(),
-            Some(project_name.clone()),
-            Some(roots.clone()),
-            req.title.clone().unwrap_or_default(),
-            req.question.clone(),
-            req.agent.clone(),
-            Some(req.cwd.clone()),
-            req.pty_id,
-            req.tags.clone(),
-            req.text.clone(),
-            req.instance.clone(),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        // digest and append are the same command; naming them separately at the
-        // tool boundary is what stops an agent treating the digest as somewhere
-        // to put the whole finding.
-        "digest" | "update" | "append" => crate::research::research_update(
-            app.clone(),
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.title.clone(),
-            req.digest.clone(),
-            req.recommendation.clone(),
-            req.open_questions.clone(),
-            req.tags.clone(),
-            (req.action == "append").then(|| req.text.clone().unwrap_or_default()),
-            None,
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        "source" => crate::research::research_add_source(
-            app.clone(),
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.title.clone().unwrap_or_default(),
-            req.text.clone().unwrap_or_default(),
-            req.origin.clone(),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        "status" => crate::research::research_set_status(
-            app.clone(),
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.status.clone().unwrap_or_default(),
-            req.by.clone(),
-            req.note.clone(),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        // The same adoption the file tab's button performs, reachable by an
-        // agent that finds loose research while doing something else.
-        "import" => crate::research::research_import(
-            app.clone(),
-            store.clone(),
-            project_id.clone(),
-            Some(project_name.clone()),
-            Some(roots.clone()),
-            req.path.clone().unwrap_or_default(),
-            req.instance.clone(),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        "link" | "supersede" => crate::research::research_link(
-            app.clone(),
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.pr.clone(),
-            req.ticket.clone(),
-            req.branch.clone(),
-            req.files.clone(),
-            req.supersedes.clone(),
-        )
-        .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
-        other => Err(format!(
-            "unknown research action: {other} — one of list, search, get, start, digest, \
-             append, source, status, link, import"
-        )),
-    })();
+    let out = canopy_core::research::op(
+        &app.state::<crate::research::ResearchStore>(),
+        canopy_core::project::Project {
+            id: &project_id,
+            name: &project_name,
+            roots: &roots,
+        },
+        &req,
+    );
 
     match out {
         Ok(value) => (StatusCode::OK, value.to_string()),
@@ -1674,63 +1521,10 @@ async fn research_op(
 // fixing this" is the case, and before this the only options were to derail
 // onto them or to lose them.
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NotesReq {
-    action: String,
-    cwd: String,
-    /// Which project this is about, by name. Absent falls back to `cwd`.
-    #[serde(default)]
-    project: Option<String>,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    tags: Option<Vec<String>>,
-    #[serde(default)]
-    query: Option<String>,
-    #[serde(default)]
-    statuses: Option<Vec<String>>,
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    note: Option<String>,
-    #[serde(default)]
-    by: Option<String>,
-    #[serde(default)]
-    pr: Option<crate::notes::PrLink>,
-    #[serde(default)]
-    research: Option<String>,
-    #[serde(default)]
-    branch: Option<String>,
-    #[serde(default)]
-    file: Option<crate::notes::FileRef>,
-    /// attach: an absolute path already on disk, inside a workspace root.
-    #[serde(default)]
-    path: Option<String>,
-    /// remind: when. Any of the shapes `remind::parse_when` accepts — an ISO
-    /// stamp, a local wall clock, a bare date, or epoch seconds. Taken as a
-    /// string even when it is a number so a JSON integer and its digits are the
-    /// same request.
-    #[serde(default)]
-    at: Option<serde_json::Value>,
-    /// remind: a delay instead of a time — `45m`, `2h`, `3d`.
-    #[serde(default, rename = "in")]
-    within: Option<String>,
-    /// remind: `true` takes the reminder off.
-    #[serde(default)]
-    clear: Option<bool>,
-}
-
 async fn notes_op(
     State(app): State<tauri::AppHandle>,
     headers: HeaderMap,
-    Json(req): Json<NotesReq>,
+    Json(req): Json<canopy_core::notes::NotesReq>,
 ) -> (StatusCode, String) {
     if !authorized(&app, &headers) {
         return (StatusCode::UNAUTHORIZED, "bad token".into());
@@ -1748,122 +1542,17 @@ async fn notes_op(
             ),
         );
     };
-    let store = app.state::<crate::notes::NotesStore>();
     let ws = app.state::<crate::fsx::WorkspaceManager>();
-    let need_id = |r: &NotesReq| -> Result<String, String> {
-        r.id.clone()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "this action needs an id — call list to see them".to_string())
-    };
-
-    let out: Result<serde_json::Value, String> = (|| match req.action.as_str() {
-        "list" => crate::notes::notes_list(project_id.clone(), req.statuses.clone(), req.limit)
-            .map(|rows| serde_json::json!({ "notes": rows })),
-        "search" => crate::notes::notes_search(
-            project_id.clone(),
-            req.query.clone().unwrap_or_default(),
-            req.limit,
-        )
-        .map(|rows| serde_json::json!({ "notes": rows })),
-        "get" => crate::notes::notes_get(project_id.clone(), need_id(&req)?)
-            .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
-        "create" => crate::notes::notes_create(
-            store.clone(),
-            project_id.clone(),
-            Some(project_name.clone()),
-            Some(roots.clone()),
-            req.title.clone().unwrap_or_default(),
-            req.text.clone(),
-            req.tags.clone(),
-            // No page context: an agent has no page. The `origin` is what
-            // answers "where do my notes come from" later.
-            None,
-            Some("agent".into()),
-            Some(req.cwd.clone()),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        "append" => crate::notes::notes_update(
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.title.clone(),
-            None,
-            req.text.clone(),
-            req.tags.clone(),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        "status" => crate::notes::notes_set_status(
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.status.clone().unwrap_or_default(),
-            // Credited to the agent, not to the user: the history is the one
-            // record of who moved a note, and it has to stay honest.
-            req.by.clone().or_else(|| Some("an agent".into())),
-            req.note.clone(),
-        )
-        .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string())),
-        "link" => crate::notes::notes_link(
-            store.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.pr.clone(),
-            req.research.clone(),
-            None,
-            req.branch.clone(),
-            req.file.clone(),
-        )
-        .and_then(|d| serde_json::to_value(d).map_err(|e| e.to_string())),
-        "attach" => crate::notes::notes_attach_file(
-            store.clone(),
-            ws.clone(),
-            project_id.clone(),
-            need_id(&req)?,
-            req.path.clone().unwrap_or_default(),
-            req.title.clone(),
-            None,
-        )
-        .and_then(|a| serde_json::to_value(a).map_err(|e| e.to_string())),
-        // The agent's half of the reminder. Worth its own action rather than a
-        // field on `create`: the case that matters most is putting a time on a
-        // note that already exists — the user's own, written weeks ago — and an
-        // agent that could only set one while creating would be an agent that
-        // has to duplicate the note to remind you of it.
-        "remind" => {
-            let clear = req.clear.unwrap_or(false);
-            let at = if clear {
-                None
-            } else {
-                let raw = req.at.as_ref().and_then(|v| match v {
-                    serde_json::Value::String(s) => Some(s.clone()),
-                    serde_json::Value::Number(n) => Some(n.to_string()),
-                    _ => None,
-                });
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                Some(crate::remind::parse_when(
-                    raw.as_deref(),
-                    req.within.as_deref(),
-                    now,
-                )?)
-            };
-            crate::notes::notes_remind(
-                store.clone(),
-                project_id.clone(),
-                need_id(&req)?,
-                at,
-                req.text.clone().or_else(|| req.note.clone()),
-                req.by.clone().or_else(|| Some("an agent".into())),
-            )
-            .and_then(|s| serde_json::to_value(s).map_err(|e| e.to_string()))
-        }
-        other => Err(format!(
-            "unknown notes action: {other} — one of list, search, get, create, append, \
-             status, link, attach, remind"
-        )),
-    })();
+    let out = canopy_core::notes::op(
+        &app.state::<crate::notes::NotesStore>(),
+        canopy_core::project::Project {
+            id: &project_id,
+            name: &project_name,
+            roots: &roots,
+        },
+        &req,
+        &|src| crate::fsx::check_scope(&ws, src),
+    );
 
     match out {
         Ok(value) => (StatusCode::OK, value.to_string()),
