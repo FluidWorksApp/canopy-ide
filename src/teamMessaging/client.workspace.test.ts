@@ -2,7 +2,7 @@
 import {webcrypto} from 'node:crypto';
 import {afterEach,beforeAll,expect,it,vi} from 'vitest';
 import {waitFor} from '@testing-library/react';
-import {PeerClient,type Device} from './client';
+import {PeerClient,type Device,type PeerRequest} from './client';
 import {createIdentity,publicIdentity,seal,open,type Envelope,type Identity} from './crypto';
 import type {JobStatus} from './jobSchema';
 beforeAll(()=>vi.stubGlobal('crypto',webcrypto));
@@ -18,7 +18,7 @@ async function setup(){
   if(b.action==='relay'){relayed.push(b as never);return {queued:true} as T;}
   return {} as T;});
  const statuses:{status:JobStatus;workspace?:string}[]=[],chats:unknown[]=[];
- const client=new PeerClient({user:'alice',team:'team',identity:async()=>({id:aliceId,keys:alice}),outbox:{load:async()=>[],put:async()=>{},remove:async()=>{}},request,remember:async()=>true,rtc:()=>{throw Error('no direct');},message:m=>chats.push(m),receipt:()=>{},status:()=>{},jobStatus:(status,_s,workspace)=>statuses.push({status,workspace})});
+ const client=new PeerClient({user:'alice',team:'team',identity:async()=>({id:aliceId,keys:alice}),outbox:{load:async()=>[],put:async()=>{},remove:async()=>{}},request:request as PeerRequest,remember:async()=>true,rtc:()=>{throw Error('no direct');},message:m=>chats.push(m),receipt:()=>{},status:()=>{},jobStatus:(status,_s,workspace)=>statuses.push({status,workspace})});
  clients.push(client);await client.start();
  const from={team:'team',user:'owner',device:hostId},to={team:'team',user:'alice',device:aliceId};
  const reply=async(payload:unknown,v2:{kind:'job-status'|'mesh'|'chat'|'job';workspace?:string}|null)=>{const e=await seal(host,await publicIdentity(alice),from,to,JSON.stringify(payload),Date.now(),v2?{version:2,...v2}:undefined);inbox.push({id:crypto.randomUUID(),envelope:e});};
