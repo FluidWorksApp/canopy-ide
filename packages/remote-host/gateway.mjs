@@ -41,9 +41,13 @@ import { body, json } from './http.mjs';
 import {startReleasePrepull} from './release-prepull.mjs';
 import {PREPULL_RESERVE_BYTES} from './image-retention.mjs';
 import {hostStorage as createHostStorage} from './host-storage.mjs';
+import {ServiceAdmin} from './service-admin.mjs';
+import {ServiceHarness} from './service-harness.mjs';
+import {serviceControlPlane} from './service-control-plane.mjs';
+import {harnessAction,harnessFailure,harnessQuery,pipeHarnessStream} from './service-routes.mjs';
 import {InputLedger,SocketInput,TERMINAL_INPUT_PROTOCOL,BINARY_TERMINAL_INPUT_PROTOCOL,forwardInput,inputKey,sequencedInput} from './terminal-input.mjs';
 
-export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage() }) {
+export function createGateway({ config, workspaces, origins = [], elasticMemory, elasticCpu, authorizeMember, authorizeRuntime, supervisor, credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, brokerOptions={}, renewMember, now=Date.now, hostStorage=createHostStorage(), harness }) {
   validateConfig(config);
   const checkMember = async (principal, bearer) => {
     if (!principal.memberId) return;
@@ -121,6 +125,33 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
   const active = new Map();
   const total = counts => [...counts.values()].reduce((sum, count) => sum + count, 0);
   const idleAttestation=config.managedSession?new IdleAttestation({config,host:workspaces,authorizeRuntime,now,busy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||cliSessions?.entries.size>0,closeBusy:()=>total(active)>1||total(streams)>0||workspaces.pending?.size>0||leases.pending.size>0||leases.entries.size>0||sharedSessions.entries.size>0||sharedSessions.pendingStops.size>0||cliSessions?.active.size>0||cliSessions?.pending.size>0||[...sessionViewLeases.entries.values()].some(entry=>entry.principal.expiresAt>now())||[...(cliSessions?.entries.values()??[])].some(entry=>!entry.isOwner)}):null;
+  const harnessStreams=new Map();
+  const harnessActor=principal=>principal.memberId?`member:${principal.memberId}`:principal.id==='managed-account'?(config.managedSession?.ownerUserId??'owner'):principal.id;
+  // IDE harness stream: SSE passthrough of the service stream. Authenticated by
+  // a one-use ticket (EventSource cannot send headers) or a bearer, re-checked
+  // every second exactly like terminal streams, so revocation cuts it.
+  const harnessStream=async(request,response)=>{
+    const url=new URL(request.url,'http://gateway'),match=url.pathname.match(/^\/v1\/workspaces\/([a-z][a-z0-9-]{0,47})\/harness\/stream$/);
+    if(!match)return false;
+    if(request.method!=='GET'){json(response,405,{error:'Unsupported method'});return true;}
+    let grant,principal,workspace;
+    try{
+      const ticket=url.searchParams.get('ticket');
+      if(ticket){grant=tickets.consume(ticket);if(grant.stream!=='/harness/stream'||grant.workspaceId!==match[1])throw Error('Unauthorized');}
+      else{const current=authenticate(config,request.headers.authorization);grant={principalId:current.id,principalFingerprint:current.tokenSha256,expiresAt:current.expiresAt,memberPrincipal:current.memberId?current:undefined,bearer:current.memberId?request.headers.authorization:undefined,workspaceId:match[1],stream:'/harness/stream'};}
+      ({principal,workspace}=authorizeStream(config,grant));await checkMember(principal,grant.bearer);
+    }catch(error){json(response,error.message==='Forbidden'?403:401,{error:error.message==='Forbidden'?'Forbidden':'Unauthorized'});return true;}
+    if(!harness){json(response,503,{error:'unavailable',reason:'not-installed',message:'This host does not run the Canopy service'});return true;}
+    // Counted apart from terminal streams: an IDE that keeps this open must not
+    // hold the workspace awake for idle shutdown.
+    if((harnessStreams.get(principal.id)??0)>=4||total(harnessStreams)>=32){json(response,429,{error:'Stream capacity reached'});return true;}
+    harnessStreams.set(principal.id,(harnessStreams.get(principal.id)??0)+1);
+    let released=false;const release=()=>{if(released)return;released=true;const count=harnessStreams.get(principal.id)-1;if(count)harnessStreams.set(principal.id,count);else harnessStreams.delete(principal.id);};
+    let checking=false;
+    await pipeHarnessStream({admin:harness.admin,workspaceId:workspace.id,cursor:url.searchParams.get('cursor'),response,onClose:release,
+      stillAuthorized:async()=>{if(checking)return true;checking=true;try{const renewed=sessionViewLeases.renewedGrant(leases.renewedGrant(grant));const current=authorizeStream(config,renewed);await checkMember(current.principal,renewed.bearer);return true;}catch{return false;}finally{checking=false;}}});
+    return true;
+  };
   const acceptedOrigins = new Set(['tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost', ...origins]);
   const server = http.createServer(async (request, response) => {
     if(process.env.CANOPY_RESOURCE_ADMISSION_LOCK)response.setHeader('x-canopy-resource-admission',String(RESOURCE_ADMISSION_PROTOCOL));
@@ -133,6 +164,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
     response.setHeader('access-control-allow-headers', 'authorization, content-type');
     response.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS');
     if (request.method === 'OPTIONS') { response.writeHead(204); return response.end(); }
+    if(await harnessStream(request,response))return;
     let principal,projectAccess;
     try { principal = authenticate(config, request.headers.authorization); projectAccess=await checkMember(principal,request.headers.authorization);sessionViewLeases.observe(principal,request.headers.authorization); }
     catch { return json(response, 401, { error: 'Unauthorized' }); }
@@ -149,7 +181,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       const match = route.match(/^\/v1\/workspaces\/([a-z][a-z0-9-]{0,47})(\/.*)$/);
       if (!match) return json(response, 404, { error: 'Unknown operation' });
       const [, workspaceId, operation] = match;
-      const reads = new Set(['/storage', '/shared-ticket', '/shared-execute', '/shared-sessions', '/projects', '/sessions', '/files/list', '/files/read', '/git/status', '/git/diff']);
+      const reads = new Set(['/harness/status', '/harness/query', '/harness/stream', '/storage', '/shared-ticket', '/shared-execute', '/shared-sessions', '/projects', '/sessions', '/files/list', '/files/read', '/git/status', '/git/diff']);
       const write = operation !== '/sessions' || request.method !== 'GET';
       const scope = operation === '/open' || operation === '/resources' || operation === '/ticket' || operation === '/native' || (reads.has(operation) && (operation !== '/sessions' || !write)) ? 'view' : 'drive';
       const workspace = authorize(config, principal, workspaceId, scope);
@@ -177,8 +209,17 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         try{return json(response,200,await sharingAttest.attest(workspace,await body(request,4096)));}
         catch(error){if(error.reason)return json(response,409,{error:error.reason,reason:error.reason});throw error;}
       }
-      if (!['/shared-ticket', '/shared-execute', '/shared-accounts', '/shared-sessions', '/projects', '/open', '/resources', '/sessions', '/ticket', '/desktop', '/files/list', '/files/read', '/files/write', '/git/status', '/git/diff', '/language/analyze', '/native'].includes(operation) && !/^\/shared-sessions\/[a-f0-9-]{36}\/input$/.test(operation) &&
+      if (!['/harness/status', '/harness/query', '/harness/actions', '/shared-ticket', '/shared-execute', '/shared-accounts', '/shared-sessions', '/projects', '/open', '/resources', '/sessions', '/ticket', '/desktop', '/files/list', '/files/read', '/files/write', '/git/status', '/git/diff', '/language/analyze', '/native'].includes(operation) && !/^\/shared-sessions\/[a-f0-9-]{36}\/input$/.test(operation) &&
           !/^\/sessions\/\d+\/(input|resize|stop)$/.test(operation)) throw new Error('Unknown operation');
+      if(operation.startsWith('/harness/')){
+        if(operation==='/harness/status'){if(request.method!=='GET')throw Error('Unsupported method');return json(response,200,harness?harness.status(workspace.id):{available:false,reason:'not-installed',message:'This host does not run the Canopy service'});}
+        if(request.method!=='POST')throw Error('Unsupported method');
+        if(!harness)return json(response,503,{error:'unavailable',reason:'not-installed',message:'This host does not run the Canopy service'});
+        try{
+          if(operation==='/harness/query')return json(response,200,await harnessQuery(harness.admin,workspace.id,await body(request,65536)));
+          return json(response,200,await harnessAction(harness.admin,workspace.id,await body(request,262144),harnessActor(principal)));
+        }catch(error){const failure=harnessFailure(error);if(failure)return json(response,failure.status,failure.body);throw error;}
+      }
       if(operation==='/shared-sessions'){
         const owner=!principal.memberId&&principal.id==='managed-account'&&config.managedSession?.workspaceId===workspace.id;
         if(request.method==='GET')return json(response,200,{sessions:owner?sharedSessions.ownerList(workspace.id):await sharedSessions.list(workspace,principal,request.headers.authorization)});
@@ -260,8 +301,8 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       if (operation === '/ticket') {
         const args = await body(request, 4096);
         const shared=args.stream?.match(/^\/shared-sessions\/([a-f0-9-]{36})\/stream$/);
-        if (!/^\/sessions\/\d+\/stream$/.test(args.stream) && args.stream !== '/desktop/ws'&&!/^\/browsers\/[a-f0-9-]{36}\/stream$/.test(args.stream)&&!shared) throw new Error('Invalid stream');
-        if(principal.memberId&&principal.scope==='view'&&!shared)throw Error('Viewer terminals are unavailable');
+        if (!/^\/sessions\/\d+\/stream$/.test(args.stream) && args.stream !== '/desktop/ws'&&!/^\/browsers\/[a-f0-9-]{36}\/stream$/.test(args.stream)&&!shared&&args.stream!=='/harness/stream') throw new Error('Invalid stream');
+        if(principal.memberId&&principal.scope==='view'&&!shared&&args.stream!=='/harness/stream')throw Error('Viewer terminals are unavailable');
         if(shared)await resolveShared(workspace,principal,request.headers.authorization,shared[1]);
         authorize(config, principal, workspaceId, args.stream === '/desktop/ws'||args.stream.startsWith('/browsers/') ? 'drive' : 'view');
         const ticket = randomBytes(32).toString('base64url');
@@ -274,6 +315,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       const opening=operation==='/open'&&request.method==='POST'?await body(request,4096):{};
       if(opening.resume===true&&(!principal.memberId||principal.scope!=='view'))authorize(config,principal,workspaceId,'drive');
       const runtime = await openRuntime(workspace,principal,request.headers.authorization,projectAccess,{resume:opening.resume===true||!!principal.memberId});
+      if(harness&&!principal.memberId)void harness.attach(workspace,runtime).catch(()=>{});
       if (operation === '/open') {
         if(!await runtimeReady(runtime))throw Error('Workspace services are not responding yet');
         return json(response, 200, { id: workspace.id, connected: true });
@@ -283,8 +325,13 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         return json(response, 200, {...(elasticMemory?.status(workspace.id) ?? {minMiB:workspace.memoryMiB,maxMiB:memoryRange(workspace).max,currentMiB:null,status:'pending'}), cpu:elasticCpu?.status(workspace.id) ?? {minCpus:workspace.cpus,maxCpus:cpuRange(workspace).max,currentCpus:null,status:'pending'}});
       }
       const payload = operation==='/native'?nativePayload:request.method === 'POST' ? await body(request) : undefined;
+      let harnessState;
       if(operation==='/sessions'&&request.method==='POST'){
         if(Object.hasOwn(payload??{},'sharedAgents'))throw Error('Shared agent configuration is administrator-managed');
+        if(Object.hasOwn(payload??{},'harness'))throw Error('Agent harness credentials are service-managed');
+        // Mint before the spawn; a missing service degrades to no harness env.
+        if(harness&&!principal.memberId){const minted=await harness.mint(workspace,runtime,payload);if(minted.harness)payload.harness=minted.harness;harnessState=minted.state;}
+        else if(harness)harnessState={available:false,reason:'member-runtime',message:'Agent tools run in the workspace owner\'s runtime only'};
         if(cliSessions&&payload?.projectId){const launch=await cliSessions.prepare(workspace,principal,payload.projectId,payload.requestId);if(Object.keys(launch).length)payload.sharedAgents=launch;}
       }
       const sessionInput=request.method==='POST'&&operation.match(/^\/sessions\/(\d+)\/input$/);
@@ -307,6 +354,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         headers: { authorization: `Bearer ${runtime.token}`, 'content-type': 'application/json' },
         body: payload === undefined ? undefined : JSON.stringify(payload), signal: AbortSignal.timeout(operation === "/native" && ["git_clone","git_fetch","git_pull","git_push"].includes(payload?.command) ? 330_000 : payload?.command === "profile_import_git" ? 45_000 : 15_000) });
       if(operation==='/sessions'&&request.method==='POST'&&!result.ok)cliSessions?.discard(workspace.id,principal.memberId??'owner',payload.requestId);
+      if(operation==='/sessions'&&request.method==='POST'&&!result.ok&&payload.harness)await harness.revoke(workspace.id,payload.requestId);
       const reader = result.body.getReader(); const chunks = []; let length = 0;
       while (true) {
         const { done, value } = await reader.read(); if (done) break;
@@ -314,8 +362,14 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
         if (length > 2 * 1024 * 1024) { await reader.cancel(); throw new Error('Workspace response too large'); }
         chunks.push(Buffer.from(value));
       }
-      let output;try{output=JSON.parse(Buffer.concat(chunks).toString());}catch(error){if(operation==='/sessions'&&request.method==='POST')cliSessions?.discard(workspace.id,principal.memberId??'owner',payload.requestId);throw error;}
-      if(operation==='/sessions'&&request.method==='POST'&&result.ok&&(!Number.isSafeInteger(output?.id)||output.id<1)){cliSessions?.discard(workspace.id,principal.memberId??'owner',payload.requestId);throw Error('Invalid session startup result');}
+      let output;try{output=JSON.parse(Buffer.concat(chunks).toString());}catch(error){if(operation==='/sessions'&&request.method==='POST'){cliSessions?.discard(workspace.id,principal.memberId??'owner',payload.requestId);if(payload.harness)await harness.revoke(workspace.id,payload.requestId);}throw error;}
+      if(operation==='/sessions'&&request.method==='POST'&&result.ok&&(!Number.isSafeInteger(output?.id)||output.id<1)){cliSessions?.discard(workspace.id,principal.memberId??'owner',payload.requestId);if(payload.harness)await harness.revoke(workspace.id,payload.requestId);throw Error('Invalid session startup result');}
+      if(harness&&result.ok&&!principal.memberId){
+        if(operation==='/sessions'&&request.method==='POST'&&payload.harness)await harness.bind(workspace.id,payload.requestId,output);
+        const stopped=operation.match(/^\/sessions\/(\d+)\/stop$/);if(stopped)await harness.revokeSession(workspace.id,Number(stopped[1]));
+        if(operation==='/sessions'&&request.method==='GET')await harness.observeSessions(workspace.id,output);
+      }
+      if(operation==='/sessions'&&request.method==='POST'&&result.ok&&harnessState&&output&&typeof output==='object')output.harness=harnessState.available?{available:true}:{available:false,reason:harnessState.reason,message:harnessState.message};
       if(result.ok&&cliSessions){
         const actor=principal.memberId??'owner';
         if(operation==='/sessions'&&request.method==='POST'&&Number.isSafeInteger(output?.id))cliSessions.bind(workspace.id,actor,payload.requestId,output.id);
@@ -432,7 +486,7 @@ export function createGateway({ config, workspaces, origins = [], elasticMemory,
       });
     } catch { release?.(); socket.destroy(); }
   });
-  server.on('close',()=>{sharedSessions.close();leases.close();cliSessions?.close();supervisor?.close();});
+  server.on('close',()=>{sharedSessions.close();leases.close();cliSessions?.close();supervisor?.close();harness?.close();});
   return server;
 }
 
@@ -453,7 +507,14 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   const credentialTickets=credentialVault?await CredentialTickets.initialize(path.join(state,'credential-ticket-journal'),secret):undefined;
   const sharedAccounts=credentialVault?new SharedAccounts(credentialVault):undefined;
   const authority=runtimeAuthority(config.managedSession?.runtimePolicyUrl,config.managedSession);
-  const workspaces = new DockerWorkspaces({ scratchRoot:process.env.CANOPY_WORKSPACE_SCRATCH_ROOT??(config.managedSession?SCRATCH_ROOT:undefined), secret, image: process.env.CANOPY_WORKSPACE_IMAGE, registry: config.workspaces,releaseChannel:process.env.CANOPY_WORKSPACE_IMAGE,resolveRelease:authority?workspace=>authority.release({...workspace,id:workspace.parentWorkspaceId??workspace.id}):undefined,upgradeDirectory:path.join(state,'image-upgrades'),authorizeAdmission:config.managedSession?runtime=>{const parent=config.workspaces.find(w=>w.id===(runtime.parentWorkspaceId??runtime.id));return !!parent&&!!authority&&authority(parent);}:undefined,resourceAdmission:process.env.CANOPY_RESOURCE_ADMISSION_LOCK?hostResourceAdmission(process.env.CANOPY_RESOURCE_ADMISSION_LOCK,{timeoutMs:45000}):action=>action(),retainImages:!!config.managedSession&&!!process.env.CANOPY_WORKSPACE_IMAGE });
+  // Canopy service (agent harness). Optional: CANOPY_SERVICE_ADMIN_SOCKET=off
+  // disables it; an absent daemon only degrades agents to no harness env.
+  let workspaces;
+  const harness=process.env.CANOPY_SERVICE_ADMIN_SOCKET==='off'?undefined:new ServiceHarness({
+    admin:new ServiceAdmin({socketPath:process.env.CANOPY_SERVICE_ADMIN_SOCKET||undefined}),config,
+    controlPlane:serviceControlPlane(config),tokenFor:id=>workspaces.token(id),inspect:workspace=>workspaces.inspectRuntime(workspace),
+    listSessions:async runtime=>{const response=await fetch(`${runtime.url}/sessions`,{redirect:'error',headers:{authorization:`Bearer ${runtime.token}`},signal:AbortSignal.timeout(5000)});const text=await response.text();if(!response.ok||text.length>2*1024*1024)throw Error('Runner session listing failed');return JSON.parse(text);}});
+  workspaces = new DockerWorkspaces({ serviceMount:harness?workspace=>harness.prepareMount(workspace):undefined, scratchRoot:process.env.CANOPY_WORKSPACE_SCRATCH_ROOT??(config.managedSession?SCRATCH_ROOT:undefined), secret, image: process.env.CANOPY_WORKSPACE_IMAGE, registry: config.workspaces,releaseChannel:process.env.CANOPY_WORKSPACE_IMAGE,resolveRelease:authority?workspace=>authority.release({...workspace,id:workspace.parentWorkspaceId??workspace.id}):undefined,upgradeDirectory:path.join(state,'image-upgrades'),authorizeAdmission:config.managedSession?runtime=>{const parent=config.workspaces.find(w=>w.id===(runtime.parentWorkspaceId??runtime.id));return !!parent&&!!authority&&authority(parent);}:undefined,resourceAdmission:process.env.CANOPY_RESOURCE_ADMISSION_LOCK?hostResourceAdmission(process.env.CANOPY_RESOURCE_ADMISSION_LOCK,{timeoutMs:45000}):action=>action(),retainImages:!!config.managedSession&&!!process.env.CANOPY_WORKSPACE_IMAGE });
   await quarantineImageUpgrades(path.join(state,'image-upgrades'),workspaces);
   // Managed hosts keep the current workspace release on the retained disk, so a
   // container start never waits for a multi-gigabyte pull.
@@ -476,8 +537,8 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   if(config.managedSession)await adoptCapacityGroup({config,host:workspaces,directory:path.join(state,'migrations'),configPath:process.env.CANOPY_HOST_CONFIG??'./host.json',authorizeRuntime:authority}).catch(error=>console.warn(`Capacity group adoption skipped: ${error.message}`));
   const sharingAttest=config.managedSession?new SharingAttest({config,host:workspaces,authorizeRuntime:authority}):undefined;
   const sharedCatalog=config.managedSession?new SharedCatalog({directory:path.join(state,'shared-catalog')}):undefined;
-  const server = createGateway({ config, workspaces, renewMember:memberRenewal(config), credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, elasticMemory, elasticCpu, supervisor, authorizeMember:memberAuthority(config.managedSession?.authorizationUrl), authorizeRuntime:authority, origins: (process.env.CANOPY_HOST_ORIGINS ?? '').split(',').filter(Boolean) });
+  const server = createGateway({ config, workspaces, harness, renewMember:memberRenewal(config), credentialVault, sharedAccounts, credentialTickets, sharingAttest, sharedCatalog, elasticMemory, elasticCpu, supervisor, authorizeMember:memberAuthority(config.managedSession?.authorizationUrl), authorizeRuntime:authority, origins: (process.env.CANOPY_HOST_ORIGINS ?? '').split(',').filter(Boolean) });
   server.on('close', () => { elasticMemory.stop(); elasticCpu.stop(); });
   if(process.env.CANOPY_RESOURCE_ADMISSION_LOCK)console.log('Canopy resource admission protocol '+RESOURCE_ADMISSION_PROTOCOL);
-  server.listen(Number(process.env.PORT ?? 8787), '127.0.0.1', () => { elasticMemory.start(); elasticCpu.start(); supervisor.start(); console.log('Canopy remote host listening on loopback'); });
+  server.listen(Number(process.env.PORT ?? 8787), '127.0.0.1', () => { elasticMemory.start(); elasticCpu.start(); supervisor.start(); harness?.start(); console.log('Canopy remote host listening on loopback'); });
 }

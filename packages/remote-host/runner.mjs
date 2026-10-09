@@ -15,6 +15,8 @@ import { SessionHistory } from './history.mjs';
 import {safeGitRead} from './git-read.mjs';
 import {gitIdentityEnvironment} from './git-identity.mjs';
 import { analyze } from './language.mjs';
+import {harnessEnvironment} from './runner-harness.mjs';
+import {AgentBrowser} from './agent-browser.mjs';
 const exec = promisify(execFile);
 const ROOT = '/workspace';
 const OUTPUT_CAP = 512 * 1024;
@@ -34,7 +36,7 @@ export async function scopedPath(value, writing = false) {
   return resolved;
 }
 
-export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'workspace', historyFile = null, environment = process.env }) {
+export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'workspace', historyFile = null, environment = process.env, browser = null }) {
   if (!secret || secret.length < 32) throw new Error('Runner secret required');
   const sessions = new Map();
   const receipts = new Map();
@@ -43,7 +45,9 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
   let pendingSpawns = 0;
   let desktop = null;
   const history = new SessionHistory(historyFile);
-  const fingerprint = args => createHash('sha256').update(JSON.stringify(args)).digest('hex');
+  // The harness credential is minted per attempt by the gateway and never
+  // persisted, so it is not part of a spawn's identity.
+  const fingerprint = ({harness,...args}) => createHash('sha256').update(JSON.stringify(args)).digest('hex');
   const ready = history.load().then(entries => {
     for (const entry of entries) {
       const session = { ...entry.session, exitCode: entry.session.exitCode ?? -1, output: Buffer.alloc(0), pty: null };
@@ -75,6 +79,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
     if (args.kind && !['terminal', 'build'].includes(args.kind)) throw new Error('Invalid session kind');
     if (args.accountId && !accounts.includes(args.accountId)) throw new Error('Account not granted to workspace');
     const gitEnvironment=args.gitIdentity?gitIdentityEnvironment(args.gitIdentity):{};
+    const harnessEnv=harnessEnvironment(args.harness);
     // Reserve before awaiting credential I/O, so a retry cannot race a spawn.
     let resolve, reject;
     const result = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -103,7 +108,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       const pty = spawnPty('/bin/bash', ['-lc', 'export PATH="'+(sharedBin?sharedBin+':':'')+'/home/agent/.local/bin:$PATH" NPM_CONFIG_PREFIX=/home/agent/.local; '+args.command], { name: 'xterm-256color', cols, rows, cwd: ROOT,
         env: { CANOPY:'1', CANOPY_PTY:String(id), CANOPY_INSTANCE:'remote-'+workspaceId, PATH: process.env.PATH, HOME: accountHome, USER: 'agent', NPM_CONFIG_PREFIX:'/home/agent/.local', TERM: 'xterm-256color',
           CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests',BROWSER:'/opt/canopy/open-url.mjs',GH_CANOPY_BROWSER_QUEUE:'/home/agent/.canopy/browser-requests', LANG: 'C.UTF-8', DISPLAY: ':99', CODEX_HOME: `${accountHome}/.codex`,
-          CLAUDE_CONFIG_DIR: `${accountHome}/.claude`, CANOPY_WORKSPACE_ID: workspaceId, CANOPY_SESSION_REQUEST_ID:args.requestId,...scratchEnv,...gitEnvironment } });
+          CLAUDE_CONFIG_DIR: `${accountHome}/.claude`, CANOPY_WORKSPACE_ID: workspaceId, CANOPY_SESSION_REQUEST_ID:args.requestId,...scratchEnv,...gitEnvironment,...harnessEnv } });
       const session = { id, pty, kind: args.kind ?? 'terminal', title: args.command.slice(0, 80), cols, rows, accountId: args.accountId ?? null, output: Buffer.alloc(0), exitCode: null };
       sessions.set(id, session);
       pty.onData(text => {
@@ -160,6 +165,12 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       if (request.method === 'GET' && route === '/sessions') return json(response, 200, [...sessions.values()].map(summarize));
       if (request.method === 'POST' && route === '/sessions') return json(response, 200, await spawnSession(await body(request, 16 * 1024)));
       if (request.method === 'POST' && route === '/desktop') return json(response, 200, await startDesktop());
+      if (request.method === 'POST' && route === '/browser') {
+        if (!browser) return json(response, 503, { error: 'unavailable', reason: 'not-implemented', message: 'This workspace image has no agent browser' });
+        const input = await body(request, 256 * 1024);
+        try { return json(response, 200, await browser.run(input.op, input.args ?? {})); }
+        catch (error) { return json(response, error.status ?? 400, { error: error.message }); }
+      }
       if (request.method === 'POST' && route === '/files/list') {
         const { path: requested = '.' } = await body(request);
         const entries = await readdir(await scopedPath(requested), { withFileTypes: true });
@@ -188,6 +199,9 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
         if (!session || session.exitCode != null) throw new Error('Session not running');
         const args = await body(request, 64 * 1024);
         if (match[2] === 'stop') session.pty.kill();
+        // Service delivery names the child it addressed; a replaced or exited
+        // terminal must not receive a message meant for its predecessor.
+        if (args.expectPid != null && (!Number.isSafeInteger(args.expectPid) || args.expectPid !== session.pty.pid)) return json(response, 409, { error: 'Terminal generation changed', pid: session.pty.pid ?? null });
         if (match[2] === 'input' || match[2] === 'input-binary') { if (typeof args.data !== 'string') throw new Error('Invalid input'); session.pty.write(decodeTerminalInput(args.data,match[2]==='input-binary'?'latin1':undefined)); }
         if (match[2] === 'resize') {
           if (!Number.isInteger(args.cols) || args.cols < 1 || args.cols > 512 || !Number.isInteger(args.rows) || args.rows < 1 || args.rows > 256) throw new Error('Invalid geometry');
@@ -223,7 +237,7 @@ export function createRunner({ secret, spawnPty, accounts = [], workspaceId = 'w
       });
     } else socket.destroy();
   });
-  server.on('close', () => { for (const ws of sockets) ws.close(); });
+  server.on('close', () => { for (const ws of sockets) ws.close(); void browser?.close(); });
   return server;
 }
 
@@ -231,6 +245,6 @@ if (process.argv[1] === new URL(import.meta.url).pathname) {
   Object.assign(process.env,await initializeScratch());
   startNativeServer();
   const { spawn } = await import('node-pty');
-  createRunner({ secret: process.env.CANOPY_RUNNER_TOKEN, spawnPty: spawn, accounts: (process.env.CANOPY_ACCOUNTS ?? '').split(',').filter(Boolean), workspaceId: process.env.CANOPY_WORKSPACE_ID, historyFile: '/home/agent/.canopy/session-history.json' })
+  createRunner({ browser: new AgentBrowser({ home: '/home/agent' }), secret: process.env.CANOPY_RUNNER_TOKEN, spawnPty: spawn, accounts: (process.env.CANOPY_ACCOUNTS ?? '').split(',').filter(Boolean), workspaceId: process.env.CANOPY_WORKSPACE_ID, historyFile: '/home/agent/.canopy/session-history.json' })
     .listen(8080, '0.0.0.0');
 }

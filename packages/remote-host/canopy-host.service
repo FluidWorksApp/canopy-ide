@@ -2,6 +2,8 @@
 Description=Canopy shared execution host
 After=network-online.target docker.service canopy-network.service
 Requires=docker.service canopy-network.service
+# Optional: without the harness service, agents start without its tools.
+Wants=canopy-service.service
 StartLimitIntervalSec=120
 StartLimitBurst=5
 
@@ -28,7 +30,7 @@ MemoryMax=512M
 TasksMax=128
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/canopy-host
+ReadWritePaths=/var/lib/canopy-host -/run/canopy-relay
 
 [Install]
 WantedBy=multi-user.target
