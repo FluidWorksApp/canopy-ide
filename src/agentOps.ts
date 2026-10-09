@@ -703,6 +703,7 @@ export async function runUiOp(op: ipc.AgentUiOp, ctx: UiOpContext): Promise<unkn
         device: op.device,
         ptyId: op.ptyId,
         instance: op.instance,
+        agent: op.agent,
       });
     case "pr_details":
       return prDetails(op, ctx);
