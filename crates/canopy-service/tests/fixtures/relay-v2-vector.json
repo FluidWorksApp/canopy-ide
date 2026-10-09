@@ -1,0 +1,119 @@
+{
+ "testOnly": true,
+ "comment": "TEST-ONLY relay v2 vector (docs/canopy-service-protocol.md §6.1). Throwaway keys generated for this file; never use them anywhere else.",
+ "sender": {
+  "address": {
+   "team": "11111111-1111-4111-8111-111111111111",
+   "user": "user-alice",
+   "device": "33333333-3333-4333-8333-333333333333"
+  },
+  "publicKeys": {
+   "agreement": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "8wgFRWc_gi_GDoJ4vnCGqNq4tvcmEwJVV5AIPUGNKWI",
+    "y": "7_3Rn3e6bx_dZNMhY7OhGl-ashHK0gk4WRZmllP1yLM"
+   },
+   "signing": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "pKyGZbPSJe52AGSn2UBkmEH6bUkzegGwnptC2mqY7Ww",
+    "y": "RZHUPk2gKJoVCpd1X0zyleyLcG9cV37IUffQlXKYIn8"
+   }
+  }
+ },
+ "recipient": {
+  "address": {
+   "team": "11111111-1111-4111-8111-111111111111",
+   "user": "user-owner",
+   "device": "44444444-4444-4444-8444-444444444444"
+  },
+  "publicKeys": {
+   "agreement": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "___YgoFuSHYD6N_p1e966sYWemAqyPF3Ir96QrGL2ys",
+    "y": "B-ALsdz-T16N8M3rdIZUMbySLjMdZ-uWxzQVUmWEROg"
+   },
+   "signing": {
+    "kty": "EC",
+    "crv": "P-256",
+    "x": "XbA_vFcfdUFZRgMyDwiRuKu7E9Bo017DlRbRbQ1qKjk",
+    "y": "boWe1kh60SQ5Ofz1st8dPWHvP-WSPYd8k4HKEp5RtCk"
+   }
+  },
+  "agreementPrivateJwk": {
+   "kty": "EC",
+   "crv": "P-256",
+   "x": "___YgoFuSHYD6N_p1e966sYWemAqyPF3Ir96QrGL2ys",
+   "y": "B-ALsdz-T16N8M3rdIZUMbySLjMdZ-uWxzQVUmWEROg",
+   "d": "qp7RvJS6cqEKhtHWSlahnaCdNPt5gXIq5W3h0RiLen8"
+  }
+ },
+ "workspace": "ws-22222222-2222-4222-8222-222222222222",
+ "created": 1791561600000,
+ "vectors": [
+  {
+   "name": "job",
+   "plaintext": "{\"kind\":\"job\",\"job\":{\"id\":\"job-0001-fixture\",\"title\":\"Fixture job\",\"brief\":\"Run the test suite and report.\",\"workspace\":\"ws-22222222-2222-4222-8222-222222222222\",\"created\":1791561600000,\"target\":{\"name\":\"reviewer\"}}}",
+   "envelope": {
+    "version": 2,
+    "id": "9a845d55-092d-4c7f-b2e5-3172835bade0",
+    "kind": "job",
+    "from": {
+     "team": "11111111-1111-4111-8111-111111111111",
+     "user": "user-alice",
+     "device": "33333333-3333-4333-8333-333333333333"
+    },
+    "to": {
+     "team": "11111111-1111-4111-8111-111111111111",
+     "user": "user-owner",
+     "device": "44444444-4444-4444-8444-444444444444",
+     "workspace": "ws-22222222-2222-4222-8222-222222222222"
+    },
+    "created": 1791561600000,
+    "expires": 1792166400000,
+    "ephemeral": {
+     "kty": "EC",
+     "crv": "P-256",
+     "x": "WVckmNWNYG8MRo_oUR6HHVY76egdPV1qkzdQumdFg2E",
+     "y": "0aNeXb4-dxbCJS-fPXI3GOIq7R39zW4I4w0ugHbd5Ao"
+    },
+    "iv": "bWW2GLL+ck9FHOOF",
+    "ciphertext": "A2yjZeapO9XexZhtUoGLSV832KMVBFs+MttuHPrB3LN7y7KkSf9Vg4XZlmrqwtMEFnjn/1awtkDs1BpeGh47ivSi1DmlIs+o//deTsEuPrDnhiea0JrqZGuhKwdnnrvzHPggp3jTMMA34I0VztEGsquW03Jtnqdn0hpI1q+s81VmmZsXVqgXOkuDx6I8vi7LYxu4zfQEK/FL20t2zF+YSvBXQRcQUWYF983V8/IjewDxYqfRHtGUfUm/of17Og14jNIhl4nFwjj+/PHrEKpzeUGC/xo730Ea6eWQOY46hV94uFu1CjSACg==",
+    "signature": "uFkeM4Q8TtfIFvG+cUSrqUuqFBlQciFGQQBNEZJb0kPHjY6sqVvrIXqwPkV8mtcq2G03w3BnPQFOENp9aOiaew=="
+   }
+  },
+  {
+   "name": "mesh",
+   "plaintext": "{\"kind\":\"mesh\",\"message\":{\"id\":\"55555555-5555-4555-8555-555555555555\",\"text\":\"Hello from a teammate agent\",\"target\":{\"ptyId\":3},\"created\":1791561600000}}",
+   "envelope": {
+    "version": 2,
+    "id": "d866aba2-b1a9-4ffe-956a-4f8b493a6f9f",
+    "kind": "mesh",
+    "from": {
+     "team": "11111111-1111-4111-8111-111111111111",
+     "user": "user-alice",
+     "device": "33333333-3333-4333-8333-333333333333"
+    },
+    "to": {
+     "team": "11111111-1111-4111-8111-111111111111",
+     "user": "user-owner",
+     "device": "44444444-4444-4444-8444-444444444444",
+     "workspace": "ws-22222222-2222-4222-8222-222222222222"
+    },
+    "created": 1791561600000,
+    "expires": 1791648000000,
+    "ephemeral": {
+     "kty": "EC",
+     "crv": "P-256",
+     "x": "NZMCcKrEoPiA1LtQ049B69OjaIClt-9EbZTaz6SzCac",
+     "y": "N8foQifCG9wy0M4FF-bTR-3hPvzkfvio_zk0ynr3hSc"
+    },
+    "iv": "pzAwfv+PJ7s0H4Ey",
+    "ciphertext": "fhQ/y99cc5Trq28/L2S8TBKv0xmswQbcEz3QTX84j3y4xuwYWgySIJBjsvBkJuzVvgraiBWYiRpfnktW9YDTTR/COqeJTNuSybq579O7prbZwz5fEX6NjGpTG//v7j421XdeI2O3naLvVJkt6xqFSsmxgCOHyALXyXJycC+b8+PnhpSylP/oxiZmFBJCoq+biN1LXNHKoF2L/NESEwqF4iT1YC1bvoZEsQ==",
+    "signature": "DThmC+WLvtONSGyrrR+4LDLHsb73abUW+MFrfyrXCM5Z07utz4aKYlWRKtkPUgu8/J3t9yqAUBl0rXOlvpnYSg=="
+   }
+  }
+ ]
+}
