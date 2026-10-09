@@ -5,7 +5,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use canopy_service::harness::NotImplemented;
+use canopy_service::harness::CoreHarness;
 use canopy_service::http::{unix_open, unix_request};
 use canopy_service::relay::crypto::Envelope;
 use canopy_service::relay::transport::{DirectoryDevice, PollRow, RelayTransport, TransportError};
@@ -242,7 +242,7 @@ impl Daemon {
         let running = canopy_service::start(
             self.config(),
             StartOptions {
-                harness: Arc::new(NotImplemented),
+                harness: Arc::new(CoreHarness::default()),
                 relay: Some(Arc::new(self.relay.clone())),
                 relay_loop: false,
             },

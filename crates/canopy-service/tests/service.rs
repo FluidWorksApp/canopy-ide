@@ -103,11 +103,6 @@ async fn the_credential_is_the_caller_and_everything_else_is_503() {
         ),
         ("/ctx/snapshot", None, "not-implemented"),
         (
-            "/ctx/notes",
-            Some(serde_json::json!({"action":"list"})),
-            "not-implemented",
-        ),
-        (
             "/ctx/ui",
             Some(serde_json::json!({"op":"workspace"})),
             "not-implemented",
@@ -693,4 +688,74 @@ async fn a_delivery_cut_by_a_restart_is_reported_uncertain_never_replayed() {
     assert_eq!(state("d-written"), "uncertain");
     let attention = daemon.service().workspace(WS).unwrap().attention.list();
     assert!(attention.iter().any(|a| a.title.contains("uncertain")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notes_and_research_are_served_from_core_and_reach_the_stream() {
+    let daemon = Daemon::start().await;
+    let runner = FakeRunner::start().await;
+    daemon.register(WS, Some(&runner)).await;
+    let (ada, _) = daemon
+        .terminal(WS, &runner, "req-ada-01", "Ada", 11, 1011)
+        .await;
+    let mut sse = Sse::open(
+        &daemon.admin_socket(),
+        &format!("/admin/workspaces/{WS}/stream"),
+    )
+    .await;
+    assert_eq!(sse.next().await.0, "snapshot");
+
+    let (status, note) = daemon
+        .agent(WS, &ada, "POST", "/ctx/notes", Some(serde_json::json!({"action":"create","cwd":"/elsewhere","title":"Flaky test","text":"retry loop in ci"})))
+        .await;
+    assert_eq!(status, 200, "{note}");
+    let (event, change) = sse.next().await;
+    assert_eq!(event, "change");
+    assert_eq!(change["store"], "notes");
+    let (status, notes) = daemon
+        .admin(
+            "POST",
+            &format!("/admin/workspaces/{WS}/query"),
+            Some(serde_json::json!({"store":"notes","action":"list","args":{}})),
+        )
+        .await;
+    assert_eq!(status, 200, "{notes}");
+    assert_eq!(notes["items"][0]["title"], "Flaky test");
+    // Another project is refused; this one by name or id is fine.
+    let (status, _) = daemon
+        .agent(
+            WS,
+            &ada,
+            "POST",
+            "/ctx/notes",
+            Some(serde_json::json!({"action":"list","cwd":"/workspace","project":"other"})),
+        )
+        .await;
+    assert_eq!(status, 400);
+    let (status, listed) = daemon
+        .agent(WS, &ada, "POST", "/ctx/notes", Some(serde_json::json!({"action":"list","cwd":"/workspace","project":format!("ws:{WS}")})))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(listed["notes"].as_array().unwrap().len(), 1);
+
+    let (status, research) = daemon
+        .agent(WS, &ada, "POST", "/ctx/research", Some(serde_json::json!({"action":"start","cwd":"/workspace","title":"Cache layer","question":"Which cache?"})))
+        .await;
+    assert_eq!(status, 200, "{research}");
+    let (_, rows) = daemon
+        .admin(
+            "POST",
+            &format!("/admin/workspaces/{WS}/query"),
+            Some(serde_json::json!({"store":"research","action":"list","args":{}})),
+        )
+        .await;
+    assert_eq!(rows["items"].as_array().unwrap().len(), 1);
+    let mut fresh = Sse::open(
+        &daemon.admin_socket(),
+        &format!("/admin/workspaces/{WS}/stream"),
+    )
+    .await;
+    let (_, snapshot) = fresh.next().await;
+    assert_eq!(snapshot["stores"]["notes"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot["stores"]["research"].as_array().unwrap().len(), 1);
 }

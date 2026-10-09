@@ -1,7 +1,7 @@
 //! `canopy-serviced`. Configured from the environment (see `Config`); flags
 //! override. Runs until SIGTERM or SIGINT.
 
-use canopy_service::harness::NotImplemented;
+use canopy_service::harness::CoreHarness;
 use std::sync::Arc;
 
 fn main() {
@@ -25,7 +25,7 @@ fn main() {
         let running = match canopy_service::start(
             config,
             canopy_service::StartOptions {
-                harness: Arc::new(NotImplemented),
+                harness: Arc::new(CoreHarness::default()),
                 relay: None,
                 relay_loop: true,
             },
