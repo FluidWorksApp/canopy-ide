@@ -46,12 +46,15 @@ pub async fn poll_workspace(
     service: &Arc<Service>,
     ws: &Arc<Workspace>,
     transport: &dyn RelayTransport,
-) {
+) -> bool {
     let device = service.device.device_id.clone();
     let rows = match transport.poll(&ws.id, &device).await {
         Ok(rows) => rows,
-        Err(TransportError::NotConfigured) => return,
-        Err(TransportError::Failed(error)) => return log(&ws.id, &error),
+        Err(TransportError::NotConfigured) => return true,
+        Err(TransportError::Failed(error)) => {
+            log(&ws.id, &error);
+            return false;
+        }
     };
     let mut acknowledged = Vec::new();
     for row in rows {
@@ -64,6 +67,7 @@ pub async fn poll_workspace(
             log(&ws.id, &format!("ack failed: {error:?}"));
         }
     }
+    true
 }
 
 fn refusal_payload(kind: &str, id: &str, reason: &str) -> (&'static str, serde_json::Value) {

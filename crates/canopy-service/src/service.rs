@@ -261,16 +261,20 @@ impl Service {
         })
     }
 
-    pub async fn relay_once(self: &Arc<Self>) {
+    /// One relay pass over every workspace. False when any poll failed, so
+    /// the loop can back off.
+    pub async fn relay_once(self: &Arc<Self>) -> bool {
         let Some(transport) = self.relay.clone() else {
-            return;
+            return true;
         };
+        let mut healthy = true;
         for id in self.workspace_ids() {
             if let Some(ws) = self.workspace(&id) {
-                crate::relay::poll_workspace(self, &ws, transport.as_ref()).await;
+                healthy &= crate::relay::poll_workspace(self, &ws, transport.as_ref()).await;
                 crate::relay::flush_outbox(self, &ws, transport.as_ref()).await;
             }
         }
+        healthy
     }
 }
 
@@ -332,9 +336,14 @@ pub async fn start(config: Config, options: StartOptions) -> Result<Running, Str
     if options.relay_loop && service.relay.is_some() {
         let svc = service.clone();
         tasks.push(tokio::spawn(async move {
+            let mut delay = svc.config.relay_poll;
             loop {
-                tokio::time::sleep(svc.config.relay_poll).await;
-                svc.relay_once().await;
+                tokio::time::sleep(delay).await;
+                delay = if svc.relay_once().await {
+                    svc.config.relay_poll
+                } else {
+                    (delay * 2).min(Duration::from_secs(60))
+                };
             }
         }));
     }
