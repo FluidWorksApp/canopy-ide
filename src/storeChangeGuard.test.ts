@@ -136,7 +136,7 @@ describe("the store change channel", () => {
           body,
           `${store.file}: ${fn} is ${store.id}'s write boundary and must call change::pulse, ` +
             `or a write by an agent or the portal reaches no open surface`,
-        ).toContain(store.id === "mesh" ? "self.events.publish" : "change::pulse");
+        ).toContain(store.file.startsWith("../../crates/") ? "self.events.publish" : "change::pulse");
       }
     }
   });
@@ -151,7 +151,7 @@ describe("the store change channel", () => {
   });
 
   it("routes every Rust store variant to a frontend handler", () => {
-    const change = read("../../crates/canopy-core/src/events.rs");
+    const change = read("change.rs");
     const enumBody = change.slice(change.indexOf("pub enum Store"));
     const variants = [...enumBody.slice(0, enumBody.indexOf("}")).matchAll(/^\s{4}(\w+),/gm)].map(
       (m) => m[1],
@@ -174,6 +174,22 @@ describe("the store change channel", () => {
         `Store::${variant} emits "store:change" but nothing in the frontend routes "${store!.id}" — ` +
           `the event would land nowhere, which looks exactly like the bug this channel closes`,
       ).toBe(true);
+    }
+  });
+
+  it("reaches change::pulse from every canopy-core store", () => {
+    // A core store publishes to an injected sink, so its write boundary alone
+    // proves nothing: a no-op sink, or one that names the wrong store, is the
+    // same silent panel. Check the desktop's sink and that each store gets it.
+    const change = read("change.rs");
+    const publish = fnBody(change.slice(change.indexOf("for DesktopEvents")), "publish") ?? "";
+    expect(publish).toContain("pulse(change.store.into()");
+    for (const store of STORES.filter((s) => s.file.startsWith("../../crates/"))) {
+      const desktop = stripComments(read(`${store.id}.rs`));
+      expect(desktop, `${store.id}.rs must hand its core store the desktop sink`).toContain(
+        "crate::change::DesktopEvents",
+      );
+      expect(desktop).not.toContain("NoopEventSink");
     }
   });
 

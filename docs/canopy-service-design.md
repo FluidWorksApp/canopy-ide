@@ -76,8 +76,10 @@ The following table covers all 73 entries in the reviewed `SUPPORTED_TOOLS` list
 | Service attention | `notify`, `ask_user`, `confirm` | Persisted attention; questions have deadlines and return `no user present` on expiry. |
 | Service language | `definition`, `references`, `hover`, `symbols`, `diagnostics` | Routed to language servers in the workspace container; advertised only for implemented operations. |
 | Host browser | `browser_click`, `browser_console`, `browser_eval`, `browser_navigate`, `browser_network`, `browser_point`, `browser_resize`, `browser_snapshot`, `browser_type`, `screenshot` | Phase 4; preview/browser screenshots only. Unavailable until implemented. |
-| IDE only | `annotations`, `editor_state`, `open_file`, `show_diff`, `open_preview`, `open_project` | Advertised only while an eligible IDE is subscribed for the target workspace. |
+| IDE only | `annotations`, `editor_state`, `open_file`, `show_diff`, `open_preview`, `open_project` | Always advertised; fail fast with `no IDE attached` when no eligible IDE is subscribed for the target workspace. |
 | Laptop only | `device_describe`, `device_key`, `device_list`, `device_logcat`, `device_run`, `device_screenshot`, `device_snapshot`, `device_start`, `device_swipe`, `device_tap`, `device_type`, `vault_fill`, `vault_list`, `vault_read` | Never served by the cloud service. Vault secrets remain on the laptop. |
+
+The advertised tool list is fixed for an agent's lifetime. `canopy-hook` declares `tools.listChanged: false` (`src-tauri/src/bin/canopy_hook.rs`), and most supported CLIs read the list once at startup, so a tool cannot appear or disappear as an IDE connects. A service advertises every tool its version implements; availability that depends on an IDE, a device or a provider is reported per call with a specific, bounded error. Laptop-only tools are not advertised by a cloud service at all.
 
 `mesh_submit` and `mesh_targets` currently forward to the IDE. They need service handlers before headless parity can be advertised. Browser work is phase 4 in the phase list, correcting the earlier phase 3 reference.
 
@@ -111,12 +113,12 @@ Persist job states such as accepted, started, done, blocked and failed, with ref
 
 ### 4.4 Authority
 
-Decision, 2026-10-09: verified envelope identity and the current workspace grant decide delivery. The current `meshJobs.ts` requires approval for every other account; allowing granted teammates to run immediately is a proposed policy change.
+Decision, 2026-10-09: verified envelope identity and the current workspace grant decide delivery. The current `meshJobs.ts` requires approval for every other account. Immediate delivery for granted teammates loosens that, so it is a per-workspace setting, **off by default**, that the workspace owner enables explicitly; the setting travels in the signed access snapshot. While it is off, a granted teammate's job is refused with a sender-visible reason, as for an ungranted sender.
 
 | Sender | Delivery |
 | --- | --- |
 | Same account as workspace owner | Immediate, subject to valid device identity and workspace ownership. |
-| Teammate with an applicable grant allowing session interaction | Immediate. |
+| Teammate with an applicable grant allowing session interaction | Immediate when the owner has enabled teammate delivery for the workspace; otherwise refused. |
 | Any other teammate | Refused at the host with a sender-visible reason; no pending approval queue. |
 
 Reuse `workspace-access.mjs`, `workspace-person-grants.mjs` and team/organization grants. Evaluate the complete applicable grant, including action, project scope and `sessions:interact`. Do not reduce the check to a `sessions` string or combine unrelated grants into broader authority.
@@ -144,8 +146,10 @@ The IDE merges authorized streams as unions keyed by service, workspace and loca
 
 ## 6. Phases and acceptance
 
-1. **Extract.** Add `canopy-core`, explicit store contexts and adapter contracts. Move shared models and store logic first, keep thin Tauri wrappers, then move bridge handlers and lifecycle work. The desktop continues to embed the core. Acceptance: the core builds and tests without Tauri; existing relevant desktop suites pass; formats, commands and behavior remain compatible. Include task completion, reminders, maintenance and companion dependencies in the extraction inventory.
-2. **Cloud service.** Ship `canopy-serviced` on the host, add container sockets and hook transport, connect execution adapters and migrate frontend-owned configuration into service ownership. Implement service, attention and language classes and the IDE stream. Acceptance: with the laptop closed, a cloud agent writes research and a note, messages a second cloud agent, and completes a task; the reopened IDE shows the persisted results. Verify daemon restart, question deadlines, concurrent workspace isolation, capability changes and snapshot/replay gaps. Existing remote language analysis supports diagnostics and symbols; definition, references and hover need additional implementations.
+1. **Extract (scoped to 2a).** Add `canopy-core`, explicit store contexts and adapter contracts for the stores and handlers phase 2a serves: mesh and claims (done in the first slice), notes, research and micro-task completion. The desktop continues to embed the core. Acceptance: the core builds and tests without Tauri; existing relevant desktop suites pass; formats, commands and behavior remain compatible. Remaining handlers move when the phase that serves them needs them, not up front.
+2. **Cloud service, in two releases.**
+   - **2a, headless stores.** Ship `canopy-serviced` on the host with the container socket, hook Unix-socket transport and spawn-time credentials, serving only `mesh`, `mesh_send`, `message_agent`, `claim`, `notes`, `notes_write`, `research`, `research_write` and `job_done` for agents on that host. Every other tool fails fast as unavailable. Acceptance: with the laptop closed, a cloud agent writes research and a note, messages a second cloud agent on the same host, and completes a micro-task; the reopened IDE shows the persisted results after a refetch. Verify daemon restart and concurrent workspace isolation.
+   - **2b, parity and stream.** Connect execution adapters, migrate frontend-owned configuration into service ownership, implement the remaining service, attention and language classes and the resumable IDE stream. Acceptance: the remaining service-class tools work without an IDE; question deadlines, capability errors and snapshot/replay gaps behave as specified. Existing remote language analysis supports diagnostics and symbols; definition, references and hover need additional implementations.
 3. **Mesh endpoint.** Add host device registration, workspace addressing, versioned envelopes, durable inbox/outbox and signed grant snapshots. Acceptance: with the owner offline, a granted teammate's message and job are delivered; an ungranted sender receives refusal; a revoked grant stops delivery after the next snapshot and expired snapshots cannot authorize delivery. Exercise duplicate envelopes, restart around acknowledgement and PTY submission, quota races and old/new protocol compatibility.
 4. **Host browser.** Serve preview browser tools through the workspace image's Chromium and `chrome-stream`. Acceptance: browser operations and preview screenshots work without an IDE, remain scoped to the target workspace and fail with bounded deadlines.
 5. **Laptop daemon.** Make the desktop a client of local `canopy-serviced`. Acceptance: closing the IDE leaves the local service running; reconnect restores state; migration preserves existing stores with one writer and a documented rollback path.
@@ -159,6 +163,7 @@ Service upgrades ship with the host release through `package-host-release.sh`. H
 - **Terminal isolation:** keep the workspace as the trust boundary initially, or add OS isolation before promising protection between hostile agents in the same workspace.
 - **Access snapshots:** choose refresh/expiry intervals, aggregate revision ownership and signing-key rotation before phase 3.
 - **Host replacement:** decide how keys and pending encrypted envelopes survive replacement or migration.
+- **Teammate delivery default:** confirm off-by-default with explicit owner opt-in, and whether the opt-in is per workspace or per granted teammate.
 - **Delivery recovery:** specify how users reconcile uncertain PTY submission and how typed job protocols may later provide stronger execution receipts.
 
 ## 8. Review against the current code
@@ -185,4 +190,4 @@ The `EventSink` contract currently covers store invalidations. `Terminals` curre
 
 This begins phase 1. Notes, research, tasks, companion, the rest of the context handlers and lifecycle work remain to be extracted. The daemon, cloud socket transport and durable peer routing remain later phases. Message persistence retains its existing best-effort behavior; durable inbox acknowledgement must not use that behavior as proof of a committed record.
 
-Local validation includes the standalone core suite, store/claim frontend guards, and a desktop integration test that sends through the core into a real PTY. The core suite checks isolated store paths and subscribers, restart persistence, legacy formats, claim recovery, delayed submission and terminal replacement. CI runs the core suite without installing Tauri or webview dependencies.
+Local validation includes the standalone core suite, store/claim frontend guards, and a desktop integration test that sends through the core into a real PTY. The core suite checks isolated store paths and subscribers, restart persistence, legacy formats, claim recovery, delayed submission and terminal replacement. CI runs the core suite without installing Tauri or webview dependencies. `src-tauri` is the Cargo workspace root and `canopy-core` a member, so both share one `Cargo.lock`, one target directory and one declared `rust-version` (1.82, which the desktop already required through `Option::is_none_or`). Core's `Store` enum lists only stores core owns; the desktop maps each onto its own channel, and coalescing stays in `change.rs`.

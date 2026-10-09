@@ -307,7 +307,7 @@ impl MeshStore {
             message: msg.clone(),
         });
         self.events.publish(StoreChange {
-            store: Store::Mesh.as_str(),
+            store: Store::Mesh,
             scope: String::new(),
             id: msg.id.clone(),
         });
@@ -334,7 +334,7 @@ impl MeshStore {
             inner.messages[index].submitted = true;
             inner.append(MeshLogEntry::Submitted { id: id.to_string() });
             self.events.publish(StoreChange {
-                store: Store::Mesh.as_str(),
+                store: Store::Mesh,
                 scope: String::new(),
                 id: id.to_string(),
             });
@@ -377,7 +377,7 @@ impl MeshStore {
         if changed {
             inner.persist_severed();
             self.events.publish(StoreChange {
-                store: Store::Mesh.as_str(),
+                store: Store::Mesh,
                 scope: String::new(),
                 id: String::new(),
             });
@@ -1266,7 +1266,7 @@ mod event_tests {
         assert_eq!(changes.len(), 2);
         assert!(changes
             .iter()
-            .all(|event| event.id == first.id && event.store == "mesh"));
+            .all(|event| event.id == first.id && event.store == Store::Mesh));
         assert_eq!(b_events.0.lock().unwrap().len(), 1);
         drop(a);
         drop(b);
@@ -1294,7 +1294,7 @@ mod event_tests {
         assert!(second.severed_pairs().is_empty());
         let changes = a.0.lock().unwrap();
         assert_eq!(changes.len(), 1, "a headless mutation must announce itself");
-        assert_eq!(changes[0].store, "mesh");
+        assert_eq!(changes[0].store, Store::Mesh);
         assert_eq!(changes[0].scope, "");
         assert_eq!(changes[0].id, "");
         assert!(b.0.lock().unwrap().is_empty());

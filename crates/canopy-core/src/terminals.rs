@@ -2,6 +2,7 @@
 //! the adapter; the core never reaches into Tauri state or spawns a runtime.
 
 use crate::mesh::MeshStore;
+use std::future::Future;
 use std::time::Duration;
 
 pub const SUBMIT_DELAY: Duration = Duration::from_millis(250);
@@ -61,8 +62,19 @@ impl PendingDelivery {
         })
     }
 
-    pub async fn finish(mut self, terminals: &dyn Terminals, mesh: &MeshStore) -> DeliveryReceipt {
-        tokio::time::sleep(SUBMIT_DELAY).await;
+    /// `sleep` is the caller's runtime timer, so core never needs an ambient
+    /// executor; it is awaited for exactly `SUBMIT_DELAY`.
+    pub async fn finish<S, F>(
+        mut self,
+        sleep: S,
+        terminals: &dyn Terminals,
+        mesh: &MeshStore,
+    ) -> DeliveryReceipt
+    where
+        S: FnOnce(Duration) -> F,
+        F: Future<Output = ()>,
+    {
+        sleep(SUBMIT_DELAY).await;
         self.receipt.submitted = terminals.write(&self.target, "\r").is_ok();
         if self.receipt.submitted {
             mesh.mark_submitted(&self.receipt.id);
@@ -118,9 +130,10 @@ mod tests {
             .record(crate::mesh::tests::new_msg("hello", 7))
             .unwrap();
         let pending =
-            PendingDelivery::begin(&terminals, 7, "/repo".into(), "m1".into(), "hello").unwrap();
+            PendingDelivery::begin(&terminals, 7, "/repo".into(), message.id.clone(), "hello")
+                .unwrap();
         assert_eq!(terminals.writes.lock().unwrap().len(), 1);
-        let receipt = pending.finish(&terminals, &mesh).await;
+        let receipt = pending.finish(tokio::time::sleep, &terminals, &mesh).await;
         assert!(receipt.submitted);
         assert!(mesh.get(&message.id).unwrap().submitted);
         let writes = terminals.writes.lock().unwrap();
@@ -130,7 +143,7 @@ mod tests {
         assert!(writes[1].0.duration_since(writes[0].0) >= SUBMIT_DELAY);
         assert_eq!(
             serde_json::to_value(receipt).unwrap(),
-            serde_json::json!({"id":"m1","toPtyId":7,"toCwd":"/repo","submitted":true})
+            serde_json::json!({"id":message.id,"toPtyId":7,"toCwd":"/repo","submitted":true})
         );
     }
 
@@ -142,9 +155,15 @@ mod tests {
             .record(crate::mesh::tests::new_msg("hello", 7))
             .unwrap();
         let pending =
-            PendingDelivery::begin(&terminals, 7, "/repo".into(), "m1".into(), "hello").unwrap();
+            PendingDelivery::begin(&terminals, 7, "/repo".into(), message.id.clone(), "hello")
+                .unwrap();
         *terminals.generation.lock().unwrap() = 2;
-        assert!(!pending.finish(&terminals, &mesh).await.submitted);
+        assert!(
+            !pending
+                .finish(tokio::time::sleep, &terminals, &mesh)
+                .await
+                .submitted
+        );
         assert!(!mesh.get(&message.id).unwrap().submitted);
         assert_eq!(terminals.writes.lock().unwrap().len(), 1);
     }

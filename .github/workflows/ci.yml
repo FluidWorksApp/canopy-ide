@@ -86,9 +86,10 @@ jobs:
           components: rustfmt
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: "./crates/canopy-core -> target"
-      - run: cargo test --locked --manifest-path crates/canopy-core/Cargo.toml
-      - run: cargo fmt --manifest-path crates/canopy-core/Cargo.toml --check
+          workspaces: "./src-tauri -> target"
+          key: canopy-core
+      - run: cargo test --locked --manifest-path crates/canopy-core/Cargo.toml -p canopy-core
+      - run: cargo fmt --manifest-path crates/canopy-core/Cargo.toml -p canopy-core --check
 
   rust:
     name: Rust (cargo test)

@@ -3049,7 +3049,9 @@ fn deliver_line(
     tauri::async_runtime::spawn(async move {
         let terminals = send.state::<crate::pty::PtyManager>();
         let bridge = send.state::<ContextBridge>();
-        let receipt = pending.finish(&*terminals, &bridge.mesh).await;
+        let receipt = pending
+            .finish(tokio::time::sleep, &*terminals, &bridge.mesh)
+            .await;
         // Preserve the desktop attention event whether submission succeeds or
         // the child exits during the delay. The core owns the two-write rule.
         let _ = send.emit("agent:message", receipt);

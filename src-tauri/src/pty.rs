@@ -3786,7 +3786,7 @@ mod tests {
             .enable_time()
             .build()
             .unwrap();
-        let receipt = runtime.block_on(pending.finish(&pm, &mesh));
+        let receipt = runtime.block_on(pending.finish(tokio::time::sleep, &pm, &mesh));
         let seen = wait_for(
             &pm,
             id,
