@@ -273,3 +273,67 @@ signature before parsing. The daemon's verify keys are `{"<kid>":"<base64 raw
 `sessions:interact`. `revision` is `workspace.access_revision`, bumped by
 database triggers on every grant, team/organization membership, ownership,
 organization move, deletion or `team_delivery` change.
+
+## 7. Service implementation notes (`crates/canopy-service`)
+
+What `canopy-serviced` does where the sections above leave a choice open.
+
+- **Credentials.** `POST .../terminals` returns `{token, ptyId}`. `ptyId` is a
+  service-assigned number, stable per `requestId`. Re-minting an unbound
+  `requestId` replaces its token, and bind is idempotent for the same
+  `{sessionId, pid}`. Only SHA-256 hashes of tokens are stored
+  (`ws/<ws>/terminals.json`, 0600). At startup and whenever `runnerUrl`
+  changes, the service keeps a credential only if the runner's `GET /sessions`
+  still lists that `id` with the same `pid` and a null `exitCode`. Unbound
+  credentials older than 10 minutes are dropped. Revocation releases the
+  terminal's claims.
+- **Agent API.** `/ctx/identity` adds `workspace` and `project`. In
+  `/ctx/tools`, `supportedTools` is the desktop list verbatim (a test pins it
+  to `context.rs`). `disabled` holds the laptop-only device and vault tools,
+  and `supportedActions` lists the kinds in §2. `POST /ctx/ui` with
+  `op:"ask"|"confirm"` is served the same as `/ctx/ask`, so an unchanged hook
+  works. Every other `/ctx/ui` op answers 503. The ask body is
+  `{op?, question | action+detail, options?, timeoutMs?, requestId?}`. A
+  retry with the same `requestId` rejoins the caller's own question. Answers
+  are `{answer, id}`, plus `accepted` for confirm, which is true only for
+  `true`, `"accept"`, `"accepted"`, `"yes"` or `"allow"`. `close_session` acts
+  on the credential's own terminal. It sets `closeRequestedMs` and publishes
+  `mesh`/`terminals`/`close`; the gateway stops the session. `job_done` records
+  the outcome on the terminal, raises an fyi and settles any relay job
+  delivered to that terminal. Mesh item paths are container paths, so only
+  their shape is checked. Notes `attach` answers a clear 400 until container
+  file reads are routed through the runner.
+- **Delivery ledger.** `ws/<ws>/inbox/service.sqlite` moves each delivery
+  through `queued → writing → written → submitted | failed | uncertain`. After
+  a restart, `queued` deliveries run (nothing was typed yet). `writing` and
+  `written` become `uncertain` with an fyi and are never typed again.
+- **Stream and query.** A `change.store` is always one of
+  `mesh|notes|research|attention`. Claims, terminals, deliveries, jobs, inbox
+  and access are `scope`s under `mesh`. The snapshot's `mesh` store is the
+  message list. `query` answers `{items:[...]}` for `list` on `mesh`
+  (messages), `notes`, `research` and `attention`, using the same rows as the
+  snapshot. It also answers for `claims`, `terminals` (never token hashes),
+  `deliveries`, `jobs`, `inbox` and `outbox`, plus `mesh` `severed`/`claims`/
+  `claim_history` and `access` `get`. Actions need `actor`. A second `answer`
+  gets 409 with the winning `resolution`.
+- **Access.** A bad signature, an unknown `kid`, or a different
+  `workspaceId`/`serviceDevice` gets 400. A lower revision, or the same
+  revision with a different payload, gets 409. Resending the same revision and
+  payload is idempotent. The snapshot is persisted in `ws/<ws>/access.json`.
+  With no snapshot, only the owner is delivered.
+- **Relay.** The service polls each registered workspace with that
+  workspace's own credential. It trusts the poll row's `sender` keys only when
+  they match `from.user` and `from.device`, then verifies and decrypts. The
+  dedupe key is crypto.ts's replay id
+  (`[[from],[to],id]`). The inbox row, the job row and any status or refusal
+  outbox row are committed in one transaction before the ack. Malformed,
+  misaddressed and unverifiable envelopes are acked without a reply. A job
+  must name a `target`, or it is declined. Job states go out as
+  `accepted` (admission), `started` (Return submitted), `done`/`blocked`
+  (`job_done`) and `failed`. A locally `uncertain` delivery goes out as
+  `failed` with an explanation. A mesh message that was admitted but could not
+  be delivered is answered with `mesh-status` `state:"failed"`. Outgoing
+  envelopes are v2 from `{user: ownerUserId, device: host}` with
+  `to.workspace` set to this workspace. Outbox rows retry until 7 days.
+  `GET /admin/device?workspace=<id>&created=<ms>` adds the `register-host`
+  `proof`.
