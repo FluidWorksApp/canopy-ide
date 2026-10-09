@@ -129,3 +129,9 @@ it('reports the conversation as on screen only while active',async()=>{
  rerender(<AccountChatView conversation={channel} active/>);unmount();
  expect(conversationShown('engineering','me',null)).toBe(false);
 });
+it('renders links in team messages as clickable links',()=>{
+ const previous=mock.snapshot.messages;mock.snapshot.messages=[{id:'u',sender:'ada',recipient:null,text:'see https://claude.com/resources/webinars/x.',created:2}];
+ try{render(<AccountChatView conversation={channel}/>);
+  const link=screen.getByRole('link',{name:'https://claude.com/resources/webinars/x'});expect(link.getAttribute('href')).toBe('https://claude.com/resources/webinars/x');
+ }finally{mock.snapshot.messages=previous;}
+});
