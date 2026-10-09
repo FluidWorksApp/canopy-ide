@@ -3399,6 +3399,8 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
             "description": "Send another agent a first-class mesh message: the full body is recorded under a stable id — multi-line is fine, it is fetched, not typed — and the target's terminal gets a one-line notice carrying that id so it knows to look. Prefer this over canopy_message_agent whenever the message is more than one line, shares files, answers an earlier message, or should be findable later; use canopy_message_agent for a quick one-liner. `items` shares files by absolute path (a screenshot, a log, a diff) which the receiver opens with its own tools. `replyTo` threads it under the message it answers. `ref` ({kind, id}) tags it to a task, PR or attempt so canopy_mesh can list the whole conversation about that thing in one query. The notice still interrupts the target exactly like canopy_message_agent — check canopy_agents first, and only agent sessions can be messaged. Sends are recorded whether or not the notice landed; the record's `submitted` says which.",
             "inputSchema": { "type": "object", "properties": {
                 "ptyId": { "type": "integer", "description": "Terminal id of the agent to message (from canopy_agents). Must be an agent session, not a shell or a run" },
+                "workspace": { "type": "string", "description": "A cloud workspace by name (from canopy_mesh_targets): the message goes to its Canopy service, which delivers it even while this machine is offline. Name the agent there with `agent` or `ptyId`" },
+                "agent": { "type": "string", "description": "With `workspace`: the agent's name in that cloud workspace" },
                 "text": { "type": "string", "description": "The message, in full — multi-line markdown is fine. The target reads it from the mesh; only a one-line preview is typed" },
                 "items": { "type": "array", "items": { "type": "object", "properties": {
                     "path": { "type": "string", "description": "Absolute path of a file to share" },
@@ -3410,7 +3412,7 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
                     "kind": { "type": "string", "description": "What the id names: task, pr, attempt, …" },
                     "id": { "type": "string" }
                 }, "required": ["kind", "id"], "additionalProperties": false, "description": "A typed reference this message is about, for canopy_mesh refKind/refId queries" }
-            }, "required": ["ptyId", "text"], "additionalProperties": false }
+            }, "required": ["text"], "additionalProperties": false }
         }),
         serde_json::json!({
             "name": "canopy_mesh_targets",
@@ -3425,7 +3427,8 @@ fn mesh_tool_defs() -> Vec<serde_json::Value> {
                 "title": { "type": "string", "description": "A short name for the job, shown to whoever approves it" },
                 "workspace": { "type": "string", "description": "The target workspace by name (from canopy_mesh_targets). Required for a job in this window; for another machine, optional — the receiver picks when omitted" },
                 "member": { "type": "string", "description": "Send to another machine: \"me\" (this account's other machine) or a teammate's name or id" },
-                "device": { "type": "string", "description": "A specific device id from canopy_mesh_targets, when the member has several online" }
+                "device": { "type": "string", "description": "A specific device id from canopy_mesh_targets, when the member has several online" },
+                "agent": { "type": "string", "description": "For a cloud workspace: the name of a running agent there to hand the job to; omitted starts a new one" }
             }, "required": ["brief"], "additionalProperties": false }
         }),
     ]
@@ -4816,6 +4819,35 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                 ),
             ))
         }
+        "canopy_mesh_send"
+            if args
+                .get("workspace")
+                .and_then(|v| v.as_str())
+                .is_some_and(|w| !w.trim().is_empty()) =>
+        {
+            let body = args
+                .get("text")
+                .and_then(|v| v.as_str())
+                .ok_or("missing required argument: text")?;
+            let agent = args.get("agent").and_then(|v| v.as_str());
+            let target = args.get("ptyId").and_then(|v| v.as_u64());
+            if agent.map_or(true, |a| a.trim().is_empty()) && target.is_none() {
+                return Err(
+                    "a cloud workspace message needs `agent` (its name there) or `ptyId`".into(),
+                );
+            }
+            text(ui_op(
+                "mesh_message_cloud",
+                &serde_json::json!({
+                    "project": args.get("workspace"),
+                    "prompt": body,
+                    "agent": agent,
+                    "targetPtyId": target,
+                    "replyTo": args.get("replyTo"),
+                }),
+                35,
+            ))
+        }
         "canopy_mesh_send" => {
             let pty = args
                 .get("ptyId")
@@ -4859,6 +4891,7 @@ fn call_tool(name: &str, args: &serde_json::Value) -> Result<ToolOutput, String>
                     "project": arg("workspace"),
                     "member": arg("member"),
                     "device": arg("device"),
+                    "agent": arg("agent"),
                 }),
                 95,
             ))

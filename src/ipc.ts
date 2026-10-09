@@ -798,7 +798,8 @@ export interface AgentUiOp {
     | "remember"
     // Mesh jobs, open to every agent: where a job can go, and sending one.
     | "mesh_targets"
-    | "mesh_submit";
+    | "mesh_submit"
+    | "mesh_message_cloud";
   route: string;
   /** Agent terminal that initiated the operation, when there is one. For
    *  mesh_submit the bridge stamps it from the caller's credential. */
@@ -809,6 +810,8 @@ export interface AgentUiOp {
    *  optionally, which of their devices. */
   member?: string | null;
   device?: string | null;
+  targetPtyId?: number | null;
+  replyTo?: string | null;
   path?: string | null;
   line?: number | null;
   column?: number | null;

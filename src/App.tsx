@@ -246,6 +246,7 @@ const PROJECTLESS_OPS = new Set([
   // stands decides nothing.
   "mesh_targets",
   "mesh_submit",
+  "mesh_message_cloud",
 ]);
 
 /** Ticket for one companion-requested session launch, so the ProjectView that

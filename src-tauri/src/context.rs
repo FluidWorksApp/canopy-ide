@@ -4222,6 +4222,11 @@ struct UiOp {
     /// workspace in this window, named by `project`.
     member: Option<String>,
     device: Option<String>,
+    /// mesh_message_cloud: the target agent's terminal in the cloud workspace.
+    #[serde(rename = "targetPtyId")]
+    target_pty_id: Option<u32>,
+    #[serde(rename = "replyTo")]
+    reply_to: Option<String>,
 }
 
 /// The longest job brief the mesh carries. A team envelope holds 32 KB of
@@ -4254,6 +4259,18 @@ async fn ui_op(
     let mut submitter: Option<u32> = None;
     let deadline = match op.op.as_str() {
         "mesh_targets" => UI_OP_TIMEOUT,
+        "mesh_message_cloud" => {
+            if who.agent().is_none() {
+                return (
+                    StatusCode::FORBIDDEN,
+                    "Only a Canopy agent terminal can message a cloud workspace's agents.".into(),
+                );
+            }
+            if op.prompt.as_deref().map_or(true, |t| t.trim().is_empty()) {
+                return (StatusCode::BAD_REQUEST, "a mesh message needs text".into());
+            }
+            std::time::Duration::from_secs(30)
+        }
         "mesh_submit" => {
             let Some(agent) = who.agent() else {
                 return (

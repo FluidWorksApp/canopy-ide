@@ -211,6 +211,19 @@ describe("jobs for a cloud workspace", () => {
     expect(store.rows()).toHaveLength(0);
   });
 
+  it("messages an agent in a cloud workspace through its service", async () => {
+    const sendWorkspaceMessage = vi.fn(async () => host);
+    const { jobs } = setup({ cloudWorkspaces: cloud }, session({ hosts: () => [host], sendWorkspaceMessage }));
+    await expect(jobs.message({ workspace: "cloud-api", text: "  look at #12 ", agent: "reviewer", replyTo: "m4" }))
+      .resolves.toMatchObject({ status: "sent", workspace: "cloud-api" });
+    expect(sendWorkspaceMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "look at #12", target: { name: "reviewer" }, replyTo: "m4" }),
+      WS,
+    );
+    await expect(jobs.message({ workspace: "cloud-api", text: "hi" })).rejects.toThrow(/Name the agent/);
+    await expect(jobs.message({ workspace: "elsewhere", text: "hi", agent: "a" })).rejects.toThrow(/No cloud workspace/);
+  });
+
   it("ignores jobs that claim to come from a cloud service", () => {
     const { jobs, deps } = setup({ cloudWorkspaces: cloud });
     jobs.receive({ ...incoming("alice"), workspace: WS });
