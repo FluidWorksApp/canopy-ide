@@ -37,6 +37,34 @@ export function bindSessionProcesses(sessions,processes,runnerPid,known=new Map(
  if(active.length===1&&roots.length===1&&!known.has(active[0].id))known.set(active[0].id,{pid:roots[0].pid,started:roots[0].started});
  return new Map(active.flatMap(session=>{const identity=known.get(session.id),proc=identity&&byPid.get(identity.pid);return proc&&proc.started===identity.started?[[session.id,proc]]:[];}));
 }
+// Match LISTEN socket inodes to the owning session's process tree. Looking at
+// every socket in the container would attribute another project's server to it.
+export function listeningSockets(tables){
+ const sockets=new Map();
+ for(const table of tables)for(const line of table.split('\n')){
+  const fields=line.trim().split(/\s+/);
+  if(fields[3]!=='0A'||!/^\d+$/.test(fields[9]??''))continue;
+  const portHex=fields[1]?.split(':').at(-1);
+  if(!/^[0-9a-f]{4}$/i.test(portHex??''))continue;
+  const port=parseInt(portHex,16);
+  if(port>0)sockets.set(fields[9],port);
+ }
+ return sockets;
+}
+export async function processListeningPorts(pids,sockets,io={readdir,readlink}){
+ const ports=new Set();
+ await Promise.all([...new Set(pids)].map(async pid=>{
+  const directory=`/proc/${pid}/fd`;
+  const fds=await io.readdir(directory).catch(()=>[]);
+  await Promise.all(fds.map(async fd=>{
+   const target=await io.readlink(`${directory}/${fd}`).catch(()=>null);
+   const inode=target?.match(/^socket:\[(\d+)\]$/)?.[1];
+   const port=inode&&sockets.get(inode);
+   if(port)ports.add(port);
+  }));
+ }));
+ return [...ports].sort((a,b)=>a-b);
+}
 export function sessionProcessReader(){
  const known=new Map(),previous=new Map();let units;
  return async sessions=>{
@@ -60,11 +88,12 @@ export function sessionProcessReader(){
    return [proc.pid,{pid:proc.pid,parent:proc.parent,name:proc.name,cmd:path.basename(proc.argv[0]??proc.exe??proc.name),cpu,mem_bytes:Math.max(0,proc.rss*pageSize)}];
   }));
   previous.clear();for(const proc of processes)previous.set(proc.pid,{started:proc.started,ticks:proc.ticks,at:now});
-  return sessions.filter(session=>session.exitCode==null).map(session=>{
+  const sockets=listeningSockets(await Promise.all(['/proc/net/tcp','/proc/net/tcp6'].map(file=>readFile(file,'utf8').catch(()=>''))));
+  return Promise.all(sessions.filter(session=>session.exitCode==null).map(async session=>{
    const root=bindings.get(session.id),owned=root?processes.filter(proc=>belongs(proc,root)):[],procs=owned.map(proc=>measured.get(proc.pid));
    const foreground=root&&owned.filter(proc=>proc.tty===root.tty&&proc.group===root.foreground);
    const hint=foreground?.map(proc=>processAgentHint(proc.argv,proc.exe,proc.name)).find(Boolean)??null;
-   return {id:session.id,title:session.title,cwd:'/workspace',total_cpu:procs.reduce((sum,proc)=>sum+proc.cpu,0),total_mem_bytes:procs.reduce((sum,proc)=>sum+proc.mem_bytes,0),procs,ports:[],agent_hint:hint,quiet_ms:null,since_input_ms:null,output_bytes:0};
-  });
+   return {id:session.id,title:session.title,cwd:'/workspace',total_cpu:procs.reduce((sum,proc)=>sum+proc.cpu,0),total_mem_bytes:procs.reduce((sum,proc)=>sum+proc.mem_bytes,0),procs,ports:await processListeningPorts(owned.map(proc=>proc.pid),sockets),agent_hint:hint,quiet_ms:null,since_input_ms:null,output_bytes:0};
+  }));
  };
 }
