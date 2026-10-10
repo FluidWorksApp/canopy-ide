@@ -1,3 +1,4 @@
+import { PreviewLauncher } from "./PreviewLauncher";
 import { activeWorkspace } from "../remoteExecution/workspace";
 // The in-app browser: a page, a URL bar, and an annotate mode. In annotate mode
 // the injected picker highlights elements in the live page; each click lands
@@ -65,7 +66,7 @@ import {
 } from "../vibePreviewContext";
 import { AgentLaunchButton } from "./AgentLaunchButton";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
-import { CameraIcon, LiveDot } from "./icons";
+import { CameraIcon } from "./icons";
 import type { AgentTarget } from "./TicketsPanel";
 import { Button } from "./ui";
 
@@ -1254,11 +1255,9 @@ export function PreviewView({
   }, [engine, native, proxyError, origin, frameSrc, navigate, pane, chromeSrc, initChromeFrame, remotePreview, remoteWorkspace, url]);
 
   // ---------- empty tab: pick one of the project's own servers ----------
-  // The empty tab offers only servers Canopy can trace back to a component, so
-  // feedback marked on the page knows which codebase to change — that's the
-  // case this feature exists for, and it's what a fresh tab should suggest.
-  // Once a page is open the URL bar (and canopy_browser_navigate) will go
-  // anywhere, remote origins included; those pages just have no component link.
+  // Suggest servers tied to this project's components for feedback routing.
+  // A manual URL remains available when process/port discovery has no result;
+  // those pages simply have no component link until discovery catches up.
   if (!origin) {
     if (buildMode) {
       return (
@@ -1298,42 +1297,7 @@ export function PreviewView({
         </div>
       );
     }
-    return (
-      <div className="preview-empty">
-        <h2>Preview a running server</h2>
-        <p className="preview-empty-hint">
-          Open one of this project's servers in an embedded browser, then mark elements and send
-          the feedback to an agent working in the right component.
-        </p>
-        {servers.length > 0 ? (
-          <div className="preview-server-list">
-            {servers.map((s) => (
-              <button
-                key={`${s.ptyId}:${s.port}`}
-                className="preview-server"
-                title={`${s.command ?? "shell"} — ${s.cwd}`}
-                onClick={() => navigate(s.url)}
-              >
-                <LiveDot size={7} className="preview-server-dot" />
-                <span className="preview-server-title">{s.title}</span>
-                <span className="preview-server-url">localhost:{s.port}</span>
-                {s.componentLabel && (
-                  <span className="preview-component-badge">{s.componentLabel}</span>
-                )}
-              </button>
-            ))}
-          </div>
-        ) : (
-          <div className="preview-setup">
-            <p className="preview-setup-lead">I'm getting your project ready.</p>
-            <p className="preview-setup-note">
-              Canopy is understanding what this project needs and will open the preview when it is
-              ready.
-            </p>
-          </div>
-        )}
-      </div>
-    );
+    return <PreviewLauncher servers={servers} onNavigate={navigate} />;
   }
 
   return (

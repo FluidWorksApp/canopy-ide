@@ -118,14 +118,18 @@ describe("the vibe MVP wiring boundaries", () => {
 
   it("never asks a Build user to configure or start a server", () => {
     const preview = read("src/components/PreviewView.tsx");
-    const buildPreview = preview.slice(
-      preview.indexOf("if (buildMode)"),
-      preview.indexOf('<div className="preview-empty">', preview.indexOf("if (buildMode)")),
-    );
+    const buildStart = preview.indexOf("if (buildMode)");
+    const engineerLauncher = preview.indexOf("return <PreviewLauncher", buildStart);
+    // The Engineer empty state is a component now. Fail explicitly if this
+    // boundary moves, instead of slice(..., -1) scanning the entire view.
+    expect(buildStart).toBeGreaterThan(-1);
+    expect(engineerLauncher).toBeGreaterThan(buildStart);
+    const buildPreview = preview.slice(buildStart, engineerLauncher);
     const projectView = read("src/components/ProjectView/index.tsx");
     expect(projectView).toContain("buildMode={vibe}");
     expect(buildPreview).toContain("Your idea is taking shape");
     expect(buildPreview).toContain("will appear here automatically");
+    expect(buildPreview).not.toContain("PreviewLauncher");
     expect(buildPreview).not.toContain("server");
     expect(buildPreview).not.toContain("component");
     expect(buildPreview).not.toContain("localhost");
